@@ -1,27 +1,30 @@
-//! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
-//! sprites, circles, lines, grids, text and emitters' particles, born on the GPU into a pool of
-//! birth records that their age alone carries on from, drawn in the game's view, as its camera
-//! sees them, with
-//! games' shaders and textures and the engine's own, models' among them, shaded by glTF's
-//! metallic-roughness materials, or KHR_materials_pbrSpecularGlossiness's, under the frame's
-//! lights, a directional light's shadows, in cascades fitted to the view, and its sky, an image or
-//! an atmosphere made from its sun, which shows behind them, prefiltered on the GPU, its light
-//! darkened by ambient occlusion from the view's depth, and its specular light given way to the
-//! reflections of what the view shows, traced through that depth, the atmosphere hazing what's
-//! far, opaque and masked ones drawn by their meshlets shaded from
-//! a visibility buffer, all in the frame's height fog, if it has one, a game's UI over them in the
-//! view's own space, and the UI over the view;
-//! the view drawn in colors of high dynamic range, its exposure adapting to the light it meters,
-//! antialiased against the frames before it or by SMAA,
-//! blurred by its depth of field and its motion, bloomed, graded, seen through a lens's vignette,
-//! chromatic aberration and grain, and mapped by a tonemapper into the range it shows; picks,
-//! which read back the ID of the draw the view shows at a pixel; an outline round what the view
-//! shows of a set of IDs;
-//! and each frame's passes in a render graph, which places the barriers between them and makes the
-//! view's images and the shadows' maps.
+//! Turns the render data the engine hands it each frame into images, on `gg-gpu`. It knows nothing
+//! of the scene, ECS or gameplay: it takes plain data, so rendering can run on its own thread, a
+//! frame behind the simulation.
 //!
-//! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
-//! can run on its own thread, a frame behind simulation.
+//! What it draws, in the game's view as its camera sees it:
+//!
+//! - Meshes, sprites, circles, lines, grids and text, with games' shaders and textures and the
+//!   engine's.
+//! - Emitters' particles, born on the GPU into a pool of birth records that age alone carries on
+//!   from.
+//! - Models, by glTF's metallic-roughness materials or KHR_materials_pbrSpecularGlossiness's, under
+//!   the frame's lights.
+//! - A directional light's shadows, in cascades fitted to the view.
+//! - A sky behind it all, an image or an atmosphere made from its sun, prefiltered on the GPU. The
+//!   atmosphere hazes what's far.
+//! - Ambient occlusion from the view's depth, and reflections traced through it, in place of
+//!   specular light.
+//! - Opaque and masked meshes by their meshlets, shaded from a visibility buffer.
+//! - Height fog, a game's UI in the view's space, and the UI over the view.
+//!
+//! The view is drawn in HDR, its exposure adapting to the light it meters. It's antialiased against
+//! the frames before it or by SMAA, blurred by depth of field and motion, bloomed, graded, put
+//! through a lens's vignette, chromatic aberration and grain, and tonemapped.
+//!
+//! Picks read back the ID of the draw at a pixel. An outline rings what the view shows of a set of
+//! IDs. Each frame's passes are a render graph, which places their barriers and makes the view's
+//! images and the shadow maps.
 
 mod ao;
 mod atmosphere;
@@ -140,23 +143,21 @@ use tonemap::TonemapPass;
 use ui::UiPass;
 use view::{OutlinePass, ViewPass};
 
-/// The debug name of a headless renderer's image.
+/// A headless renderer's image's debug name.
 const OFFSCREEN: &str = "offscreen color";
 
-/// `id`'s low and high halves, as the view's IDs hold it: shaders have no 64-bit integers.
+/// `id` as the view's IDs hold it, low half first: shaders have no 64-bit integers.
 fn halves(id: u64) -> [u32; 2] {
     [id as u32, (id >> 32) as u32]
 }
 
-/// Renders frames into a window or, headless, into an offscreen image, and UI into the app's
-/// other windows.
+/// Renders frames into a window or an offscreen image, and UI into the app's other windows.
 pub struct Renderer {
     frames: Frames,
     output: Output,
-    /// The last frame's [`RenderData::origin`], which what's kept from frame to frame is in the
-    /// space of.
+    /// The last frame's [`RenderData::origin`]. What's kept across frames is relative to it.
     origin: DVec3,
-    /// The keys of the other windows, in the order of their swapchains in `windows`.
+    /// The other windows' keys, in `windows`' order.
     window_keys: Vec<u64>,
     windows: Vec<Swapchain>,
     meshes: MeshPass,
@@ -164,95 +165,86 @@ pub struct Renderer {
     bloom: BloomPass,
     tonemap: TonemapPass,
     outline: OutlinePass,
-    /// What fogs what's opaque in the view, if it's in fog.
     fog: FogPass,
-    /// What resolves the view, antialiased, against the frames before, and what it resolves into
-    /// and against, apart from its pipeline, as frames take them as targets while they record it.
+    /// `history` is apart, as frames take its images as targets while recording.
     taa: TaaPass,
     history: taa::History,
-    /// Made by the first frame that antialiases the view by SMAA.
+    /// Made by the first frame that uses SMAA.
     smaa: Option<SmaaPass>,
-    /// What shows an image the frame makes in the view, made by the first frame that shows one;
-    /// and the name of the last it couldn't find, which it warned of.
+    /// Made by the first frame that shows an image. `missing` is the last name it couldn't find,
+    /// which it warned of.
     show: Option<ShowPass>,
     missing: Option<String>,
-    /// The images the last frame asked to list them made that a show finds, as
-    /// [`Renderer::images`] gives them.
+    /// What [`Renderer::images`] gives.
     images: Vec<FrameImage>,
-    /// Made by the first frame with a sky to show.
+    /// Made by the first frame with a sky.
     sky: Option<SkyPass>,
-    /// The sky's light, prefiltered, apart from its pipelines, as frames take its images as
-    /// targets while they record its passes.
+    /// Apart from the sky's pipelines, as frames take its images as targets while recording.
     sky_light: SkyLight,
-    /// Made by the first frame with an atmosphere to show.
+    /// Made by the first frame with an atmosphere.
     atmosphere: Option<AtmospherePass>,
-    /// The frame's lights, an atmosphere's sun dimmed by the air, kept from frame to frame.
+    /// The frame's lights, an atmosphere's sun dimmed by the air. Kept across frames.
     sunlit: Vec<Light>,
-    /// The passes of the frame being rendered, declared afresh each frame in the memory of the
-    /// last's.
+    /// Declared afresh each frame, in the last's memory.
     graph: Graph,
-    /// The passes into the other windows that the frame draws UI in, in their order.
+    /// The UI passes into the other windows, in order.
     window_passes: Vec<PassId>,
-    /// What the view's pixels go into while it shows pixels ([`RenderData::pixels`]), their size,
-    /// and whether a frame has written them.
+    /// The texture the view's pixels go into while it shows [`RenderData::pixels`], and whether a
+    /// frame has written it.
     pixels: Option<(GpuTexture, bool)>,
-    /// The number of the last frame, if it read the view back, which [`Renderer::view_read`]
-    /// gives; 0 otherwise.
+    /// The last frame's number if it read the view back, else 0: [`Renderer::view_read`]'s frame.
     view_read: u64,
-    /// The picks asked of the view, from asked to answered.
+    /// From asked to answered.
     picks: Picks,
     ui: UiPass,
     instance: Arc<Instance>,
     device: Arc<Device>,
     vsync: bool,
-    /// As [`Settings::visibility_buffer`] says.
+    /// From [`Settings::visibility_buffer`].
     visibility_buffer: bool,
-    /// The frame to capture, as [`Settings::capture`] says.
+    /// From [`Settings::capture`].
     capture: Option<NonZeroU64>,
     /// Set once rendering fails, which can leave the GPU's copies of meshes and textures
     /// unfinished.
     failed: bool,
-    /// How long the last frame waited, which [`Renderer::waited`] describes.
+    /// What [`Renderer::waited`] gives.
     waited: Duration,
-    /// What the frame two before the last drew, which [`Renderer::drawn`] describes.
+    /// What [`Renderer::drawn`] gives.
     drawn: DrawCounts,
-    /// What each frame in flight drew of the draws it didn't cull, and whether it culled any, by
-    /// its number, for the frame two later to add what the culling counted, as it comes back.
+    /// Per frame in flight, by number: what it drew of the draws it didn't cull, and whether it
+    /// culled any. The frame two later adds the culling's counts as they come back.
     counted: [(u64, DrawCounts, bool); 2],
-    /// The frame's lights as shaders read them, and what bins them into the view's clusters.
+    /// The frame's lights as shaders read them, and their binning into the view's clusters.
     lighting: Lighting,
-    /// What moves skinned meshes' vertices before the frame draws them.
     skinning: Skinning,
-    /// What writes emitters' particles' births before the frame draws them, and draws them.
+    /// Writes emitters' births before the frame draws, and draws the particles.
     particles: ParticlePass,
-    /// What computes the view's ambient occlusion, and the history it averages it over the frames
-    /// by, apart from it, as frames take its images as targets while they record its passes.
+    /// `ao_history`, averaging the AO over frames, is apart, as frames take its images as targets
+    /// while recording.
     ao: AoPass,
     ao_history: ao::History,
-    /// What traces the view's reflections and keeps its colors for them, and the images it keeps
-    /// them in, apart from it, as frames take them as targets while they record its passes.
+    /// `reflected`, the images of the view's colors it traces into, is apart, as frames take them
+    /// as targets while recording.
     reflections: ReflectionPass,
     reflected: reflections::Images,
-    /// What meters the view, for its exposure to adapt; what adapts the game's own view's exposure
-    /// and a tool's look's, apart, as [`RenderData::looked`] says; and what lit shading multiplied
-    /// light by in the last frame rendered, 0 before the first.
+    /// Meters the view. `adapting` holds the game's view's exposure and a tool's look's, adapted
+    /// apart ([`RenderData::looked`]). `exposed` is what lit shading multiplied light by in the
+    /// last frame, 0 before the first.
     exposure: ExposurePass,
     adapting: [Adapting; 2],
     exposed: f32,
-    /// What blurs the view by its depth of field, and by its motion.
     depth_of_field: DepthOfFieldPass,
     motion_blur: MotionBlurPass,
-    /// What lays a lens's effects over the view.
     lens: LensPass,
 }
 
 enum Output {
     Window(Swapchain),
-    /// The image, and the size it's to have, which the next frame makes it again at, if it hasn't.
+    /// The image, and the size it's to have: the next frame remakes it if they differ.
     Offscreen(ColorImage, [u32; 2]),
 }
 
-// The engine renders on a thread of its own, which the renderer and its uploads move to.
+// The renderer and its uploads move to the engine's render thread.
 const _: () = {
     const fn send<T: Send>() {}
     send::<Renderer>();
@@ -260,7 +252,7 @@ const _: () = {
 };
 
 impl Renderer {
-    /// A renderer that presents to `window`, whose drawable area is `width` by `height` pixels.
+    /// A renderer presenting to `window`, of `width` by `height` drawable pixels.
     pub fn windowed(
         settings: &Settings<'_>,
         window: Arc<dyn Window>,
@@ -285,12 +277,11 @@ impl Renderer {
         Self::new(&instance, &device, Output::Window(swapchain), settings)
     }
 
-    /// A renderer without a window, which renders into an offscreen image of `width` by
-    /// `height` pixels.
+    /// A renderer into an offscreen image of `width` by `height` pixels.
     ///
     /// # Panics
     ///
-    /// If a side is 0.
+    /// - If a side is 0.
     pub fn headless(settings: &Settings<'_>, width: u32, height: u32) -> Result<Self> {
         let _zone = gg_core::zone!();
         let instance = Instance::new(&InstanceDesc {
@@ -387,12 +378,12 @@ impl Renderer {
         })
     }
 
-    /// Tells the renderer that the window's drawable area changed size; or, headless, has the next
-    /// frame render into an offscreen image of that size, made then.
+    /// Tells the renderer the window's drawable area changed size. Headless, the next frame renders
+    /// into an offscreen image of that size.
     ///
     /// # Panics
     ///
-    /// Headless, if a side is 0.
+    /// - Headless, if a side is 0.
     pub fn resize(&mut self, width: u32, height: u32) {
         match &mut self.output {
             Output::Window(swapchain) => swapchain.resize(width, height),
@@ -403,14 +394,13 @@ impl Renderer {
         }
     }
 
-    /// Starts presenting to another of the app's windows, which `key` names in
-    /// [`Renderer::render`], and whose drawable area is `width` by `height` pixels; its Vulkan
-    /// objects are named after its `title`. A headless renderer can't, since its GPU was opened
-    /// without a window.
+    /// Starts presenting to another of the app's windows, named `key` in [`Renderer::render`], of
+    /// `width` by `height` drawable pixels. Its Vulkan objects are named after `title`. A headless
+    /// renderer can't: its GPU was opened without a window.
     ///
     /// # Panics
     ///
-    /// If a window named `key` is already open.
+    /// - If window `key` is already open.
     pub fn open_window(
         &mut self,
         key: u64,
@@ -431,7 +421,7 @@ impl Renderer {
         Ok(())
     }
 
-    /// Stops presenting to window `key`, once the GPU is done with it, if it's open.
+    /// Stops presenting to window `key`, if it's open, once the GPU is done with it.
     pub fn close_window(&mut self, key: u64) {
         if let Some(i) = self.window_keys.iter().position(|&open| open == key) {
             self.window_keys.swap_remove(i);
@@ -446,52 +436,59 @@ impl Renderer {
         }
     }
 
-    /// Renders a frame from `data`, with `ui` drawn over it, and draws into each of the other
-    /// windows its UI from `windows`, over black. It presents them all. `windows` lists the UIs
-    /// in the order egui ran their passes, which ran before `ui`'s: the order of their texture
-    /// changes. A window that isn't open, or whose swapchain has no image free yet, is left as it
-    /// was.
+    /// Renders a frame from `data` with `ui` over it, draws each other window's UI from `windows`
+    /// over black, and presents them all. `windows` is in the order egui ran their passes, before
+    /// `ui`'s: the order of their texture changes. A window not open, or with no swapchain image
+    /// free yet, is left as it was.
     ///
-    /// It reads back the IDs at the pixels `data.picks` asks for, unless `data.read_picks` is
-    /// false, and answers, in [`Renderer::picked`], those that the frame two before it read; then
-    /// outlines in the view what `data.outline` says, from the view's IDs this frame.
+    /// It reads `data.picks`, unless `data.read_picks` is false, and answers picks as [`Pick`]
+    /// says; then it outlines what `data.outline` says from this frame's IDs.
     ///
-    /// Returns `false` when there was nothing to render into, as when the window is minimized;
-    /// the meshes and textures stay in `data.uploads`, and the UIs' texture changes and the picks
-    /// wait, for the next frame that renders.
+    /// Returns `false` when there was nothing to render into, as when the window is minimized. The
+    /// meshes and textures then stay in `data.uploads`, and the UIs' texture changes and the picks
+    /// wait for the next frame that renders.
     ///
-    /// The frame streams the meshes and textures queued, those `data.uploads` brings after those
-    /// before, to the GPU within [`Settings::upload_budget`], in order, and draws each from the
-    /// frame it's all there on: a mesh draws nothing until then, and a texture samples as a pixel
-    /// of white, or of zeros if its texels are data, which text draws nothing with; one replaced
-    /// draws as it did until its replacement is there. Through a transfer queue, no frame waits for
-    /// the copies: what the frame streams becomes drawable in a later frame. [`Renderer::streaming`]
-    /// tells what's still on the way. An asset that would take the GPU's memory past its budget
-    /// waits in the queue, warning `renderer.over_budget` once, while those after it go on, unless
-    /// nothing of the queue is being copied, when it goes ahead alone, so that a game comes up on
-    /// a GPU past its budget already; one whose buffers or image the GPU's memory has no room for
-    /// warns `renderer.out_of_memory` once and waits, tried again as room comes. A mesh, texture
-    /// or shader removed draws nothing, or samples as its stand-in, from the frame that takes the
-    /// removal on; one replaced while it streams drops what was streaming for its replacement.
+    /// Streaming:
     ///
-    /// An error ends the renderer, which can then only be dropped: a frame that failed can leave
-    /// the GPU's copies of meshes and textures unfinished, so every later call fails with
-    /// `renderer.failed`. A shader replaced since, whose new pipeline can't be made, is no error:
-    /// it warns, and the shader goes on drawing as it did.
+    /// - The frame streams the queued meshes and textures, `data.uploads`' after those before, to
+    ///   the GPU in order, within [`Settings::upload_budget`].
+    /// - Each draws from the frame it's all there on. Until then a mesh draws nothing, and a
+    ///   texture samples as a white pixel, or zeros if its texels are data (text then draws
+    ///   nothing). One replaced draws as before until its replacement is there.
+    /// - Through a transfer queue no frame waits for the copies: what a frame streams draws in a
+    ///   later one. [`Renderer::streaming`] tells what's still on the way.
+    /// - An asset that would take GPU memory past its budget waits, warning `renderer.over_budget`
+    ///   once, while those after it go on. When nothing else is being copied it goes ahead alone,
+    ///   so a game comes up on a GPU already past its budget.
+    /// - One whose buffers or image don't fit in GPU memory warns `renderer.out_of_memory` once and
+    ///   waits, retried as room comes.
+    /// - A mesh, texture or shader removed draws nothing, or samples as its stand-in, from the
+    ///   frame that takes the removal on. One replaced while it streams drops that stream for its
+    ///   replacement's.
     ///
-    /// The frame [`Settings::capture`] names is captured through RenderDoc, which logs `Frame
-    /// captured` with the capture's path; if it has nothing to render into, the next frame that
-    /// renders is captured instead. A capture that fails to start, as while another is under way
-    /// (`gpu.capture_busy`), or that RenderDoc doesn't make (`gpu.capture_failed`), is an error that
-    /// leaves the renderer as it was.
+    /// [`Settings::capture`]'s frame is captured through RenderDoc, which logs `Frame captured`
+    /// with the capture's path. If that frame has nothing to render into, the next that renders is
+    /// captured.
+    ///
+    /// # Errors
+    ///
+    /// - Any error ends the renderer, which can then only be dropped. A failed frame can leave the
+    ///   GPU's copies of meshes and textures unfinished, so every later call fails with
+    ///   `renderer.failed`.
+    /// - A capture that fails to start, as while another is under way (`gpu.capture_busy`), or that
+    ///   RenderDoc doesn't make (`gpu.capture_failed`). It leaves the renderer as it was.
+    ///
+    /// A replaced shader whose new pipeline can't be made is no error: it warns, and the shader
+    /// draws as before.
     ///
     /// # Panics
     ///
-    /// If `data.uploads` holds meshes, shaders or textures taken from another [`Meshes`],
-    /// [`Shaders`] or [`Textures`] than those it held before, which could draw a mesh with a shader
-    /// for another vertex type or parameters of another type; if `data.draws` draws a mesh, or
-    /// with a shader, whose handle no upload so far has brought; if its viewpoint's projection
-    /// can't project, as [`Projection`] says; or if it asks more than [`MAX_PICKS`] picks.
+    /// - If `data.uploads` holds meshes, shaders or textures taken from another [`Meshes`],
+    ///   [`Shaders`] or [`Textures`] than before, which could draw a mesh with a shader of another
+    ///   vertex or parameter type.
+    /// - If `data.draws` draws a mesh, or with a shader, whose handle no upload has brought yet.
+    /// - If its viewpoint's projection can't project, as [`Projection`] says.
+    /// - If it asks more than [`MAX_PICKS`] picks.
     pub fn render(
         &mut self,
         data: RenderData<'_>,
@@ -509,9 +506,9 @@ impl Renderer {
                  GPU; the renderer can only be dropped",
             ));
         }
-        // The frame about to begin; one with nothing to render into begins none.
+        // The frame about to begin. One with nothing to render into begins none.
         let frame = self.frames.submitted() + 1;
-        // Through another handle on the device, so that the capture doesn't borrow the renderer.
+        // Another handle on the device, so the capture doesn't borrow the renderer.
         let device =
             (self.capture.map(NonZeroU64::get) == Some(frame)).then(|| self.device.clone());
         let capture = device.as_deref().map(Device::start_capture).transpose()?;
@@ -526,66 +523,56 @@ impl Renderer {
         Ok(rendered)
     }
 
-    /// How long the last [`Renderer::render`] waited, if it rendered a frame: for the GPU to
-    /// finish an earlier frame, and for the display to let go of an image. Zero if it didn't.
+    /// How long the last [`Renderer::render`] waited for the GPU to finish an earlier frame and for
+    /// the display to free an image. Zero if it rendered no frame.
     pub fn waited(&self) -> Duration {
         self.waited
     }
 
-    /// What the GPU drew in the game's view in the frame whose counts the last [`Renderer::render`]
-    /// that rendered a frame read, two frames before it, once it had finished, as the culling of
-    /// its opaque runs counts them on the GPU. Zero if the last call rendered no frame, before then,
-    /// and for a frame that didn't render the view or whose view had no area. The UI's draws
-    /// aren't counted, nor the draws of meshes not yet drawable or removed, or with shaders
+    /// What the GPU drew in the game's view two frames before the last [`Renderer::render`] that
+    /// rendered one, as its opaque runs' culling counted on the GPU. Zero if the last call rendered
+    /// no frame, before then, and for a frame without the view or whose view had no area. Not
+    /// counted: the UI's draws, and draws of meshes not yet drawable or removed, or with shaders
     /// removed.
     pub fn drawn(&self) -> DrawCounts {
         self.drawn
     }
 
-    /// The time on the GPU of the frame whose timestamps the last [`Renderer::render`] that
-    /// rendered a frame read, two frames before it: from its first pass's beginning to its last's
-    /// end. `None` before then, and for a GPU whose graphics queue writes no timestamps. With
-    /// gg-core's `tracy` feature, Tracy's GPU timeline shows each pass.
+    /// The GPU time of the frame two before the last [`Renderer::render`] that rendered one, from
+    /// its first pass's start to its last's end. `None` before then, and when the graphics queue
+    /// writes no timestamps. With gg-core's `tracy` feature, Tracy's GPU timeline shows each pass.
     pub fn gpu_time(&self) -> Option<Duration> {
         self.frames.gpu_time()
     }
 
-    /// What lit shading multiplied light by in the last frame rendered: [`RenderData::exposure`],
-    /// or what [`RenderData::adaptation`] adapted it to. 0 before the first.
+    /// What lit shading multiplied light by in the last frame: [`RenderData::exposure`], or what
+    /// [`RenderData::adaptation`] adapted it to. 0 before the first.
     pub fn exposure(&self) -> f32 {
         self.exposed
     }
 
-    /// The bytes of GPU memory the frames' own images are in, the view's among them, which those
-    /// whose uses in a frame don't overlap share.
+    /// The GPU memory, in bytes, of the frames' own images, the view's among them. Images whose
+    /// uses in a frame don't overlap share it.
     pub fn transient_bytes(&self) -> u64 {
         self.frames.transient_bytes()
     }
 
-    /// What's being streamed to the GPU after the last [`Renderer::render`]: the meshes and
-    /// textures queued, being copied, or copied and not yet drawable, and the bytes of them still
-    /// to copy. Empty once every mesh and texture added is drawable, or removed: a test renders
-    /// until then.
+    /// What's still streaming after the last [`Renderer::render`]. Empty once every mesh and
+    /// texture added is drawable or removed; a test renders until then.
     pub fn streaming(&self) -> Streaming {
         self.meshes.streaming()
     }
 
-    /// The answers to picks that came in during the last [`Renderer::render`]: each pick's tag,
-    /// with the ID of the draw on top at its pixel, as [`Draws`] gives it, in the frame that read
-    /// it, or 0 where none drew. That's the frame that asked it, or for a pick past the 64 a frame
-    /// reads, or asked while frames had nothing to render into or read no picks, the next that
-    /// could read it. A pick of a pixel outside the view, as the frame that would read it renders
-    /// it, is answered 0 there; the rest, as the frame two after the one that read them begins,
-    /// once the GPU has rendered that one.
+    /// Answers that came in during the last [`Renderer::render`]: each pick's tag, and the ID read,
+    /// as [`Pick`] says.
     pub fn picked(&self) -> &[(u64, u64)] {
         self.picks.answered()
     }
 
-    /// The images the last frame that [`RenderData::list_images`] asked to list them made that
-    /// [`Show::Image`] finds: of the graph's own, before the show's pass, but the antialiasing's,
-    /// which a frame showing an image, drawn without it, doesn't make; in the order the frame made
-    /// them, each name once, as the last of that name, which a show finds; none for a frame that
-    /// had no view to draw. Empty before such a frame.
+    /// The images [`Show::Image`] finds, made by the last frame that [`RenderData::list_images`]
+    /// asked: the graph's own before the show's pass, but the antialiasing's, which a frame showing
+    /// an image skips. In the order made, each name once, as its last image, which a show finds.
+    /// None for a frame with no view to draw; empty before such a frame.
     pub fn images(&self) -> &[FrameImage] {
         &self.images
     }
@@ -600,21 +587,21 @@ impl Renderer {
         self.device.upload_path()
     }
 
-    /// How much of the GPU's own memory is in use, and the budget the driver gives the process, as
+    /// GPU memory in use, and the driver's budget for the process, as
     /// [`gg_gpu::Device::memory_budget`] says.
     pub fn memory_budget(&self) -> MemoryBudget {
         self.device.memory_budget()
     }
 
-    /// What the frames' arenas hold, of the geometry, instances and UI frames copy to the GPU, and
-    /// the most a frame has taken of its own, as [`Arenas`] says.
+    /// What the frames' arenas hold of the geometry, instances and UI copied to the GPU, and the
+    /// most a frame has taken, as [`Arenas`] says.
     pub fn arenas(&self) -> Arenas {
         self.frames.arenas()
     }
 
-    /// What the GPU's pipeline cache holds, for a later run's [`Settings::pipeline_cache`]: `None`
-    /// for a renderer made without one, and once it has failed, since a device that's lost or out
-    /// of memory may hand back what no driver should be given.
+    /// The GPU's pipeline cache, for a later run's [`Settings::pipeline_cache`]. `None` for a
+    /// renderer made without one, and once it has failed: a lost or out-of-memory device may hand
+    /// back what no driver should be given.
     pub fn pipeline_cache(&self) -> Result<Option<Vec<u8>>> {
         if self.failed {
             return Ok(None);
@@ -622,8 +609,8 @@ impl Renderer {
         self.device.pipeline_cache()
     }
 
-    /// Copies the last frame rendered offscreen to the CPU: rows of RGBA8 pixels, sRGB-encoded
-    /// and tightly packed, top row first. `None` for a renderer with a window.
+    /// Copies the last frame rendered offscreen to the CPU: tightly packed rows of sRGB-encoded
+    /// RGBA8 pixels, top row first. `None` for a renderer with a window.
     pub fn read_back(&mut self) -> Result<Option<Vec<u8>>> {
         match &mut self.output {
             Output::Window(_) => Ok(None),
@@ -631,11 +618,10 @@ impl Renderer {
         }
     }
 
-    /// The game's view as the last [`Renderer::render`] rendered it and read it back, as
-    /// [`RenderData::read_view`] asked, with its outline but without the UI drawn over it, once the
-    /// GPU has finished that frame, which this waits for, holding back the next. `None` if that
-    /// call read no view back, as when the view had no area, showed pixels, or there was nothing to
-    /// render into.
+    /// The game's view as the last [`Renderer::render`] read it back ([`RenderData::read_view`]),
+    /// with its outline but not the UI. Waits for the GPU to finish that frame, holding back the
+    /// next. `None` if that call read no view back: the view had no area or showed pixels, or there
+    /// was nothing to render into.
     pub fn view_read(&self) -> Result<Option<ImageRead<'_>>> {
         if self.view_read == 0 {
             return Ok(None);
@@ -643,8 +629,8 @@ impl Renderer {
         self.frames.image_read(self.view_read)
     }
 
-    /// What validation reports. It outlives the renderer, so it also counts what's reported
-    /// while the renderer shuts down.
+    /// What validation reports. It outlives the renderer, so it also counts reports during
+    /// shutdown.
     pub fn validation(&self) -> Validation {
         self.instance.validation()
     }

@@ -1,15 +1,19 @@
-//! Models' meshes as the GPU holds them: each vertex packed into 8- and 16-bit fields, 24 bytes
-//! where a [`ModelVertex`] takes 64, unpacked by the model shaders as they read it; and, as the
-//! cooker cuts a mesh's levels, meshlets, each up to [`MAX_MESHLET_VERTICES`] of its vertices and
-//! [`MAX_MESHLET_TRIANGLES`] of its triangles, with the sphere round them and the cone they face
-//! within, which views cull them by.
+//! Models' meshes as the GPU holds them. Each vertex packs into 8- and 16-bit fields, 24 bytes
+//! where a [`ModelVertex`] takes 64, which the model shaders unpack. The cooker cuts a mesh's
+//! levels into meshlets of up to [`MAX_MESHLET_VERTICES`] vertices and [`MAX_MESHLET_TRIANGLES`]
+//! triangles, each with a bounding sphere and a normal cone that views cull it by.
 //!
-//! A mesh's buffer holds, in order: a [`Header`], in two vertices' room, which says how its
-//! vertices unpack and where its meshlets' parts are; its vertices; and, if it has meshlets, what
-//! draws each, as [`GpuMeshlet`] has it, their vertices' indices among the mesh's, and their
-//! triangles' bytes, each part starting at a word; or, if it's skinned, which keeps it from being
-//! cut into meshlets, each vertex's [`SkinVertex`]. Shaders reach every part through the buffer's
-//! address, as `shaders/model.slang` and `shaders/skin.slang` read them.
+//! A mesh's buffer holds, in order, each part starting at a word:
+//!
+//! 1. A [`Header`], in two vertices' room: how its vertices unpack, and where its other parts are.
+//! 2. Its vertices.
+//! 3. If it has meshlets: each one's [`GpuMeshlet`], their vertices' indices among the mesh's, and
+//!    their triangles' bytes.
+//! 4. Or, if it's skinned, which keeps it from being cut into meshlets: each vertex's
+//!    [`SkinVertex`].
+//!
+//! Shaders reach every part through the buffer's address, as `shaders/model.slang` and
+//! `shaders/skin.slang` read them.
 
 use bytemuck::NoUninit;
 use gg_core::Result;
@@ -18,56 +22,56 @@ use gg_core::math::{BVec3, Vec2, Vec3, libm};
 use crate::mesh::{bad_mesh, check, check_lods};
 use crate::{Lod, Lods, ModelVertex};
 
-/// The most vertices a meshlet has: as many as NVIDIA recommends a mesh shader's workgroup
-/// output, and meshoptimizer's README suggests. `MAX_VERTICES` in `shaders/model.slang`.
+/// The most vertices a meshlet has: NVIDIA's recommended mesh shader output, and meshoptimizer's
+/// README's. `MAX_VERTICES` in `shaders/model.slang`.
 pub const MAX_MESHLET_VERTICES: u32 = 64;
 
-/// The most triangles a meshlet has: 124 rather than NVIDIA's 126, as meshoptimizer takes a
-/// multiple of 4. `MAX_TRIANGLES` in `shaders/model.slang`, whose vertex path draws each meshlet
-/// as this many triangles, those past its own drawing nothing.
+/// The most triangles a meshlet has: 124, not NVIDIA's 126, as meshoptimizer takes a multiple of 4.
+/// `MAX_TRIANGLES` in `shaders/model.slang`, whose vertex path draws each meshlet as this many
+/// triangles, those past its own drawing nothing.
 pub const MAX_MESHLET_TRIANGLES: u32 = 124;
 
-/// A vertex of a model's mesh as the GPU holds it, `PackedVertex` in `shaders/model.slang`, which
-/// unpacks it to what a [`ModelVertex`] holds, as nearly as its fields keep it.
+/// A model mesh's vertex as the GPU holds it: `PackedVertex` in `shaders/model.slang`, which
+/// unpacks it to a [`ModelVertex`]'s fields, as nearly as they're kept.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, NoUninit)]
 pub struct PackedVertex {
-    /// Where it is, in steps of its mesh's [`Packing::step`] from its offset.
+    /// In steps of its mesh's [`Packing::step`] from its offset.
     pub position: [u16; 3],
-    /// Its bitangent's sign, as its tangent's W has it: 1, or -1.
+    /// Its bitangent's sign, its tangent's W: 1 or -1.
     pub sign: i16,
-    /// Its normal and its tangent, each a unit vector folded onto an octahedron and unfolded onto
-    /// a square, whose two coordinates are signed 16-bit fractions of 1 (Cigolle et al., "A Survey
-    /// of Efficient Representations for Independent Unit Vectors", 2014): within a few
-    /// thousandths of a degree of the vector.
+    /// Its normal and tangent, each a unit vector folded onto an octahedron and unfolded onto a
+    /// square, its two coordinates signed 16-bit fractions of 1 (Cigolle et al., "A Survey of
+    /// Efficient Representations for Independent Unit Vectors", 2014): within a few thousandths of
+    /// a degree.
     pub normal: [i16; 2],
     pub tangent: [i16; 2],
-    /// Where it samples its material's textures, as unsigned 16-bit fractions of its mesh's box of
-    /// them, which [`Packing`] gives.
+    /// Its texture coordinates, as unsigned 16-bit fractions of its mesh's box of them
+    /// ([`Packing`]).
     pub uv: [u16; 2],
-    /// Its color, as unsigned 8-bit fractions of 1: its red, green and blue sRGB-encoded, which
-    /// keeps dark colors apart, and its alpha as it is.
+    /// Unsigned 8-bit fractions of 1: red, green and blue sRGB-encoded, which keeps dark colors
+    /// apart, and alpha linear.
     pub color: [u8; 4],
 }
 
-/// A skinned vertex's joints and how far each moves it, as a skinned mesh's buffer holds them after
-/// its vertices: `SkinVertex` in `shaders/skin.slang`. Each frame the renderer places the vertex
-/// where its joints, as they're drawn then, carry it, each as much as its weight says.
+/// A skinned vertex's joints and weights, after its mesh's vertices in the buffer: `SkinVertex` in
+/// `shaders/skin.slang`. Each frame the renderer moves the vertex where its joints, as drawn then,
+/// carry it, each by its weight.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, NoUninit)]
 pub struct SkinVertex {
-    /// Its joints, each the index of one of its skin's joints among the joint matrices a frame
-    /// gives its mesh, as [`Draws::skin`](crate::Draws::skin) says.
+    /// Indices into the joint matrices a frame gives its mesh
+    /// ([`Draws::skin`](crate::Draws::skin)).
     pub joints: [u16; 4],
-    /// How much each joint moves it, as unsigned 16-bit fractions of 1, which add up to 1 within
-    /// their rounding; a vertex whose add up to 0 stays where it is.
+    /// Unsigned 16-bit fractions of 1, adding up to 1 within their rounding. A vertex whose weights
+    /// add up to 0 stays where it is.
     pub weights: [u16; 4],
 }
 
 impl SkinVertex {
-    /// A vertex moved by `joints` as much as `weights` say, its weights scaled to add up to 1, as
-    /// glTF has them nearly, and rounded to 16 bits each; those that aren't finite, or are less
-    /// than 0, taken as 0, so that a vertex of weights that add up to 0 stays where it is.
+    /// A vertex moved by `joints` by `weights`, scaled to add up to 1, as glTF's nearly do, and
+    /// rounded to 16 bits each. Weights that aren't finite, or are below 0, count as 0, so a vertex
+    /// of weights adding up to 0 stays put.
     pub fn new(joints: [u16; 4], weights: [f32; 4]) -> Self {
         let weights = weights.map(|weight| {
             if weight.is_finite() {
@@ -86,13 +90,12 @@ impl SkinVertex {
     }
 }
 
-/// How a mesh's [`PackedVertex`]es unpack: a vertex's position is `offset + step * position`, and
-/// its texture coordinates `uv_offset + uv_scale * uv`.
+/// How a mesh's [`PackedVertex`]es unpack: position is `offset + step * position`, texture
+/// coordinates `uv_offset + uv_scale * uv`.
 ///
-/// `step` is a power of two, the least that spans the mesh's longest side in 65,534 steps, and
-/// `offset` a multiple of it, so that meshes whose sizes are within a factor of two of each other
-/// put their vertices on one grid, and an edge two of them share keeps its ends together, where
-/// each fitted to its own box would round them apart.
+/// `step` is the least power of two that spans the mesh's longest side in 65,534 steps, and
+/// `offset` a multiple of it. So meshes within a factor of two in size share one grid, and an edge
+/// two of them share keeps its ends together, where boxes fitted to each would round them apart.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
 pub struct Packing {
@@ -102,9 +105,9 @@ pub struct Packing {
     pub uv_scale: Vec2,
 }
 
-/// What a mesh's buffer starts with, `Header` in `shaders/model.slang`: its [`Packing`], and where
-/// its meshlets' parts start and where its [`SkinVertex`]es do, in words from the buffer's start,
-/// or 0 for a mesh without them. Two vertices' room, so that its vertices follow it in place.
+/// What a mesh's buffer starts with: `Header` in `shaders/model.slang`. Its [`Packing`], and where
+/// its meshlets' parts and its [`SkinVertex`]es start, in words from the buffer's start, 0 for
+/// none. Two vertices' room, so its vertices follow it in place.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
 struct Header {
@@ -115,13 +118,12 @@ struct Header {
     skin: u32,
 }
 
-/// How many vertices' room a mesh's [`Header`] takes at its buffer's start: `HEADER` in
-/// `shaders/model.slang`.
+/// How many vertices' room a [`Header`] takes: `HEADER` in `shaders/model.slang`.
 const HEADER_VERTICES: usize = 2;
 
 const _: () = assert!(size_of::<Header>() == HEADER_VERTICES * size_of::<PackedVertex>());
 
-/// What draws a meshlet, as a mesh's buffer holds it: `Meshlet` in `shaders/model.slang`.
+/// What draws a meshlet, in a mesh's buffer: `Meshlet` in `shaders/model.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit)]
 struct GpuMeshlet {
@@ -132,87 +134,82 @@ struct GpuMeshlet {
     triangle_count: u32,
 }
 
-/// What culls a meshlet, as the renderer's table of them holds it: `MeshletBounds` in
-/// `shaders/cull.slang`.
+/// What culls a meshlet, in the renderer's table of them: `MeshletBounds` in `shaders/cull.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
 pub(crate) struct MeshletBounds {
     center: Vec3,
     radius: f32,
-    /// [`Meshlet::cone`]'s bytes, its axis's X lowest.
+    /// [`Meshlet::cone`]'s bytes, the axis's X lowest.
     cone: u32,
     triangles: u32,
 }
 
-/// A meshlet of a mesh: some of its triangles, of few vertices, which views cull and draw apart
-/// from the rest.
+/// Some of a mesh's triangles, of few vertices, which views cull and draw apart from the rest.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Meshlet {
-    /// Where its vertices start in [`Meshlets::vertices`], and how many it has, from 1 to
+    /// Its first vertex in [`Meshlets::vertices`], and how many it has, 1 to
     /// [`MAX_MESHLET_VERTICES`].
     pub vertices: u32,
     pub vertex_count: u32,
-    /// Where its triangles start in [`Meshlets::triangles`], three bytes each, each byte a corner's
-    /// place among its vertices, winding as the mesh's; and how many it has, from 1 to
-    /// [`MAX_MESHLET_TRIANGLES`].
+    /// Its first triangle in [`Meshlets::triangles`], three bytes each, each a corner's place among
+    /// its vertices, winding as the mesh's; and how many, 1 to [`MAX_MESHLET_TRIANGLES`].
     pub triangles: u32,
     pub triangle_count: u32,
     /// The center of a sphere round its triangles, in the mesh's space, and its radius.
     pub center: Vec3,
     pub radius: f32,
     /// The cone its triangles face within, as meshoptimizer's `meshopt_Bounds` gives it in bytes:
-    /// its axis's X, Y and Z, then its cutoff, each a signed fraction of 127, rounded so that the
-    /// cone holds every triangle's normal. Where the way from the camera to the sphere's center,
-    /// `d`, has `dot(d, axis) >= cutoff * length(d) + radius`, the camera sees only those
-    /// triangles' backs; a cutoff of 127 holds for no camera.
+    /// its axis's X, Y and Z, then its cutoff, each a signed fraction of 127, rounded so the cone
+    /// holds every triangle's normal. Where the way from the camera to the sphere's center, `d`,
+    /// has `dot(d, axis) >= cutoff * length(d) + radius`, the camera sees only backs. A cutoff of
+    /// 127 holds for no camera.
     pub cone: [i8; 4],
 }
 
-/// A mesh's meshlets, its levels' each cut into theirs: none for a mesh drawn whole, as a
-/// development run draws a model's primitives.
+/// A mesh's meshlets, each level cut into its own. None for a mesh drawn whole, as a development
+/// run draws a model's primitives.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Meshlets {
     pub meshlets: Vec<Meshlet>,
-    /// The meshlets' vertices, each an index among the mesh's.
+    /// Indices among the mesh's vertices.
     pub vertices: Vec<u32>,
-    /// The meshlets' triangles, a byte for each corner.
+    /// A byte per corner.
     pub triangles: Vec<u8>,
-    /// Each level's meshlets, in the mesh's levels' order: the first, and how many.
+    /// Each level's first meshlet and count, in the mesh's levels' order.
     pub levels: Vec<[u32; 2]>,
 }
 
-/// A model's mesh as the GPU draws it: its vertices packed, its triangles' indices, its levels of
-/// detail among them with the sphere round its vertices, and its meshlets, if the cooker cut it
-/// into them; or, skinned, none, and what moves each vertex.
+/// A model's mesh as the GPU draws it: packed vertices, triangle indices, levels of detail among
+/// them with the sphere round its vertices, and meshlets if the cooker cut them; or, skinned, no
+/// meshlets and what moves each vertex.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelMesh {
     pub packing: Packing,
     pub vertices: Vec<PackedVertex>,
-    /// Three for each triangle, indexing `vertices`.
+    /// Three per triangle, into `vertices`.
     pub indices: Vec<u32>,
     pub lods: Lods,
     pub meshlets: Meshlets,
-    /// For a skinned mesh, what moves each of `vertices`, as many as they are, which its packing
-    /// and sphere hold wherever its clips take them, as [`pack_skinned`](Self::pack_skinned)
-    /// packs it; none for the rest.
+    /// For a skinned mesh, what moves each of `vertices`; its packing and sphere hold wherever its
+    /// clips take them ([`pack_skinned`](Self::pack_skinned)). Empty for the rest.
     pub skin: Vec<SkinVertex>,
 }
 
 impl ModelMesh {
-    /// `vertices` packed, mesh `name`'s, with `indices`, of `levels` among them, or of one level,
-    /// all of them, if none is given; with the sphere round them as they unpack, which views cull
-    /// it by, and without meshlets, which the cooker cuts. It isn't checked otherwise:
-    /// [`Meshes::add_model`] checks it.
+    /// Packs mesh `name`'s `vertices`, with `indices` and `levels` among them, or one level of all
+    /// of them if none is given. It gets the sphere round them as they unpack, which views cull it
+    /// by, and no meshlets, which the cooker cuts. Nothing else is checked: [`Meshes::add_model`]
+    /// checks it.
     ///
-    /// A coordinate that isn't finite packs as the least of its axis's that is, and a normal or
-    /// tangent that isn't a finite vector of some length as +Z or +X: no mesh the engine reads has
+    /// A coordinate that isn't finite packs as its axis's least finite one. A normal or tangent
+    /// that isn't a finite vector of some length packs as +Z or +X: no mesh the engine reads has
     /// them, and such a vertex draws nothing sensible either way. A tangent along its normal packs
-    /// as a vector square to it, which the model shaders' tangent space needs.
+    /// square to it, as the model shaders' tangent space needs.
     ///
-    /// Fails with `renderer.bad_mesh` for vertices that its grid can't reach with what an f32
-    /// holds, so that a vertex would unpack to a coordinate that isn't finite: as one at -f32::MAX
-    /// beside one at 0 would, from an offset of -2^128, or one at f32::MAX beside one at 0, at
-    /// 2^128.
+    /// Fails with `renderer.bad_mesh` for vertices its grid can't reach within an f32, which would
+    /// unpack to coordinates that aren't finite: one at -f32::MAX beside one at 0, from an offset
+    /// of -2^128, or one at f32::MAX beside one at 0, at 2^128.
     ///
     /// [`Meshes::add_model`]: crate::Meshes::add_model
     pub fn pack(
@@ -224,16 +221,15 @@ impl ModelMesh {
         Self::pack_within(name, vertices, indices, levels, None)
     }
 
-    /// `vertices` packed, as [`pack`](Self::pack) packs them, as a skinned mesh, each moved by
-    /// what `skin` says, as many as they are: its grid and its sphere hold `reach`, a box, its
-    /// least corner and its most, as well as the vertices, so that the vertices skinned within it
-    /// pack too, and views cull it there.
+    /// Packs `vertices` as [`pack`](Self::pack) does, as a skinned mesh moved by `skin`. Its grid
+    /// and sphere hold `reach`, a box given by its least and greatest corners, as well as the
+    /// vertices, so vertices skinned within it pack too, and views cull it there.
     ///
     /// Fails as `pack` does, for vertices or a box its grid can't reach.
     ///
     /// # Panics
     ///
-    /// If `skin` isn't as many as `vertices`.
+    /// - If `skin` isn't as many as `vertices`.
     pub fn pack_skinned(
         name: &str,
         vertices: &[ModelVertex],
@@ -248,8 +244,7 @@ impl ModelMesh {
         Ok(mesh)
     }
 
-    /// `vertices` packed, as [`pack`](Self::pack) says, their grid and sphere holding `reach` too,
-    /// if it's given.
+    /// [`pack`](Self::pack), the grid and sphere holding `reach` too, if given.
     fn pack_within(
         name: &str,
         vertices: &[ModelVertex],
@@ -313,8 +308,8 @@ impl ModelMesh {
             meshlets: Meshlets::default(),
             skin: Vec::new(),
         };
-        // Checked as they unpack rather than by the grid alone, whose offset and step can be finite
-        // while a vertex unpacks past what an f32 holds.
+        // Checked as they unpack, not by the grid alone, whose offset and step can be finite while
+        // a vertex unpacks past an f32.
         let positions = mesh.positions();
         if let Some(i) = positions.iter().position(|position| !position.is_finite()) {
             return Err(bad_mesh(
@@ -326,7 +321,7 @@ impl ModelMesh {
                 ),
             ));
         }
-        // The box's corners as the grid holds them, its nearest points.
+        // The box's nearest corners on the grid.
         let mut held = positions;
         held.extend(corners.iter().map(|&corner| {
             let steps = ((corner - offset) / step).round();
@@ -336,7 +331,7 @@ impl ModelMesh {
         Ok(mesh)
     }
 
-    /// Its vertices' positions, unpacked as the model shaders unpack them.
+    /// Its vertices' positions, unpacked as the model shaders do.
     pub fn positions(&self) -> Vec<Vec3> {
         let Packing { offset, step, .. } = self.packing;
         (self.vertices.iter())
@@ -344,12 +339,11 @@ impl ModelMesh {
             .collect()
     }
 
-    /// Checks that it holds together, mesh `name`'s: its indices whole triangles of its vertices
-    /// and its levels among them, as [`Meshes::add_lods`](crate::Meshes::add_lods) checks them;
-    /// its packing finite, its step more than 0; and its meshlets, if any, a run of each level's,
-    /// each of its own vertices, within its sizes, among the mesh's vertices, and with a finite
-    /// sphere. Shaders read what it says where it says, so a mesh that doesn't hold together could
-    /// read past its buffer.
+    /// Checks that mesh `name`'s parts hold together: indices of whole triangles of its vertices,
+    /// levels among them as [`Meshes::add_lods`](crate::Meshes::add_lods) checks them, a finite
+    /// packing with a step above 0, and meshlets, if any, a run per level, each of its own
+    /// vertices, within its sizes, among the mesh's vertices, with a finite sphere. Shaders read
+    /// what it says where it says, so a mesh that doesn't hold together could read past its buffer.
     ///
     /// Fails with `renderer.bad_mesh`, saying where.
     pub fn check(&self, name: &str) -> Result<()> {
@@ -453,7 +447,7 @@ impl ModelMesh {
         Ok(())
     }
 
-    /// What its buffer on the GPU holds, as the [module's](self) docs lay it out.
+    /// Its GPU buffer's bytes, laid out as the [module](self) says.
     pub(crate) fn bytes(&self) -> Vec<u8> {
         let Meshlets {
             meshlets,
@@ -475,7 +469,7 @@ impl ModelMesh {
         } else {
             meshlet_vertices + vertices.len() as u32
         };
-        // A skinned mesh has no meshlets, as `check` says, so its skin follows its vertices.
+        // A skinned mesh has no meshlets (`check`), so its skin follows its vertices.
         let skin = if self.skin.is_empty() {
             0
         } else {
@@ -509,7 +503,6 @@ impl ModelMesh {
         bytes
     }
 
-    /// The bytes its meshlets take in its buffer.
     fn meshlets_bytes(&self) -> usize {
         let Meshlets {
             meshlets,
@@ -522,7 +515,7 @@ impl ModelMesh {
             + triangles.len().next_multiple_of(4)
     }
 
-    /// What culls each of its meshlets, in their order.
+    /// What culls each of its meshlets, in order.
     pub(crate) fn meshlet_bounds(&self) -> Vec<MeshletBounds> {
         (self.meshlets.meshlets.iter())
             .map(|meshlet| MeshletBounds {
@@ -535,9 +528,9 @@ impl ModelMesh {
     }
 }
 
-/// The sphere round `positions`, all finite, as they unpack: round their box's center, as far as
-/// the farthest. In f64, so that the farthest of positions near the edges of what an f32 holds
-/// doesn't overflow; its radius at most the most an f32 holds, which every view keeps whole.
+/// The sphere round finite `positions` as they unpack: round their box's center, out to the
+/// farthest. In f64, so the farthest of positions near an f32's limits doesn't overflow. Its radius
+/// is at most `f32::MAX`, which every view keeps whole.
 fn sphere(positions: &[Vec3]) -> (Vec3, f32) {
     let wide = |p: Vec3| p.to_array().map(f64::from);
     let mut box_ = [(f64::INFINITY, f64::NEG_INFINITY); 3];
@@ -549,13 +542,13 @@ fn sphere(positions: &[Vec3]) -> (Vec3, f32) {
     if positions.is_empty() {
         return (Vec3::ZERO, 0.0);
     }
-    // As an f32 holds it, which the radius is measured from.
+    // As an f32 holds it, as the radius is measured from it.
     let center = Vec3::from_array(box_.map(|(low, high)| (low / 2.0 + high / 2.0) as f32));
     let farthest = (positions.iter()).fold(0.0, |farthest: f64, &p| {
         let apart = (wide(p).into_iter().zip(wide(center))).map(|(c, m)| (c - m) * (c - m));
         farthest.max(apart.sum::<f64>().sqrt())
     });
-    // Rounded up, so that it holds the farthest.
+    // Rounded up, so it holds the farthest.
     let farthest = farthest.min(f64::from(f32::MAX));
     let mut radius = farthest as f32;
     if f64::from(radius) < farthest {
@@ -564,7 +557,7 @@ fn sphere(positions: &[Vec3]) -> (Vec3, f32) {
     (center, radius)
 }
 
-/// The least and the most of each axis of `points` that's finite, or 0 for an axis without one.
+/// Each axis's least and greatest finite value in `points`, or 0 for an axis with none.
 fn bounds<const N: usize>(points: impl Iterator<Item = [f32; N]>) -> [(f32, f32); N] {
     let mut axes = [(f32::INFINITY, f32::NEG_INFINITY); N];
     for point in points {
@@ -577,10 +570,10 @@ fn bounds<const N: usize>(points: impl Iterator<Item = [f32; N]>) -> [(f32, f32)
     axes.map(|(low, high)| if low <= high { (low, high) } else { (0.0, 0.0) })
 }
 
-/// The grid positions within `axes` pack onto, as [`Packing`] says: its offset, and its step.
+/// The grid of positions within `axes` ([`Packing`]): its offset and step.
 fn grid(axes: [(f32, f32); 3]) -> (Vec3, f32) {
-    // In f64, which holds the extent of any two finite f32s, and whose rounding is the same on
-    // every platform, as no transcendental is taken.
+    // In f64, which holds the extent of any two finite f32s, and rounds alike on every platform, as
+    // no transcendental is taken.
     let extent = (axes.iter()).fold(0.0, |most: f64, &(low, high)| {
         most.max(f64::from(high) - f64::from(low))
     });
@@ -589,8 +582,8 @@ fn grid(axes: [(f32, f32); 3]) -> (Vec3, f32) {
     (Vec3::from_array(offset), step as f32)
 }
 
-/// The least power of two that's at least `x`, a finite number of 0 or more, and at least the
-/// least normal f32, so that it's a step that packs; 1 for 0, a mesh of one point.
+/// The least power of two at least `x`, a finite number of 0 or more, and at least the least normal
+/// f32, so it's a step that packs. 1 for 0, a mesh of one point.
 fn power_of_two_at_least(x: f64) -> f64 {
     if x == 0.0 {
         return 1.0;
@@ -602,16 +595,14 @@ fn power_of_two_at_least(x: f64) -> f64 {
     step
 }
 
-/// The box texture coordinates within `axes` pack into, as [`Packing`] says: its offset, and its
-/// scale.
+/// The box of texture coordinates within `axes` ([`Packing`]): its offset and scale.
 fn uv_box(axes: [(f32, f32); 2]) -> (Vec2, Vec2) {
     let scale = axes.map(|(low, high)| ((f64::from(high) - f64::from(low)) / 65_535.0) as f32);
     (Vec2::new(axes[0].0, axes[1].0), Vec2::from_array(scale))
 }
 
-/// `value` as a 16-bit count of `step`s past `offset`, rounded to the nearest and clamped to what
-/// 16 bits hold: 0 for a value that isn't finite, or a step of 0, as of an axis whose values are
-/// all one.
+/// `value` as a 16-bit count of `step`s past `offset`, rounded to the nearest and clamped. 0 for a
+/// value that isn't finite, or a step of 0, as of an axis of one value.
 fn quantize(value: f32, offset: f32, step: f32) -> u16 {
     if !(value.is_finite() && step > 0.0) {
         return 0;
@@ -620,12 +611,11 @@ fn quantize(value: f32, offset: f32, step: f32) -> u16 {
     steps.round().clamp(0.0, 65_535.0) as u16
 }
 
-/// The unit normal and tangent a vertex of `normal` and `tangent` packs: its normal, or +Z for one
-/// that isn't a finite vector of some length; and its tangent, or +X for one that isn't, or a
-/// vector square to the normal for one along it, within about a twentieth of a degree, as a tool
-/// can leave one where texture coordinates have no area. The model shaders keep the tangent's part
-/// square to the normal, which such a tangent, packed, would leave none of, to normalize; packed,
-/// each is within a few thousandths of a degree of what it was.
+/// The unit normal and tangent a vertex packs: `normal`, or +Z if it isn't a finite vector of some
+/// length; and `tangent`, or +X if it isn't, or a vector square to the normal, within about a
+/// twentieth of a degree, if it's along it, as a tool can leave where texture coordinates have no
+/// area. The model shaders normalize the tangent's part square to the normal, which such a tangent,
+/// packed, would have none of. Packed, each is within a few thousandths of a degree.
 fn normal_and_tangent(normal: Vec3, tangent: Vec3) -> (Vec3, Vec3) {
     let normal = normal.try_normalize().unwrap_or(Vec3::Z);
     let tangent = tangent.try_normalize().unwrap_or(Vec3::X);
@@ -636,8 +626,7 @@ fn normal_and_tangent(normal: Vec3, tangent: Vec3) -> (Vec3, Vec3) {
     }
 }
 
-/// Unit vector `v`, folded onto an octahedron and unfolded onto a square, as [`PackedVertex`]
-/// says.
+/// Unit vector `v` packed as [`PackedVertex`] says.
 fn octahedral(v: Vec3) -> [i16; 2] {
     let p = v / (v.x.abs() + v.y.abs() + v.z.abs());
     let sign = |c: f32| if c >= 0.0 { 1.0 } else { -1.0 };
@@ -660,8 +649,7 @@ fn srgb(value: f32) -> f32 {
     }
 }
 
-/// `value`, of 0 to 1, as an 8-bit fraction of 1, rounded to the nearest: 0 for one that isn't a
-/// number.
+/// `value`, 0 to 1, as an 8-bit fraction rounded to the nearest. 0 for NaN.
 fn unorm8(value: f32) -> u8 {
     if value.is_nan() {
         return 0;
@@ -684,7 +672,7 @@ mod tests {
         }
     }
 
-    /// The vector [`PackedVertex`]'s two coordinates stand for, as `model.slang` unfolds them.
+    /// The vector [`PackedVertex`]'s two coordinates unfold to, as `model.slang` does.
     fn unfolded(packed: [i16; 2]) -> Vec3 {
         let [x, y] = packed.map(|c| f32::from(c) / 32_767.0);
         let mut v = Vec3::new(x, y, 1.0 - x.abs() - y.abs());
@@ -694,10 +682,10 @@ mod tests {
         v.normalize()
     }
 
-    /// A skinned vertex's weights add up to 1 within their rounding, whatever they added up to,
-    /// and to 0 where none is above 0 or one isn't finite; and a skinned mesh packs on a grid,
-    /// and in a sphere, that hold its reach as well as its vertices, its weights after its
-    /// vertices in its buffer, which its header says, and refuses meshlets and a weight short.
+    /// Skinned weights add up to 1 within their rounding, whatever they added up to, and to 0 where
+    /// none is above 0 or one isn't finite. A skinned mesh's grid and sphere hold its reach as well
+    /// as its vertices, and its weights follow its vertices where its header says. It refuses
+    /// meshlets and a weight short.
     #[test]
     fn a_skinned_mesh_packs_within_its_reach_with_its_weights() {
         let weighed = SkinVertex::new([3, 1, 0, 0], [2.0, 2.0, 0.0, 0.0]);
@@ -748,8 +736,8 @@ mod tests {
         assert!(short.check("short").is_err(), "a skinned vertex short");
     }
 
-    /// Positions unpack within half a step of where they were, on a step that's a power of two,
-    /// from an offset that's a multiple of it, the longest side in 65,534 steps or fewer.
+    /// Positions unpack within half a step, on a step that's a power of two, from an offset that's
+    /// a multiple of it, the longest side in 65,534 steps or fewer.
     #[test]
     fn positions_unpack_within_half_a_step() {
         let points = [
@@ -774,7 +762,7 @@ mod tests {
                 "{unpacked} {point}"
             );
         }
-        // The sphere round them holds them as they unpack, which is what draws.
+        // The sphere holds them as they unpack, which is what draws.
         let Lods { center, radius, .. } = mesh.lods;
         let apart = |p: &Vec3| p.as_dvec3().distance(center.as_dvec3());
         assert!(
@@ -812,9 +800,9 @@ mod tests {
         assert_eq!(left.positions()[..2], right.positions()[..2]);
     }
 
-    /// Normals and tangents unfold to within a few thousandths of a degree, keeping the sign;
-    /// colors to within an 8-bit step of their sRGB encoding; texture coordinates to within a
-    /// 16-bit step of their box.
+    /// Normals and tangents unfold within a few thousandths of a degree, keeping the sign; colors
+    /// within an 8-bit step of their sRGB encoding; texture coordinates within a 16-bit step of
+    /// their box.
     #[test]
     fn attributes_unpack_nearly_as_they_were() {
         let normals = [
@@ -859,9 +847,9 @@ mod tests {
         );
     }
 
-    /// A tangent along its normal, either way, nearly, or as +X stands in for one along a normal of
+    /// A tangent nearly along its normal, either way, or +X standing in for one along a normal of
     /// +X, packs square to the normal: unpacked, its part square to the normal, which the model
-    /// shaders normalize, is about as long as it is. One that's off its normal packs as it was.
+    /// shaders normalize, is about as long as it is. One off its normal packs as it was.
     #[test]
     fn tangents_along_their_normals_pack_square_to_them() {
         let unpacked = |normal: Vec3, tangent: Vec3| {
@@ -891,8 +879,8 @@ mod tests {
         assert!(t.dot(off) > 0.9999, "{off}: {t}");
     }
 
-    /// A buffer holds its header, its vertices after it at their place, and its meshlets' parts
-    /// where the header says, each a run of words.
+    /// A buffer holds its header, its vertices after it, and its meshlets' parts where the header
+    /// says, each a run of words.
     #[test]
     fn a_buffer_holds_its_header_then_its_vertices_then_its_meshlets() {
         let vertices: Vec<_> = (0..3).map(|i| vertex(Vec3::splat(i as f32))).collect();
@@ -1012,9 +1000,8 @@ mod tests {
         assert!(mesh.check("odd").is_ok());
     }
 
-    /// Vertices farther apart than the grid reaches with what an f32 holds are refused, rather
-    /// than packed to unpack where a coordinate isn't finite: from an offset of -2^128, or at
-    /// 2^128 from an offset of 0.
+    /// Vertices farther apart than the grid reaches within an f32 are refused, not packed to unpack
+    /// where a coordinate isn't finite: from an offset of -2^128, or at 2^128 from an offset of 0.
     #[test]
     fn vertices_past_what_the_grid_reaches_are_refused() {
         for far in [-f32::MAX, f32::MAX] {

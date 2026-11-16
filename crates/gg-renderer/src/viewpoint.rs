@@ -1,51 +1,48 @@
-//! Viewpoints: where the game's view sees the world from, and how what's in front of it is
-//! projected onto the view.
+//! Where the game's view sees the world from, and how it projects.
 
 use std::f32::consts::PI;
 
 use gg_core::math::camera::rh::proj::vulkan;
 use gg_core::math::{DVec3, Mat4, Quat, Vec3, Vec4};
 
-/// Where the game's view sees the world from, and how. World space is right-handed with +Y up, and
-/// a viewpoint without rotation looks down -Z, with +X to its right and +Y up, as glTF's cameras
-/// do.
+/// Where the game's view sees the world from, and how. World space is right-handed, +Y up. Without
+/// rotation a viewpoint looks down -Z, +X to its right, as glTF's cameras do.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewpoint {
-    /// Where it is, in `f64`, as the engine's translations are, so that it sees as precisely 1,000
-    /// km from the origin as at it: a frame draws relative to its
-    /// [`origin`](crate::RenderData::origin), near the viewpoint, in `f32`.
+    /// In `f64`, as the engine's translations are, so it sees as precisely 1,000 km from the origin
+    /// as at it. A frame draws in `f32` relative to its [`origin`](crate::RenderData::origin), near
+    /// the viewpoint.
     pub position: DVec3,
-    /// Which way it faces, as a unit quaternion. A 2D game's camera turns about Z, with
-    /// [`Quat::from_rotation_z`]: turning it counterclockwise turns the scene clockwise on screen.
+    /// A unit quaternion. A 2D game's camera turns about Z ([`Quat::from_rotation_z`]): turning it
+    /// counterclockwise turns the scene clockwise on screen.
     pub rotation: Quat,
     pub projection: Projection,
 }
 
-/// How a camera projects what's in front of it onto the view, and its depth: both projections run
-/// it reversed, from 1 at the near plane to 0 at the far one, or far away, which keeps the
-/// precision of the view's depth, floating-point, where it's needed, and lets perspective see
-/// infinitely far.
+/// How a camera projects what's in front of it onto the view. Both projections run depth reversed,
+/// from 1 at the near plane to 0 at the far one, or infinitely far: that keeps the floating-point
+/// depth's precision where it's needed, and lets perspective see forever.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Projection {
-    /// Without perspective, as 2D games draw: the view spans `height` world units from bottom to
-    /// top, and as many across as its aspect ratio makes, so nothing stretches as it's resized. It
-    /// shows what's from `near` to `far` in front of the camera; either may be negative, to show
-    /// what's behind it too, as 2D games' cameras do, and either the nearer.
+    /// Without perspective, as 2D games draw. The view spans `height` world units from bottom to
+    /// top, and across as its aspect ratio makes, so nothing stretches as it's resized. It shows
+    /// what's from `near` to `far` in front of the camera. Either may be negative, to show what's
+    /// behind, as 2D games' cameras do, and either may be the nearer.
     ///
     /// Rendering panics unless `height` is a positive normal number, and `near` and `far` are
     /// finite and different: otherwise the view would be blank or upside down.
     Orthographic { height: f32, near: f32, far: f32 },
-    /// With perspective, as 3D games draw: the view spans `fov` radians from bottom to top, as
-    /// glTF's `yfov` does, and as much across as its aspect ratio makes. It shows what's at least
-    /// `near` in front of the camera, however far.
+    /// With perspective, as 3D games draw. The view spans `fov` radians from bottom to top, as
+    /// glTF's `yfov`, and across as its aspect ratio makes. It shows what's at least `near` in
+    /// front, however far.
     ///
-    /// Rendering panics unless `fov` is more than 0 and less than π, and `near` is a positive
-    /// normal number: otherwise the view would be blank or upside down.
+    /// Rendering panics unless `fov` is between 0 and π, exclusive, and `near` is a positive normal
+    /// number: otherwise the view would be blank or upside down.
     Perspective { fov: f32, near: f32 },
 }
 
 impl Projection {
-    /// Whether it can project, as its variant says: rendering panics on one that can't.
+    /// Whether it can project, as its variant says. Rendering panics on one that can't.
     pub fn projects(&self) -> bool {
         match *self {
             Self::Orthographic { height, near, far } => {
@@ -63,8 +60,8 @@ impl Projection {
 }
 
 impl Default for Viewpoint {
-    /// At the origin, without rotation, seeing the 2 units around it from bottom to top, and from
-    /// 1 behind it to 1 in front.
+    /// At the origin, unrotated, seeing 2 units from bottom to top, and from 1 behind to 1 in
+    /// front.
     fn default() -> Self {
         Self {
             position: DVec3::ZERO,
@@ -79,8 +76,8 @@ impl Default for Viewpoint {
 }
 
 impl Viewpoint {
-    /// The viewpoint where it is in a world whose origin is moved to `origin`, as a frame draws
-    /// relative to its own: the same but for its position, `origin` taken from it, in `f64`.
+    /// The viewpoint in a world whose origin is moved to `origin`, as a frame draws: `origin` taken
+    /// from its position, in `f64`.
     pub fn relative_to(self, origin: DVec3) -> Self {
         Self {
             position: self.position - origin,
@@ -88,28 +85,27 @@ impl Viewpoint {
         }
     }
 
-    /// The matrix from world space to Vulkan's clip space, whose Y points down, for a view
-    /// `aspect` times as wide as it's tall: in `f32`, so that far from the origin its translation
-    /// rounds, as `f32`s do, 6 cm at 1,000 km; one [`relative_to`](Self::relative_to) a point near
-    /// it maps the world relative to that point.
+    /// World space to Vulkan's clip space, Y down, for a view `aspect` times as wide as tall. In
+    /// `f32`, so far from the origin its translation rounds, 6 cm at 1,000 km; one
+    /// [`relative_to`](Self::relative_to) a near point maps the world relative to that point.
     ///
     /// # Panics
     ///
-    /// If its projection can't project, as [`Projection`] says.
+    /// - If its projection can't project, as [`Projection`] says.
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
         let view =
             Mat4::from_rotation_translation(self.rotation, self.position.as_vec3()).inverse();
         self.projection_matrix(aspect) * view
     }
 
-    /// The matrix from Vulkan's clip space to the ways the view sees, for a view `aspect` times as
-    /// wide as it's tall, as a sky is drawn: with perspective, from a point at the near plane,
-    /// where reversed depth is 1, to one whose way from the origin is the way its pixel sees,
-    /// whatever the viewpoint's position; without, from every point to the one way it sees.
+    /// Vulkan's clip space to the ways the view sees, for a view `aspect` times as wide as tall, as
+    /// a sky is drawn. With perspective, a point at the near plane, where reversed depth is 1, maps
+    /// to one whose way from the origin is its pixel's, wherever the viewpoint is. Without, every
+    /// point maps to the one way it sees.
     ///
     /// # Panics
     ///
-    /// If its projection can't project, as [`Projection`] says.
+    /// - If its projection can't project, as [`Projection`] says.
     pub(crate) fn ways_from_clip(&self, aspect: f32) -> Mat4 {
         let projection = self.projection_matrix(aspect);
         match self.projection {
@@ -123,11 +119,11 @@ impl Viewpoint {
         }
     }
 
-    /// The matrix of its projection alone, from its own space to Vulkan's clip space.
+    /// Its projection alone, from its own space to Vulkan's clip space.
     ///
     /// # Panics
     ///
-    /// If its projection can't project, as [`Projection`] says.
+    /// - If its projection can't project, as [`Projection`] says.
     pub(crate) fn projection_matrix(&self, aspect: f32) -> Mat4 {
         // glam checks none of it, without its `glam-assert` feature.
         assert!(
@@ -141,8 +137,8 @@ impl Viewpoint {
             Projection::Orthographic { height, near, far } => {
                 let top = height / 2.0;
                 let right = top * aspect;
-                // The nearer as near, whichever is given as it; then swapped, so that depth runs
-                // from 1 at the near plane to 0 at the far one, as perspective's does.
+                // The nearer as near, whichever was given as it; then swapped, so depth runs from 1
+                // at the near plane to 0 at the far one, as perspective's does.
                 let (near, far) = (near.min(far), near.max(far));
                 vulkan::orthographic(-right, right, -top, top, far, near)
             }
@@ -153,8 +149,8 @@ impl Viewpoint {
     }
 
     /// Where lit shading sees from, as the frame's data holds it: its position and 1 with
-    /// perspective, or the way back toward it, its own +Z, and 0 without, as an orthographic
-    /// projection sees along one way wherever it looks.
+    /// perspective; without, the way back toward it, its own +Z, and 0, as an orthographic view
+    /// sees along one way wherever it looks.
     pub(crate) fn eye(&self) -> Vec4 {
         match self.projection {
             Projection::Orthographic { .. } => (self.rotation * Vec3::Z).extend(0.0),
@@ -174,8 +170,7 @@ mod tests {
 
     #[test]
     fn a_viewpoint_sees_its_height_of_the_world_without_stretching_it() {
-        // A quarter turn counterclockwise, so its up is the world's -X and its right the world's
-        // +Y.
+        // A quarter turn counterclockwise: its up is the world's -X, its right the world's +Y.
         let viewpoint = Viewpoint {
             position: DVec3::new(3.0, -2.0, 5.0),
             rotation: Quat::from_rotation_z(FRAC_PI_2),
@@ -189,11 +184,11 @@ mod tests {
         for (world, expected) in [
             // 1 in front of it: the view's center, as near as it sees, where depth is 1.
             ([3.0, -2.0, 4.0], [0.0, 0.0, 1.0]),
-            // Half its height up, and 11 in front: the top edge, where Vulkan's Y is -1, as far as
-            // it sees, where depth is 0.
+            // Half its height up, 11 in front: the top edge, where Vulkan's Y is -1, as far as it
+            // sees, where depth is 0.
             ([1.0, -2.0, -6.0], [0.0, -1.0, 0.0]),
-            // Half its width, 1.5 times half its height, to its right, and 6 in front: the right
-            // edge, halfway into what it sees.
+            // Half its width, 1.5 times half its height, to its right, 6 in front: the right edge,
+            // halfway into what it sees.
             ([3.0, 1.0, -1.0], [1.0, 0.0, 0.5]),
         ] {
             let got = clip.project_point3(Vec3::from(world));
@@ -216,8 +211,8 @@ mod tests {
 
     #[test]
     fn a_perspective_viewpoint_sees_its_field_of_view_to_infinity() {
-        // A quarter turn counterclockwise, so its up is the world's -X and its right the world's
-        // +Y; a quarter turn from bottom to top, so the view spans as far up as it is in front.
+        // A quarter turn counterclockwise: its up is the world's -X, its right the world's +Y. A
+        // quarter turn from bottom to top, so the view spans as far up as it is in front.
         let viewpoint = Viewpoint {
             position: DVec3::new(3.0, -2.0, 5.0),
             rotation: Quat::from_rotation_z(FRAC_PI_2),
@@ -251,9 +246,9 @@ mod tests {
         assert!(behind.w < 0.0, "{behind}");
     }
 
-    /// A pixel sees the way its point in the world is from the viewpoint, wherever that is: the
-    /// center ahead, the top edge 45° up, and the right edge, 1.5 times as far across, toward its
-    /// right; and without perspective, every pixel the one way ahead.
+    /// A pixel sees the way its point is from the viewpoint, wherever that is: the center ahead,
+    /// the top edge 45° up, the right edge 1.5 times as far across. Without perspective, every
+    /// pixel sees the one way ahead.
     #[test]
     fn each_pixel_sees_the_way_it_shows() {
         let viewpoint = Viewpoint {

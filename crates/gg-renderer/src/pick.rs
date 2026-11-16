@@ -1,5 +1,5 @@
-//! Picks: questions of what the game's view shows at its pixels, which the frames that render it
-//! read back from its IDs, and the frames two later answer.
+//! Picks: what the game's view shows at given pixels, read back from its IDs by the frames that
+//! render it and answered two frames later.
 
 use gg_gpu::MAX_READS;
 
@@ -8,45 +8,46 @@ use gg_gpu::MAX_READS;
 /// [`RenderData::picks`]: crate::RenderData::picks
 pub const MAX_PICKS: usize = MAX_READS;
 
-/// A question of what the game's view shows at a pixel, which [`Renderer::picked`] answers with the
-/// ID of the draw on top there, as [`Draws`] gives it, in the frame that reads it, once the GPU has
-/// rendered that frame, as the frame two after it begins: the frame that asks it, but for those
-/// [`Renderer::picked`] says. One outside the view is answered 0 by the frame that would read it.
+/// A question of what the game's view shows at a pixel.
+///
+/// A frame reads up to [`MAX_PICKS`] as it renders the view: first those left by frames with
+/// nothing to render into or that read none, then its own. Later frames read the rest.
+/// [`Renderer::picked`] answers each with the ID of the draw on top there ([`Draws`]), or 0 where
+/// none drew, as the frame two after the reading one begins. One outside the view is answered 0 by
+/// the frame that would read it.
 ///
 /// [`Renderer::picked`]: crate::Renderer::picked
 /// [`Draws`]: crate::Draws
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pick {
-    /// What the answer comes back with, which the asker tells its picks apart by.
+    /// Comes back with the answer, to tell picks apart by.
     pub tag: u64,
-    /// The pixel's column and row in the view's image, from its top left.
+    /// Column and row in the view's image, from its top left.
     pub pixel: [u32; 2],
 }
 
-/// The picks a renderer has been asked, from asked to answered. Each step keeps its memory, so that
+/// The picks a renderer has been asked, from asked to answered. Each step keeps its memory, so
 /// frames that pick no more than those before allocate nothing.
 #[derive(Default)]
 pub(crate) struct Picks {
-    /// Those asked and not yet read, in the order they were asked.
+    /// Asked and not yet read, in order.
     waiting: Vec<Pick>,
     /// The pixels the frame being rendered reads.
     pixels: Vec<[u32; 2]>,
-    /// Those read and not yet answered, in the order they were read: the number of the frame that
-    /// read each, with its tag.
+    /// Read and not yet answered, in order: the reading frame's number, and the tag.
     pending: Vec<(u64, u64)>,
-    /// Those answered during the last render: each one's tag, with the ID read.
+    /// Answered during the last render: each tag, with the ID read.
     answered: Vec<(u64, u64)>,
 }
 
 impl Picks {
-    /// Starts a render that's asked `picks`: forgets the last render's answers, and has these wait
-    /// after those waiting already, which a frame that didn't begin or read no picks left, and
-    /// those past the [`MAX_READS`] a frame read after it. A frame asking at most [`MAX_PICKS`]
-    /// keeps them few.
+    /// Starts a render asked `picks`: forgets the last render's answers, and queues these after
+    /// those already waiting, which a frame that didn't begin or read none left, or past the
+    /// [`MAX_READS`] a frame read. A frame asking at most [`MAX_PICKS`] keeps them few.
     ///
     /// # Panics
     ///
-    /// If `picks` are more than [`MAX_PICKS`].
+    /// - If `picks` are more than [`MAX_PICKS`].
     pub(crate) fn ask(&mut self, picks: &[Pick]) {
         assert!(
             picks.len() <= MAX_PICKS,
@@ -57,12 +58,12 @@ impl Picks {
         self.waiting.extend_from_slice(picks);
     }
 
-    /// Answers those that frame `frame` read with `ids`, what it read, in order, as
+    /// Answers those frame `frame` read with `ids`, in order, as
     /// [`Frame::ids_read`](gg_gpu::Frame::ids_read) gives them.
     ///
     /// # Panics
     ///
-    /// If `ids` aren't as many as frame `frame` read.
+    /// - If `ids` aren't as many as frame `frame` read.
     pub(crate) fn answer(&mut self, (frame, ids): (u64, &[[u32; 2]])) {
         let read = (self.pending.iter())
             .take_while(|&&(by, _)| by == frame)
@@ -78,10 +79,9 @@ impl Picks {
     }
 
     /// Takes those waiting that frame `frame` reads of the view's IDs, `size` pixels, if it renders
-    /// the view, and returns their pixels, for it to read in that order: up to [`MAX_READS`] of
-    /// them, in the order they were asked, the rest waiting for the frames after. Those outside the
-    /// view as the frame renders it, every one if it renders none, are answered 0, as nothing of
-    /// the view is there.
+    /// the view, and returns their pixels in reading order: up to [`MAX_READS`], in asking order,
+    /// the rest waiting for later frames. Those outside the view as the frame renders it, or all if
+    /// it renders none, are answered 0.
     pub(crate) fn take(&mut self, frame: u64, size: Option<[u32; 2]>) -> &[[u32; 2]] {
         self.pixels.clear();
         let mut kept = 0;
@@ -102,7 +102,7 @@ impl Picks {
         &self.pixels
     }
 
-    /// Those answered during the last render: each one's tag, with the ID read.
+    /// Answered during the last render: each tag, with the ID read.
     pub(crate) fn answered(&self) -> &[(u64, u64)] {
         &self.answered
     }
@@ -112,11 +112,11 @@ impl Picks {
 mod tests {
     use super::*;
 
-    /// Picks across frames as a renderer goes through them, each frame answering what the one two
-    /// before it read: a pick outside the view answered 0 at once; IDs whose high halves are set;
-    /// a frame that reads none, answered with none two later; more than a frame reads, the rest
-    /// read by the next; picks while a frame doesn't begin, which wait for one that does; and a
-    /// frame without the view, which answers 0 every pick waiting.
+    /// Picks across frames, each frame answering what the one two before read: a pick outside the
+    /// view answered 0 at once; IDs whose high halves are set; a frame reading none, answered with
+    /// none two later; more than a frame reads, the next reading the rest; picks while a frame
+    /// doesn't begin, waiting for one that does; and a frame without the view answering 0 every
+    /// pick waiting.
     #[test]
     fn each_pick_is_answered_by_the_ids_its_frame_read() {
         let pick = |tag, pixel| Pick { tag, pixel };
@@ -138,8 +138,8 @@ mod tests {
         assert!(picks.take(2, in_view).is_empty());
         assert!(picks.answered().is_empty(), "the last render's");
 
-        // Frame 3 doesn't begin at first, so what it was asked waits with what it's asked next: more
-        // than a frame reads, whose rest the next reads.
+        // Frame 3 doesn't begin at first, so what it was asked waits with what it's asked next:
+        // more than a frame reads, the next reading the rest.
         let many: Vec<Pick> = (0..MAX_PICKS as u64 + 2)
             .map(|tag| pick(100 + tag, [tag as u32 % 4, 1]))
             .collect();

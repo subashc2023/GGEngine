@@ -1,13 +1,12 @@
-//! Compiles the shaders in `shaders/` to SPIR-V with `slangc`, which the Vulkan SDK ships. The
-//! `SLANGC` environment variable names it; otherwise it's the Vulkan SDK's, under `VULKAN_SDK`,
-//! or the first on the path. The crate compiles games' shaders as they're added with the same
-//! one, which `GG_SLANGC` names to it.
+//! Compiles `shaders/` to SPIR-V with `slangc`: `SLANGC` if set, else the Vulkan SDK's under
+//! `VULKAN_SDK`, else the first on the path. The crate compiles games' shaders with the same one,
+//! which it gets as `GG_SLANGC`.
 
 use std::env;
 use std::path::{self, Path, PathBuf};
 use std::process::Command;
 
-/// Those that draw, of a vertex and a fragment shader each.
+/// Shaders that draw, each a vertex and a fragment shader.
 const SHADERS: [&str; 14] = [
     "circle",
     "egui",
@@ -25,7 +24,7 @@ const SHADERS: [&str; 14] = [
     "view",
 ];
 
-/// Those that compute, with their entry points.
+/// Shaders that compute, with their entry points.
 const COMPUTE: [(&str, &[&str]); 22] = [
     (
         "ao",
@@ -122,7 +121,7 @@ fn main() {
     };
     println!("cargo::rustc-env=GG_SLANGC={name}");
     check_release(&slangc);
-    // The whole directory, so that a change to a file the shaders include compiles them again too.
+    // The whole directory, so a change to an included file recompiles too.
     println!("cargo::rerun-if-changed=shaders");
     let drawing: &[(&str, &str)] = &[("vertex_main", "vertex"), ("fragment_main", "fragment")];
     for shader in SHADERS {
@@ -130,22 +129,22 @@ fn main() {
     }
     // The atmosphere's sky, drawn, apart from its tables' compute shaders.
     compile(&slangc, &out, "atmosphere", "atmosphere_sky", drawing);
-    // The masked model shader's shadows, cut out as it is, apart from it, which keeps to the
-    // contract games' shaders keep, of two entry points.
+    // The masked model shader's cut-out shadows, apart from it, which keeps to games' shaders'
+    // contract of two entry points.
     let shadow = &[("vertex_main", "vertex"), ("shadow_main", "fragment")];
     compile(&slangc, &out, "model_masked", "model_masked_shadow", shadow);
-    // The opaque and masked model shaders' meshlets, drawn through vertex shaders or through a mesh
-    // shader, each apart, so that a device without mesh shaders takes no SPIR-V of one; the mesh
-    // shader alone, as gg-gpu's `GraphicsDesc::mesh` says why.
+    // The opaque and masked model shaders' meshlets, through vertex shaders or a mesh shader, each
+    // apart, so a device without mesh shaders takes no mesh shader's SPIR-V. The mesh shader alone:
+    // gg-gpu's `GraphicsDesc::mesh` says why.
     let meshlets = ("meshlet_vertex_main", "vertex");
     for name in ["model_opaque", "model_masked"] {
         let entries = &[meshlets, ("fragment_main", "fragment")];
         compile(&slangc, &out, name, &format!("{name}_meshlets"), entries);
         let mesh = &[("mesh_main", "mesh")];
         compile(&slangc, &out, name, &format!("{name}_mesh"), mesh);
-        // Their meshlets drawn into the visibility buffer likewise: the mesh shader alone, and the
-        // fragment shader behind it alone too, as it reads its primitive's ID, which takes a
-        // capability only devices that draw through mesh shaders enable.
+        // Their meshlets into the visibility buffer likewise: the mesh shader alone, and its
+        // fragment shader alone too, as it reads its primitive's ID, a capability only devices
+        // drawing through mesh shaders enable.
         let entries = &[
             ("meshlet_visibility_main", "vertex"),
             ("visibility_main", "fragment"),
@@ -162,9 +161,9 @@ fn main() {
         let fragment = &[("visibility_primitive_main", "fragment")];
         let spirv = format!("{name}_visibility_primitive");
         compile(&slangc, &out, name, &spirv, fragment);
-        // Their normals, for the view's reflections, apart from them, as the masked one's shadows
-        // are: by their indices, and by their meshlets through vertex shaders, a mesh shader's
-        // pipelines taking the first's fragment shader.
+        // Their normals, for the view's reflections, apart, as the masked one's shadows are: by
+        // index, and by meshlets through vertex shaders. Mesh shader pipelines take the first's
+        // fragment shader.
         let normals = &[("vertex_main", "vertex"), ("normal_main", "fragment")];
         compile(&slangc, &out, name, &format!("{name}_normals"), normals);
         let normals = &[meshlets, ("normal_main", "fragment")];
@@ -185,8 +184,8 @@ fn main() {
     }
 }
 
-/// Compiles `shaders/<shader>.slang` with `slangc` into `<spirv>.spv` in `out`, of `entries`, each
-/// an entry point and its stage.
+/// Compiles `entries` of `shaders/<shader>.slang`, each an entry point and stage, into
+/// `<spirv>.spv` in `out`.
 fn compile(slangc: &Path, out: &Path, shader: &str, spirv: &str, entries: &[(&str, &str)]) {
     let source = format!("shaders/{shader}.slang");
     let mut command = Command::new(slangc);
@@ -220,10 +219,10 @@ fn compile(slangc: &Path, out: &Path, shader: &str, spirv: &str, entries: &[(&st
     }
 }
 
-/// Warns where `slangc` isn't the release CI builds with, as the `SLANG` of its action pins: each
-/// release's SPIR-V differs, so a shader test can pass under one and fail under another, as
-/// `the_model_shaders_load_the_frame_whole` did under 2025.23.2 and 2026.20. Says nothing where
-/// either release can't be read.
+/// Warns if `slangc` isn't the release CI pins, its action's `SLANG`: each release's SPIR-V
+/// differs, so a shader test can pass under one and fail under another, as
+/// `the_model_shaders_load_the_frame_whole` did under 2025.23.2 and 2026.20. Silent where either
+/// release can't be read.
 fn check_release(slangc: &Path) {
     const ACTION: &str = "../../.github/actions/slangc/action.yml";
     println!("cargo::rerun-if-changed={ACTION}");

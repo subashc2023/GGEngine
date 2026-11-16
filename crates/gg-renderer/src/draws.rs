@@ -1,5 +1,4 @@
-//! Draws: what a frame draws besides UI, in order, each a mesh with a shader, the parameters it
-//! takes, a transform and an ID, kept in runs that each render as one instanced draw.
+//! What a frame draws besides UI, in runs that each render as one instanced draw.
 
 use std::ops::Range;
 
@@ -12,71 +11,67 @@ use crate::{
     sprite,
 };
 
-/// What a frame draws besides UI: meshes, each with a shader for its vertex type, the parameters
-/// that shader takes, and where it is in the world. Those whose shaders are opaque draw first,
-/// whatever their order, each hiding what's behind it; then those that blend, in order, each over
-/// those before it and over what's opaque, but where what's opaque is nearer. Each run of
-/// consecutive draws of one mesh with one shader that draw the same [`Faces`], within the same
-/// [`clip`](Self::clip), renders as one instanced draw, whatever their transforms, IDs and parameters, a texture among them, or, of a
-/// mesh with levels of detail, as one for each level its instances draw at: every draw draws both
-/// faces of its mesh's triangles but a material's that isn't double-sided. Each draw has an ID, a
-/// 64-bit number that the view writes where it shows, which [picks](crate::Pick) read back: what
-/// the engine gives it, an entity's ID for a draw of the world's; 0 for a draw of no entity, as
-/// [`push`](Self::push), [`push_sprite`](Self::push_sprite) and [`push_circle`](Self::push_circle)
-/// give. Clearing it keeps its memory, so that a frame that draws no more than the last allocates
-/// nothing.
+/// What a frame draws besides UI: meshes, each with a shader for its vertex type, that shader's
+/// parameters, a transform and an ID.
 ///
-/// The renderer's [`Scene`](crate::Scene) draws among them where [`draw_scene`](Self::draw_scene)
-/// says, or else before them all. Skinned meshes, the scene's or these', draw where the frame's
-/// skins move them, as [`skin`](Self::skin) says. Emitters' particles draw among those that blend,
-/// each emitter's where [`push_particles`](Self::push_particles) puts them.
+/// - Opaque draws come first, in any order, each hiding what's behind it. Those that blend follow
+///   in order, over those before and over what's opaque where it isn't nearer.
+/// - Each run of consecutive draws of one mesh and shader, with the same [`Faces`] and
+///   [`clip`](Self::clip), renders as one instanced draw, whatever their transforms, IDs and
+///   parameters, textures among them. A mesh with levels of detail draws once per level its
+///   instances draw at.
+/// - Draws draw both faces, but a material's that isn't double-sided.
+/// - An ID is a 64-bit number the view writes where the draw shows, which [picks](crate::Pick) read
+///   back: an entity's for a draw of the world's, 0 for none, as [`push`](Self::push),
+///   [`push_sprite`](Self::push_sprite) and [`push_circle`](Self::push_circle) give.
+/// - The renderer's [`Scene`](crate::Scene) draws where [`draw_scene`](Self::draw_scene) says, or
+///   else first. Skinned meshes draw where the frame's skins move them ([`skin`](Self::skin)).
+///   Emitters' particles draw among those that blend, where
+///   [`push_particles`](Self::push_particles) puts them.
+///
+/// Clearing keeps its memory, so a frame that draws no more than the last allocates nothing.
 #[derive(Debug, Default, PartialEq)]
 pub struct Draws {
-    /// The runs, in order.
     pub(crate) runs: Vec<Run>,
-    /// The run the scene draws before, if [`draw_scene`](Self::draw_scene) says one.
+    /// The run the scene draws before, if any.
     pub(crate) scene_at: Option<usize>,
-    /// Every draw's transform, in order.
     pub(crate) transforms: Vec<Mat4>,
-    /// Every draw's ID, in order, as its low and high halves, which shaders write.
+    /// Every draw's ID as its low and high halves, which shaders write.
     pub(crate) ids: Vec<[u32; 2]>,
-    /// Every draw's parameters, one after another.
     pub(crate) params: Vec<u8>,
-    /// The skinned meshes the frame moves, each with where its joints' matrices are in `joints`.
+    /// The skinned meshes the frame moves, each with its joints' range in `joints`.
     pub(crate) skins: Vec<(u32, Range<usize>)>,
-    /// Every skin's joints' matrices, one after another.
     pub(crate) joints: Vec<Mat4>,
-    /// Every emitter's particles, in order, each drawn in its run's place.
+    /// Every emitter's particles, each drawn in its run's place.
     pub(crate) particles: Vec<Particles>,
-    /// The clip the draws pushed from here on take, as [`clip`](Self::clip) set it, and whether
-    /// the next of them starts a run of its own, as each call has it.
+    /// The clip of the draws pushed from here on ([`clip`](Self::clip)), and whether the next
+    /// starts a run of its own.
     clip: Option<[Vec2; 2]>,
     split: bool,
 }
 
-/// Consecutive draws of one mesh with one shader that draw the same faces, within the same clip:
-/// the instances of one instanced draw.
+/// Consecutive draws of one mesh and shader with the same faces and clip: one instanced draw's
+/// instances.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Run {
     pub(crate) mesh: u32,
     pub(crate) shader: u32,
     pub(crate) faces: Faces,
-    /// The rectangle its draws show within, as [`Draws::clip`] says, if any.
+    /// Where its draws show ([`Draws::clip`]), if they're clipped.
     pub(crate) clip: Option<[Vec2; 2]>,
-    /// Where its draws' transforms and IDs are in `Draws::transforms` and `Draws::ids`.
+    /// Its draws' range in `Draws::transforms` and `Draws::ids`.
     pub(crate) instances: Range<usize>,
-    /// Where their parameters are in `Draws::params`.
+    /// Their range in `Draws::params`.
     pub(crate) params: Range<usize>,
-    /// For an emitter's particles, which draw in its place in place of its draws, of which it has
-    /// none, of the engine's quad with the sprite shader: their index in `Draws::particles`.
+    /// For an emitter's particles, drawn in place of the run's draws, of which it has none, of the
+    /// engine's quad with the sprite shader: their index in `Draws::particles`.
     pub(crate) particles: Option<usize>,
 }
 
 impl Draws {
-    /// Draws `mesh` with `shader`, which reads its vertex type and takes `params`, where
-    /// [`Draws`] puts it by how `shader` blends: among the opaque, first, or else in its turn.
-    /// `transform` takes the mesh's own space, which its vertices' positions are in, to the
-    /// world's. Its ID is 0, of no entity.
+    /// Draws `mesh` with `shader`, which reads its vertex type and takes `params`: among the
+    /// opaque, first, or in its turn if it blends. `transform` takes the mesh's space to the
+    /// world's. Its ID is 0.
     pub fn push<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,
@@ -87,7 +82,7 @@ impl Draws {
         self.push_with_id(mesh, shader, transform, params, 0);
     }
 
-    /// Draws as [`push`](Self::push) does, with the ID `id`.
+    /// [`push`](Self::push), with the ID `id`.
     fn push_with_id<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,
@@ -103,11 +98,9 @@ impl Draws {
         self.extend_run(mesh.index, shader.index, Faces::Both, instance, start);
     }
 
-    /// Draws `draw` as [`push`](Self::push) draws its mesh with its shader and parameters, with
-    /// the ID `id`. A
-    /// material's draw that isn't double-sided draws its mesh's fronts: the triangles whose corners
-    /// wind counterclockwise, as glTF's fronts do, or clockwise where `transform` mirrors them, as
-    /// glTF has it.
+    /// Draws `draw`'s mesh with its shader and parameters, as [`push`](Self::push) does, with the
+    /// ID `id`. A material that isn't double-sided draws its mesh's fronts: triangles winding
+    /// counterclockwise, as glTF's do, or clockwise where `transform` mirrors them.
     pub fn push_draw(&mut self, transform: Mat4, draw: &MeshDraw, id: u64) {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.push(transform);
@@ -123,38 +116,34 @@ impl Draws {
         self.extend_run(draw.mesh, draw.shader, faces, instance, start);
     }
 
-    /// Draws `sprite` over what's drawn before it and what's opaque, but where what's opaque is
-    /// nearer, as [`Sprite`] describes. `transform` takes the sprite's own space, where it's a unit square
-    /// around the origin, to the world's. Its ID is 0, of no entity.
+    /// Draws `sprite` among those that blend ([`Sprite`]). `transform` takes its space, a unit
+    /// square round the origin, to the world's. Its ID is 0.
     pub fn push_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         self.push(sprite::QUAD, sprite::SHADER, transform, sprite.params());
     }
 
-    /// Draws each of `sprites`, a transform, a sprite and its ID, in turn, as
-    /// [`push_sprite`](Self::push_sprite) does, but with its ID, making room for them and joining a
-    /// run once for them all.
+    /// Draws each of `sprites`, a transform, a sprite and an ID, as
+    /// [`push_sprite`](Self::push_sprite) does, making room and joining a run once for all.
     pub fn extend_sprites(&mut self, sprites: impl ExactSizeIterator<Item = (Mat4, Sprite, u64)>) {
         let sprites = sprites.map(|(transform, sprite, id)| (transform, sprite.params(), id));
         self.extend_quads(sprite::SHADER, sprites);
     }
 
-    /// Draws `circle` over what's drawn before it and what's opaque, but where what's opaque is
-    /// nearer, as [`Circle`] describes, with the engine's circle shader, which `shaders` adds the first time
-    /// it's asked for. `transform` takes the circle's own space, where it's as large as fits a unit
-    /// square around the origin, to the world's. Its ID is 0, of no entity.
+    /// Draws `circle` among those that blend ([`Circle`]), with the engine's circle shader, which
+    /// `shaders` adds when first asked. `transform` takes its space, where it fills a unit square
+    /// round the origin, to the world's. Its ID is 0.
     pub fn push_circle(&mut self, shaders: &mut Shaders, transform: Mat4, circle: Circle) {
         self.push(sprite::QUAD, shaders.circle(), transform, circle.params());
     }
 
-    /// Draws each of `circles`, a transform, a circle and its ID, in turn, as
-    /// [`push_circle`](Self::push_circle) does, but with its ID, making room for them and joining a
-    /// run once for them all.
+    /// Draws each of `circles` as [`push_circle`](Self::push_circle) does, with its ID, making room
+    /// and joining a run once for all.
     pub fn extend_circles(
         &mut self,
         shaders: &mut Shaders,
         circles: impl ExactSizeIterator<Item = (Mat4, Circle, u64)>,
     ) {
-        // No circles ask for no shader, which would have a renderer make its pipeline.
+        // No circles, no shader: asking for it would have a renderer make its pipeline.
         if circles.len() == 0 {
             return;
         }
@@ -162,17 +151,16 @@ impl Draws {
         self.extend_quads(shaders.circle(), circles);
     }
 
-    /// Draws each of `glyphs`, a transform, a glyph and its ID, in turn, over what's drawn before
-    /// it and what's opaque, but where what's opaque is nearer, as [`Glyph`] describes, with the engine's text
-    /// shader, which `shaders` adds the first time it's asked for, making room for them and joining
-    /// a run once for them all. Each transform takes the glyph's own space, where it's a unit square
-    /// around the origin, to the world's.
+    /// Draws each of `glyphs`, a transform, a glyph and an ID, among those that blend ([`Glyph`]),
+    /// with the engine's text shader, which `shaders` adds when first asked, making room and
+    /// joining a run once for all. Each transform takes the glyph's unit square round the origin to
+    /// the world.
     pub fn extend_glyphs(
         &mut self,
         shaders: &mut Shaders,
         glyphs: impl ExactSizeIterator<Item = (Mat4, Glyph, u64)>,
     ) {
-        // No glyphs ask for no shader, which would have a renderer make its pipeline.
+        // No glyphs, no shader: asking for it would have a renderer make its pipeline.
         if glyphs.len() == 0 {
             return;
         }
@@ -180,20 +168,18 @@ impl Draws {
         self.extend_quads(shaders.text(), glyphs);
     }
 
-    /// Draws `line` over what's drawn before it and what's opaque, but where what's opaque is
-    /// nearer, as [`Line`] describes, with the engine's line shader, which `shaders` adds the first time it's asked
-    /// for, and with the ID `id`: an entity's, or 0 for none. `transform` takes the space its
-    /// points are in to the world's, and leaves its width as it is, in the view's pixels.
+    /// Draws `line` among those that blend ([`Line`]), with the engine's line shader, which
+    /// `shaders` adds when first asked, and the ID `id`: an entity's, or 0. `transform` takes its
+    /// points' space to the world's; its width stays in the view's pixels.
     pub fn push_line(&mut self, shaders: &mut Shaders, transform: Mat4, line: Line, id: u64) {
         self.push_with_id(sprite::QUAD, shaders.line(), transform, line.params(), id);
     }
 
-    /// Draws `grid` over what's drawn before it and what's opaque, but where what's opaque is
-    /// nearer, as [`Grid`] describes, with the engine's grid mesh and shader, which `meshes` and `shaders` add the
-    /// first time they're asked for. `transform` takes the grid's own space, where it's a unit
-    /// square around the origin in its XY plane, to the world's: its first two columns are the
-    /// square's sides in the grid's plane, and its translation the square's center. It has no ID,
-    /// leaving the IDs of what's under it, so that picks see through it.
+    /// Draws `grid` among those that blend ([`Grid`]), with the engine's grid mesh and shader,
+    /// which `meshes` and `shaders` add when first asked. `transform` takes the grid's unit square
+    /// round the origin in its XY plane to the world's: its first two columns are the square's
+    /// sides, its translation the square's center. It has no ID and leaves what's under it, so
+    /// picks see through it.
     pub fn push_grid(
         &mut self,
         meshes: &mut Meshes,
@@ -204,10 +190,9 @@ impl Draws {
         self.push(meshes.grid(), shaders.grid(), transform, grid.params());
     }
 
-    /// Draws the outline of the square a unit across around the origin, in its XY plane, as a
-    /// sprite is, that `transform` places in the world: its four sides, each a line in `color`,
-    /// `width` pixels wide, as [`push_line`](Self::push_line) draws them with the ID `id`, which
-    /// meet at its corners.
+    /// Draws the outline of a sprite's unit square that `transform` places: four lines meeting at
+    /// its corners, in `color`, `width` pixels wide, drawn as [`push_line`](Self::push_line) does
+    /// with the ID `id`.
     pub fn push_rect(
         &mut self,
         shaders: &mut Shaders,
@@ -230,7 +215,7 @@ impl Draws {
     }
 
     /// Draws each of `quads`, a transform, parameters and an ID, on the engine's quad with
-    /// `shader`, making room for them and joining a run once for them all.
+    /// `shader`, making room and joining a run once for all.
     fn extend_quads<P: NoUninit>(
         &mut self,
         shader: Shader<sprite::Corner, P>,
@@ -252,13 +237,11 @@ impl Draws {
         }
     }
 
-    /// Draws `particles`, an emitter's, over what's drawn before them and what's opaque, but where
-    /// what's opaque is nearer, as [`Particles`] describes: every particle facing the view, alive
-    /// at the frame's time, in its emitter's ring's order, from its oldest, testing depth without
-    /// writing it, and writing their emitter's ID where they show. A frame that doesn't draw an
-    /// emitter lets go of its particles, as does one that doesn't render the view; and of two
-    /// draws of one emitter in a frame, the second draws nothing. What's on the canvas draws no
-    /// particles.
+    /// Draws an emitter's `particles` among those that blend ([`Particles`]): each facing the view,
+    /// alive at the frame's time, in its ring's order from the oldest, testing depth without
+    /// writing it, and writing the emitter's ID. A frame that doesn't draw an emitter, or doesn't
+    /// render the view, lets go of its particles. A second draw of one emitter in a frame draws
+    /// nothing. The canvas draws no particles.
     pub fn push_particles(&mut self, particles: Particles) {
         self.particles.push(particles);
         let (instance, start) = (self.transforms.len(), self.params.len());
@@ -274,20 +257,18 @@ impl Draws {
         self.split = false;
     }
 
-    /// The emitters' particles the frame draws, in order: for tests, which read what a frame
-    /// draws of them.
+    /// The emitters' particles the frame draws, in order, for tests.
     #[doc(hidden)]
     pub fn particles(&self) -> &[Particles] {
         &self.particles
     }
 
-    /// Has the frame draw skinned `mesh`, a model's mesh that
-    /// [`pack_skinned`](crate::ModelMesh::pack_skinned) packed, wherever it draws, with its vertices
-    /// where `joints` carry them: the matrix of each of its skin's joints, in order, from the
-    /// mesh's own space as the joint was bound, to the mesh's own space as the joint is drawn now,
-    /// which each vertex blends by its weights, as glTF's skins do. A frame that doesn't, or that
-    /// gives a mesh that isn't skinned or drawable yet, draws it unmoved, as it was bound. A joint
-    /// past those given counts as the last.
+    /// Has the frame draw skinned `mesh`, packed by
+    /// [`pack_skinned`](crate::ModelMesh::pack_skinned), wherever it draws, with its vertices where
+    /// `joints` carry them. In skin order, each joint's matrix takes the mesh's space as the joint
+    /// was bound to its space as the joint is drawn now; each vertex blends them by its weights, as
+    /// glTF's skins do. A frame that doesn't, or gives a mesh not skinned or not yet drawable,
+    /// draws it as bound. A joint past those given counts as the last.
     pub fn skin<V>(&mut self, mesh: Mesh<V>, joints: impl IntoIterator<Item = Mat4>) {
         let start = self.joints.len();
         self.joints.extend(joints);
@@ -296,15 +277,14 @@ impl Draws {
         }
     }
 
-    /// The skinned meshes the frame moves, each by its handle, with its joints' matrices, in
-    /// order: for tests, which read what a frame skins.
+    /// The skinned meshes the frame moves, by handle, with their joints' matrices, for tests.
     #[doc(hidden)]
     pub fn skins(&self) -> impl Iterator<Item = (u32, &[Mat4])> {
         (self.skins.iter()).map(|(mesh, joints)| (*mesh, &self.joints[joints.clone()]))
     }
 
-    /// Moves `other`'s draws after these, in their order, leaving it empty but with its memory, as
-    /// though they'd been drawn here.
+    /// Moves `other`'s draws after these, in order, as though drawn here, leaving it empty with its
+    /// memory.
     pub fn append(&mut self, other: &mut Draws) {
         let joint = self.joints.len();
         self.joints.append(&mut other.joints);
@@ -328,9 +308,9 @@ impl Draws {
             let particles = run.particles.map(|index| emitter + index);
             let scene_last = self.scene_at == Some(self.runs.len());
             match self.runs.last_mut() {
-                // Its first run goes on from these' last, if it's of the same mesh, shader, faces
+                // Its first run goes on from these' last if it's of the same mesh, shader, faces
                 // and clip, neither is particles, the scene doesn't draw between them, and no clip
-                // was set since: the last ends where it begins.
+                // was set since.
                 Some(last)
                     if (last.mesh, last.shader, last.faces, last.clip)
                         == (run.mesh, run.shader, run.faces, run.clip)
@@ -356,9 +336,9 @@ impl Draws {
         (other.clip, other.split) = (None, false);
     }
 
-    /// Adds the draws from `instance` on, whose parameters start at `start`, of `mesh` with
-    /// `shader`, drawing `faces`, to the last run if it's of them too, and of the clip set, which
-    /// was set before it, or as a run of their own.
+    /// Adds the draws from `instance` on, their parameters from `start`, of `mesh` with `shader`
+    /// drawing `faces`: to the last run if it's of them and of the clip set before it, or else as a
+    /// run of their own.
     fn extend_run(&mut self, mesh: u32, shader: u32, faces: Faces, instance: usize, start: usize) {
         let scene_last = self.scene_at == Some(self.runs.len());
         match self.runs.last_mut() {
@@ -385,40 +365,38 @@ impl Draws {
         self.split = false;
     }
 
-    /// Has the draws pushed from here on show only within `clip`, a rectangle in the XY plane of
-    /// the space their transforms take them to, its least corner then its greatest, until the next
-    /// call: what of them falls outside the box round where the view shows it, to its pixels, isn't
-    /// drawn, as a list that scrolls hides what's scrolled out of it. `None` clips nothing. Each
-    /// call starts a run for the draws after it, so that [`place`](Self::place) can place their
-    /// clip with them. The view's culling doesn't know a clip, and culls a clipped draw as if it
-    /// weren't. A scissor on the run, rather than a rectangle in each instance, which every shader
-    /// that draws on the canvas would have to test: so a UI's list or text field of clipped draws
-    /// is one scissored instanced draw of each mesh and shader.
+    /// Has the draws pushed from here on show only within `clip` until the next call: a rectangle
+    /// in the XY plane their transforms take them to, least corner then greatest. What falls
+    /// outside the box round where the view shows it isn't drawn, as a scrolling list hides what's
+    /// scrolled out. `None` clips nothing.
+    ///
+    /// Each call starts a run, so [`place`](Self::place) can place the clip with its draws. It's a
+    /// scissor on the run, not a rectangle in each instance that every canvas shader would test, so
+    /// a UI's list or text field is one scissored instanced draw per mesh and shader. The view's
+    /// culling ignores clips.
     pub fn clip(&mut self, clip: Option<[Vec2; 2]>) {
         (self.clip, self.split) = (clip, true);
     }
 
-    /// Has the renderer's [`Scene`](crate::Scene) draw here, after the draws so far and before
-    /// those after: over what's drawn so far, and under what's drawn after, but where what's
-    /// opaque is nearer. The last place it says is the scene's.
+    /// Has the renderer's [`Scene`](crate::Scene) draw here: over the draws so far and under those
+    /// after, but where what's opaque is nearer. The last place called is the scene's.
     pub fn draw_scene(&mut self) {
         self.scene_at = Some(self.runs.len());
     }
 
-    /// How many draws there are: one for each mesh drawn, of whichever run.
+    /// How many draws there are: one per mesh drawn.
     pub fn len(&self) -> usize {
         self.transforms.len()
     }
 
-    /// Places draws `draws`, as they're counted from the first, in the space `transform` takes
-    /// theirs to: each one's transform becomes `transform` times its own, and the clip of each run
-    /// whose first draw is among them the box round where `transform` takes its corners. It
-    /// changes no run otherwise, so a `transform` that mirrors leaves a draw that culls culling the
-    /// faces it culled before.
+    /// Places draws `draws`, counted from the first, in the space `transform` takes theirs to: each
+    /// transform becomes `transform` times its own, and the clip of each run starting among them
+    /// the box round its corners, transformed. Runs don't change otherwise, so a mirroring
+    /// `transform` leaves a culling draw culling the faces it did.
     ///
     /// # Panics
     ///
-    /// If `draws` reaches past them.
+    /// - If `draws` reaches past them.
     pub fn place(&mut self, draws: Range<usize>, transform: Mat4) {
         for run in &mut self.runs {
             if let Some([least, most]) = &mut run.clip
@@ -544,10 +522,10 @@ mod tests {
         assert_eq!(draws.ids, [[0; 2]]);
     }
 
-    /// Circles and lines are runs of the engine's quad with shaders of their own, which `Shaders`
-    /// adds as each is first asked for, and no circles ask for none. Draws appended after others go
-    /// on in their order, with their IDs, the first joining the last run, of the same mesh, shader
-    /// and faces; those appended keep their memory alone.
+    /// Circles and lines are runs of the engine's quad with their own shaders, which `Shaders` adds
+    /// when first asked, and no circles ask for none. Appended draws go on in order with their IDs,
+    /// the first joining the last run of the same mesh, shader and faces; those appended from keep
+    /// their memory alone.
     #[test]
     fn appended_draws_go_on_after_the_rest() {
         let mut shaders = Shaders::default();
@@ -586,8 +564,7 @@ mod tests {
         assert_eq!([over.transforms.capacity(), over.ids.capacity()], held);
     }
 
-    /// Placing draws counted from the first moves those alone into the space a transform takes
-    /// them to, across their runs, which stay as they were.
+    /// Placing draws moves those alone, across their runs, which stay as they were.
     #[test]
     fn placed_draws_go_where_a_transform_takes_them() {
         let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
@@ -609,10 +586,10 @@ mod tests {
         assert_eq!(draws.transforms, placed);
     }
 
-    /// A clip set starts a run for the draws after it, though its draws be of the run before's mesh
-    /// and shader, and though it be the clip before; draws appended keep their runs' clips; placing
-    /// draws places the clips of the runs that start among them, as the box round their corners,
-    /// and no other's; and clearing forgets the clip.
+    /// A clip starts a run for the draws after it, even of the last run's mesh and shader and the
+    /// same clip. Appended draws keep their runs' clips. Placing places the clips of the runs
+    /// starting among the placed draws, as their corners' box, and no other's. Clearing forgets the
+    /// clip.
     #[test]
     fn a_clip_starts_a_run_and_is_placed_with_its_draws() {
         let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
@@ -648,8 +625,8 @@ mod tests {
         assert_eq!(draws.runs[0].clip, None);
     }
 
-    /// Grids are runs of a mesh and a shader of the engine's own, which `Meshes` and `Shaders` add
-    /// the first time they're asked for, and then the same.
+    /// Grids are runs of the engine's own mesh and shader, which `Meshes` and `Shaders` add when
+    /// first asked, and reuse after.
     #[test]
     fn grids_draw_with_a_mesh_and_a_shader_added_once() {
         let mut meshes = Meshes::default();

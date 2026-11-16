@@ -1,9 +1,7 @@
 //! What the game's view shows in place of its light, to see how it's made, as the tool API's look
-//! and captures ask for it: a part of what lit shading takes or makes, which shading.slang's `lit`
-//! returns in place of its light, shown as drawn and nothing after it; or an image the frame makes,
-//! by its debug name, which a pass of its own, as `shaders/show.slang` says, writes into colors of
-//! the view's own in place of the view's, from a frame drawn as the game's is but for its
-//! antialiasing, so that every pass's images are there to show. [`showing`] says how each frame
+//! and captures ask. Either a part of what lit shading takes or makes, which shading.slang's `lit`
+//! returns in place of its light; or an image the frame makes, by debug name, which
+//! `shaders/show.slang`'s pass writes into the view's own colors. [`showing`] says how each frame
 //! draws.
 
 use std::ops::Range;
@@ -17,19 +15,24 @@ use crate::{Antialiasing, Grade, Lens, RenderData, Tonemapper};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/show.spv"));
 
-/// How many pixels across and down a workgroup takes: `GROUP` in `shaders/show.slang`.
+/// A workgroup's side, in pixels: `GROUP` in `shaders/show.slang`.
 const GROUP: u32 = 8;
 
-/// What the game's view shows in place of its light, as [`RenderData::show`] gives it.
+/// What the game's view shows in place of its light ([`RenderData::show`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Show<'a> {
-    /// A part of what lit shading takes or makes, at each point of what models draw.
+    /// A part of what lit shading takes or makes, at each point models draw.
     Shading(Channel),
-    /// An image the frame makes, by its debug name, as RenderDoc shows it, the last of that name:
-    /// colors as they are, those of high dynamic range through the tonemapper; depth as `1 +
-    /// log2(depth) / 24`; IDs and a visibility buffer as a color for each value; motion as a
-    /// normal is; a float a pixel as its value; each value as [`Channel`] says the view stores
-    /// one. An image the frame doesn't make shows black, warning `renderer.no_image` once.
+    /// An image the frame makes, by its debug name as RenderDoc shows it, the last of that name:
+    ///
+    /// - Colors as they are, HDR ones through the tonemapper.
+    /// - Depth as `1 + log2(depth) / 24`.
+    /// - IDs and a visibility buffer as a color per value.
+    /// - Motion as a normal is.
+    /// - A one-float pixel as its value.
+    /// - Values as [`Channel`] says the view stores them.
+    ///
+    /// One the frame doesn't make shows black, warning `renderer.no_image` once.
     Image(&'a str),
 }
 
@@ -45,10 +48,9 @@ pub struct FrameImage {
     pub size: [u32; 2],
 }
 
-/// Lists into `images` the images of `graph`'s own added so far, in the order they were, but those
-/// whose places among them are `unlisted`, each name once, at the place of its first, as the last of
-/// that name, which a show finds: a scan of those listed for each, of the tens a frame makes, in a
-/// frame asked to list them alone.
+/// Lists into `images` the graph's own images added so far, in order, but those at the places
+/// `unlisted`: each name once, at its first place, as its last image, which a show finds. It scans
+/// those listed for each, of the tens a frame makes, only in a frame asked to list them.
 pub(crate) fn list(images: &mut Vec<FrameImage>, graph: &Graph, unlisted: Range<usize>) {
     let listed = graph.images().enumerate();
     let listed = listed.filter(|(i, _)| !unlisted.contains(i));
@@ -61,50 +63,51 @@ pub(crate) fn list(images: &mut Vec<FrameImage>, graph: &Graph, unlisted: Range<
     }
 }
 
-/// A part of what lit shading takes or makes, which shading returns in place of its light: colors
-/// as they are; values, from 0 to 1, a normal's axes from -1 to 1 taken as 0 to 1, as the view's
-/// 8-bit sRGB image stores them as their bytes over 255; and light, exposed, without the haze, which
-/// the frame's tonemapper maps. Shading.slang's `SHOW_` constants number them, as `Channel::index`
-/// does.
+/// A part of what lit shading takes or makes, returned in place of its light:
+///
+/// - Colors as they are.
+/// - Values from 0 to 1, a normal's axes taken from -1..1 to 0..1, as the view's 8-bit sRGB image
+///   stores them, as bytes over 255.
+/// - Light, exposed, without the haze, which the tonemapper maps.
+///
+/// Shading.slang's `SHOW_` constants number them, as `Channel::index` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
-    /// The base color, its texture's, its vertices' and its factor's; a specular-glossiness
-    /// material's diffuse color.
+    /// Its texture's, vertices' and factor's; a specular-glossiness material's diffuse color.
     BaseColor = 1,
-    /// Which way it faces in the world, as shading turns it, its normal map's bumps among it.
+    /// Which way it faces in the world, as shading turns it, normal map included.
     Normal,
     /// Which way it faces before its normal map.
     SurfaceNormal,
-    /// How metallic it is: 0 for a specular-glossiness material.
+    /// 0 for a specular-glossiness material.
     Metallic,
-    /// How rough it is, as shading takes it, from 0.045.
+    /// As shading takes it, from 0.045.
     Roughness,
-    /// The share of the light from all around that reaches it: its occlusion map's and the
-    /// view's ambient occlusion's.
+    /// The share of light from all around that reaches it: its occlusion map's and the view's
+    /// ambient occlusion's.
     Occlusion,
     /// The light it gives off.
     Emission,
-    /// What it reflects head-on, as the frame's lights take it: a metallic-roughness material's
-    /// 0.04 mixed with its base color by how metallic it is; a specular-glossiness material's
-    /// specular color.
+    /// What it reflects head-on: a metallic-roughness material's 0.04 mixed with its base color by
+    /// how metallic it is; a specular-glossiness material's specular color.
     SpecularColor,
-    /// The light the frame's lights shade it with, shadows and all; none for what's unlit.
+    /// The frame's lights' shading, shadows and all; none for what's unlit.
     DirectLight,
-    /// The sky's light from all around, diffuse and specular, as occlusion darkens it and the
-    /// view's reflections take the place of it.
+    /// The sky's diffuse and specular light, as occlusion darkens it and the view's reflections
+    /// replace it.
     SkyLight,
-    /// The view's reflections, as much as takes the place of the sky's specular light.
+    /// The view's reflections, as much as replaces the sky's specular light.
     Reflection,
-    /// The light it diffuses, the frame's lights' and the sky's.
+    /// Diffused light, the frame's lights' and the sky's.
     DiffuseLight,
-    /// The light it reflects: the frame's lights' highlights, the sky's specular light and the
-    /// view's reflections.
+    /// Reflected light: the frame's lights' highlights, the sky's specular light and the view's
+    /// reflections.
     SpecularLight,
 }
 
 impl Channel {
-    /// Its number, as shading.slang's `SHOW_` constants have it, which the frame's data carries:
-    /// from 1, 0 being the view's light.
+    /// Its number in shading.slang's `SHOW_` constants, which the frame's data carries: from 1, 0
+    /// being the view's light.
     pub(crate) fn index(self) -> u32 {
         self as u32
     }
@@ -122,13 +125,11 @@ impl Channel {
     }
 }
 
-/// `data` as a frame renders it while it shows something in place of the view's light, with no
-/// antialiasing, so that the view shows it as drawn, a pixel at each pixel's center. A part of
-/// shading shows with no fog, depth of field, motion blur, bloom, grade or lens either, cleared to
-/// black, without the sky, and through no tonemapper unless it shows light, so that the view's sRGB
-/// image stores colors and values as they are. An image shows from a frame drawn as the game's is
-/// but for that, so that the passes after the view's make theirs. Either way the frame keeps its
-/// exposure as it adapts, metering none of it.
+/// `data` as a frame renders it to show something in place of the view's light, as
+/// [`RenderData::show`] says. Without antialiasing, each pixel shows as drawn at its center. A part
+/// of shading skips the tonemapper unless it's light, so the view's sRGB image stores colors and
+/// values as they are. An image comes from a frame drawn as the game's but for antialiasing, so the
+/// passes after the view's make their images.
 pub(crate) fn showing(data: RenderData<'_>) -> RenderData<'_> {
     match data.show {
         None => data,
@@ -184,8 +185,8 @@ pub(crate) struct ShowPass {
     pipeline: ComputePipeline,
 }
 
-/// The pass in a frame's graph: the pass, the view's size, the image it shows and its kind, if the
-/// frame makes it, and what it writes, which the view shows.
+/// The pass in a frame's graph, the view's size, the image shown and its kind if the frame makes
+/// it, and what it writes, which the view shows.
 pub(crate) struct Plan {
     pass: PassId,
     size: [u32; 2],
@@ -194,13 +195,12 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// What the view shows.
     pub(crate) fn shown(&self) -> ImageId {
         self.shown
     }
 
-    /// The tonemapper the view's shown through, of `tonemapper`, the frame's: none but for colors
-    /// of high dynamic range, which are light.
+    /// The tonemapper the view shows through: `tonemapper`, the frame's, for HDR colors, which are
+    /// light; none for the rest.
     pub(crate) fn tonemapper(&self, tonemapper: Tonemapper) -> Tonemapper {
         match self.source {
             Some((_, ImageKind::Hdr)) => tonemapper,
@@ -216,9 +216,8 @@ impl ShowPass {
         })
     }
 
-    /// Declares in `graph` the pass that shows `source`, the last image of the graph's added so
-    /// far of that name, and its kind, or black if there's none, in colors of the view's own of
-    /// `size` pixels, made in `graph`.
+    /// Declares in `graph` the pass showing `source`, the graph's last image of that name so far,
+    /// by its kind, or black if there's none, into colors of the view's own of `size` pixels.
     pub(crate) fn plan(
         graph: &mut Graph,
         source: Option<(ImageId, ImageKind)>,
@@ -262,8 +261,8 @@ impl ShowPass {
 mod tests {
     use super::*;
 
-    /// A name the graph has twice is listed once, where it first was, as the last of it, which a
-    /// show finds; a target, which has no name, isn't; nor are those at the places left out.
+    /// A name the graph has twice is listed once, at its first place, as its last image, which a
+    /// show finds. A target, which has no name, isn't listed, nor are those at the places left out.
     #[test]
     fn a_name_twice_is_listed_once_as_the_last_of_it() {
         let mut graph = Graph::default();

@@ -1,5 +1,5 @@
-//! The game's view, which the meshes are drawn into, and the outline round what it shows of a set of
-//! IDs after them, shown in the frame where the view is.
+//! The game's view, which the meshes draw into, its outline of a set of IDs, and its place in the
+//! frame.
 
 use std::sync::Arc;
 
@@ -17,51 +17,49 @@ static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/view.spv"));
 static OUTLINE_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/outline.spv"));
 static DISTANCES_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/outline_distances.spv"));
 
-/// The widest the band of an [`Outline`] is, in pixels: the glow reaches as far again, and each
-/// pixel of the view looks `2 * MAX_OUTLINE + 1` pixels each way along its row and its column, so
-/// that its cost grows with the width, not its square. The distances' shader holds
-/// [`MAX_REACH`] pixels of a row in groupshared memory.
+/// The widest an [`Outline`]'s band is, in pixels; the glow reaches as far again. Each pixel looks
+/// `2 * MAX_OUTLINE + 1` pixels along its row and column, so the cost grows with the width, not its
+/// square. The distances' shader holds [`MAX_REACH`] pixels of a row in groupshared memory.
 const MAX_OUTLINE: f32 = 8.0;
 
 /// The most a pixel looks along a row for the outline's IDs, for a band of [`MAX_OUTLINE`]:
 /// `MAX_REACH` in `shaders/outline_distances.slang`.
 const MAX_REACH: u32 = 17;
 
-/// How many pixels across and down a workgroup of the distances' pass takes: `GROUP_X` and
-/// `GROUP_Y` in `shaders/outline_distances.slang`.
+/// A workgroup of the distances' pass, in pixels: `GROUP_X` and `GROUP_Y` in
+/// `shaders/outline_distances.slang`.
 const GROUP_X: u32 = 64;
 const GROUP_Y: u32 = 4;
 
-/// Shows the game's view where the main window's UI paints it, as the callback of an egui
-/// `PaintCallback`: from the callback's rect's top left, the view's size, clipped as the UI clips
-/// the callback, in the UI's order, rather than at [`RenderData::viewport`]'s origin under the
-/// whole UI. So the view can be a panel among the UI's, under some and over others.
+/// Shows the game's view where the main window's UI paints it, as an egui `PaintCallback`: at the
+/// callback's rect's top left, the view's size, clipped as the UI clips the callback, in the UI's
+/// order. So the view can be a panel among the UI's, under some and over others, rather than at
+/// [`RenderData::viewport`]'s origin under the whole UI.
 ///
 /// [`RenderData::viewport`]: crate::RenderData::viewport
 #[derive(Debug)]
 pub struct ViewCallback;
 
-/// An outline round what the game's view shows of the draws of a set of IDs, such as an entity's and
-/// those of every entity under it, drawn into the view over them, so that wherever the view shows,
-/// under the UI, and as it's read back, it shows outlined: round whatever shape their pixels make
-/// together where they're on top, as the IDs the view writes say, inside it too where a draw of
-/// another ID covers some of it, but not round what's hidden. A solid band `width` pixels wide past
-/// their pixels' edge, its outer edge smoothed, then a glow that fades over as far again.
+/// An outline round what the game's view shows of a set of IDs' draws, such as an entity's and its
+/// descendants', drawn into the view so it shows wherever the view does, and as it's read back. It
+/// rings the shape their pixels on top make together, inside it too where another ID's draw covers
+/// part, but not what's hidden. A solid band `width` pixels past their edge, its outer edge
+/// smoothed, then a glow fading over as far again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Outline<'a> {
-    /// The IDs, sorted, without 0, which draws of no entity have, or repeats; none outlines
-    /// nothing. The renderer searches them as they are and doesn't check them in release builds.
+    /// Sorted, without 0 (draws of no entity) or repeats. None outlines nothing. The renderer
+    /// searches them as they are and checks them only in debug builds.
     pub ids: &'a [u64],
-    /// The band's color, in linear RGBA, alpha not multiplied in; the glow's is the same at up to
+    /// The band's color, in linear RGBA, alpha not premultiplied. The glow's is the same at up to
     /// half the alpha.
     pub color: Vec4,
-    /// The band's width, in the view's pixels: at most 8, a width past that drawing 8, and one of 0
-    /// or less, or NaN, outlining nothing. The glow reaches as far again.
+    /// The band's width, in the view's pixels: at most 8, wider drawing 8. 0 or less, or NaN,
+    /// outlines nothing. The glow reaches as far again.
     pub width: f32,
 }
 
 impl Outline<'_> {
-    /// Whether it outlines anything: it has IDs and a width.
+    /// Whether it has IDs and a width.
     pub(crate) fn shows(&self) -> bool {
         !self.ids.is_empty() && self.width > 0.0
     }
@@ -73,7 +71,6 @@ pub(crate) struct ViewPass {
 }
 
 impl ViewPass {
-    /// A pass that draws into targets of `format`.
     pub(crate) fn new(device: &Arc<Device>, format: Format) -> Result<Self> {
         let pipeline = Pipeline::graphics(
             device,
@@ -95,11 +92,12 @@ impl ViewPass {
     }
 
     /// Draws the view's image, whose index [`Pass::sampled`] gave this pass, into `viewport` of the
-    /// pass's target, which is the image's size, within `clip` of the target if it's given.
+    /// pass's target, at the image's size, within `clip` of the target if given.
     ///
     /// # Panics
     ///
-    /// If the pass's target has another format than the pass's, or `viewport` has no area.
+    /// - If the pass's target is of another format than the pass's.
+    /// - If `viewport` has no area.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
@@ -122,16 +120,15 @@ impl ViewPass {
     }
 }
 
-/// Draws an outline into the view's image, of [`ColorImage::FORMAT`], over its draws, from the IDs
-/// they wrote beside it: a pass that finds how far along its row each pixel is from the nearest
-/// pixel of the outline's IDs, then the pass that draws.
+/// Draws an outline into the view's image, of [`ColorImage::FORMAT`], from the IDs its draws wrote
+/// beside it: a pass finds how far along its row each pixel is from the nearest of the outline's
+/// IDs, then a pass draws.
 pub(crate) struct OutlinePass {
     distances: ComputePipeline,
     pipeline: Pipeline,
 }
 
-/// The outline's passes in a frame's graph: the one that finds the distances along rows, and the
-/// one that draws the outline from them, the view's size, and the images they use.
+/// The outline's two passes in a frame's graph, the view's size, and the images they use.
 pub(crate) struct OutlinePlan {
     find: PassId,
     draw: PassId,
@@ -141,7 +138,6 @@ pub(crate) struct OutlinePlan {
 }
 
 impl OutlinePass {
-    /// A pass that draws into the view's image.
     pub(crate) fn new(device: &Arc<Device>) -> Result<Self> {
         let distances = ComputePipeline::new(
             device,
@@ -171,8 +167,8 @@ impl OutlinePass {
         })
     }
 
-    /// Declares in `graph` the passes that outline the view, of `size` pixels, in its `color`,
-    /// drawn over by the pass the view's tonemapping added, from its `ids`.
+    /// Declares the passes outlining the view, `size` pixels, in its `color`, from its `ids`, over
+    /// the view's tonemapping pass.
     pub(crate) fn plan(
         graph: &mut Graph,
         color: ImageId,
@@ -197,7 +193,7 @@ impl OutlinePass {
         }
     }
 
-    /// Records `plan`'s passes, the outline's `ids` uploaded for the first.
+    /// Records `plan`'s passes, uploading the outline's `ids` for the first.
     pub(crate) fn record(
         &self,
         frame: &mut Frame<'_>,
@@ -238,9 +234,8 @@ impl OutlinePass {
     }
 }
 
-/// How far along a row the outline looks for a pixel of its IDs, in pixels, for a band `width`
-/// pixels wide: as far as its glow reaches, and one more, so that the distances' end isn't an edge
-/// of the outline.
+/// How far along a row the outline looks for its IDs, in pixels, for a band `width` wide: as far as
+/// its glow reaches, and one more, so the distances' end isn't an edge of the outline.
 fn reach(width: f32) -> u32 {
     let reach = (2.0 * width).ceil() as u32 + 1;
     debug_assert!(
@@ -250,14 +245,13 @@ fn reach(width: f32) -> u32 {
     reach
 }
 
-/// What the view pass pushes before it draws the view's image: `Push` in `shaders/view.slang`,
-/// field for field.
+/// What the view pass pushes: `Push` in `shaders/view.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct ViewPush {
-    /// Where the view's top left is in the target, in pixels.
+    /// The view's top left in the target, in pixels.
     origin: [u32; 2],
-    /// The index of the view's image in the bindless set.
+    /// The view's image's index in the bindless set.
     image: u32,
 }
 
@@ -266,26 +260,25 @@ struct ViewPush {
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct DistancePush {
-    /// The address of the IDs, uploaded as the little-endian halves of each, the low one first, as
-    /// the view's IDs hold them.
+    /// The IDs' address, each uploaded as little-endian halves, low first, as the view's IDs hold
+    /// them.
     list: u64,
     size: [u32; 2],
-    /// The indices of the view's IDs among the bindless set's textures, and of the distances among
-    /// its storage images.
+    /// The view's IDs' index among the bindless set's textures, and the distances' among its
+    /// storage images.
     image: u32,
     target: u32,
     count: u32,
     reach: u32,
 }
 
-/// What the outline's second pass pushes before it draws an outline: `Push` in
-/// `shaders/outline.slang`, field for field.
+/// What the outline's second pass pushes: `Push` in `shaders/outline.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct OutlinePush {
-    /// Linear RGBA, alpha not multiplied in.
+    /// Linear RGBA, alpha not premultiplied.
     color: [f32; 4],
-    /// The index of the distances in the bindless set.
+    /// The distances' index in the bindless set.
     image: u32,
     /// The band's width in pixels.
     width: f32,

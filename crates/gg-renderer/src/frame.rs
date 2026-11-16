@@ -38,8 +38,8 @@ use crate::{
     reflections, show, sky, smaa, taa, ui,
 };
 
-/// Warns that the view shows image `name`, which the frame doesn't make, unless it's `found`: once
-/// while frames go on asking for it, `missing` naming the last image warned of.
+/// Warns that the view shows image `name`, which the frame doesn't make, unless it's `found`.
+/// `missing` names the last image warned of, so it warns once while frames go on asking.
 fn show_missing(missing: &mut Option<String>, name: &str, found: bool) {
     if found {
         *missing = None;
@@ -53,9 +53,9 @@ fn show_missing(missing: &mut Option<String>, name: &str, found: bool) {
     }
 }
 
-/// The matrix from the canvas's space, as [`RenderData::canvas`] has it, of a view `size` pixels
-/// across and down, to Vulkan's clip space, whose Y points down: every point at the near plane,
-/// where reversed depth is 1, which every draw's depth test passes.
+/// From the canvas's space ([`RenderData::canvas`]) of a view `size` pixels across and down to
+/// Vulkan's clip space, Y down: every point at the near plane, where reversed depth is 1, so every
+/// depth test passes.
 pub(crate) fn canvas_projection(size: [u32; 2]) -> Mat4 {
     let [width, height] = size.map(|side| side as f32);
     Mat4::from_cols(
@@ -68,94 +68,74 @@ pub(crate) fn canvas_projection(size: [u32; 2]) -> Mat4 {
 
 /// The game's view's images and passes in a frame's graph.
 struct ViewPasses {
-    /// What moves skinned meshes' vertices before the passes that draw them, if the frame skins
-    /// any.
     skin: Option<SkinPlan>,
-    /// What writes emitters' particles' births before the passes that draw them, if the frame
-    /// draws any.
     particles: Option<ParticlePlan>,
-    /// What culls the view's opaque runs and their shadows' casters, if it draws any.
+    /// Culls the view's opaque runs and the shadows' casters.
     cull: Option<CullPlan>,
-    /// What bins the lights into the view's clusters, if a light is binned.
     clusters: Option<ClusterPlan>,
-    /// What draws the shadows the view shows, if a light casts them.
     shadows: Option<ShadowPasses>,
-    /// What the view draws into, of high dynamic range.
+    /// What the view draws into, in HDR.
     hdr: ImageId,
     /// What it shows, tonemapped.
     color: ImageId,
     /// How far what's opaque in it moved in the world since the frame before.
     motion: ImageId,
-    /// What draws the view: what its culling's first pass keeps, or all of it, if it culls nothing;
-    /// into its visibility buffer, if it has one.
+    /// Draws what the culling's first pass keeps, or everything if it culls nothing; into the
+    /// visibility buffer if there is one.
     first: PassId,
-    /// What draws the rest over that, if it culls; into its visibility buffer, if it has one.
+    /// Draws the rest over that, if it culls; into the visibility buffer if there is one.
     second: Option<PassId>,
-    /// What shades the view from its visibility buffer, and draws the rest over that, if it has
-    /// one.
+    /// Shades the view from its visibility buffer, if it has one, and draws the rest over that.
     shaded: Option<ShadedPasses>,
-    /// What computes its ambient occlusion and traces its reflections, if it has either.
+    /// Ambient occlusion and reflections, if it has either.
     early: Option<EarlyPasses>,
-    /// What fogs what's opaque in it, and draws what blends over that, if it's in fog.
+    /// Fogs what's opaque, then draws what blends over it.
     fog: Option<FogPasses>,
-    /// What resolves it, antialiased, if it's antialiased.
     taa: Option<taa::Plan>,
-    /// What antialiases it by SMAA, if it's so antialiased.
     smaa: Option<smaa::Plan>,
-    /// What keeps its colors, as drawn and antialiased, for the next frame's reflections, if it
-    /// reflects.
+    /// Keeps its colors, drawn and antialiased, for the next frame's reflections.
     keep: Option<reflections::Keep>,
-    /// What meters it, if its exposure adapts.
+    /// Meters it, if its exposure adapts.
     exposure: Option<exposure::Plan>,
-    /// What blurs it by its depth of field, and by its motion, if it's blurred so.
     focus: Option<depth_of_field::Plan>,
     blur: Option<motion_blur::Plan>,
-    /// What blooms and grades it, if it does either.
+    /// Blooms and grades it, if it does either.
     bloom: Option<bloom::Plan>,
-    /// What lays a lens's effects over it, if it has any.
     lens: Option<lens::Plan>,
-    /// What draws its canvas, if it has one, in a pass of its own, if the view is antialiased,
-    /// kept for reflections, metered, blurred, bloomed, graded or seen through a lens; otherwise
-    /// the view's last pass draws the canvas.
+    /// Draws the canvas in its own pass if antialiasing, keeping for reflections, metering, blurs,
+    /// bloom, the grade or a lens follow the view's last pass. Otherwise that pass draws it.
     canvas: Option<PassId>,
-    /// What shows an image the frame makes in its place, if it shows one.
+    /// Shows an image the frame makes in the view's place.
     show: Option<show::Plan>,
-    /// What it shows, drawn, antialiased, blurred, bloomed, graded and seen through a lens, with
-    /// its canvas over that, or an image the frame makes in its place, which the tonemap pass
-    /// samples.
+    /// What the tonemap pass samples: the view after all its passes, with its canvas, or an image
+    /// shown in its place.
     shown: ImageId,
-    /// What tonemaps it, and how.
     tonemap: PassId,
     tonemapper: Tonemapper,
-    /// What reads the view's IDs at the picks' pixels, if the frame reads picks.
     read_ids: Option<PassId>,
-    /// What outlines what the view shows of a set of IDs, if anything.
     outline: Option<OutlinePlan>,
-    /// What reads the view back, if the frame does.
     read_view: Option<PassId>,
 }
 
-/// The game's view's visibility buffer, in a frame's graph, which the runs its culling draws by
-/// their meshlets with the opaque and masked model shaders draw into, in the view's two passes;
-/// the compute pass that then shades the view from it; and the pass after, which draws everything
-/// else: the sky, the culled runs drawn otherwise, as their shaders shade them, what blends and the
-/// canvas.
+/// The game's view's visibility buffer, in a frame's graph. The culled runs of the opaque and
+/// masked model shaders draw into it by their meshlets, in the view's two passes. A compute pass
+/// then shades the view from it, and the pass after draws everything else: the sky, culled runs
+/// drawn otherwise, what blends and the canvas.
 struct ShadedPasses {
     visibility: ImageId,
     shade: PassId,
     rest: PassId,
 }
 
-/// The game's view's ambient occlusion and reflections, in a frame's graph, which need the depth of
-/// what's opaque in the view before any of it shades: beside a visibility buffer, which has the
-/// depth of what it draws, the pass that draws the depth alone of the culled runs drawn otherwise,
-/// if any may be, into an image of its own; reflecting, the compute pass that finds the view's
-/// normals from its visibility buffer, as its shading turns them, and those normals, and the pass
-/// that draws the normals of the culled runs whose depth alone was drawn, where they're nearest in
-/// it, and those, which the reflections' rays are traced about; the occlusion and the reflections,
-/// if the view has them, from the depths; and without a visibility buffer, whose view's first and
-/// second passes draw the depth alone of every culled run, the pass that draws the view after,
-/// shaded, as those would have.
+/// The game's view's ambient occlusion and reflections, in a frame's graph. They need the depth of
+/// what's opaque before any of it shades.
+///
+/// - Beside a visibility buffer, which has its draws' depth, the culled runs drawn otherwise, if
+///   any may be, draw their depth alone into an image of their own.
+/// - Reflecting, a compute pass finds the visibility buffer's normals, as its shading turns them,
+///   and the depth-only runs draw theirs where they're nearest. The rays are traced about these.
+/// - Without a visibility buffer, the view's two passes draw every culled run's depth alone, and a
+///   pass after draws the view shaded.
 struct EarlyPasses {
     depth: Option<PassId>,
     normals: Option<(PassId, ImageId)>,
@@ -166,8 +146,7 @@ struct EarlyPasses {
 }
 
 impl EarlyPasses {
-    /// What the passes that shade the view sample of them: the ambient occlusion and the
-    /// reflections, those the view has.
+    /// What the view's shading passes sample: the ambient occlusion and reflections the view has.
     fn sampled(&self) -> [Option<ImageId>; 3] {
         let reflected = (self.reflections.as_ref()).map(reflections::Plan::sampled);
         let [colors, spread] = [0, 1].map(|i| reflected.map(|images| images[i]));
@@ -175,30 +154,31 @@ impl EarlyPasses {
     }
 }
 
-/// The game's view's fog, in a frame's graph: the pass that fogs its colors once what's opaque has
-/// drawn, the sky or the clear color among it, from its depth, and the pass after, which draws what
-/// blends over them, fogging itself, and the canvas, where the view's last pass draws it.
+/// The game's view's fog, in a frame's graph: a pass fogging what's opaque, the sky or clear color
+/// included, from the view's depth, then a pass drawing what blends, and the canvas where the
+/// view's last pass draws it. What blends fogs itself, as a pass over the colors would fog it as
+/// though it were as far as what's behind it.
 struct FogPasses {
     plan: fog::Plan,
     blended: PassId,
 }
 
-/// The shadows' cascades, fitted to the view, and their shadow maps and the passes that draw them,
-/// in a frame's graph, before the view's pass, which samples them.
+/// The shadows' cascades, fitted to the view, their maps and the passes drawing them, before the
+/// view's pass samples them.
 struct ShadowPasses {
     cascades: Cascades,
     maps: [ImageId; CASCADES],
     passes: [PassId; CASCADES],
 }
 
-/// What the frame shows as the game's view: an image of its graph's, or a texture, by its index.
+/// What the frame shows as the game's view: an image of its graph's, or a texture by index.
 enum Shown {
     Image(ImageId),
     Texture(u32),
 }
 
-/// What a frame decided of the game's view before planning its passes, which plans and records
-/// them: each field the local of its name in [`Renderer::render_frame`].
+/// What a frame decided of the game's view before planning its passes. Each field is the local of
+/// its name in [`Renderer::render_frame`].
 #[derive(Clone, Copy)]
 struct Viewing<'a> {
     size: [u32; 2],
@@ -227,7 +207,7 @@ struct Viewing<'a> {
 }
 
 /// The renderer's passes that record the game's view, borrowed apart from its frames, graph and
-/// targets, which the frame being recorded holds.
+/// targets, as the frame being recorded holds those.
 struct Recorder<'a> {
     meshes: &'a mut MeshPass,
     bloom: &'a BloomPass,
@@ -252,7 +232,7 @@ struct Recorder<'a> {
     lens: &'a LensPass,
 }
 
-/// `pass`, taking the instances and commands of what `cull` keeps, if the frame culls.
+/// `pass`, taking what `cull` keeps, if the frame culls.
 fn culled<'g>(cull: Option<&CullPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
     match cull {
         Some(cull) => cull.drawn(pass),
@@ -260,7 +240,7 @@ fn culled<'g>(cull: Option<&CullPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
     }
 }
 
-/// `pass`, reading the skinned meshes' vertices where the skin pass moved them, if it moves any.
+/// `pass`, reading the skinned meshes' vertices where the skin pass moved them, if it moved any.
 fn skinned<'g>(skin: Option<&SkinPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
     match skin {
         Some(skin) => pass.read_buffer(skin.buffer),
@@ -276,12 +256,11 @@ fn particled<'g>(particles: Option<&ParticlePlan>, pass: RenderPass<'g>) -> Rend
     }
 }
 
-/// `pass`, sampling each of `images`.
 fn sampling<'g>(images: impl Iterator<Item = ImageId>, pass: RenderPass<'g>) -> RenderPass<'g> {
     images.fold(pass, RenderPass::sample)
 }
 
-/// `pass`, reading the clusters the lights are binned into, if `clusters` bins them.
+/// `pass`, reading the lights' clusters, if `clusters` bins them.
 fn binned<'g>(clusters: Option<&ClusterPlan>, pass: RenderPass<'g>) -> RenderPass<'g> {
     match clusters {
         Some(clusters) => pass.read_buffer(clusters.buffer),
@@ -298,12 +277,12 @@ impl Renderer {
     ) -> Result<bool> {
         let _zone = gg_core::zone!();
         let data = show::showing(data);
-        // From here on, the world is relative to the frame's origin, as its draws are, the
-        // viewpoint and fog's height too; the atmosphere alone reads the viewpoint's altitude, the
+        // From here on, the world is relative to the frame's origin, as are its draws, the
+        // viewpoint and fog's height. Only the atmosphere reads the viewpoint's altitude, the
         // world's.
         let altitude = data.viewpoint;
-        // What's kept from the frame before, in its origin's space, taken into this one's, before
-        // this frame's changes to the scene; once, whether or not the frame renders.
+        // What's kept from the frame before, moved into this one's origin, before this frame's
+        // changes to the scene; once, whether or not the frame renders.
         let moved = (data.origin - self.origin).as_vec3();
         self.origin = data.origin;
         if moved != Vec3::ZERO {
@@ -327,18 +306,17 @@ impl Renderer {
             self.ui.queue(window.textures);
         }
         self.ui.queue(ui.textures);
-        // The frame about to begin; one with nothing to render into begins none, and the next is
-        // of the same number.
+        // The frame about to begin. One with nothing to render into begins none, and the next has
+        // the same number.
         let number = self.frames.submitted() + 1;
-        // Before the frame begins, which a failure would then present unrendered.
+        // Before the frame begins: a failure after would present it unrendered.
         self.meshes.add_shaders(data.uploads, number)?;
-        // Every frame, whether it renders or draws anything, so that a viewpoint that can't
-        // project always panics. A view without an area draws nothing, so its aspect ratio doesn't
-        // matter.
+        // Every frame, rendered or not, so a viewpoint that can't project always panics. A view
+        // without an area draws nothing, so its aspect ratio doesn't matter.
         let [width, height] = data.viewport.size;
         let unjittered = data.viewpoint.view_projection(data.viewport.aspect());
-        // A view without an area renders nothing; nor does one that shows pixels, which go into a
-        // texture of their own size, made again as that changes.
+        // A view without an area renders nothing, nor does one showing pixels, which go into a
+        // texture of their size, remade as that changes.
         let has_view = width > 0 && height > 0;
         let pixels = data.pixels.filter(|_| has_view);
         if let Some(Pixels {
@@ -360,8 +338,8 @@ impl Renderer {
             })
         });
         let renders_view = has_view && pixels.is_none();
-        // A view antialiased temporally is drawn off by the frame's offset, everything in it but its
-        // canvas, and culled as it's drawn; one antialiased by SMAA is drawn as it is.
+        // Antialiased temporally, the view but its canvas is drawn off by the frame's offset, and
+        // culled as drawn. By SMAA, it's drawn as it is.
         let antialiased = renders_view && data.antialiasing == Antialiasing::Taa;
         let smaa = renders_view && data.antialiasing == Antialiasing::Smaa;
         if smaa && self.smaa.is_none() {
@@ -389,8 +367,8 @@ impl Renderer {
         {
             *image = ColorImage::new(&self.device, size[0], size[1], OFFSCREEN)?;
         }
-        // The atmosphere the view shows in place of an image sky, if any, under its sun, and the
-        // lights the frame shades with: its sun's dimmed by the air between it and the viewer.
+        // The atmosphere shown in place of an image sky, if any, and the frame's lights, its sun's
+        // dimmed by the air toward the viewer.
         let atmosphere = (data.atmosphere.filter(|_| renders_view))
             .map(|atmosphere| atmosphere::Seen::new(atmosphere, data.lights, &altitude));
         let shining = match &atmosphere {
@@ -402,11 +380,10 @@ impl Renderer {
             }
             _ => data.lights,
         };
-        // What the sky's light is prefiltered from, and what a texel of it of 1 stands for: the
-        // atmosphere, of a sun of an illuminance of 1; or the sky the view shows, while its
-        // texture's slot shows an image of its own, with that image's size, how many times the
-        // slot has come to show another, and what its light keeps each texel to, leaving out a
-        // sun that a directional light stands for.
+        // What the sky's light is prefiltered from, and what a texel of 1 stands for: the
+        // atmosphere, of a sun of illuminance 1; or the image sky, while its slot shows its own
+        // image, with that image's size, how many times the slot has changed image, and what its
+        // light keeps texels to, leaving out a sun a directional light stands for.
         let sky = match &atmosphere {
             Some(seen) => Some((Source::Atmosphere(seen.lit()), seen.illuminance())),
             None => data.sky.filter(|_| renders_view).and_then(|sky| {
@@ -427,24 +404,23 @@ impl Renderer {
         if atmosphere.is_some() && self.atmosphere.is_none() {
             self.atmosphere = Some(AtmospherePass::new(&self.device)?);
         }
-        // The view's ambient occlusion, where it darkens anything: of the light from all around,
-        // which only a sky gives, under a perspective, whose depth it reads.
+        // Ambient occlusion darkens only light from all around, which only a sky gives, under a
+        // perspective, whose depth it reads.
         let perspective = matches!(data.viewpoint.projection, Projection::Perspective { .. });
         let occluded = (data.ambient_occlusion)
             .filter(|occlusion| occlusion.darkens() && sky.is_some() && perspective);
-        // Averaged over the frames by a history in images of the view's size, let go of by a frame
-        // that renders the view without; against what the frame before accumulated, if it did, at
-        // this size, and the view isn't cut to where it sees from.
+        // Averaged over frames in a history of the view's size, let go by a frame rendering the
+        // view without it. Against what the frame before accumulated, if it did at this size and
+        // the view isn't cut.
         if occluded.is_some() {
             self.ao_history.prepare(&self.device, data.viewport.size)?;
         } else if renders_view {
             self.ao_history.forget();
         }
         let occluded_against = (self.ao_history).against(number, data.viewport.size, data.cut);
-        // The view's reflections, where they show anything: in place of the sky's specular light,
-        // under a perspective, whose depth they're traced through, against the colors the frame
-        // before kept, which each frame that reflects keeps for the next, in images of the view's
-        // size, let go of by a frame that renders the view without.
+        // Under a perspective, reflections trace through its depth against the colors the frame
+        // before kept. Each reflecting frame keeps them for the next, in images of the view's size,
+        // let go by a frame rendering the view without reflections.
         let reflected = (data.reflections)
             .filter(|reflections| reflections.reflects() && sky.is_some() && perspective);
         if reflected.is_some() {
@@ -452,8 +428,8 @@ impl Renderer {
         } else if renders_view {
             self.reflected.forget();
         }
-        // Traced against the colors the frame before kept, if it kept them at this size, and how
-        // that frame drew them.
+        // Against the colors the frame before kept, if it kept them at this size, and how it drew
+        // them.
         let traced = reflected.zip(self.reflected.traced_against(number, data.viewport.size));
         if renders_view {
             self.lighting.order(shining, &data.viewpoint);
@@ -461,12 +437,9 @@ impl Renderer {
             // The pool goes undeclared, which the graph lets go of.
             self.particles.forget();
         }
-        // The frame's passes: the view, into images of its own, its size, so that it never shows
-        // stretched, made again in the frame that changes its size, which a drag that resizes the
-        // view does every frame, as growing them in steps and rendering into part of them wouldn't;
-        // what the view's IDs are read back by; its tonemapping, into the image it shows; its
-        // outline, and what reads it back; then the frame, which shows the view under the UI, and
-        // the other windows' UI, over black.
+        // The frame's passes. The view's images are its own, at its size, so it never shows
+        // stretched. A resizing drag remakes them every frame, which growing them in steps and
+        // rendering into part of them wouldn't.
         let has_ui = |key: &u64| windows.iter().any(|(drawn, _)| drawn == key);
         let windows_drawn = self.window_keys.iter().filter(|key| has_ui(key)).count();
         let graph = &mut self.graph;
@@ -478,25 +451,23 @@ impl Renderer {
         graph.clear();
         let output = graph.target(0);
         let size = data.viewport.size;
-        // The antialiased view's images it resolves into and against are the targets after the
-        // windows'.
+        // The antialiasing's resolve images are the targets after the windows'.
         let resolved = 1 + windows_drawn;
         let resolves = if antialiased { taa::TARGETS } else { 0 };
-        // The reflections' images are the targets after those, and the ambient occlusion's history's
-        // after those.
+        // The reflections' images are the targets after those, then the ambient occlusion's
+        // history's.
         let reflections_first = resolved + resolves;
         let reflects = if reflected.is_some() { 2 } else { 0 };
         let occlusion_first = reflections_first + reflects;
         let occludes = if occluded.is_some() { 2 } else { 0 };
-        // First, the atmosphere's tables, if the frame shows one, which the view samples and its
+        // First the atmosphere's tables, if the frame shows one, which the view samples and its
         // sky's cube is made from.
         let tables = atmosphere.as_ref().map(|_| AtmospherePass::plan(graph));
-        // Then the sky's prefiltering, if this frame prefilters it: the first to render the view
-        // since its texture came to show the image it shows, or since a directional light came to
-        // stand for its sun or ceased to, or, while one stands for it, its luminance crossed a
-        // power of two that changes what its light keeps texels to; or, of the atmosphere, since
-        // its sun turned or the viewer rose or fell past what the light holds. Its images are the
-        // targets after those. A frame that doesn't takes the light from those before.
+        // Then the sky's prefiltering, in the first frame to render the view since: its texture
+        // came to show its image; a directional light came to stand for its sun or ceased to; while
+        // one does, its luminance crossed a power of two that changes what its light keeps texels
+        // to; or, for the atmosphere, its sun turned or the viewer rose or fell past what the light
+        // holds. Its images are the targets after those. Other frames reuse the light.
         let plan = match sky {
             Some((source, _)) if !self.sky_light.holds(&source) => {
                 let first = occlusion_first + occludes;
@@ -595,9 +566,8 @@ impl Renderer {
                 self.drawn += culled;
             }
         }
-        // What the meter found in that one, if it metered the view, for the exposure of the view it
-        // metered, the game's own or a look's; and what lit shading multiplies light by in this
-        // frame, as the exposure of the view it renders adapts.
+        // What the meter found in that frame, for the view it metered, the game's or a look's; and
+        // what lit shading multiplies light by in this frame, as its view's exposure adapts.
         for (adapting, name) in self.adapting.iter_mut().zip(exposure::METERED) {
             if let Some((metered, mean)) = exposure::metered(frame.buffer_read(name)) {
                 adapting.meter(metered, mean);
@@ -638,15 +608,14 @@ impl Renderer {
             }
             pass.prefilter(&mut frame, plan);
         }
-        // Whether the frame keeps the view's colors for the next frame's reflections, and
-        // accumulates its ambient occlusion for the next frame's, which it notes once it's
-        // submitted.
+        // Whether the frame keeps the view's colors for the next frame's reflections and
+        // accumulates its ambient occlusion for the next's, noted once it's submitted.
         let keeps = (view.as_ref()).is_some_and(|view| view.keep.is_some());
         let accumulates = (view.as_ref())
             .and_then(|view| view.early.as_ref())
             .is_some_and(|early| early.ao.is_some());
-        // What the view shows, how much of its area that covers, what its draws that weren't
-        // culled drew, and whether the frame culled any.
+        // What the view shows, the area it covers, what its unculled draws drew, and whether the
+        // frame culled any.
         let (counts, view, culled) = match (view, pixels_shown) {
             (Some(view), _) => {
                 let color = view.color;
@@ -708,7 +677,7 @@ impl Renderer {
                 (DrawCounts::default(), None, false)
             }
         };
-        // What the GPU counts of the frame comes back with the frame two later, which adds it.
+        // The GPU's counts come back with the frame two later, which adds them.
         self.counted[(number % 2) as usize] = (number, counts, culled);
         let mut pass = (frame.render(frame_pass)).expect("a frame's first target has an image");
         let view = view.map(|(shown, size)| {
@@ -807,20 +776,17 @@ fn plan_view(
         occlusion_first,
         ..
     } = *viewing;
-    // The cascades of the shadows of the light that casts them, if one does, each drawn
-    // before the view samples it, and before them, the culling of the view's opaque runs
-    // and the cascades' casters, for the view's first pass; and after them, the binning of
-    // the lights into the view's clusters, which its passes read. The culling and the
-    // binning run on the compute queue where there's one, the binning beside the shadows.
-    // First, the skinned meshes' vertices moved, which every pass that draws reads, and the
-    // particles' births written, which the passes that draw what blends read.
+    // Before the view's first pass: the skinning and the particles' births, which the drawing
+    // passes read; the culling of the view's opaque runs and the cascades' casters; the shadows;
+    // then the lights' binning. The culling and the binning run on the compute queue where there's
+    // one, the binning beside the shadows.
     let skin_plan = skinning.plan(graph, data.draws, meshes);
     let skin = skin_plan.as_ref();
     let particle_plan = particles.plan(graph, data.draws);
     let born = particle_plan.as_ref();
     let aspect = data.viewport.aspect();
-    // Of the lights as they shine outside an atmosphere, so that its sun casts them while
-    // it's up however dim, and none once it's set.
+    // From the lights as they shine outside an atmosphere, so its sun casts shadows while it's up
+    // however dim, and none once it's set.
     let casters = match &atmosphere {
         Some(seen) if seen.set() => shining,
         _ => data.lights,
@@ -855,12 +821,12 @@ fn plan_view(
     let clusters = lighting.plan(graph);
     let hdr = graph.hdr("view colors", size);
     let ids = graph.ids("view ids", size);
-    // Drawn every frame, antialiased or not, as the IDs are, for the reason
-    // ARCHITECTURE.md's Rendering gives: so that one pipeline draws each shader.
+    // Drawn every frame, antialiased or not, as the IDs are, so one pipeline draws each shader:
+    // ARCHITECTURE.md's Rendering says why.
     let motion = graph.motion("view motion", size);
     let depth = graph.depth("view depth", size);
-    // What the draws light by, as the frame that prefilters it leaves it, the atmosphere's
-    // tables, and the shadows they're in.
+    // What the draws light by: the sky's light as its prefiltering frame left it, the atmosphere's
+    // tables, and the shadows.
     let lit = || {
         let maps = shadows.iter().flat_map(|shadows| shadows.maps);
         let tables = tables.iter().flat_map(atmosphere::Plan::sampled);
@@ -869,11 +835,9 @@ fn plan_view(
             .chain(tables)
             .chain(maps)
     };
-    // A pass of the view's, named `label`, that draws over what the passes before it drew,
-    // shading as it draws: taking what `kept` keeps, if it's given a culling, and reading
-    // the skinned meshes' vertices, the particles' pool and the lights' clusters, and
-    // sampling what the draws light by, and the view's ambient occlusion and reflections,
-    // `early`, those it has for what the pass draws.
+    // A view pass named `label`, drawing over those before it and shading as it draws, with all
+    // that needs: `kept`'s culled runs, the skinned vertices, the particles' pool, the lights'
+    // clusters, what the draws light by, and `early`'s ambient occlusion and reflections.
     let shading =
         |graph: &mut Graph, label, kept: Option<&CullPlan>, early: [Option<ImageId>; 3]| {
             let pass = particled(born, culled(kept, skinned(skin, graph.render(label))));
@@ -881,17 +845,9 @@ fn plan_view(
             let pass = binned(clusters.as_ref(), sampling(sampled, pass));
             pass.keep(hdr).keep(ids).keep(motion).keep(depth).add()
         };
-    // Where the view culls runs drawn by their meshlets, those of the opaque and masked
-    // model shaders draw into a visibility buffer alone, in both of its passes, and a
-    // compute pass then shades the view from it, before a pass that draws the rest.
     let visibility = (cull.as_ref())
         .filter(|cull| visibility_buffer && cull.by_meshlets())
         .map(|_| graph.visibility("view visibility", size));
-    // The ambient occlusion and the reflections take the depth of what's opaque before any
-    // of it shades, where something is: what's drawn otherwise than into a visibility
-    // buffer, if anything may be, draws its depth alone first, into an image of its own;
-    // without one, in the view's first and second passes, and the view then draws all
-    // again, shaded, in one pass.
     let early = cull.is_some() && (occluded.is_some() || traced.is_some());
     let by_indices = (cull.as_ref()).is_some_and(CullPlan::by_indices);
     let opaque_depth =
@@ -919,9 +875,9 @@ fn plan_view(
         }
     };
     let first = first.add();
-    // Where the view culls, its second pass, over its first: once the depth pyramid is
-    // built from the first's depth, and the culling's second pass has culled against it,
-    // what that kept, and, without a visibility buffer, the runs it doesn't cull.
+    // Where the view culls, its second pass, over its first: once the depth pyramid is built from
+    // the first's depth and the culling's second pass has culled against it, what that kept, and,
+    // without a visibility buffer, the runs it doesn't cull.
     let second = cull.as_mut().map(|cull| {
         cull.second_pass(graph, forward_depth.unwrap_or(depth), size);
         match (visibility, forward_depth) {
@@ -941,11 +897,6 @@ fn plan_view(
             (None, None) => shading(graph, label!("view second"), Some(&*cull), [None; 3]),
         }
     });
-    // Beside a visibility buffer, the depth of the culled runs drawn otherwise, if any may
-    // be, and reflecting, the view's normals as its shading turns them, where the buffer
-    // drew; reflecting, the normals of those whose depth alone was drawn, where they're
-    // nearest in it; then the occlusion and the reflections, from the nearer of the two
-    // depths; and without one, the view, shaded.
     let early = early.then(|| {
         let rest = visibility.zip(opaque_depth).map(|(_, opaque_depth)| {
             let rest = skinned(skin, graph.render(label!("opaque depth")));
@@ -1011,10 +962,6 @@ fn plan_view(
             rest,
         }
     });
-    // In fog, what's opaque, the sky among it, is fogged by a pass of its own over the
-    // view's colors, from its depth, once it's drawn; then what blends draws over them in a
-    // pass of its own, fogging itself, as a pass over the colors alone would fog it as
-    // though it were as far away as what's behind it.
     let fog = fogged.then(|| {
         let sky_light = plan.iter().flat_map(sky::Plan::sampled);
         FogPasses {
@@ -1022,36 +969,32 @@ fn plan_view(
             blended: shading(graph, label!("view blended"), None, [None; 3]),
         }
     });
-    // Antialiased, the view's colors, which the frame drew off by its offset, are resolved
-    // against the frames before into one of the antialiasing's images; and into the view's
-    // resolved colors apart, if what follows writes over them in place, as the next frame
-    // resolves against what the resolve alone wrote. Antialiased by SMAA, they're blended
-    // into colors of their own, which keep no history. Then depth of field, into those
-    // colors, and motion blur, into colors of its own, as it reads the pixels round each,
-    // before bloom, as Unreal orders them; bloom and the grade, into the colors the view
-    // shows; and the lens, into colors of its own, as its chromatic aberration reads the
-    // pixels round each: all before the canvas, so that a game's UI is neither blurred,
-    // bloomed, graded nor seen through a lens. Then the canvas, if there is one, which
-    // isn't antialiased, in a pass of its own over what the view shows, where the view's
-    // last pass doesn't draw it, as when any of those follows it. Reflecting, the colors as
-    // antialiased, resolved or blended by SMAA, or as drawn, are kept for the next frame's
-    // reflections first, before depth of field, motion blur, bloom, the grade, the lens and
-    // the canvas, so that a reflection holds none of them; and where the exposure adapts,
-    // they're metered next, before the same.
+    // The passes after the draws, in `RenderData`'s order, and what each writes into:
+    //
+    // - TAA: one of its images, and the view's colors apart if what follows writes over them in
+    //   place, as the next frame resolves against what the resolve alone wrote. SMAA: colors of its
+    //   own, with no history.
+    // - Depth of field: those colors. Motion blur and the lens: their own, as they read the pixels
+    //   round each.
+    // - Bloom and the grade: the colors the view shows.
+    // - The canvas: its own pass over what the view shows, unless the view's last pass draws it.
+    //
+    // Reflections keep the colors before all of these, so a reflection holds none of them. Depth of
+    // field and motion blur come before bloom, as Unreal orders them.
     let blooms = bloom::blooms(data.bloom, size);
     let grades = !data.grade.is_identity();
     let circle = (data.depth_of_field)
         .and_then(|focus| depth_of_field::Circle::new(focus, &data.viewpoint, size));
     let blur = data.motion_blur.filter(MotionBlur::blurs);
     let lensed = data.lens.shows();
-    // Where the antialiasing's images are among the graph's own, which a frame that shows
-    // an image, drawn without antialiasing, doesn't make, and a list of the images leaves
-    // out, so that it offers only what a show finds.
+    // Where the antialiasing's images start among the graph's own. A frame showing an image, drawn
+    // without antialiasing, doesn't make them, so the image list leaves them out and offers only
+    // what a show finds.
     let unlisted_from = data.list_images.then(|| graph.images().count());
     let taa = antialiased.then(|| {
-        // Apart where what follows writes the resolved colors in place: depth of field;
-        // bloom, the grade or the canvas, unless motion blur or the lens has written colors
-        // of their own before them.
+        // Apart where what follows writes the resolved colors in place: depth of field; or bloom,
+        // the grade or the canvas, unless motion blur or the lens wrote colors of their own before
+        // them.
         let over = blooms || grades || (!lensed && !data.canvas.is_empty());
         let apart = circle.is_some() || (blur.is_none() && over);
         let drawn = [hdr, depth, motion];
@@ -1061,14 +1004,14 @@ fn plan_view(
     let unlisted = unlisted_from.map_or(0..0, |from| from..graph.images().count());
     let shown = taa.as_ref().map_or(hdr, taa::Plan::shown);
     let shown = smaa.as_ref().map_or(shown, smaa::Plan::shown);
-    // A frame that shows something in place of the view's light keeps nothing for the next,
-    // whose reflections take what the last frame that showed the view's light kept.
+    // A frame showing something in place of the view's light keeps nothing. The next reflects what
+    // the last frame showing that light kept.
     let keep = (reflected)
         .filter(|_| data.show.is_none())
         .map(|_| ReflectionPass::plan_keep(graph, reflections_first, shown, size));
-    // Where its exposure adapts, the view's light is metered as resolved, before the
-    // camera's passes, bloom and the canvas, whose UI isn't lit: blurring keeps about the
-    // mean of what it blurs, and a lens's vignette and grain shouldn't move the exposure.
+    // Metered as resolved, before the camera's passes, bloom and the canvas, whose UI isn't lit:
+    // blurring keeps about the mean of what it blurs, and a lens's vignette and grain shouldn't
+    // move the exposure.
     let looked = data.looked;
     let metered = data.adaptation.is_some() && data.show.is_none();
     let exposure = metered.then(|| ExposurePass::plan(graph, shown, size, looked));
@@ -1111,8 +1054,8 @@ fn plan_view(
         .clear(color, data.clear_color)
         .sample(shown)
         .add();
-    // Into the view's image, from the IDs the picks read, so that wherever the view shows,
-    // and as it's read back, it shows outlined.
+    // Into the view's image, from the picks' IDs, so the view shows outlined wherever it shows and
+    // as it's read back.
     let outline = (data.outline.as_ref().is_some_and(Outline::shows))
         .then(|| OutlinePass::plan(graph, color, ids, size));
     let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
@@ -1150,8 +1093,8 @@ fn plan_view(
 }
 
 impl Recorder<'_> {
-    /// Records `view`'s passes into `frame`, as `viewing` says the frame renders the view: what its
-    /// draws that weren't culled drew, and whether the frame culled any.
+    /// Records `view`'s passes into `frame`, as `viewing` says the frame renders the view. Returns
+    /// what its unculled draws drew, and whether the frame culled any.
     #[expect(
         clippy::too_many_arguments,
         reason = "what recording the view takes, each apart"
@@ -1221,8 +1164,8 @@ impl Recorder<'_> {
             }
             None => false,
         };
-        // What a pass draws: what the culling's view in `slot` kept, or, if the frame
-        // culls nothing, every run.
+        // What a pass draws: what the culling's view in `slot` kept, or every run if the frame
+        // culls nothing.
         let runs = |slot: usize| match &view.cull {
             Some(plan) => Runs::Culled(plan, slot),
             None => Runs::All,
@@ -1253,8 +1196,8 @@ impl Recorder<'_> {
             aerial: AerialData::default(),
             reflections: ReflectionData::default(),
         };
-        // What the casters and what's drawn into the visibility buffer read of the frame's
-        // data, all but what the view alone samples.
+        // What the casters and the visibility buffer's draws read of the frame's data: all but what
+        // the view alone samples.
         let partial = frame.upload(bytemuck::bytes_of(&shared))?.address();
         // The casters, each cascade's from the light.
         if let Some(shadows) = &view.shadows {
@@ -1276,9 +1219,8 @@ impl Recorder<'_> {
         let (binning, viewpoint) = (view.clusters.as_ref(), &data.viewpoint);
         let (view_lights, clusters) =
             (self.lighting).bin(frame, binning, lights, viewpoint, aspect);
-        // The view's data, as the pass that shades it samples the sky's light, the
-        // shadows' maps, the ambient occlusion and the reflections through the indices
-        // `sampled` gives.
+        // The view's data, as its shading pass samples the sky's light, the shadows' maps, the
+        // ambient occlusion and the reflections through `sampled`'s indices.
         let early = view.early.as_ref();
         let occlusion = early
             .and_then(|early| early.ao.as_ref())
@@ -1314,9 +1256,8 @@ impl Recorder<'_> {
             };
             (shared, lit)
         };
-        // The ambient occlusion's and the reflections' view, from its space to its clip
-        // space, offset as the frame draws it; and the reflections', from its space to the
-        // world.
+        // The ambient occlusion's and reflections' view-to-clip matrix, off by the frame's offset
+        // as it's drawn, and the reflections' view-to-world.
         let clip_from_view = taa::jitter(jitter) * data.viewpoint.projection_matrix(aspect);
         let world_from_view = Mat4::from_rotation_translation(
             data.viewpoint.rotation,
@@ -1338,8 +1279,7 @@ impl Recorder<'_> {
                     settings,
                 },
             );
-        // The occlusion and the reflections, those `early` has, the next of the frame's
-        // passes.
+        // The occlusion and reflections `early` has: the frame's next passes.
         let (ao_pass, reflection_pass) = (&self.ao, &self.reflections);
         let record_early = |frame: &mut gg_gpu::Frame<'_>, early: &EarlyPasses| {
             if let (Some(plan), Some(seen)) = (&early.ao, &occlusion_seen) {
@@ -1350,7 +1290,7 @@ impl Recorder<'_> {
             }
             Ok::<_, Error>(())
         };
-        // The depth alone of the culled runs `runs` keeps, for the ambient occlusion and the
+        // The depth alone of the culled runs `runs` keeps, for the ambient occlusion and
         // reflections, or their normals, as `way` says.
         let meshes = &self.meshes;
         let draw_alone = |pass: &mut gg_gpu::Pass<'_, '_>, runs: Runs<'_>, way| {
@@ -1360,9 +1300,9 @@ impl Recorder<'_> {
         let draw_depth = |pass: &mut gg_gpu::Pass<'_, '_>, runs: Runs<'_>, beside_visibility| {
             draw_alone(pass, runs, Way::Depth { beside_visibility })
         };
-        // Reflecting, in pass `pass`, the normals of the culled runs `plan` kept in both of
-        // the view's passes whose depth alone was drawn, where they're nearest in it: all
-        // of them, or, `beside_visibility`, those drawn otherwise than into it.
+        // Reflecting, in `pass`, the normals of the culled runs `plan` kept in both view passes
+        // whose depth alone was drawn, where they're nearest: all of them, or, `beside_visibility`,
+        // those drawn other than into it.
         let draw_normals =
             |frame: &mut gg_gpu::Frame<'_>, pass, plan: &CullPlan, beside_visibility| {
                 let mut pass =
@@ -1374,12 +1314,9 @@ impl Recorder<'_> {
                 Ok::<_, Error>(())
             };
         let shades = view.shaded.as_ref().zip(view.cull.as_ref());
-        // Beside a visibility buffer, what's drawn into it, in the view's two passes, then
-        // the ambient occlusion and the reflections, if any, and the view's shading, which
-        // the view's data is uploaded in, then the pass the rest draws in; or else, with
-        // ambient occlusion or reflections, the depth of what the view's two passes keep,
-        // the occlusion and the reflections, and the pass that draws all of it, shaded; or
-        // else the view's first pass, which takes the culled runs it kept.
+        // Beside a visibility buffer, as ShadedPasses says; else with ambient occlusion or
+        // reflections, as EarlyPasses says; else the view's first pass alone, taking the culled
+        // runs it kept.
         let (mut pass, shared, frame_data, lit) = if let Some((shaded, plan)) = shades {
             let mut pass =
                 (frame.render(view.first)).expect("the graph's own images are always there");
@@ -1484,8 +1421,8 @@ impl Recorder<'_> {
             let shared = pass.upload(bytemuck::bytes_of(&frame_data))?.address();
             (pass, shared, frame_data, lit)
         };
-        // Behind everything, in place of the clear color: the atmosphere's sky, or the
-        // image sky; unless the view shows a part of shading in place of its light.
+        // Behind everything, in place of the clear color: the atmosphere's sky or the image sky,
+        // unless the view shows a part of shading.
         let aspect = data.viewport.aspect();
         let draws_sky = !matches!(data.show, Some(Show::Shading(_)));
         if draws_sky && let (Some(seen), Some(tables), Some(air)) = (&atmosphere, &tables, air) {
@@ -1509,8 +1446,8 @@ impl Recorder<'_> {
         let way = Way::Shaded {
             beside_visibility: shades.is_some(),
         };
-        // In fog, a view that culls nothing has nothing opaque to draw before the fog, but
-        // the sky, as what it draws all blends.
+        // In fog, a view that culls nothing has nothing opaque to draw before the fog but the sky,
+        // as all it draws blends.
         let mut counts = if view.fog.is_some() && view.cull.is_none() {
             DrawCounts::default()
         } else {
@@ -1526,10 +1463,9 @@ impl Recorder<'_> {
                 born,
             )?
         };
-        // What the first pass didn't draw, over it: after the depth pyramid, from the
-        // first's depth, and the culling's second pass, against it, in a pass of its own;
-        // or, beside a visibility buffer or after the ambient occlusion, in the same pass,
-        // as its culling has run.
+        // What the first pass didn't draw, over it: in its own pass, after the depth pyramid from
+        // the first's depth and the culling's second pass against it; or in the same pass, beside a
+        // visibility buffer or after the ambient occlusion, as its culling has run.
         if let (Some(plan), Some(second)) = (&view.cull, view.second) {
             if shades.is_none() && view.early.is_none() {
                 drop(pass);
@@ -1554,8 +1490,8 @@ impl Recorder<'_> {
                 born,
             )?;
         }
-        // In fog, what's opaque fogged, the sky among it, and then what blends over it, in
-        // a pass of its own, fogging itself.
+        // In fog, what's opaque is fogged, the sky included, then what blends draws over it in its
+        // own pass, fogging itself.
         if let Some(fog) = &view.fog {
             drop(pass);
             self.fog.record(frame, &fog.plan, view_projection, shared);
@@ -1576,10 +1512,9 @@ impl Recorder<'_> {
                 born,
             )?;
         }
-        // The canvas, over the view's last pass's; or, after what follows that, over what
-        // the view shows, in its own pass, if it has one; without the view's ambient
-        // occlusion or reflections, which are of the depth the view's own passes draw, or
-        // its fog or its atmosphere's haze, as it's drawn in the view's own space.
+        // The canvas, over the view's last pass, or in its own pass over what the view shows, after
+        // what follows. It has no ambient occlusion or reflections, which are of the view's own
+        // depth, and no fog or haze, as it's in the view's own space.
         let canvas_data = if frame_data.ambient_occlusion == 0
             && view.fog.is_none()
             && frame_data.aerial == AerialData::default()
