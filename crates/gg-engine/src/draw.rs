@@ -147,250 +147,328 @@ pub(crate) fn draw_world(
 ) {
     let _zone = gg_core::zone!();
     draws.draw_scene();
-    let Scratch {
-        segments,
-        last,
-        blended,
-        blends,
-        items,
-        groups,
-        sorted,
-        blending,
-        meshes_seen,
-        emitters,
-    } = scratch;
-    emitters.begin(origin);
+    scratch.emitters.begin(origin);
     let clock = Clock::new(ticks, alpha);
-    segments.clear();
-    blends.clear();
-    blends.resize(world.tables().len(), None);
+    scratch.segments.clear();
+    scratch.blends.clear();
+    scratch.blends.resize(world.tables().len(), None);
     let Some(poses) = Poses::new(world, past, placed, alpha, origin) else {
         return;
     };
-    let transform = poses.transform;
-    let sprite = world.component::<Sprite>();
-    let circle = world.component::<Circle>();
-    let text = world.component::<Text>();
-    let mesh = world.component::<MeshDraw>();
-    let emitter = world.component::<ParticleEmitter>();
-    let parent = world.component::<Parent>();
-    let since = match *meshes_seen {
-        Some((serial, tick)) if serial == world.serial() => Some(tick),
-        _ => None,
-    };
-    *meshes_seen = Some((world.serial(), world.change_tick()));
-    blending.resize_with(world.tables().len(), Default::default);
-    // How many of `blended`'s matrices the frame's roots take.
-    let mut blended_len = 0;
-    for (index, rows) in world.tables().iter().enumerate() {
-        let Some(transforms) = rows.column::<Transform>(transform) else {
-            continue;
+    let columns = Columns::of(world);
+    scratch.find(&poses, columns);
+    scratch.order(world);
+    scratch.draw(&poses, columns, clock, draws, shaders, fonts);
+}
+
+impl Scratch {
+    /// Finds the runs of each table's rows at one z that draw, of each kind, as `segments`, and
+    /// blends the matrices of the roots that draw between ticks into `blended`, as [`draw_world`]
+    /// says.
+    fn find(&mut self, poses: &Poses<'_>, columns: Columns) {
+        let (world, placed, alpha, origin) = (poses.world, poses.placed, poses.alpha, poses.origin);
+        let transform = poses.transform;
+        let Columns {
+            sprite,
+            circle,
+            text,
+            mesh,
+            emitter,
+            parent,
+        } = columns;
+        let Self {
+            segments,
+            blended,
+            blends,
+            blending,
+            meshes_seen,
+            ..
+        } = self;
+        let since = match *meshes_seen {
+            Some((serial, tick)) if serial == world.serial() => Some(tick),
+            _ => None,
         };
-        let meshes = mesh.and_then(|id| rows.column::<MeshDraw>(id));
-        // The rows whose meshes blend, found again as its meshes change, or its rows, as one joins
-        // it, which marks it, or leaves it, which marks nothing but leaves it shorter; those that
-        // write depth the scene holds.
-        let (had, blending_rows) = &mut blending[index];
-        match (meshes, mesh) {
-            (Some(meshes), Some(id)) => {
-                let marks = [rows.changed(id).expect("it has meshes"), rows.joined()];
-                let marked = |tick| marks.iter().any(|marks| marks.since(tick));
-                if *had != meshes.len() || since.is_none_or(marked) {
-                    let blends = (0..).zip(meshes).filter(|(_, draw)| draw.batch().is_none());
-                    blending_rows.clear();
-                    blending_rows.extend(blends.map(|(row, _)| row));
-                    *had = meshes.len();
-                }
-            }
-            _ => blending_rows.clear(),
-        }
-        let blending_rows = &*blending_rows;
-        let drawn = [
-            (Kind::Sprite, sprite.is_some_and(|id| rows.has(id))),
-            (Kind::Circle, circle.is_some_and(|id| rows.has(id))),
-            (Kind::Text, text.is_some_and(|id| rows.has(id))),
-            (Kind::Mesh, !blending_rows.is_empty()),
-            (Kind::Particles, emitter.is_some_and(|id| rows.has(id))),
-        ];
-        if drawn.iter().all(|&(_, drawn)| !drawn) {
-            continue;
-        }
-        let table = index as u32;
-        let len = transforms.len();
-        let children = parent.is_some_and(|id| rows.has(id));
-        let entities = rows.entities();
-        // Its rows' z's, a child's where it's placed, as the latest tick left it.
-        let z = |row: usize| match children {
-            true => {
-                (placed
-                    .kept(entities[row])
-                    .expect("a drawn entity is placed"))
-                .matrix
-                .translation
-                .z
-            }
-            false => transforms[row].translation.z,
-        };
-        for (kind, _) in drawn.into_iter().filter(|&(_, drawn)| drawn) {
-            match kind {
-                Kind::Mesh => {
-                    let rows = blending_rows.iter().map(|&row| row as usize);
-                    cut(segments, rows, z, kind, table, children);
-                }
-                _ => cut(segments, 0..len, z, kind, table, children),
-            }
-        }
-        if !children {
-            let (from, instead) = (poses.from(index), poses.past.instead_of(index));
-            if from.is_some() || !instead.is_empty() {
-                let end = blended_len + len;
-                if blended.len() < end {
-                    blended.resize(end, Mat4::IDENTITY);
-                }
-                let out = &mut blended[blended_len..end];
-                match from {
-                    Some(from) => blend(out, &from[..len], transforms, (alpha, origin)),
-                    None => {
-                        for (out, local) in out.iter_mut().zip(transforms) {
-                            *out = local.matrix_from(origin);
-                        }
+        *meshes_seen = Some((world.serial(), world.change_tick()));
+        blending.resize_with(world.tables().len(), Default::default);
+        // How many of `blended`'s matrices the frame's roots take.
+        let mut blended_len = 0;
+        for (index, rows) in world.tables().iter().enumerate() {
+            let Some(transforms) = rows.column::<Transform>(transform) else {
+                continue;
+            };
+            let meshes = mesh.and_then(|id| rows.column::<MeshDraw>(id));
+            // The rows whose meshes blend, found again as its meshes change, or its rows, as one joins
+            // it, which marks it, or leaves it, which marks nothing but leaves it shorter; those that
+            // write depth the scene holds.
+            let (had, blending_rows) = &mut blending[index];
+            match (meshes, mesh) {
+                (Some(meshes), Some(id)) => {
+                    let marks = [rows.changed(id).expect("it has meshes"), rows.joined()];
+                    let marked = |tick| marks.iter().any(|marks| marks.since(tick));
+                    if *had != meshes.len() || since.is_none_or(marked) {
+                        let blends = (0..).zip(meshes).filter(|(_, draw)| draw.batch().is_none());
+                        blending_rows.clear();
+                        blending_rows.extend(blends.map(|(row, _)| row));
+                        *had = meshes.len();
                     }
                 }
-                for &(_, row, pose) in instead {
-                    out[row as usize] = pose.matrix_from(origin);
+                _ => blending_rows.clear(),
+            }
+            let blending_rows = &*blending_rows;
+            let drawn = [
+                (Kind::Sprite, sprite.is_some_and(|id| rows.has(id))),
+                (Kind::Circle, circle.is_some_and(|id| rows.has(id))),
+                (Kind::Text, text.is_some_and(|id| rows.has(id))),
+                (Kind::Mesh, !blending_rows.is_empty()),
+                (Kind::Particles, emitter.is_some_and(|id| rows.has(id))),
+            ];
+            if drawn.iter().all(|&(_, drawn)| !drawn) {
+                continue;
+            }
+            let table = index as u32;
+            let len = transforms.len();
+            let children = parent.is_some_and(|id| rows.has(id));
+            let entities = rows.entities();
+            // Its rows' z's, a child's where it's placed, as the latest tick left it.
+            let z = |row: usize| match children {
+                true => {
+                    (placed
+                        .kept(entities[row])
+                        .expect("a drawn entity is placed"))
+                    .matrix
+                    .translation
+                    .z
                 }
-                blends[index] = Some(blended_len);
-                blended_len = end;
+                false => transforms[row].translation.z,
+            };
+            for (kind, _) in drawn.into_iter().filter(|&(_, drawn)| drawn) {
+                match kind {
+                    Kind::Mesh => {
+                        let rows = blending_rows.iter().map(|&row| row as usize);
+                        cut(segments, rows, z, kind, table, children);
+                    }
+                    _ => cut(segments, 0..len, z, kind, table, children),
+                }
+            }
+            if !children {
+                let (from, instead) = (poses.from(index), poses.past.instead_of(index));
+                if from.is_some() || !instead.is_empty() {
+                    let end = blended_len + len;
+                    if blended.len() < end {
+                        blended.resize(end, Mat4::IDENTITY);
+                    }
+                    let out = &mut blended[blended_len..end];
+                    match from {
+                        Some(from) => blend(out, &from[..len], transforms, (alpha, origin)),
+                        None => {
+                            for (out, local) in out.iter_mut().zip(transforms) {
+                                *out = local.matrix_from(origin);
+                            }
+                        }
+                    }
+                    for &(_, row, pose) in instead {
+                        out[row as usize] = pose.matrix_from(origin);
+                    }
+                    blends[index] = Some(blended_len);
+                    blended_len = end;
+                }
             }
         }
     }
-    // Back to front, then by kind, then as they were found.
-    segments.sort_unstable_by(|a, b| {
-        let z = a.z.total_cmp(&b.z);
-        z.then(a.kind.cmp(&b.kind)).then(a.order.cmp(&b.order))
-    });
-    if *sorted != Some(world.version()) || segments != last {
-        sort(world, segments, items, groups);
-        *sorted = Some(world.version());
-        last.clone_from(segments);
+
+    /// Sorts `segments` back to front, and the rows they hold by ID, if they've changed.
+    fn order(&mut self, world: &World) {
+        let Self {
+            segments,
+            last,
+            items,
+            groups,
+            sorted,
+            ..
+        } = self;
+        // Back to front, then by kind, then as they were found.
+        segments.sort_unstable_by(|a, b| {
+            let z = a.z.total_cmp(&b.z);
+            z.then(a.kind.cmp(&b.kind)).then(a.order.cmp(&b.order))
+        });
+        if *sorted != Some(world.version()) || segments != last {
+            sort(world, segments, items, groups);
+            *sorted = Some(world.version());
+            last.clone_from(segments);
+        }
     }
-    let tables = world.tables();
-    // A segment's table, its transforms, and what its rows draw by.
-    let placing = |index: u32| {
-        let segment = &segments[index as usize];
-        let table = &tables[segment.table as usize];
-        let transforms = table.column::<Transform>(transform);
-        let transforms = transforms.expect("it has transforms");
-        let drawn = match (segment.children, blends[segment.table as usize]) {
-            (true, _) => Drawn::Placed(table.entities()),
-            (false, Some(start)) => Drawn::Blended(&blended[start..]),
-            (false, None) => Drawn::Transforms,
+
+    /// Draws each group's rows into `draws`, as [`draw_world`] says.
+    fn draw(
+        &mut self,
+        poses: &Poses<'_>,
+        columns: Columns,
+        clock: Clock,
+        draws: &mut Draws,
+        shaders: &mut Shaders,
+        fonts: &mut Fonts,
+    ) {
+        let (world, placed, origin) = (poses.world, poses.placed, poses.origin);
+        let transform = poses.transform;
+        let Columns {
+            sprite,
+            circle,
+            text,
+            mesh,
+            emitter,
+            ..
+        } = columns;
+        let Self {
+            segments,
+            blended,
+            blends,
+            items,
+            groups,
+            emitters,
+            ..
+        } = self;
+        let tables = world.tables();
+        // A segment's table, its transforms, and what its rows draw by.
+        let placing = |index: u32| {
+            let segment = &segments[index as usize];
+            let table = &tables[segment.table as usize];
+            let transforms = table.column::<Transform>(transform);
+            let transforms = transforms.expect("it has transforms");
+            let drawn = match (segment.children, blends[segment.table as usize]) {
+                (true, _) => Drawn::Placed(table.entities()),
+                (false, Some(start)) => Drawn::Blended(&blended[start..]),
+                (false, None) => Drawn::Transforms,
+            };
+            (table, transforms, drawn)
         };
-        (table, transforms, drawn)
-    };
-    let matrix = |transforms: &[Transform], drawn: Drawn<'_>, row: usize| match drawn {
-        Drawn::Transforms => transforms[row].matrix_from(origin),
-        Drawn::Blended(blended) => blended[row],
-        Drawn::Placed(entities) => {
-            let place = placed.drawn(entities[row]);
-            from_origin(place.expect("a drawn entity is placed").matrix, origin)
-        }
-    };
-    // Kept across groups, whose segments' indices differ.
-    let mut sprites_at = [None; AT_HAND];
-    let (mut circles_at, mut meshes_at) = ([None; AT_HAND], [None; AT_HAND]);
-    let (mut texts_at, mut emitters_at) = ([None; AT_HAND], [None; AT_HAND]);
-    for group in groups.iter() {
-        let items = &items[group.items.start as usize..group.items.end as usize];
-        match group.kind {
-            Kind::Sprite => {
-                let sprite = sprite.expect("a table has sprites");
-                let columns = |index: u32| {
-                    let (table, transforms, drawn) = placing(index);
-                    let sprites = table.column::<Sprite>(sprite).expect("it has sprites");
-                    (transforms, sprites, drawn)
-                };
-                draws.extend_sprites(items.iter().map(|item| {
-                    let found = found(&mut sprites_at, item.segment, columns);
-                    let (transforms, sprites, drawn) = found;
-                    let row = item.row as usize;
-                    (matrix(transforms, drawn, row), sprites[row], item.id.get())
-                }));
+        let matrix = |transforms: &[Transform], drawn: Drawn<'_>, row: usize| match drawn {
+            Drawn::Transforms => transforms[row].matrix_from(origin),
+            Drawn::Blended(blended) => blended[row],
+            Drawn::Placed(entities) => {
+                let place = placed.drawn(entities[row]);
+                from_origin(place.expect("a drawn entity is placed").matrix, origin)
             }
-            Kind::Circle => {
-                let circle = circle.expect("a table has circles");
-                let columns = |index: u32| {
-                    let (table, transforms, drawn) = placing(index);
-                    let circles = table.column::<Circle>(circle).expect("it has circles");
-                    (transforms, circles, drawn)
-                };
-                let circles = items.iter().map(|item| {
-                    let found = found(&mut circles_at, item.segment, columns);
-                    let (transforms, circles, drawn) = found;
-                    let row = item.row as usize;
-                    (matrix(transforms, drawn, row), circles[row], item.id.get())
-                });
-                draws.extend_circles(shaders, circles);
-            }
-            Kind::Text => {
-                let text = text.expect("a table has texts");
-                let columns = |index: u32| {
-                    let (table, transforms, drawn) = placing(index);
-                    let texts = table.column::<Text>(text).expect("it has texts");
-                    (transforms, texts, drawn)
-                };
-                for item in items {
-                    let found = found(&mut texts_at, item.segment, columns);
-                    let (transforms, texts, drawn) = found;
-                    let row = item.row as usize;
-                    let at = matrix(transforms, drawn, row);
-                    let shown = &texts[row];
-                    let style = shown.style();
-                    let glyphs = fonts.lay_out(at, &shown.text, &style, item.id.get());
-                    draws.extend_glyphs(shaders, glyphs);
-                }
-            }
-            Kind::Mesh => {
-                let mesh = mesh.expect("a table has meshes");
-                let columns = |index: u32| {
-                    let (table, transforms, drawn) = placing(index);
-                    let meshes = table.column::<MeshDraw>(mesh).expect("it has meshes");
-                    (transforms, meshes, drawn)
-                };
-                for item in items {
-                    let found = found(&mut meshes_at, item.segment, columns);
-                    let (transforms, meshes, drawn) = found;
-                    let row = item.row as usize;
-                    let at = matrix(transforms, drawn, row);
-                    draws.push_draw(at, &meshes[row], item.id.get());
-                }
-            }
-            Kind::Particles => {
-                let emitter = emitter.expect("a table has emitters");
-                let columns = |index: u32| {
-                    let (table, transforms, drawn) = placing(index);
-                    let emitters = table.column::<ParticleEmitter>(emitter);
-                    (transforms, emitters.expect("it has emitters"), drawn)
-                };
-                for item in items {
-                    let found = found(&mut emitters_at, item.segment, columns);
-                    let (transforms, emitted, drawn) = found;
-                    let row = item.row as usize;
-                    let at = matrix(transforms, drawn, row);
-                    // Where the latest tick left it, which its bursts are born at.
-                    let ticked = match drawn {
-                        Drawn::Placed(entities) => {
-                            let place = placed.kept(entities[row]);
-                            from_origin(place.expect("a drawn entity is placed").matrix, origin)
-                        }
-                        Drawn::Transforms | Drawn::Blended(_) => {
-                            transforms[row].matrix_from(origin)
-                        }
+        };
+        // Kept across groups, whose segments' indices differ.
+        let mut sprites_at = [None; AT_HAND];
+        let (mut circles_at, mut meshes_at) = ([None; AT_HAND], [None; AT_HAND]);
+        let (mut texts_at, mut emitters_at) = ([None; AT_HAND], [None; AT_HAND]);
+        for group in groups.iter() {
+            let items = &items[group.items.start as usize..group.items.end as usize];
+            match group.kind {
+                Kind::Sprite => {
+                    let sprite = sprite.expect("a table has sprites");
+                    let columns = |index: u32| {
+                        let (table, transforms, drawn) = placing(index);
+                        let sprites = table.column::<Sprite>(sprite).expect("it has sprites");
+                        (transforms, sprites, drawn)
                     };
-                    let particles = emitters.emit(item.id, &emitted[row], at, ticked, clock);
-                    draws.push_particles(particles);
+                    draws.extend_sprites(items.iter().map(|item| {
+                        let found = found(&mut sprites_at, item.segment, columns);
+                        let (transforms, sprites, drawn) = found;
+                        let row = item.row as usize;
+                        (matrix(transforms, drawn, row), sprites[row], item.id.get())
+                    }));
+                }
+                Kind::Circle => {
+                    let circle = circle.expect("a table has circles");
+                    let columns = |index: u32| {
+                        let (table, transforms, drawn) = placing(index);
+                        let circles = table.column::<Circle>(circle).expect("it has circles");
+                        (transforms, circles, drawn)
+                    };
+                    let circles = items.iter().map(|item| {
+                        let found = found(&mut circles_at, item.segment, columns);
+                        let (transforms, circles, drawn) = found;
+                        let row = item.row as usize;
+                        (matrix(transforms, drawn, row), circles[row], item.id.get())
+                    });
+                    draws.extend_circles(shaders, circles);
+                }
+                Kind::Text => {
+                    let text = text.expect("a table has texts");
+                    let columns = |index: u32| {
+                        let (table, transforms, drawn) = placing(index);
+                        let texts = table.column::<Text>(text).expect("it has texts");
+                        (transforms, texts, drawn)
+                    };
+                    for item in items {
+                        let found = found(&mut texts_at, item.segment, columns);
+                        let (transforms, texts, drawn) = found;
+                        let row = item.row as usize;
+                        let at = matrix(transforms, drawn, row);
+                        let shown = &texts[row];
+                        let style = shown.style();
+                        let glyphs = fonts.lay_out(at, &shown.text, &style, item.id.get());
+                        draws.extend_glyphs(shaders, glyphs);
+                    }
+                }
+                Kind::Mesh => {
+                    let mesh = mesh.expect("a table has meshes");
+                    let columns = |index: u32| {
+                        let (table, transforms, drawn) = placing(index);
+                        let meshes = table.column::<MeshDraw>(mesh).expect("it has meshes");
+                        (transforms, meshes, drawn)
+                    };
+                    for item in items {
+                        let found = found(&mut meshes_at, item.segment, columns);
+                        let (transforms, meshes, drawn) = found;
+                        let row = item.row as usize;
+                        let at = matrix(transforms, drawn, row);
+                        draws.push_draw(at, &meshes[row], item.id.get());
+                    }
+                }
+                Kind::Particles => {
+                    let emitter = emitter.expect("a table has emitters");
+                    let columns = |index: u32| {
+                        let (table, transforms, drawn) = placing(index);
+                        let emitters = table.column::<ParticleEmitter>(emitter);
+                        (transforms, emitters.expect("it has emitters"), drawn)
+                    };
+                    for item in items {
+                        let found = found(&mut emitters_at, item.segment, columns);
+                        let (transforms, emitted, drawn) = found;
+                        let row = item.row as usize;
+                        let at = matrix(transforms, drawn, row);
+                        // Where the latest tick left it, which its bursts are born at.
+                        let ticked = match drawn {
+                            Drawn::Placed(entities) => {
+                                let place = placed.kept(entities[row]);
+                                from_origin(place.expect("a drawn entity is placed").matrix, origin)
+                            }
+                            Drawn::Transforms | Drawn::Blended(_) => {
+                                transforms[row].matrix_from(origin)
+                            }
+                        };
+                        let particles = emitters.emit(item.id, &emitted[row], at, ticked, clock);
+                        draws.push_particles(particles);
+                    }
                 }
             }
+        }
+    }
+}
+
+/// The components drawing reads, by their IDs among the world's, where it has them.
+#[derive(Clone, Copy)]
+struct Columns {
+    sprite: Option<ComponentId>,
+    circle: Option<ComponentId>,
+    text: Option<ComponentId>,
+    mesh: Option<ComponentId>,
+    emitter: Option<ComponentId>,
+    parent: Option<ComponentId>,
+}
+
+impl Columns {
+    fn of(world: &World) -> Self {
+        Self {
+            sprite: world.component::<Sprite>(),
+            circle: world.component::<Circle>(),
+            text: world.component::<Text>(),
+            mesh: world.component::<MeshDraw>(),
+            emitter: world.component::<ParticleEmitter>(),
+            parent: world.component::<Parent>(),
         }
     }
 }
