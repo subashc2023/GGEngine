@@ -1,19 +1,18 @@
-//! A panic's frames, each as the module its return address is in and the offset there, which the
-//! build's kept symbols turn into functions and lines offline, as ARCHITECTURE.md's Diagnostics
-//! says: by each OS's own calls, `RtlCaptureStackBackTrace` and `GetModuleHandleExW` on Windows,
-//! and `backtrace` and `dladdr`, glibc's on Linux and libSystem's on macOS.
+//! A panic's frames, each a module and an offset, for the build's kept symbols to turn into
+//! functions and lines offline (ARCHITECTURE.md's Diagnostics). Each OS's own calls get them:
+//! `RtlCaptureStackBackTrace` and `GetModuleHandleExW` on Windows, and `backtrace` and `dladdr`,
+//! glibc's on Linux and libSystem's on macOS.
 
 use std::fmt::Write as _;
 
 /// The most frames a panic logs.
 const MOST: usize = 64;
 
-/// The frames of the calls the caller is inside, innermost first, this function's own and the
-/// panic hook's among them, space-separated, each as `<module>+0x<offset>`: the file name of the
-/// module whose code holds its return address, rather than its path, which may name the player;
-/// and the offset from where the module is loaded of the return address less one, which falls
-/// inside the call, as symbolizers take it; `?+0x<address>` where no module holds it. Empty on an
-/// OS whose calls it doesn't make.
+/// The caller's frames, innermost first, this function's and the panic hook's among them, each
+/// `<module>+0x<offset>`, space-separated. The module is its file name, not its path, which may
+/// name the player. The offset, from where the module is loaded, is of the return address less one,
+/// inside the call as symbolizers take it. `?+0x<address>` where no module holds it; empty on an OS
+/// whose calls it doesn't make.
 pub(super) fn capture() -> String {
     let mut text = String::new();
     for (module, offset) in frames() {
@@ -25,7 +24,7 @@ pub(super) fn capture() -> String {
     text
 }
 
-/// The file name a module's path, `/` or `\` between its parts, ends with.
+/// A module's path's last part, after `/` or `\`.
 fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
@@ -94,8 +93,8 @@ fn frames() -> Vec<(Option<String>, usize)> {
             // SAFETY: the loader's name of a loaded object, a C string that outlives the call.
             let path = unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy();
             let name = file_name(&path).to_owned();
-            // Where the object is loaded: on Linux, the executable being position-independent,
-            // the offset is the address addr2line takes; on macOS, it's from the image's header.
+            // On Linux, the executable being position-independent, this is the address addr2line
+            // takes; on macOS, the offset from the image's header.
             (Some(name), call.wrapping_sub(info.dli_fbase as usize))
         })
         .collect()

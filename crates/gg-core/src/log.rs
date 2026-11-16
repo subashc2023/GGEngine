@@ -1,9 +1,8 @@
-//! Logging through `tracing`: colored lines on the console for people, and every event as a JSON
-//! line in a file for agents and tools, the last of which are kept in memory too, [`EVENTS`], for
-//! the tool API to serve as they come.
+//! Logging through `tracing`: colored console lines for people, and JSON lines for agents and
+//! tools, in a file and in [`EVENTS`] for the tool API.
 
 mod console;
-// The OS's calls that walk the stack and name the module an address is in, behind a safe function.
+// The OS's calls that walk the stack, behind a safe function.
 #[allow(unsafe_code)]
 mod frames;
 
@@ -26,45 +25,37 @@ use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// The engine's crates, which log debug events in debug builds unless `RUST_LOG` says otherwise.
+/// The engine's crates, logged at debug in debug builds unless `RUST_LOG` says otherwise.
 const ENGINE_CRATES: [&str; 4] = ["gg_core", "gg_gpu", "gg_renderer", "gg_engine"];
 
-/// The target panics are logged under, which every filter lets through but one that names its
-/// fields, such as `panic[{code}]=off`, which outranks the engine's own directive for it.
+/// Panics' target. Every filter passes it but one naming its fields, as `panic[{code}]=off` does,
+/// outranking the engine's directive.
 const PANICS: &str = "panic";
 
-/// The most events [`Events`] keeps, past which the oldest go.
+/// [`Events`]' limits: events, bytes of lines, and bytes of a line.
 const MOST_EVENTS: usize = 10_000;
-
-/// The most bytes of lines [`Events`] keeps, past which the oldest go.
 const MOST_BYTES: usize = 8 << 20;
-
-/// The most bytes a line [`Events`] keeps may have: a longer one takes its number, but isn't kept.
 const MOST_LINE: usize = 1 << 20;
 
-/// The JSON log's events, the last of them, as [`init`] has the log keep them.
+/// The JSON log's last events.
 pub static EVENTS: Events = Events::new();
 
-/// Starts logging for this process: colored lines on stderr, if `console`, and a JSON-lines file
-/// in `dir` named after `name`, the time and the process ID, whose lines [`EVENTS`] keeps too, the
-/// last of them. Returns the file's path, or `None` if the file couldn't be created; the console
-/// and `EVENTS` still log then, starting with a warning that says why.
+/// Starts this process's logging: colored lines on stderr if `console`, and JSON lines in
+/// [`EVENTS`] and a file in `dir`, named by `name`, the time and the process ID. Returns the file's
+/// path, or `None`, warning why, if it can't be made.
 ///
-/// Without `console`, nothing logged reaches stderr: for a process whose tool reads both its
-/// stderr and its events, as an embedded game's does, which would show each event twice.
+/// Without `console`, nothing reaches stderr: an embedded game's tool reads its stderr and events,
+/// and would show each event twice.
 ///
-/// `RUST_LOG` sets the filter, such as `debug` or `info,gg_gpu=trace`. Without it, events at info
-/// and above are logged, and the engine's debug events too in debug builds. A filter that names
-/// targets alone, such as `gg_gpu=trace`, sets their levels and keeps that default for the rest.
-/// `NO_COLOR` turns the console's colors off, and `CLICOLOR_FORCE` turns them on when stderr isn't
-/// a terminal.
+/// `RUST_LOG` sets the filter, such as `debug` or `info,gg_gpu=trace`. The default is info, and
+/// debug for the engine's crates in debug builds. Targets alone, as `gg_gpu=trace`, keep it for the
+/// rest. `NO_COLOR` turns colors off, and `CLICOLOR_FORCE` on off a terminal.
 ///
-/// Panics are logged as errors, `log.panic`, with where they happened, before the process ends,
-/// even under `off`.
+/// Panics log as errors (`log.panic`) before the process ends, even under `off`.
 ///
 /// # Panics
 ///
-/// If logging has already started: a process has one log.
+/// - If logging has already started.
 pub fn init(name: &str, dir: &Path, console: bool) -> Option<PathBuf> {
     let start = Instant::now();
     let rust_log = std::env::var("RUST_LOG").ok();
@@ -120,26 +111,23 @@ pub fn init(name: &str, dir: &Path, console: bool) -> Option<PathBuf> {
     }
 }
 
-/// `duration` in milliseconds, rounded to the microsecond: how events give how long something
-/// took, in their `ms` fields.
+/// `duration` in milliseconds, rounded to the microsecond, as events' `ms` fields give it.
 pub fn millis(duration: Duration) -> f64 {
     (duration.as_nanos() as f64 / 1e3).round() / 1e3
 }
 
-/// The JSON log's last events, kept in memory, as [`init`] has [`EVENTS`] keep them, for any thread
-/// to [`read`](Self::read) as they come: each numbered as it's pushed, from 0, with its level and
-/// its line. At most 10,000 events and 8 MiB of their lines are kept, the oldest going first; a
-/// line of more than 1 MiB takes its number but isn't kept, and one that isn't JSON, as the JSON
-/// layer's message that it can't format an event isn't, takes none. Keeping events allocates each
-/// one's line, and nothing while nothing is logged.
+/// The JSON log's last events, for any thread to [`read`](Self::read) as they come.
+///
+/// Events are numbered from 0. It keeps 10,000 events and 8 MiB of lines at most, the oldest going
+/// first. A line over 1 MiB takes a number but isn't kept; one that isn't JSON, such as the layer's
+/// "can't format" message, takes none. Keeping allocates each line, and nothing while nothing logs.
 pub struct Events {
     ring: Mutex<Ring>,
-    /// Woken as each event is pushed, for the reads that wait for one.
+    /// Wakes the waiting reads at each push.
     pushed: Condvar,
 }
 
-/// The events [`Events`] keeps, the oldest first, the bytes of their lines, and the number the
-/// next event pushed gets.
+/// Oldest first; `end` is the next event's number.
 struct Ring {
     kept: VecDeque<Kept>,
     bytes: usize,
@@ -155,26 +143,23 @@ struct Kept {
 /// What [`Events::read`] read.
 #[derive(Debug, PartialEq)]
 pub struct Read {
-    /// One past the number of the last event the read looked at, at its level or not: where the
-    /// next read goes on from.
+    /// One past the last event looked at, of any level: where the next read goes on.
     pub next: u64,
-    /// The number the next event pushed gets, as the read ended.
+    /// The next event's number as the read ended.
     pub end: u64,
-    /// The events from where the read started, before `next`, that it couldn't read, of any level:
-    /// dropped as newer ones came, or too long to keep.
+    /// Events of any level from the start to `next` it couldn't read: dropped, or too long to keep.
     pub missed: u64,
-    /// The lines of the events read, in order, each without its line break.
+    /// The lines read, in order, without line breaks.
     pub lines: Vec<Arc<str>>,
 }
 
 thread_local! {
-    /// Whether this thread holds an [`Events`]' lock, during which an event it logs, as the panic
-    /// hook logs a panic that happens there, isn't kept, rather than waiting forever for the lock.
+    /// Whether this thread holds an [`Events`]' lock. What it logs meanwhile, as a panic there,
+    /// isn't kept, rather than waiting forever for the lock.
     static HOLDING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Says that this thread holds an [`Events`]' lock, as [`HOLDING`] does, until it drops, unwinding
-/// from a panic too.
+/// Sets [`HOLDING`] until it drops, unwinding from a panic too.
 struct Holding;
 
 impl Holding {
@@ -202,13 +187,12 @@ impl Events {
         }
     }
 
-    /// Keeps `line`, an event's line of JSON without its line break, as the event at `level`, as
-    /// [`Events`] says, and wakes the reads waiting.
+    /// Keeps `line`, an event's JSON without its line break, at `level`, and wakes waiting reads.
     pub fn push(&self, level: Level, line: &str) {
         if !line.starts_with('{') || HOLDING.get() {
             return;
         }
-        // Made before the lock is taken, so that no read waits for an allocation.
+        // Allocated before locking, so that no read waits for it.
         let line = (line.len() <= MOST_LINE).then(|| Arc::<str>::from(line));
         {
             let _holding = Holding::new();
@@ -235,11 +219,9 @@ impl Events {
         self.pushed.notify_all();
     }
 
-    /// Reads the events kept at level `min` and more severe: with `from`, those numbered `from` and
-    /// after, a `from` past the end reading those to come; without, the last `last` of them, or
-    /// else all, from the oldest kept. If none of them is there, it waits up to `wait` for one to
-    /// come. It reads at most `max_bytes` of lines, but at least one, leaving the rest for the
-    /// next read, from the [`Read::next`] it returns.
+    /// Reads kept events at `min` or more severe: from `from` (past the end, those to come), else
+    /// the last `last`, else all, waiting up to `wait` for one. It reads at most `max_bytes` of
+    /// lines but at least one, and the next read goes on from [`Read::next`].
     pub fn read(
         &self,
         from: Option<u64>,
@@ -283,7 +265,7 @@ impl Events {
             if full {
                 break;
             }
-            // The events after the last kept, too long to keep, are looked past too.
+            // Skips the events after the last kept, too long to keep.
             next = ring.end;
             let left = deadline.map_or(Duration::MAX, |deadline| {
                 deadline.saturating_duration_since(Instant::now())
@@ -291,7 +273,7 @@ impl Events {
             if !lines.is_empty() || left.is_zero() {
                 break;
             }
-            // Pushes of events at other levels wake it too, as can nothing at all.
+            // Pushes at other levels wake it too, as can nothing at all.
             ring = (self.pushed.wait_timeout(ring, left))
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
@@ -304,8 +286,8 @@ impl Events {
         }
     }
 
-    /// The ring, locked, even if a thread panicked holding it: a [`push`](Self::push) cut short
-    /// leaves it consistent, but for a number taken, which reads count as missed.
+    /// The ring, locked, even if poisoned: a [`push`](Self::push) cut short leaves it consistent,
+    /// but for a number taken, which reads count as missed.
     fn lock(&self) -> MutexGuard<'_, Ring> {
         self.ring.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -317,13 +299,12 @@ impl Default for Events {
     }
 }
 
-/// Where the JSON layer writes each event: to the file, if one was made, and to `events`.
+/// The JSON layer's writer, to the file, if made, and `events`.
 struct Tee {
     file: Option<Mutex<File>>,
     events: &'static Events,
 }
 
-/// What [`Tee`] makes for each event, at the event's level.
 struct TeeWriter<'a> {
     file: Option<&'a Mutex<File>>,
     events: &'static Events,
@@ -333,8 +314,8 @@ struct TeeWriter<'a> {
 impl<'a> MakeWriter<'a> for Tee {
     type Writer = TeeWriter<'a>;
 
-    /// The layer writes each event through [`make_writer_for`](Self::make_writer_for); what's
-    /// written without an event's metadata is kept at info.
+    /// Events come through [`make_writer_for`](Self::make_writer_for); what comes here, without an
+    /// event's metadata, is kept at info.
     fn make_writer(&'a self) -> Self::Writer {
         TeeWriter {
             file: self.file.as_ref(),
@@ -352,8 +333,8 @@ impl<'a> MakeWriter<'a> for Tee {
 }
 
 impl io::Write for TeeWriter<'_> {
-    /// Takes the whole of `buf`, as the layer writes each event's line at once, so that each is
-    /// kept whole: fails only if the file can't take it.
+    /// Takes all of `buf`, an event's whole line, so that each is kept whole. Fails only if the
+    /// file does.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let written = match self.file {
             Some(file) => (file.lock())
@@ -373,10 +354,7 @@ impl io::Write for TeeWriter<'_> {
     }
 }
 
-/// The filter `RUST_LOG`'s value sets, or the default plus the value if it doesn't parse. A value
-/// with a level for every target, such as `debug` or `info,gg_gpu=trace`, replaces the default;
-/// one that names targets alone, such as `gg_gpu=trace`, sets their levels over the default's, so
-/// that it adds detail and hides nothing. Panics pass it, as [`PANICS`] says.
+/// The filter `RUST_LOG`'s value sets, as [`init`] says, or the default and the bad value.
 fn filter(rust_log: Option<&str>) -> (Targets, Option<&str>) {
     let engine = if cfg!(debug_assertions) {
         LevelFilter::DEBUG
@@ -386,9 +364,8 @@ fn filter(rust_log: Option<&str>) -> (Targets, Option<&str>) {
     let default = Targets::new()
         .with_default(LevelFilter::INFO)
         .with_targets(ENGINE_CRATES.map(|target| (target, engine)));
-    // `Targets` parses each directive as it's written, so ` gg_gpu=trace` would name a target
-    // ` gg_gpu`, and an empty one, as a stray comma leaves, would set every target the value
-    // doesn't name to errors.
+    // `Targets` doesn't trim: ` gg_gpu=trace` would name target ` gg_gpu`, and an empty directive,
+    // from a stray comma, would set every target the value doesn't name to errors.
     let value = rust_log.map(|value| {
         let directives: Vec<&str> = (value.split(',').map(str::trim))
             .filter(|directive| !directive.is_empty())
@@ -398,9 +375,8 @@ fn filter(rust_log: Option<&str>) -> (Targets, Option<&str>) {
     let (filter, bad) = match value {
         Some((value, trimmed)) if !trimmed.is_empty() => match trimmed.parse::<Targets>() {
             Ok(filter) if filter.default_level().is_some() => (filter, None),
-            // Parsing adds directives in turn, each replacing any before it for the same target,
-            // so the value's go after the default's, which `Targets` writes in the syntax it
-            // parses.
+            // A directive replaces any before it for its target, so the value's go after the
+            // default's, which `Targets` writes in the syntax it parses.
             Ok(_) => {
                 let merged = format!("{default},{trimmed}").parse();
                 let merged = merged.expect("the default and the value each parse, so both do");
@@ -413,8 +389,8 @@ fn filter(rust_log: Option<&str>) -> (Targets, Option<&str>) {
     (filter.with_target(PANICS, LevelFilter::ERROR), bad)
 }
 
-/// Whether the console gets colors: stderr is a terminal that takes ANSI escape codes and
-/// `NO_COLOR` isn't set, or `CLICOLOR_FORCE` asks for them.
+/// Whether the console gets colors: never under `NO_COLOR`, else under `CLICOLOR_FORCE` or on a
+/// terminal that takes ANSI escape codes.
 fn colors() -> bool {
     let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
     if set("NO_COLOR") {
@@ -427,7 +403,7 @@ fn colors() -> bool {
 
 #[cfg(windows)]
 fn ansi_codes_work() -> bool {
-    // Older Windows consoles show escape codes as text until asked to interpret them.
+    // Older Windows consoles print escape codes until told to interpret them.
     nu_ansi_term::enable_ansi_support().is_ok()
 }
 
@@ -436,8 +412,7 @@ fn ansi_codes_work() -> bool {
     true
 }
 
-/// Creates `<dir>/<name>-<UTC time>-<process ID>.jsonl`, or returns the path it tried with the
-/// reason it failed.
+/// Creates `<dir>/<name>-<UTC time>-<process ID>.jsonl`, or returns that path and the error.
 fn create(name: &str, dir: &Path) -> Result<(PathBuf, File), (PathBuf, io::Error)> {
     let mut time = String::new();
     // `2026-10-21T00:16:49.123456Z` becomes `20261021T001649`.
@@ -464,11 +439,10 @@ fn create(name: &str, dir: &Path) -> Result<(PathBuf, File), (PathBuf, io::Error
     }
 }
 
-/// Logs a panic as an error, with where it happened, so it reaches the JSON log too: under
-/// [`PANICS`], which the filter lets through, `off` included. With its backtrace, whatever
-/// `RUST_BACKTRACE` says, as a panic is rare and its backtrace what explains it, resolved as far as
-/// the player's machine can, which on Windows has no PDB; and with its `frames`, as [`frames`]
-/// captures them, which the build's kept symbols resolve.
+/// Logs a panic as an error with its location, under [`PANICS`], so that even `off` passes it.
+/// Its backtrace is captured whatever `RUST_BACKTRACE` says, as panics are rare and it explains
+/// them. It resolves as far as the player's machine can (on Windows, without a PDB). Its
+/// [`frames`] are for the build's kept symbols to resolve.
 fn log_panic(info: &PanicHookInfo<'_>) {
     let message = info
         .payload_as_str()
@@ -542,17 +516,15 @@ mod tests {
         }
     }
 
-    /// Event `n`'s line.
     fn line(n: usize) -> String {
         format!("{{\"n\":{n}}}")
     }
 
-    /// The lines `read` read.
     fn lines(read: &Read) -> Vec<&str> {
         read.lines.iter().map(|line| &**line).collect()
     }
 
-    /// Everything `events` keeps from `from`, at once.
+    /// Everything `events` keeps from `from`, without waiting.
     fn all_from(events: &Events, from: Option<u64>) -> Read {
         events.read(from, None, Level::TRACE, Duration::ZERO, usize::MAX)
     }
@@ -601,13 +573,13 @@ mod tests {
         );
         assert_eq!(lines(&at(None, Some(9), Level::WARN)), [line(1), line(3)]);
         assert_eq!(lines(&at(Some(2), None, Level::TRACE)), [line(2), line(3)]);
-        // Neither the last none nor what's past the end reads anything there is.
+        // Neither the last 0 nor a `from` past the end reads what's there.
         for (from, last) in [(None, Some(0)), (Some(9), None)] {
             let read = at(from, last, Level::TRACE);
             assert!(read.lines.is_empty(), "{from:?} {last:?}");
             assert_eq!((read.next, read.missed), (4, 0), "{from:?} {last:?}");
         }
-        // At least one line, however few bytes it may read; the next read goes on from it.
+        // At least one line, whatever `max_bytes`; the next read goes on from it.
         let first = events.read(None, None, Level::TRACE, Duration::ZERO, 1);
         assert_eq!((lines(&first), first.next), (vec![&*line(0)], 1));
         let rest = events.read(Some(first.next), None, Level::TRACE, Duration::ZERO, 16);
@@ -663,8 +635,6 @@ mod tests {
         assert_eq!((read.next, read.missed), (2, 1));
     }
 
-    /// An event a thread logs while it holds the lock, as the panic hook logs a panic there, isn't
-    /// kept, rather than waiting forever for the lock.
     #[test]
     fn an_event_logged_holding_the_lock_isnt_kept() {
         let events = Events::new();

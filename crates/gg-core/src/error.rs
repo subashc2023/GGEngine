@@ -4,17 +4,17 @@ use std::fmt;
 
 type Source = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// An engine error: a stable code, a message that names what failed, and what caused it.
+/// An engine error: a stable code, a message naming what failed, and its cause.
 ///
-/// Tools and agents match on the code, so a code names one kind of failure and keeps its
-/// meaning. Codes are dotted names, such as `gpu.device_lost`.
+/// Tools and agents match on codes, so a code names one kind of failure and keeps its meaning.
+/// Codes are dotted names, such as `gpu.device_lost`.
 pub struct Error {
     code: &'static str,
     message: String,
     source: Option<Source>,
 }
 
-/// What the engine's crates return: `T`, or an [`Error`] unless it names another error type.
+/// A result whose error is an [`Error`] unless it names another.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
@@ -34,15 +34,14 @@ impl Error {
         self
     }
 
-    /// This error with `message` in place of its own, keeping its code and what caused it: for an
-    /// error that says more of where it happened as it's passed up.
+    /// Replaces the message, keeping the code and cause: for context added as it's passed up.
     #[must_use]
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = message.into();
         self
     }
 
-    /// Its code, which tools and agents match on.
+    /// Its code.
     pub fn code(&self) -> &'static str {
         self.code
     }

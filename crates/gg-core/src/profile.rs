@@ -1,16 +1,10 @@
-//! Profiling: zones, plots and frame marks for Tracy, which compile to nothing unless gg-core's
-//! `tracy` feature is on. A zone times the code from where it starts to where its guard drops,
-//! and Tracy lays each frame's zones out on a timeline. Zones are for work of about 10 µs or more,
-//! never one for each draw, sprite or other item of a loop over a frame's content, which would
-//! cost more than it measures.
+//! Tracy's zones, plots and frame marks, compiled out without the `tracy` feature. Zones are for
+//! work of about 10 µs or more, never one per item of a frame's content: that costs more than it
+//! measures.
 //!
-//! The GPU's work shows on a timeline of its own: a pass, named by a [`Label`], is a zone there,
-//! timed by the GPU's own clock, which a [`GpuTimeline`] takes once the GPU has run it.
-//!
-//! The macros are defined here twice, under gg-core's feature, so that it decides for every crate
-//! that calls them. tracy-client's macros expand to `unsafe` blocks, sound for the literal names
-//! these take; rustc doesn't lint code expanded from another crate's macro, so callers that deny
-//! or forbid unsafe code still compile.
+//! Each macro is defined twice, by gg-core's feature, so that gg-core decides for every caller.
+//! tracy-client's macros expand to `unsafe` blocks, sound for the literal names these take. rustc
+//! doesn't lint another crate's macro expansions, so callers that forbid `unsafe_code` compile.
 
 use std::ffi::CStr;
 use std::fmt::Display;
@@ -27,7 +21,7 @@ pub use tracy_client as __tracy;
 pub struct Zone {
     #[cfg(feature = "tracy")]
     span: tracy_client::Span,
-    /// Neither `Send` nor `Sync`, as Tracy's zones aren't, so that both builds take the same code.
+    /// `!Send` and `!Sync`, as Tracy's zones are, so both builds accept the same code.
     #[cfg(not(feature = "tracy"))]
     _not_send: std::marker::PhantomData<*const ()>,
 }
@@ -47,9 +41,8 @@ impl Zone {
         }
     }
 
-    /// Shows `text` with the zone, such as the path of the file it loads. Tracy copies it each
-    /// time, so it's for zones that run rarely, or a few times a tick at most; without the feature,
-    /// it isn't even formatted.
+    /// Shows `text` with the zone. Tracy copies it each time, so it's for a few times a tick at
+    /// most. Without the feature, it isn't formatted.
     pub fn text(&self, text: impl Display) {
         #[cfg(feature = "tracy")]
         self.span.emit_text(&text.to_string());
@@ -58,15 +51,14 @@ impl Zone {
     }
 }
 
-/// Ends a frame in Tracy's list of frames, and starts the next.
+/// Ends a frame in Tracy, starting the next.
 pub fn frame_mark() {
     #[cfg(feature = "tracy")]
     tracy_client::frame_mark();
 }
 
-/// Starts a zone, which ends when the guard it returns drops. `let _zone = zone!();` names it
-/// after the function it's in, such as `gg_gpu::device::Device::new`; `zone!("wait for the GPU")`
-/// gives it a name of its own, a literal, since Tracy keeps every name it's given.
+/// Starts a zone that ends as its guard drops. `let _zone = zone!();` names it after its function,
+/// and `zone!("wait for the GPU")` by a literal, as Tracy keeps every name.
 #[cfg(feature = "tracy")]
 #[macro_export]
 macro_rules! zone {
@@ -78,9 +70,8 @@ macro_rules! zone {
     };
 }
 
-/// Starts a zone, which ends when the guard it returns drops. `let _zone = zone!();` names it
-/// after the function it's in, such as `gg_gpu::device::Device::new`; `zone!("wait for the GPU")`
-/// gives it a name of its own, a literal, since Tracy keeps every name it's given.
+/// Starts a zone that ends as its guard drops. `let _zone = zone!();` names it after its function,
+/// and `zone!("wait for the GPU")` by a literal, as Tracy keeps every name.
 #[cfg(not(feature = "tracy"))]
 #[macro_export]
 macro_rules! zone {
@@ -93,8 +84,7 @@ macro_rules! zone {
     }};
 }
 
-/// Adds `value`, an `f64`, to the plot named `name`, a literal, which Tracy draws under the
-/// frames, such as `plot!("draws", draws as f64)`.
+/// Adds an `f64` to a plot Tracy draws under the frames: `plot!("draws", draws as f64)`.
 #[cfg(feature = "tracy")]
 #[macro_export]
 macro_rules! plot {
@@ -103,9 +93,8 @@ macro_rules! plot {
     };
 }
 
-/// Adds `value`, an `f64`, to the plot named `name`, a literal, which Tracy draws under the
-/// frames, such as `plot!("draws", draws as f64)`. Without the feature, `value` is checked but
-/// not evaluated.
+/// Adds an `f64` to a plot Tracy draws under the frames: `plot!("draws", draws as f64)`. Without
+/// the feature, the value is checked but not evaluated.
 #[cfg(not(feature = "tracy"))]
 #[macro_export]
 macro_rules! plot {
@@ -115,9 +104,8 @@ macro_rules! plot {
     }};
 }
 
-/// The name of some of the GPU's work, such as a pass, which [`label!`](crate::label) makes from a
-/// literal: what captures show it as, its debug label, and, with the feature, where Tracy's GPU
-/// timeline shows it, a zone named so.
+/// The name of some GPU work, such as a pass, from [`label!`](crate::label): its debug label, and
+/// with the feature its zone on Tracy's GPU timeline.
 #[derive(Clone, Copy)]
 pub struct Label {
     name: &'static CStr,
@@ -185,17 +173,15 @@ pub const fn __c_name(name: &'static str) -> &'static CStr {
     }
 }
 
-/// Tracy's timeline of one GPU queue's work, where each zone begins and ends at timestamps that
-/// the GPU writes, numbered by the query each goes in, which come back once it has run them.
+/// Tracy's timeline of one GPU queue, its zones timed by timestamps the GPU writes into queries.
 pub struct GpuTimeline {
     #[cfg(feature = "tracy")]
     context: tracy_client::GpuContext,
 }
 
 impl GpuTimeline {
-    /// The timeline named `name` of a GPU whose clock read `timestamp` just now and ticks every
-    /// `period` nanoseconds; `None` without the feature, or once Tracy has made all the 255 it
-    /// makes in a process.
+    /// A timeline for a GPU whose clock read `timestamp` just now and ticks every `period`
+    /// nanoseconds. `None` without the feature, or past Tracy's 255 in a process.
     pub fn new(name: &str, timestamp: i64, period: f32) -> Option<Self> {
         #[cfg(feature = "tracy")]
         {
@@ -211,8 +197,8 @@ impl GpuTimeline {
         }
     }
 
-    /// A zone named `label` begins at the timestamp the GPU writes into `query`, which must be no
-    /// other zone's that hasn't had its times yet.
+    /// Begins a zone at the timestamp the GPU writes into `query`, which no zone awaiting its times
+    /// may hold.
     pub fn begin(&self, label: Label, query: u16) {
         #[cfg(feature = "tracy")]
         self.context.begin_span(label.location, query);
@@ -220,7 +206,7 @@ impl GpuTimeline {
         let _ = (label, query);
     }
 
-    /// The zone begun last ends at the timestamp the GPU writes into `query`.
+    /// Ends the zone begun last at the timestamp the GPU writes into `query`.
     pub fn end(&self, query: u16) {
         #[cfg(feature = "tracy")]
         self.context.end_span(query);
@@ -228,7 +214,7 @@ impl GpuTimeline {
         let _ = query;
     }
 
-    /// The GPU wrote `timestamp` into `query`: given in the order the GPU wrote them.
+    /// Gives `query`'s `timestamp`, in the order the GPU wrote them.
     pub fn time(&self, query: u16, timestamp: i64) {
         #[cfg(feature = "tracy")]
         self.context.upload_gpu_timestamp(query, timestamp);
@@ -236,8 +222,7 @@ impl GpuTimeline {
         let _ = (query, timestamp);
     }
 
-    /// The GPU's clock read `timestamp` just now: Tracy places the timeline's timestamps from here
-    /// on by it, against its own clock as this is called, so that the two don't drift apart.
+    /// Realigns the timeline with Tracy's clock against drift: the GPU's read `timestamp` just now.
     pub fn sync(&self, timestamp: i64) {
         #[cfg(feature = "tracy")]
         self.context.sync_gpu_time(timestamp);

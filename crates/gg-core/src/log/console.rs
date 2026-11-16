@@ -1,16 +1,12 @@
-//! The console format: one line per event, colored so the message stands out and the context
-//! around it recedes.
+//! The console format: a line per event, colored so the message stands out and its context recedes.
 //!
 //! ```text
 //!    0.505  INFO  gpu::device     GPU selected  name="NVIDIA GeForce RTX 4090" kind=discrete
 //!    0.552 ERROR  gpu::vulkan     [gpu.validation] vkCreateImageView(): ...  vuid=VUID-...
 //! ```
 //!
-//! A line holds the seconds since logging started, the level, where the event came from (an
-//! engine crate without its `gg_` prefix, and its module), the event's error code if it has one,
-//! the message and the other fields, and the spans the event happened in. Warnings and errors
-//! end with the source line that logged them. Field names recede and their values are colored by
-//! kind, as a syntax highlighter colors code: text, numbers and booleans each in their own color.
+//! A line holds the seconds since logging started, the level, the source, the error code, the
+//! message, the other fields and the spans. Warnings and errors end with their source line.
 
 use std::fmt::{self, Write as _};
 use std::time::Instant;
@@ -22,11 +18,10 @@ use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
 use tracing_subscriber::registry::LookupSpan;
 
-/// The width the source column is padded to, so that messages line up.
+/// The source column's width, so that messages line up.
 const SOURCE_WIDTH: usize = 15;
 
-/// Where messages start: after the time, the level and the source. Lines after the first in a
-/// multi-line message or value start here too.
+/// Where messages start, after the time, level and source, as do later lines of a message or value.
 const MESSAGE_COLUMN: usize = 8 + 8 + SOURCE_WIDTH + 1;
 
 pub(super) struct Console {
@@ -110,8 +105,7 @@ where
     }
 }
 
-/// Writes where an event came from, padded: target `gg_gpu::device::candidate::pick` becomes
-/// `gpu::device`, with the engine's crates in one color and every other crate in another.
+/// Writes an event's source, padded: `gg_gpu::device::candidate::pick` becomes `gpu::device`.
 fn write_source(w: &mut Writer<'_>, target: &str, s: &Styles) -> fmt::Result {
     let mut path = target.split("::");
     let krate = path.next().unwrap_or_default();
@@ -128,9 +122,9 @@ fn write_source(w: &mut Writer<'_>, target: &str, s: &Styles) -> fmt::Result {
     write!(w, "{:pad$} ", "", pad = SOURCE_WIDTH.saturating_sub(width))
 }
 
-/// The colors of one event's line, all plain when the console doesn't take colors.
+/// An event line's colors, all plain when colors are off.
 struct Styles {
-    /// Context that recedes: the time, modules, field names, spans and source lines.
+    /// The context that recedes: time, modules, field names, spans and source lines.
     dim: Style,
     level: Style,
     code: Style,
@@ -171,7 +165,7 @@ impl Styles {
             Level::DEBUG => (Color::LightBlue.bold(), plain),
             _ => (Color::Purple.normal(), dim),
         };
-        // Trace events are the least wanted, so their values recede with their message.
+        // Trace events are the least wanted, so their values recede too.
         let value = |color: Color| {
             if level == Level::TRACE {
                 dim
@@ -200,7 +194,7 @@ enum Pass {
     Rest,
 }
 
-/// Writes an event's fields over three passes: its code, its message, then the others.
+/// Writes an event's fields in three passes: code, message, the rest.
 struct Fields<'a, 'w> {
     w: &'a mut Writer<'w>,
     s: &'a Styles,
@@ -210,7 +204,7 @@ struct Fields<'a, 'w> {
 }
 
 impl Fields<'_, '_> {
-    /// Writes a field if this pass is for it; `style` is the value's color among the others.
+    /// Writes `field` if this pass is for it; `style` colors it among the rest.
     fn write(&mut self, field: &Field, value: Value<'_>, style: Style) {
         if self.result.is_err() {
             return;
@@ -253,8 +247,7 @@ impl Fields<'_, '_> {
     }
 }
 
-// Values logged with `%` or `?` arrive through `record_debug`, so they count as text whatever
-// their type.
+// `%` and `?` values arrive through `record_debug`, so they count as text whatever their type.
 impl Visit for Fields<'_, '_> {
     fn record_f64(&mut self, field: &Field, value: f64) {
         self.write(field, Value::Debug(&value), self.s.number);
@@ -289,8 +282,8 @@ impl Visit for Fields<'_, '_> {
     }
 }
 
-/// A field's value, written with control characters escaped, so a logged string can't move the
-/// cursor or change the console's colors.
+/// A field's value, its control characters escaped so that a logged string can't move the cursor
+/// or change colors.
 #[derive(Clone, Copy)]
 enum Value<'a> {
     Str(&'a str),
@@ -307,8 +300,7 @@ impl fmt::Display for Value<'_> {
     }
 }
 
-/// A value among the fields after the message: an empty string, or one with spaces, is quoted so
-/// it's clear where it ends.
+/// A value after the message, quoted if empty or holding spaces, so that its end is clear.
 struct Quoted<'a>(Value<'a>);
 
 impl fmt::Display for Quoted<'_> {
@@ -322,8 +314,7 @@ impl fmt::Display for Quoted<'_> {
     }
 }
 
-/// Passes text through, escaping control characters other than tab, and starting the lines after
-/// a newline at the message column.
+/// Escapes control characters but tab, and starts each line after a newline at the message column.
 struct Escape<'a, 'b>(&'a mut fmt::Formatter<'b>);
 
 impl fmt::Write for Escape<'_, '_> {

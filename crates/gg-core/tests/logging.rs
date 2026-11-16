@@ -1,9 +1,10 @@
-//! A panic reaches the console and the JSON log under each filter tried, `off` among them; a
-//! filter that names targets alone keeps the default for the rest; a value that isn't a filter
-//! keeps the default, warning with `log.filter`; the events kept in memory are the JSON log's
-//! lines, as written; and without the console, nothing logged reaches stderr. Logging and the panic
-//! hook are the process's, so for each filter the test runs itself again, as a run that logs and
-//! then panics, and reads what that run printed and wrote.
+//! Under each filter, `off` among them, a panic reaches the console and the JSON log. Targets alone
+//! keep the default for the rest. A value that isn't a filter keeps the default, warning with
+//! `log.filter`. The events kept in memory are the JSON log's lines. Without the console, nothing
+//! reaches stderr.
+//!
+//! Logging and the panic hook are the process's, so the test reruns itself for each filter, as a
+//! run that logs and panics, and reads what it printed and wrote.
 
 use std::path::Path;
 use std::process::Command;
@@ -11,10 +12,10 @@ use std::time::Duration;
 
 use tracing::Level;
 
-/// Set in the runs the test makes of itself: where they log.
+/// Set in the test's reruns: where they log.
 const RUN: &str = "GG_LOGGING_TEST_DIR";
 
-/// Set in a run the test makes of itself that logs without the console.
+/// Set in a rerun that logs without the console.
 const QUIET: &str = "GG_LOGGING_TEST_QUIET";
 
 /// The events a run logs before it panics: a game's at info, and one of gg-gpu's at trace.
@@ -25,8 +26,7 @@ fn main() {
         log_and_panic(Path::new(&dir));
     }
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
-    // Each filter, the events that pass it, whether it warns that it isn't a filter, and whether
-    // the run logs on the console.
+    // Each filter, the events it passes, whether it warns, and whether the run has the console.
     let filters: [(&str, &[&str], bool, bool); 5] = [
         ("gg_gpu=trace", &EVENTS, false, true),
         ("info,gg_gpu=debug", &EVENTS[..1], false, true),
@@ -100,9 +100,9 @@ fn main() {
     }
 }
 
-/// Checks the frames the panic's line, `panic`, names, innermost first, and its backtrace, logged
-/// whatever `RUST_BACKTRACE` says: the first frame is in the test's own executable, which the
-/// panic hook is linked into, by its file name, at an offset within the file.
+/// Checks the panic's line, `panic`: a backtrace, whatever `RUST_BACKTRACE` says, and frames,
+/// innermost first. The first is in the test's executable, which links the panic hook: its file
+/// name and an offset within the file.
 fn check_frames(panic: &str) {
     let field = |name: &str| {
         let rest = panic.split(&format!(r#""{name}":""#)).nth(1)?;
@@ -127,8 +127,8 @@ fn check_frames(panic: &str) {
     assert!(frames.split(' ').count() > 3, "{frames}");
 }
 
-/// Starts logging, on the console unless [`QUIET`] is set, prints the JSON log's path, logs
-/// [`EVENTS`], prints the lines of the events kept, and panics.
+/// Starts logging (on the console unless [`QUIET`]), prints the JSON log's path, logs [`EVENTS`],
+/// prints the lines kept, and panics.
 fn log_and_panic(dir: &Path) -> ! {
     let console = std::env::var_os(QUIET).is_none();
     let log = gg_core::log::init("logging test", dir, console).expect("the JSON log");
