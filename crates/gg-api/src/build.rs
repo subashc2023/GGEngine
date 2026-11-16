@@ -1,7 +1,6 @@
-//! For a game's build script: the digest of what the game's code is compiled from, which a session's
-//! hello names the game's build by, with its package's, so that runs of one source join whatever OS
-//! and machine built them, and runs of another are refused, as ARCHITECTURE.md's Networking says. A
-//! game's `build.rs` is
+//! For a game's build script: the digest of the source its code is compiled from. A session's hello
+//! names the build by it and the package's digest, so that runs of one source join whatever built
+//! them, and others are refused (ARCHITECTURE.md's Networking). A game's `build.rs` is
 //!
 //! ```no_run
 //! fn main() -> Result<(), gg_api::Failure> {
@@ -11,39 +10,35 @@
 //!
 //! and its `main` names the digest to its app, `.source(env!("GG_SOURCE"))`.
 //!
-//! It also reads the game's project manifest, beside its `Cargo.toml`. On Windows, built by MSVC's
-//! linker, it gives the game's executables version info, which names the game as
-//! [`Project::name`] does, and the manifest's icon, if it names one, in a resource file it links in.
-//! With an icon, it tells the game's code the icon's path, `GG_ICON`, which its `main` gives its
-//! app's window, `.icon(include_bytes!(env!("GG_ICON")))`.
+//! For a Windows target built by MSVC, it links in version info named by [`Project::name`], and the
+//! manifest's icon, if any, whose path `GG_ICON` gives `main`:
+//! `.icon(include_bytes!(env!("GG_ICON")))`.
 //!
-//! The digest reads each file by its name and its bytes, in the order of their names. A file of the
-//! game's workspace is named by its path from the workspace's root, `/` between its parts; one of a
-//! workspace outside it, which a path dependency reaches, by `/`, the workspace's number, counting
-//! from 1 in the order they're reached, and its path from that workspace's root, so that a checkout
-//! of the engine beside a game digests alike wherever the two are. It reads:
+//! # The digest
 //!
-//! - the game's package's, and those of each package it reaches through path dependencies, normal
-//!   or build ones, on any target, as `cargo metadata --no-deps` lists them in each one's own
-//!   workspace: every file under its `src/` but those whose names begin with `.`, as macOS's
-//!   `.DS_Store`, its `build.rs` and its `Cargo.toml`;
+//! Each file goes in by name and bytes, in name order. A name is the path from its workspace's
+//! root, `/` between parts, after `/<n>/` for the `n`th workspace outside the game's that a path
+//! dependency reaches: so an engine checkout beside a game digests alike wherever the two are. It
+//! reads:
+//!
+//! - of the game's package and each it reaches by a normal or build path dependency, on any target,
+//!   as `cargo metadata --no-deps` lists them: `src/` but files starting `.`, `build.rs` and
+//!   `Cargo.toml`;
 //! - the game's workspace's `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and
-//!   `.cargo/config.toml`, those there are, and each outside workspace's `Cargo.toml`, which its
-//!   packages inherit from, the game's build reading no other file of it;
+//!   `.cargo/config.toml`, where present, and each outside workspace's `Cargo.toml`, which its
+//!   packages inherit;
+//! - `rustc -vV` but its `host` line, the features and `CARGO_ENCODED_RUSTFLAGS`.
 //!
-//! and then `rustc -vV`'s answer but its `host` line, the game's features, and its flags to rustc,
-//! `CARGO_ENCODED_RUSTFLAGS`. It leaves out where the workspaces are, the target and the OS, which
-//! the simulation doesn't depend on, as CI's reference hashes check on each platform; files outside
-//! `src/`, as shaders, which only render, and assets, which the game's package holds and the hello
-//! names apart; the profile's levels of optimization and debug info, at which floats give the same
-//! bits, debug and release told apart by the hello's engine; and the C and C++ compilers, which
-//! differ by OS, CI's hashes checking Luau's results across them. A crate whose simulation code is
-//! made from files outside its `src/` would have to be read here too. A dependency by git is read
-//! through `Cargo.lock`, which names its commit; a `[patch]` that puts a path in a dependency's
-//! place isn't read, as `cargo metadata --no-deps` doesn't list patches.
+//! It leaves out what the simulation's bits don't depend on, as CI's reference hashes check on each
+//! platform: the workspaces' places, the target, the OS, the C and C++ compilers, and the profile's
+//! optimization and debug info (the hello's engine tells debug from release). Files outside `src/`
+//! only render, as shaders do, or are the package's assets, which the hello names apart. A crate
+//! whose simulation code comes from outside its `src/` would have to be read too. A git dependency
+//! is read through `Cargo.lock`'s commit; a `[patch]` to a path isn't, as
+//! `cargo metadata --no-deps` lists no patches.
 //!
 //! For gg-engine's build script, [`check_cxx_contract`] refuses C++ flags that would let Luau's
-//! scripts give other bits on one platform than on another.
+//! scripts give other bits on one platform than another.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -58,19 +53,19 @@ use crate::{Failure, Project};
 
 mod resource;
 
-/// For a game's build script: tells cargo `GG_SOURCE`, the digest of what the game's code is
-/// compiled from, as 16 hex digits, as the module says, and to run the script again as any file it
-/// reads changes, the manifest and its icon among them; with an icon, `GG_ICON`, its absolute path;
-/// and for a Windows target built by MSVC, to link the game's executables with the resource file
-/// `gg.res` it writes in its `OUT_DIR`, holding their version info and any icon, as the module
-/// says.
+/// For a game's build script, tells cargo `GG_SOURCE`, the digest in 16 hex digits; to rerun as any
+/// file it reads changes, the manifest and icon among them; with an icon, `GG_ICON`, its absolute
+/// path; and for a Windows target built by MSVC, to link `gg.res`, the resource file it writes in
+/// `OUT_DIR`.
 ///
-/// Fails with `build.metadata` if cargo's environment for build scripts, `cargo metadata` or
-/// `rustc -vV` doesn't give what it should; with `build.read` if a file can't be read, naming it; as
-/// gg-api's [`Project::read`] does for the manifest, with `project.read` or `project.bad`; with
-/// `build.icon` for an icon that isn't a PNG of 256 by 256 pixels; with `build.version` for a
-/// package's version that Windows' version info can't hold; and with `build.write` if the resource
-/// file can't be written.
+/// # Errors
+///
+/// - `build.metadata`: cargo's environment, `cargo metadata` or `rustc -vV` isn't as it should be.
+/// - `build.read`, naming the file it can't read.
+/// - `project.read` or `project.bad`, as [`Project::read`] says.
+/// - `build.icon`: the icon isn't a PNG of 256 by 256 pixels.
+/// - `build.version`: Windows' version info can't hold the package's version.
+/// - `build.write`: the resource file can't be written.
 pub fn emit() -> Result<(), Failure> {
     let var = |name: &str| {
         env::var_os(name).ok_or_else(|| {
@@ -129,10 +124,8 @@ pub fn emit() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Checks that `png`, the bytes of the icon at `path`, are a PNG of 256 by 256 pixels, by its
-/// signature and its first chunk, its header, which gives its size.
-///
-/// Fails with `build.icon` if they aren't.
+/// Checks that `png`, the icon at `path`, is a PNG of 256 by 256 pixels by its signature and header
+/// chunk, failing with `build.icon` if not.
 fn check_icon(path: &Path, png: &[u8]) -> Result<(), Failure> {
     const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
     let header = (png.starts_with(SIGNATURE) && png.get(12..16) == Some(b"IHDR"))
@@ -160,19 +153,16 @@ fn check_icon(path: &Path, png: &[u8]) -> Result<(), Failure> {
     }
 }
 
-/// For gg-engine's build script: checks that Luau's C++, which mlua builds through luau0-src and the
-/// cc crate, compiles for `target` on `host` with `-ffp-contract=off`, fusing no multiplication into
-/// an addition, so that scripts give the same bits on every platform, as the engine's
-/// `.cargo/config.toml` says. `var` gives an environment variable's value, `None` where it's unset.
+/// For gg-engine's build script: checks that Luau's C++ (mlua's, through luau0-src and cc) compiles
+/// for `target` on `host` with `-ffp-contract=off`, which fuses no multiplication into an addition,
+/// so that scripts give the same bits everywhere. `var` reads an environment variable.
 ///
-/// The flag must come from `LUAU_CXXFLAGS`, the one variable whose change builds Luau again, as
-/// luau0-src tells cargo; cc, whose cargo metadata luau0-src turns off, tells it of none of its own
-/// variables. cc 1.9 passes the compiler luau0-src's flags, `LUAU_CXXFLAGS`' among them, and after
-/// them its own variables', from the first to the last of `CXXFLAGS`, `HOST_CXXFLAGS`
-/// (`TARGET_CXXFLAGS` for a target other than the host), `CXXFLAGS_` and the target with its `-`
-/// and `.` as `_`, and `CXXFLAGS_` and the target, a flag's last instance winning; so none of those
-/// may give another `-ffp-contract=`. Each is split at whitespace, as cc splits them unless
-/// `CC_SHELL_ESCAPED_FLAGS` has it read them as a shell would. A target built by MSVC passes: it
+/// The flag must come from `LUAU_CXXFLAGS`, the one variable luau0-src rebuilds Luau for; cc, its
+/// cargo metadata off, reports none of its own. cc 1.9 passes luau0-src's flags, then its own
+/// variables', a flag's last instance winning, so none of these may give another `-ffp-contract=`:
+/// `CXXFLAGS`, `HOST_CXXFLAGS` (`TARGET_CXXFLAGS` for a target other than the host), then
+/// `CXXFLAGS_` and the target, with its `-` and `.` as `_` and then as is. Each splits at
+/// whitespace, as cc does unless `CC_SHELL_ESCAPED_FLAGS` is set. A target built by MSVC passes: it
 /// takes no such flag, and fuses none by default.
 ///
 /// Fails with `build.flags`, saying what to change.
@@ -228,28 +218,25 @@ pub fn check_cxx_contract(
     Ok(())
 }
 
-/// What cargo tells a package's build script, which the digest reads.
+/// What cargo tells a build script, for the digest.
 struct Given {
-    /// The cargo and the rustc of the build.
     cargo: OsString,
     rustc: OsString,
-    /// The package's directory and its name.
     dir: PathBuf,
     package: String,
-    /// Its features, as their variables name them, `CARGO_FEATURE_DEV`'s `DEV`, in order.
+    /// As their variables name them, `CARGO_FEATURE_DEV`'s `DEV`, in order.
     features: Vec<String>,
-    /// Its flags to rustc, as `CARGO_ENCODED_RUSTFLAGS` gives them.
+    /// `CARGO_ENCODED_RUSTFLAGS`.
     rustflags: String,
 }
 
-/// What a package's code is compiled from: its digest, and the files and directories the digest
-/// read, which cargo watches.
+/// The digest, and the files and directories it read, for cargo to watch.
 struct Source {
     digest: u64,
     watched: Vec<PathBuf>,
 }
 
-/// The workspace, as `cargo metadata --no-deps` gives it: its root and its packages.
+/// A workspace, as `cargo metadata --no-deps` gives it.
 #[derive(Deserialize)]
 struct Metadata {
     workspace_root: PathBuf,
@@ -271,10 +258,10 @@ struct Dependency {
     path: Option<PathBuf>,
 }
 
-/// The digest of what `given`'s package is compiled from, as the module says.
+/// The digest of `given`'s package, as the module says.
 fn source(given: &Given) -> Result<Source, Failure> {
-    // The game's workspace, then each outside it that a path dependency reaches, in the order
-    // reached, which numbers their files' names.
+    // The game's workspace, then each a path dependency reaches, in that order, which numbers
+    // their files' names.
     let mut workspaces = vec![metadata(&given.cargo, &given.dir)?];
     let mut files = BTreeMap::new();
     let mut watched = Vec::new();
@@ -326,9 +313,8 @@ fn source(given: &Given) -> Result<Source, Failure> {
         }
     }
     for (at, workspace) in workspaces.iter().enumerate() {
-        // An outside workspace's packages inherit from its `Cargo.toml`, the one file of it beside
-        // theirs that the game's build reads: the lock, toolchain and cargo's config it builds with
-        // are the game's workspace's.
+        // The game builds with its own workspace's lock, toolchain and cargo config; an outside
+        // workspace adds only the `Cargo.toml` its packages inherit from.
         let names: &[&str] = if at == 0 {
             &[
                 "Cargo.toml",
@@ -375,9 +361,8 @@ fn find(workspaces: &[Metadata], dir: &Path) -> Option<(usize, usize)> {
     })
 }
 
-/// What the names of the files of the digest's `at`th workspace begin with: nothing for the
-/// game's, the first; for one outside it, `/`, which no path from a root begins with, and its
-/// number.
+/// What the `at`th workspace's file names start with: nothing for the game's, else `/<at>/`, as no
+/// path from a root starts with `/`.
 fn prefix(at: usize) -> String {
     if at == 0 {
         String::new()
@@ -386,8 +371,8 @@ fn prefix(at: usize) -> String {
     }
 }
 
-/// The workspace of the package in `dir`, as `cargo metadata --no-deps` lists it, which resolves
-/// no dependency, and so needs no network and takes no lock a build holds.
+/// The workspace of the package in `dir`, by `cargo metadata --no-deps`, which resolves no
+/// dependency, so it needs no network and takes no lock a build holds.
 fn metadata(cargo: &OsStr, dir: &Path) -> Result<Metadata, Failure> {
     let failed = |why: String| {
         let message = format!("can't list the workspace's packages, `cargo metadata`: {why}");
@@ -413,8 +398,8 @@ fn metadata(cargo: &OsStr, dir: &Path) -> Result<Metadata, Failure> {
     serde_json::from_slice(&output.stdout).map_err(|error| failed(error.to_string()))
 }
 
-/// Adds each file under `dir` to `files`, by `prefix` and its path from `root`, as [`relative`] has
-/// it, but those whose names begin with `.`.
+/// Adds each file under `dir` but those starting `.` to `files`, named by `prefix` and
+/// [`relative`].
 fn read_dir(
     root: &Path,
     prefix: &str,
@@ -453,8 +438,7 @@ fn relative(root: &Path, path: &Path) -> Result<String, Failure> {
     Ok(parts.join("/"))
 }
 
-/// `rustc -vV`'s answer, which names its release, its commit and its LLVM's, but its `host` line,
-/// which names the OS.
+/// `rustc -vV`'s answer (release, commit, LLVM's) but its `host` line, which names the OS.
 fn toolchain(rustc: &OsStr) -> Result<String, Failure> {
     let failed = |why: String| {
         let message = format!("can't ask {} its version: {why}", rustc.display());
@@ -490,8 +474,7 @@ impl Fnv {
         Self(0xcbf2_9ce4_8422_2325)
     }
 
-    /// `bytes`, after their length, so that where one part ends and the next begins is digested
-    /// too.
+    /// `bytes`, after their length, so that the parts' boundaries are digested too.
     fn part(&mut self, bytes: &[u8]) {
         let len = (bytes.len() as u64).to_le_bytes();
         for &byte in len.iter().chain(bytes) {
@@ -504,9 +487,8 @@ impl Fnv {
 mod tests {
     use super::*;
 
-    /// A workspace at `root`: a game, `game`, which depends on `lib` by path and is built by a
-    /// script, and uses `tested` in its tests alone; and beside it, in `engine`, a workspace of its
-    /// own, whose `front` the game depends on by path, and which depends on `core` there.
+    /// A workspace at `root`: `game`, built by a script, depends by path on `lib` and on
+    /// `../engine`'s `front`, which depends on `core`, and on `tested` in its tests alone.
     fn workspace(root: &Path) {
         let manifest = |name: &str, more: &str| {
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n{more}")

@@ -1,7 +1,7 @@
-//! A Windows executable's resources, as link.exe takes them in a resource file, `.res`: the version
-//! info that Explorer's Details and Task Manager show, and the icon Explorer shows, a PNG, which
-//! Windows reads in an icon resource since Vista. The layouts are Microsoft's documented ones:
-//! `RESOURCEHEADER` in "Resource File Formats", `GRPICONDIR` and `VS_VERSIONINFO`.
+//! A Windows executable's resources, in the `.res` file link.exe takes: the version info Explorer's
+//! Details and Task Manager show, and the icon, a PNG, which Windows reads in an icon resource
+//! since Vista. The layouts are Microsoft's documented ones: `RESOURCEHEADER` in "Resource File
+//! Formats", `GRPICONDIR` and `VS_VERSIONINFO`.
 
 use crate::Failure;
 
@@ -10,12 +10,12 @@ const ICON: u16 = 3;
 const GROUP_ICON: u16 = 14;
 const VERSION: u16 = 16;
 
-/// Each resource's memory flags, moveable, pure and discardable, as rc.exe marks an icon group;
-/// Windows has ignored them since its 32-bit versions.
+/// Memory flags, moveable, pure and discardable, as rc.exe marks an icon group. Windows has ignored
+/// them since its 32-bit versions.
 const FLAGS: u16 = 0x1030;
 
-/// The language the resources are in, U.S. English, and the code page of the version info's
-/// strings, Unicode, as rc.exe writes them by default.
+/// The resources' language, U.S. English, and the version strings' code page, Unicode: rc.exe's
+/// defaults.
 const LANGUAGE: u16 = 0x0409;
 const CODE_PAGE: u16 = 1200;
 
@@ -32,12 +32,11 @@ const EMPTY: [u8; 32] = {
     empty
 };
 
-/// A resource file holding the version info of game `name`, of version `version`, its executable
-/// `<name>.exe`, and, with `icon`, a PNG's bytes of 256 by 256 pixels, as icon 1 in icon group 1,
-/// which Explorer shows as the executable's, as the first group.
+/// A resource file of game `name`'s version info, its executable `<name>.exe`, and, with `icon`, a
+/// PNG of 256 by 256 pixels as icon 1 in icon group 1, which Explorer shows as the first group.
 ///
-/// Fails with `build.version` if `version` isn't three numbers of at most 65,535 each, as the
-/// version info's fixed part holds them, before any pre-release or build of semver's.
+/// Fails with `build.version` if `version`, before semver's pre-release or build, isn't three
+/// numbers of at most 65,535 each, as the version info's fixed part holds them.
 pub(super) fn resources(
     name: &str,
     version: &str,
@@ -59,8 +58,8 @@ pub(super) fn resources(
     Ok(file)
 }
 
-/// Adds the resource of type `kind` numbered 1, holding `data`, to `file`: its header, its data, and
-/// zeros to the next multiple of 4 bytes, where the next header begins.
+/// Adds resource 1 of type `kind`, holding `data`, to `file`: its header, its data, and zeros to
+/// the next multiple of 4 bytes, where the next header begins.
 fn resource(file: &mut Vec<u8>, kind: u16, data: &[u8]) {
     let words = [data.len() as u32, 32];
     file.extend(words.iter().flat_map(|word| word.to_le_bytes()));
@@ -78,8 +77,7 @@ fn resource(file: &mut Vec<u8>, kind: u16, data: &[u8]) {
     pad(file);
 }
 
-/// The icon group naming icon 1, a PNG of `bytes` bytes, as 256 by 256 pixels, which a size of 0
-/// says, of 32 bits a pixel.
+/// The icon group naming icon 1: a PNG of `bytes` bytes, 256 by 256 (a size of 0), 32 bits a pixel.
 fn group(bytes: usize) -> Vec<u8> {
     let mut group = Vec::new();
     // Reserved, a group of icons rather than cursors, and one of them.
@@ -96,8 +94,8 @@ fn group(bytes: usize) -> Vec<u8> {
     group
 }
 
-/// The version info of game `name` of version `version`, whose numbers are `fixed`: Windows' fixed
-/// part, for an application, and the strings Explorer's Details show, in [`LANGUAGE`].
+/// Game `name`'s version info for `version`, whose numbers are `fixed`: Windows' fixed part, for an
+/// application, and the strings Explorer's Details show, in [`LANGUAGE`].
 fn version_info(name: &str, version: &str, [major, minor, patch]: [u16; 3]) -> Vec<u8> {
     let (high, low) = (
         (u32::from(major) << 16) | u32::from(minor),
@@ -158,11 +156,10 @@ fn version_info(name: &str, version: &str, [major, minor, patch]: [u16; 3]) -> V
     )
 }
 
-/// A node of the version info's tree, as each of its structures is: its length, its value's length,
-/// `value_length`, in bytes for a binary value and in characters for text, the NUL that ends it
-/// counted, its type, `kind`, and its key in UTF-16, ending in NUL; then its value and its
-/// children, each beginning at a multiple of 4 bytes from the node's start, which is one itself.
-/// Its length leaves out the zeros after its last child.
+/// A node of the version info's tree, as each of its structures is: its length, leaving out the
+/// zeros after its last child; `value_length`, in bytes for binary, in characters for text, NUL
+/// counted; `kind`; its key, UTF-16 ending in NUL; then its value and children, each at a multiple
+/// of 4 bytes from the node's start, itself one.
 fn node(key: &str, kind: u16, value_length: u16, value: &[u8], children: &[Vec<u8>]) -> Vec<u8> {
     let mut node = vec![0; 2];
     node.extend(value_length.to_le_bytes());
@@ -190,8 +187,8 @@ fn pad(bytes: &mut Vec<u8>) {
     bytes.resize(bytes.len().next_multiple_of(4), 0);
 }
 
-/// The three numbers of `version`, semver's, before any pre-release or build: `None` unless each
-/// fits the 16 bits the fixed part holds it in.
+/// The three numbers of semver `version` before any pre-release or build; `None` unless each fits
+/// the fixed part's 16 bits.
 fn fixed(version: &str) -> Option<[u16; 3]> {
     let numbers = version.split(['-', '+']).next()?;
     let mut parts = numbers.split('.').map(|part| part.parse::<u16>().ok());
@@ -203,7 +200,6 @@ fn fixed(version: &str) -> Option<[u16; 3]> {
 mod tests {
     use super::*;
 
-    /// A resource as a file holds it: its type, its number, its language and its data.
     #[derive(Debug, PartialEq)]
     struct Resource<'a> {
         kind: u16,
@@ -236,7 +232,7 @@ mod tests {
         resources
     }
 
-    /// A node of the version info, as [`node`] writes it: its key, type, value and children.
+    /// A version info node, as [`node`] writes it.
     #[derive(Debug)]
     struct Node {
         key: String,

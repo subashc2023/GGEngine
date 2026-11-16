@@ -1,6 +1,6 @@
-//! A probe: the numbers of what shading takes and makes at one pixel of a game's view, read from
-//! captures of that pixel, each showing a part of shading, and a `pick` and a `look`, all of one
-//! world, as `gg probe` and the editor's Probe tool ask for them.
+//! A probe: what shading takes and makes at one pixel of a game's view, for `gg probe` and the
+//! editor's Probe tool. It reads captures of the pixel, one per part of shading, a `pick` and a
+//! `look`, all of one world.
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -8,8 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{Captured, Failure, Looked, Picked, Projection, while_paused};
 
-/// The parts of shading a probe captures, by the names a capture's `show` takes, which are the names
-/// of the fields they answer.
+/// The parts of shading a probe captures, as a capture's `show` and [`Probe`]'s fields name them.
 pub const SHADING: [&str; 13] = [
     "base_color",
     "normal",
@@ -36,8 +35,8 @@ pub const CAPTURES: usize = SHADING.len() + 2;
 const QUANTIZED: &str = "every value is read from an 8-bit pixel, so it's good to about 1/255; \
                          `distance` to about 3%";
 
-/// What shading took and made at a pixel of the view, as [`probe`] answers it; each value `None`
-/// where the pixel is outside the view.
+/// What shading took and made at a pixel of the view, as [`probe`] answers; each value `None` where
+/// the pixel is outside the view.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Probe {
     /// The pixel, `[x, y]` from the view's top left.
@@ -48,8 +47,8 @@ pub struct Probe {
     pub ticks: u64,
     /// Linear RGB, each channel from 0, its sRGB byte decoded; past 1 is shown as 1.
     pub base_color: Option<[f64; 3]>,
-    /// With its normal map: a unit vector in the world, `[x, y, z]`, each axis from -1 to 1, as
-    /// its byte over 255, times 2, less 1; read from bytes, so not of unit length exactly.
+    /// With its normal map: a world-space unit vector, `[x, y, z]`, each axis from -1 to 1, its
+    /// byte over 255, times 2, less 1. Read from bytes, it isn't exactly of unit length.
     pub normal: Option<[f64; 3]>,
     /// As `normal`, without its normal map.
     pub surface_normal: Option<[f64; 3]>,
@@ -63,8 +62,8 @@ pub struct Probe {
     pub emission: Option<[f64; 3]>,
     /// What the point reflects head-on, as `base_color`.
     pub specular_color: Option<[f64; 3]>,
-    /// The light from the frame's lights, as the view shows it, exposed and tonemapped, as sRGB
-    /// bytes, `[r, g, b]`, 0 to 255; not linear, nor in physical units.
+    /// The frame's lights' light as the view shows it, exposed and tonemapped: sRGB bytes,
+    /// `[r, g, b]`, not linear nor in physical units.
     pub direct_light: Option<[u8; 3]>,
     /// As `direct_light`, the light from all around.
     pub sky_light: Option<[u8; 3]>,
@@ -76,13 +75,12 @@ pub struct Probe {
     pub specular_light: Option<[u8; 3]>,
     /// The view's pixel as it's drawn, with all the view adds to the light, as `direct_light`.
     pub shown: Option<[u8; 3]>,
-    /// The reversed depth the view drew, 1 at the viewpoint's near plane and smaller the farther it
-    /// is, `2^(24 * (byte / 255 - 1))`; 0 where the byte is 0, where nothing drew, or past about
-    /// 2^-24.
+    /// The reversed depth the view drew, 1 at the near plane and smaller farther off:
+    /// `2^(24 * (byte / 255 - 1))`. 0 where the byte is 0: nothing drew, or past about 2^-24.
     pub depth: Option<f64>,
-    /// `near / depth`, in world units, how far the point is in front of the viewpoint, along the
-    /// way it faces, not from its position; `None` where `depth` is 0, and for a view that doesn't
-    /// have a perspective projection, whose depth isn't reversed this way.
+    /// `near / depth` in world units: how far the point is along the way the viewpoint faces, not
+    /// from its position. `None` where `depth` is 0, and for a view without a perspective
+    /// projection, whose depth isn't reversed this way.
     pub distance: Option<f64>,
     /// The entity there, as `pick` answers it.
     pub entity: Picked,
@@ -90,11 +88,9 @@ pub struct Probe {
     pub quantized: String,
 }
 
-/// What shading took and made at pixel `at` of the game's view, as the view shows it, or its own
-/// with `own`, as [`decode`] gives it, read from one world, sending each request through `call`:
-/// the game is paused for it if it plays, as [`while_paused`] says, and runs again after. It takes
-/// a `capture` of `at` as the view is shown, one for each of [`SHADING`] and one of the depth, then
-/// a `pick` of `at` and a `look`: as many frames as captures, each waiting for its own.
+/// Probes pixel `at` of the game's view as shown, or its own with `own`, through `call`. It pauses
+/// a playing game meanwhile ([`while_paused`]), so that all is of one world, and takes a frame per
+/// capture: the view as shown, each of [`SHADING`] and the depth; then a `pick` and a `look`.
 ///
 /// Fails as the calls do, and with `api.protocol` for an answer that isn't what the API says.
 pub fn probe(
@@ -137,9 +133,8 @@ pub fn probe(
     Ok(decode(&captured, at, &picked, &looked))
 }
 
-/// The answer of a probe of pixel `at`: `captured`, the answers of its captures, the view as shown,
-/// each of [`SHADING`] and the depth, in that order; and what `picked` and `looked`, a `pick` of it
-/// and a `look`, answered, as [`Probe`]'s fields say.
+/// The probe of pixel `at` from its captures' answers, `captured` (the view as shown, each of
+/// [`SHADING`], then the depth), its `pick` and its `look`.
 pub fn decode(
     captured: &[Captured; CAPTURES],
     at: [f64; 2],
@@ -195,10 +190,9 @@ pub fn decode(
     }
 }
 
-/// The reversed depth `depth`, a capture of the depth, has at its pixel: 0 for byte 0, where nothing
-/// drew.
-// The workspace bans std's powers for a simulation's bits to be the same everywhere; these are
-// numbers for a reader of 8-bit bytes, good to 1/255, which the platform's precision doesn't touch.
+/// The reversed depth at a capture of the depth's pixel: 0 for byte 0, where nothing drew.
+// The workspace bans std's powers for the simulation's bits. These read 8-bit bytes, good to 1/255
+// on any platform.
 #[allow(clippy::disallowed_methods)]
 fn captured_depth(depth: &Captured) -> Option<f64> {
     depth.pixel.map(|[byte, ..]| match byte {
