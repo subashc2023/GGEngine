@@ -179,6 +179,11 @@ pub use animation::{
     ParamCondition, ParamTest, ParamValue, Play, Playback, StateMotion, StateTransition, Tween,
     TweenValue, Tweens, step_animation,
 };
+// The tool API's viewpoints, for a tool that shows the game's view, as the editor does: hidden, as
+// tools alone use them, as they do `cook`.
+#[cfg(feature = "dev")]
+#[doc(hidden)]
+pub use api::{api_viewpoint, engine_viewpoint};
 pub use audio::{Bus, Music, Place, Sound};
 pub use camera::{
     Camera, CameraAction, FlyAction, FlyCameraController, OrthographicCameraController,

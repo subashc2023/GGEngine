@@ -22,7 +22,7 @@ mod parse;
 mod view;
 mod world;
 
-pub(crate) use view::api_viewpoint;
+pub use view::{api_viewpoint, engine_viewpoint};
 pub(crate) use world::instanced;
 
 use std::fs;
@@ -58,7 +58,7 @@ use connection::{Reply, accept};
 use edits::{Offer, answer_done, assets_named, operations, save_prefab, words};
 use files::{Taken, Writing, write_pngs, write_snapshots};
 use parse::{Call, bad_params};
-use view::{Capturing, Filming, Picking, engine_viewpoint, input_event};
+use view::{Capturing, Filming, Picking, input_event};
 use world::{Listing, assets, entity, field, list};
 
 /// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the

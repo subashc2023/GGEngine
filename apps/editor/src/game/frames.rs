@@ -4,8 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_api::view::Reader;
 use gg_engine::grid::Plane;
-use gg_engine::math::{DVec3, Quat};
-use gg_engine::{Context, EntityId, Projection, Viewpoint, Viewport};
+use gg_engine::{Context, EntityId, Viewpoint, Viewport, api_viewpoint, engine_viewpoint};
 use serde_json::json;
 use tracing::info;
 
@@ -248,36 +247,6 @@ pub(super) fn wants<T, F>(view: &ViewTools<T, F>) -> Wants {
         colliders: view.toolbar.colliders,
         show: view.toolbar.show.clone(),
         skip: view.toolbar.skip.clone(),
-    }
-}
-
-/// `viewpoint` as the tool API gives one.
-pub(super) fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
-    let projection = match viewpoint.projection {
-        Projection::Orthographic { height, near, far } => {
-            gg_api::Projection::Orthographic { height, near, far }
-        }
-        Projection::Perspective { fov, near } => gg_api::Projection::Perspective { fov, near },
-    };
-    gg_api::Viewpoint {
-        position: viewpoint.position.to_array(),
-        rotation: viewpoint.rotation.to_array(),
-        projection,
-    }
-}
-
-/// The viewpoint the tool API's `given` is.
-fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
-    let projection = match given.projection {
-        gg_api::Projection::Orthographic { height, near, far } => {
-            Projection::Orthographic { height, near, far }
-        }
-        gg_api::Projection::Perspective { fov, near } => Projection::Perspective { fov, near },
-    };
-    Viewpoint {
-        position: DVec3::from_array(given.position),
-        rotation: Quat::from_array(given.rotation),
-        projection,
     }
 }
 

@@ -11,7 +11,6 @@ use gg_engine::math::{DVec2, Quat};
 use gg_engine::reflect::{self, Reflect};
 use gg_engine::{MouseButton, Name, Projection, Scroll, Transform};
 
-use super::frames::api_viewpoint;
 use super::input::forwarded;
 use super::logs::LOGGED;
 use super::run::gg_run;
@@ -23,6 +22,7 @@ use crate::look::Parts;
 use crate::overlay::Mode;
 use crate::tests::{SCALE, VIEW, reading};
 use crate::view::{OUTLINE, OUTLINE_WIDTH};
+use gg_engine::api_viewpoint;
 
 /// The game runs embedded and starts stopped either way; `--release-game` has `gg run` build
 /// it optimized, by its `--release`, which goes before the game's own arguments.

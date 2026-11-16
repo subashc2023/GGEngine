@@ -19,7 +19,9 @@ use crate::main_loop::Stepper;
 use crate::render_thread::{Render, RenderThread};
 
 #[cfg(feature = "dev")]
-pub(crate) use server::{Api, api_viewpoint, instanced};
+pub(crate) use server::{Api, instanced};
+#[cfg(feature = "dev")]
+pub use server::{api_viewpoint, engine_viewpoint};
 
 /// The API, which builds without `dev` have none of.
 #[cfg(not(feature = "dev"))]

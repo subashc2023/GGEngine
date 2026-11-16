@@ -418,7 +418,7 @@ fn frame_image(image: &gg_renderer::FrameImage) -> gg_api::FrameImage {
 }
 
 /// `viewpoint` as the tool API gives one.
-pub(crate) fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
+pub fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
     let projection = match viewpoint.projection {
         Projection::Orthographic { height, near, far } => {
             gg_api::Projection::Orthographic { height, near, far }
@@ -433,7 +433,7 @@ pub(crate) fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
 }
 
 /// The viewpoint the tool API's `given` is.
-pub(super) fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
+pub fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
     Viewpoint {
         position: DVec3::from_array(given.position),
         rotation: Quat::from_array(given.rotation),
