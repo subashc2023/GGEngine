@@ -1,8 +1,7 @@
-//! Prefabs: `.prefab` files under the asset root, each a scene of one subtree, which a context adds
-//! once, and whose entities a world spawns under each entity whose [`PrefabRoot`] names the prefab,
-//! as many times as it likes, each such entity an instance that keeps what of it differs from the
-//! prefab; and, in development builds, read again as their files change, every instance taking
-//! what changed.
+//! Prefabs: `.prefab` files under the asset root, each a scene of one subtree. A context adds each
+//! once. A world spawns its entities under each entity whose [`PrefabRoot`] names it, any number of
+//! times; each such entity is an instance that keeps what differs from the prefab. Development
+//! builds read prefabs again as their files change, and every instance takes the change.
 
 #[cfg(feature = "dev")]
 use std::ffi::OsStr;
@@ -17,85 +16,80 @@ use crate::EntityId;
 use crate::package::Files;
 use crate::{Component, Entity, Reflect, Transform, World};
 
-/// The most bytes a prefab's file may have, as a scene's text is read whole.
+/// The most bytes a prefab's file may have: a load reads it whole.
 const MOST: u64 = 16 << 20;
 
-/// A prefab that [`Context::add_prefab`](crate::Context::add_prefab) added, or that text named and
-/// the engine loaded: its index among its context's, which a [`PrefabRoot`] holds, and which
-/// scenes, recordings, snapshots and the tool API name as they name a texture, by its asset ID, or
-/// else its path. [`spawn`](Self::spawn) places an instance of it in a world.
+/// A prefab added by [`Context::add_prefab`](crate::Context::add_prefab) or loaded from a name in
+/// text: its index among its context's, which a [`PrefabRoot`] holds. Scenes, recordings,
+/// snapshots and the tool API name it as they name a texture: by asset ID, else path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Prefab(u32);
 
 impl Prefab {
-    /// The prefab that's `index`th among its context's.
     pub(crate) fn new(index: usize) -> Self {
         Self(u32::try_from(index).expect("fewer than 2^32 prefabs"))
     }
 
-    /// Its index among its context's prefabs.
     pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 
-    /// Spawns an instance of the prefab at `at`, as [`PrefabRoot`] says, and returns its root: an
-    /// entity with a `PrefabRoot` of the prefab, `at` and the prefab's root's other components, and
-    /// under it the prefab's other entities. Its ID is drawn from the world's stream, and the
-    /// others' are mixed from it, so that a world seeded alike spawns the prefab alike. It reads
-    /// the prefab's text, which allocates, so that a game spawns a prefab as it loads a level
-    /// rather than each tick.
+    /// Spawns an instance at `at`, as [`PrefabRoot`] says, and returns its root: a `PrefabRoot`
+    /// entity at `at` with the prefab root's other components, the prefab's other entities under
+    /// it. The root's ID is drawn from the world's stream, the others' mixed from it, so a world
+    /// seeded alike spawns alike. It reads the prefab's text and allocates: spawn as a level
+    /// loads, not each tick.
     ///
-    /// Fails, spawning nothing, as a scene that names the prefab fails to load, such as with
+    /// Fails, spawning nothing, as a scene naming the prefab fails to load, such as with
     /// `reflect.unknown_type` for a component type the world hasn't registered,
     /// `scene.prefab_cycle` for a prefab that links itself, or `scene.prefab_variant` for one
     /// whose root links another.
     ///
     /// # Panics
     ///
-    /// If `world` doesn't share the assets of the context that added the prefab, as a world a
-    /// layer makes doesn't until it's the context's.
+    /// If `world` doesn't share the assets of the context that added the prefab, as a layer's
+    /// world doesn't until it's the context's.
     pub fn spawn(self, world: &mut World, at: Transform) -> Result<Entity> {
         world.spawn_prefab(self, at)
     }
 }
 
-/// The root of an instance of a prefab: an entity whose instance the world spawns as it comes with
-/// one, as [`Prefab::spawn`], a scene loaded or a tool's create or add makes it, and again as it's
-/// given another prefab; and takes away with it. The root takes the prefab's root's components but
-/// its [`Transform`], which is its own, placing the instance; each of the prefab's other entities
-/// is an entity under it, its ID mixed from the root's and the prefab's own for it, so that the
-/// root's ID alone gives them wherever it's loaded, made or restored, and its references to the
-/// prefab's entities are to the instance's. An entity of a prefab may itself link another, whose
-/// entities' IDs mix again from its own.
+/// The root of a prefab's instance. The world spawns the instance when an entity comes with this
+/// ([`Prefab::spawn`], a loaded scene, a tool's create or add) or is given another prefab, and
+/// takes it away with it. The root keeps its own [`Transform`], which places the instance, and
+/// takes the prefab root's other components. The prefab's other entities go under it, each ID
+/// mixed from the root's and the prefab's own: the root's ID alone gives them wherever it's
+/// loaded, made or restored, and references to the prefab's entities mean the instance's. A
+/// prefab entity may link another prefab, whose IDs mix again from its own.
 ///
-/// An instance keeps what differs from its prefab, which a scene saves, field by field, and
-/// nothing else: a field it leaves as the prefab has it takes what the prefab has, as the prefab's
-/// file changes, in a development run that serves the tool API. Tools change its entities' fields
-/// and give them components and children, but take none of the prefab's entities or components
-/// away (`ecs.prefab_entity`); they change the root's prefab, take it away, its entities with it,
-/// unlink the instance into entities of their own, and revert a field to the prefab's.
+/// An instance keeps only what differs from its prefab, field by field; a scene saves that.
+/// Fields left as the prefab has them follow its file as it changes, in a development run that
+/// serves the tool API. Tools can change the instance's fields and add components and children,
+/// but can't take away the prefab's entities or components (`ecs.prefab_entity`). They can change
+/// the root's prefab, take it away with its entities, unlink the instance into plain entities,
+/// and revert a field to the prefab's.
 ///
-/// The world keeps it, as it keeps [`Parent`](crate::Parent): a scene, the tool API's operations
-/// and [`Prefab::spawn`] give it, and code reads it but can't change it, since the entities under
-/// it would then be another prefab's.
+/// The world keeps it, as it keeps [`Parent`](crate::Parent): scenes, the tool API's operations
+/// and [`Prefab::spawn`] give it. Code reads it but can't change it: the entities under it would
+/// then be another prefab's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Reflect)]
 pub struct PrefabRoot(pub Prefab);
 
-// And not `Writable`, so that only the world changes it, spawning its instance as it does.
+// Not `Writable`: only the world changes it, spawning its instance as it does.
 impl Component for PrefabRoot {}
 
-/// The folder under the asset root that a prefab saved without a path goes in.
+/// The folder under the asset root for a prefab saved without a path.
 #[cfg(feature = "dev")]
 const FOLDER: &str = "prefabs";
 
-/// The most characters the stem of a prefab's file named after its entity has: so that its name
-/// and its ID file's, with a number, and the files they're written through first, with this
-/// process's ID and a count after, stay well within the 255 every OS takes.
+/// The most characters in a prefab file's stem. With a number, the ID file's name, and the
+/// files written through first (this process's ID and a count), it stays well within the 255
+/// every OS takes.
 #[cfg(feature = "dev")]
 const STEM: usize = 64;
 
-/// A prefab [`Context::save_prefab`](crate::Context::save_prefab) saved: its file's path from the
-/// asset root, with `/` between its parts, and the prefab, added, named by its asset ID.
+/// What [`Context::save_prefab`](crate::Context::save_prefab) saved: the file's `/`-separated
+/// path from the asset root, and the prefab added, named by asset ID.
 #[cfg(feature = "dev")]
 pub(crate) struct Saved {
     pub(crate) path: String,
@@ -104,27 +98,28 @@ pub(crate) struct Saved {
 
 #[cfg(feature = "dev")]
 impl crate::Context {
-    /// Saves the entity of ID `id` and its descendants as a new prefab, as [`World::save_prefab`]
-    /// writes it, so that linking the entity to it, as [`Operation::Link`](crate::Operation::Link)
-    /// does, makes it an instance of it under the IDs its subtree holds: in a new file at `path`,
-    /// absolute or from the asset root, in a folder there that the asset scan reaches, ending in
-    /// `.prefab`, or else in `prefabs/` under the root, which it makes, named after the entity's
-    /// [`Name`](crate::Name), in at most [`STEM`] lowercase letters, digits and `_`, or `prefab`
-    /// without one, and `-2`, `-3` and so on after it while a file of that name, or its ID file, is
-    /// there; whole or not at all, writing over nothing. Writes its ID file beside it, as a scan
-    /// would, takes it into the asset database, and adds the prefab, of the text written, named by
-    /// its ID, a new one whatever a file there gave before; or, if the ID file can't be written,
-    /// warning `asset.unwritten`, by its path.
+    /// Saves the entity `id` and its descendants as a new prefab, as [`World::save_prefab`] writes
+    /// it; linking the entity to it with [`Operation::Link`](crate::Operation::Link) makes it an
+    /// instance under its subtree's IDs. The file is new, written whole or not at all, over
+    /// nothing. It goes at `path` (absolute or from the asset root, in a folder the asset scan
+    /// reaches, ending in `.prefab`), or else in `prefabs/` under the root (made if missing),
+    /// named after the entity's [`Name`](crate::Name) in at most [`STEM`] lowercase letters,
+    /// digits and `_`, or `prefab` without one, with `-2`, `-3`… while that file or its ID file
+    /// exists. Writes the ID file beside it, takes it into the asset database, and adds the prefab
+    /// by its ID: always a new one, whatever a file there gave before. If the ID file can't be
+    /// written, warns `asset.unwritten` and names the prefab by its path.
     ///
-    /// Fails, writing nothing, with `engine.no_root` in a game that names no asset root;
-    /// `ecs.no_entity` for an ID no living entity has; as `World::save_prefab` does, as for a
-    /// subtree that wouldn't link to the text; with `engine.bad_prefab` for a text of more than 16
-    /// MiB, which no load reads; with `asset.outside_root` for a path outside the root, or whose
-    /// folder isn't there, as a save makes none there, or that the asset scan doesn't reach, as
-    /// [`reached`](gg_api::asset::reached) says, such as one in a folder whose name starts with
-    /// `.`, in a `target` or in a top-level `tests`; with `asset.exists` for a path where a file is,
-    /// or the ID file an asset deleted from there left, whose ID scenes may name; and with
-    /// `asset.unwritten` if the file can't be written.
+    /// Fails, writing nothing, with:
+    /// - `engine.no_root` in a game that names no asset root.
+    /// - `ecs.no_entity` for an ID no living entity has.
+    /// - what `World::save_prefab` fails with, as for a subtree that wouldn't link to the text.
+    /// - `engine.bad_prefab` for a text of more than 16 MiB, which no load reads.
+    /// - `asset.outside_root` for a path outside the root, in a folder that isn't there (a save
+    ///   makes none), or that the asset scan doesn't reach ([`reached`](gg_api::asset::reached)):
+    ///   a folder starting with `.`, a `target` or a top-level `tests`.
+    /// - `asset.exists` for a path where a file is, or the ID file a deleted asset left, whose ID
+    ///   scenes may name.
+    /// - `asset.unwritten` if the file can't be written.
     pub(crate) fn save_prefab(&mut self, id: EntityId, path: Option<&Path>) -> Result<Saved> {
         use gg_api::asset::{AssetId, AssetKind, Meta};
 
@@ -165,7 +160,7 @@ impl crate::Context {
             Error::new("asset.unwritten", message).with_source(error)
         };
         let base = std::fs::canonicalize(&root).map_err(|e| unwritten(&root, e))?;
-        // The folder it goes in, as the disk resolves it, which is under the root.
+        // The folder it goes in, as the disk resolves it, under the root.
         let folder = |given: &Path| -> Result<std::path::PathBuf> {
             let dir = given.parent().unwrap_or(&root);
             let dir = std::fs::canonicalize(dir)
@@ -175,9 +170,8 @@ impl crate::Context {
             }
             Ok(dir)
         };
-        // The path from the root of the file `name` in `dir`, as `folder` gives it for `given`,
-        // which the asset scan reaches, so that the next run finds the prefab by its ID, and its
-        // package holds it.
+        // The path from the root of file `name` in `dir` (from `folder`, for `given`), which the
+        // asset scan must reach, so the next run finds the prefab by ID and a package holds it.
         let scanned = |dir: &Path, name: &OsStr, given: &Path| -> Result<Arc<str>> {
             let within = dir.strip_prefix(&base).expect("checked under the root");
             let path = crate::assets::name_of(None, &within.join(name));
@@ -188,8 +182,7 @@ impl crate::Context {
             }
             Ok(path)
         };
-        // Whether `file`'s ID file is there, as one an asset deleted from there left, whose ID
-        // scenes may name still.
+        // Whether `file`'s ID file is there, perhaps left by a deleted asset; scenes may name it.
         let id_file = |file: &Path| std::fs::symlink_metadata(Meta::path(file)).is_ok();
         let (file, path) = match path {
             Some(given) => {
@@ -298,14 +291,14 @@ impl crate::Context {
     }
 }
 
-/// A file's stem made of `name`, an entity's: its ASCII letters, lowered, and digits, each run of
-/// anything else one `_`, none at either end, so that every OS takes it, cut to its first [`STEM`]
-/// characters; `prefab` for none, and with `_` after a name Windows keeps for a device, as `con`.
+/// A file stem from an entity's `name` that every OS takes: its ASCII letters, lowered, and
+/// digits, each run of anything else one `_` (none at either end), cut to [`STEM`] characters.
+/// `prefab` for none; `_` after a name Windows keeps for a device, such as `con`.
 #[cfg(feature = "dev")]
 fn file_stem(name: &str) -> String {
     let mut stem = String::new();
     for c in name.chars() {
-        // ASCII alone, a byte a character.
+        // ASCII only: a byte a character.
         if stem.len() == STEM {
             break;
         }
@@ -330,10 +323,10 @@ fn file_stem(name: &str) -> String {
     }
 }
 
-/// The text of prefab `name`'s file at `path`, from `files`, the disk or the game's package, whole.
+/// The whole text of prefab `name`'s file at `path`, from `files` (the disk or the package).
 ///
 /// Fails with `engine.bad_prefab` if it can't be read, isn't a regular file, is more than 16 MiB,
-/// isn't UTF-8, or isn't a scene's RON, as far as its syntax and its entities' IDs go.
+/// isn't UTF-8, or isn't a scene's RON, as far as syntax and entity IDs go.
 pub(crate) fn read(name: &str, path: &Path, files: &Files) -> Result<String> {
     let _zone = gg_core::zone!();
     let error = |why: String| {
@@ -362,8 +355,8 @@ mod tests {
     use crate::scene_files::tests as scenes;
     use crate::{Context, Log, Name, Operation};
 
-    /// A prefab saved without a path is named after its entity in what every OS takes, and short
-    /// enough that every OS takes the files it's written through.
+    /// A prefab saved without a path is named after its entity, in characters and a length every
+    /// OS takes.
     #[test]
     fn a_saved_prefabs_file_is_named_after_its_entity() {
         for (name, stem) in [
@@ -384,13 +377,12 @@ mod tests {
         assert_eq!(file_stem(&long), "a".repeat(STEM - 1), "no `_` at its end");
     }
 
-    /// The entity of ID `n`.
     fn id(n: u64) -> EntityId {
         EntityId::new(n).expect("not zero")
     }
 
-    /// The game of a project in `dir`, its asset root, whose start scene is a lamp, `Lamp`, of ID
-    /// a01, with its bulb, a02, under it.
+    /// The game of a project in `dir`, its asset root, whose start scene is `Lamp` (ID a01) with
+    /// its bulb (a02) under it.
     fn lamp(dir: &Path) -> Context {
         scenes::project(dir, 0);
         let main = "(entities: {\"0000000000000a01\": (Name: (\"Lamp\")), \"0000000000000a02\": \
@@ -399,14 +391,13 @@ mod tests {
         scenes::started(dir)
     }
 
-    /// The code `saved` was refused with.
     fn refused(saved: Result<Saved>) -> String {
         saved.err().expect("refused").code().to_owned()
     }
 
-    /// A prefab saved where one was saved before in the run, whose file and ID file are deleted
-    /// since, is a new prefab, of its new ID and the text written, which its path names from then
-    /// on, and which its entity links to.
+    /// A prefab saved where an earlier one was (file and ID file since deleted) is a new prefab
+    /// with a new ID and the text written; its path names it from then on, and its entity links
+    /// to it.
     #[test]
     fn a_prefab_saved_where_one_was_deleted_is_a_new_one() {
         let dir = Scratch::new("prefab-saved-again");
@@ -443,8 +434,8 @@ mod tests {
         assert!(saved.contains(&now.to_string()), "by its ID: {saved}");
     }
 
-    /// A prefab is saved only where the asset scan finds it, so that the next run finds it by its
-    /// ID, and a package holds it: nothing is written in a folder it skips, or hidden.
+    /// A prefab is saved only where the asset scan finds it, so the next run finds it by ID and a
+    /// package holds it: nothing is written in a folder the scan skips, or hidden.
     #[test]
     fn a_prefab_is_saved_only_where_the_asset_scan_reaches() {
         let dir = Scratch::new("prefab-unscanned");
@@ -470,7 +461,7 @@ mod tests {
         assert_eq!(listed.collect::<Vec<_>>(), [&*path]);
     }
 
-    /// A prefab whose text no load would read is refused before anything is written.
+    /// A prefab whose text no load would read is refused before writing.
     #[test]
     fn a_prefab_too_big_to_load_is_refused() {
         let dir = Scratch::new("prefab-too-big");
@@ -484,9 +475,8 @@ mod tests {
         assert!(!dir.0.join("prefabs").exists(), "nothing written");
     }
 
-    /// The name of a prefab whose file was deleted, its ID file left, is taken, so that scenes
-    /// naming its ID don't find another prefab by it: a save without a path is numbered past it,
-    /// and one at its path refused.
+    /// A deleted prefab's name stays taken while its ID file is left, so scenes naming its ID
+    /// find no other prefab: a save without a path is numbered past it, one at its path refused.
     #[test]
     fn a_left_id_file_keeps_its_name_taken() {
         let dir = Scratch::new("prefab-left-id");

@@ -1,10 +1,9 @@
-//! Drawing between ticks: a copy of where the world's entities were as its latest tick started,
-//! which each frame draws them on from, part of the way to where the tick left them, and what each
-//! row of the world's tables draws from, found from the copy once a frame that ticked. Both follow
-//! what changed: a table's copy takes again only the rows whose transforms or parents changed
-//! since, while no row joined or left it, and its rows draw from it as they are while none did.
-//! So an entity despawned in a tick vanishes up to a tick before it reaches where it stopped, and
-//! an Inspector set glides there over a tick, as a drag does.
+//! Drawing between ticks. A copy holds where entities were as the latest tick started; each frame
+//! draws them part of the way from there to where the tick left them. What each table row draws
+//! from is found from the copy once per frame that ticked. A table's copy takes again only rows
+//! whose transforms or parents changed, while no row joined or left it. So an entity despawned in
+//! a tick vanishes up to a tick before it reaches where it stopped, and an Inspector set glides
+//! there over a tick, as a drag does.
 
 use std::iter;
 
@@ -12,23 +11,23 @@ use gg_core::math::{DVec3, Vec3};
 
 use crate::{Entity, EntityId, Parent, Transform, World};
 
-/// For a slot that no row copied.
+/// For a slot no row copied.
 const NONE: (u32, u32) = (u32::MAX, u32::MAX);
 
 /// What a table's rows draw from.
 #[derive(Clone, Copy)]
 enum Rows {
-    /// Nothing: the table has no transforms.
+    /// Nothing: no transforms.
     None,
-    /// The table's copy: its rows are the entities copied, with the parents copied, and the copy
-    /// of each reset is its transform.
+    /// The table's copy: its rows are the entities copied, with the parents copied, and each
+    /// reset row's copy is its transform.
     Copied,
-    /// What was found for each of its rows, in `from`, from where they start.
+    /// What was found for each row, in `from` starting here.
     Found(u32),
 }
 
-/// A table's rows as the latest tick started: their entities, their transforms, and their
-/// parents, [`Entity::DEAD`] for a root's; and whether it had transforms then.
+/// A table's rows as the latest tick started: entities, transforms, and parents ([`Entity::DEAD`]
+/// for a root's); and whether it had transforms then.
 #[derive(Default)]
 struct Copy {
     transformed: bool,
@@ -47,41 +46,37 @@ impl Copy {
 }
 
 /// Where the world's entities were as its latest tick started, and what each row of its tables
-/// draws from: kept from tick to tick, so that it allocates nothing once it's grown, while the
-/// world's tables keep their sizes.
+/// draws from. Kept from tick to tick: it allocates nothing once grown, while the world's tables
+/// keep their sizes.
 #[derive(Default)]
 pub(crate) struct Past {
-    /// The world copied, by its serial, the change tick it had as it was copied, after which its
-    /// changes are copied again, and how many resets of interpolation it had made then; `None`
-    /// before the first copy.
+    /// The world copied: its serial, the change tick it had as copied (later changes are copied
+    /// again), and how many interpolation resets it had made. `None` before the first copy.
     copied: Option<(u64, u64, u64)>,
-    /// Each table's rows copied, by the table's index.
+    /// Each table's rows copied, by table index.
     tables: Vec<Copy>,
-    /// Each slot's table and row in the copy, or [`NONE`]: made only for a tick that left some
-    /// table's rows other than its copy's, as a despawn or a change of table moves rows, and a
-    /// spawn appends one, so that a row moved still draws on from where it was.
+    /// Each slot's table and row in the copy, or [`NONE`]. Made only for a tick that left some
+    /// table's rows other than its copy's (despawns and table changes move rows, spawns append),
+    /// so a moved row still draws on from where it was.
     slots: Vec<(u32, u32)>,
-    /// Whether what rows draw from has been found from the copy since it was taken.
+    /// Whether what rows draw from has been found since the copy was taken.
     resolved: bool,
-    /// What each table's rows draw from, by the table's index.
     starts: Vec<Rows>,
-    /// What each row of the tables whose rows aren't the ones copied draws from, table by table.
+    /// What each row of the tables not drawing from the copy draws from, table by table.
     from: Vec<Transform>,
-    /// The world, by its serial, and its version, that `from` was found for; `None` while there's
-    /// nothing to draw on from, as before the first tick and after a world restored or replaced in
-    /// a tick.
+    /// The world serial and version `from` was found for; `None` while there's nothing to draw on
+    /// from: before the first tick, and after a world restored or replaced in a tick.
     found: Option<(u64, u64)>,
-    /// The poses rows draw as in place of where they'd draw, by their tables and rows, sorted, as
-    /// [`instead`](Self::instead) has them.
+    /// Poses rows draw as instead, by table and row, sorted: see [`instead`](Self::instead).
     instead: Vec<(u32, u32, Transform)>,
 }
 
 impl Past {
     /// Copies where `world`'s entities are, as a tick starts: every table with transforms, drawn
-    /// or not, since a drawn child's ancestors can be in any; of a table whose rows are those it
-    /// copied before, as no row joined or left it since, the rows whose transforms or parents
-    /// changed alone, and of another, all of it, a few copies of whole columns. Then moves the
-    /// world's change tick on, so that what the tick changes is marked as changed since the copy.
+    /// or not, since a drawn child's ancestors can be in any. A table whose rows are those it
+    /// copied before (none joined or left) copies only rows whose transforms or parents changed;
+    /// another copies whole columns. Then moves the world's change tick on, so what the tick
+    /// changes is marked as changed since the copy.
     pub(crate) fn capture(&mut self, world: &mut World) {
         let _zone = gg_core::zone!();
         let since = match self.copied {
@@ -136,15 +131,19 @@ impl Past {
         world.advance();
     }
 
-    /// Finds what each row of `world`'s tables draws from, once a tick has been copied since it
-    /// last did: where its entity was as the tick started, unless it jumped. It jumped, and its own
-    /// transform draws from where it is, though its ancestors still carry it on their way, if it
-    /// wasn't copied, as an entity spawned in the tick, given its transform there, or put back by
-    /// an undone delete wasn't; if its slot holds another entity than was copied; if its parent
-    /// changed; or if it was reset. A world restored or replaced in the tick draws where it is, all
-    /// of it. A table that no row joined or left since its copy, and whose parents didn't change,
-    /// as most are at most ticks, draws from its copy, which takes the transform of each of its
-    /// rows that changed and was reset; the others' rows are found one by one.
+    /// Finds what each row of `world`'s tables draws from, once per tick copied: where its entity
+    /// was as the tick started, unless it jumped. A jumped entity's own transform draws from where
+    /// it is, though its ancestors still carry it on their way. It jumped if:
+    /// - it wasn't copied: spawned in the tick, given its transform there, or put back by an
+    ///   undone delete;
+    /// - its slot holds another entity than was copied;
+    /// - its parent changed;
+    /// - it was reset.
+    ///
+    /// A world restored or replaced in the tick draws all where it is. A table with no rows joined
+    /// or left and no parent changes since its copy (most, at most ticks) draws from its copy,
+    /// which takes the transform of each changed row that was reset. Other tables' rows are found
+    /// one by one.
     pub(crate) fn resolve(&mut self, world: &World) {
         if self.resolved {
             return;
@@ -205,7 +204,7 @@ impl Past {
                 u32::try_from(from.len()).expect("fewer than 2^32 rows"),
             ));
             for (row, (&entity, now)) in entities.iter().zip(transforms).enumerate() {
-                // The same row of its table's copy, or else the row its slot was copied in, if it
+                // The same row of its table's copy, else the row its slot was copied in, if that
                 // was its entity's.
                 let same = (tables.get(index))
                     .filter(|copy| copy.entities.get(row) == Some(&entity))
@@ -230,10 +229,8 @@ impl Past {
         *found = Some(world.version());
     }
 
-    /// Has the frames draw each entity of `poses`, by its ID, of `world` as it is, as its pose
-    /// says, in place of where it would draw, as a client draws the other players' entities where
-    /// the server's states had them: until they're given others, which a frame of `world` as it
-    /// is takes.
+    /// Has frames of `world` as it is draw each entity of `poses` (by ID) as its pose says until
+    /// given others: how a client draws other players' entities where the server's states had them.
     pub(crate) fn instead(&mut self, world: &World, poses: &[(EntityId, Transform)]) {
         self.instead.clear();
         for &(id, pose) in poses {
@@ -246,8 +243,7 @@ impl Past {
             .sort_unstable_by_key(|&(table, row, _)| (table, row));
     }
 
-    /// The poses table `table`'s rows draw as in place of where they'd draw, each with its table
-    /// and row, by row.
+    /// The poses table `table`'s rows draw as instead, with table and row, by row.
     pub(crate) fn instead_of(&self, table: usize) -> &[(u32, u32, Transform)] {
         let table = u32::try_from(table).expect("fewer than 2^32 tables");
         let start = self.instead.partition_point(|&(of, ..)| of < table);
@@ -255,8 +251,8 @@ impl Past {
         &self.instead[start..end]
     }
 
-    /// What the rows of `world`'s table `table` draw from, from its first row on, if they draw
-    /// between ticks: once what they draw from has been found for the world as it is.
+    /// What table `table`'s rows draw from, from its first row, if they draw between ticks and
+    /// it's been found for the world as it is.
     pub(crate) fn from(&self, world: &World, table: usize) -> Option<&[Transform]> {
         if self.found != Some(world.version()) {
             return None;
@@ -269,8 +265,7 @@ impl Past {
     }
 }
 
-/// Fills `slots` with the table and row of the copy each slot's entity was copied in, by
-/// `tables`, the copy's.
+/// Fills `slots` with the table and row of `tables`' copy that each slot's entity was copied in.
 fn map(tables: &[Copy], slots: &mut Vec<(u32, u32)>) {
     slots.clear();
     for (index, copy) in (0..).zip(tables) {
@@ -284,20 +279,19 @@ fn map(tables: &[Copy], slots: &mut Vec<(u32, u32)>) {
     }
 }
 
-/// Whether an entity whose transform was `was` as a tick started, and is `now`, can draw on its way
-/// between them: `was` is finite, and no scale has changed its sign.
+/// Whether an entity whose transform was `was` as a tick started, and is `now`, can draw between
+/// them: `was` is finite and no scale changed sign.
 fn continuous(was: &Transform, now: &Transform) -> bool {
     let finite = was.translation.is_finite() && was.rotation.is_finite() && was.scale.is_finite();
     finite && was.scale.is_negative_bitmask() == now.scale.is_negative_bitmask()
 }
 
-/// The transform `alpha`, from 0 to 1, of the way from `from` to `to`; or `to`, where `from` isn't
-/// finite, or a scale changed its sign, as a sprite mirrored does, which would otherwise shrink to
-/// nothing on its way. What's equal in both comes out as `to` has it, bit for bit, so that what
-/// didn't move draws as it would without interpolating. A rotation takes the shorter way round,
-/// normalized, which is near enough to a slerp for the angle a tick turns. A translation goes its
-/// way in `f64`, as it's held, so that an entity far from the origin moves as smoothly as one at
-/// it.
+/// The transform `alpha` (0 to 1) of the way from `from` to `to`; or `to` if `from` isn't finite
+/// or a scale changed sign (a mirrored sprite would shrink to nothing on its way). What's equal
+/// in both comes out as `to` has it, bit for bit, so what didn't move draws as without
+/// interpolating. Rotation takes the shorter way round, normalized: near enough to a slerp for a
+/// tick's angle. Translation goes in `f64`, so an entity far from the origin moves as smoothly as
+/// one at it.
 pub(crate) fn between(from: &Transform, to: &Transform, alpha: f32) -> Transform {
     if !continuous(from, to) {
         return *to;
@@ -330,7 +324,6 @@ mod tests {
     use crate::transform::from_origin;
     use crate::{Log, Operation};
 
-    /// A transform at `x` and `z`, which tell the cases apart.
     fn at(x: f32, z: f32) -> Transform {
         Transform {
             translation: Vec3::new(x, 0.0, z).as_dvec3(),
@@ -349,7 +342,6 @@ mod tests {
         *world.get_mut::<Transform>(entity).expect("alive") = to;
     }
 
-    /// What `world` draws halfway on from `past`, found for it.
     fn halfway(world: &World, past: &mut Past) -> Draws {
         past.resolve(world);
         let mut draws = Draws::default();
@@ -369,10 +361,9 @@ mod tests {
     }
 
     /// Each way a tick breaks an entity's way on from where it was draws it where the tick left
-    /// it, beside entities halfway on their way, one of them in a row a despawn moved it to:
-    /// spawned; given a transform; in the slot of an entity despawned; put back by an undone
-    /// delete; moved from one parent to another, and from none to one; reset; from a transform
-    /// that isn't finite; and mirrored.
+    /// it, beside entities halfway on (one in a row a despawn moved it to): spawned; given a
+    /// transform; in a despawned entity's slot; put back by an undone delete; moved between
+    /// parents, or from none to one; reset; from a non-finite transform; mirrored.
     #[test]
     fn what_a_tick_breaks_draws_where_the_tick_left_it() {
         let mut world = World::default();
@@ -399,7 +390,7 @@ mod tests {
         // The tick.
         moved(&mut world, mover, at(2.0, 0.0));
         moved(&mut world, swapped, at(32.0, 0.9));
-        // The table's last row, `swapped`, takes its row, and the next entity spawned its slot.
+        // The table's last row, `swapped`, takes its row; the next spawn takes its slot.
         world.despawn(freed).expect("alive");
         let reused = world.spawn((at(6.0, 0.3), sprite(3.0)));
         assert_eq!(reused.slot(), freed.slot(), "the slot freed");
@@ -420,7 +411,7 @@ mod tests {
         };
         moved(&mut world, mirrored, flipped);
 
-        // Back to front by z, each with its entity's ID, the deleted one's put back with its own.
+        // Back to front by z, with entity IDs; the deleted one is put back with its own.
         let deleted = world.entity(id).expect("put back");
         let mut want = Draws::default();
         want.draw_scene();
@@ -454,9 +445,8 @@ mod tests {
         assert_eq!(halfway(&world, &mut past), want);
     }
 
-    /// An entity given a pose to draw as instead, as a client draws another player's, draws as the
-    /// pose says, rather than on its way between ticks, carrying its child, beside an entity that
-    /// draws halfway on its way.
+    /// An entity given a pose to draw as instead (as a client draws another player's) draws as
+    /// the pose says, not between ticks, carrying its child, beside one drawn halfway.
     #[test]
     fn an_entity_given_a_pose_draws_as_it_says_carrying_its_children() {
         let mut world = World::default();
@@ -487,8 +477,8 @@ mod tests {
         assert_eq!(halfway(&world, &mut past), want);
     }
 
-    /// A child moved from one parent to another, which moves no row, draws its own transform where
-    /// the tick left it, beside a sibling whose rows stay its own, which still draws on its way.
+    /// A child moved to another parent, which moves no row, draws where the tick left it, beside a
+    /// sibling that still draws on its way.
     #[test]
     fn a_child_given_another_parent_draws_where_the_tick_left_it() {
         let mut world = World::default();
@@ -525,8 +515,8 @@ mod tests {
         assert_eq!(halfway(&world, &mut past), want);
     }
 
-    /// A world restored from a snapshot in a tick, or replaced by another, draws where the tick
-    /// left it, all of it, though its handles and rows are the same as before.
+    /// A world restored from a snapshot in a tick, or replaced, draws all of it where the tick
+    /// left it, though its handles and rows are as before.
     #[test]
     fn a_world_restored_or_replaced_draws_where_the_tick_left_it() {
         let mut world = World::seeded(1);
@@ -562,8 +552,6 @@ mod tests {
         assert_eq!(halfway(&world, &mut past), want, "replaced");
     }
 
-    /// Where a past's buffers are, and how big, which copying and finding again without taking
-    /// more memory leaves as they were.
     fn held(past: &Past) -> Vec<(usize, usize)> {
         let Past {
             copied: _,
@@ -589,9 +577,8 @@ mod tests {
         held
     }
 
-    /// Copying a world, and finding what it draws from, again, through ticks that move every
-    /// entity, despawn one, which moves another's row, and spawn one into its slot, take no more
-    /// memory once they've grown.
+    /// Copying and finding, through ticks that move every entity, despawn one (moving another's
+    /// row) and spawn into its slot, take no more memory once grown.
     #[test]
     fn capturing_and_resolving_again_take_no_more_memory() {
         let mut world = World::default();
@@ -611,7 +598,7 @@ mod tests {
             let gone = entities.swap_remove(round * 7);
             world.despawn(gone).expect("alive");
             entities.push(world.spawn((at(0.0, 0.0), sprite(0.0))));
-            // Emptied, keeping its memory, so that only this round's map fills it.
+            // Emptied, keeping its memory, so only this round's map fills it.
             past.slots.clear();
             halfway(&world, &mut past);
             assert!(!past.slots.is_empty(), "round {round} moved a row");
@@ -624,10 +611,9 @@ mod tests {
         }
     }
 
-    /// A past kept from tick to tick, which copies again only what changed, draws each row from
-    /// what a past copying the world afresh as each tick starts does, bit for bit, through ticks
-    /// that move some entities, change a parent, reset one, move one to another table, spawn and
-    /// despawn, and change nothing.
+    /// A kept past, copying only changes, draws each row as a past copied afresh each tick does,
+    /// bit for bit, through ticks that move entities, change a parent, reset, change table,
+    /// spawn, despawn, and change nothing.
     #[test]
     fn a_kept_past_draws_from_what_a_fresh_one_does() {
         let mut world = World::default();
@@ -668,8 +654,7 @@ mod tests {
             }),
         ];
         for (what, tick) in ticks {
-            // As a tick starts, a copy afresh, and the kept one's, of the changes since it last
-            // copied.
+            // As a tick starts: a copy afresh, and the kept one's of changes since it last copied.
             let mut fresh = Past::default();
             fresh.capture(&mut world);
             kept.capture(&mut world);

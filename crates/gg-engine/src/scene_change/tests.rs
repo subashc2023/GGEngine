@@ -14,8 +14,8 @@ use crate::{App, Context, EntityId, Layer, Tick, WorldHash};
 #[derive(Reflect)]
 struct Go(String);
 
-/// Loads `scenes/menu.ron` as it attaches, beside an entity of its own, and asks at each tick for
-/// the scenes its commands name.
+/// Loads `scenes/menu.ron` as it attaches, beside an entity of its own, and asks each tick for the
+/// scenes its commands name.
 #[derive(Default)]
 struct Levels(Vec<Go>);
 
@@ -38,11 +38,9 @@ impl Layer for Levels {
     }
 }
 
-/// The texture the menu names, by its path, and the one only the level names.
 const STONE: &str = "textures/stone.png";
 const MOSS: &str = "textures/moss.png";
 
-/// A scene of a sprite of each texture `textures` names, the first under ID 1, and so on.
 fn scene(textures: &[&str]) -> String {
     let mut text = "(\n    entities: {\n".to_owned();
     for (at, texture) in textures.iter().enumerate() {
@@ -55,9 +53,9 @@ fn scene(textures: &[&str]) -> String {
     text + "    },\n)\n"
 }
 
-/// A project's asset root in `dir`: two textures, the menu, of a sprite of stone, the level, of
-/// sprites of moss and stone, a scene of a component no world registers, and one of a model that
-/// isn't there beside a sprite of a texture loaded nowhere else.
+/// A project's asset root in `dir`: textures; the menu (a stone sprite); the level (moss and stone
+/// sprites); a scene of a component no world registers; one of a missing model beside a sprite of
+/// a texture loaded nowhere else.
 fn project(dir: &Path) -> PathBuf {
     let root = dir.join("game");
     for folder in ["textures", "scenes"] {
@@ -81,7 +79,6 @@ fn project(dir: &Path) -> PathBuf {
     root
 }
 
-/// The IDs of `world`'s entities, in order.
 fn ids(world: &World) -> Vec<EntityId> {
     let mut ids: Vec<EntityId> = (world.query::<crate::Entity>())
         .map(|entity| world.id(entity).expect("alive"))
@@ -90,12 +87,10 @@ fn ids(world: &World) -> Vec<EntityId> {
     ids
 }
 
-/// The IDs a scene of `count` entities gives them.
 fn scene_ids(count: u64) -> Vec<EntityId> {
     (1..=count).filter_map(EntityId::new).collect()
 }
 
-/// Runs tick `number` of `stack`, its layer asking for `scene` at it, if one is given.
 fn tick(stack: &mut Stack, cx: &mut Context, number: u64, scene: Option<&str>) {
     if let Some(scene) = scene {
         let queue = stack.commands_of(0).expect("a queue");
@@ -106,16 +101,14 @@ fn tick(stack: &mut Stack, cx: &mut Context, number: u64, scene: Option<&str>) {
     assert!(stack.tick(cx, Tick { number }));
 }
 
-/// The authors of `files`, in order.
 fn authors(files: &[crate::scene_files::SceneFile]) -> Vec<&str> {
     files.iter().map(|file| file.author.as_str()).collect()
 }
 
-/// A scene asked for in a tick goes in as the tick returns, in place of every entity, the layer's
-/// own too, loading the texture it names that no layer had, the world the same world by its
-/// serial; one that isn't there leaves the world as it was, logging `scene.not_found`; one asked
-/// again goes in again, as a level restarts. The run's recording replays to every hash, the replay
-/// loading what the scene names at the tick its run did.
+/// A scene asked for in a tick goes in as the tick returns, replacing every entity (the layer's
+/// too) and loading the textures no layer had; the world keeps its serial. A missing one leaves
+/// the world as it was and logs `scene.not_found`. Asking again restarts the level. The run's
+/// recording replays to every hash, loading what the scene names at the tick its run did.
 #[test]
 fn a_scene_asked_for_in_a_tick_goes_in_as_it_returns_and_replays_to_its_hashes() {
     let logged = crate::testing::logged();
@@ -171,10 +164,10 @@ fn a_scene_asked_for_in_a_tick_goes_in_as_it_returns_and_replays_to_its_hashes()
     assert_eq!((ran, replay.world().hash()), (5, ended));
 }
 
-/// What refuses a scene leaves the world as it was, logging the refusal's code: a scene that isn't
-/// there, naming it; a name that isn't a path inside the asset root; a name in another case than
-/// its file's; a scene that doesn't load, its name beginning the message; and one naming a model
-/// that doesn't load, which leaves no stand-in behind, for the model nor for the texture beside it.
+/// Each refusal leaves the world as it was and logs its code: a missing scene, naming it; a name
+/// that isn't a path inside the asset root; a name in another case than its file's; a scene that
+/// doesn't load, its name starting the message; one naming a model that doesn't load, which leaves
+/// no stand-in for the model or the texture beside it.
 #[test]
 fn a_scene_that_isn_t_there_or_doesn_t_load_changes_nothing() {
     let logged = crate::testing::logged();
@@ -225,8 +218,8 @@ fn a_scene_that_isn_t_there_or_doesn_t_load_changes_nothing() {
     stack.detach(&mut cx);
 }
 
-/// A run without an asset root has no scene to change to, and one under the root that's a link to
-/// a file outside it is refused, as a package wouldn't hold it.
+/// A run without an asset root has no scene to change to; a link under the root to a file outside
+/// it is refused, as a package wouldn't hold it.
 #[test]
 fn a_scene_outside_the_asset_root_is_refused() {
     let mut cx = Context::seeded(1);
@@ -245,11 +238,10 @@ fn a_scene_outside_the_asset_root_is_refused() {
     }
 }
 
-/// A request made outside a tick, as a layer's attach makes one, is dropped as the next tick
-/// starts, warning `scene.not_in_tick`, the world staying as it was.
+/// A request made outside a tick (a layer's attach) is dropped as the next tick starts, warning
+/// `scene.not_in_tick`; the world stays as it was.
 #[test]
 fn a_scene_asked_for_outside_a_tick_is_dropped() {
-    /// Asks for the level as it attaches.
     struct Eager;
 
     impl Layer for Eager {
@@ -277,8 +269,8 @@ fn a_scene_asked_for_outside_a_tick_is_dropped() {
     stack.detach(&mut cx);
 }
 
-/// A server's session loads nothing as it plays: a scene that names a texture no layer loaded is
-/// refused, with `net.no_scene_change`, and goes in once a layer has loaded it.
+/// A server's session loads nothing as it plays: a scene naming a texture no layer loaded is
+/// refused with `net.no_scene_change`, and goes in once a layer has loaded it.
 #[test]
 fn a_server_s_session_changes_only_to_a_scene_of_what_is_loaded() {
     let dir = Scratch::new("scene-change-served");
@@ -296,7 +288,7 @@ fn a_server_s_session_changes_only_to_a_scene_of_what_is_loaded() {
     assert_eq!(ids(cx.world()), scene_ids(2));
 }
 
-/// A scene that names a texture that doesn't load goes in all the same, a stand-in in its place.
+/// A scene naming a texture that doesn't load goes in anyway, with a stand-in.
 #[test]
 fn a_texture_a_scene_names_that_doesn_t_load_stands_in() {
     let logged = crate::testing::logged();
@@ -313,7 +305,7 @@ fn a_texture_a_scene_names_that_doesn_t_load_stands_in() {
     );
 }
 
-/// A scene's text is read once a run: a change after its file changes on the disk puts in the text
+/// A scene's text is read once a run: a change after its file changes on disk puts in the text
 /// read first, as a tick run again, a replay and a lockstep peer would.
 #[test]
 fn a_scene_is_read_once_a_run() {
@@ -325,9 +317,9 @@ fn a_scene_is_read_once_a_run() {
     assert_eq!(cx.change_scene("scenes/level.ron").ok(), Some(2), "as read");
 }
 
-/// A run's snapshot taken once a scene has gone in holds its entities, the textures it loaded, its
-/// file and the texts kept, so that a run restored from it comes back in the scene, its world
-/// hashing alike, and changes to a scene as the run would have.
+/// A snapshot taken once a scene has gone in holds its entities, loaded textures, file and kept
+/// texts. A run restored from it is back in the scene, hashes alike, and changes scene as the
+/// original would.
 #[test]
 fn a_run_restored_from_a_snapshot_comes_back_in_the_scene() {
     use crate::snapshot::{Of, Run, Snapshot};
@@ -368,8 +360,8 @@ fn a_run_restored_from_a_snapshot_comes_back_in_the_scene() {
     stack.detach(&mut cx);
 }
 
-/// A tick that asks for a scene runs again on a copy of the world under a SyncTest, the scene
-/// going in there too, and leaves the copy as it left the world.
+/// Under a SyncTest, a tick asking for a scene runs again on a copy of the world, the scene going
+/// in there too, and leaves the copy as it left the world.
 #[test]
 fn a_scene_change_runs_again_alike_under_a_sync_test() {
     let dir = Scratch::new("scene-change-sync-test");
@@ -388,12 +380,11 @@ fn a_scene_change_runs_again_alike_under_a_sync_test() {
     assert!(!stack.failed());
 }
 
-/// The authors' edits stay in their logs as a scene goes in, the world the same world, but an
-/// edit applied before it refuses to undo (`ops.scene_changed`), as a level started again has put
-/// another entity under the ID it set, which stays as the scene gave it, and the edit stays in the
-/// log, while one applied after undoes; the scene's file is then the scene file in the world and
-/// the project's open scene; and a save of a scene file kept for scene changes, as an edit, has the
-/// next change put in its text, though the file isn't in the world.
+/// Authors' edits stay in their logs as a scene goes in, but one applied before refuses to undo
+/// (`ops.scene_changed`): a restarted level put another entity under its ID, which stays as the
+/// scene gave it, and the edit stays logged. One applied after undoes. The scene's file becomes
+/// the world's scene file and the project's open scene. A save of a scene file kept for changes
+/// puts its text in at the next change, though the file isn't in the world.
 #[cfg(feature = "dev")]
 #[test]
 fn edits_from_before_a_change_refuse_to_undo_and_a_save_reaches_the_next_change() {
@@ -432,7 +423,7 @@ fn edits_from_before_a_change_refuse_to_undo_and_a_save_reaches_the_next_change(
     stack.edit(&mut cx, set(5.0)).expect("applied");
     assert_eq!(x(&cx), 5.0);
 
-    // The level started again: the entity under ID 1 is the scene's anew.
+    // The level restarts: the entity under ID 1 is the scene's anew.
     tick(&mut stack, &mut cx, 1, Some("scenes/placed.ron"));
     assert_eq!(x(&cx), 0.0);
     assert_eq!(cx.authors.entries(cx.world()), 1, "kept");
@@ -452,7 +443,7 @@ fn edits_from_before_a_change_refuse_to_undo_and_a_save_reaches_the_next_change(
     let replaced = codes.iter().filter(|code| *code == "scene.replaced");
     assert_eq!(replaced.count(), 2, "{codes:?}");
 
-    // The menu's file saved, which isn't in the world now: the save keeps its text alone.
+    // The menu's file saved, not in the world now: the save keeps only its text.
     let saved = scene(&[MOSS, MOSS, STONE]);
     let apply = &mut |cx: &mut Context, edit| stack.edit(cx, edit);
     let done = crate::scene_files::apply_save(&mut cx, apply, "scenes/menu.ron", saved);
@@ -463,15 +454,15 @@ fn edits_from_before_a_change_refuse_to_undo_and_a_save_reaches_the_next_change(
     stack.detach(&mut cx);
 }
 
-/// A run from a game's package, as a build without `dev` runs, reads the scene from the package,
-/// though no file of it is on the disk, and loads the texture it names by its ID from there; a
-/// name in another case than the package's is refused.
+/// A run from a game's package (a build without `dev`) reads the scene from it though no file is
+/// on disk, and loads the texture it names by ID from there. A name in another case than the
+/// package's is refused.
 #[test]
 fn a_run_from_a_package_changes_to_a_scene_it_holds() {
     use crate::image::tests::ktx2;
 
     let dir = Scratch::new("scene-change-package");
-    // Never made: what loads, loads from the package.
+    // Never made: everything loads from the package.
     let root = dir.0.join("game");
     let block = ktx2(ktx2::Format::BC7_SRGB_BLOCK, [1, 1], &[vec![0; 16]], true);
     let mut writer = Writer::new(".", Some("scenes/menu.ron"), None);
@@ -511,7 +502,7 @@ fn a_run_from_a_package_changes_to_a_scene_it_holds() {
     stack.detach(&mut cx);
 }
 
-/// A level put in again hashes as it did the first time, whatever the world held between.
+/// A level put in again hashes as the first time, whatever the world held between.
 #[test]
 fn a_level_restarted_hashes_as_it_started() {
     let dir = Scratch::new("scene-change-restart");

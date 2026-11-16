@@ -3,31 +3,29 @@
 use crate::{Entity, Tick, World, Writable};
 
 /// A component that acts: a layer's tick runs it for each entity that has one, with
-/// [`run_scripts`], among its systems and after its commands, so that its input reaches it as the
-/// rest of the simulation's does, in the components those commands set. Its fields are its state,
-/// which the world holds, so that scenes save it, the Inspector and operations edit it, the hash
-/// reads it and snapshots copy it: a script keeps nothing anywhere else. It starts from its value,
-/// as code, a scene or an operation made it, and setup that needs the world runs in its
-/// [`tick`](Self::tick), behind a field of its own.
+/// [`run_scripts`], among its systems and after its commands, so its input arrives as the rest
+/// of the simulation's does, in the components those commands set. Its fields are its state, held
+/// by the world: scenes save it, the Inspector and operations edit it, the hash reads it,
+/// snapshots copy it. A script keeps nothing elsewhere. It starts from the value code, a scene or
+/// an operation gave it; setup needing the world runs in [`tick`](Self::tick), behind a field of
+/// its own.
 ///
-/// Scripts run one entity at a time, on the tick's thread, since each gets the whole world: a kind
-/// of entity that a game has thousands of moves faster as a system over a query, which
+/// Scripts run one entity at a time on the tick's thread, since each gets the whole world. A kind
+/// of entity a game has thousands of is faster as a system over a query, which
 /// [`par_for_each`](crate::QueryIterMut::par_for_each) splits across the job system's threads.
 pub trait Script: Writable {
-    /// Runs the script for `entity` at `tick`. It reads and sets its own state as it does any
-    /// component's, through `world`'s typed calls on `entity`, and can change anything a system
-    /// can: other entities, spawning and despawning them, and its own, its script among them.
+    /// Runs the script for `entity` at `tick`. It reads and sets its own state through `world`'s
+    /// typed calls on `entity`, and can change anything a system can: spawn and despawn entities,
+    /// its own and its script included.
     fn tick(entity: Entity, world: &mut World, tick: Tick);
 }
 
-/// Runs `S` at `tick` for each entity that has one as the pass starts, once, in the order queries
-/// find them: each that's still alive and still has one when its turn comes, so that one despawned,
-/// or whose `S` is taken away, by a script before its turn is passed over, and one that had none
-/// as the pass started, given one during it, starts at the next tick. A script that replaces the
-/// world, or restores it from a copy, ends the pass, since the entities it listed are another
-/// world's: that world's scripts start at the next tick. The entities are listed in memory the
-/// world keeps, so that a pass, and one run within it by a script's tick, allocates nothing once
-/// the world has listed as many.
+/// Runs `S` at `tick`, once for each entity that has one as the pass starts, in the order queries
+/// find them. An entity despawned, or stripped of `S`, by a script before its turn is skipped. One
+/// given an `S` during the pass starts at the next tick. A script that replaces the world, or
+/// restores it from a copy, ends the pass, since the listed entities are another world's: that
+/// world's scripts start at the next tick. The list lives in memory the world keeps, so a pass,
+/// and one nested in a script's tick, allocates nothing once the world has listed as many.
 pub fn run_scripts<S: Script>(world: &mut World, tick: Tick) {
     let zone = gg_core::zone!();
     // A zone made in a generic function is one for every `S`, which its text tells apart.
@@ -51,14 +49,13 @@ mod tests {
     use super::*;
     use crate::Component;
 
-    /// What the scripts ran for, in the order they ran, on an entity of its own.
+    /// The numbers of the scripts that ran, in order.
     #[derive(Clone, Component)]
     struct Ran(Vec<u32>);
 
-    /// A script that notes its number in the world's `Ran` as it runs, and, the first time, may
-    /// despawn another entity, take another's script away, give one to an entity without one,
-    /// spawn a scripted entity, and despawn its own; or replace the world with one of `Ran` and
-    /// `REPLACED`'s numbers.
+    /// Notes its number in the world's `Ran`, then, the first time, may despawn another entity,
+    /// strip another's script, give one to an entity without, spawn a scripted entity and despawn
+    /// its own; or replace the world with one of `Ran` and `REPLACED`'s numbers.
     #[derive(Clone, Default, Component)]
     struct Noted {
         number: u32,
@@ -70,7 +67,7 @@ mod tests {
         replace: bool,
     }
 
-    /// The numbers of the scripts in the world a script replaces its own with.
+    /// The script numbers in the world a script replaces its own with.
     const REPLACED: [u32; 2] = [7, 8];
 
     impl Script for Noted {
@@ -119,7 +116,7 @@ mod tests {
         }
     }
 
-    /// What a tick of `Noted`s ran for, from the world's `Ran`, which it empties.
+    /// Runs a tick of `Noted`s and takes the world's `Ran`.
     fn tick(world: &mut World, number: u64) -> Vec<u32> {
         run_scripts::<Noted>(world, Tick { number });
         let ran = world.query_mut::<&mut Ran>().next().expect("one");
@@ -133,8 +130,7 @@ mod tests {
         }
     }
 
-    /// A pass runs each entity with the script once, in the order queries find them, across
-    /// tables; another tick runs them again.
+    /// A pass runs each scripted entity once, in query order across tables.
     #[test]
     fn a_pass_runs_each_scripted_entity_once_in_the_order_queries_find_them() {
         let mut world = World::seeded(1);
@@ -151,9 +147,8 @@ mod tests {
         assert_eq!(tick(&mut world, 1), order);
     }
 
-    /// An entity despawned, or whose script is taken away, by a script before its turn is passed
-    /// over; one given the script, or spawned with it, during the pass starts at the next tick;
-    /// and a script that despawns its own entity ends it, the rest running on.
+    /// Entities despawned or stripped before their turn are skipped; ones given the script or
+    /// spawned with it start next tick; a script despawning its own entity doesn't stop others.
     #[test]
     fn what_scripts_change_during_a_pass_runs_from_the_next_tick() {
         let mut world = World::seeded(2);
@@ -182,8 +177,8 @@ mod tests {
         assert!(world.contains(fifth));
     }
 
-    /// A script that replaces the world ends the pass, though the entities left to run have their
-    /// slots in the new world too: its scripts start at the next tick.
+    /// A script that replaces the world ends the pass, though the new world has slots for the
+    /// entities left to run: its scripts start at the next tick.
     #[test]
     fn a_script_that_replaces_the_world_ends_the_pass() {
         let mut world = World::seeded(4);

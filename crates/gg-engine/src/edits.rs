@@ -1,9 +1,8 @@
-//! The edits the engine applies to the world for authors outside the layers: the tool API's
-//! clients, and the scene files a game loaded, saved while it runs. Each author undoes and redoes
-//! its own, through a [`Log`] of its own, as the Inspector does through its. They apply between
-//! ticks, as a frame starts, which a recording keeps as values, the edits as their authors gave
-//! them, before the commands of the tick after, and a replay applies there. So do the reloads of
-//! scripts whose files were saved, which no author undoes.
+//! Edits the engine applies to the world for authors outside the layers: the tool API's clients,
+//! and scene files a game loaded, saved while it runs. Each author undoes and redoes its own
+//! through its own [`Log`], as the Inspector does. Edits apply between ticks, as a frame starts,
+//! before the next tick's commands. A recording keeps them as values as their authors gave them;
+//! a replay applies them there. So do reloads of saved scripts, which no author undoes.
 
 use gg_core::{Error, Result};
 
@@ -13,20 +12,20 @@ use crate::{EntityId, Log, Operation, World};
 /// An edit, as an author asks for it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Edit {
-    /// Applies `operations`, in order, as one edit of `author`'s: all of them or none.
+    /// Applies `operations` in order as one edit of `author`'s: all or none.
     Apply {
         author: String,
         operations: Vec<Operation>,
     },
-    /// Applies `operations` as the rest of `author`'s edit applied just before, as
-    /// [`Log::append`] does: those whose values hold entities that edit made.
+    /// Like [`Log::append`]: applies `operations`, whose values hold entities `author`'s edit just
+    /// before made, as part of that edit.
     Append {
         author: String,
         operations: Vec<Operation>,
     },
-    /// Applies `operations`, sets of one field, as part of `author`'s gesture `gesture`, such as a
-    /// drag: as [`Log::amend_all`] does, joining `author`'s last edit if that's sets of the same
-    /// field in the same gesture, of one entity or several, so that the gesture undoes whole.
+    /// Like [`Log::amend_all`]: applies `operations`, sets of one field, as part of `author`'s
+    /// gesture `gesture` (a drag, say), joining its last edit if that's sets of the same field in
+    /// the same gesture, of one entity or several, so the gesture undoes whole.
     Amend {
         author: String,
         gesture: u64,
@@ -36,38 +35,37 @@ pub(crate) enum Edit {
     Undo { author: String },
     /// Redoes the last edit `author` undid.
     Redo { author: String },
-    /// Reloads the script whose path from the project's root is `path`, its text now `text`,
-    /// through the [`Scripts`](crate::Scripts) that loaded it, as the context applies it.
+    /// Reloads the script at `path` from the project's root, now `text`, through the
+    /// [`Scripts`](crate::Scripts) that loaded it. The context applies it.
     Script { path: String, text: String },
-    /// Has the scene file whose path from the asset root is `path` hold `text` for the scene
-    /// changes to come, as [`World::change_scene`](crate::World::change_scene) reads it, as its
-    /// file is saved, as the context applies it.
+    /// Keeps `text` as the scene file at `path` from the asset root, for the next
+    /// [`World::change_scene`](crate::World::change_scene), when it's saved. The context applies
+    /// it.
     Scene { path: String, text: String },
-    /// Drops every author's log, and what they kept, and renews the world, as
-    /// [`World::renew`](crate::World::renew) says, through the context: as a lockstep host does as
-    /// it sends its joiner its world, which no log of the joiner's could undo into, and a replay
-    /// of its recording does at the same place.
+    /// Drops every author's log and what they kept, and renews the world through the context, as
+    /// [`World::renew`](crate::World::renew) says. A lockstep host does it as it sends its joiner
+    /// its world, which no joiner log could undo into; a replay does it at the same place.
     Renew,
 }
 
-/// What an edit did: the IDs of the entities an apply's creates and duplicates spawned, in order,
-/// or the operations of the edit an undo or a redo stepped through, if there was one.
+/// What an edit did: the IDs an apply's creates and duplicates spawned, in order, or the
+/// operations of the edit an undo or redo stepped through, if any.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Done {
     Applied(Vec<EntityId>),
     Stepped(Option<Vec<Operation>>),
 }
 
-/// Each author's log of its edits, in the order the authors first edited, of the world whose serial
-/// is `world`: another world, as one cleared, replaced or restored is, starts them afresh, as
-/// their entries are refused there.
+/// Each author's log, in the order the authors first edited, for the world with serial `world`.
+/// Another world (cleared, replaced or restored) starts them afresh: their entries are refused
+/// there.
 #[derive(Default)]
 pub(crate) struct Authors {
     logs: Vec<Author>,
     world: Option<u64>,
 }
 
-/// An author's log, and the gesture its last edit is part of, if that's an amend's.
+/// An author's log, and the gesture its last edit is part of, if an amend's.
 struct Author {
     name: String,
     log: Log,
@@ -75,7 +73,7 @@ struct Author {
 }
 
 impl Authors {
-    /// Applies `edit`, an author's, to `world`, and says what it did.
+    /// Applies `edit` to `world` and says what it did.
     ///
     /// Fails as [`Log::apply_all`], [`Log::amend_all`], [`Log::undo`] and [`Log::redo`] do.
     ///
@@ -84,13 +82,13 @@ impl Authors {
     /// For a script's reload, which no author makes: the context reloads it.
     pub(crate) fn edit(&mut self, world: &mut World, edit: Edit) -> Result<Done> {
         if self.world != Some(world.serial()) {
-            // Their entries are another world's, which keeps what they kept, if it's still about.
+            // Their entries are another world's, which keeps what they kept, if still about.
             self.logs.clear();
             self.world = Some(world.serial());
         }
-        // Any other edit of the author's ends its gesture, refused or not, as the log's own end
-        // its, but for a refused apply. One the API refuses as it reads it never comes here, nor
-        // to a recording, and leaves it going on.
+        // Any other edit of the author's ends its gesture, refused or not; the log's own ends it
+        // too, except for a refused apply. An edit the API refuses as it reads it never comes
+        // here or to a recording, and leaves the gesture going.
         if !matches!(edit, Edit::Amend { .. })
             && let Some(author) = self.logs.iter_mut().find(|a| a.name == edit.author())
         {
@@ -149,20 +147,17 @@ impl Authors {
     }
 
     #[cfg(feature = "dev")]
-    /// Each author's log, in the order the authors first edited `world`'s current entities: none
-    /// for a world that took the place of the one they edited.
+    /// Each author's log, in first-edit order: none for a world that replaced the edited one.
     pub(crate) fn logs(&self, world: &World) -> impl Iterator<Item = (&str, &Log)> {
         let current = self.world == Some(world.serial());
         let logs = self.logs.iter().filter(move |_| current);
         logs.map(|author| (author.name.as_str(), &author.log))
     }
 
-    /// Whether `author` has edited the world.
     fn has(&self, author: &str) -> bool {
         self.logs.iter().any(|logged| logged.name == author)
     }
 
-    /// `author`'s log and gesture, which start empty.
     fn author(&mut self, author: String) -> &mut Author {
         let at = match self.logs.iter().position(|logged| logged.name == author) {
             Some(at) => at,
@@ -178,7 +173,7 @@ impl Authors {
         &mut self.logs[at]
     }
 
-    /// How many edits the logs hold, done and undone, for `world`: none for another world's.
+    /// How many edits the logs hold, done and undone: none if they're another world's.
     pub(crate) fn entries(&self, world: &World) -> usize {
         let current = self.world == Some(world.serial());
         let logs = self.logs.iter().filter(|_| current);
@@ -186,7 +181,7 @@ impl Authors {
             .sum()
     }
 
-    /// Drops every log, and what they kept, from `world`, if they're its.
+    /// Drops every log and what they kept from `world`, if its.
     pub(crate) fn clear(&mut self, world: &mut World) {
         if self.world == Some(world.serial()) {
             for author in &mut self.logs {
@@ -197,7 +192,7 @@ impl Authors {
     }
 }
 
-/// The IDs of the entities the creates and duplicates of `log`'s last edit spawned, in order.
+/// The IDs `log`'s last edit's creates and duplicates spawned, in order.
 fn made(log: &Log) -> Vec<EntityId> {
     let made = log.undoable().unwrap_or_default().iter();
     let made = made.flat_map(|operation| match operation {
@@ -209,7 +204,7 @@ fn made(log: &Log) -> Vec<EntityId> {
 }
 
 impl Edit {
-    /// Its author's name: none for a renewal, which no author makes.
+    /// Its author's name: empty for a renewal, which no author makes.
     fn author(&self) -> &str {
         match self {
             Self::Apply { author, .. }
@@ -222,10 +217,10 @@ impl Edit {
         }
     }
 
-    /// The edit as a value, which a recording keeps: variants `Apply` and `Append`, with its author
-    /// and its operations, `Amend`, with its author, its gesture and its operations, `Undo` and
-    /// `Redo`, with their author, `Script` and `Scene`, with its path and its text, and `Renew`;
-    /// each operation a variant named as its [`Operation`]'s, with its entities' IDs as text.
+    /// The edit as a value, which a recording keeps. Variants: `Apply` and `Append` (author,
+    /// operations), `Amend` (author, gesture, operations), `Undo` and `Redo` (author), `Script`
+    /// and `Scene` (path, text), and `Renew`. Each operation is a variant named as its
+    /// [`Operation`]'s, with entity IDs as text.
     pub(crate) fn to_value(&self) -> Value {
         let text = |text: &str| Value::String(text.to_owned());
         let author = |author: &str| ("author".into(), text(author));
@@ -281,10 +276,8 @@ impl Edit {
         }
     }
 
-    /// The edit `value` is, as [`to_value`](Self::to_value) writes it.
-    ///
-    /// Fails as [`Reflect::from_value`](crate::Reflect::from_value) does for a value that isn't
-    /// one, saying where.
+    /// The edit `value` is, as [`to_value`](Self::to_value) writes it. Fails as
+    /// [`Reflect::from_value`](crate::Reflect::from_value) does, saying where.
     pub(crate) fn from_value(value: &Value) -> Result<Self> {
         let (name, fields) = reflect::variant(value)?;
         match name {
@@ -351,7 +344,7 @@ impl Edit {
     }
 }
 
-/// The operations the list `value` holds, as [`Edit::to_value`] writes them; its error is within
+/// The operations in list `value`, as [`Edit::to_value`] writes them; errors are within
 /// `operations`.
 fn operation_list(value: &Value) -> Result<Vec<Operation>> {
     let Value::List(operations) = value else {
@@ -366,7 +359,6 @@ fn operation_list(value: &Value) -> Result<Vec<Operation>> {
         .map_err(|error| reflect::within(error, "operations"))
 }
 
-/// `operation` as a value, as [`Edit::to_value`] writes it.
 fn operation_value(operation: &Operation) -> Value {
     let text = |text: &str| Value::String(text.to_owned());
     let maybe =
@@ -454,12 +446,10 @@ fn operation_value(operation: &Operation) -> Value {
     Value::Variant(name.into(), fields)
 }
 
-/// An entity's ID as an operation's value holds it, as text.
 fn id(id: &EntityId) -> Value {
     Value::String(id.to_string())
 }
 
-/// The operation `value` is, as [`operation_value`] writes it.
 fn operation(value: &Value) -> Result<Operation> {
     let (name, fields) = reflect::variant(value)?;
     let entity = |value: &Value| parse_id(value, "entity");
@@ -578,7 +568,6 @@ fn operation(value: &Value) -> Result<Operation> {
     })
 }
 
-/// The text `value` holds, as field `field`.
 fn text(value: &Value, field: &str) -> Result<String> {
     match value {
         Value::String(text) => Ok(text.clone()),
@@ -586,7 +575,6 @@ fn text(value: &Value, field: &str) -> Result<String> {
     }
 }
 
-/// The ID `value` holds as text, as field `field`.
 fn parse_id(value: &Value, field: &str) -> Result<EntityId> {
     let id: Result<EntityId> = text(value, field)?.parse();
     id.map_err(|error: Error| reflect::within(error, field))
@@ -597,7 +585,6 @@ mod tests {
     use super::*;
     use crate::Transform;
 
-    /// A world of one entity with a transform, and its ID.
     fn world() -> (World, EntityId) {
         let mut world = World::seeded(1);
         world.register::<Transform>().expect("registered");
@@ -623,9 +610,9 @@ mod tests {
         }
     }
 
-    /// An author's sets of one field in one gesture undo whole; another gesture, or any other edit
-    /// of the author's between them, refused or not, starts another edit; and another author's
-    /// edits leave the gesture going on.
+    /// An author's sets of one field in one gesture undo whole. Another gesture, or any other edit
+    /// of the author's between them (refused or not), starts another edit. Another author's edits
+    /// leave the gesture going.
     #[test]
     fn a_gestures_sets_undo_whole() {
         let (mut world, id) = world();
@@ -673,7 +660,7 @@ mod tests {
         assert_eq!(y(&world), 7.0, "a refused edit between ends the gesture");
     }
 
-    /// An amend is kept as a value, as a recording keeps it, and read back as itself.
+    /// An amend kept as a value, as a recording keeps it, reads back as itself.
     #[test]
     fn an_amend_reads_back_as_it_was_written() {
         let (_, id) = world();
@@ -688,8 +675,8 @@ mod tests {
         assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
     }
 
-    /// An amend of several operations reads back as itself, and a recording of format 5's, whose
-    /// amend has one `operation`, reads as an amend of that one.
+    /// An amend of several operations reads back as itself; a format 5 recording's amend, with
+    /// one `operation`, reads as an amend of that one.
     #[test]
     fn an_amend_of_several_sets_reads_back_and_an_older_one_reads_as_one() {
         let (_, id) = world();
@@ -714,8 +701,8 @@ mod tests {
         assert_eq!(older, amend(3, set(id, 1.0)));
     }
 
-    /// A link reads back with its prefab, as a recording keeps it, and one whose prefab isn't one,
-    /// as a name no prefab loaded has reads, is refused.
+    /// A link reads back with its prefab, as a recording keeps it; one whose prefab isn't one (a
+    /// name no loaded prefab has) is refused.
     #[test]
     fn a_link_reads_back_with_its_prefab() {
         let (_, id) = world();

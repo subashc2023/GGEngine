@@ -3,10 +3,9 @@
 use crate::Component;
 
 /// What an entity is called, for people: the Entities and Inspector panels show it, and scenes
-/// save it. It's optional, so that entities that come by the thousand, as a swarm's or bullets,
-/// hold none and spawn without allocating; and it isn't unique, so two entities may share one. A
-/// model's node without one is called by its node's name in the model's file, as
-/// [`World::name`](crate::World::name) gives either. Files, operations and diagnostics name an
-/// entity by its [`EntityId`](crate::EntityId), never by this.
+/// save it. It's optional, so entities that come by the thousand (a swarm, bullets) hold none and
+/// spawn without allocating. It isn't unique. A model's node without one takes its name from the
+/// model's file; [`World::name`](crate::World::name) gives either. Files, operations and
+/// diagnostics name an entity by its [`EntityId`](crate::EntityId), never by this.
 #[derive(Clone, Debug, PartialEq, Eq, Component)]
 pub struct Name(pub String);
