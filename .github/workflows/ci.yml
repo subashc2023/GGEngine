@@ -105,13 +105,25 @@ jobs:
       # Its unit tests without `dev`, which `cargo test --workspace` turns on for every crate.
       - name: Test gg-engine without dev
         if: matrix.part == 'shipping'
-        run: cargo test -p gg-engine --lib --locked
+        run: 'cargo test -p gg-engine --lib --locked -- --skip net::'
+      # Its tests of sessions and links after the rest, as the gates' below.
+      - name: Test gg-engine's sessions without dev
+        if: matrix.part == 'shipping'
+        run: 'cargo test -p gg-engine --lib --locked -- net::'
       # The docs, private items' included, without a warning: on one runner too, as they're alike
       # on every platform but in code built for one alone.
       - name: Check the docs
         if: matrix.part == 'shipping'
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --locked
-      - run: cargo test --workspace --locked
+      # gg-engine's tests of sessions and links, `net::`, after the rest and beside nothing but each
+      # other: those that pace themselves by the clock fail on a runner of two vCPUs when other
+      # tests load its cores beside them. `--workspace --lib` reruns the binary the step before
+      # built, where `-p gg-engine` would build it again without the workspace's features, and
+      # leaves out the doctests and other binaries, which hold none. Quoted, as YAML reads a plain
+      # value that ends in a colon as a key.
+      - run: 'cargo test --workspace --locked -- --skip net::'
+        if: ${{ !matrix.part }}
+      - run: 'cargo test --workspace --lib --locked -- net::'
         if: ${{ !matrix.part }}
       # Whether the engine runs: rendering offscreen on lavapipe, under validation, it exits 0.
       - name: Run the sandbox headless
