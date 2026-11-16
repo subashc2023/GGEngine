@@ -22,7 +22,7 @@ use super::connection::{
     same_token,
 };
 use super::files::{engine_named, prune};
-use super::parse::{MOST_STEPS, parse};
+use super::parse::{METHODS, MOST_STEPS, parse};
 use super::view::CAPTURE_WAIT;
 use super::world::listed;
 use crate::api::Waiting;
@@ -3494,4 +3494,48 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         let refused = refused.map(|failure| failure.code);
         assert_eq!(refused.as_deref(), Some(code), "{method}");
     }
+}
+
+/// `METHODS`, which `api.unknown_method` lists, matches the methods there are: none it holds is
+/// unknown to a connection, and it holds each one the parser matches or the connection answers
+/// itself, as their sources name them.
+#[test]
+fn each_method_is_listed_and_each_one_listed_is_answered() {
+    let (_api, session) = started("Api Methods");
+    let (mut stream, mut answers) = said_hello(&session);
+    for (id, method) in (1..).zip(METHODS) {
+        // Parameters no method takes: the parser refuses each it reads, rather than passing it on
+        // to the main loop, which no frame serves here.
+        let request = json!({"id": id, "method": method, "params": "none"});
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("written");
+        let answer = gg_api::read_line(&mut answers).expect("an answer");
+        let answer: gg_api::Answer = serde_json::from_str(&answer.expect("a line")).expect("JSON");
+        let code = answer.error.map(|failure| failure.code);
+        assert_ne!(code.as_deref(), Some("api.unknown_method"), "{method}");
+    }
+    // The parser's arms, as `"step" =>` or `"undo" | "redo" =>`, and the methods the connection
+    // answers itself, as `request.method == "ping"`.
+    let parser = include_str!("parse.rs").split("fn parse(").nth(1);
+    let arms = parser.expect("the parser").lines().filter_map(|line| {
+        let (patterns, _) = line.trim_start().split_once(" =>")?;
+        let names = patterns.split(" | ");
+        let names = names.map(|name| name.strip_prefix('"')?.strip_suffix('"'));
+        names.collect::<Option<Vec<_>>>()
+    });
+    let own = include_str!("connection.rs")
+        .split("request.method == \"")
+        .skip(1);
+    let own = own.map(|rest| rest.split('"').next().expect("a name"));
+    let named: Vec<&str> = arms.flatten().chain(own).collect();
+    assert!(
+        named.len() >= METHODS.len(),
+        "the sources no longer name methods as this test reads them: {named:?}"
+    );
+    let unlisted: Vec<&str> = named
+        .into_iter()
+        .filter(|name| !METHODS.contains(name))
+        .collect();
+    assert!(unlisted.is_empty(), "`METHODS` doesn't list {unlisted:?}");
 }

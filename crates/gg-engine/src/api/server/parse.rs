@@ -17,7 +17,7 @@ use super::view::{checked_viewpoint, look, shown};
 use crate::{EntityId, Key};
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 35] = [
+pub(super) const METHODS: [&str; 35] = [
     "hello",
     "ping",
     "status",
