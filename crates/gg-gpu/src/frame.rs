@@ -1499,23 +1499,10 @@ impl<'a> Frame<'a> {
     /// Submits the frame's copies and batches, readying its swapchains' images to present.
     fn send(&mut self) -> Result<()> {
         let Frames {
-            device,
-            timeline,
             submitted,
-            slots,
             arenas,
             staging,
-            transfer_timeline,
-            transfers_submitted,
-            transfers,
-            transfer_wait,
-            images,
             scratch,
-            queue_timelines,
-            timelines,
-            plan,
-            batch_commands,
-            buffers_written,
             ..
         } = &mut *self.frames;
         arenas[self.slot].flush()?;
@@ -1523,8 +1510,6 @@ impl<'a> Frame<'a> {
         // Its buffers retire with this frame and with the copies being recorded, so they last
         // until the GPU has finished both.
         staging.clear();
-        let raw = device.raw();
-        let acquired = &slots[self.slot].acquired;
         let frame = *submitted + 1;
         scratch.waits.clear();
         scratch.signals.clear();
@@ -1533,6 +1518,38 @@ impl<'a> Frame<'a> {
         scratch.rendered.clear();
         scratch.swapchains.clear();
         scratch.images.clear();
+        self.submit_uploads(frame)?;
+        // The presents' barriers end the graphics queue's last batch, which signals what the
+        // presents wait on after every command, the layout changes included, so the barriers need
+        // no second scope.
+        let last = self.frames.plan.last_graphics();
+        self.ready_presents(last);
+        self.plan_submissions(frame, last);
+        self.end_batches(frame)?;
+        self.submit_batches(frame)?;
+        self.frames.submitted = frame;
+        for (target, image) in self.targets.iter_mut().zip(self.frames.images.iter()) {
+            match (target, image) {
+                (Target::Image(target), Some(Tracked { layout, .. })) => target.set_layout(*layout),
+                (Target::Storage(target), Some(Tracked { layout, .. })) => {
+                    target.set_layout(*layout);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends and submits the frame's copies on the transfer queue, if it recorded any.
+    fn submit_uploads(&mut self, frame: u64) -> Result<()> {
+        let Frames {
+            device,
+            transfer_timeline,
+            transfers_submitted,
+            transfers,
+            ..
+        } = &mut *self.frames;
+        let raw = device.raw();
         if let Some(i) = self.transfers {
             let transfer = &mut transfers[i];
             // SAFETY: the transfer commands are recording.
@@ -1562,10 +1579,20 @@ impl<'a> Frame<'a> {
             *transfers_submitted = number;
             device.transfer_submitted(number);
         }
-        // The presents' barriers end the graphics queue's last batch, which signals what the
-        // presents wait on after every command, the layout changes included, so the barriers need
-        // no second scope.
-        let last = plan.last_graphics();
+        Ok(())
+    }
+
+    /// Ends the graphics queue's `last` batch with each swapchain image's barrier to present,
+    /// listing what the present waits on and shows.
+    fn ready_presents(&mut self, last: usize) {
+        let Frames {
+            device,
+            images,
+            scratch,
+            batch_commands,
+            ..
+        } = &mut *self.frames;
+        let raw = device.raw();
         for (target, image) in self.targets.iter().zip(images.iter_mut()) {
             let (
                 Target::Swapchain(swapchain),
@@ -1599,6 +1626,26 @@ impl<'a> Frame<'a> {
             scratch.swapchains.push(swapchain.raw());
             scratch.images.push(*index);
         }
+    }
+
+    /// Lists each batch's waits, signals and commands, frame `frame`'s, whose timeline batch
+    /// `last` signals.
+    fn plan_submissions(&mut self, frame: u64, last: usize) {
+        let Frames {
+            timeline,
+            slots,
+            transfer_timeline,
+            transfer_wait,
+            images,
+            scratch,
+            queue_timelines,
+            timelines,
+            plan,
+            batch_commands,
+            buffers_written,
+            ..
+        } = &mut *self.frames;
+        let acquired = &slots[self.slot].acquired;
         // Each batch's waits and signals. A semaphore's wait takes in all the other queue did
         // before it signaled, and makes it visible to all its own queue does after, through every
         // stage.
@@ -1663,6 +1710,15 @@ impl<'a> Frame<'a> {
                 waits_on,
             });
         }
+    }
+
+    fn end_batches(&self, frame: u64) -> Result<()> {
+        let Frames {
+            device,
+            batch_commands,
+            ..
+        } = &*self.frames;
+        let raw = device.raw();
         for (i, &commands) in batch_commands.iter().enumerate() {
             // SAFETY: the commands are recording, outside a pass.
             unsafe { raw.end_command_buffer(commands) }.map_err(|e| {
@@ -1670,6 +1726,17 @@ impl<'a> Frame<'a> {
                 vk_error("vkEndCommandBuffer", subject, e)
             })?;
         }
+        Ok(())
+    }
+
+    fn submit_batches(&mut self, frame: u64) -> Result<()> {
+        let Frames {
+            device,
+            scratch,
+            timelines,
+            plan,
+            ..
+        } = &mut *self.frames;
         // Runs of one queue's batches, each after the batches of the other's it waits for, which
         // were planned before it, the compute queue's first where they can be, so that its work
         // begins as soon as it can. Each queue's batches up to the frame's are submitted.
@@ -1727,18 +1794,7 @@ impl<'a> Frame<'a> {
         }
         scratch.submits = emptied(submits);
         // The frame's copies, if any, run on regardless: the frames' drop waits for them.
-        sent?;
-        *submitted = frame;
-        for (target, image) in self.targets.iter_mut().zip(images.iter()) {
-            match (target, image) {
-                (Target::Image(target), Some(Tracked { layout, .. })) => target.set_layout(*layout),
-                (Target::Storage(target), Some(Tracked { layout, .. })) => {
-                    target.set_layout(*layout);
-                }
-                _ => {}
-            }
-        }
-        Ok(())
+        sent
     }
 
     /// Presents the images of the frame's swapchains, which its submission readied. Each
