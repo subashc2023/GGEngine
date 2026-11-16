@@ -1037,21 +1037,54 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         return Ok(Command::Help(overview()));
     };
     let mut parsed = Parsed::new(args)?;
-    let call = |parsed: &mut Parsed, method: &str, params: Value| -> Result<Command, Failure> {
-        Ok(Command::Call {
-            pick: parsed.pick()?,
-            method: method.to_owned(),
-            params,
-        })
-    };
     let command = match name.as_str() {
-        "help" | "-h" | "--help" => {
-            let given = parsed.positional(0, 1, "help [<COMMAND>]")?;
-            Command::Help(match given.first() {
-                Some(name) => section(name)?,
-                None => overview(),
-            })
+        "help" | "-h" | "--help" => help_args(&mut parsed)?,
+        "run" | "check" | "ship" => build_args(name, &mut parsed)?,
+        "fetch" | "new" => project_args(name, &mut parsed)?,
+        "wait" | "step" | "scene" | "snapshot" => control_args(name, &mut parsed)?,
+        "input" | "capture" | "frames" | "look" | "pick" | "probe" => view_args(name, &mut parsed)?,
+        "sessions" | "logs" | "entities" | "assets" | "entity" | "get" => {
+            read_args(name, &mut parsed)?
         }
+        "apply" | "save-prefab" | "set" | "undo" | "redo" | "edits" => {
+            edit_args(name, &mut parsed)?
+        }
+        "debug" => debug_args(&mut parsed)?,
+        "mcp" => mcp_args(&mut parsed)?,
+        "call" => call_args(&mut parsed)?,
+        method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "cells"
+        | "ui" | "images" | "quit") => {
+            parsed.positional(0, 0, method)?;
+            call(&mut parsed, method, Value::Null)?
+        }
+        other => return Err(bad(format!("there's no command `{other}`"))),
+    };
+    parsed.finish(name)?;
+    Ok(command)
+}
+
+/// The call of `method` with `params` that a command makes of the game the options in `parsed`
+/// pick.
+fn call(parsed: &mut Parsed, method: &str, params: Value) -> Result<Command, Failure> {
+    Ok(Command::Call {
+        pick: parsed.pick()?,
+        method: method.to_owned(),
+        params,
+    })
+}
+
+/// Parses `help`: gg's help, or a command's.
+fn help_args(parsed: &mut Parsed) -> Result<Command, Failure> {
+    let given = parsed.positional(0, 1, "help [<COMMAND>]")?;
+    Ok(Command::Help(match given.first() {
+        Some(name) => section(name)?,
+        None => overview(),
+    }))
+}
+
+/// Parses `run`, `check` or `ship`, the commands that build a package.
+fn build_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
+    let command = match name {
         "run" => {
             let project = parsed.scope()?;
             let run = Run {
@@ -1114,6 +1147,14 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 project,
             })
         }
+        _ => unreachable!("`parse` passes the build commands alone"),
+    };
+    Ok(command)
+}
+
+/// Parses `fetch` or `new`, the commands that write a project's files.
+fn project_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
+    let command = match name {
         "fetch" => {
             parsed.positional(0, 0, "fetch")?;
             let scope = parsed.scope()?.ok_or_else(|| {
@@ -1141,43 +1182,18 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 .map(|given| new::Engine::parse(&given));
             Command::New(name, engine.transpose().map_err(bad)?)
         }
-        "sessions" => {
-            parsed.positional(0, 0, "sessions")?;
-            Command::Sessions(parsed.scope()?.map(|scope| scope.manifest))
-        }
-        "logs" => {
-            parsed.positional(0, 0, "logs [--level <LEVEL>] [--follow]")?;
-            let level = parsed.value("--level").unwrap_or_else(|| "warn".to_owned());
-            let level = level.to_ascii_lowercase();
-            if !gg_api::LEVELS.contains(&level.as_str()) {
-                return Err(bad(format!(
-                    "`--level` is `error`, `warn`, `info`, `debug` or `trace`, not `{level}`"
-                )));
-            }
-            Command::Logs {
-                pick: parsed.pick()?,
-                level,
-                follow: parsed.switch("--follow"),
-            }
-        }
+        _ => unreachable!("`parse` passes the project commands alone"),
+    };
+    Ok(command)
+}
+
+/// Parses `wait`, `step`, `scene` or `snapshot`, of the game's run.
+fn control_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
+    let command = match name {
         "wait" => {
             parsed.positional(0, 0, "wait [--timeout <SECONDS>]")?;
             let timeout = parsed.seconds("--timeout", 300)?;
             Command::Wait(parsed.pick()?, timeout)
-        }
-        method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "cells"
-        | "ui" | "images" | "quit") => {
-            parsed.positional(0, 0, method)?;
-            call(&mut parsed, method, Value::Null)?
-        }
-        "input" => {
-            let given = parsed.positional(1, 1, "input <EVENTS>")?;
-            let events: Value = serde_json::from_str(&given[0])
-                .map_err(|error| bad(format!("EVENTS isn't JSON: {error}")))?;
-            if !events.is_array() {
-                return Err(bad("EVENTS is a JSON array of input events".to_owned()));
-            }
-            call(&mut parsed, "input", json!({"events": events}))?
         }
         "step" => {
             let ticks = parsed.positional(0, 1, "step [N]")?;
@@ -1187,7 +1203,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 })?,
                 None => 1,
             };
-            call(&mut parsed, "step", json!({"ticks": ticks}))?
+            call(parsed, "step", json!({"ticks": ticks}))?
         }
         "scene" => {
             let usage = "scene open <PATH> [--discard] | scene save [PATH] | scene new [--discard]";
@@ -1202,7 +1218,32 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 ("new", None) => json!({"action": "new", "discard": parsed.switch("--discard")}),
                 _ => return Err(bad(format!("it's `gg {usage}`"))),
             };
-            call(&mut parsed, "scene", params)?
+            call(parsed, "scene", params)?
+        }
+        "snapshot" => {
+            let path = parsed.positional(0, 1, "snapshot [PATH]")?;
+            let params = match path.first() {
+                Some(path) => json!({"path": absolute(path)?}),
+                None => json!({}),
+            };
+            call(parsed, "snapshot", params)?
+        }
+        _ => unreachable!("`parse` passes the control commands alone"),
+    };
+    Ok(command)
+}
+
+/// Parses `input`, `capture`, `frames`, `look`, `pick` or `probe`, of the view.
+fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
+    let command = match name {
+        "input" => {
+            let given = parsed.positional(1, 1, "input <EVENTS>")?;
+            let events: Value = serde_json::from_str(&given[0])
+                .map_err(|error| bad(format!("EVENTS isn't JSON: {error}")))?;
+            if !events.is_array() {
+                return Err(bad("EVENTS is a JSON array of input events".to_owned()));
+            }
+            call(parsed, "input", json!({"events": events}))?
         }
         "capture" => {
             let usage = "capture [--own] [--show <NAME>[,<NAME>...]]... [PATH]";
@@ -1221,10 +1262,10 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 })
                 .collect::<Result<Vec<Value>, Failure>>()?;
             match shows.as_slice() {
-                [] => call(&mut parsed, "capture", params)?,
+                [] => call(parsed, "capture", params)?,
                 [show] => {
                     params["show"] = show.clone();
-                    call(&mut parsed, "capture", params)?
+                    call(parsed, "capture", params)?
                 }
                 _ if !path.is_empty() => {
                     return Err(bad(
@@ -1279,15 +1320,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 params["show"] =
                     game::shown(&json!(name.trim())).map_err(|failure| bad(failure.message))?;
             }
-            call(&mut parsed, "frames", params)?
-        }
-        "snapshot" => {
-            let path = parsed.positional(0, 1, "snapshot [PATH]")?;
-            let params = match path.first() {
-                Some(path) => json!({"path": absolute(path)?}),
-                None => json!({}),
-            };
-            call(&mut parsed, "snapshot", params)?
+            call(parsed, "frames", params)?
         }
         "look" => {
             let given = parsed.positional(0, 1, "look [<LOOK>]")?;
@@ -1299,7 +1332,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             if !look.is_object() {
                 return Err(bad("LOOK is a JSON object of the look's parts".to_owned()));
             }
-            call(&mut parsed, "look", look)?
+            call(parsed, "look", look)?
         }
         "pick" => {
             let given = parsed.positional(2, 2, "pick <X> <Y> [--within <ID>]")?;
@@ -1319,7 +1352,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             // refuses a field it doesn't know, still takes the pick.
             let within = parsed.value("--within");
             let pick = serde_json::to_value(gg_api::Pick { at, within }).expect("JSON");
-            call(&mut parsed, "pick", pick)?
+            call(parsed, "pick", pick)?
         }
         "probe" => {
             let given = parsed.positional(2, 2, "probe <X> <Y> [--own]")?;
@@ -1340,6 +1373,33 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 pick: parsed.pick()?,
             }
         }
+        _ => unreachable!("`parse` passes the view commands alone"),
+    };
+    Ok(command)
+}
+
+/// Parses `sessions`, `logs`, `entities`, `assets`, `entity` or `get`, which read what runs.
+fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
+    let command = match name {
+        "sessions" => {
+            parsed.positional(0, 0, "sessions")?;
+            Command::Sessions(parsed.scope()?.map(|scope| scope.manifest))
+        }
+        "logs" => {
+            parsed.positional(0, 0, "logs [--level <LEVEL>] [--follow]")?;
+            let level = parsed.value("--level").unwrap_or_else(|| "warn".to_owned());
+            let level = level.to_ascii_lowercase();
+            if !gg_api::LEVELS.contains(&level.as_str()) {
+                return Err(bad(format!(
+                    "`--level` is `error`, `warn`, `info`, `debug` or `trace`, not `{level}`"
+                )));
+            }
+            Command::Logs {
+                pick: parsed.pick()?,
+                level,
+                follow: parsed.switch("--follow"),
+            }
+        }
         "entities" => {
             parsed.positional(
                 0,
@@ -1350,7 +1410,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             let skip: usize = parsed.number("--skip", 0)?;
             let take: usize = parsed.number("--take", 100)?;
             call(
-                &mut parsed,
+                parsed,
                 "entities",
                 json!({"with": with, "skip": skip, "take": take}),
             )?
@@ -1362,14 +1422,14 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             let skip: usize = parsed.number("--skip", 0)?;
             let take: usize = parsed.number("--take", 100)?;
             call(
-                &mut parsed,
+                parsed,
                 "assets",
                 json!({"kind": kind, "skip": skip, "take": take}),
             )?
         }
         "entity" => {
             let id = parsed.positional(1, 1, "entity <ID>")?.remove(0);
-            call(&mut parsed, "entity", json!({"id": id}))?
+            call(parsed, "entity", json!({"id": id}))?
         }
         "get" => {
             let mut given = parsed.positional(2, 3, "get <ID> <COMPONENT> [PATH]")?;
@@ -1380,11 +1440,19 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             };
             let (id, component) = (given.remove(0), given.remove(0));
             call(
-                &mut parsed,
+                parsed,
                 "get",
                 json!({"id": id, "component": component, "path": path}),
             )?
         }
+        _ => unreachable!("`parse` passes the read commands alone"),
+    };
+    Ok(command)
+}
+
+/// Parses `apply`, `save-prefab`, `set`, `undo`, `redo` or `edits`, of edits.
+fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
+    let command = match name {
         "apply" => {
             let given = parsed.positional(1, 1, "apply <OPERATIONS>")?;
             let operations: Value = serde_json::from_str(&given[0])
@@ -1392,7 +1460,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             if !operations.is_array() {
                 return Err(bad("OPERATIONS is a JSON array of operations".to_owned()));
             }
-            call(&mut parsed, "apply", json!({"operations": operations}))?
+            call(parsed, "apply", json!({"operations": operations}))?
         }
         "save-prefab" => {
             let given = parsed.positional(1, 2, "save-prefab <ID> [PATH]")?;
@@ -1400,7 +1468,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             if let Some(path) = given.get(1) {
                 params["path"] = json!(absolute(path)?);
             }
-            call(&mut parsed, "save_prefab", params)?
+            call(parsed, "save_prefab", params)?
         }
         "set" => {
             let given = parsed.positional(4, 4, "set <ID> <COMPONENT> <PATH> <VALUE>")?;
@@ -1408,64 +1476,67 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 serde_json::from_str(&given[3]).unwrap_or_else(|_| Value::String(given[3].clone()));
             let set =
                 json!({"id": given[0], "component": given[1], "path": given[2], "value": value});
-            call(&mut parsed, "apply", json!({"operations": [{"set": set}]}))?
+            call(parsed, "apply", json!({"operations": [{"set": set}]}))?
         }
         method @ ("undo" | "redo" | "edits") => {
             parsed.positional(0, 0, &format!("{method} [--author <NAME>]"))?;
             let author = parsed.value("--author");
-            call(&mut parsed, method, json!({"author": author}))?
+            call(parsed, method, json!({"author": author}))?
         }
-        "debug" => {
-            let usage = "debug [break <SCRIPT> [<LINE>...] | pause | continue | into | over | out] \
-                         [--wait <SECONDS>]";
-            let given = parsed.positional(0, usize::MAX, usage)?;
-            let wait: u64 = parsed.number("--wait", 0)?;
-            let mut params = json!({"wait_ms": wait.saturating_mul(1000)});
-            match given.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-                [] => {}
-                ["break", script, ref lines @ ..] => {
-                    let lines = lines.iter().map(|line| {
-                        line.parse::<u32>()
-                            .ok()
-                            .filter(|&line| line > 0)
-                            .ok_or_else(|| {
-                                bad(format!("`gg debug break` takes lines from 1, not `{line}`"))
-                            })
-                    });
-                    let lines = lines.collect::<Result<Vec<u32>, Failure>>()?;
-                    params["breakpoints"] = json!({"script": script, "lines": lines});
-                }
-                [action @ ("pause" | "continue")] => params["action"] = json!(action),
-                [step @ ("into" | "over" | "out")] => {
-                    params["action"] = json!(format!("step_{step}"))
-                }
-                _ => return Err(bad(format!("it's `gg {usage}`"))),
-            }
-            call(&mut parsed, "debug", params)?
-        }
-        "mcp" => {
-            parsed.positional(0, 0, "mcp")?;
-            // Its MCP client's name, once it says, and else its own.
-            let pick = parsed.pick()?;
-            Command::Mcp(Pick {
-                client: "mcp".to_owned(),
-                ..pick
-            })
-        }
-        "call" => {
-            let mut given = parsed.positional(1, 2, "call <METHOD> [<PARAMS>]")?;
-            let params = match given.get(1) {
-                Some(params) => serde_json::from_str(params)
-                    .map_err(|error| bad(format!("PARAMS isn't JSON: {error}")))?,
-                None => Value::Null,
-            };
-            let method = given.remove(0);
-            call(&mut parsed, &method, params)?
-        }
-        other => return Err(bad(format!("there's no command `{other}`"))),
+        _ => unreachable!("`parse` passes the edit commands alone"),
     };
-    parsed.finish(name)?;
     Ok(command)
+}
+
+/// Parses `debug`, of the game's scripts' debugger.
+fn debug_args(parsed: &mut Parsed) -> Result<Command, Failure> {
+    let usage = "debug [break <SCRIPT> [<LINE>...] | pause | continue | into | over | out] \
+                 [--wait <SECONDS>]";
+    let given = parsed.positional(0, usize::MAX, usage)?;
+    let wait: u64 = parsed.number("--wait", 0)?;
+    let mut params = json!({"wait_ms": wait.saturating_mul(1000)});
+    match given.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        [] => {}
+        ["break", script, ref lines @ ..] => {
+            let lines = lines.iter().map(|line| {
+                line.parse::<u32>()
+                    .ok()
+                    .filter(|&line| line > 0)
+                    .ok_or_else(|| {
+                        bad(format!("`gg debug break` takes lines from 1, not `{line}`"))
+                    })
+            });
+            let lines = lines.collect::<Result<Vec<u32>, Failure>>()?;
+            params["breakpoints"] = json!({"script": script, "lines": lines});
+        }
+        [action @ ("pause" | "continue")] => params["action"] = json!(action),
+        [step @ ("into" | "over" | "out")] => params["action"] = json!(format!("step_{step}")),
+        _ => return Err(bad(format!("it's `gg {usage}`"))),
+    }
+    call(parsed, "debug", params)
+}
+
+/// Parses `mcp`, which serves agents.
+fn mcp_args(parsed: &mut Parsed) -> Result<Command, Failure> {
+    parsed.positional(0, 0, "mcp")?;
+    // Its MCP client's name, once it says, and else its own.
+    let pick = parsed.pick()?;
+    Ok(Command::Mcp(Pick {
+        client: "mcp".to_owned(),
+        ..pick
+    }))
+}
+
+/// Parses `call`, of any method.
+fn call_args(parsed: &mut Parsed) -> Result<Command, Failure> {
+    let mut given = parsed.positional(1, 2, "call <METHOD> [<PARAMS>]")?;
+    let params = match given.get(1) {
+        Some(params) => serde_json::from_str(params)
+            .map_err(|error| bad(format!("PARAMS isn't JSON: {error}")))?,
+        None => Value::Null,
+    };
+    let method = given.remove(0);
+    call(parsed, &method, params)
 }
 
 #[cfg(test)]
