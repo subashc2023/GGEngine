@@ -190,8 +190,12 @@ jobs:
       # 75 ms each way, up to 30 more and 2% lost, for 640 ticks. Each joiner joins, the third and
       # fourth to in these steps, every link's packets go direct once each end sees that way work,
       # as no router stands between them here, their worlds hash alike, each logs what its link
-      # carried and how its delay went, and the relay logs the pairs.
-      - name: Run the demo's peers through a relay, over a slow link
+      # carried and how its delay went, and the relay logs the pairs. Then the demo's server,
+      # registered at the relay alone, and two clients given the relay and the code alone, over the
+      # same link: each client joins as a player of its own, the third and fourth to, and takes the
+      # server's states, as each client of these steps does, each of the four links' ends goes
+      # direct, and the server, sent Ctrl+C, ends cleanly.
+      - name: Run the demo's peers, and its server and clients, through a relay, over a slow link
         if: matrix.part == 'runs'
         run: |
           cargo build -p relay --locked
@@ -206,10 +210,20 @@ jobs:
           host=$!
           target/debug/gg-shards $slow --frames 640 --join --code 0000-0000-0000-7802 --rollback
           wait $host
+          target/debug/gg-shards --serve --relay 127.0.0.1:7800 --code 0000-0000-0000-7804 --link 75,30,2 &
+          server=$!
+          target/debug/gg-shards $slow --frames 640 --connect --code 0000-0000-0000-7804 &
+          client=$!
+          target/debug/gg-shards $slow --frames 640 --connect --code 0000-0000-0000-7804
+          wait $client
+          kill -INT $server
+          wait $server
           kill $relay
           wait $relay || true
           test "$(grep -h '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl | wc -l)" = 4
-          test "$(grep -h '"code":"net.direct"' target/debug/logs/shards-*.jsonl | wc -l)" = 4
+          test "$(grep -h '"message":"Joined the server"' target/debug/logs/shards-*.jsonl | wc -l)" = 4
+          test "$(grep -h '"code":"net.corrected".*"states":[1-9]' target/debug/logs/shards-*.jsonl | wc -l)" = 4
+          test "$(grep -h '"code":"net.direct"' target/debug/logs/shards-*.jsonl | wc -l)" = 8
           grep -q '"code":"net.traffic"' target/debug/logs/shards-*.jsonl
           grep -q '"code":"net.delay"' target/debug/logs/shards-*.jsonl
           grep -q '"code":"relay.paired"' target/debug/logs/relay-*.jsonl
