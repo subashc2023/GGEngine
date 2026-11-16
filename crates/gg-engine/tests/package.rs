@@ -1,8 +1,8 @@
 //! An app that runs from a game's package, as the reference player does, ends as its run starts
-//! without one, in any build, with status 1 and `engine.no_package` as the last thing its log says,
-//! before any renderer, so that it needs no GPU.
+//! without one, in any build, with status 1 and `engine.no_package` last in its log, before any
+//! renderer, so it needs no GPU.
 //!
-//! It runs in a process of its own, as a run starts the log, which a process starts once.
+//! It runs in a process of its own, since a process starts the log once.
 
 use std::fs;
 use std::process::ExitCode;

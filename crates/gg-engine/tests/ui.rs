@@ -1,10 +1,14 @@
-//! A game's UI from its file, drawn by a run embedded in a tool, as the editor embeds a game: its
-//! capture matches its reference image, within what GPUs differ by, in rasterizing and filtering;
-//! the tool API's `ui` lists its nodes where the capture shows them; and a click at a button's
-//! pixels through `input` presses it, which the layer shows in the UI's text. It renders, so it
-//! needs a GPU and the validation layer, as the GPU tests do, and lavapipe serves; and it runs in a
-//! process of its own, as a run starts the log, which a process starts once.
-//! `GG_UPDATE_REFERENCES=1` writes the capture as its new reference instead of comparing.
+//! A game's UI from its file, drawn by a run embedded in a tool, as the editor embeds a game. Pins
+//! that:
+//! - its capture matches its reference image, within what GPUs differ by in rasterizing and
+//!   filtering;
+//! - the tool API's `ui` lists its nodes where the capture shows them;
+//! - a click at a button's pixels through `input` presses it, which the layer shows in the UI's
+//!   text.
+//!
+//! It needs a GPU and the validation layer, as the GPU tests do (lavapipe serves), and runs in a
+//! process of its own, since a process starts the log once. `GG_UPDATE_REFERENCES=1` writes the
+//! capture as the new reference instead of comparing.
 #![cfg(feature = "dev")]
 
 use std::fs::{self, File};
@@ -19,18 +23,17 @@ use gg_api::{Captured, Client, Session, UiList, UiNode, UiValue};
 use gg_engine::{App, Context, Event, GameUi, Layer, UiEvent};
 use serde_json::{Value, json};
 
-/// How long the test waits for what should come soon, past which it fails rather than hangs: a
-/// debug build under validation takes a while to start.
+/// How long to wait before failing rather than hanging: a debug build under validation starts
+/// slowly.
 const DEADLINE: Duration = Duration::from_secs(60);
 
 /// The view's size the client asks for: a third of a pixel to each of the canvas's units.
 const SIZE: [u32; 2] = [640, 360];
 
-/// A menu in a rounded panel in the view's middle, its title and three buttons, the first
-/// focused and the last disabled; a row along the view's top, a text at each end; a panel in the
-/// bottom left corner, a textured image beside a text that says what was pressed; and a panel at
-/// the view's right of each widget, a slider, a toggle, a drop-down and a text field, and a list of
-/// more than it shows, which it clips, a bar as wide as it first, under its scroll bar.
+/// A menu (first button focused, last disabled), a row of texts along the view's top, a corner
+/// panel with a textured image and a text saying what was pressed, and a panel of every widget
+/// at the right, its list holding more than it shows (it clips), a bar as wide as its first
+/// under its scroll bar.
 const MENU: &str = r#"(
     focus: "play",
     nodes: [
@@ -140,8 +143,7 @@ const MENU: &str = r#"(
 )
 "#;
 
-/// Draws the menu each frame, its clock set each time to what it says already, and has its status
-/// say which button was pressed, or which widget changed.
+/// Draws the menu each frame; its status says which button was pressed or widget changed.
 struct Menu {
     dir: PathBuf,
     ui: Option<GameUi>,
@@ -189,11 +191,11 @@ fn a_ui_draws_as_its_reference_and_lists_where_it_draws() {
             _ => [250, 250, 250, 255],
         }
     });
-    // The run's on this thread, as its layers stay on the thread they're made on.
+    // The run is on this thread: layers stay on the thread they're made on.
     let client = thread::spawn(|| {
         let mut client = Client::connect(&session(), "test", DEADLINE).expect("it connects");
         let checked = panic::catch_unwind(AssertUnwindSafe(|| check(&mut client)));
-        // Whatever the checks found, so that the run ends.
+        // Whatever the checks found, end the run.
         let quit = client.call("quit", Value::Null);
         if let Err(panic) = checked {
             panic::resume_unwind(panic);
@@ -216,7 +218,6 @@ fn a_ui_draws_as_its_reference_and_lists_where_it_draws() {
     );
 }
 
-/// The session of the run, once its file is written.
 fn session() -> Session {
     let exe = std::env::current_exe().expect("the test's executable");
     let dir = Session::dir(exe.parent().expect("its directory"));
@@ -232,20 +233,19 @@ fn session() -> Session {
     }
 }
 
-/// The node of `list`'s UI named `name`.
 fn node<'l>(list: &'l UiList, name: &str) -> &'l UiNode {
     let found = (list.uis[0].nodes.iter()).find(|node| node.name.as_deref() == Some(name));
     found.unwrap_or_else(|| panic!("a node `{name}`: {list:?}"))
 }
 
-/// Has the view published at [`SIZE`], captures it once it's drawn and compares it with its
-/// reference, checks the tool API's `ui` against what the capture shows, and clicks a button.
+/// Publishes the view at [`SIZE`], compares its capture with the reference, checks the tool API's
+/// `ui` against the capture, and clicks a button.
 fn check(client: &mut Client) {
     let mut reader = gg_api::view::Reader::create(SIZE[0], SIZE[1]).expect("the view's memory");
     let memory = json!({"memory": reader.name()});
     client.call("view", memory).expect("the view published");
     reader.unlink();
-    // A frame at the size asked for, which the next capture rides after.
+    // Wait for a frame at the size asked for; the capture follows it.
     let start = Instant::now();
     while reader.take().is_none_or(|frame| frame.size != SIZE) {
         assert!(
@@ -264,7 +264,7 @@ fn check(client: &mut Client) {
     assert_eq!(size, SIZE);
     compare("ui", SIZE, &pixels);
 
-    // Where the capture shows the nodes, a third of a pixel to a unit.
+    // The nodes sit where the capture shows them, a third of a pixel to a unit.
     let list: UiList = client.call_as("ui", Value::Null).expect("the UIs");
     assert_eq!(list.view, SIZE);
     assert!(list.uis[0].drawn && list.uis[0].input);
@@ -295,7 +295,7 @@ fn check(client: &mut Client) {
     ];
     assert!((middle[0] - 320.0).abs() < 1e-3 && (middle[1] - 180.0).abs() < 1e-3);
 
-    // A click at the options' middle focuses it, and presses it as it's let go.
+    // A click at the options' middle focuses it and presses it on release.
     let options = node(&list, "options").pixels;
     let at = [options[0] + options[2] / 2.0, options[1] + options[3] / 2.0];
     let button = |pressed| json!({"button": {"button": "left", "pressed": pressed}});
@@ -306,7 +306,7 @@ fn check(client: &mut Client) {
     let status = node(&list, "status").text.as_deref();
     assert_eq!(status, Some("PRESSED OPTIONS"));
 
-    // The widgets list what they hold; the list's last line lies past its bottom, which clips it.
+    // The widgets list what they hold; the list's last line lies past its bottom, clipped.
     assert_eq!(node(&list, "volume").value, Some(UiValue::Number(0.7)));
     assert_eq!(node(&list, "sound").value, Some(UiValue::On(true)));
     let difficulty = node(&list, "difficulty");
@@ -315,7 +315,7 @@ fn check(client: &mut Client) {
     let lines = node(&list, "lines").rect;
     let fourth = list.uis[0].nodes.last().expect("the fourth line").rect;
     assert!(fourth[1] > lines[1] + lines[3], "{fourth:?} past {lines:?}");
-    // A click on the toggle flips it, and a click on the text field takes what's typed.
+    // A click flips the toggle; a click on the text field takes typed text.
     let middle = |name: &str| {
         let pixels = node(&list, name).pixels;
         [pixels[0] + pixels[2] / 2.0, pixels[1] + pixels[3] / 2.0]
@@ -333,7 +333,6 @@ fn check(client: &mut Client) {
     assert_eq!(status, Some("CHANGED PLAYER"));
 }
 
-/// Writes a PNG of `size` pixels, each `pixel` of its column and row, to `path`.
 fn write_png(path: &Path, size: [u32; 2], pixel: impl Fn(u32, u32) -> [u8; 4]) {
     let file = File::create(path).expect("the PNG is made");
     let mut encoder = png::Encoder::new(BufWriter::new(file), size[0], size[1]);
@@ -349,7 +348,6 @@ fn write_png(path: &Path, size: [u32; 2], pixel: impl Fn(u32, u32) -> [u8; 4]) {
         .expect("the PNG's pixels are written");
 }
 
-/// The size and RGBA8 pixels of the PNG at `path`.
 fn read_png(path: &Path) -> ([u32; 2], Vec<u8>) {
     let file = File::open(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
@@ -361,10 +359,10 @@ fn read_png(path: &Path) -> ([u32; 2], Vec<u8>) {
     ([info.width, info.height], pixels)
 }
 
-/// Compares RGBA8 `pixels` with the reference image `name`, allowing for how GPUs differ in
+/// Compares RGBA8 `pixels` with the reference image `name`, allowing for GPU differences in
 /// rasterizing and filtering, as the renderer's GPU tests do: a pixel matches if no channel is off
-/// by more than 16, and up to one pixel in a hundred may not match. Writes the pixels beside the
-/// test's directory when they don't match, to look at.
+/// by more than 16, and up to one pixel in a hundred may not match. A mismatch writes the pixels
+/// beside the test's directory.
 fn compare(name: &str, size: [u32; 2], pixels: &[u8]) {
     let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/references")

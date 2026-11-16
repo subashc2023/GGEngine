@@ -1,40 +1,31 @@
-//! Steady-state frames of an app whose layers draw no development UI, egui's, which allocates,
-//! allocate nothing, on any thread: frames
-//! of what games draw, sprites flat, textured and of a sprite sheet's cells, circles filled and
-//! rings, games' meshes with parameters, opaque and blended, a glTF model and a mirrored copy of
-//! it, Khronos's skinned Fox running, its joints posed at each tick, a turning hierarchy and
-//! drifters that wrap, whose ticks despawn and spawn entities, with colliders, whose outlines draw
-//! over the rest, as a layer's own lines and square's outline do,
-//! text, written and shaped again each frame, a sprite and that text on the view's canvas, a UI
-//! from its file, its widgets among it and a list it clips, laid out again each frame as code
-//! changes its text, drawn on the canvas, its focused text field's caret too, and fed input that
-//! changes nothing, and another UI of that file, its list scrolled and its drop-down's options
-//! open over the rest,
-//! emitters' particles, of one the turning parent carries round and one its ticks burst, and an
-//! outline round the turning parent, as the editor outlines what's picked, seen through a
-//! camera of the world's that a pivot the ticks turn carries round, under an environment that
-//! antialiases the view against the frames before, blooms it, grades it, darkens its sky's light
-//! by ambient occlusion, fogs it, reflects what it shows, adapts its exposure to it, blurs it by its
-//! depth of field and its motion and lays a lens's effects over it, its sky an atmosphere whose sun
-//! the ticks raise, its light prefiltered again each degree it rises, and then antialiases it by
-//! SMAA, adapting, blurring and seen through the lens still, its frames counted again once the
-//! switch has settled, run through the engine's main loop headless, without
-//! the tool API, whose development runs' watchers of the assets' files allocate as they look,
-//! three fifths of a tick apart, so that they draw between ticks, once its first frames have run,
-//! by which every image its attach added has decoded off the main thread
-//! and everything has streamed to the GPU. Every frame picks what the view shows at its middle, as the frame before had
-//! it, and outside it, from the first on, and headless, each answer comes back in the frame it's
-//! due: four frames after the one that asked, and two for the pick outside the view, which finds
-//! nothing.
+//! Steady-state frames of an app whose layers draw no development UI (egui's allocates) allocate
+//! nothing, on any thread.
 //!
-//! It runs in one process with a main of its own, so that no other test's threads run beside it,
-//! and counts every allocation the process makes through Rust's allocator while the frames run,
-//! whichever thread makes it; the Vulkan loader, the driver, the validation layer and VMA, beneath
-//! the engine, go uncounted. It needs a GPU, as the GPU tests do, and `GG_SKIP_GPU_TESTS` skips
-//! it. With `--windowed`, it runs the app in a window instead, for checks by hand of frames that
-//! the mouse moves and clicks over: without `dev`, whose watcher of the assets' files allocates as
-//! it looks at them, as `cargo test -p gg-engine --test frames -- --windowed`, and with no gamepad
-//! connected, since gilrs allocates as it reads one.
+//! The app draws what games draw: sprites, circles, meshes, glTF models and a skinned Fox; a
+//! turning hierarchy and wrapping drifters whose ticks despawn and spawn entities; colliders'
+//! outlines; text, also on the canvas; a UI from its file, laid out again each frame, with input
+//! that changes nothing, and a second one with a list scrolled and a drop-down open; particles;
+//! and an outline. A camera that a pivot carries round sees it under an environment with every
+//! effect on: temporal antialiasing, bloom, grade, ambient occlusion, fog, reflections, adapting
+//! exposure, depth of field, motion blur, lens, and an atmosphere whose sun the ticks raise, its
+//! light prefiltered again each degree. Then the environment switches to SMAA, and frames are
+//! counted again once the switch has settled.
+//!
+//! The run is the engine's main loop headless, without the tool API (development runs' watchers of
+//! the assets' files allocate as they look), three fifths of a tick per frame so frames draw
+//! between ticks. Counting starts after the first frames, by which every image the attach added has
+//! decoded off the main thread and streamed to the GPU.
+//!
+//! Every frame picks at the view's middle, as the frame before had it, and outside the view.
+//! Headless, each answer comes back in the frame it's due: four frames after the ask, two for the
+//! pick outside, which finds nothing.
+//!
+//! It runs in one process with a main of its own, so no other test's threads run beside it. It
+//! counts every allocation through Rust's allocator, on any thread; the Vulkan loader, driver,
+//! validation layer and VMA go uncounted. It needs a GPU like the GPU tests; `GG_SKIP_GPU_TESTS`
+//! skips it. `--windowed` runs the app in a window, for hand checks of frames the mouse moves and
+//! clicks over: `cargo test -p gg-engine --test frames -- --windowed`, without `dev` (its watcher
+//! of the assets' files allocates) and with no gamepad connected (gilrs allocates).
 
 // For the allocator that counts, in `common`, and for setting the environment; see the SAFETY
 // comments.
@@ -67,55 +58,53 @@ use serde_json::json;
 
 use crate::common::Counted;
 
-/// What the world's IDs are drawn from, so that every run draws its entities in one order.
+/// Seeds the world's IDs, so every run draws its entities in one order.
 const SEED: u64 = 0x5eed_f2a3;
-/// The frames run before counting, as a run's first frames size what the engine and the app keep:
-/// three periods of what the ticks move, and many turns of every pool.
+/// Frames run before counting: a run's first frames size what the engine and the app keep. Three
+/// periods of what the ticks move, and many turns of every pool.
 const WARM_UP: u64 = 320;
-/// The frames counted: more than a period of every motion.
+/// Frames counted: more than a period of every motion.
 const COUNTED: u64 = 160;
-/// The frames run once the environment antialiases by SMAA rather than temporally, before counting
-/// again, as SMAA's first frame makes its passes and its images; and those counted then.
+/// Frames run after the switch to SMAA before counting again, as its first frame makes its passes
+/// and images; then those counted.
 const SMAA_WARM_UP: u64 = 32;
 const SMAA_COUNTED: u64 = 64;
 /// Every frame the app runs, the last after the last counted.
 const FRAMES: u64 = WARM_UP + COUNTED + SMAA_WARM_UP + SMAA_COUNTED + 1;
-/// The ticks a drifter takes to come back to where it started, the parent to turn round, and the
-/// camera to go round.
+/// Ticks a drifter takes to return to its start, the parent to turn round, and the camera to go
+/// round.
 const PERIOD: u64 = 64;
 const DRIFTERS: usize = 2_000;
-/// Where the drifters drift, across and up, around the origin.
+/// The drifters' field, around the origin.
 const FIELD: Vec2 = Vec2::new(16.0, 9.0);
-/// The pool of sprites' parents, with colliders, and their children, sprites, or circles with
-/// colliders of their own, of which each tick replaces the oldest `REPLACED`, as a game's bullets
-/// and particles come and go.
+/// A pool of sprites with colliders and their children; each tick replaces the oldest `REPLACED`,
+/// as a game's bullets and particles come and go.
 const SUBTREES: usize = 256;
 const REPLACED: usize = 16;
-/// The pool of copies of a model, of which each tick replaces the oldest.
+/// A pool of model copies; each tick replaces the oldest.
 const COPIES: usize = 8;
-/// The frames whose picks the app keeps, more than an answer takes to come back.
+/// Frames whose picks the app keeps: more than an answer takes to come back.
 const ASKED: usize = 8;
-/// The ticks the atmosphere's sun takes to rise a degree, past which its light is prefiltered
-/// again: a few times in the frames counted, as prefiltering is slow on lavapipe.
+/// Ticks the sun takes to rise a degree, past which its light is prefiltered again: a few times in
+/// the frames counted, as prefiltering is slow on lavapipe.
 const SUN_TICKS: u64 = 16;
-/// A headless run's view, in pixels: small, as what's allocated is alike at any size, and lavapipe
-/// draws a frame of 1280 by 720 on CI's two CPUs in about 820 ms, which made the test the longest.
+/// A headless run's view, in pixels: small, as allocations are alike at any size, and lavapipe
+/// drew 1280 by 720 on CI's two CPUs in about 820 ms a frame, which made this the longest test.
 const SIZE: [u32; 2] = [320, 180];
 
-/// The answers that came back: to the picks at the view's middle, those that found an entity and
-/// those that found none; to those outside it, which find none; and those that came back in
-/// another frame than they were due, or found an entity outside the view.
+/// Answers that came back: to picks at the view's middle, those that found an entity and those
+/// that found none; to picks outside the view, which find none; and those in the wrong frame or
+/// finding an entity outside the view.
 static FOUND: AtomicU64 = AtomicU64::new(0);
 static MISSED: AtomicU64 = AtomicU64::new(0);
 static OUTSIDE: AtomicU64 = AtomicU64::new(0);
 static ASTRAY: AtomicU64 = AtomicU64::new(0);
 
-/// What the counted frames allocated, once the app has run them all: antialiased temporally, then
-/// by SMAA.
+/// What the counted frames allocated: antialiased temporally, then by SMAA.
 static ALLOCATED: Mutex<[Option<Counted>; 2]> = Mutex::new([None, None]);
 
-/// A drifter: where it starts, and how far it goes a tick, a whole number of fields across and up
-/// in `PERIOD` ticks, so that it's back where it started each period; and its z.
+/// A drifter: where it starts, how far it goes a tick (a whole number of fields in `PERIOD` ticks,
+/// so it's back each period), and its z.
 #[derive(Clone, Component)]
 struct Drifter {
     start: Vec2,
@@ -124,7 +113,6 @@ struct Drifter {
 }
 
 impl Drifter {
-    /// Drifter `i`, which starts somewhere in the field and drifts one way of sixteen.
     fn new(i: usize) -> Self {
         let mix = |salt: u64| {
             let mut z = (i as u64 ^ salt).wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -140,7 +128,6 @@ impl Drifter {
         }
     }
 
-    /// Where it is at tick `tick`.
     fn at(&self, tick: u64) -> Transform {
         let moved = self.start + self.velocity * (tick % PERIOD) as f32;
         let at = moved.rem_euclid(FIELD) - FIELD / 2.0;
@@ -152,28 +139,26 @@ impl Drifter {
     }
 }
 
-/// What the app's input does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
     Spin,
     Jump,
 }
 
-/// What the app draws with, which its attach adds.
+/// What the app draws with, added by its attach.
 struct Assets {
     quad: Mesh<[f32; 3]>,
     opaque: Shader<[f32; 3], Vec4>,
     blended: Shader<[f32; 3], Vec4>,
     texture: Texture,
     sheet: SpriteSheet,
-    /// Opaque, so that its copies draw in runs that the order of their IDs doesn't split.
+    /// Opaque, so its copies draw in runs that the order of their IDs doesn't split.
     plain: Model,
-    /// The engine's own font, Inter.
     font: Font,
-    /// A panel of texts, buttons and widgets, its list clipped, in the view's bottom left corner.
+    /// In the view's bottom left corner.
     ui: GameUi,
     /// Another UI of the same file, over it, its list scrolled to its last button and its
-    /// drop-down's options open over the rest.
+    /// drop-down's options open.
     open: GameUi,
 }
 
@@ -183,34 +168,31 @@ struct Scene {
     dir: PathBuf,
     assets: Option<Assets>,
     turning: Option<Entity>,
-    /// What carries the camera round.
+    /// Carries the camera round.
     pivot: Option<Entity>,
     /// The emitter the ticks burst.
     sparks: Option<Entity>,
-    /// The atmosphere's sun, which the ticks turn.
     sun: Option<Entity>,
-    /// The environment, which the next tick switches to SMAA once the first frames are counted, as
-    /// `smaa` asks.
+    /// The next tick switches it to SMAA when `smaa` asks.
     environment: Option<Entity>,
     smaa: bool,
     subtrees: VecDeque<Entity>,
     copies: VecDeque<Entity>,
-    /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
-    /// ticks.
+    /// The drifters that wrapped at a tick: empty between ticks.
     wrapped: Mutex<Vec<Entity>>,
     actions: Actions<Act>,
-    /// What the actions did since the last tick, as a game's commands: plain data, which the
-    /// tick applies, here by forgetting.
+    /// What the actions did since the last tick, as a game's commands: plain data the tick
+    /// applies, here by forgetting.
     commands: Vec<Change<Act>>,
     frames: u64,
-    /// The tickets of the picks of each of the last frames, by its number modulo `ASKED`: at the
-    /// view's middle, then outside it.
+    /// Tickets of the last frames' picks, by frame number modulo `ASKED`: at the view's middle,
+    /// then outside it.
     asked: [Option<[Pick; 2]>; ASKED],
-    /// The text each frame draws, written again in its memory.
+    /// Written again in its memory each frame.
     text: String,
 }
 
-/// The atmosphere's sun at tick `tick`: 30° up, and a degree higher every [`SUN_TICKS`] ticks.
+/// The atmosphere's sun at tick `tick`: 30° up, a degree higher every [`SUN_TICKS`] ticks.
 fn sun_at(tick: u64) -> Transform {
     let up = math::to_radians(30.0 + tick as f32 / SUN_TICKS as f32);
     Transform {
@@ -224,9 +206,8 @@ impl Scene {
         self.assets.as_ref().expect("attached")
     }
 
-    /// Spawns the subtree of slot `slot` of the pool, the newest: a sprite with a box collider,
-    /// whose child is another sprite, or in every eighth slot a circle with a circle collider, a
-    /// disc and a ring by turns.
+    /// Spawns the pool's newest subtree: a sprite with a box collider and a sprite child, or in
+    /// every eighth `slot` a circle child with a circle collider, disc and ring by turns.
     fn spawn_subtree(&mut self, world: &mut World, slot: usize) {
         let assets = self.assets.as_ref().expect("attached");
         let at = Transform {
@@ -258,7 +239,6 @@ impl Scene {
         self.subtrees.push_back(root);
     }
 
-    /// Spawns a copy of the plain model at `x`, the newest of the pool.
     fn spawn_copy(&mut self, world: &mut World, x: f32) {
         let at = Transform {
             translation: DVec3::new(f64::from(x), 3.0, -1.0),
@@ -293,7 +273,7 @@ impl Layer for Scene {
         let ui = cx.add_ui("corner", self.dir.join("corner.ui"));
         let open = cx.add_ui("open", self.dir.join("corner.ui"));
         let open = open.expect("the UI reads");
-        // Its list scrolled as its last button takes the focus, then its drop-down opened.
+        // Scroll the list by focusing its last button, then open the drop-down.
         open.set_focus(cx, "three").expect("a button");
         open.set_focus(cx, "mode").expect("a drop-down");
         let enter = Event::Key {
@@ -302,7 +282,7 @@ impl Layer for Scene {
             repeat: false,
         };
         assert_eq!(open.event(cx, &enter), None, "opened");
-        // Its options take the down arrow, lighting the second, rather than the focus moving.
+        // The open options take the down arrow, lighting the second; the focus stays.
         let down = Event::Key {
             key: Key::ArrowDown,
             pressed: true,
@@ -344,7 +324,6 @@ impl Layer for Scene {
             };
             world.spawn((drifter.at(0), drifter, sprite));
         }
-        // A parent that turns, carrying a child of each kind, and a grandchild.
         let at = |x: f32, y: f32, z: f32| Transform {
             translation: Vec3::new(x, y, z).as_dvec3(),
             ..Transform::IDENTITY
@@ -355,15 +334,13 @@ impl Layer for Scene {
         let glass = world.spawn((at(1.5, 0.0, 0.0), glass));
         let sprite = world.spawn((at(-1.5, 0.0, 0.0), assets.sheet.sprite([0, 1], [1, 1])));
         let grandchild = world.spawn((at(0.0, 1.0, 0.0), Sprite::default()));
-        // Text in the engine's own font, which bakes as the first frame draws it.
+        // The font bakes as the first frame draws it.
         let label = Text {
             text: "Turning".to_owned(),
             size: 0.4,
             ..Text::default()
         };
         let label = world.spawn((at(0.0, -1.0, 0.0), label));
-        // Particles from a fountain the parent carries round, which leaves a trail, and sparks
-        // that the ticks burst.
         let fountain = ParticleEmitter {
             rate: 300.0,
             ..ParticleEmitter::default()
@@ -382,8 +359,6 @@ impl Layer for Scene {
             world.set_parent(child, Some(parent)).expect("both alive");
         }
         self.turning = Some(parent);
-        // The camera, looking down a little at the origin from 16 away, which a pivot there
-        // carries round, as the ticks turn it.
         let pivot = world.spawn(Transform::IDENTITY);
         let tilt = Quat::from_rotation_x(-0.25);
         let looking = Transform {
@@ -404,14 +379,9 @@ impl Layer for Scene {
         ));
         world.set_parent(camera, Some(pivot)).expect("both alive");
         self.pivot = Some(pivot);
-        // The default environment's, which antialiases the view, resolving it against the frames
-        // before, blooms it, and darkens its sky's light by ambient occlusion, but graded, which
-        // bakes its grade's table each frame, under an atmosphere, whose sun the ticks turn and
-        // which the occlusion needs as a sky, in the default fog, which a pass of its own fogs
-        // what's opaque by and what blends draws over in another, reflecting, which traces the
-        // view's depth against the colors each frame keeps for the next, its exposure adapting,
-        // metered and read back each frame; with the default depth of field and motion blur, and a
-        // lens of each of its effects, each in passes of their own, under TAA and then SMAA.
+        // Every effect on, each in passes of its own: the grade bakes its table each frame, the
+        // occlusion needs the atmosphere as a sky, reflections trace the view's depth against the
+        // colors each frame keeps for the next, and exposure is metered and read back each frame.
         self.environment = Some(world.spawn(Environment {
             adaptation: Some(Adaptation::default()),
             sky: Sky::Atmosphere(Atmosphere::default()),
@@ -431,14 +401,14 @@ impl Layer for Scene {
             ..Environment::default()
         }));
         self.sun = Some(world.spawn((sun_at(0), Light::default())));
-        // The pair, and a copy mirrored, which culls the other way.
+        // A mirrored copy culls the other way.
         pair.spawn(world, at(-4.0, 0.0, 2.0));
         let mirrored = Transform {
             scale: Vec3::new(-1.0, 1.0, 1.0),
             ..at(4.0, 0.0, 2.0)
         };
         pair.spawn(world, mirrored);
-        // The Fox, its units centimeters, running on the spot below the pair.
+        // The Fox's units are centimeters.
         let below = Transform {
             scale: Vec3::splat(0.04),
             ..at(-4.0, -3.0, 2.0)
@@ -453,7 +423,7 @@ impl Layer for Scene {
         for i in 0..COPIES {
             self.spawn_copy(world, i as f32);
         }
-        // Room for every drifter to wrap at once, so that the list never grows at a tick.
+        // Room for every drifter to wrap at once, so the list never grows at a tick.
         self.wrapped.get_mut().expect("unshared").reserve(DRIFTERS);
         cx.set_colliders_shown(true);
         let click = Binding::Button(Source::Button(MouseButton::Left));
@@ -516,7 +486,7 @@ impl Layer for Scene {
         let assets = self.assets();
         let (quad, opaque) = (assets.quad, assets.opaque);
         let cell = assets.sheet.sprite([1, 0], [1, 1]);
-        // Away from the view's middle, where these, of no entity, would hide what the picks find.
+        // Away from the view's middle, where these entity-less draws would hide what picks find.
         let below = Mat4::from_translation(Vec3::new(0.0, -5.0, 0.0));
         cx.draw(quad, opaque, below, Vec4::new(0.5, 0.5, 0.5, 1.0));
         let (left, right) = (Vec3::new(-2.0, -5.0, 0.0), Vec3::new(2.0, -5.0, 0.0));
@@ -529,7 +499,7 @@ impl Layer for Scene {
             ..Circle::default()
         };
         cx.draw_circle(Mat4::from_translation(Vec3::new(1.5, 5.0, 0.0)), ring);
-        // Text shaped again each frame, of the same length, and kerned, over two lines.
+        // Same-length text shaped again each frame, kerned, over two lines.
         self.text.clear();
         let written = write!(self.text, "Frame {:06}\nAVA Æ€ ‘f’ \u{7}漢", self.frames);
         written.expect("a string takes any text");
@@ -541,8 +511,7 @@ impl Layer for Scene {
         };
         let corner = Mat4::from_translation(Vec3::new(-6.0, -6.0, 0.0));
         cx.draw_text(corner, &self.text, &style);
-        // On the canvas, from the view's top right, away from its middle, where the cursor is
-        // found too, as a menu finds what it's over.
+        // Away from the view's middle; the cursor is found too, as a menu finds what it's over.
         let mut canvas = cx.canvas([Align::End, Align::Start]);
         let backing = Mat4::from_translation(Vec3::new(-200.0, -80.0, 0.0))
             * Mat4::from_scale(Vec3::new(360.0, 120.0, 1.0));
@@ -559,9 +528,8 @@ impl Layer for Scene {
         let inset = Mat4::from_translation(Vec3::new(-40.0, -80.0, 0.0));
         canvas.draw_text(inset, &self.text, &on_canvas);
         let _ = canvas.cursor();
-        // The UI's text shaped and laid out again, its title set to what it says already, and keys
-        // it takes nothing from: a letter its text field types nothing for without its text, and a
-        // step down from that field, its last.
+        // Shape and lay out the UI's text again: a title set to what it says, and keys that change
+        // nothing (a letter the text field takes no text for, a step down from the last field).
         let ui = self.assets().ui;
         ui.set_text(cx, "frame", &self.text).expect("a text");
         ui.set_text(cx, "title", "CORNER").expect("a text");
@@ -580,7 +548,6 @@ impl Layer for Scene {
         cx.outline(turning, Vec4::new(1.0, 0.6, 0.1, 1.0), 1.0);
         self.frames += 1;
         let frame = self.frames;
-        // The picks of the frame `back` before this one.
         let asked = |back: u64| {
             let frame = frame.checked_sub(back)?;
             self.asked[frame as usize % ASKED]
@@ -596,8 +563,8 @@ impl Layer for Scene {
             };
             counted.fetch_add(1, Ordering::Relaxed);
         }
-        // The view's middle, where the last frame had it, or a headless run's at first; and left of
-        // the window.
+        // The view's middle as the last frame had it (a headless run's at first), and a point left
+        // of the window.
         let middle = cx
             .view()
             .map_or(SIZE.map(|side| f64::from(side) / 2.0), |view| {
@@ -608,8 +575,7 @@ impl Layer for Scene {
         let picks = [middle, [-1.0, middle[1]]].map(|at| cx.pick(at).expect("two a frame"));
         self.asked[frame as usize % ASKED] = Some(picks);
         if self.frames == WARM_UP {
-            // What the attach added decoded and streamed to the GPU long before, so that the
-            // frames counted draw it all.
+            // The attach's assets must be decoded and streamed, so the counted frames draw all.
             let loading = cx.streaming();
             assert!(loading.is_empty(), "still on its way: {loading:?}");
             common::start();
@@ -634,7 +600,6 @@ impl Layer for Scene {
     }
 }
 
-/// Writes a PNG of `size` pixels, each `pixel` of its column and row, to `path`.
 fn write_png(path: &Path, size: [u32; 2], pixel: impl Fn(u32, u32) -> [u8; 4]) {
     let file = fs::File::create(path).expect("the PNG is made");
     let mut encoder = png::Encoder::new(BufWriter::new(file), size[0], size[1]);
@@ -649,9 +614,9 @@ fn write_png(path: &Path, size: [u32; 2], pixel: impl Fn(u32, u32) -> [u8; 4]) {
     written.expect("the PNG's pixels are written");
 }
 
-/// Writes what the app loads to `dir`: a checker texture, a sprite sheet of 2 by 2 cells, and two
-/// models of quads, which share a buffer and the checker: the pair, one opaque, double-sided and
-/// textured, one blended; and the plain one, opaque.
+/// Writes the app's assets to `dir`: a checker, a sheet of 2 by 2 cells, and two quad models
+/// sharing a buffer and the checker. The pair is an opaque, double-sided, textured quad and a
+/// blended one; the plain model is opaque.
 fn write_assets(dir: &Path) {
     fs::create_dir_all(dir).expect("the test's directory is made");
     let checker = |x: u32, y: u32| {
@@ -663,7 +628,6 @@ fn write_assets(dir: &Path) {
     let cells = |x: u32, y: u32| [(x / 8 * 200) as u8, (y / 8 * 200) as u8, 120, 255];
     write_png(&dir.join("cells.png"), [16, 16], cells);
 
-    // A quad's corners, the corners' texture coordinates, and its two triangles.
     let corners = [
         -1.0f32, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0,
     ];
@@ -717,10 +681,8 @@ fn write_assets(dir: &Path) {
     fs::write(dir.join("corner.ui"), CORNER).expect("the UI is written");
 }
 
-/// The UI in the view's bottom left corner, away from its middle, where the picks look: a rounded
-/// panel of a title, a text, two buttons, the second disabled, a slider, a toggle and a drop-down,
-/// a list of more buttons than it shows, which it clips, and a text field at the bottom, focused,
-/// its caret and its text drawn within it.
+/// A UI in the view's bottom left corner, away from its middle, where the picks look. Its list has
+/// more buttons than it shows, and its text field is focused, its caret and text drawn.
 const CORNER: &str = r#"(
     focus: "typed",
     nodes: [
@@ -785,17 +747,16 @@ fn main() {
              --windowed`"
         );
     }
-    // CI runners without a GPU or a Vulkan driver, Windows' and macOS's, set this. Linux CI runs
-    // the test on lavapipe instead.
+    // CI runners without a GPU or Vulkan driver (Windows, macOS) set this. Linux CI runs the test
+    // on lavapipe.
     if std::env::var_os("GG_SKIP_GPU_TESTS").is_some_and(|value| !value.is_empty()) {
         println!("the frames test skipped: GG_SKIP_GPU_TESTS is set");
         return;
     }
-    // Overlays such as Steam's and OBS's load into every instance as implicit layers, and can
-    // add validation errors of their own. The loader warns of each layer it disables as each
-    // instance starts, a general message, which `RUST_LOG` quiets by naming that target alone, so
-    // that the rest keeps the default filter: one of the environment's could log, and so allocate,
-    // as the frames run, as one at trace level would for every event.
+    // Overlays such as Steam's and OBS's load into every instance as implicit layers and can add
+    // validation errors. The loader warns of each layer it disables, a general message that
+    // `RUST_LOG` quiets by naming that target alone, so the rest keeps the default filter: an
+    // environment's could log, and so allocate, as the frames run (trace level logs every event).
     // SAFETY: no other thread exists yet to read the environment.
     unsafe {
         std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~");
@@ -811,13 +772,13 @@ fn main() {
         .seeded(SEED)
         .headless_step(Tick::DT * 3 / 5)
         .layer(scene);
-    // Four threads, so that the job system has threads of its own on a machine of two CPUs too.
+    // Four threads, so the job system has threads of its own on a two-CPU machine too.
     let frames = FRAMES.to_string();
     let size = format!("{}x{}", SIZE[0], SIZE[1]);
     let mut args = vec!["--frames", &frames, "--threads", "4"];
     if !windowed {
-        // Without the tool API, whose runs in a development build have threads watch the assets'
-        // files, which allocate as they look at them, as docs/PLAN.md's Deferred says.
+        // No tool API: in a development build its runs watch the assets' files on threads that
+        // allocate as they look, as docs/PLAN.md's Deferred says.
         args.extend(["--headless", "--no-api", "--size", &size]);
     }
     assert_eq!(
@@ -840,9 +801,9 @@ fn main() {
         }
         println!("{frames} frames {how}, {antialiased}, allocated nothing");
     }
-    // Headless, every frame renders, so each answer comes back in the frame it's due: all but
-    // those of the last four frames' picks at the middle, and of the last two's outside the view.
-    // A window's frames may not, as one that's minimized doesn't.
+    // Headless, every frame renders, so each answer comes back when due: all but the last four
+    // frames' picks at the middle and the last two's outside. A window's may not (minimized, it
+    // doesn't render).
     if !windowed {
         let frames = FRAMES;
         let [found, missed, outside, astray] =

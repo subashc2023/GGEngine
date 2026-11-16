@@ -1,6 +1,6 @@
-//! The allocator the allocation tests count with: System's, which counts every allocation the
-//! process makes through Rust's allocator between [`start`] and [`stop`], whichever thread makes
-//! it, and keeps where the first was made.
+//! The allocation tests' allocator: System's, counting every allocation the process makes through
+//! Rust's allocator between [`start`] and [`stop`], on any thread, and keeping where the first was
+//! made.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::backtrace::Backtrace;
@@ -10,13 +10,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 
-/// System's allocator, which counts the allocations made while `COUNTING` is set, and keeps where
-/// the first was made.
+/// System's allocator, counting allocations while `COUNTING` is set.
 struct Counting;
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-/// The backtrace of the first allocation counted, whose frames say which thread made it.
+/// The first counted allocation's backtrace; its frames say which thread made it.
 static FIRST: Mutex<Option<Backtrace>> = Mutex::new(None);
 
 thread_local! {
@@ -28,9 +27,8 @@ fn count() {
     if !COUNTING.load(Ordering::Relaxed) || IN_COUNT.with(|in_count| in_count.replace(true)) {
         return;
     }
-    // Neither while panicking, since the panic hook captures a backtrace too, nor through
-    // `thread::current`, which std aborts for as it runs inside itself, as it would if its own
-    // first allocation came here: the backtrace's frames say which thread.
+    // No backtrace while panicking (the panic hook captures one too), and no `thread::current`:
+    // std aborts if its own first allocation comes here. The backtrace's frames say which thread.
     if ALLOCATIONS.fetch_add(1, Ordering::Relaxed) == 0 && !thread::panicking() {
         let first = Backtrace::force_capture();
         if let Ok(mut kept) = FIRST.lock() {
@@ -71,14 +69,14 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// Counts from none, forgetting what was counted before.
+/// Counts from none.
 pub fn start() {
     ALLOCATIONS.store(0, Ordering::SeqCst);
     *FIRST.lock().expect("no thread panicked holding it") = None;
     COUNTING.store(true, Ordering::SeqCst);
 }
 
-/// Stops counting, and returns what was counted since [`start`].
+/// Stops counting and returns the count.
 pub fn stop() -> Counted {
     COUNTING.store(false, Ordering::SeqCst);
     Counted {
@@ -87,14 +85,14 @@ pub fn stop() -> Counted {
     }
 }
 
-/// The allocations counted between a [`start`] and its [`stop`], and the backtrace of the first,
-/// unless it was made while panicking.
+/// The allocations counted between [`start`] and [`stop`], and the first's backtrace unless it was
+/// made while panicking.
 pub struct Counted {
     pub allocations: u64,
     first: Option<Backtrace>,
 }
 
-/// As a failure says it: how many times, and where the first was made.
+/// For a failure message: how many times, and where the first was made.
 impl fmt::Display for Counted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} times; the first, from", self.allocations)?;

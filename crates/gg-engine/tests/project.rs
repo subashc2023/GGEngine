@@ -1,7 +1,7 @@
 //! A game whose project's manifest doesn't read ends as its run starts, with status 1 and the
-//! manifest's error as the last thing its log says, before any renderer, so that it needs no GPU.
+//! manifest's error last in its log, before any renderer, so it needs no GPU.
 //!
-//! It runs in a process of its own, as a run starts the log, which a process starts once.
+//! It runs in a process of its own, since a process starts the log once.
 
 use std::fs;
 use std::path::Path;

@@ -1,9 +1,8 @@
-//! A run embedded in a tool, as the editor embeds a game: once a client has its view published to
-//! memory the client made, a frame comes as the client takes the last, at the size the client asks
-//! for, with the viewpoint and the look it drew with, and the client's input reaches the layers,
-//! until it asks the run to end. It renders, so it needs a GPU and the validation layer, as the GPU
-//! tests do; and it runs in a process of its own, as a run starts the log, which a process starts
-//! once.
+//! A run embedded in a tool, as the editor embeds a game. Once a client has the view published to
+//! memory it made, a frame comes as the client takes the last, at the size it asks for, with the
+//! viewpoint and look it drew with, and the client's input reaches the layers, until it asks the
+//! run to end. It needs a GPU and the validation layer, as the GPU tests do, and runs in a process
+//! of its own, since a process starts the log once.
 #![cfg(feature = "dev")]
 
 use std::panic::{self, AssertUnwindSafe};
@@ -16,8 +15,8 @@ use gg_api::{Captured, Client, Looked, Session};
 use gg_engine::{App, Context, Key, Layer, Tick};
 use serde_json::{Value, json};
 
-/// How long the test waits for what should come soon, past which it fails rather than hangs: a
-/// debug build under validation takes a while to start.
+/// How long to wait before failing rather than hanging: a debug build under validation starts
+/// slowly.
 const DEADLINE: Duration = Duration::from_secs(60);
 
 /// Clears the view to green, or to red while W is held.
@@ -33,7 +32,7 @@ impl Layer for Lit {
 const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
-/// Takes frames until one comes that `wanted` says is the one, and returns it with its pixels.
+/// Takes frames until `wanted` accepts one, and returns it with its pixels.
 fn take_until(reader: &mut Reader, wanted: impl Fn(&Frame, &[u8]) -> bool) -> (Frame, Vec<u8>) {
     let start = Instant::now();
     loop {
@@ -49,7 +48,6 @@ fn take_until(reader: &mut Reader, wanted: impl Fn(&Frame, &[u8]) -> bool) -> (F
     }
 }
 
-/// Whether every pixel of `pixels` is `color`.
 fn all(pixels: &[u8], color: [u8; 4]) -> bool {
     pixels
         .as_chunks::<4>()
@@ -64,11 +62,11 @@ fn an_embedded_run_publishes_its_view_as_its_client_takes_it() {
         println!("skipped: GG_SKIP_GPU_TESTS is set");
         return;
     }
-    // The run's on this thread, as its layers stay on the thread they're made on.
+    // The run is on this thread: layers stay on the thread they're made on.
     let client = thread::spawn(|| {
         let mut client = Client::connect(&session(), "test", DEADLINE).expect("it connects");
         let checked = panic::catch_unwind(AssertUnwindSafe(|| check(&mut client)));
-        // Whatever the checks found, so that the run ends.
+        // Whatever the checks found, end the run.
         let quit = client.call("quit", Value::Null);
         if let Err(panic) = checked {
             panic::resume_unwind(panic);
@@ -87,7 +85,6 @@ fn an_embedded_run_publishes_its_view_as_its_client_takes_it() {
     );
 }
 
-/// The session of the run, once its file is written.
 fn session() -> Session {
     let exe = std::env::current_exe().expect("the test's executable");
     let dir = Session::dir(exe.parent().expect("its directory"));
@@ -103,9 +100,8 @@ fn session() -> Session {
     }
 }
 
-/// Has the view published to memory of its own, and checks the frames it takes from it: green, at
-/// the size it asks, the next only once it has taken the last, red once it holds W, and coming as
-/// fast paused as playing.
+/// Publishes the view to memory of its own and checks the frames taken: green, at the size asked,
+/// the next only once the last is taken, red once W is held, and as fast paused as playing.
 fn check(client: &mut Client) {
     let mut reader = Reader::create(64, 32).expect("memory for the view");
     let memory = json!({"memory": reader.name()});
@@ -124,8 +120,8 @@ fn check(client: &mut Client) {
     let (frame, _) = take_until(&mut reader, |frame, _| frame.size == [32, 16]);
     assert!(frame.started <= frame.published);
 
-    // The frames drawn with a look carry its viewpoint and its revision; and a capture of the
-    // game's own view, whose frame isn't published, comes all the same.
+    // Frames drawn with a look carry its viewpoint and revision; a capture of the game's own
+    // view, whose frame isn't published, still comes.
     let viewpoint = json!({"position": [0, 0, 5], "rotation": [0, 0, 0, 1],
         "projection": {"Perspective": {"fov": 1.0, "near": 0.1}}});
     let looked: Looked =
@@ -142,8 +138,8 @@ fn check(client: &mut Client) {
     client.call("input", held).expect("the input");
     take_until(&mut reader, |_, pixels| all(pixels, [255, 0, 0, 255]));
 
-    // Paused, the frames come as the client takes them, as fast as playing, rather than a tick
-    // apart or more, as a paused headless run's do while no request comes.
+    // Paused, frames come as fast as the client takes them, as when playing, not a tick or more
+    // apart as in a paused headless run with no request.
     let playing = shortest_apart(&mut reader);
     client.call("pause", Value::Null).expect("paused");
     let paused = shortest_apart(&mut reader);
@@ -153,8 +149,8 @@ fn check(client: &mut Client) {
     );
 }
 
-/// The shortest time, by the run's clock, between the starts of two frames one after the other,
-/// among the next 16 it renders, taking each as it comes.
+/// The shortest time, by the run's clock, between the starts of consecutive frames among the next
+/// 16, taking each as it comes.
 fn shortest_apart(reader: &mut Reader) -> Duration {
     let (mut last, _) = take_until(reader, |_, _| true);
     let mut shortest = Duration::MAX;

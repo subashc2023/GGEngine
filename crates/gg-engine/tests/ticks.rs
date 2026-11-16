@@ -1,21 +1,16 @@
-//! Steady-state ticks allocate nothing, on any thread: a layer's ticks that apply its commands,
-//! run a system on the job system's threads and another on the ticks' thread alone, and hash the
-//! world, as a recorded run's do, once their first ticks have run, with scripts that despawn their
-//! own entities and spawn others in their place among them, and a Luau script that moves its
-//! entities and counts its ticks in its own component, sprites' flipbooks and tweens of their
-//! fields, looping and going back and forth, skinned foxes' state machines, blending a walk and a
-//! run along a speed that the layer sets for some and a Luau script for the rest, and cutting from
-//! a walk to a hop at a trigger and back, and agents walking to and fro over a navmesh, each
-//! planning a path round a wall's end at each end of its way, turning its corners as each comes in
-//! sight, and steering round the others coming the other way; before the job system's threads
-//! start,
-//! as in a run on one thread, and after, once each thread has waited for jobs and slept, as it
-//! allocates the first time it does; and ticks that despawn entities and spawn others in their
-//! place, as a game's bullets and particles come and go.
+//! Steady-state ticks allocate nothing, on any thread, once their first ticks have run. A layer's
+//! ticks apply its commands, run a system on the job system's threads and another on the ticks'
+//! thread alone, and hash the world, as a recorded run's do. They also run scripts that respawn
+//! their entities, a Luau script, flipbooks and tweens, skinned foxes' state machines (blending
+//! and cutting), and agents planning and steering paths round a wall's ends over a navmesh.
 //!
-//! It runs in one process with a main of its own, so that no other test's threads run beside it,
-//! and counts every allocation the process makes while the ticks run, whichever thread makes it,
-//! keeping where the first was made.
+//! This holds before the job system's threads start, as in a run on one thread, and after, once
+//! each thread has waited for jobs and slept (it allocates the first time). Separate ticks
+//! despawn entities and spawn others in their place, as a game's bullets and particles do.
+//!
+//! It runs in one process with a main of its own, so no other test's threads run beside it. It
+//! counts every allocation the process makes while the ticks run, on any thread, keeping where the
+//! first was made.
 
 // For the allocator that counts, in `common`; see its SAFETY comments.
 #![allow(unsafe_code)]
@@ -42,16 +37,16 @@ use gg_engine::{
 
 use crate::common::Counted;
 
-/// The ticks run before counting, on one thread and again on four, as a run's first ticks size
-/// what the world and the layer keep, and the pool's what its threads make as they first wait.
+/// Ticks run before counting, on one thread and again on four: a run's first ticks size what the
+/// world and the layer keep, and the pool's threads make allocations as they first wait.
 const WARM_UP: u64 = 64;
-/// The ticks counted.
+/// Ticks counted.
 const COUNTED: u64 = 1_000;
 /// The parents, each with a child, that churn, and how many of them each tick replaces.
 const SUBTREES: usize = 2_000;
 const REPLACED: usize = 20;
-/// The ticks of churn counted: far more than the world's map of IDs takes, at this population,
-/// to run out of room, so that one that grew at a time its keys pick would grow among them.
+/// Ticks of churn counted: far more than the world's map of IDs takes, at this population, to run
+/// out of room, so a growth at a time its keys pick would land among them.
 const CHURNED: u64 = 20_000;
 
 /// The allocations the process makes while `f` runs, on every thread, and where the first was made.
@@ -64,16 +59,15 @@ fn allocations(f: impl FnOnce()) -> Counted {
 #[derive(Clone, Component)]
 struct Velocity(Vec3);
 
-/// On a third of the movers, so that they're two tables.
+/// On a third of the movers, making two tables.
 #[derive(Clone, Component)]
 struct Heavy;
 
-/// The scripted entities, of which each tick's scripts replace a `LIFETIME`th.
+/// The scripted entities, of which each tick replaces a `LIFETIME`th.
 const EPHEMERA: u32 = 256;
 const LIFETIME: u32 = 64;
 
-/// A script that drifts its entity, and once its ticks are up despawns it and spawns another in its
-/// place.
+/// Drifts its entity; once its ticks are up, despawns it and spawns another.
 #[derive(Clone, Component)]
 struct Ephemeral {
     left: u32,
@@ -96,16 +90,14 @@ impl Script for Ephemeral {
     }
 }
 
-/// The entities a Luau script moves.
+/// Entities a Luau script moves.
 const DRIFTERS: u32 = 256;
-
-/// The sprites that flipbooks play and tweens ease.
+/// Sprites with flipbooks and tweens.
 const ANIMATED: u32 = 256;
-
-/// The agents walking to and fro, half from each end.
+/// Agents walking to and fro, half from each end.
 const WALKERS: u32 = 24;
 
-/// A static box of `size` around `at`, which the navmesh is baked from.
+/// A static box the navmesh is baked from.
 fn solid(world: &mut World, at: Vec3, size: Vec3) {
     let placed = Transform {
         translation: at.as_dvec3(),
@@ -136,14 +128,13 @@ end
 return Drift
 "#;
 
-/// The foxes whose state machines blend Walk and Run along a speed, half of them the layer's, which
-/// it sets at each tick, and half a Luau script's; and those that cut from a walk to a hop, Run
-/// played once, at a trigger the layer pulls every `HOPS` ticks, and back once it's done.
+/// Foxes blending Walk and Run along a speed (half set by the layer, half by a Luau script), and
+/// foxes cutting from a walk to a hop (Run once) at a trigger pulled every `HOPS` ticks.
 const BLENDING: u32 = 8;
 const CUTTING: u32 = 4;
 const HOPS: u64 = 48;
 
-/// Sets its entity's state machine's speed at each tick, between a walk's and a run's.
+/// Sets its entity's speed each tick, between a walk's and a run's.
 const PACE: &str = r#"
 local Pace = gg.declare("Pace", { time = 0 })
 
@@ -163,7 +154,6 @@ fn param(name: &str, value: ParamValue) -> AnimationParam {
     }
 }
 
-/// A state of `name` that plays `motion`, at `speed`, as `playback` says.
 fn state(name: &str, motion: StateMotion, speed: f32, playback: Playback) -> AnimationState {
     AnimationState {
         name: name.to_owned(),
@@ -173,8 +163,7 @@ fn state(name: &str, motion: StateMotion, speed: f32, playback: Playback) -> Ani
     }
 }
 
-/// A transition from `from`, or from any state, to `to`, cutting, on `conditions`, after `exit` of
-/// its state's motion if that's given.
+/// A cutting transition; `from` of `None` is any state.
 fn cut(
     from: Option<&str>,
     to: &str,
@@ -190,7 +179,6 @@ fn cut(
     }
 }
 
-/// A fox's machine that blends Walk and Run along its speed, and stays.
 fn blending() -> AnimationStates {
     let points = [("Walk", 1.6), ("Run", 5.0)].map(|(clip, at)| BlendPoint {
         clip: clip.to_owned(),
@@ -207,8 +195,6 @@ fn blending() -> AnimationStates {
     }
 }
 
-/// A fox's machine that walks, and hops at its trigger, from any state, and walks again once the
-/// hop's done.
 fn cutting() -> AnimationStates {
     let clip = |name: &str| StateMotion::Clip(name.to_owned());
     let hop = ParamCondition {
@@ -233,23 +219,20 @@ enum Command {
     Speed(f32),
 }
 
-/// The rows of `Movers`' system that ran on the threads the job system started rather than on the
-/// ticks' thread.
+/// Rows of `Movers`' system that ran on the job system's threads, not the ticks' thread.
 static ON_WORKERS: AtomicU64 = AtomicU64::new(0);
 
-/// Whether the calling thread is one the job system started, which the ticks' thread isn't.
+/// Whether this is a job system thread; the ticks' thread isn't.
 fn on_a_worker() -> bool {
     thread::current()
         .name()
         .is_some_and(|name| name.starts_with("gg-job-"))
 }
 
-/// 5,000 movers, in tables of six chunks between them, which each tick moves at its speed on the
-/// job system's threads, and whose heavy ones it turns back on the ticks' thread alone;
-/// `EPHEMERA` scripted entities, and `DRIFTERS` that a Luau script moves, whose scripts it runs;
-/// `ANIMATED` sprites, whose animation it steps; the Fox, `BLENDING` and `CUTTING` times, the first
-/// half of the blending ones and the cutting ones driven by its tick; and `WALKERS` agents on a
-/// floor between pillars, which its navigation steps, each sent back the way it came as it arrives.
+/// 5,000 movers, in tables of six chunks between them: each tick moves them at its speed on the
+/// job system's threads, and turns the heavy ones back on the ticks' thread alone. The layer's
+/// tick drives the first half of the blending foxes and the cutting ones. Walkers are sent back
+/// the way they came on arrival.
 struct Movers {
     commands: Vec<Command>,
     speed: f32,
@@ -257,8 +240,7 @@ struct Movers {
     fox: Option<Model>,
     blending: Vec<Entity>,
     cutting: Vec<Entity>,
-    /// How many times an agent has been sent back the way it came, and the most corners of a path
-    /// one walked.
+    /// Times an agent was sent back, and the most corners of a path one walked.
     turned: u64,
     corners: usize,
 }
@@ -346,7 +328,7 @@ impl Layer for Movers {
         for (x, z) in [(-5.5, -5.5), (5.5, -5.5), (-5.5, 5.5), (5.5, 5.5)] {
             solid(world, Vec3::new(x, 1.0, z), Vec3::new(1.5, 2.0, 1.5));
         }
-        // Between the ends, a gap past each of its own, so that every path turns its corners.
+        // A wall between the ends with a gap past each end, so every path turns corners.
         solid(world, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.4, 2.0, 8.0));
         let volume = NavMeshVolume {
             size: Vec3::new(16.0, 4.0, 16.0),
@@ -412,8 +394,7 @@ impl Layer for Movers {
     }
 }
 
-/// Runs `count` ticks from tick `number`, queuing a command every 8th, and hashing the world
-/// after each.
+/// Runs `count` ticks from `number`, queuing a command every 8th and hashing the world after each.
 fn ticks(movers: &mut Movers, cx: &mut Context, number: &mut u64, count: u64) {
     for _ in 0..count {
         if number.is_multiple_of(8) {
@@ -426,8 +407,7 @@ fn ticks(movers: &mut Movers, cx: &mut Context, number: &mut u64, count: u64) {
     }
 }
 
-/// Parents, each with a child, of which each tick despawns the oldest `REPLACED` and spawns as many
-/// anew in their place.
+/// Parents with a child each: every tick despawns the oldest `REPLACED` and spawns as many anew.
 struct Churn {
     roots: VecDeque<Entity>,
 }
@@ -459,12 +439,11 @@ impl Churn {
     }
 }
 
-/// Has the ticks' thread wait 100 ms, with no job left to take, for rows another thread holds: long
-/// enough for it to find none and sleep, as it does only when a wait drags on, which ticks this
-/// quick can put off for a long while, though a run's ticks come to one at some point. The pool's
-/// other threads sleep at the end of every tick. The ticks' thread holds its rows until another
-/// thread has taken one, since rows this quick it could otherwise finish before a sleeping thread
-/// woke to take any, as on one or two cores.
+/// Has the ticks' thread wait 100 ms, with no job left to take, for rows another thread holds:
+/// long enough to find none and sleep. It sleeps only when a wait drags on, which ticks this quick
+/// can put off a long while. The pool's other threads sleep at the end of every tick. The ticks'
+/// thread holds its rows until another has taken one: rows this quick it could otherwise finish
+/// before a sleeping thread woke, as on one or two cores.
 fn sleep_the_ticks_thread(world: &mut World) {
     let held = AtomicBool::new(false);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -483,10 +462,9 @@ fn sleep_the_ticks_thread(world: &mut World) {
     );
 }
 
-/// Checks that what the job system's other threads allocate is counted: that a pass whose rows
-/// allocate once each on those threads counts as many allocations as such rows at least. The
-/// ticks' thread holds its rows until one has run on another thread, since rows this quick it could
-/// otherwise finish before a sleeping thread woke to take any, as on one or two cores.
+/// Checks that the job system's other threads' allocations are counted: a pass whose rows
+/// allocate once each there must count at least that many. Holds rows as [`sleep_the_ticks_thread`]
+/// does.
 fn workers_are_counted(world: &mut World) {
     let elsewhere = AtomicU64::new(0);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -556,7 +534,7 @@ fn main() {
             counted.allocations, 0,
             "{COUNTED} ticks on {on} allocated {counted}"
         );
-        // So that the count covers paths planned at the ticks it counts, round the wall's ends.
+        // The count must cover paths planned round the wall's ends.
         assert!(
             movers.turned > turned,
             "no agent was sent back in the {COUNTED} ticks on {on}"
@@ -568,7 +546,7 @@ fn main() {
         );
         let on_workers = ON_WORKERS.load(Ordering::Relaxed);
         if threads > 1 {
-            // So that the count covers ticks whose thread waited for jobs the others took.
+            // The count must cover ticks whose thread waited for jobs the others took.
             assert!(
                 on_workers > 0,
                 "no row of the {COUNTED} ticks on {on} ran on the job system's other threads"
@@ -579,17 +557,14 @@ fn main() {
              system's other threads"
         );
     }
-    // The Luau script ran at every tick, its counts say.
     let world = cx.world();
     let drifter = world.entities(Some("Drift")).expect("declared").next();
     let ran = world.get_field(drifter.expect("a drifter"), "Drift", "ticks");
     assert_eq!(ran.expect("its count"), Value::F64(number as f64));
-    // The foxes blended, paced by the layer and by their script, and hopped as they went.
     let machines = world.query::<&AnimationStates>();
     let states: Vec<&str> = machines.map(|machine| machine.state.as_str()).collect();
     let count = |state| states.iter().filter(|&&of| of == state).count();
-    // The cutting ones 16 ticks into a hop, of the 38 that Run's 1.16 seconds take at twice its
-    // speed.
+    // The cutting ones are 16 ticks into a hop of 38 (Run's 1.16 seconds at twice its speed).
     assert_eq!(number % HOPS, 16);
     let counted = (count("Move"), count("Hop"));
     assert_eq!(counted, (BLENDING as usize, CUTTING as usize), "{states:?}");
@@ -600,7 +575,7 @@ fn main() {
     workers_are_counted(cx.world_mut());
     println!("allocations on the job system's other threads count");
 
-    // A turn of the pool first, as a run's first ticks of churn take what its tables keep.
+    // A turn of the pool first: a run's first churn ticks size what its tables keep.
     let mut churn = Churn::new(cx.world_mut());
     for _ in 0..SUBTREES / REPLACED {
         churn.tick(cx.world_mut());
