@@ -77,8 +77,8 @@
 //! Values are written as recordings write them, entities by ID and textures by name, and read
 //! only at their tick, against the world then. The joiner names textures as its host does,
 //! whatever ID files its disk holds: as the host's world gives them, and as its `n` lines name
-//! those it adds after, before the inputs that may name them. A peer's ticks allocate, for inputs'
-//! text, hash lines and packets, as recorded ticks do.
+//! those it adds after, before the inputs that may name them. A peer's ticks allocate, for inputs
+//! and hash lines, as recorded ticks do; its packets reuse their text.
 //!
 //! [`server`] and [`client`] hold a server that owns the world and its clients, over links like a
 //! peer's, each a [`Session`].

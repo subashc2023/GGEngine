@@ -151,6 +151,9 @@ pub(crate) struct Lockstep {
     /// How many times this peer rolled back, how many ticks it reran, and the most at once.
     pub(super) rolled: [u64; 3],
     buffer: Vec<u8>,
+    /// What [`send_packets`](Self::send_packets) writes into: a packet's header, the packet, and a
+    /// tick's lines. Kept, so that ticks allocate nothing for packets once as long ones have gone.
+    sending: [String; 3],
     /// What this peer offered since its last tick, an answered one with its ticket; it goes out
     /// with the next inputs.
     pub(super) offered: Vec<(Option<Ticket>, Outside)>,
@@ -275,6 +278,7 @@ impl Lockstep {
             predicted: BTreeMap::new(),
             rolled: [0; 3],
             buffer: vec![0; 1 << 16],
+            sending: Default::default(),
             offered: Vec::new(),
             #[cfg(feature = "dev")]
             tickets: 0,
@@ -1359,23 +1363,26 @@ impl Lockstep {
         }
         let Some(link) = &mut self.link else { return };
         let now = Instant::now();
-        let mut header = format!("a {} {} {} ", self.since, self.whole, self.next);
+        let [header, packet, lines] = &mut self.sending;
+        let written = "a string takes any text";
+        header.clear();
+        write!(header, "a {} {} {} ", self.since, self.whole, self.next).expect(written);
         match link.past {
-            Some(past) => write!(header, "{past} ").expect("a string takes any text"),
+            Some(past) => write!(header, "{past} ").expect(written),
             None => header.push_str("- "),
         }
-        link.write_times(&mut header, now);
+        link.write_times(header, now);
         header.push('\n');
-        let (mut packet, mut lines) = (header.clone(), String::new());
+        packet.clone_from(header);
         let sent = (self.ours.range(self.acked..)).filter(|(_, inputs)| !inputs.streamed);
         for (&tick, inputs) in sent {
             lines.clear();
-            write_inputs(&mut lines, tick, inputs);
+            write_inputs(lines, tick, inputs);
             if packet.len() + lines.len() > MAX_PACKET_TEXT && packet.len() > header.len() {
                 link.send_packet(packet.as_bytes());
-                packet.clone_from(&header);
+                packet.clone_from(header);
             }
-            packet.push_str(&lines);
+            packet.push_str(lines);
         }
         // The last, or the header alone: it says how far this peer has the other's inputs.
         link.send_packet(packet.as_bytes());
