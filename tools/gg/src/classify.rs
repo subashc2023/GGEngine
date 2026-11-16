@@ -1,5 +1,4 @@
-//! Telling an edit inside function bodies, which a patch carries, from one that needs a rebuild, as
-//! `gg run`'s patches do for each of a game's modules that changed.
+//! Telling an edit inside function bodies, which a patch carries, from one that needs a rebuild.
 
 use syn::visit_mut::{self, VisitMut};
 use syn::{Attribute, Block, File, ImplItemFn, Item, ItemFn, ItemImpl, Stmt, TraitItemFn};
@@ -7,27 +6,27 @@ use syn::{Attribute, Block, File, ImplItemFn, Item, ItemFn, ItemImpl, Stmt, Trai
 /// What an edit to a module is, as a patch sees it.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Edit {
-    /// Inside the bodies of functions, which a patch carries: `attach` if among them is a `Layer`
-    /// impl's `attach`, which builds the world as a run starts afresh, and so never runs again in a
-    /// run that keeps its world, whose restarts start from snapshots.
+    /// Inside function bodies, which a patch carries. `attach` if among them is a `Layer` impl's
+    /// `attach`, which builds the world only as a run starts afresh, not in one that keeps it.
     Bodies { attach: bool },
-    /// One whose new text doesn't parse: a patch's build then says what rustc makes of it while the
-    /// game runs on, but if it builds, rustc reading what gg can't, the game is rebuilt, as gg
-    /// can't tell what changed.
+    /// The new text doesn't parse. A patch's build shows what rustc makes of it; if it builds,
+    /// rustc read what gg can't, so the game is rebuilt.
     Unreadable,
-    /// One that a patch can't carry, for a reason.
+    /// A patch can't carry it, for the reason.
     Rebuild(&'static str),
 }
 
-/// What the edit from `old`, a module's text as of the game's build, to `new` is. It's inside
-/// function bodies if the two are the same, token for token, but for the bodies of functions that
-/// aren't `const`, the items declared in them aside, and for doc comments; comments and whitespace
-/// aren't tokens. But an edit inside the bodies of code that runs as the game starts, `main` and a
-/// `Layer`'s `load` and `restored`, needs a rebuild, which runs them again, as a patch would come
-/// after they ran: as an edit to code only they call, in a function of its own, would, which gg
-/// can't tell. An edit inside a `Layer`'s `attach` is patched, and told of, as the world `attach`
-/// builds is the run's from its start, which no patch builds again. Old text that doesn't parse
-/// can't be compared with, so any edit to it rebuilds.
+/// What the edit from `old`, a module's text as of the game's build, to `new` is.
+///
+/// Inside function bodies if the two are the same token for token, but for non-`const` function
+/// bodies (their declared items aside) and doc comments.
+///
+/// An edit inside code that runs as the game starts (`main`, a `Layer`'s `load` and `restored`)
+/// needs a rebuild: a patch would come after they ran. So does an edit to code only they call,
+/// which gg can't tell. An edit inside `attach` is patched and told of: no patch builds the world
+/// again.
+///
+/// Old text that doesn't parse can't be compared with: any edit to it rebuilds.
 pub(crate) fn classify(old: &str, new: &str) -> Edit {
     let Ok(old) = syn::parse_file(old) else {
         return Edit::Rebuild("an edit to a module gg can't read as it was built");
@@ -48,30 +47,28 @@ pub(crate) fn classify(old: &str, new: &str) -> Edit {
     }
 }
 
-/// The bodies of functions that [`bare`] keeps, beside those of `const fn`s.
+/// The bodies [`bare`] keeps, beside those of `const fn`s.
 #[derive(Clone, Copy, PartialEq)]
 enum Keep {
     None,
-    /// Those of the code that runs as the game starts: `main`, and a `Layer` impl's `load` and
-    /// `restored`.
+    /// `main`, and a `Layer` impl's `load` and `restored`.
     Startup,
-    /// Those of a `Layer` impl's `attach`, which builds the world as a run starts afresh.
+    /// A `Layer` impl's `attach`.
     Attach,
 }
 
-/// `file` without doc comments, which are `#[doc]` attributes, and without the bodies of the
-/// functions that aren't `const` but for the items declared in them, and for those `keep` keeps.
+/// `file` without doc comments (`#[doc]` attributes) and without non-`const` function bodies,
+/// but for the items declared in them and the bodies `keep` keeps.
 fn bare(mut file: File, keep: Keep) -> File {
     let mut bare = Bare { keep, layer: false };
     bare.visit_file_mut(&mut file);
     file
 }
 
-/// Empties the bodies of free functions, methods and traits' default methods, but for a `const
-/// fn`'s, which the crate's build may evaluate into a type or a static, and those `keep` keeps;
-/// keeps the items declared in a body, however deep, as a type whose values the running game
-/// holds; and drops doc comments. An item that a macro invoked in a body declares, as
-/// `thread_local!` does, goes with the body.
+/// Empties function bodies (free, methods, default methods) but for `const fn`s' (the build may
+/// evaluate them into a type or a static) and those `keep` keeps. Keeps items declared in a body,
+/// however deep: the running game may hold values of a type among them. Drops doc comments. Items
+/// a macro declares in a body (`thread_local!`) go with it.
 struct Bare {
     keep: Keep,
     /// Whether the impl being visited is one of `Layer`.
@@ -126,8 +123,7 @@ impl VisitMut for Bare {
     }
 }
 
-/// Empties `block` but for the items declared in it, however deep, as in a nested block or a
-/// closure's body, in the order they come.
+/// Empties `block` but for the items declared in it, however deep, in order.
 fn keep_items(block: &mut Block) {
     let mut items = Items(Vec::new());
     items.visit_block_mut(block);
@@ -147,9 +143,8 @@ impl VisitMut for Items {
 mod tests {
     use super::*;
 
-    /// A module with what a game's has: a type, a static, a `const fn`, free functions, one with a
-    /// type of its own, a trait with a default method, impls of it, of the type with methods named
-    /// as a `Layer`'s are, and of `Layer`, and `main`.
+    /// A game's module: types, a static, a `const fn`, functions, a trait with a default method,
+    /// impls (one with methods named as a `Layer`'s are, one of `Layer`), and `main`.
     const MODULE: &str = r#"
 //! The game.
 
@@ -235,8 +230,8 @@ fn main() {
     #[test]
     fn edits_inside_function_bodies_are_patchable() {
         for (from, to) in [
-            // A body, a method's, a trait's default method's, a `Layer`'s tick's, a function's
-            // declared in a body, and a method's of another impl named as a `Layer`'s is.
+            // Bodies of: a method, a default method, a `Layer`'s `tick`, a function declared in a
+            // body, and another impl's method named as a `Layer`'s is.
             ("ship.x += by * SPEED;", "ship.x -= by * SPEED * 2.0;"),
             (
                 "self.x = 0.0;",
@@ -263,9 +258,8 @@ fn main() {
         }
     }
 
-    /// An edit inside a `Layer`'s `attach`, which builds the world as a run starts afresh, is
-    /// patched, and said to be, beside other edits too; one to a method of another impl named so
-    /// isn't said to be.
+    /// An edit inside a `Layer`'s `attach` is patched and told of, beside other edits too. One to
+    /// another impl's method of that name isn't told of.
     #[test]
     fn edits_inside_a_layers_attach_are_patched_and_told_of() {
         let attached = edited("Ship { x: 0.0 }", "Ship { x: 5.0 }");
@@ -298,7 +292,7 @@ fn main() {
                 "    fn stop(&mut self) {",
                 "    #[inline]\n    fn stop(&mut self) {",
             ),
-            // A type declared in a body, whose values the running game may hold.
+            // A type declared in a body: the running game may hold its values.
             (
                 "        count: u32,",
                 "        count: u32,\n        size: f32,",
@@ -329,7 +323,7 @@ fn main() {
                 "{edit:?}"
             );
         }
-        // Beside an edit inside `attach`, which a patch would carry.
+        // Beside an edit inside `attach`.
         let both = edited("Ship { x: 0.0 }", "Ship { x: 5.0 }").replace("ship.png", "boat.png");
         let edit = classify(MODULE, &both);
         assert!(
@@ -342,7 +336,7 @@ fn main() {
     fn text_that_doesnt_parse_is_patched_to_hear_rustc_unless_its_the_builds() {
         let broken = edited("ship.x += by * SPEED;", "ship.x += by *;");
         assert_eq!(classify(MODULE, &broken), Edit::Unreadable);
-        // The build's own text, as one in syntax syn doesn't know, can't be compared with.
+        // Build text in syntax syn doesn't know can't be compared with.
         for new in [MODULE, broken.as_str()] {
             assert!(matches!(classify("fn steer( {", new), Edit::Rebuild(_)));
         }
