@@ -15,8 +15,8 @@ use crate::reflect::Value;
 use crate::snapshot::{self, Run, Snapshot};
 use crate::{Context, Entity, ModelNode, ModelRoot, Operation, Reflect, Tick, Transform, World};
 
-/// Writes `text` at `path`, stamped `later` seconds past now, so that a look sees it changed
-/// whatever the clock's grain.
+/// Writes `text` at `path`, stamped `later` seconds past now, so a look sees it changed whatever
+/// the clock's grain.
 pub(crate) fn save(path: &Path, text: &str, later: u64) {
     fs::write(path, text).expect("written");
     let at = SystemTime::now() + Duration::from_secs(later);
@@ -24,15 +24,14 @@ pub(crate) fn save(path: &Path, text: &str, later: u64) {
     file.set_modified(at).expect("stamped");
 }
 
-/// Looks at `cx`'s scene files at once, as a frame's start does once a [`LOOK`] has gone by.
+/// Looks at `cx`'s scene files at once, without waiting a [`LOOK`].
 pub(crate) fn look_now(cx: &mut Context, stack: &mut Stack) {
     cx.scenes.looked = None;
     look(cx, stack);
 }
 
-/// Writes a project's manifest in `dir`, a game's whose scenes are in its `scenes` folder, its
-/// start scene `scenes/main.ron`, which holds `count` entities with transforms, saved from a
-/// world of their own, which is returned with their IDs.
+/// Writes a project's manifest in `dir`: a game whose start scene `scenes/main.ron` holds `count`
+/// entities with transforms, saved from a world of their own. Returns that world and their IDs.
 pub(crate) fn project(dir: &Path, count: usize) -> (World, Vec<EntityId>) {
     fs::create_dir_all(dir.join("scenes")).expect("a directory");
     let project = gg_api::Project {
@@ -55,14 +54,13 @@ pub(crate) fn project(dir: &Path, count: usize) -> (World, Vec<EntityId>) {
     (file, ids)
 }
 
-/// A context of the project in `dir`, its start scene loaded, as a layer's attach loads it.
+/// A context of the project in `dir`, its start scene loaded as a layer's attach does.
 pub(crate) fn started(dir: &Path) -> Context {
     let mut cx = Context::seeded(2).project(dir).expect("the project reads");
     cx.load_start_scene().expect("loaded");
     cx
 }
 
-/// A create of an entity with a transform, its ID drawn.
 fn create() -> Operation {
     Operation::Create {
         entity: None,
@@ -71,7 +69,6 @@ fn create() -> Operation {
     }
 }
 
-/// A set of entity `id`'s translation's x to `x`.
 fn set_x(id: EntityId, x: f32) -> Operation {
     Operation::Set {
         entity: id,
@@ -81,8 +78,7 @@ fn set_x(id: EntityId, x: f32) -> Operation {
     }
 }
 
-/// Has `edit`, a client's, apply now, through `stack`, as the tool API's does, and returns what
-/// it did.
+/// Applies `edit`, a client's, now through `stack`, as the tool API does; returns what it did.
 fn client(cx: &mut Context, stack: &mut Stack, edit: Edit) -> Done {
     match stack.offer(cx, edit) {
         Offered::Now(done) => done.unwrap_or_else(|error| panic!("{error:#}")),
@@ -90,8 +86,7 @@ fn client(cx: &mut Context, stack: &mut Stack, edit: Edit) -> Done {
     }
 }
 
-/// Applies `operations` as client `author`'s edit, as [`client`] does, and returns the IDs of
-/// the entities it made.
+/// Applies `operations` as client `author`'s edit ([`client`]); returns the IDs it made.
 fn apply(
     cx: &mut Context,
     stack: &mut Stack,
@@ -105,7 +100,6 @@ fn apply(
     }
 }
 
-/// The IDs of the entities `cx`'s open scene owns.
 fn owned_ids(cx: &Context) -> Vec<EntityId> {
     let owned = open_scene::owned(cx.world(), &cx.scenes.files, &cx.scenes.open);
     owned
@@ -114,7 +108,6 @@ fn owned_ids(cx: &Context) -> Vec<EntityId> {
         .collect()
 }
 
-/// The x of entity `id`'s translation in `world`.
 fn x(world: &World, id: EntityId) -> f64 {
     let entity = world.entity(id).expect("alive");
     world
@@ -124,20 +117,18 @@ fn x(world: &World, id: EntityId) -> f64 {
         .x
 }
 
-/// The authors whose edits `cx`'s authors keep.
 fn authors(cx: &Context) -> Vec<String> {
     let logs = cx.authors.logs(cx.world());
     logs.map(|(author, _)| author.to_owned()).collect()
 }
 
-/// A sorted copy of `ids`.
 fn sorted(mut ids: Vec<EntityId>) -> Vec<EntityId> {
     ids.sort_unstable();
     ids
 }
 
-/// A project's start scene loads as a scene file, watched, its edits' author its path from the
-/// project's asset root, and is the open scene; a game that isn't a project's has none.
+/// A project's start scene loads as a watched scene file, its edits' author its path from the
+/// asset root, and is the open scene; a game that isn't a project's has none.
 #[test]
 fn the_start_scene_loads_as_a_scene_file_of_its_project() {
     let dir = Scratch::new("start-scene");
@@ -172,9 +163,8 @@ fn the_start_scene_loads_as_a_scene_file_of_its_project() {
     assert_eq!(none.map(|error| error.code()), Some("engine.no_project"));
 }
 
-/// A scene file a layer loaded applies as it's saved, as an edit of its own, which an undo of
-/// its author takes back; one saved that doesn't load changes nothing, and the next save is
-/// compared with the file as last applied.
+/// A saved scene file applies as an edit of its own, which an undo of its author takes back. One
+/// that doesn't load changes nothing; the next save is compared with the file as last applied.
 #[test]
 fn a_scene_file_saved_applies_as_an_edit_of_its_own() {
     let dir = Scratch::new("scene-files");
@@ -239,9 +229,8 @@ fn a_scene_file_saved_applies_as_an_edit_of_its_own() {
     );
 }
 
-/// A scene file saved while a copy of the world as edited plays applies to the copy, and once
-/// `stop` brings back the world as edited, which holds the file as it was last applied there,
-/// to that world too, as the file's own edit.
+/// A scene file saved while a copy plays applies to the copy, and after `stop` to the world as
+/// edited too (which holds the file as last applied there), as the file's own edit.
 #[test]
 fn a_scene_file_saved_while_a_copy_plays_applies_to_both_worlds() {
     let dir = Scratch::new("scene-files-play");
@@ -281,8 +270,8 @@ fn a_scene_file_saved_while_a_copy_plays_applies_to_both_worlds() {
     assert_eq!(authors, ["scenes/level.ron"]);
 }
 
-/// In a lockstep session, whose saves apply at a tick to come, a file put back before its
-/// save has applied is a save too, and the world ends as the file does.
+/// In a lockstep session, whose saves apply at a tick to come, a file put back before its save
+/// applies is a save too, and the world ends as the file does.
 #[test]
 fn a_file_put_back_before_its_save_applies_applies_as_put_back() {
     let dir = Scratch::new("scene-files-lockstep");
@@ -322,10 +311,8 @@ fn a_file_put_back_before_its_save_applies_applies_as_put_back() {
     assert_eq!(cx.scenes.files[0].text, old);
 }
 
-/// The open scene owns the entities its file's text holds and those clients' edits make into
-/// it, but not the game's own, nor another scene file's, whose save's creates aren't a
-/// client's; one its file's save deleted it owns still, which an undo of the file's author
-/// brings back.
+/// The open scene owns its file's entities and those clients make into it, not the game's, nor
+/// another scene file's. An entity its file's save deleted stays owned; an undo restores it.
 #[test]
 fn the_open_scene_owns_its_files_entities_and_what_clients_make_into_it() {
     let dir = Scratch::new("open-scene-owns");
@@ -373,10 +360,9 @@ fn the_open_scene_owns_its_files_entities_and_what_clients_make_into_it() {
     assert_eq!(owned_ids(&cx), sorted([&ids[..], &made[..]].concat()));
 }
 
-/// A save of its file that deletes an entity with a child deletes the child with it, and a
-/// child the game made under it; an undo of the file's author brings all three back, the open
-/// scene owning the two its file held, but not the game's, and a save writing them as they
-/// were, without it.
+/// A file save that deletes an entity deletes its child and a game-made child. An undo of the
+/// file's author restores all three: the scene owns the two its file held, not the game's, and a
+/// save writes them as they were, without it.
 #[test]
 fn an_undo_of_its_files_save_brings_back_what_it_deleted_owned() {
     let dir = Scratch::new("open-scene-undo-save");
@@ -420,8 +406,8 @@ fn an_undo_of_its_files_save_brings_back_what_it_deleted_owned() {
     assert!(loaded.entity(game).is_none(), "the game's");
 }
 
-/// An entity of the open scene that a client deleted, and its file's save then took out of the
-/// text, comes back owned as the client undoes its delete, so a save doesn't leave it out.
+/// An entity a client deleted, which its file's save then took out of the text, comes back owned
+/// when the client undoes the delete, so a save doesn't leave it out.
 #[test]
 fn what_its_files_save_takes_out_while_gone_comes_back_owned() {
     let dir = Scratch::new("open-scene-undo-gone");
@@ -442,10 +428,9 @@ fn what_its_files_save_takes_out_while_gone_comes_back_owned() {
     assert_eq!(owned_ids(&cx), [ids[0]]);
 }
 
-/// A save writes exactly the entities the open scene owns, as the world as edited has them, to
-/// its file, a child the game made under one of them left out, and changes no world; the
-/// watch's next look applies nothing of it, and nothing is unsaved after it. One it owned
-/// that's gone it owns still, which an undo brings back.
+/// A save writes exactly the entities the open scene owns to its file, leaving out a game-made
+/// child, and changes no world. The watch's next look applies nothing of it, and nothing is
+/// unsaved after. A gone owned entity stays owned; an undo restores it.
 #[test]
 fn a_save_writes_what_the_open_scene_owns_which_the_watch_applies_nothing_of() {
     let logged = crate::testing::logged();
@@ -511,9 +496,9 @@ fn a_save_writes_what_the_open_scene_owns_which_the_watch_applies_nothing_of() {
     assert!(open_scene::unsaved(&mut cx, 0));
 }
 
-/// A save is refused for a file the watch hasn't applied as it holds it, for an untitled scene
-/// without a path, and for another scene file's path, saving nothing; to a path, it saves the
-/// scene there, the file it's open in from then on, the one before no longer watched.
+/// A save is refused, saving nothing, for a file the watch hasn't applied, an untitled scene
+/// without a path, and another scene file's path. To a path, it saves there; that file is open
+/// from then on and the old one unwatched.
 #[test]
 fn a_save_is_refused_what_would_lose_an_edit_and_saves_as_another_file() {
     let dir = Scratch::new("open-scene-save-as");
@@ -569,9 +554,8 @@ fn a_save_is_refused_what_would_lose_an_edit_and_saves_as_another_file() {
     assert_eq!(untitled.code(), "scene.untitled", "{untitled}");
 }
 
-/// While a copy of the world as edited plays, a save writes the world as edited, held aside,
-/// and the copy's scene files follow: neither world applies it, then or once `stop` brings the
-/// world as edited back.
+/// While a copy plays, a save writes the world as edited, held aside, and the copy's scene files
+/// follow; neither world applies it, then or once `stop` brings the world as edited back.
 #[test]
 fn a_save_while_a_copy_plays_writes_the_world_as_edited() {
     let dir = Scratch::new("open-scene-save-playing");
@@ -597,11 +581,10 @@ fn a_save_while_a_copy_plays_writes_the_world_as_edited() {
     assert_eq!(authors(&cx), ["agent"], "no edit of the file's");
 }
 
-/// New is refused while the open scene has unsaved edits, unless they're discarded; it deletes
-/// the entities the scene owns, keeping the game's own, a child of theirs a root, and leaves
-/// the scene untitled, its file unwatched and as it was; every author's history starts afresh,
-/// in another world, as the layers are told. Untitled, the scene is unsaved once it owns an
-/// entity.
+/// New is refused while the open scene has unsaved edits, unless discarded. It deletes the
+/// scene's entities, keeping the game's own (a child of theirs becomes a root), and leaves the
+/// scene untitled, its file unwatched and unchanged. Every author's history starts afresh, and
+/// the layers are told. Untitled, the scene is unsaved once it owns an entity.
 #[test]
 fn new_empties_the_open_scene_and_starts_history_afresh() {
     let dir = Scratch::new("open-scene-new");
@@ -656,11 +639,10 @@ impl crate::Layer for Counted {
     }
 }
 
-/// Open is refused, changing nothing, for unsaved edits not discarded, another scene file's
-/// path, a file that doesn't load, and one that gives a game's entity's ID; else it puts the
-/// file's entities in place of the open scene's, keeping the game's own, the file watched from
-/// then on in place of the one before, and history starting afresh; and opening the open
-/// scene's file again reverts it.
+/// Open is refused, changing nothing, for undiscarded unsaved edits, another scene file's path, a
+/// file that doesn't load, and one giving a game entity's ID. Otherwise it replaces the open
+/// scene's entities with the file's, keeping the game's own; the file is watched from then on,
+/// the old one not, and history starts afresh. Opening the open scene's file again reverts it.
 #[test]
 fn open_puts_a_files_entities_in_place_of_the_open_scenes() {
     let dir = Scratch::new("open-scene-open");
@@ -745,10 +727,9 @@ fn open_puts_a_files_entities_in_place_of_the_open_scenes() {
     assert_eq!((x(cx.world(), p), x(cx.world(), q)), (1.0, 0.0));
 }
 
-/// Open and new delete a model's root the open scene owns with its nodes, which scenes don't
-/// save, and whatever code put under them, the scene's or the game's, as a change of its model
-/// does; its file, opened again, spawns the nodes again, under the same IDs; and a file may give
-/// an entity a node's ID, which the node frees as it goes.
+/// Open and new delete a model root with its nodes, which scenes don't save, and whatever code
+/// put under them, as a change of its model does. Its file, opened again, respawns the nodes
+/// under the same IDs; a file may give an entity a node's ID, which the node frees as it goes.
 #[test]
 fn open_and_new_take_a_models_nodes_with_its_root() {
     let dir = Scratch::new("open-scene-model");
@@ -808,9 +789,9 @@ fn open_and_new_take_a_models_nodes_with_its_root() {
     assert_eq!(nodes(world), []);
 }
 
-/// A path names a scene file from the asset root, given relative or absolute, in its folder's
-/// own form; one outside the scenes folders is refused, as is a file to open that isn't there,
-/// a directory to save in that isn't, and any path in a game that isn't a project's.
+/// A path names a scene file from the asset root, relative or absolute, in its folder's own
+/// form. Refused: a path outside the scenes folders, a file to open that isn't there, a
+/// directory to save in that isn't, and any path in a game that isn't a project's.
 #[test]
 fn a_path_names_a_scene_file_in_the_projects_scenes_folders() {
     let dir = Scratch::new("open-scene-paths");
@@ -849,10 +830,9 @@ fn a_path_names_a_scene_file_in_the_projects_scenes_folders() {
     assert_eq!(none.map(|error| error.code()), Some("engine.no_project"));
 }
 
-/// A copy of the world as edited plays with a copy of its open scene, what clients make into
-/// the copy going with it at `stop`; a snapshot keeps the open scene of the run's world and of
-/// the world as edited it holds, and one written before the open scene was opens the start
-/// scene's file.
+/// A playing copy has a copy of the open scene; what clients make into it goes with it at
+/// `stop`. A snapshot keeps the open scene of the run's world and the held edited world; one
+/// written before open scenes existed opens the start scene's file.
 #[test]
 fn the_open_scene_lasts_across_play_stop_and_a_snapshots_restore() {
     let dir = Scratch::new("open-scene-kept");
@@ -917,9 +897,9 @@ fn the_open_scene_lasts_across_play_stop_and_a_snapshots_restore() {
     );
 }
 
-/// Whether the open scene is unsaved is compared in canonical form, so that a file written by
-/// hand isn't as loaded; is found again after an edit, or another tick, and kept otherwise; and
-/// a file whose text as last applied no longer loads is.
+/// Unsaved is compared in canonical form, so a hand-written file isn't unsaved as loaded; it's
+/// found again after an edit or another tick and kept otherwise; and a file whose text as last
+/// applied no longer loads is unsaved.
 #[test]
 fn unsaved_compares_canonically_and_is_kept_until_the_world_as_edited_changes() {
     let dir = Scratch::new("open-scene-unsaved");
@@ -950,10 +930,10 @@ fn unsaved_compares_canonically_and_is_kept_until_the_world_as_edited_changes() 
         "a text that no longer loads"
     );
 }
-/// A tick's change to the world makes the open scene unsaved but not edited; an author's apply
-/// makes it edited, which a reload of a script, a renewal, another scene file's save, a play
-/// and its stop leave as they found it, an edit of the copy that played going with it; and a
-/// save, the open scene's file's applying and New clear it.
+/// A tick's change makes the open scene unsaved but not edited; an author's apply makes it
+/// edited. A script reload, a renewal, another scene file's save, and a play and its stop leave
+/// it as found, the copy's edits going with it. A save, the open scene's file applying, and New
+/// clear it.
 #[test]
 fn edited_is_set_by_authors_edits_alone_and_cleared_by_saves() {
     let dir = Scratch::new("open-scene-edited");
@@ -1031,13 +1011,12 @@ fn edited_is_set_by_authors_edits_alone_and_cleared_by_saves() {
     assert!(!cx.scenes.open.edited, "New clears it");
 }
 
-/// The entity of the world's own in [`world_project`]'s start scene, beside its `Cells`.
+/// The world's own entity in [`world_project`]'s start scene, beside its `Cells`.
 const OWN: u64 = 0xb0;
 
-/// Writes a project's manifest in `dir`, as [`project`] does, whose start scene is a world of
-/// cells, `scenes/cells`, 10 units on a side, of an entity of its own, [`OWN`], at x 100 beside
-/// its `Cells`; its cells 0 to 2 along x each hold an entity at its middle, and cell 100 one at
-/// x 1005, as [`id_of`] names them. Returns the scenes folder.
+/// Like [`project`], but the start scene is a world of cells in `scenes/cells`, 10 units on a
+/// side, with its own entity [`OWN`] at x 100 beside its `Cells`. Cells 0 to 2 along x each hold an
+/// entity ([`id_of`]) at their middle, cell 100 one at x 1005. Returns the scenes folder.
 fn world_project(dir: &Path) -> PathBuf {
     project(dir, 0);
     let scenes = dir.join("scenes");
@@ -1059,7 +1038,7 @@ fn world_project(dir: &Path) -> PathBuf {
     scenes
 }
 
-/// `cx`'s world's cells near x 15, as the look's viewpoint brings them in while the run is
+/// Brings in `cx`'s world's cells near x 15, as the look's viewpoint does while the run is
 /// stopped: cells 0 to 2.
 fn bring_cells_in(cx: &mut Context) {
     look_at(cx, 15.0);
@@ -1068,17 +1047,15 @@ fn bring_cells_in(cx: &mut Context) {
     assert_eq!(xs(cx.world()), [0, 1, 2]);
 }
 
-/// The IDs scene file `path` holds.
 fn file_ids(path: &Path) -> Vec<u64> {
     let text = crate::read_scene(path).expect("read");
     let ids = World::scene_ids(&text).expect("a scene");
     ids.into_iter().map(EntityId::get).collect()
 }
 
-/// A world's save writes each cell's file whose entities changed, as they stand, each streamed
-/// root in the file of the cell it's in, without `Streamed`, a duplicate of one too, and the
-/// world's file without them, but for one whose `Streamed` was taken away; a cell's file that
-/// didn't change isn't written. Unsaved follows.
+/// A world's save writes each changed cell's file: each streamed root, and a duplicate of one,
+/// in its cell's file without `Streamed`; the world's file without them, but for one whose
+/// `Streamed` was taken away. An unchanged cell's file isn't written. Unsaved follows.
 #[test]
 fn a_world_s_save_writes_each_cell_s_file_as_its_entities_stand() {
     let dir = Scratch::new("open-scene-world-save");
@@ -1136,10 +1113,9 @@ fn a_world_s_save_writes_each_cell_s_file_as_its_entities_stand() {
     open_scene::save(&mut cx, None).expect("saved again");
 }
 
-/// The cells the game makes come in around the look's viewpoint while the run is stopped and go
-/// out as they came; a world's save writes no file of a made cell but of one that changed,
-/// whose file stands for it from then on, and is refused a root moved into a made cell that
-/// hasn't come in, until it has.
+/// Made cells come in around the look's viewpoint while the run is stopped and go out as they
+/// came. A save writes a made cell's file only once it changed, and that file stands for it from
+/// then on. A root moved into a made cell that hasn't come in is refused until it has.
 #[test]
 fn a_world_s_save_writes_a_made_cell_s_file_once_it_changes() {
     use crate::cells::Cell;
@@ -1205,8 +1181,8 @@ fn a_world_s_save_writes_a_made_cell_s_file_once_it_changes() {
     assert_eq!(file_ids(&cell(80)), [id_of(0).get(), 0x150]);
 }
 
-/// A world's save is refused, writing nothing, for a cell's file saved since it last applied,
-/// and for a root moved into a cell whose file hasn't come in, until it has; unsaved meanwhile.
+/// A world's save is refused, writing nothing, for a cell's file saved since it last applied, and
+/// a root moved into a cell whose file hasn't come in, until it has; unsaved meanwhile.
 #[test]
 fn a_world_s_save_is_refused_what_would_lose_a_cell_s_file() {
     let dir = Scratch::new("open-scene-world-refused");
@@ -1267,10 +1243,9 @@ fn new_and_open_from_a_world_leave_none_of_its_cells() {
     assert!(xs(cx.world()).is_empty());
 }
 
-/// A cell's file saved on disk applies to its cell in as the open scene's file does, an edit
-/// of the file's own, which an undo takes back, a root it adds streaming; a cell's file made
-/// since brings its cell in; and one saved while a copy plays applies to the world as edited
-/// after it stops.
+/// A saved cell file applies to its cell in like the open scene's file: an edit of its own, which
+/// an undo takes back, a root it adds streaming. A cell file made since brings its cell in. One
+/// saved while a copy plays applies to the edited world after `stop`.
 #[test]
 fn a_cell_s_file_saved_applies_to_its_cell_in() {
     let dir = Scratch::new("open-scene-world-watch");
