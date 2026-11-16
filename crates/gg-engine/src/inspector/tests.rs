@@ -14,7 +14,7 @@ use crate::reflect::tests::{Everything, Form, Inner, everything, same_snapshots,
 use crate::reflect::{self, Ident};
 use crate::{Camera, Component, Entity, Projection, Sprite};
 
-/// `entity`'s ID, which the Inspector picks it by and names it by.
+/// `entity`'s ID: what the Inspector picks and names it by.
 fn id(world: &World, entity: Entity) -> EntityId {
     world.id(entity).expect("alive")
 }
@@ -22,15 +22,14 @@ fn id(world: &World, entity: Entity) -> EntityId {
 /// A text drawn, and where.
 type Text = (String, egui::Rect);
 
-/// Queues `pass`, as the panels do, and makes what it found at a tick, as the next one does.
+/// Queues `pass` as the panels do, then makes what it found at a tick.
 fn make(inspector: &mut Inspector, world: &mut World, pass: Pass) {
     inspector.queue(pass);
     Layer::tick(inspector, world, Tick { number: 0 });
 }
 
-/// Draws the two panels side by side, each in a half of `ui` of its own, as the dock gives each
-/// a rect of its own: below its rows, the Entities panel takes the rest of its half. First,
-/// as a pass does, it makes the pick the link asked for.
+/// Draws both panels side by side, each in its own half of `ui` as the dock does; the Entities
+/// panel takes the rest of its half below its rows. First it makes the link's pick, as a pass does.
 fn panels(inspector: &mut Inspector, world: &World, ui: &mut egui::Ui, pass: &mut Pass) {
     inspector.follow(world);
     let (left, right) = ui.max_rect().split_left_right_at_fraction(0.5);
@@ -41,8 +40,8 @@ fn panels(inspector: &mut Inspector, world: &World, ui: &mut egui::Ui, pass: &mu
     ui.scope_builder(inspect, |ui| inspector.inspect(world, ui, pass, &pending));
 }
 
-/// A frame of the two panels' contents, on a screen big enough for all of them, given
-/// `events`, whose edits are then set at a tick; returns its texts, and how many edits it made.
+/// A frame of both panels on a screen big enough for them; its edits are then set at a tick.
+/// Returns its texts and its edit count.
 fn frame(
     inspector: &mut Inspector,
     world: &mut World,
@@ -53,8 +52,8 @@ fn frame(
     frame_ticking(inspector, world, ctx, time, events, true)
 }
 
-/// A frame as [`frame`] draws it, whose edits are set at a tick if `tick`, or else wait for
-/// one, as at a frame rate above the simulation's.
+/// Like [`frame`], but its edits are set at a tick only if `tick`: else they wait, as above the
+/// simulation's frame rate.
 fn frame_ticking(
     inspector: &mut Inspector,
     world: &mut World,
@@ -67,7 +66,7 @@ fn frame_ticking(
     (texts_in(&shapes), made)
 }
 
-/// The texts `shapes` draw, and where, in the order they're drawn.
+/// The texts `shapes` draw, and where, in drawing order.
 fn texts_in(shapes: &[egui::epaint::ClippedShape]) -> Vec<Text> {
     let painted = crate::testing::painted(shapes).into_iter();
     let texts = painted.filter_map(|shape| match shape {
@@ -79,9 +78,8 @@ fn texts_in(shapes: &[egui::epaint::ClippedShape]) -> Vec<Text> {
     texts.collect()
 }
 
-/// The buttons of the components' menus that `shapes` paint, in the order they're painted:
-/// each one's frame, and the bounds of its dots, the three circles of [`DOT`]'s radius painted
-/// just after it.
+/// The component menus' buttons in `shapes`, in painting order: each frame, and the bounds of
+/// its dots (three circles of [`DOT`]'s radius painted just after it).
 fn find_menus(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, egui::Rect)> {
     let mut frame = egui::Rect::NOTHING;
     let mut dots = Vec::new();
@@ -103,7 +101,7 @@ fn find_menus(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, egui::R
         .collect()
 }
 
-/// The menu on the row of `header`, a component's name: its button, and its dots.
+/// The menu on the row of `header`, a component's name: its button and dots.
 fn menu_on(menus: &[(egui::Rect, egui::Rect)], header: egui::Rect) -> (egui::Rect, egui::Rect) {
     let on_row = menus
         .iter()
@@ -111,7 +109,7 @@ fn menu_on(menus: &[(egui::Rect, egui::Rect)], header: egui::Rect) -> (egui::Rec
     *on_row.unwrap_or_else(|| panic!("no menu on {header:?}'s row: {menus:?}"))
 }
 
-/// A frame as [`frame_ticking`] draws it; returns its shapes, and how many edits it made.
+/// Like [`frame_ticking`], but returns its shapes and edit count.
 fn frame_shapes(
     inspector: &mut Inspector,
     world: &mut World,
@@ -142,7 +140,7 @@ fn frame_shapes(
     (output.shapes, made)
 }
 
-/// Three frames, the last's text: a grid lays itself out unseen in its first.
+/// Three frames, the last's text: a grid lays out unseen in its first.
 fn frames(inspector: &mut Inspector, world: &mut World, ctx: &egui::Context) -> Vec<String> {
     let mut texts = Vec::new();
     for time in 0..3 {
@@ -166,7 +164,7 @@ fn drawing_the_panels_changes_nothing() {
         ..Transform::IDENTITY
     };
     let lost = world.spawn(lost);
-    // Transparent, so that its color is lost if alpha is multiplied in.
+    // Transparent: premultiplying alpha would lose its color.
     let sprite = Sprite {
         color: Vec4::new(0.3, 0.6, 0.9, 0.0),
         ..Sprite::default()
@@ -196,7 +194,6 @@ fn drawing_the_panels_changes_nothing() {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     let texts = frames(&mut inspector, &mut world, &ctx);
-    // The rows of entities without names.
     for text in [
         "6 entities",
         "Entity",
@@ -230,8 +227,8 @@ fn drawing_the_panels_changes_nothing() {
                 "level",
                 "pair",
                 "0",
-                // Its integers' negative values, `inner.level`'s and the pair's, after a
-                // minus sign as wide as a digit.
+                // Negative integers (`inner.level`, the pair's) follow a minus sign as wide as
+                // a digit.
                 "\u{2212}1",
                 "\u{2212}4",
                 "handle",
@@ -249,7 +246,6 @@ fn drawing_the_panels_changes_nothing() {
         let clash = texts.iter().find(|text| text.contains(" use of "));
         assert_eq!(clash, None, "egui saw an ID twice");
     }
-    // A parent lists its children, and a child shows its parent, by their IDs.
     let [one, two] = [first, second].map(|child| id(&world, child));
     let children = format!("Children: {one}, {two}");
     let parent = id(&world, turned).to_string();
@@ -287,8 +283,7 @@ fn a_parent_lists_its_first_16_children() {
     assert_eq!(children(&world, parent_id), Some(shown));
 }
 
-/// A click of `button` at `at`: the pointer there, pressed and released in one frame, as egui
-/// takes a tap.
+/// A click of `button` at `at`, pressed and released in one frame (egui's tap).
 fn click(button: egui::PointerButton, at: egui::Pos2) -> Vec<egui::Event> {
     let button = |pressed| egui::Event::PointerButton {
         pos: at,
@@ -309,7 +304,7 @@ fn enter() -> Vec<egui::Event> {
     }]
 }
 
-/// The pointer pressed at `from`, moved to `to` and released, each in a frame of its own.
+/// The pointer pressed at `from`, moved to `to` and released, each in its own frame.
 fn drag(from: egui::Pos2, to: egui::Pos2) -> [Vec<egui::Event>; 3] {
     let button = |pos, pressed| egui::Event::PointerButton {
         pos,
@@ -332,8 +327,8 @@ fn find(texts: &[Text], after: &str, name: &str) -> egui::Rect {
     found.unwrap_or_else(|| panic!("no {name}: {texts:?}")).1
 }
 
-/// Where the last of `names` is, each the first drawn at or after the one before it, as
-/// `["rect", "[1]", "X"]` finds the button of the x of a field's second element.
+/// Where the last of `names` is, each the first at or after the previous: `["rect", "[1]", "X"]`
+/// finds the x button of a field's second element.
 fn find_after(texts: &[Text], names: &[&str]) -> egui::Rect {
     let mut at = 0;
     for name in names {
@@ -343,7 +338,7 @@ fn find_after(texts: &[Text], names: &[&str]) -> egui::Rect {
     texts[at].1
 }
 
-/// What's drawn just right of `label`, on its row: the widget of its field.
+/// What's drawn just right of `label` on its row: its field's widget.
 fn next_to(texts: &[Text], label: egui::Rect) -> &Text {
     let row = |rect: &egui::Rect| (rect.center().y - label.center().y).abs() < 4.0;
     let right = texts.iter();
@@ -352,7 +347,7 @@ fn next_to(texts: &[Text], label: egui::Rect) -> &Text {
     nearest.expect("a widget beside the label")
 }
 
-/// The middle of what's drawn just right of `label`, on its row: the widget of its field.
+/// The middle of what's drawn just right of `label` on its row: its field's widget.
 fn beside(texts: &[Text], label: egui::Rect) -> egui::Pos2 {
     next_to(texts, label).1.center()
 }
@@ -386,7 +381,6 @@ fn the_find_field_picks_an_entity_by_a_pasted_id() {
     let bad = "no entity's name has `5F3A9C0E12B47D68`, and `5F3A9C0E12B47D68` isn't an entity's \
                ID: an ID is 16 lowercase hex digits, not all zero, such as `5f3a9c0e12b47d68`";
     let missing = format!("no entity has ID {gone}");
-    // Quoted, as a scene writes it; refused, keeping the pick; and another.
     for (typed, picked, says) in [
         (format!(" \"{first}\" "), first, None),
         ("5F3A9C0E12B47D68".to_owned(), first, Some(bad)),
@@ -421,8 +415,8 @@ fn row_text(world: &World, entity: Entity) -> String {
     row_label(world, id(world, entity)).text().to_owned()
 }
 
-/// Names in a field and in an option, which a tuple struct of one field shows alone, and sets
-/// at its own path or whole; and an enum whose variant has a field, which keeps its label.
+/// Names in a field and in an option: a one-field tuple struct shows alone and sets at its path
+/// or whole. An enum variant's field keeps its label.
 #[derive(Clone, Component)]
 struct Shaped {
     name: Name,
@@ -438,9 +432,8 @@ fn shaped() -> Shaped {
     }
 }
 
-/// An entity's row shows its name alone, and one without a name, or with an empty one,
-/// "Entity": neither its ID nor its components, which the Inspector shows, its heading naming
-/// it and giving its ID.
+/// An entity's row shows its name alone; one without a name, or with an empty one, "Entity".
+/// Neither shows its ID or components: the Inspector's heading names it and gives its ID.
 #[test]
 fn an_entitys_row_shows_its_name_alone_and_the_inspector_its_id() {
     let mut world = World::default();
@@ -469,7 +462,6 @@ fn an_entitys_row_shows_its_name_alone_and_the_inspector_its_id() {
         let texts = frames(&mut inspector, &mut world, &ctx);
         assert!(texts.contains(&heading), "{heading}: {texts:?}");
     }
-    // Despawned, a pick has no name left to show.
     inspector.pick(named_id);
     world.despawn(named).expect("alive");
     let texts = frames(&mut inspector, &mut world, &ctx);
@@ -487,8 +479,7 @@ fn a_tuple_of_one_field_shows_its_field_without_a_label() {
     let parent = id(&world, parent).to_string();
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
-    // A name or a parent shows as its field alone, and so does a name in a field or an option;
-    // the field of an enum's variant keeps its label, `0`.
+    // An enum variant's field keeps its label, `0`.
     let picks: [(Entity, &[&str], usize); 3] = [
         (named, &["Name", "Ada"], 0),
         (child, &["Parent", parent.as_str()], 0),
@@ -505,8 +496,8 @@ fn a_tuple_of_one_field_shows_its_field_without_a_label() {
     }
 }
 
-/// A name typed into is set at its field's path, `0` as a component and `name.0` in a field,
-/// and whole in an option.
+/// A name typed into is set at its field's path (`0` as a component, `name.0` in a field) and
+/// whole in an option.
 #[test]
 fn a_tuple_of_one_field_is_set_at_its_own_path_or_whole() {
     let mut world = World::default();
@@ -515,7 +506,6 @@ fn a_tuple_of_one_field_is_set_at_its_own_path_or_whole() {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     let mut time = 0.0;
-    // A frame given `events`, then two that settle what they did; the last one's texts.
     let mut run = |inspector: &mut Inspector, world: &mut World, events| {
         let mut texts = Vec::new();
         for events in [events, Vec::new(), Vec::new()] {
@@ -524,8 +514,7 @@ fn a_tuple_of_one_field_is_set_at_its_own_path_or_whole() {
         }
         texts
     };
-    // An x typed into each name as a person would: clicked left of its text, which puts the
-    // cursor first, and typed.
+    // Clicked left of the text (cursor first), then typed.
     let mut texts = Vec::new();
     for (entity, after, name) in [
         (named, "Name", "Ada"),
@@ -548,13 +537,11 @@ fn a_tuple_of_one_field_is_set_at_its_own_path_or_whole() {
     let held = world.get::<Shaped>(shape).expect("shaped");
     assert_eq!(held.name, called("xBob"));
     assert_eq!(held.maybe, Some(called("xCy")));
-    // The Entities panel, the screen's left half, shows the name as it is now.
     let row = |(text, rect): &Text| text == "xAda" && rect.max.x < 800.0;
     assert!(texts.iter().any(row), "{texts:?}");
 }
 
-/// A value refused for the field of a tuple struct shows under it, not in the row of the grid
-/// it's in.
+/// A value refused for a tuple struct's field shows under it, not in its grid's row.
 #[test]
 fn a_value_refused_for_a_tuple_of_one_field_shows_under_it() {
     let mut world = World::default();
@@ -594,13 +581,13 @@ fn widgets_set_the_fields_they_show() {
             size: Vec2::ONE,
             turn: 0.5,
         },
-        // Infinite, as code may leave it, which a number typed sets back.
+        // Infinite, as code may leave it; a typed number sets it back.
         offset: Vec3::new(f32::INFINITY, -0.0, 3.0),
         ..everything()
     };
     let entity = world.spawn(odd.clone());
-    // Transparent, so that its color is lost if alpha is multiplied in; one whose bits egui's
-    // popup moves as it passes it through gamma.
+    // Transparent: premultiplying alpha would lose its color. Its bits move as egui's popup
+    // passes it through gamma.
     let tint = Vec4::new(0.3, 0.6, 0.9, 0.0);
     let sprite = Sprite {
         color: tint,
@@ -610,7 +597,6 @@ fn widgets_set_the_fields_they_show() {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     let mut time = 0.0;
-    // A frame given `events`, then two that settle what they did; the last one's texts.
     let mut run = |inspector: &mut Inspector, world: &mut World, events| {
         let mut texts = Vec::new();
         for events in [events, Vec::new(), Vec::new()] {
@@ -621,8 +607,7 @@ fn widgets_set_the_fields_they_show() {
     };
     inspector.pick(id(&world, entity));
     let mut texts = run(&mut inspector, &mut world, Vec::new());
-    // Each number typed in as a person would: clicked, which selects its text, typed over and
-    // entered; a vector's beside the buttons of their axes.
+    // Typed as a person would: clicked (selecting its text), typed over, entered.
     let typed: [(&[&str], &str); 5] = [
         (&["maybe", "level"], "1"),
         (&["rect", "[1]", "X"], "0.75"),
@@ -653,9 +638,9 @@ fn widgets_set_the_fields_they_show() {
             size: Vec2::ONE,
             turn,
         },
-        // Typed past its max, it stops there, at the f32 the field takes.
+        // Typed past its max, it stops at the f32 the field takes.
         angle: 3.2,
-        // Past what an f32 holds, it stops at the most one does, rather than become infinite.
+        // Past f32's range, it stops at the f32 maximum, not infinity.
         offset: Vec3::new(f32::MAX, -0.0, 3.0),
         ..odd
     };
@@ -663,20 +648,18 @@ fn widgets_set_the_fields_they_show() {
 
     inspector.pick(id(&world, sprite));
     let texts = run(&mut inspector, &mut world, Vec::new());
-    // Its color's button, in the column the texture's "None" starts: its popup opens.
     let at = egui::pos2(
         find(&texts, "texture", "None").min.x + 10.0,
         find(&texts, "Sprite", "color").center().y,
     );
     let opened = run(&mut inspector, &mut world, click(Primary, at));
-    // Open a while, as egui passes it through gamma each frame.
+    // Open a while: egui passes it through gamma each frame.
     for _ in 0..3 {
         run(&mut inspector, &mut world, Vec::new());
     }
     let bits = |color: Vec4| color.to_array().map(f32::to_bits);
     let set = world.get::<Sprite>(sprite).expect("a sprite").color;
     assert_eq!(bits(set), bits(tint));
-    // Closed by a click away from it, the sampler's choice is opened and picked from.
     let away = click(Primary, egui::pos2(1500.0, 3900.0));
     run(&mut inspector, &mut world, away);
     let at = beside(&texts, find(&texts, "Sprite", "sampler"));
@@ -692,9 +675,8 @@ fn widgets_set_the_fields_they_show() {
 
 #[test]
 fn a_gray_keeps_the_hue_picked_for_it() {
-    // White, as a sprite is untinted, and a gray whose value gamma's round trip moves; with a
-    // tick each frame, and with frames that draw the sets waiting for one, as at frame rates
-    // above the simulation's.
+    // White (untinted) and a gray gamma's round trip moves; with a tick each frame, and with
+    // frames whose sets wait for one.
     for gray in [Vec4::ONE, Vec4::new(0.9, 0.9, 0.9, 1.0)] {
         for every_frame in [true, false] {
             a_gray_keeps_its_hue(gray, every_frame);
@@ -712,8 +694,6 @@ fn a_gray_keeps_its_hue(gray: Vec4, every_frame: bool) {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     let mut time = 0.0;
-    // A frame given `events`, then two that settle what they did, the last with a tick, if not
-    // each; the last one's texts.
     let mut run = |inspector: &mut Inspector, world: &mut World, events| {
         let mut texts = Vec::new();
         for (i, events) in [events, Vec::new(), Vec::new()].into_iter().enumerate() {
@@ -730,7 +710,7 @@ fn a_gray_keeps_its_hue(gray: Vec4, every_frame: bool) {
         find(&texts, "Sprite", "color").center().y,
     );
     let opened = run(&mut inspector, &mut world, click(Primary, at));
-    // The popup's hue slider, found by its tooltip below its first row, about halfway along.
+    // The popup's hue slider: found by its tooltip, below the first row, about halfway along.
     let copy = find(&opened, "📋", "📋");
     let x = copy.center().x + 70.0;
     let below = (0..100).map(|step| copy.max.y + 4.0 * step as f32);
@@ -740,16 +720,16 @@ fn a_gray_keeps_its_hue(gray: Vec4, every_frame: bool) {
         texts.iter().any(|(text, _)| text == "Hue")
     });
     let hue = egui::pos2(x, hue.expect("the hue's slider") + 4.0);
-    // Clicked, so that it's picked once: a drag would pick it again each frame it's held.
+    // Clicked: a drag would pick again each frame it's held.
     run(&mut inspector, &mut world, click(Primary, hue));
-    // A hue alone leaves it gray, though it may be one whose last bits gamma moves.
     let color = world.get::<Sprite>(sprite).expect("a sprite").color;
     let still = color.x == color.y && color.y == color.z;
+    // A hue alone leaves it gray, though gamma may move its last bits.
     assert!(
         still && (color - gray).abs().max_element() < 1e-6,
         "{color}"
     );
-    // Saturated from the square above the slider, it takes the hue picked, not red.
+    // Saturated from the square above the slider: it takes the picked hue, not red.
     let square = egui::pos2(x, hue.y - 250.0);
     for events in drag(square, square + egui::vec2(5.0, 0.0)) {
         run(&mut inspector, &mut world, events);
@@ -774,30 +754,28 @@ fn angles_typed_stay_while_a_system_renormalizes_the_rotation() {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     inspector.pick(id(&world, entity));
-    // As the widget keeps them once 200° is typed: from the rotation alone, it shows -160°.
+    // The widget keeps the typed 200°; from the rotation alone, it shows -160°.
     let id = egui::Id::unique(("inspector rotation", "Transform", "rotation"));
     ctx.data_mut(|data| data.insert_temp(id, (typed, [0.0f32, 0.0, 200.0])));
-    // A bit off in each component, as renormalizing it at each tick leaves it.
+    // A bit off in each component, as renormalizing each tick leaves it.
     let nudged = typed.to_array().map(|x| f32::from_bits(x.to_bits() + 1));
     world
         .get_mut::<Transform>(entity)
         .expect("a transform")
         .rotation = Quat::from_array(nudged).normalize();
-    // egui draws the number apart from its suffix, after a figure space in place of a sign.
+    // egui draws the number apart from its suffix, after a figure space for a sign.
     let texts = frames(&mut inspector, &mut world, &ctx);
     assert!(
         texts.iter().any(|text| text == "\u{2007}200.0"),
         "{texts:?}"
     );
-    // Turned by something else, it shows the new rotation's own angles.
     world
         .get_mut::<Transform>(entity)
         .expect("a transform")
         .rotation = Quat::from_rotation_z(math::to_radians(10.0));
     let texts = frames(&mut inspector, &mut world, &ctx);
     assert!(texts.iter().any(|text| text == "\u{2007}10.0"), "{texts:?}");
-    // 200° typed again, and set at a tick that hasn't come yet: the frames before it draw the
-    // rotation as the set will make it, and so keep the angles typed.
+    // Before the tick, frames draw the rotation as the set will make it: the typed angles stay.
     ctx.data_mut(|data| data.insert_temp(id, (typed, [0.0f32, 0.0, 200.0])));
     let set = Edit {
         component: "Transform".to_owned(),
@@ -828,7 +806,6 @@ fn an_edit_applies_at_the_next_tick_to_the_entity_picked_as_it_was_made() {
         path: "count".to_owned(),
         value,
     };
-    // A set, and then one refused, before another entity is picked.
     for value in [7, 200] {
         inspector.queue(Pass {
             sets: vec![count(Value::UInt(value))],
@@ -843,8 +820,7 @@ fn an_edit_applies_at_the_next_tick_to_the_entity_picked_as_it_was_made() {
     Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
     assert_eq!(counts(&world), [7, 42]);
     assert_eq!(inspector.log.edits().len(), 1);
-    // The refusal, of a field of the entity picked before, isn't shown beside the same field
-    // of this one.
+    // The earlier entity's refusal isn't shown beside this one's same field.
     assert!(inspector.refusals.is_empty());
 }
 
@@ -878,21 +854,20 @@ fn a_value_refused_shows_beside_its_field_until_one_is_set() {
     );
     let texts = frames(&mut inspector, &mut world, &ctx);
     assert!(!texts.contains(&refused), "{texts:?}");
-    // Another entity picked starts without the last one's.
     inspector.apply(&mut world, inspector.picked, count(Value::UInt(200)));
     let other = world.spawn(everything());
     inspector.pick(id(&world, other));
     assert!(inspector.refusals.is_empty());
 }
 
-/// A pick despawned is named by the ID it was shown by, and an entity field holding a handle
-/// whose entity is gone shows the handle, not the ID of the entity now in its slot.
+/// A despawned pick is named by the ID it was shown by. An entity field whose handle's entity
+/// is gone shows the handle, not the ID of the entity now in its slot.
 #[test]
 fn the_despawned_are_named_by_what_they_were_shown_by() {
     let mut world = World::default();
     let gone = world.spawn(Transform::IDENTITY);
     world.despawn(gone).expect("alive");
-    // In the slot `gone` left, the last freed being taken first.
+    // Takes the slot `gone` left: the last freed is reused first.
     let occupant = world.spawn(Transform::IDENTITY);
     let holder = world.spawn(Everything {
         target: Some(gone),
@@ -912,7 +887,7 @@ fn the_despawned_are_named_by_what_they_were_shown_by() {
     assert!(texts.contains(&despawned), "{texts:?}");
 }
 
-/// `key` pressed with Ctrl, or Cmd on macOS, and with Shift too if `shift`.
+/// `key` pressed with Ctrl (Cmd on macOS), and Shift if `shift`.
 fn shortcut(key: egui::Key, shift: bool) -> Vec<egui::Event> {
     let modifiers = match shift {
         true => Modifiers::COMMAND.plus(Modifiers::SHIFT),
@@ -927,8 +902,7 @@ fn shortcut(key: egui::Key, shift: bool) -> Vec<egui::Event> {
     }]
 }
 
-/// The pointer pressed at `at`, moved right three times and released, each in a frame of its
-/// own, so that a drag sets its field in several frames.
+/// A drag from `at`: pressed, moved right three times, released, each in its own frame.
 fn slide(at: egui::Pos2) -> Vec<Vec<egui::Event>> {
     let button = |pressed, pos| egui::Event::PointerButton {
         pos,
@@ -955,7 +929,7 @@ fn a_drag_is_one_edit_which_the_keys_undo_and_redo() {
         time += 1.0;
         frame(inspector, world, &ctx, time, events)
     };
-    // Shown above the fields until the drag's first set, so that they move as it goes on.
+    // Shown above the fields until the drag's first set, so they move as it goes on.
     inspector.not_done = Some("can't undo it".to_owned());
     let mut texts = Vec::new();
     for _ in 0..3 {
@@ -1004,7 +978,7 @@ fn frames_that_change_nothing_queue_nothing() {
         for events in slide(at) {
             run(&mut inspector, &mut world, events, true);
         }
-        // Frames between the drags, which wait for a tick, and end no edit.
+        // Frames between drags wait for a tick and end no edit.
         for _ in 0..10 {
             run(&mut inspector, &mut world, Vec::new(), false);
         }
@@ -1051,7 +1025,7 @@ fn its_commands_are_values_that_queue_them_again() {
             ..Pass::default()
         });
     }
-    // A set, and then operations, the first of which ends its edit, so that no seal does.
+    // A set, then operations, the first ending its edit, so no seal does.
     inspector.queue(Pass {
         sets: vec![set("count", Value::UInt(8))],
         cues: pressed(),
@@ -1077,11 +1051,11 @@ fn its_commands_are_values_that_queue_them_again() {
     });
     let values = |queue: &Queue| (0..queue.len()).map(|i| queue.value(i)).collect::<Vec<_>>();
     let queued = values(&inspector.queued);
+    // The press began no edit (none went on); the release ended the one it began.
     let names: Vec<&str> = queued
         .iter()
         .map(|value| reflect::variant(value).expect("a variant").0)
         .collect();
-    // The press began no edit, since none went on, and the release ended the one it began.
     assert_eq!(
         names,
         [
@@ -1151,7 +1125,6 @@ fn its_commands_are_values_that_queue_them_again() {
         ),
         "{error}"
     );
-    // The operations' values, refused where they're wrong.
     let text = |text: &str| Value::String(text.to_owned());
     let create = |parent, components| {
         let fields = vec![named("parent", parent), named("components", components)];
@@ -1230,10 +1203,10 @@ fn its_commands_are_values_that_queue_them_again() {
     assert_eq!(again.len(), queued.len());
 }
 
-/// Adds and removes, queued as a recording replays them, are made at the next tick, through
-/// the log, whose undo takes them back; a remove forgets what its component refused, as an add
-/// does, and either clears a refusal shown above the components, as a set's of a component the
-/// entity hasn't is. One refused shows above the components.
+/// - Adds and removes, queued as a recording replays them, are made at the next tick through
+///   the log; undo takes them back.
+/// - A remove, like an add, forgets what its component refused.
+/// - Either clears a refusal shown above the components. One refused shows there too.
 #[test]
 fn components_are_added_and_removed_at_the_next_tick() {
     let mut world = World::default();
@@ -1248,7 +1221,7 @@ fn components_are_added_and_removed_at_the_next_tick() {
         path: path.to_owned(),
         value,
     };
-    // Above its bounds, and of a component it hasn't yet.
+    // Above its bounds, on a component it lacks.
     let count = refused("Everything", "count", Value::UInt(200));
     inspector.apply(&mut world, Some(picked), count);
     let tint = refused("Sprite", "color", Value::F32(1.0));
@@ -1286,7 +1259,7 @@ fn components_are_added_and_removed_at_the_next_tick() {
     assert_eq!(color, sprite.color);
     assert!(inspector.refusals.is_empty() && inspector.not_done.is_none());
     assert_eq!(inspector.log.edits().len(), 2);
-    // Refused, since it has one, and said so above its components.
+    // Refused (it has one), and said so above its components.
     let again = operation("Add", "Transform", Some(Transform::IDENTITY.to_value()));
     tick(&mut inspector, &mut world, &[again]);
     let says = inspector.not_done.clone().expect("refused");
@@ -1305,7 +1278,6 @@ fn components_are_added_and_removed_at_the_next_tick() {
     }
     let heading = format!("Entity {picked}");
     assert!(find(&texts, &says, &says).max.y < find(&texts, &says, &heading).min.y);
-    // Undone, each comes back as it was, and the refusal goes.
     for _ in 0..2 {
         inspector.queue(Pass {
             chosen: Some(Step::Undo),
@@ -1318,10 +1290,10 @@ fn components_are_added_and_removed_at_the_next_tick() {
     assert!(world.get::<Sprite>(entity).is_none());
 }
 
-/// An entity an instance's prefab gives says which instance it's of, and marks the fields that
-/// differ from its prefab, whose context menu reverts one at the next tick, as an edit the Edit
-/// menu undoes; and an instance's root says its prefab, beside Unlink, which unlinks it, as one
-/// edit, which an undo links again.
+/// - An entity from an instance's prefab says which instance it's of and marks fields that
+///   differ from the prefab. Their context menu reverts one at the next tick, as an edit the
+///   Edit menu undoes.
+/// - An instance's root says its prefab, beside Unlink: one edit, which an undo reverses.
 #[test]
 fn an_instances_overrides_are_marked_and_reverted_and_its_root_unlinked() {
     let mut world = World::default();
@@ -1368,7 +1340,6 @@ fn an_instances_overrides_are_marked_and_reverted_and_its_root_unlinked() {
     let texts = texts_in(&shapes);
     let root_id = id(&world, root);
     let of = format!("Of the instance of lamp.prefab whose root is lamp, entity {root_id}");
-    // The bars of the selection's color just left of the field and the component that differ.
     let selection = ctx.style_of(ctx.theme()).visuals.selection.bg_fill;
     let bars = crate::testing::painted(&shapes).into_iter();
     let bars: Vec<egui::Rect> = bars
@@ -1429,8 +1400,7 @@ fn an_instances_overrides_are_marked_and_reverted_and_its_root_unlinked() {
 
 #[test]
 fn a_number_typed_is_one_edit() {
-    // With a tick each frame, and every other one, as at frame rates above the simulation's,
-    // whose frames between draw the sets waiting for one.
+    // With a tick each frame, and every other (the others draw sets waiting for one).
     for every in [1, 2] {
         a_number_is_typed(every);
     }
@@ -1454,7 +1424,6 @@ fn a_number_is_typed(every: u32) {
     }
     let at = beside(&texts, find(&texts, "Everything", "weight"));
     let weight = |world: &World| world.get::<Everything>(entity).expect("everything").weight;
-    // Clicked, which selects its text, typed over a key a frame, and entered.
     run(&mut inspector, &mut world, click(Primary, at));
     let mut sets = 0;
     for typed in ["0", ".", "7", "5"] {
@@ -1462,7 +1431,6 @@ fn a_number_is_typed(every: u32) {
         sets += run(&mut inspector, &mut world, text).1;
     }
     sets += run(&mut inspector, &mut world, enter()).1;
-    // Then a frame with a tick, if that one had none.
     run(&mut inspector, &mut world, Vec::new());
     assert!(sets > 1 && weight(&world) == 0.75, "{sets} sets");
     assert_eq!(inspector.log.edits().len(), 1, "one edit");
@@ -1471,8 +1439,7 @@ fn a_number_is_typed(every: u32) {
     assert_eq!(weight(&world).to_bits(), 2.5f64.to_bits());
 }
 
-/// What the window of its own that [`in_window`] gives the panels gets and gives: its pass's
-/// time and events, and its texts.
+/// What [`in_window`]'s window gets and gives: its pass's time and events, and its texts.
 #[derive(Default)]
 struct Window {
     time: f64,
@@ -1480,8 +1447,8 @@ struct Window {
     texts: Vec<Text>,
 }
 
-/// Runs `ctx`'s windows of their own as the engine runs a torn-off panel's: each in a pass of
-/// its own inside the main window's, with its own input, which the returned `Window` gives.
+/// Runs `ctx`'s windows as the engine runs a torn-off panel's: each in its own pass inside the
+/// main window's, with its own input (the returned `Window`'s).
 fn in_window(ctx: &egui::Context) -> Rc<RefCell<Window>> {
     ctx.set_embed_viewports(false);
     let window = Rc::new(RefCell::new(Window::default()));
@@ -1514,8 +1481,8 @@ fn in_window(ctx: &egui::Context) -> Rc<RefCell<Window>> {
     window
 }
 
-/// A frame of the main window, in whose pass the two panels draw in `window`, a window of
-/// their own, given `events`; returns that window's texts, and how many edits it made.
+/// A frame of the main window, in whose pass both panels draw in `window`. Returns that
+/// window's texts and its edit count.
 fn window_frame(
     inspector: &mut Inspector,
     world: &mut World,
@@ -1578,7 +1545,6 @@ fn a_torn_off_inspector_keeps_its_drags_and_keys() {
     let dragged = weight(&world);
     assert!(sets > 1 && dragged != 2.5, "{sets} sets, to {dragged}");
     assert_eq!(inspector.log.edits().len(), 1, "one edit");
-    // Pressed in that window, the keys step through the edits.
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
     assert_eq!(weight(&world).to_bits(), 2.5f64.to_bits());
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, true));
@@ -1602,17 +1568,16 @@ fn each_click_is_an_edit_and_a_text_field_keeps_its_keys() {
         texts = run(&mut inspector, &mut world, Vec::new());
     }
     let on = |world: &World| world.get::<Everything>(entity).expect("everything").on;
-    // Its checkbox, which has no text, in the column its neighbor's number starts.
+    // The checkbox has no text: find it in the column where its neighbor's number starts.
     let checkbox = egui::pos2(
         find(&texts, "count", "42").min.x + 4.0,
         find(&texts, "Everything", "on").center().y,
     );
-    // Clicked in frames one after the other, each click is an edit of its own.
     run(&mut inspector, &mut world, click(Primary, checkbox));
     run(&mut inspector, &mut world, click(Primary, checkbox));
     assert!(on(&world));
     assert_eq!(inspector.log.edits().len(), 2);
-    // While the Find field has the keys, they undo its own text, not an edit.
+    // With the Find field holding the keys, undo hits its text, not an edit.
     run(
         &mut inspector,
         &mut world,
@@ -1627,7 +1592,7 @@ fn each_click_is_an_edit_and_a_text_field_keeps_its_keys() {
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
     assert_eq!(inspector.log.edits().len(), 1);
     assert!(!on(&world));
-    // Two drags while the Find field keeps the keys are two edits, a press beginning each.
+    // Still two edits: a press begins each.
     run(&mut inspector, &mut world, click(Primary, field));
     let weight = beside(&texts, find(&texts, "Everything", "weight"));
     for events in [slide(weight), slide(weight)].concat() {
@@ -1636,8 +1601,8 @@ fn each_click_is_an_edit_and_a_text_field_keeps_its_keys() {
     assert_eq!(inspector.log.edits().len(), 3);
 }
 
-/// A frame of the Edit and Entity menus' items alone, as the open menus show them, given
-/// `events`, and then the tick that makes what the one clicked chose; returns its texts.
+/// A frame of the open Edit and Entity menus' items alone, then the tick that makes what the
+/// clicked item chose. Returns its texts.
 fn menu(
     inspector: &mut Inspector,
     world: &mut World,
@@ -1714,7 +1679,7 @@ fn the_edit_menu_names_its_steps_and_a_refused_one_says_why() {
         click(Primary, find(&texts, &redo, &redo).center()),
     );
     assert_eq!(count(&world), 99);
-    // With its entity gone, the edit can't be undone, which the Inspector panel says.
+    // With its entity gone, the edit can't be undone, and the Inspector panel says so.
     world.despawn(entity).expect("alive");
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
     assert_eq!(inspector.log.undoable(), None);
@@ -1728,11 +1693,12 @@ fn the_edit_menu_names_its_steps_and_a_refused_one_says_why() {
     assert!(said, "{texts:?}");
 }
 
-/// A world cleared, replaced or restored, as a layer below the Inspector's would at its tick,
-/// is another, which the Inspector's next tick finds: it unpicks, closes every row, forgets
-/// what was refused and clears its log, so that Undo names nothing; and drops what was queued
-/// for the world before, rather than make it in this one, where a replace or a restore gives
-/// the entity it named back under its ID, or have it refused, as the world cleared would.
+/// A world cleared, replaced or restored by a lower layer is another; the Inspector's next tick
+/// finds it and:
+/// - unpicks, closes every row, forgets refusals and clears its log, so Undo names nothing;
+/// - drops what was queued for the old world, neither making it here (a replace or restore
+///   gives the named entity back under its ID) nor having it refused, as a cleared world would.
+///
 /// Edits from then on are this world's.
 #[test]
 fn another_world_unpicks_and_drops_the_edits_made_to_the_one_before() {
@@ -1758,7 +1724,6 @@ fn another_world_unpicks_and_drops_the_edits_made_to_the_one_before() {
         inspector.pick(picked);
         inspector.expanded.insert(id(&world, parent));
         make(&mut inspector, &mut world, set(7));
-        // Refused, and shown beside its field.
         inspector.apply(&mut world, Some(picked), count(200));
         time += 1.0;
         let texts = menu(&mut inspector, &mut world, &ctx, time, Vec::new());
@@ -1767,7 +1732,7 @@ fn another_world_unpicks_and_drops_the_edits_made_to_the_one_before() {
         assert!(named, "{case}: {texts:?}");
         inspector.not_done = Some("can't undo it".to_owned());
         inspector.not_found = Some("no entity has ID 0123456789abcdef".to_owned());
-        // For the next tick: a delete, then a set of a gesture that goes on.
+        // For the next tick: a delete, then a set of an ongoing gesture.
         inspector.queue(Pass {
             operations: vec![Command::Delete(vec![picked])],
             ..Pass::default()
@@ -1792,7 +1757,7 @@ fn another_world_unpicks_and_drops_the_edits_made_to_the_one_before() {
         assert_eq!(inspector.picked, None, "{case}");
         assert!(inspector.expanded.is_empty(), "{case}");
         assert!(inspector.refusals.is_empty(), "{case}");
-        // Dropped, not refused, as the delete would be in the world cleared.
+        // Dropped, not refused, as the delete would be in a cleared world.
         assert_eq!(inspector.not_done, None, "{case}");
         assert_eq!(inspector.not_found, None, "{case}");
         assert!(
@@ -1807,7 +1772,7 @@ fn another_world_unpicks_and_drops_the_edits_made_to_the_one_before() {
             assert_eq!(world.entities(None).expect("every entity").len(), 0);
             continue;
         }
-        // Given back under its ID, neither set nor deleted; and edited from then on.
+        // Given back under its ID, neither set nor deleted.
         let entity = world.entity(picked).expect("given back");
         let counted = |world: &World| {
             let all = world.get::<Everything>(entity);
@@ -1821,9 +1786,9 @@ fn another_world_unpicks_and_drops_the_edits_made_to_the_one_before() {
     }
 }
 
-/// The very world the Inspector left coming back, as when a layer swaps a copy in to play and
-/// back to stop, finds its edits, its pick and its open rows as they were, and its undo undoes
-/// in it; the copy's go, and so do those of a world left before, which never comes back.
+/// When a layer swaps a copy in to play and back to stop, the returning world finds its edits,
+/// pick and open rows as they were, and its undo works. The copy's go, and so do an earlier
+/// world's, which never returns.
 #[test]
 fn the_world_left_coming_back_finds_its_edits_pick_and_rows() {
     let mut world = World::default();
@@ -1842,7 +1807,6 @@ fn the_world_left_coming_back_finds_its_edits_pick_and_rows() {
     inspector.pick(picked);
     inspector.expanded.insert(id(&world, parent));
     make(&mut inspector, &mut world, count(7));
-    // Swapped for a copy, edited there, and back.
     let copy = world.clone();
     let mut left = mem::replace(&mut world, copy);
     Layer::tick(&mut inspector, &mut world, Tick { number: 1 });
@@ -1862,7 +1826,7 @@ fn the_world_left_coming_back_finds_its_edits_pick_and_rows() {
     });
     Layer::tick(&mut inspector, &mut world, Tick { number: 3 });
     assert_eq!(counted(&world), 42, "undone in it");
-    // A world cleared is another for good: neither it nor the copy comes back.
+    // A cleared world is another for good: neither it nor the copy returns.
     world.clear();
     Layer::tick(&mut inspector, &mut world, Tick { number: 4 });
     mem::swap(&mut world, &mut left);
@@ -1871,10 +1835,9 @@ fn the_world_left_coming_back_finds_its_edits_pick_and_rows() {
     assert_eq!(inspector.picked, None);
 }
 
-/// The very world the Inspector left coming back through `restored`, as the tool API's `stop`
-/// brings back the world as edited, with no tick between, finds its edits, its pick and its open
-/// rows as they were, and its undo undoes in it; and so does it after another copy has played,
-/// and in a run whose world as edited never ticked.
+/// Through `restored`, as the tool API's `stop` brings back the world as edited with no tick
+/// between, the returning world finds its edits, pick and open rows as they were, and its undo
+/// works. So it does after another copy has played, and in a run whose edited world never ticked.
 #[test]
 fn the_world_left_coming_back_through_restored_finds_its_edits_pick_and_rows() {
     let mut cx = Context::seeded(1);
@@ -1896,7 +1859,7 @@ fn the_world_left_coming_back_through_restored_finds_its_edits_pick_and_rows() {
     inspector.expanded.insert(parent);
     make(&mut inspector, cx.world_mut(), count(7));
     for play in 1..=2 {
-        // A copy plays in its place, whose first tick puts the world's aside.
+        // A copy plays in its place; its first tick puts the world's aside.
         let copy = cx.world().clone();
         let edited = mem::replace(cx.world_mut(), copy);
         Layer::tick(&mut inspector, cx.world_mut(), Tick { number: 1 });
@@ -1915,8 +1878,8 @@ fn the_world_left_coming_back_through_restored_finds_its_edits_pick_and_rows() {
     });
     Layer::tick(&mut inspector, cx.world_mut(), Tick { number: 2 });
     assert_eq!(counted(&cx), 42, "undone in it");
-    // A stopped run's world as edited, which never ticks, picked and opened in after the
-    // Inspector attached, or after it was restored, as a run restored from a snapshot starts.
+    // A run restored from a snapshot starts stopped: its edited world never ticks, yet is picked
+    // and opened in after the Inspector attached or was restored.
     for start in ["attached", "restored"] {
         let mut inspector = Inspector::default();
         match start {
@@ -1936,10 +1899,9 @@ fn the_world_left_coming_back_through_restored_finds_its_edits_pick_and_rows() {
     }
 }
 
-/// In a run whose ticks run again on a copy of the world (`--sync-test`), the Inspector's sets,
-/// undos and redos run again on the copy as they ran in the world, through a copy of its log as
-/// each tick started, so that the copy parts from the world at no tick; and the world keeps its
-/// serial, and its log, whose undos and redos go on in it.
+/// With ticks rerun on a copy of the world (`--sync-test`), the Inspector's sets, undos and
+/// redos rerun on the copy through a copy of the log as each tick started: the copy never
+/// parts from the world. The world keeps its serial and log; its undos and redos go on.
 #[test]
 fn a_sync_tests_copy_takes_the_inspectors_edits_undos_and_redos_as_the_world_did() {
     let mut cx = Context::seeded(1);
@@ -1984,8 +1946,7 @@ fn a_sync_tests_copy_takes_the_inspectors_edits_undos_and_redos_as_the_world_did
     assert!(!stack.failed());
 }
 
-/// Every row of the tree, the naive way: each root in turn, each followed, if its row is open,
-/// by the rows of each of its children in turn.
+/// Every row of the tree, the naive way: each root, then if open each child's rows in turn.
 fn flatten(world: &World, expanded: &HashSet<EntityId>) -> Vec<(EntityId, usize)> {
     fn rows(
         world: &World,
@@ -2007,7 +1968,7 @@ fn flatten(world: &World, expanded: &HashSet<EntityId>) -> Vec<(EntityId, usize)
     out
 }
 
-/// `n` children made for `parent`, each spawned a root and then given its parent.
+/// `n` children of `parent`, each spawned a root then parented.
 fn children_of(world: &mut World, parent: Entity, n: usize) -> Vec<Entity> {
     let made = (0..n).map(|_| {
         let child = world.spawn(Transform::IDENTITY);
@@ -2017,17 +1978,15 @@ fn children_of(world: &mut World, parent: Entity, n: usize) -> Vec<Entity> {
     made.collect()
 }
 
-/// The tree finds a page of its rows as a listing of every row does, wherever the page starts:
-/// over 50,000 roots in several tables, open ones followed by their rows, with open children
-/// among them; an open root without children; an open child under a closed parent, which adds
-/// no rows; and an open entity despawned.
+/// A page of the tree's rows matches the full listing wherever it starts. Covers 50,000+ roots
+/// in several tables, open ones (open children among them), an open root without children, an
+/// open child under a closed parent (adds no rows) and an open entity despawned.
 #[test]
 fn the_tree_finds_a_page_as_a_listing_of_every_row_does() {
     let mut world = World::default();
     let plain: Vec<Entity> = (0..20_000)
         .map(|_| world.spawn(Transform::IDENTITY))
         .collect();
-    // In a table of children, between the roots' tables.
     let top = children_of(&mut world, plain[5], 4);
     let middle = children_of(&mut world, top[0], 3);
     let bottom = children_of(&mut world, middle[1], 2);
@@ -2057,7 +2016,7 @@ fn the_tree_finds_a_page_as_a_listing_of_every_row_does() {
     assert_eq!(tree.spans.len(), 4, "the roots open");
     assert_eq!(tree.len, flat.len());
     assert_eq!(tree.page(&world, 0..flat.len()), flat);
-    // Pages from every 97th row, and from each row about each open root's.
+    // Pages from every 97th row, and from each row near an open root's.
     let mut starts: Vec<usize> = (0..flat.len()).step_by(97).collect();
     let mut before = 0;
     for &(at, n) in &tree.spans {
@@ -2071,8 +2030,7 @@ fn the_tree_finds_a_page_as_a_listing_of_every_row_does() {
     }
 }
 
-/// A frame scrolled thousands of rows down draws the rows in view alone, as the tree lists
-/// them, an open root's rows among them.
+/// A frame scrolled thousands of rows down draws only the rows in view, as the tree lists them.
 #[test]
 fn a_frame_scrolled_over_thousands_of_roots_draws_the_rows_in_view() {
     let mut world = World::default();
@@ -2126,7 +2084,7 @@ fn a_frame_scrolled_over_thousands_of_roots_draws_the_rows_in_view() {
     assert!((131..134).all(|child| shown.contains(&child)), "{shown:?}");
 }
 
-/// Where the arrows `shapes` draw are: their triangles.
+/// The triangles of the arrows `shapes` draw.
 fn arrows_in(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Rect> {
     let painted = crate::testing::painted(shapes).into_iter();
     let arrows = painted.filter_map(|shape| match shape {
@@ -2138,9 +2096,9 @@ fn arrows_in(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Rect> {
     arrows.collect()
 }
 
-/// Only the rows of entities with children have arrows, which show and hide their children's
-/// rows, under theirs and further in, rather than pick them; a list of the entities with a
-/// component has neither arrows nor indents.
+/// Only rows of entities with children have arrows; they show and hide the children's rows
+/// (indented under theirs) rather than pick. A list of the entities with a component has
+/// neither arrows nor indents.
 #[test]
 fn rows_with_children_alone_have_arrows() {
     let mut world = World::default();
@@ -2150,8 +2108,6 @@ fn rows_with_children_alone_have_arrows() {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     let mut time = 0.0;
-    // A frame given `events`, then two that settle what it did; the last one's texts and
-    // arrows.
     let mut run = |inspector: &mut Inspector, world: &mut World, events| {
         let (mut texts, mut arrows) = (Vec::new(), Vec::new());
         for events in [events, Vec::new(), Vec::new()] {
@@ -2161,7 +2117,6 @@ fn rows_with_children_alone_have_arrows() {
         }
         (texts, arrows)
     };
-    // The arrow on the row labeled `row`, left of its label, if it has one.
     let arrow = |(texts, arrows): &(Vec<Text>, Vec<egui::Rect>), row: &str| {
         let label = find(texts, row, row);
         let on_row = |arrow: &&egui::Rect| {
@@ -2211,7 +2166,7 @@ fn in_menu(ctx: &egui::Context, texts: &[Text], name: &str) -> egui::Pos2 {
         .center()
 }
 
-/// A world that has registered the components of an empty entity, as a bare one hasn't.
+/// A world with an empty entity's components registered, unlike a bare one.
 fn creating() -> World {
     let mut world = World::default();
     world.register::<Name>().expect("registered");
@@ -2219,11 +2174,13 @@ fn creating() -> World {
     world
 }
 
-/// The Entities panel's context menus, which a secondary click opens and egui sizes in a
-/// frame of their own: below the rows, one makes a root; and on a row, one makes a child of
-/// its entity, duplicates it or deletes it, with its descendants. Each is made at the next
-/// tick, which picks what a create made, or the copy, and shows its row; and each is undone,
-/// and the creates and the delete redone.
+/// The Entities panel's context menus (a secondary click opens each; egui sizes it in a frame
+/// of its own):
+/// - Below the rows: make a root.
+/// - On a row: make a child of its entity, duplicate it or delete it, descendants included.
+///
+/// Each is made at the next tick, which picks what a create made, or the copy, and shows its
+/// row. Each is undone; the creates and the delete are redone.
 #[test]
 fn context_menus_create_and_delete_entities() {
     let mut world = creating();
@@ -2234,7 +2191,6 @@ fn context_menus_create_and_delete_entities() {
         clock.set(clock.get() + 1.0);
         clock.get()
     };
-    // A frame given `events`, then two that settle what it did; the last one's texts.
     let run = |inspector: &mut Inspector, world: &mut World, events| {
         let mut texts = Vec::new();
         for events in [events, Vec::new(), Vec::new()] {
@@ -2243,8 +2199,6 @@ fn context_menus_create_and_delete_entities() {
         texts
     };
     let alive = |world: &World| world.entities(None).expect("every entity").len();
-    // Every entity is an Empty Entity: where the Entities panel, the screen's left half,
-    // shows their rows, top first.
     let rows = |texts: &[Text]| {
         let rows = texts
             .iter()
@@ -2253,7 +2207,6 @@ fn context_menus_create_and_delete_entities() {
         rows.sort_by(|a, b| a.min.y.total_cmp(&b.min.y));
         rows
     };
-    // Opens the menu of what's at `at`, and clicks its item `item`.
     let choose = |inspector: &mut Inspector, world: &mut World, at: egui::Pos2, item: &str| {
         let texts = run(inspector, world, click(Secondary, at));
         let item = in_menu(&ctx, &texts, item);
@@ -2271,8 +2224,6 @@ fn context_menus_create_and_delete_entities() {
     assert_eq!(inspector.picked, Some(id(&world, root)));
     assert_eq!(world.get::<Name>(root), Some(&called("Empty Entity")));
     assert_eq!(world.get::<Transform>(root), Some(&Transform::IDENTITY));
-    // A child, and a child of that, each shown under its parent's row, further in, as it's
-    // picked.
     let mut parent = root;
     let mut made = Vec::new();
     for depth in 0..2 {
@@ -2294,8 +2245,6 @@ fn context_menus_create_and_delete_entities() {
         made.push(id(&world, child));
         parent = child;
     }
-    // The whole subtree duplicated from the root's row, the copy of the root picked, and
-    // undone.
     let (undo, redo) = (shortcut(egui::Key::Z, false), shortcut(egui::Key::Z, true));
     let texts = run(&mut inspector, &mut world, Vec::new());
     let at = rows(&texts)[0].center();
@@ -2306,7 +2255,7 @@ fn context_menus_create_and_delete_entities() {
     run(&mut inspector, &mut world, undo.clone());
     assert_eq!(alive(&world), 3);
     inspector.pick(made[1]);
-    // The whole subtree deleted from the root's row, the pick staying on what's gone.
+    // The pick stays on what's gone.
     let texts = run(&mut inspector, &mut world, Vec::new());
     let at = rows(&texts)[0].center();
     let texts = choose(&mut inspector, &mut world, at, "Delete Entity");
@@ -2317,7 +2266,6 @@ fn context_menus_create_and_delete_entities() {
         texts.iter().any(|(text, _)| *text == despawned),
         "{texts:?}"
     );
-    // Undone, it comes back, under its IDs; then each create is undone, and each redone.
     run(&mut inspector, &mut world, undo.clone());
     assert_eq!(alive(&world), 3);
     assert!(made.iter().all(|&made| world.entity(made).is_some()));
@@ -2335,8 +2283,8 @@ fn context_menus_create_and_delete_entities() {
     }
 }
 
-/// A context menu left open acts on the entity it opened on, though its row moves as tables
-/// swap rows, and another entity's row comes to its place.
+/// A context menu left open acts on the entity it opened on, though its row moves and another
+/// entity's takes its place.
 #[test]
 fn a_context_menu_acts_on_its_entity_as_its_row_moves() {
     let mut world = World::default();
@@ -2356,7 +2304,7 @@ fn a_context_menu_acts_on_its_entity_as_its_row_moves() {
     let texts = run(&mut inspector, &mut world, Vec::new());
     let first = find(&texts, &row(&world, a), &row(&world, a));
     run(&mut inspector, &mut world, click(Secondary, first.center()));
-    // To the end of another table, the last of its own taking its row.
+    // Moves it to the end of another table; the last of its own takes its row.
     world.insert(a, Sprite::default()).expect("alive");
     let texts = run(&mut inspector, &mut world, Vec::new());
     let moved_in = find(&texts, &row(&world, c), &row(&world, c));
@@ -2370,17 +2318,15 @@ fn a_context_menu_acts_on_its_entity_as_its_row_moves() {
     assert!(world.contains(b) && world.contains(c));
 }
 
-/// The Entity menu makes a root; and, while the entity picked is alive, makes a child of it,
-/// duplicates it, as Ctrl+D does, picking the copy, and deletes it; and unpicks it, despawned
-/// too.
+/// The Entity menu makes a root. While the picked entity is alive it makes a child, duplicates
+/// it (like Ctrl+D) picking the copy, and deletes it; a despawned pick is unpicked.
 #[test]
 fn the_entity_menu_creates_duplicates_deletes_and_unpicks() {
     let mut world = creating();
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     let mut time = 0.0;
-    // A frame given `events`, then one that settles what it did, since egui finds what's
-    // clicked among the last frame's widgets; the last one's texts.
+    // One settling frame only: egui finds a click among the last frame's widgets.
     let mut run = |inspector: &mut Inspector, world: &mut World, events| {
         let mut texts = Vec::new();
         for events in [events, Vec::new()] {
@@ -2410,7 +2356,7 @@ fn the_entity_menu_creates_duplicates_deletes_and_unpicks() {
     let child_id = id(&world, child);
     assert_eq!(inspector.picked, Some(child_id));
     assert!(inspector.expanded.contains(&id(&world, root)));
-    // Each copy the last of the root's children, and picked; the second a copy of the first.
+    // Each copy is the root's last child and picked; the second copies the first.
     for events in [item("Duplicate"), duplicate] {
         run(&mut inspector, &mut world, events);
         let children: Vec<Entity> = world.children(root).expect("alive").collect();
@@ -2421,19 +2367,18 @@ fn the_entity_menu_creates_duplicates_deletes_and_unpicks() {
     assert_eq!(world.children(root).expect("alive").count(), 3);
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
     assert_eq!(world.children(root).expect("alive").count(), 2, "undone");
-    // Drawn picked, so that Delete is enabled in the frame before the click, which egui finds
-    // it among.
+    // Drawn picked first: Delete must be enabled in the frame before the click.
     inspector.pick(child_id);
     run(&mut inspector, &mut world, Vec::new());
     run(&mut inspector, &mut world, item("Delete"));
     assert!(!world.contains(child));
-    // Still picked, for an undo to bring it back; but its pick despawned unpicks too.
+    // Still picked, for an undo to bring it back; a despawned pick unpicks too.
     assert_eq!(inspector.picked, Some(child_id));
     run(&mut inspector, &mut world, item("Unpick"));
     assert_eq!(inspector.picked, None);
 }
 
-/// A click below the rows unpicks, forgetting the refusals of the entity picked.
+/// A click below the rows unpicks, forgetting the picked entity's refusals.
 #[test]
 fn a_click_below_the_rows_unpicks() {
     let mut world = World::default();
@@ -2461,9 +2406,9 @@ fn a_click_below_the_rows_unpicks() {
     assert!(texts.iter().any(|(text, _)| text == nothing), "{texts:?}");
 }
 
-/// A click across a row, well right of its label's text, picks its entity, in the tree and in
-/// the list of those with a component; and each row is a line tall, as their paging takes it,
-/// one whose label is wider than the panel too.
+/// A click across a row, well right of its label, picks its entity, in the tree and in the
+/// component list. Each row is a line tall, as paging assumes, even with a label wider than the
+/// panel.
 #[test]
 fn a_click_across_a_row_picks_its_entity() {
     let mut world = World::default();
@@ -2492,11 +2437,9 @@ fn a_click_across_a_row_picks_its_entity() {
         let rows = [a, b, c].map(row);
         let wide = rows[1];
         assert!(wide.width() > 800.0 && wide.height() < line, "{wide:?}");
-        // Where the texts of the rows around it end below, which none of theirs hangs under,
-        // as the g of "long" does: two lines apart.
+        // Neighbors' texts end two lines apart (none hangs below the line, as the g of "long").
         let apart = rows[2].max.y - rows[0].max.y;
         assert!((apart - 2.0 * line).abs() < 1.0, "{with:?}: {apart}");
-        // Near the right edge of the Entities panel, the screen's left half.
         for (entity, label) in [(c, rows[2]), (a, rows[0])] {
             let at = egui::pos2(790.0, label.center().y);
             assert!(at.x > label.max.x + 400.0, "{label:?}");
@@ -2562,13 +2505,13 @@ fn in_entities(texts: &[Text], name: &str) -> egui::Rect {
     found.unwrap_or_else(|| panic!("no {name}: {texts:?}")).1
 }
 
-/// How far left of the text of a button in the Entities panel's header the middle of the glyph's
-/// button before it is, in egui's default spacing: the text's button's padding, 8 points, the
-/// space between widgets, 8, and half the glyph's button, square and as tall as a text's, 10.
+/// How far left of a header text button's text the preceding glyph button's middle is, in
+/// egui's default spacing: the text button's padding 8 points, the widget gap 8, and half the
+/// glyph button (square, as tall as a text's) 10.
 const GLYPH_BEFORE: f32 = 26.0;
 
-/// Where the Entities panel's magnifier is, which opens its Find field: at the start of its
-/// header, before its component filter, which lists them all.
+/// The Entities panel's magnifier, which opens its Find field: at the start of the header,
+/// before the component filter.
 fn magnifier(texts: &[Text]) -> egui::Pos2 {
     let filter = in_entities(texts, "All");
     egui::pos2(filter.min.x - GLYPH_BEFORE, filter.center().y)
@@ -2579,10 +2522,10 @@ fn find_field(texts: &[Text]) -> egui::Pos2 {
     in_entities(texts, "ID or name").center()
 }
 
-/// The Find field finds an entity by a part of its name, ignoring case, the next such at each
-/// Enter, from the first again past the last, opening the rows above it; and says when neither a
-/// name has what's typed nor is it an ID. The magnifier opens it in place of the rest of the
-/// header, and its × closes it, emptied, the rest coming back.
+/// - The Find field matches part of a name, ignoring case: each Enter finds the next match,
+///   wrapping, and opens the rows above it.
+/// - It says so when no name matches and the text isn't an ID.
+/// - The magnifier opens it in place of the rest of the header; × closes it, emptied.
 #[test]
 fn the_find_field_finds_the_next_entity_whose_name_has_whats_typed() {
     let mut world = World::default();
@@ -2638,9 +2581,9 @@ fn the_find_field_finds_the_next_entity_whose_name_has_whats_typed() {
     in_entities(&texts, "All");
 }
 
-/// F2, while the panel has the keys, and a row's Rename rename its entity in its row: what's
-/// typed replaces its name, all selected, and Enter names it so at the next tick, as a set of the
-/// name it has, or an add of one, which an undo takes back; Escape leaves it as it was.
+/// F2 (while the panel has the keys) and a row's Rename rename its entity in its row. Typing
+/// replaces the selected name; Enter applies it at the next tick, as a set or an add, which an
+/// undo takes back. Escape leaves it as it was.
 #[test]
 fn f2_and_a_rows_rename_name_its_entity_in_its_row() {
     let mut world = creating();
@@ -2685,10 +2628,11 @@ fn f2_and_a_rows_rename_name_its_entity_in_its_row() {
     assert_eq!(world.get::<Name>(nameless), None, "undone");
 }
 
-/// While the panel has the keys, from a press in it until a press elsewhere, Delete deletes the
-/// entity picked and F asks the link to frame it; a double click on a row frames its entity,
-/// picking it, and so does its menu's Frame in View, which shows once a layer takes frames; and its
-/// Copy ID copies its ID.
+/// - While the panel has the keys (from a press in it until a press elsewhere), Delete deletes
+///   the picked entity and F asks the link to frame it.
+/// - A double click on a row frames and picks its entity, as does its menu's Frame in View,
+///   which shows once a layer takes frames.
+/// - Its Copy ID copies its ID.
 #[test]
 fn the_panels_keys_its_double_clicks_and_its_menus_delete_and_frame() {
     let mut world = World::default();
@@ -2721,7 +2665,7 @@ fn the_panels_keys_its_double_clicks_and_its_menus_delete_and_frame() {
         "{menu:?}"
     );
     run(&mut inspector, &mut world, press(egui::Key::Escape));
-    // A press in it gives it the keys.
+    // A press in the panel gives it the keys.
     run(&mut inspector, &mut world, click(Primary, row(&texts, "a")));
     run(&mut inspector, &mut world, press(egui::Key::Delete));
     assert!(!world.contains(a));
@@ -2747,7 +2691,7 @@ fn the_panels_keys_its_double_clicks_and_its_menus_delete_and_frame() {
     .concat();
     run(&mut inspector, &mut world, twice);
     assert_eq!((inspector.picked, link.framed()), (Some(c_id), Some(c_id)));
-    // Once a layer takes frames, as it has.
+    // Frame in View shows once a layer takes frames, as it has.
     inspector.pick(b_id);
     let menu = run(
         &mut inspector,
@@ -2781,11 +2725,12 @@ fn the_panels_keys_its_double_clicks_and_its_menus_delete_and_frame() {
     assert_ne!(a_id, c_id);
 }
 
-/// A click on a row with Ctrl (Cmd on macOS) held adds its entity to what's picked, as the active
-/// one, or takes it out, the one picked before becoming the active one; with Shift held, it picks
-/// the rows from the active one's to it; and the Inspector panel says how many are picked. Delete
-/// deletes them all, and a picked row's Duplicate Entity copies them all, each as one edit, which
-/// one undo takes back, one under another picked going with it, the copies picked.
+/// - Ctrl-click (Cmd on macOS) adds a row's entity to the picks as the active one, or takes it
+///   out, the previous pick becoming active.
+/// - Shift-click picks the rows from the active one's to it.
+/// - The Inspector panel says how many are picked.
+/// - Delete deletes them all; a picked row's Duplicate Entity copies them all, picking the
+///   copies. Each is one edit, one undo; a pick under another picked goes with it.
 #[test]
 fn clicks_with_ctrl_and_shift_pick_several_which_delete_and_copy_as_one_edit() {
     let mut world = World::default();
@@ -2797,8 +2742,7 @@ fn clicks_with_ctrl_and_shift_pick_several_which_delete_and_copy_as_one_edit() {
     let mut inspector = Inspector::default();
     inspector.expanded.insert(c_id);
     let mut time = 0.0;
-    // A frame given `events` with `modifiers` held, then two that settle what it did, the second
-    // with them let go; the last one's texts.
+    // `modifiers` are held for the first frame and let go for the last.
     let mut run = |inspector: &mut Inspector, world: &mut World, events: Vec<_>, modifiers| {
         let mut texts = Vec::new();
         let held = [egui::Event::ModifiersChanged(modifiers)]
@@ -2843,7 +2787,7 @@ fn clicks_with_ctrl_and_shift_pick_several_which_delete_and_copy_as_one_edit() {
     assert_eq!(picks(&inspector), ids, "the rows from a's to d's");
     let said = "4 entities picked: the last one picked is below";
     assert!(texts.iter().any(|(text, _)| text == said), "{texts:?}");
-    // The panel has the keys, from the clicks in it; d goes with c.
+    // The clicks gave the panel the keys; d goes with c.
     run(&mut inspector, &mut world, press(egui::Key::Delete), none);
     assert!([a, b, c, d].iter().all(|&entity| !world.contains(entity)));
     run(
@@ -2878,8 +2822,8 @@ fn clicks_with_ctrl_and_shift_pick_several_which_delete_and_copy_as_one_edit() {
     assert_ne!(b_id, d_id);
 }
 
-/// The Inspector's commands of several entities are values as one's, and a recording's of one,
-/// as before multiselect, reads as one of them.
+/// Commands on several entities are values like one's; recordings from before multiselect
+/// still read.
 #[test]
 fn deletes_and_duplicates_of_one_entity_as_recordings_had_them_read() {
     let id: EntityId = "0123456789abcdef".parse().expect("an ID");
@@ -2899,8 +2843,8 @@ fn deletes_and_duplicates_of_one_entity_as_recordings_had_them_read() {
     assert_eq!(queue.value(0), written);
 }
 
-/// A row dragged onto another makes its entity that one's last child, opening its row, and onto
-/// the space below the rows a root; but onto one of its descendants, nothing.
+/// A row dragged onto another makes its entity that one's last child, opening its row; onto the
+/// space below the rows, a root; onto one of its descendants, nothing.
 #[test]
 fn a_row_dragged_onto_another_makes_its_entity_that_ones_child() {
     let mut world = World::default();
@@ -2969,7 +2913,6 @@ fn the_plus_menu_creates_and_collapse_all_hides_every_roots_rows() {
     };
     let texts = run(&mut inspector, &mut world, Vec::new());
     in_entities(&texts, "kid");
-    // Its glyph's button, just before the + menu's.
     let plus = in_entities(&texts, "+");
     let collapse = egui::pos2(plus.min.x - GLYPH_BEFORE, plus.center().y);
     let texts = run(&mut inspector, &mut world, click(Primary, collapse));
@@ -2998,33 +2941,31 @@ fn the_plus_menu_creates_and_collapse_all_hides_every_roots_rows() {
     }
 }
 
-/// What a component that follows an entity holds: its handle, of which there's no default.
+/// A component that follows an entity: it holds its handle, which has no default.
 #[derive(Clone, Component)]
 struct Follower(Entity);
 
-/// Opaque as a whole, as a mesh's draw is: no value makes one.
+/// Opaque as a whole, like a mesh's draw: no value makes one.
 #[derive(Clone, Component)]
 #[reflect(opaque)]
 struct Sealed;
 
-/// The Add Component menu lists the types the picked entity can be given, in the order they
-/// registered: not those it has, nor a parent, nor those opaque as a whole. One picked is added
-/// at the next tick, of its type's default, which an undo takes away; one without a default
-/// shows disabled, saying why on hover, and adds nothing.
+/// The Add Component menu lists, in registration order, the types the picked entity can be
+/// given: not those it has, a parent, or those opaque as a whole. A pick is added at the next
+/// tick as its type's default; undo removes it. A type without a default shows disabled,
+/// saying why on hover, and adds nothing.
 #[test]
 fn add_component_adds_a_types_default() {
     let mut world = creating();
     world.register::<Camera>().expect("registered");
     let entity = world.spawn(Transform::IDENTITY);
-    // Registered as they're spawned.
     world.spawn(Follower(entity));
     world.spawn(Sealed);
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     inspector.pick(id(&world, entity));
     let mut time = 0.0;
-    // A frame given `events`, then two that settle what they did, as a popup draws unseen in
-    // its first; the last one's texts.
+    // Two settling frames: a popup draws unseen in its first.
     let mut run = |inspector: &mut Inspector, world: &mut World, events| {
         let mut texts = Vec::new();
         for events in [events, Vec::new(), Vec::new()] {
@@ -3077,8 +3018,8 @@ fn add_component_adds_a_types_default() {
     assert_eq!(world.get::<Camera>(entity), None);
 }
 
-/// The menu beside each component's header removes it, at the next tick, and until then it
-/// isn't drawn; an undo gives it back. A parent, which the world gives, has no menu.
+/// The menu beside a component's header removes it at the next tick; undo gives it back. A
+/// parent, which the world gives, has no menu.
 #[test]
 fn a_components_menu_removes_it() {
     let mut world = World::default();
@@ -3094,8 +3035,6 @@ fn a_components_menu_removes_it() {
     let mut inspector = Inspector::default();
     inspector.pick(id(&world, entity));
     let mut time = 0.0;
-    // A frame given `events`, then two that settle what they did, each with a tick if `tick`;
-    // the last one's texts, and its components' menus.
     let mut run = |inspector: &mut Inspector, world: &mut World, events, tick| {
         let mut shapes = Vec::new();
         for events in [events, Vec::new(), Vec::new()] {
@@ -3105,7 +3044,6 @@ fn a_components_menu_removes_it() {
         (texts_in(&shapes), find_menus(&shapes))
     };
     let (texts, menus) = run(&mut inspector, &mut world, Vec::new(), true);
-    // Its transform's and its sprite's.
     assert_eq!(menus.len(), 2, "{menus:?}");
     let (button, _) = menu_on(&menus, find(&texts, "Sprite", "Sprite"));
     let menu = click(Primary, button.center());
@@ -3129,9 +3067,9 @@ fn a_components_menu_removes_it() {
     assert_eq!(back, Some(color));
 }
 
-/// A component's header is framed, as wide as the Inspector panel: a click on it, however far
-/// right of its name, closes and opens it, while its menu, over its right end, its dots in the
-/// middle of its button, opens from its button and leaves it as it was.
+/// A component's header is framed, as wide as the Inspector panel. A click on it, however far
+/// right of its name, closes and opens it; its menu (over the right end, dots mid-button) opens
+/// from its button without toggling it.
 #[test]
 fn a_header_spans_its_panel_under_its_menu() {
     let mut world = World::default();
@@ -3152,8 +3090,6 @@ fn a_header_spans_its_panel_under_its_menu() {
     let (texts, menus) = run(&mut inspector, &mut world, Vec::new());
     assert!(open(&texts), "{texts:?}");
     let header = find(&texts, "Sprite", "Sprite");
-    // On the header's row, at the right end of the Inspector panel, the screen's right half,
-    // its dots in the middle of its button, both ways.
     let (menu, dots) = menu_on(&menus, header);
     assert!(menu.max.x > 1550.0 && menu.max.x <= 1600.0, "{menu:?}");
     let off = dots.center() - menu.center();
@@ -3169,10 +3105,9 @@ fn a_header_spans_its_panel_under_its_menu() {
     assert!(open(&texts), "left open: {texts:?}");
 }
 
-/// A component's menu shows, and opens from a click anywhere on its button, in an Inspector
-/// panel narrower and shorter than its contents: their rows run past its right edge, cut off,
-/// as a narrow one's axes do, and its scroll bar floats along that edge. It's at the end of
-/// what shows of its header, short of the bar.
+/// In an Inspector panel narrower and shorter than its contents, rows run past the right edge,
+/// cut off, and the scroll bar floats along it. A component's menu still shows, at the end of
+/// the visible header short of the bar, and opens from a click anywhere on its button.
 #[test]
 fn a_components_menu_opens_in_a_panel_smaller_than_its_contents() {
     let mut world = World::default();
@@ -3183,9 +3118,7 @@ fn a_components_menu_opens_in_a_panel_smaller_than_its_contents() {
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0));
     let panel = egui::Rect::from_min_max(egui::pos2(1380.0, 0.0), egui::pos2(1600.0, 150.0));
     let mut time = 0.0;
-    // A frame given `events`, then two that settle what they did, as the dock draws the panel,
-    // cut off at its edges, with the Inspector's own scroll area; the last one's texts, and
-    // its components' menus.
+    // The panel is drawn as the dock does: cut off at its edges, in the Inspector's scroll area.
     let mut run = |events: Vec<egui::Event>| {
         let mut shapes = Vec::new();
         for events in [events, Vec::new(), Vec::new()] {
@@ -3213,7 +3146,7 @@ fn a_components_menu_opens_in_a_panel_smaller_than_its_contents() {
         (texts_in(&shapes), find_menus(&shapes))
     };
     let (texts, menus) = run(Vec::new());
-    // The rows of axes run past the panel's edge, translation's Z button cut off, undrawn.
+    // Axis rows run past the edge: translation's Z button is cut off, undrawn.
     let row = |name: &str| texts.iter().position(|(text, _)| text == name);
     let (translation, rotation) = (row("translation").unwrap(), row("rotation").unwrap());
     let z = texts[translation..rotation]
@@ -3232,15 +3165,14 @@ fn a_components_menu_opens_in_a_panel_smaller_than_its_contents() {
     in_menu(&ctx, &texts, "Remove Component");
     let (texts, _) = run(click(Primary, menu.center()));
     assert!(!opened(&texts), "closed: {texts:?}");
-    // Its right end, a point in from its edge: the end toward the scroll bar.
     let end = egui::pos2(menu.max.x - 1.0, menu.center().y);
     let (texts, _) = run(click(Primary, end));
     in_menu(&ctx, &texts, "Remove Component");
 }
 
-/// An enum with fields switches its variant from a choice of them: to one it had while the
-/// entity was drawn, with the fields it had then; to one it hadn't, with its fields' defaults;
-/// and on another entity, to the defaults again.
+/// An enum with fields switches variant from a choice: to one it had while the entity was
+/// drawn, with the fields it had then; to a new one, with defaults; on another entity, with
+/// defaults again.
 #[test]
 fn variants_switch_to_the_fields_they_had_or_their_defaults() {
     let mut world = World::default();
@@ -3257,8 +3189,6 @@ fn variants_switch_to_the_fields_they_had_or_their_defaults() {
     let mut inspector = Inspector::default();
     inspector.pick(id(&world, first));
     let clock = Cell::new(0.0);
-    // A frame given `events`, then two that settle what they did, as a popup draws unseen in
-    // its first, each with a tick if `tick`; the last one's texts.
     let run = |inspector: &mut Inspector, world: &mut World, events, tick| {
         let mut texts = Vec::new();
         for events in [events, Vec::new(), Vec::new()] {
@@ -3267,7 +3197,6 @@ fn variants_switch_to_the_fields_they_had_or_their_defaults() {
         }
         texts
     };
-    // Picks `to` from the projection's choice, which shows `from`, the variant it is.
     let switch = |inspector: &mut Inspector, world: &mut World, from: &str, to: &str| {
         let texts = run(inspector, world, Vec::new(), true);
         let choice = click(Primary, find(&texts, "projection", from).center());
@@ -3290,14 +3219,12 @@ fn variants_switch_to_the_fields_they_had_or_their_defaults() {
     assert_eq!(projection(&world, first), orthographic);
     switch(&mut inspector, &mut world, "Orthographic", "Perspective");
     assert_eq!(projection(&world, first), defaults);
-    // Its field of view typed in; then switched away from, and back to.
     let texts = run(&mut inspector, &mut world, Vec::new(), true);
     let fov = beside(&texts, find(&texts, "projection", "fov"));
     run(&mut inspector, &mut world, click(Primary, fov), true);
     let typed = vec![egui::Event::Text("60".to_owned())];
     run(&mut inspector, &mut world, typed, true);
     run(&mut inspector, &mut world, enter(), true);
-    // As a field in degrees takes what's typed.
     let sixty = perspective((60.0 / (180.0 / PI)) as f32);
     assert_eq!(projection(&world, first), sixty);
     switch(&mut inspector, &mut world, "Perspective", "Orthographic");
@@ -3309,8 +3236,8 @@ fn variants_switch_to_the_fields_they_had_or_their_defaults() {
     assert_eq!(projection(&world, second), defaults);
 }
 
-/// An environment's sky switches from its clear color to Earth's atmosphere in its choice, and
-/// back; an image sky, whose texture has no default, shows disabled there, saying why on hover.
+/// An environment's sky switches between its clear color and Earth's atmosphere in its choice.
+/// An image sky, whose texture has no default, shows disabled there, saying why on hover.
 #[test]
 fn an_environments_sky_switches_to_the_atmosphere() {
     let mut world = World::default();
@@ -3351,10 +3278,10 @@ fn an_environments_sky_switches_to_the_atmosphere() {
     assert_eq!(sky(&world), crate::Sky::ClearColor);
 }
 
-/// An option turns on and off by its checkbox, each an edit that an undo takes back: an
-/// environment's reflections, turned on, take their defaults; tuned, turned off and on again, what
-/// they last held; and on another entity, the defaults again. A sprite's texture, which has no
-/// default, shows its checkbox disabled, saying why on hover, and isn't turned on.
+/// An option's checkbox turns it on and off, each an edit undo reverses. An environment's
+/// reflections turn on with defaults; after tuning and an off-on cycle, with what they last
+/// held; on another entity, with defaults. A sprite's texture, with no default, shows its
+/// checkbox disabled, saying why on hover, and stays off.
 #[test]
 fn options_turn_on_with_what_they_last_held_or_their_defaults() {
     let mut world = World::default();
@@ -3377,12 +3304,10 @@ fn options_turn_on_with_what_they_last_held_or_their_defaults() {
         environment.reflections
     };
     let defaults = Some(crate::Reflections::default());
-    // Clicks the checkbox of the reflections, labeled `label`, as they are.
     let turn = |texts: &[Text], label| click(Primary, find(texts, "reflections", label).center());
     let texts = run(&mut inspector, &mut world, Vec::new());
     let texts = run(&mut inspector, &mut world, turn(&texts, "None"));
     assert_eq!(reflections(&world, first), defaults);
-    // Its distance typed in; then turned off, and on again.
     let distance = beside(&texts, find(&texts, "reflections", "distance"));
     run(&mut inspector, &mut world, click(Primary, distance));
     let typed = vec![egui::Event::Text("30".to_owned())];
@@ -3419,10 +3344,10 @@ fn options_turn_on_with_what_they_last_held_or_their_defaults() {
     assert_eq!(inspector.log.edits().len(), edits);
 }
 
-/// An option that's on, holding a struct, keeps its fields' rows within its own: each of an
-/// environment's rows, with every option on, ends above the next one's start, rather than a grid
-/// centering what an option holds in the height its row had a frame before, which put the last of
-/// its fields on the next row.
+/// An option that's on, holding a struct, keeps its fields within its row: with every option
+/// on, each of an environment's rows ends above the next one's start. Regression: a grid
+/// centered the content in the previous frame's row height, putting its last field on the next
+/// row.
 #[test]
 fn options_holding_structs_keep_within_their_rows() {
     let mut world = World::default();
@@ -3437,13 +3362,10 @@ fn options_holding_structs_keep_within_their_rows() {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     inspector.pick(id(&world, entity));
-    // A grid measures its rows' heights in one frame, and places them by those in the next.
     let mut texts = Vec::new();
     for time in 1..=3 {
         texts = frame(&mut inspector, &mut world, &ctx, time.into(), Vec::new()).0;
     }
-    // Where each row starts in what's drawn: its field's label, the first drawn at or after the
-    // row before it's.
     let rows = [
         "exposure",
         "adaptation",
@@ -3478,8 +3400,8 @@ fn options_holding_structs_keep_within_their_rows() {
     }
 }
 
-/// A variant that holds what's opaque, which no value makes, shows disabled in its enum's
-/// choice, saying why on hover, and isn't switched to.
+/// A variant holding opaque state, which no value makes, shows disabled in its enum's choice,
+/// saying why on hover, and can't be switched to.
 #[test]
 fn a_variant_that_holds_whats_opaque_shows_disabled() {
     let mut world = World::default();
@@ -3497,7 +3419,6 @@ fn a_variant_that_holds_whats_opaque_shows_disabled() {
         texts
     };
     let texts = run(&mut inspector, &mut world, Vec::new());
-    // Its form's choice, which shows the variant it is.
     let choice = click(Primary, find(&texts, "form", "Point").center());
     let texts = run(&mut inspector, &mut world, choice);
     let held = in_menu(&ctx, &texts, "Held");
@@ -3511,10 +3432,11 @@ fn a_variant_that_holds_whats_opaque_shows_disabled() {
     assert_eq!(inspector.log.edits().len(), 0);
 }
 
-/// Each axis's button sets its component alone to the default's, a click an edit: a
-/// translation's x to 0, its type's; a scale's y to 1, the transform's; the x of a sprite's
-/// rect's bottom right to 1, the sprite's; and a rotation's angle about z to the default
-/// rotation's, keeping the others.
+/// An axis button resets its component alone to the default, a click an edit:
+/// - a translation's x to 0 (its type's default);
+/// - a scale's y to 1 (the transform's);
+/// - the x of a sprite rect's bottom right to 1 (the sprite's);
+/// - a rotation's angle about z to the default rotation's, keeping the others.
 #[test]
 fn axis_buttons_set_their_component_to_its_default() {
     let mut world = World::default();
@@ -3565,12 +3487,11 @@ fn axis_buttons_set_their_component_to_its_default() {
     assert_eq!(inspector.log.edits().len(), 4);
 }
 
-/// The axis buttons' labels draw in the family [`crate::BOLD`] names where the context binds
-/// it, as the engine's does, and else in egui's proportional one, as in a context with egui's
-/// own fonts, or a game's: never in a family that isn't bound.
+/// Axis button labels draw in [`crate::BOLD`]'s family where the context binds it (the
+/// engine's does), else in egui's proportional one (egui's own fonts, or a game's); never in an
+/// unbound family.
 #[test]
 fn axis_buttons_are_bold_where_the_family_is_bound() {
-    /// Each text `shapes` draw, by its sections, and its family.
     fn families(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::FontFamily)> {
         let mut found = Vec::new();
         for shape in crate::testing::painted(shapes) {
@@ -3603,15 +3524,13 @@ fn axis_buttons_are_bold_where_the_family_is_bound() {
         for axis in ["X", "Y", "Z"] {
             let drawn = found.iter().filter(|(text, _)| text == axis);
             let drawn_in: Vec<&egui::FontFamily> = drawn.map(|(_, family)| family).collect();
-            // A translation's, a rotation's and a scale's.
             assert_eq!(drawn_in, [&family; 3], "{axis}");
         }
     }
 }
 
-/// A drag of an axis sets that component alone, at its own path, so that a system moving
-/// another at the ticks between the frames keeps what it moved; the drag is one edit, whose
-/// undo takes back that component alone.
+/// An axis drag sets that component alone, at its own path, so a system moving another between
+/// frames keeps its move. The drag is one edit; undo takes back that component alone.
 #[test]
 fn an_axis_drag_sets_its_component_alone() {
     let mut world = World::default();
@@ -3638,7 +3557,6 @@ fn an_axis_drag_sets_its_component_alone() {
     let mut sets = 0;
     for events in slide(at) {
         sets += run(&mut inspector, &mut world, events, false).1;
-        // The system, at the tick, after the frame drew it.
         let moved = world.get_mut::<Transform>(entity).expect("a transform");
         moved.translation.y += 1.0;
         Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
@@ -3656,9 +3574,8 @@ fn an_axis_drag_sets_its_component_alone() {
     assert_eq!(translation(&world), DVec3::new(0.0, 5.0, 0.0));
 }
 
-/// Sets of a vector and of its components that wait for a tick draw it as they'll make it, in
-/// the order they were made, as at frame rates above the simulation's; and the tick makes it
-/// so.
+/// Sets of a vector and its components waiting for a tick draw it as they'll make it, in order;
+/// the tick then makes it so.
 #[test]
 fn sets_of_a_vector_and_of_its_components_draw_in_order() {
     let mut world = World::default();
@@ -3699,8 +3616,6 @@ fn sets_of_a_vector_and_of_its_components_draw_in_order() {
             let drawn = frame_ticking(&mut inspector, &mut world, &ctx, time, Vec::new(), false);
             texts = drawn.0;
         }
-        // What each axis's drag shows, beside its button, after the figure space in place of a
-        // sign.
         let shown = ["X", "Y", "Z"].map(|axis| {
             let (text, _) = next_to(&texts, find_after(&texts, &["translation", axis]));
             text.trim_start_matches('\u{2007}')
@@ -3714,10 +3629,9 @@ fn sets_of_a_vector_and_of_its_components_draw_in_order() {
     }
 }
 
-/// A vector's numbers keep their places as they change: each axis's field takes a share of the
-/// row, however wide its number, and a number, centered in its field, keeps its width as its
-/// digits change and its sign comes and goes, a minus sign or a figure space in its place; one
-/// that shows as zero shows no minus.
+/// A vector's numbers keep their places as they change. Each axis field takes an equal share of
+/// the row; its centered number keeps its width as digits change and the sign comes and goes
+/// (a minus sign or a figure space). A number showing as zero shows no minus.
 #[test]
 fn a_vectors_numbers_hold_still_as_they_change() {
     let mut world = World::default();
@@ -3731,8 +3645,7 @@ fn a_vectors_numbers_hold_still_as_they_change() {
     for (x, shown) in [
         (0.0, "\u{2007}0.00"),
         (-1.5, "\u{2212}1.50"),
-        // Ending in the same digit as the first two, so that where their ink ends compares
-        // their widths.
+        // Same last digit as the first two: where their ink ends compares widths.
         (9.5, "\u{2007}9.50"),
         (-12345.5, "\u{2212}12345.50"),
         (-1e-9, "\u{2007}0.00"),
@@ -3746,11 +3659,10 @@ fn a_vectors_numbers_hold_still_as_they_change() {
         }
         let (number, at) = next_to(&texts, find_after(&texts, &["translation", "X"]));
         assert_eq!(number, shown, "{x}");
-        // Where its ink ends: where it starts leaves out a figure space's blank.
+        // Where ink ends: a start would include a figure space's blank.
         numbers.push(at.max.x);
         ys.push(find_after(&texts, &["translation", "Y"]).min.x);
     }
-    // The first three alike in width, and so in place.
     assert!(
         numbers[..3].iter().all(|&end| end == numbers[0]),
         "{numbers:?}"
@@ -3758,10 +3670,9 @@ fn a_vectors_numbers_hold_still_as_they_change() {
     assert!(ys.iter().all(|&y| y == ys[0]), "{ys:?}");
 }
 
-/// In an Inspector panel as narrow as the editor's first is, cut off at its edges in its scroll
-/// area as the dock draws it, a vector's axes share what shows of their row: the last ends
-/// within the panel, short of the scroll bar, and stays where it is whichever number the
-/// first shows.
+/// In a panel as narrow as the editor's first Inspector, cut off in its scroll area as the dock
+/// draws it, a vector's axes share what shows of their row: the last ends within the panel,
+/// short of the scroll bar, and stays put whatever the first shows.
 #[test]
 fn a_vectors_axes_fit_a_panel_as_narrow_as_the_editors() {
     let mut world = World::default();
@@ -3810,7 +3721,6 @@ fn a_vectors_axes_fit_a_panel_as_narrow_as_the_editors() {
         assert!(at.max.x < edge, "{at:?} past {edge}: {texts:?}");
         zs.push(z);
     }
-    // Where Z is, whichever number X's field shows.
     assert_eq!(zs[0], zs[1]);
 }
 
@@ -3861,10 +3771,10 @@ fn queued_names(inspector: &Inspector) -> Vec<&'static str> {
     names.collect()
 }
 
-/// A gesture of the link's is one edit, whatever the panels' input says meanwhile, which a drag
-/// in the game's view doesn't come through: across passes whose cues let go, press and
-/// release, its sets queue as `Set`s, its seal as a `Seal`, and one undo takes it back. Its
-/// first set ends an edit of the panels' going on, and a set of the panels' ends it.
+/// A link gesture is one edit, whatever the panels' input says meanwhile (a drag in the game's
+/// view doesn't pass through it). Across passes whose cues let go, press and release, its sets
+/// queue as `Set`s, its seal as a `Seal`, and one undo reverses it. Its first set ends an
+/// ongoing panel edit; a panel set ends the gesture.
 #[test]
 fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
     let mut world = World::default();
@@ -3883,7 +3793,6 @@ fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
         held: true,
         ..Cues::default()
     };
-    // A number being typed into the panel.
     inspector.queue(Pass {
         sets: vec![count(7)],
         cues: held(),
@@ -3931,7 +3840,6 @@ fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
     assert_eq!(translation(&world), Some(DVec3::ZERO));
     let typed = world.get::<Everything>(entity).map(|all| all.count);
     assert_eq!(typed, Some(7));
-    // The panels' set ends a gesture of the link's going on.
     link.set(picked, "Transform", "translation", at(4.0));
     inspector.queue(Pass::default());
     inspector.queue(Pass {
@@ -3942,8 +3850,8 @@ fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
     assert_eq!(queued_names(&inspector), ["Set", "Seal", "Set"]);
 }
 
-/// A set through the link is its entity's, whatever's picked as it's queued: here one picked
-/// through the link in the same pass.
+/// A link set belongs to its entity, whatever's picked as it's queued: here, one picked through
+/// the link in the same pass.
 #[test]
 fn a_set_through_the_link_is_its_entitys_whatever_is_picked() {
     let mut world = World::default();
@@ -3960,9 +3868,8 @@ fn a_set_through_the_link_is_its_entitys_whatever_is_picked() {
     assert_eq!((inspector.picked, link.picked()), (Some(b_id), Some(b_id)));
 }
 
-/// The link's sets wait from the frame they're made until a tick has made them: those of a
-/// drag and the undo that follows them in one queue leave the world as it was, and nothing
-/// waiting; and a refused one is dropped.
+/// Link sets wait from their frame until a tick makes them. A drag's sets and the undo after
+/// them in one queue leave the world as it was, nothing waiting. A refused set is dropped.
 #[test]
 fn the_links_sets_wait_until_a_tick_makes_them() {
     let mut world = World::default();
@@ -3984,7 +3891,7 @@ fn the_links_sets_wait_until_a_tick_makes_them() {
     Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
     assert!(!link.waiting());
     assert_eq!(world.get::<Transform>(entity), Some(&Transform::IDENTITY));
-    // A rotation that isn't a unit, which the world refuses.
+    // A non-unit rotation, which the world refuses.
     let skewed = Value::Quat(Quat::from_xyzw(0.0, 0.0, 2.0, 1.0));
     link.set(picked, "Transform", "rotation", skewed);
     make(&mut inspector, &mut world, Pass::default());
@@ -3992,8 +3899,8 @@ fn the_links_sets_wait_until_a_tick_makes_them() {
     assert_eq!(world.get::<Transform>(entity), Some(&Transform::IDENTITY));
 }
 
-/// The Inspector panel draws a field as the link's set waiting for a tick will make it, from
-/// the frame the set is made, after the sets queued before it.
+/// The panel draws a field as the link's waiting set will make it, from the set's frame, after
+/// earlier queued sets.
 #[test]
 fn the_panel_draws_the_links_sets_from_the_frame_theyre_made() {
     let mut world = World::default();
@@ -4032,9 +3939,9 @@ fn the_panel_draws_the_links_sets_from_the_frame_theyre_made() {
     assert_eq!(held, Some(42), "until a tick");
 }
 
-/// The link picks a living entity as the next pass starts, opening the rows above its own, and
-/// unpicks for a despawned one's ID, one no entity had, or none; without a pick asked for, the
-/// pick stays.
+/// The link picks a living entity as the next pass starts, opening the rows above it. It
+/// unpicks for a despawned entity's ID, an ID no entity had, or none. With no pick asked for,
+/// the pick stays.
 #[test]
 fn the_link_picks_a_living_entity_and_unpicks_for_any_other() {
     let mut world = World::default();
@@ -4070,8 +3977,8 @@ fn the_link_picks_a_living_entity_and_unpicks_for_any_other() {
     assert_eq!(link.picked(), Some(child_id));
 }
 
-/// A world restored, which is another, drops the link's sets queued for the world before and
-/// those no pass has taken yet, and the pick it asked for.
+/// A restored world, being another, drops the link's sets queued for the old world (those no
+/// pass has taken) and the pick it asked for.
 #[test]
 fn another_world_drops_what_the_link_asked_of_the_one_before() {
     let mut world = World::default();
@@ -4081,7 +3988,6 @@ fn another_world_drops_what_the_link_asked_of_the_one_before() {
     let ctx = crate::egui_context();
     let mut inspector = Inspector::default();
     let link = inspector.link();
-    // So that it knows the world.
     Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
     let at = |x: f64| Value::DVec3(DVec3::new(x, 0.0, 0.0));
     link.set(picked, "Transform", "translation", at(1.0));
@@ -4131,8 +4037,8 @@ fn the_link_counts_the_undos_and_redos_asked_for() {
     assert_eq!(link.stepped(), 3);
 }
 
-/// Between passes the link keeps the latest value of each field of its gesture alone, and a
-/// seal keeps those before it apart; a second seal ends nothing more.
+/// Between passes the link keeps only the latest value of each field of its gesture; a seal
+/// keeps earlier ones apart. A second seal ends nothing more.
 #[test]
 fn the_link_keeps_the_latest_value_of_each_field_between_passes() {
     let link = Inspector::default().link();
@@ -4165,8 +4071,8 @@ fn the_link_keeps_the_latest_value_of_each_field_between_passes() {
     );
 }
 
-/// A debug build refuses a set through the link of the component whole, or inside a field of
-/// another kind than a vector, which the panel couldn't draw as it'll be.
+/// A debug build refuses a link set of a whole component, or inside a non-vector field: the
+/// panel couldn't draw it as it'll be.
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "a link sets a field of a component's own")]
@@ -4176,9 +4082,8 @@ fn a_link_refuses_a_set_inside_another_kind_of_field() {
     link.set(id, "Everything", "maybe.level", Value::UInt(1));
 }
 
-/// A debug build refuses, as the Inspector's next pass takes it, a set through the link of a
-/// field whose insides the panels set at paths of their own, as a struct's, which the panel
-/// couldn't draw beside theirs.
+/// A debug build refuses, as the next pass takes it, a link set of a field whose insides the
+/// panels set at their own paths (a struct's): the panel couldn't draw it beside theirs.
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "got `inner` of `Everything`")]
@@ -4192,8 +4097,8 @@ fn a_link_refuses_a_set_of_a_struct_whole() {
     inspector.follow(&world);
 }
 
-/// A field's latest set through the link goes after the sets made since its last, so that a
-/// vector set whole and one of its components still set in the order they came.
+/// A field's latest link set goes after sets made since its last, so a vector set whole and
+/// then one component still apply in that order.
 #[test]
 fn the_links_latest_set_of_a_field_comes_after_those_made_since() {
     let link = Inspector::default().link();
@@ -4210,9 +4115,9 @@ fn the_links_latest_set_of_a_field_comes_after_those_made_since() {
     assert_eq!(link.pending(), expected);
 }
 
-/// A create through the link queues after the link's sets before it, ending their gesture, and
-/// makes a root at the next tick, which the Inspector picks; one undo takes it back alone. One
-/// the world refuses, of a type it hasn't, shows above the components, as the menu's does.
+/// A link create queues after earlier link sets, ending their gesture, and makes a root at the
+/// next tick, which the Inspector picks; one undo takes it back alone. A refused create (a
+/// type the world lacks) shows above the components, as the menu's does.
 #[test]
 fn a_create_through_the_link_makes_a_root_and_picks_it() {
     let mut world = World::default();
@@ -4261,16 +4166,16 @@ fn a_create_through_the_link_makes_a_root_and_picks_it() {
         1,
         "the create undone"
     );
+    // Refused at the first frame's tick, shown from the next.
     link.create(vec![("Nothing".into(), Value::Bool(true))]);
-    // Refused at the first frame's tick, and shown from the next.
     frame(&mut inspector, &mut world, &ctx, 1.0, Vec::new());
     let (texts, _) = frame(&mut inspector, &mut world, &ctx, 2.0, Vec::new());
     let said = inspector.not_done.clone().expect("refused");
     assert!(texts.iter().any(|(text, _)| *text == said), "{texts:?}");
 }
 
-/// A set through the link of a component the picked entity hasn't, whose field the panel doesn't
-/// draw, is refused above its components, as an operation is, rather than beside a field.
+/// A link set of a component the picked entity lacks (no field drawn) is refused above its
+/// components, like an operation, not beside a field.
 #[test]
 fn a_links_set_of_a_component_the_entity_hasnt_shows_above_its_components() {
     let mut world = World::default();
@@ -4281,8 +4186,8 @@ fn a_links_set_of_a_component_the_entity_hasnt_shows_above_its_components() {
     let mut inspector = Inspector::default();
     inspector.pick(picked);
     let link = inspector.link();
+    // Refused at the first frame's tick, shown from the next.
     link.set(picked, "Sprite", "color", Value::Vec4(Vec4::ONE));
-    // Refused at the first frame's tick, and shown from the next.
     frame(&mut inspector, &mut world, &ctx, 1.0, Vec::new());
     let (texts, _) = frame(&mut inspector, &mut world, &ctx, 2.0, Vec::new());
     assert!(inspector.refusals.is_empty());
@@ -4306,8 +4211,7 @@ mod remote {
     use crate::layer::Stack;
     use crate::main_loop::Stepper;
 
-    /// How long a test waits for what should come in a few frames, past which it fails rather than
-    /// hangs.
+    /// How long a test waits for what should come in a few frames, before it fails, not hangs.
     const DEADLINE: Duration = Duration::from_secs(20);
 
     /// A game whose world its API serves on this thread, as its frames would.
@@ -4326,9 +4230,9 @@ mod remote {
         }
     }
 
-    /// A frame of a remote Inspector's panels, side by side as [`panels`] draws them, as its `ui`
-    /// takes in the game's answers before them and sends the pass after them, then tells its link
-    /// the pick and its place; `give` adds to the pass before it's sent. Returns the frame's texts.
+    /// A frame of a remote Inspector's panels, drawn as [`panels`] does: its `ui` takes in the
+    /// game's answers first, then sends the pass and tells its link the pick and its place.
+    /// `give` adds to the pass before it's sent. Returns the texts.
     fn frame(
         inspector: &mut Inspector,
         ctx: &egui::Context,
@@ -4371,8 +4275,8 @@ mod remote {
             .collect()
     }
 
-    /// Runs frames of `game` and of `inspector`, the first given `give`, until `until` holds of
-    /// the Inspector's texts and the game; returns the texts.
+    /// Runs frames of `game` and `inspector`, the first given `give`, until `until` holds of the
+    /// texts and the game. Returns the texts.
     fn until(
         inspector: &mut Inspector,
         game: &mut Game,
@@ -4404,11 +4308,13 @@ mod remote {
         transform.expect("a transform").translation.x as f32
     }
 
-    /// A remote Inspector lists a game's entities through its API, as they come and go, shows the
-    /// one picked, its components in the order they registered, sets a field in a gesture, which
-    /// one undo takes back, its Edit menu naming the edit, and creates an entity, which it picks,
-    /// as it does one its link creates; and a set through the link of a component the entity
-    /// hasn't is refused above its components.
+    /// A remote Inspector, through a game's API:
+    /// - lists the game's entities as they come and go;
+    /// - shows the pick, its components in registration order;
+    /// - sets a field in a gesture one undo reverses, its Edit menu naming the edit;
+    /// - creates and picks an entity, as for one its link creates.
+    ///
+    /// A link set of a component the entity lacks is refused above its components.
     #[test]
     fn a_remote_inspector_shows_and_edits_a_game_through_the_api() {
         let app = "Remote Inspector";
@@ -4436,7 +4342,6 @@ mod remote {
         inspector.link().reach(Some(session));
         let (ctx, mut time) = (crate::egui_context(), 0.0);
         let has = |texts: &[String], text: &str| texts.iter().any(|shown| shown == text);
-        // The tree, its root closed.
         let texts = until(
             &mut inspector,
             &mut game,
@@ -4446,7 +4351,6 @@ mod remote {
             |texts, _| has(texts, "Hero") && has(texts, "2 entities"),
         );
         assert!(!has(&texts, "Kid"), "{texts:?}");
-        // Picked through the link, its components in the order they registered.
         inspector.link().pick(Some(hero_id));
         let heading = format!("Hero, entity {hero_id}");
         let texts = until(
@@ -4458,8 +4362,7 @@ mod remote {
             |texts, _| has(texts, &heading) && has(texts, "Transform"),
         );
         assert!(has(&texts, &format!("Children: {kid_id}")), "{texts:?}");
-        // Placed by the read that shows it, in the space of the world, by the Inspector's first
-        // reach.
+        // Placed in world space by the read that shows it, the Inspector's first reach.
         let placed = inspector.link().placed().expect("placed");
         let expected = Placed {
             id: hero_id,
@@ -4476,7 +4379,6 @@ mod remote {
             .filter_map(|text| own.iter().find(|&&name| name == text).copied())
             .collect();
         assert_eq!(drawn, own, "in the order they registered");
-        // Two sets in one gesture, then its end.
         let set = |x: f32| Edit {
             component: "Transform".to_owned(),
             path: "translation.x".to_owned(),
@@ -4528,7 +4430,6 @@ mod remote {
                 |_, _| true,
             );
         }
-        // One undo takes the gesture back whole.
         until(
             &mut inspector,
             &mut game,
@@ -4539,7 +4440,6 @@ mod remote {
             },
             |_, game| x(game, hero) == 0.0,
         );
-        // The game despawns one, which goes from the list.
         game.cx.world_mut().despawn(kid).expect("alive");
         until(
             &mut inspector,
@@ -4549,7 +4449,6 @@ mod remote {
             |_| {},
             |texts, _| has(texts, "1 entity"),
         );
-        // An entity made, and picked.
         let texts = until(
             &mut inspector,
             &mut game,
@@ -4566,7 +4465,6 @@ mod remote {
         );
         assert_ne!(inspector.picked, Some(hero_id), "{texts:?}");
         assert_eq!(game.cx.world().entities(None).expect("all").len(), 2);
-        // One the link creates, picked too.
         let made = Transform {
             translation: DVec3::new(0.0, 3.0, 0.0),
             ..Transform::IDENTITY
@@ -4589,7 +4487,7 @@ mod remote {
             .entity(rock)
             .and_then(|rock| world.get::<Transform>(rock));
         assert_eq!(placed, Some(&made));
-        // Its sprite's color, which it hasn't.
+        // A component it lacks: the sprite's color.
         inspector
             .link()
             .set(rock, "Sprite", "color", Value::Vec4(Vec4::ONE));
@@ -4603,7 +4501,6 @@ mod remote {
             |texts, _| texts.iter().any(refused),
         );
         assert!(inspector.refusals.is_empty());
-        // One without a name, which the list shows as nameless.
         let nameless = game.cx.world_mut().spawn(Transform::IDENTITY);
         let nameless = id(game.cx.world(), nameless);
         until(
@@ -4614,16 +4511,15 @@ mod remote {
             |_| {},
             |texts, _| has(texts, "Entity"),
         );
-        // The hero placed away from the world's origin, turned and scaled, which the rock is kept
-        // clear of as it's made its child.
+        // The hero is away from the origin, turned and scaled; the rock stays clear as its child.
         let away = Transform {
             translation: DVec3::new(10.0, 0.0, -2.0),
             rotation: Quat::from_rotation_z(0.5),
             scale: Vec3::splat(2.0),
         };
         game.cx.world_mut().insert(hero, away).expect("alive");
-        // The rock renamed, made the hero's last child and a root again, where it is in the world,
-        // and the nameless one given a name, each as the game takes it.
+        // The rock renamed, made the hero's last child and a root again (kept in place in the
+        // world); the nameless one named. Each as the game takes it.
         let entity = |game: &Game, id| game.cx.world().entity(id).expect("alive");
         let name = |game: &Game, id| game.cx.world().get::<Name>(entity(game, id)).cloned();
         let parent = |game: &Game, id| game.cx.world().parent(entity(game, id)).expect("alive");

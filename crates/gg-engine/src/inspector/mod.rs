@@ -1,13 +1,13 @@
 //! The inspector: the Entities panel, which lists the world's entities as the tree of its
-//! hierarchy, and creates, duplicates and deletes them, and the Inspector panel, which shows the
+//! hierarchy and creates, duplicates and deletes them, and the Inspector panel, which shows the
 //! picked entity's components, edits their fields, and adds and removes them. It reaches the world
-//! only through its by-name calls, its IDs and its hierarchy, as the tool API will, so that an
-//! editor can show it for a game in another process, and names entities by their names, where they
-//! have one, and their IDs. Its edits and operations are its commands: the panels queue them, its
-//! next tick makes them, and a recording keeps them. Its link lets another layer pick and edit as
-//! the panels do. A remote Inspector shows a game's world in another process, as the tool API gives
-//! it, and edits it through the API. In development builds alone, as `dev` has the UI: a build
-//! without it has `none.rs` in its place.
+//! only through its by-name calls, IDs and hierarchy, as the tool API will, so an editor can show
+//! it for a game in another process. It names entities by their names, where they have one, and
+//! their IDs. Its edits and operations are its commands: the panels queue them, its next tick
+//! makes them, and a recording keeps them. Its link lets another layer pick and edit as the panels
+//! do. A remote Inspector shows a game's world in another process through the tool API, and edits
+//! it through the API. Development builds alone have the UI (`dev`): a build without it has
+//! `none.rs` in its place.
 
 mod commands;
 mod entities;
@@ -42,127 +42,141 @@ use crate::{
 };
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
-/// `.overlay(gg_engine::Inspector::default())`. The Entities panel lists the world's entities as
-/// the tree of its hierarchy, whose rows' arrows show and hide their children, and its Collapse All
-/// hides them all, or those with one component as a list, to pick one from, and finds one by an ID
-/// pasted into its Find field, which its magnifier opens over the rest of its header, from a scene
-/// or a log, or by a part of its name, the next such at each Enter, opening the rows above its
-/// own; a click below the rows, or the Entity menu, unpicks. A click on a row picks its entity
-/// alone; with Ctrl (Cmd on macOS) held, it adds it to what's picked, or takes it out; with Shift
-/// held, it picks the rows from the active pick's to it. The entity picked last is the active one,
-/// which the Inspector panel shows.
-/// A row's context menu, the one below the rows, the panel's + menu and the Entity menu create
-/// empty entities, which they pick, and a row's and the Entity menu duplicate entities, picking the
-/// copies, with Ctrl+D (Cmd+D on macOS) too, and delete them, with their descendants: all those
-/// picked at once, as one edit, those under another picked going with it, from the Entity menu,
-/// Ctrl+D, the panel's keys, or the context menu of a picked one's row. A row's context
-/// menu also renames its entity in its row, copies its ID and moves it to the roots; a row dragged
-/// onto another makes its entity the other's last child, and onto the space below the rows a root,
-/// each keeping where it is in the world, as [`World::reparent_in_place`] says;
-/// and a double click on a row, or its menu's Frame in View, frames its entity in the view, through
-/// the link, as [`InspectorLink::framed`] says. While the panel has the keys, from a press in it
-/// until a press elsewhere, F frames the entities picked, F2 renames the active one and Delete
-/// deletes them. The Inspector
-/// panel shows the active entity's components, each field with a widget for its type and hints, and
-/// sets a field as its widget changes it, through a [`Log`] of the edits, as [`World::set_field`]
-/// does. That checks the value: a value refused shows beside its field, and is logged, as an
-/// operation refused is, which shows above the components. An enum switches its variant from a
-/// choice of them, to the fields that variant last had while the entity was drawn, or else to
-/// their defaults, and an option turns on and off by its checkbox, on to what it last held while
-/// the entity was drawn, or else to its default; each of a vector's components, set at its own path, and each of a rotation's
-/// angles has a button of its axis, which sets it to its default; the Add Component menu, below
-/// the components, adds one with its type's default; and the menu beside each one's header
-/// removes it. An entity of a prefab's instance, its root or one its prefab gives, says which
-/// instance it's of, and marks, strong and with a bar of the selection's color, each component
-/// and field of its own that differs from its prefab's, and each component the prefab doesn't
-/// give it, as the tool API's `entity` finds them: a marked field's context menu, and a marked
-/// component's menu, revert it to the prefab's, and an outermost instance's root has Unlink. The
-/// Edit menu, Ctrl+Z (Cmd+Z on macOS) and Ctrl+Shift+Z or Ctrl+Y undo and redo them, a drag, or
-/// a number typed, as one edit. The panels queue each frame's edits,
-/// operations, undos and redos, which the Inspector's next tick makes, so that the world changes
-/// only at ticks; until then, a field set is drawn as the set will make it, and a refusal, and the
-/// Edit menu's names, show from the tick. A world cleared, replaced, restored or renewed, which is
-/// another, as [`World::serial`] says, unpicks and closes every row, which drops the edits made to
-/// the world before, and those queued for it: at the next tick, or at once as the run calls
-/// [`restored`](Layer::restored), having put a world in place, as a snapshot's restore, a lockstep
-/// joiner's and the tool API's `stop` do, or renewed it, as its `scene new` and `scene open` do.
-/// But the very world it left coming back, as an app that swaps one world for another and back has
-/// it, or as `stop` brings back the world as edited, finds its edits, pick and open rows as they
-/// were. A SyncTest's copy of the world (`--sync-test`), which each tick runs again on, takes none
-/// of that: the tick's edits run again there through a copy of the log as the tick started, and
-/// the pick and the open rows stay. Another layer picks and edits as the panels do through the
-/// [`InspectorLink`] that [`link`](Self::link) gives it.
+/// `.overlay(gg_engine::Inspector::default())`.
 ///
-/// A remote Inspector, which [`remote`](Self::remote) makes, shows the world of the game its link
-/// reaches, as [`InspectorLink::reach`] says, in place of the app's own, as the tool API gives it,
-/// a few times a second, and edits it as the panels do through the API, as the game's client: its
-/// sets of a gesture join as the log's do, its Edit menu undoes and redoes the client's edits, and
-/// the panels draw what waits for the game's answers as it will be. A row's context menu of its
-/// Entities panel saves the entity and its descendants as a prefab, linked in their place, through
-/// the API's `save_prefab`, which a game's own Inspector doesn't offer: a save writes files, which
-/// neither a replay nor a lockstep peer of its commands would have.
+/// # Entities
+///
+/// The tree of the world's hierarchy.
+///
+/// - A row's arrow shows or hides its children; Collapse All hides them all. A list of the
+///   entities with one component can replace the tree.
+/// - Find (the magnifier opens it over the header) takes an ID pasted from a scene or log, or part
+///   of a name, the next match at each Enter, opening the rows above it.
+/// - A click picks a row's entity alone; Ctrl (Cmd on macOS) adds or removes it; Shift picks the
+///   rows from the active pick's to it. A click below the rows, or the Entity menu, unpicks. The
+///   entity picked last is the active one, which the Inspector panel shows.
+/// - A row's context menu, the one below the rows, the + menu and the Entity menu create empty
+///   entities and pick them.
+/// - A row's menu and the Entity menu duplicate entities (Ctrl+D, Cmd+D, too), picking the copies,
+///   and delete them with their descendants (the panel's Delete key, too). Each acts on all
+///   picked at once as one edit, those under another picked going with it.
+/// - A row's menu also renames its entity in its row, copies its ID and moves it to the roots.
+/// - Dragging a row onto another makes its entity that one's last child; onto the space below
+///   the rows, a root. Each keeps its place in the world, as [`World::reparent_in_place`] says.
+/// - A double click, or the menu's Frame in View, frames the entity through the link, as
+///   [`InspectorLink::framed`] says.
+/// - While the panel has the keys (from a press in it until a press elsewhere), F frames the
+///   picked entities, F2 renames the active one and Delete deletes them.
+///
+/// # Inspector
+///
+/// The active entity's components, each field with a widget for its type and hints.
+///
+/// - A widget's change sets the field through a [`Log`] of edits, as [`World::set_field`] does,
+///   checking the value. A refused value shows beside its field and is logged, as an operation
+///   refused is, above the components.
+/// - An enum switches variant from a choice of them, to the fields that variant last had while
+///   the entity was drawn, else their defaults. An option's checkbox turns it on, to what it last
+///   held while the entity was drawn, else its default, or off.
+/// - Each vector component (set at its own path) and rotation angle has a button of its axis that
+///   resets it to its default.
+/// - The Add Component menu, below the components, adds one with its type's default. The menu
+///   beside each header removes it.
+/// - An entity of a prefab's instance says which instance. It marks, strong and with a bar of
+///   the selection's color, each own component and field that differs from its prefab's, and each
+///   component the prefab doesn't give, as the tool API's `entity` finds them. A marked field's
+///   or component's menu reverts it. An outermost instance's root has Unlink.
+/// - The Edit menu, Ctrl+Z (Cmd+Z) and Ctrl+Shift+Z or Ctrl+Y undo and redo, a drag or typed
+///   number being one edit.
+///
+/// # Ticks and worlds
+///
+/// The panels queue each frame's edits, operations, undos and redos for the next tick, so the
+/// world changes only at ticks. Until then a set field is drawn as the set will make it, and a
+/// refusal and the Edit menu's names show from the tick.
+///
+/// A world cleared, replaced, restored or renewed is another ([`World::serial`]). The Inspector
+/// then unpicks, closes every row, and drops the earlier world's edits and queued commands, at
+/// the next tick or, at once, when the run calls [`restored`](Layer::restored) after putting a
+/// world in place (a snapshot's restore, a lockstep joiner's, the tool API's `stop`) or renewing
+/// it (`scene new`, `scene open`). The very world it left coming back, as when an app swaps
+/// worlds and back, or `stop` restores the world as edited, finds its edits, pick and open rows
+/// as they were.
+///
+/// A SyncTest's copy of the world (`--sync-test`), which each tick runs again on, takes none of
+/// that: the tick's edits run again there through a copy of the log as the tick started, and the
+/// pick and open rows stay.
+///
+/// Another layer picks and edits like the panels through the [`InspectorLink`] from
+/// [`link`](Self::link).
+///
+/// # Remote
+///
+/// A remote Inspector ([`remote`](Self::remote)) shows the world of the game its link reaches
+/// ([`InspectorLink::reach`]), not the app's own, a few times a second. It edits through the tool
+/// API as the game's client:
+///
+/// - Its sets of a gesture join like the log's.
+/// - Its Edit menu undoes and redoes the client's edits.
+/// - The panels draw what waits for the game's answers as it will be.
+/// - A row's context menu saves the entity and its descendants as a prefab, linked in their
+///   place, through the API's `save_prefab`. A game's own Inspector doesn't offer it: a save
+///   writes files, which neither a replay nor a lockstep peer of its commands would have.
 #[derive(Default)]
 pub struct Inspector {
-    /// The entity picked last, the active one, which the Inspector panel shows, by its ID, which
-    /// outlives it, so that a pick despawned is still named by its ID: its name is gone. And the
-    /// others picked with it, in the order they were picked: none unless one is active.
+    /// The entity picked last, the active one, by its ID, which outlives it: a despawned pick is
+    /// still named by it. `others` were picked with it, in pick order: none unless one is active.
     picked: Option<EntityId>,
     others: Vec<EntityId>,
-    /// The rows of the Entities panel's tree that are open, showing their children's, by their
-    /// entities' IDs, which outlive them: an entity an undo gives back comes back open.
+    /// The open rows of the Entities tree, by IDs, which outlive entities: an entity an undo
+    /// gives back comes back open.
     expanded: HashSet<EntityId>,
-    /// The component type the Entities panel lists the entities of; all of them if `None`.
+    /// The component type the Entities panel lists; all entities if `None`.
     with: Option<String>,
-    /// What's typed into the Find field.
     find: String,
-    /// Why the last ID or name entered there found no entity.
+    /// Why the last ID or name entered in Find found no entity.
     not_found: Option<String>,
-    /// Whether the Find field shows, in place of the rest of the Entities panel's header, and
-    /// whether it's to take the keys as it next shows, as it does as it opens.
+    /// Whether Find shows in place of the rest of the header, and whether it takes the keys as it
+    /// next shows (as it opens).
     finding: bool,
     focus_find: bool,
-    /// The name being typed into the picked entity's row, if it's being renamed.
+    /// The name being typed into the picked entity's row.
     renaming: Option<Renaming>,
-    /// Whether the Entities panel has the keys, for its own: from a press in it until a press
-    /// elsewhere, as the view has them from a press over it.
+    /// Whether the Entities panel has the keys: from a press in it until a press elsewhere.
     keys: bool,
     /// The last value refused of each field of the picked entity.
     refusals: Vec<Refusal>,
     /// The edits made, which undo and redo step through.
     log: Log,
-    /// The serial of the world the log, the pick and the open rows are of, as the Inspector found
-    /// it as it attached, or as the last tick or restore did: another, as a world cleared, replaced
-    /// or restored is, puts them aside at the next.
+    /// The serial of the world the log, pick and open rows are of, as found when it attached or
+    /// at the last tick or restore. At the next, another serial puts them aside.
     world: Option<u64>,
-    /// The log, the pick and the open rows of the world the Inspector left last, which they come
-    /// back from if that world comes back.
+    /// The log, pick and open rows of the world last left, which come back if it does.
     left: Option<Left>,
     /// Whether a SyncTest runs each tick again on a copy of the world (`--sync-test`), as the run
-    /// said as the Inspector attached or picked up from a restore.
+    /// said when the Inspector attached or picked up from a restore.
     sync_tested: bool,
-    /// In a run whose ticks run again, a copy of the log as the last tick that had commands
-    /// started, which the tick runs again with on the copy of the world, as
-    /// [`swapped`](Layer::swapped) says.
+    /// When ticks run again: a copy of the log as the last tick with commands started, which the
+    /// tick runs again with on the world copy ([`swapped`](Layer::swapped)).
     before: Option<Log>,
-    /// The log of the world the Inspector left as a SyncTest swapped another in its place, by the
-    /// world's serial: the world's while its tick runs again on a copy, and then the copy's, until
-    /// the next.
+    /// The log of the world left when a SyncTest swapped another in, by serial: the world's while
+    /// its tick runs again on a copy, then the copy's, until the next.
     aside: Option<(u64, Log)>,
     /// Why the last operation, undo or redo was refused, until the next edit, operation, undo or
     /// redo.
     not_done: Option<String>,
-    /// What the panels and the link did since the last tick, which it makes.
+    /// What the panels and the link did since the last tick, which makes it.
     queued: Queue,
-    /// Whose edit goes on, if a set has been queued since the last seal, operation, undo or redo,
-    /// which leave none going on: a seal queued otherwise would end none, so none is.
+    /// Whose edit goes on, if a set was queued since the last seal, operation, undo or redo,
+    /// which end it: a seal queued otherwise would end none.
     open: Option<Gesture>,
     /// What it shares with its links.
     link: Rc<RefCell<Linked>>,
-    /// The game's world it shows, if it's remote.
+    /// The game's world it shows, if remote.
     remote: Option<Remote>,
 }
 
-/// What the Inspector had of a world it left, by its serial.
+/// What the Inspector had of a world it left, by serial.
 struct Left {
     world: u64,
     log: Log,
@@ -171,13 +185,13 @@ struct Left {
     expanded: HashSet<EntityId>,
 }
 
-/// The name being typed into an entity's row in place of its label, from F2 or its row's Rename
-/// until Enter or a click elsewhere names it, or Escape, or a pick of another, leaves it.
+/// The name being typed into an entity's row, from F2 or its row's Rename until Enter or a click
+/// elsewhere names it, or Escape or another pick leaves it.
 struct Renaming {
     id: EntityId,
     name: String,
-    /// Whether its field is yet to take the keys, which it does as it's first drawn, its text all
-    /// selected, so that what's typed replaces it.
+    /// Whether its field is yet to take the keys, as it does when first drawn, its text all
+    /// selected.
     focus: bool,
 }
 
@@ -189,35 +203,31 @@ enum Gesture {
     Link,
 }
 
-/// Undoes the last edit.
 const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::Z);
 
-/// Redo the last edit undone; the Edit menu shows the first.
+/// The Edit menu shows the first.
 const REDO: [KeyboardShortcut; 2] = [
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), egui::Key::Z),
     KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::Y),
 ];
 
-/// Duplicates the entity picked, as Hazel's Ctrl+D does.
+/// As Hazel's Ctrl+D.
 const DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::D);
 
-/// The Entities panel's own keys, while it has them, as other editors' hierarchies take them:
-/// frames the entity picked in the view, renames it, and deletes it.
+/// The Entities panel's own keys while it has them, as other editors' hierarchies take them.
 const FRAME: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, egui::Key::F);
 const RENAME: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, egui::Key::F2);
 const DELETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, egui::Key::Delete);
 
-/// A step through the log of edits, as the Edit menu or a key asks for one.
 #[derive(Clone, Copy)]
 enum Step {
     Undo,
     Redo,
 }
 
-/// What a frame's input, in the windows the panels draw in, says of the edits: a press, which
-/// starts another, and a release, which ends one; whether a widget has the pointer or the keys,
-/// which keeps one going; the step through them a key asks for; and whether Ctrl+D asks for the
-/// entity picked to be duplicated.
+/// What a frame's input, in the panels' windows, says of the edits: a press starts one, a release
+/// ends one, a widget having the pointer or keys keeps one going, and keys may ask for a step or
+/// a duplicate.
 #[derive(Default)]
 struct Cues {
     pressed: bool,
@@ -228,9 +238,8 @@ struct Cues {
 }
 
 impl Cues {
-    /// Adds what `egui`'s input says, as the window that's drawing has it: a panel's own, if it's
-    /// torn off, or the main one. Its keys ask for a step, or a duplicate, unless a text field
-    /// there has them, which undo its own text.
+    /// Adds `egui`'s input as the drawing window has it, a torn-off panel's or the main one. Its
+    /// keys ask for a step or duplicate unless a text field there has them, which undo its text.
     fn read(&mut self, egui: &egui::Context) {
         let pointer =
             egui.input(|input| (input.pointer.any_pressed(), input.pointer.any_released()));
@@ -261,7 +270,7 @@ struct Refusal {
     message: String,
 }
 
-/// A field to set, found as the Inspector panel draws, and set at the next tick.
+/// A field to set, found as the Inspector panel draws, set at the next tick.
 #[derive(Clone)]
 struct Edit {
     component: String,
@@ -269,24 +278,23 @@ struct Edit {
     value: Value,
 }
 
-/// What a pass of the panels found to do, which [`Inspector::queue`] queues for the next tick: the
-/// sets of the picked entity's fields its widgets made, the operations its menus and Ctrl+D chose,
-/// what its input says of the edits, and the step the Edit menu chose.
+/// What a pass of the panels found to do, for [`Inspector::queue`]: widgets' sets of the picked
+/// entity's fields, menu and Ctrl+D operations, input cues, and the Edit menu's step.
 #[derive(Default)]
 struct Pass {
     sets: Vec<Edit>,
     /// Creates, duplicates, deletes, adds, removes, reverts and unlinks.
     operations: Vec<Command>,
-    /// The entities the Entities panel's menus chose to save as prefabs, which a remote Inspector
-    /// alone offers, as `Inspected::saves_prefabs` says.
+    /// The entities the Entities menus chose to save as prefabs: a remote Inspector's alone, per
+    /// `Inspected::saves_prefabs`.
     saves: Vec<EntityId>,
     cues: Cues,
     chosen: Option<Step>,
 }
 
 impl Layer for Inspector {
-    /// Knows the world it shows from the start, which a stopped run's may be for its first edits,
-    /// with no tick yet.
+    /// Knows the world it shows from the start: a stopped run may get edits before its first
+    /// tick.
     fn attach(&mut self, cx: &mut Context) {
         self.sync_tested = cx.sync_tested();
         if self.remote.is_none() {
@@ -294,11 +302,13 @@ impl Layer for Inspector {
         }
     }
 
-    /// Goes to the world now in place, if it's another, at once rather than at the next tick: as
-    /// the tool API's `stop` brings back the world as edited, whose log, pick and open rows come
-    /// back, since the next tick may be the next copy's, which would drop them as those of a world
-    /// left before; as the API's `scene new` and `scene open` renew the world; as a run restored
-    /// from a snapshot starts; and as a lockstep joiner's world gives way to its host's.
+    /// Goes to the world now in place, if another, at once, not at the next tick. Called when:
+    ///
+    /// - The tool API's `stop` brings back the world as edited. Its log, pick and open rows come
+    ///   back; the next tick may be the next copy's and would drop them.
+    /// - The API's `scene new` or `scene open` renews the world.
+    /// - A run restored from a snapshot starts.
+    /// - A lockstep joiner's world gives way to its host's.
     fn restored(&mut self, cx: &mut Context) {
         self.sync_tested = cx.sync_tested();
         let serial = cx.world().serial();
@@ -307,11 +317,11 @@ impl Layer for Inspector {
         }
     }
 
-    /// Moves its log to the world in place, as a SyncTest swaps a copy of the world in while the
-    /// tick runs again there: the copy takes a copy of the log as the tick started, through which
-    /// its undos and redos go there as they went in the world, and the world takes its own log
-    /// back after, the copy's going aside until the next. The pick, the open rows and the edit
-    /// going on stay, as the entities they name by their IDs are the same in both.
+    /// Moves its log to the world in place when a SyncTest swaps a copy in for the tick's rerun.
+    /// The copy takes a copy of the log as the tick started, so its undos and redos go as they
+    /// went in the world. The world takes its log back after; the copy's goes aside until the
+    /// next. The pick, open rows and edit going on stay: the entities they name are the same in
+    /// both.
     fn swapped(&mut self, cx: &mut Context) {
         let serial = cx.world().serial();
         let left = self.world.filter(|&world| world != serial);
@@ -344,7 +354,7 @@ impl Layer for Inspector {
             self.swap_to(world.serial());
         }
         self.world = Some(world.serial());
-        // The log as the tick starts, which it runs again with on a copy of the world.
+        // The log as the tick starts, for running again on a copy of the world.
         let again = self.sync_tested && !self.queued.0.is_empty();
         self.before = again.then(|| self.log.copied());
         let mut queued = mem::take(&mut self.queued.0);
@@ -363,7 +373,7 @@ impl Layer for Inspector {
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
         let _zone = gg_core::zone!("inspector");
-        // Apart, so that it's what the panels show while they change the rest.
+        // Apart, so it's what the panels show while they change the rest.
         let mut remote = self.remote.take();
         if let Some(remote) = &mut remote {
             remote.update(self);
@@ -385,7 +395,7 @@ impl Layer for Inspector {
         });
         ui.panel("Entities", |ui| self.entities(source, ui, &mut pass));
         ui.panel("Inspector", |ui| {
-            // As the pick the Entities panel may just have made has them.
+            // Again: the Entities panel may just have changed the pick.
             let pending = match &remote {
                 Some(remote) => remote.pending(self.picked),
                 None => self.pending(),
@@ -397,8 +407,8 @@ impl Layer for Inspector {
         // The Edit and Entity menus' keys, wherever the panels are.
         pass.cues.read(ui.egui());
         self.duplicate_picked(source, &mut pass);
-        // Every pass, even one egui discards, which alone had the frame's input; and empty ones
-        // too, whose cues end an edit.
+        // Every pass, even one egui discards, which alone had the frame's input, and empty ones,
+        // whose cues end an edit.
         match &mut remote {
             Some(remote) => remote.send(pass, self),
             None => self.queue(pass),
@@ -416,15 +426,15 @@ impl Layer for Inspector {
 }
 
 impl Inspector {
-    /// A link through which another layer picks and edits as the panels do, as
-    /// [`InspectorLink`] says: each is a clone of one, which the Inspector shares.
+    /// A link for another layer to pick and edit like the panels. Each is a clone of one the
+    /// Inspector shares.
     pub fn link(&self) -> InspectorLink {
         InspectorLink(self.link.clone())
     }
 
-    /// A remote Inspector, which shows the world of the game its link reaches, as
-    /// [`InspectorLink::reach`] says, rather than the app's own, and edits it as the game's client
-    /// `client`, the author of its edits, which its Edit menu undoes and redoes.
+    /// A remote Inspector: shows the world of the game its link reaches
+    /// ([`InspectorLink::reach`]), not the app's own. It edits it as the game's client `client`,
+    /// the author of the edits its Edit menu undoes and redoes.
     pub fn remote(client: &str) -> Self {
         Self {
             remote: Some(Remote::new(client)),
@@ -432,9 +442,9 @@ impl Inspector {
         }
     }
 
-    /// What waits for the next tick: the queued sets of the picked entity's fields, and then the
-    /// link's since the last pass, which the pass queues after them; the queued adds and removes;
-    /// and the edits the log would undo and redo next.
+    /// What waits for the next tick: queued sets of the picked entity's fields, then the link's
+    /// since the last pass (queued after them); queued adds and removes; and the edits the log
+    /// would undo and redo next.
     fn pending(&self) -> Pending {
         let id = self.picked;
         let queued = self.queued.0.iter().filter_map(|command| match command {
@@ -460,12 +470,15 @@ impl Inspector {
         }
     }
 
-    /// Makes the pick the link asked for since the last pass, before the panels draw: a living
-    /// entity's ID picks it and opens the rows above its own, as Find does; an ID whose entity
-    /// isn't known yet to be alive or not, as one a game has just made, picks it too, a remote
-    /// Inspector opening the rows above it as its read comes; any other, or none, unpicks. A debug
-    /// build checks the link's sets against the world's types first, which the link hasn't, as
-    /// [`InspectorLink::set`] says, once it shows the world: a game's, once its types are read.
+    /// Makes the pick the link asked for since the last pass, before the panels draw.
+    ///
+    /// - A living entity's ID picks it and opens the rows above it, as Find does.
+    /// - An ID not yet known to be alive, as of an entity a game just made, picks it too. A remote
+    ///   Inspector opens the rows above it as its read comes.
+    /// - Any other ID, or none, unpicks.
+    ///
+    /// A debug build first checks the link's sets against the world's types (the link has none,
+    /// per [`InspectorLink::set`]) once it shows the world: a game's, once its types are read.
     fn follow(&mut self, world: &dyn Inspected) {
         if cfg!(debug_assertions) && world.waiting().is_none() {
             for linking in &self.link.borrow().pending {
@@ -501,8 +514,7 @@ impl Inspector {
         }
     }
 
-    /// The Edit menu: Undo and Redo, each naming the edit it steps through, as `pending` has
-    /// them; returns the one clicked.
+    /// The Edit menu: Undo and Redo, each naming its edit from `pending`. Returns the one clicked.
     fn edit_menu(&self, ui: &mut egui::Ui, pending: &Pending) -> Option<Step> {
         let items = [
             (Step::Undo, "Undo", &pending.undo, UNDO),
@@ -523,11 +535,13 @@ impl Inspector {
         chosen
     }
 
-    /// The Entity menu: Create Empty, which makes a root; while an entity is picked, Unpick, which
-    /// unpicks every one; while the active one is alive, Create Empty Child, which makes a child of
-    /// it; and while one picked is alive, Duplicate, which copies those picked and their
-    /// descendants, as Ctrl+D (Cmd+D on macOS) does too, and Delete, which deletes them and their
-    /// descendants, each as one edit. The operation chosen goes in `operations`.
+    /// The Entity menu; the operation chosen goes in `operations`.
+    ///
+    /// - Create Empty makes a root.
+    /// - While an entity is picked, Unpick unpicks all.
+    /// - While the active one is alive, Create Empty Child makes its child.
+    /// - While one picked is alive, Duplicate (like Ctrl+D) and Delete act on those picked and
+    ///   their descendants, each as one edit.
     fn entity_menu(
         &mut self,
         world: &dyn Inspected,
@@ -545,7 +559,7 @@ impl Inspector {
         let duplicate = egui::Button::new("Duplicate").shortcut_text(shortcut);
         let duplicate = ui.add_enabled(any, duplicate);
         let delete = ui.add_enabled(any, egui::Button::new("Delete"));
-        // A pick despawned unpicks too, since it stays picked for an undo to bring it back.
+        // A despawned pick unpicks too: it stays picked for an undo to bring it back.
         let unpick = ui.add_enabled(self.picked.is_some(), egui::Button::new("Unpick"));
         if unpick.clicked() {
             self.unpick();
@@ -561,8 +575,7 @@ impl Inspector {
         }
     }
 
-    /// Has `pass` duplicate the entities picked that are alive in `world`, if its input's Ctrl+D
-    /// asks for that.
+    /// Has `pass` duplicate the picked entities alive in `world`, if its input's Ctrl+D asks.
     fn duplicate_picked(&self, world: &dyn Inspected, pass: &mut Pass) {
         let uppermost = self.uppermost(world);
         if pass.cues.duplicate && !uppermost.is_empty() {
@@ -570,14 +583,18 @@ impl Inspector {
         }
     }
 
-    /// Queues a pass of the panels, for the next tick to make: first what the link did since the
-    /// last pass, whose events came before the pass's input, its sets of one field as one edit
-    /// from its gesture's first set to its seal, and its creates, each of which ends the edit
-    /// going on; then the pass's sets of the picked entity's fields, as one edit from a press of
-    /// the pointer to its release, or while a widget has the keys, as its input says, so that a
-    /// drag, or a number typed, is one edit; then its operations, each of which ends the edit
-    /// going on; then the step the Edit menu chose, or a key asks for. Each gesture's first set
-    /// ends the other's edit going on, and the pass's input ends only its own.
+    /// Queues a pass of the panels for the next tick, in order:
+    ///
+    /// 1. What the link did since the last pass (its events came before the pass's input): its
+    ///    sets as one edit from its gesture's first set to its seal, and its creates, each
+    ///    ending the edit going on.
+    /// 2. The pass's sets of the picked entity's fields, one edit from a pointer press to its
+    ///    release, or while a widget has the keys, so a drag or typed number is one edit.
+    /// 3. Its operations, each ending the edit going on.
+    /// 4. The Edit menu's or a key's step.
+    ///
+    /// Each gesture's first set ends the other's edit going on; the pass's input ends only its
+    /// own.
     fn queue(&mut self, pass: Pass) {
         // Its saves are a remote Inspector's alone.
         let Pass {
@@ -606,8 +623,8 @@ impl Inspector {
         }
         // Kept for its memory.
         self.link.borrow_mut().pending = linked;
-        // Before this pass's sets: a press begins another edit, even while a text field keeps
-        // the keys.
+        // Before this pass's sets: a press begins another edit, even while a text field has the
+        // keys.
         if cues.pressed {
             self.seal(Gesture::Panels);
         }
@@ -634,9 +651,8 @@ impl Inspector {
         }
     }
 
-    /// Queues a seal if `gesture`'s edit goes on, which it ends, so that a pass that does nothing
-    /// queues nothing: only a set the log takes begins one, and seals, operations, undos and redos
-    /// end it.
+    /// Queues a seal if `gesture`'s edit goes on, so an idle pass queues nothing. Only a set the
+    /// log takes begins an edit; seals, operations, undos and redos end it.
     fn seal(&mut self, gesture: Gesture) {
         if self.open == Some(gesture) {
             self.queued.0.push(Command::Seal);
@@ -644,7 +660,6 @@ impl Inspector {
         }
     }
 
-    /// Makes, at a tick, `command`, which the panels queued.
     fn run(&mut self, world: &mut World, command: Command) {
         match command {
             Command::Set(id, edit) => self.apply(world, Some(id), edit),
@@ -727,15 +742,15 @@ impl Inspector {
         }
     }
 
-    /// Applies `operation`, which the panels chose, as [`operate_all`](Self::operate_all) does.
+    /// [`operate_all`](Self::operate_all) of one.
     fn operate(&mut self, world: &mut World, operation: Operation) {
         self.operate_all(world, vec![operation]);
     }
 
-    /// Applies `operations`, which the panels chose, through the log, as one edit, which ends the
-    /// edit going on; then picks the entities its creates made, and its duplicates' copies of their
-    /// entities, the last the active one, opening the rows of their ancestors. A refusal shows
-    /// above the components, and is logged, of the first operation. None do nothing.
+    /// Applies `operations` through the log as one edit, ending the edit going on. Then picks the
+    /// entities its creates made and its duplicates' copies, the last active, opening their
+    /// ancestors' rows. The first operation's refusal shows above the components and is logged.
+    /// None do nothing.
     fn operate_all(&mut self, world: &mut World, operations: Vec<Operation>) {
         let Some(first) = operations.first() else {
             return;
@@ -763,8 +778,8 @@ impl Inspector {
         self.pick_all(made);
     }
 
-    /// Forgets the values `entity`'s `component` refused, if it's the entity picked, whose
-    /// refusals are kept: an add or a remove makes it anew.
+    /// Forgets the values `entity`'s `component` refused, if picked: an add or remove makes it
+    /// anew.
     fn forget(&mut self, entity: EntityId, component: &str) {
         if self.picked == Some(entity) {
             self.refusals
@@ -772,13 +787,11 @@ impl Inspector {
         }
     }
 
-    /// Picks the entity of ID `id` alone.
     fn pick(&mut self, id: EntityId) {
         self.pick_all([id]);
     }
 
-    /// Picks the entities of IDs `ids` alone, in this order, the last the active one: none
-    /// unpicks.
+    /// Picks `ids` alone, in order, the last the active one. None unpicks.
     fn pick_all(&mut self, ids: impl IntoIterator<Item = EntityId>) {
         let mut ids: Vec<EntityId> = ids.into_iter().collect();
         let active = ids.pop();
@@ -796,7 +809,7 @@ impl Inspector {
         self.activate(None);
     }
 
-    /// Makes `id` the active pick, forgetting the refusals of the one before, if it's another.
+    /// Makes `id` the active pick, forgetting the previous one's refusals if it differs.
     fn activate(&mut self, id: Option<EntityId>) {
         if self.picked != id {
             self.picked = id;
@@ -804,8 +817,7 @@ impl Inspector {
         }
     }
 
-    /// Adds the entity of ID `id` to the picks, as the active one, from among the others if it's
-    /// one of them.
+    /// Adds `id` as the active pick, moving it from `others` if it's there.
     fn add(&mut self, id: EntityId) {
         self.others.retain(|&other| other != id);
         if let Some(active) = self.picked.filter(|&active| active != id) {
@@ -814,8 +826,8 @@ impl Inspector {
         self.activate(Some(id));
     }
 
-    /// Adds the entity of ID `id` to the picks, as the active one, or takes it out if it's
-    /// picked: the one picked before it becomes the active one if it was.
+    /// Adds `id` as the active pick, or takes it out if picked; the one picked before replaces it
+    /// as active.
     fn toggle(&mut self, id: EntityId) {
         if self.picked == Some(id) {
             let before = self.others.pop();
@@ -827,26 +839,24 @@ impl Inspector {
         }
     }
 
-    /// Every entity picked, in the order they were, the active one last.
+    /// Every entity picked, in pick order, the active one last.
     fn picks(&self) -> impl Iterator<Item = EntityId> + '_ {
         self.others.iter().copied().chain(self.picked)
     }
 
-    /// Whether the entity of ID `id` is picked, the active one or another.
     fn is_picked(&self, id: EntityId) -> bool {
         self.picked == Some(id) || self.others.contains(&id)
     }
 
-    /// The entities picked and alive in `world` that have no picked ancestor, in the order they
-    /// were picked: those a delete or a duplicate of them all acts on, as one under another would
-    /// go, or be copied, with it.
+    /// The picked entities alive in `world` with no picked ancestor, in pick order: what a delete
+    /// or duplicate of all acts on, one under another going or copied with it.
     fn uppermost(&self, world: &dyn Inspected) -> Vec<EntityId> {
         let picks = self.picks().filter(|&id| world.alive(id) == Some(true));
         picks.filter(|&id| !self.under_a_pick(world, id)).collect()
     }
 
-    /// Whether an ancestor of the entity of ID `id` is picked, up to one met again, as a hierarchy
-    /// put together from reads of a game's world at two moments may have it.
+    /// Whether an ancestor of `id` is picked, stopping at a repeat: a hierarchy built from reads
+    /// of a game's world at two moments may loop.
     fn under_a_pick(&self, world: &dyn Inspected, id: EntityId) -> bool {
         let mut met = HashSet::from([id]);
         let mut up = world.parent(id);
@@ -859,7 +869,6 @@ impl Inspector {
         false
     }
 
-    /// Tells the link what's picked.
     fn share_picks(&self) {
         let linked = &mut *self.link.borrow_mut();
         linked.picked = self.picked;
@@ -867,12 +876,10 @@ impl Inspector {
         linked.picks.extend(self.picks());
     }
 
-    /// Goes from the world it showed to the one whose serial is `serial`, another: another world's
-    /// entities aren't those the pick, the rows, the log and the commands queued name, though they
-    /// may have their IDs, as a scene reopened gives them back; nor are those the link asked for
-    /// since the last pass. The pick, the rows and the log go aside, for the world they're of to
-    /// find again if it comes back; those of the world left before come back if it's that world,
-    /// and go otherwise, since it never will.
+    /// Goes to the other world with `serial`. Its entities aren't those the pick, rows, log,
+    /// queued commands and the link's requests since the last pass name, though IDs may match, as
+    /// when a scene reopens. The pick, rows and log go aside for their world to find if it comes
+    /// back. Those set aside earlier come back if they're this world's, else go: it never will.
     fn swap_to(&mut self, serial: u64) {
         let left = self.world.map(|world| Left {
             world,
@@ -900,9 +907,8 @@ impl Inspector {
         linked.pending.clear();
     }
 
-    /// Opens the rows of the ancestors of the entity of ID `id`, so that the tree shows its own; up
-    /// to one met again, as a hierarchy put together from reads of a game's world at two moments
-    /// may have it.
+    /// Opens `id`'s ancestors' rows so the tree shows its own, stopping at a repeat: a hierarchy
+    /// built from reads of a game's world at two moments may loop.
     fn open_ancestors(&mut self, world: &dyn Inspected, id: EntityId) {
         let mut met = HashSet::from([id]);
         let mut up = world.parent(id);
@@ -912,12 +918,10 @@ impl Inspector {
         }
     }
 
-    /// The Inspector panel: the active pick's components, how many are picked above them if it's
-    /// one of several, each under a header that collapses,
-    /// with its fields' widgets, and beside it a menu that removes it; and below them, a menu that
-    /// adds one; each drawn as what's `pending` will leave it. The fields they change, the
-    /// operations the menus choose, and what the input of the window it draws in says of them, go
-    /// in `pass`.
+    /// The Inspector panel: the active pick's components (above them, how many are picked, if
+    /// several), each under a collapsing header with its fields' widgets and a removal menu
+    /// beside it; below, an add menu. Each is drawn as `pending` will leave it. Changed fields,
+    /// menu operations and the drawing window's input cues go in `pass`.
     fn inspect(
         &self,
         world: &dyn Inspected,
@@ -960,9 +964,8 @@ impl Inspector {
         if let Some(instance) = &instance {
             instance_line(world, ui, id, instance, &mut pass.operations);
         }
-        // So that what's typed into a field of one entity never lands in the field of the next
-        // one picked; and, being its own, so that the fields keep their widgets' IDs, and a drag
-        // or a number being typed, as the labels above them come and go.
+        // The entity's own ID scope: typing into one entity's field never lands in the next's, and
+        // widgets keep their IDs, and drags and typing, as the labels above come and go.
         let scope = egui::UiBuilder::new().scope_id(ui.make_persistent_id(id));
         ui.scope_builder(scope, |ui| {
             let types = world.types();
@@ -1053,12 +1056,11 @@ impl Inspector {
         });
     }
 
-    /// The Add Component menu, below the components of the entity of ID `id`: the types it can be
-    /// given, in the order they registered, each with its doc on hover; but not those it has, nor
-    /// a parent, which the world gives it, nor those opaque as a whole, such as handles, which are
-    /// code's to make, nor those an add of is `pending`. A type whose default an add would refuse
-    /// shows disabled, saying why on hover. The defaults are made only while it's open. The add
-    /// chosen, of the type's default, goes in `operations`.
+    /// The Add Component menu below `id`'s components: the types it can be given, in registration
+    /// order, each with its doc on hover. Not listed: those it has, a parent (the world gives
+    /// it), those opaque as a whole (handles, which code makes) and those with an add `pending`.
+    /// A type whose default an add would refuse shows disabled, saying why on hover. Defaults are
+    /// made only while it's open. The add chosen goes in `operations`.
     fn add_menu(
         &self,
         world: &dyn Inspected,
@@ -1099,10 +1101,9 @@ impl Inspector {
             }
         });
     }
-    /// Sets the field `edit` changed of `entity`, the entity picked as it was made, as part of the
-    /// edit going on, and keeps the refusal if it's refused, while that's still the entity picked:
-    /// beside its field, or above the components for one of a component the entity hasn't, as a
-    /// link's set may be, whose field isn't drawn.
+    /// Sets the field `edit` changed of `entity`, the entity picked when it was made, as part of
+    /// the edit going on. If refused while it's still picked, keeps the refusal (see
+    /// [`refuse`](Self::refuse)).
     fn apply(&mut self, world: &mut World, entity: Option<EntityId>, edit: Edit) {
         let Some(id) = entity.filter(|&id| world.entity(id).is_some()) else {
             return;
@@ -1138,9 +1139,9 @@ impl Inspector {
         }
     }
 
-    /// Keeps `message`, why a set of `path` of the picked entity's `component` was refused, as
-    /// `world`, which it's of, has the entity now: beside the field, or above the components for a
-    /// component the entity hasn't, whose field isn't drawn.
+    /// Keeps `message`, why a set of `path` of the picked entity's `component` was refused,
+    /// beside the field, or above the components if `world` says the entity lacks the component
+    /// (as a link's set may be), whose field isn't drawn.
     fn refuse(
         &mut self,
         world: &dyn Inspected,
@@ -1165,18 +1166,17 @@ impl Inspector {
 /// Inspector neither adds nor removes one.
 const PARENT: &str = "Parent";
 
-/// The radius of each of the three dots across the button of a component's menu, and how far apart
-/// their middles are: about as large and as far apart as the dots of Inter's ellipsis at egui's 13
-/// points of button text.
+/// The radius of the three dots across a component's menu button, and their spacing: about
+/// Inter's ellipsis dots at egui's 13 points of button text.
 const DOT: f32 = 1.0;
 const DOTS_APART: f32 = 4.0;
 
-/// The menu of `component`, at the right end of the row of its header, `header`, as it shows,
-/// whose Remove Component takes it away from the entity of ID `id`, and, if it `reverts`, as a
-/// component that differs from the entity's prefab's does, Revert to Prefab sets it whole back to
-/// the prefab's, the operation going in `operations`. A framed header is as wide as `ui`, and the
-/// menu is over its end, taking the clicks there from it, since it's made after it. It's in a child
-/// of `ui`, which leaves the cursor where the header's body left it, for the next header.
+/// The menu of `component` at the right end of its `header`'s row. Remove Component removes it
+/// from `id`. If it `reverts` (differs from the entity's prefab's), Revert to Prefab resets it
+/// whole. The operation goes in `operations`.
+///
+/// A framed header is as wide as `ui`; the menu, made after it, covers its end and takes the
+/// clicks there. It's in a child of `ui`, leaving the cursor where the header's body left it.
 fn component_menu(
     ui: &mut egui::Ui,
     header: egui::Rect,
@@ -1186,18 +1186,17 @@ fn component_menu(
     operations: &mut Vec<Command>,
 ) {
     let size = egui::Vec2::splat(ui.spacing().interact_size.y);
-    // `ui`'s end rather than the header's, which is the end of its name where it isn't framed.
+    // `ui`'s end, not the header's, which ends at its name where it isn't framed.
     let at = egui::pos2(shown_right(ui) - size.x, header.top());
-    // Laid out from its right, so that the button ends there.
+    // Laid out from its right, so the button ends there.
     let child = egui::UiBuilder::new()
         .id_salt(("component menu", component))
         .max_rect(egui::Rect::from_min_size(at, size))
         .layout(egui::Layout::right_to_left(egui::Align::Center));
     let mut menu = ui.new_child(child);
-    // Three dots across its middle, painted in the color of its text as it's lit, and centered both
-    // ways: a font's ellipsis sits on its baseline, some 4 points below the middle of the row egui
-    // centers a button's text in, and neither Inter nor egui's proportional fonts have the midline
-    // one, `⋯`.
+    // Three dots across the middle in the lit text color, centered both ways: a font's ellipsis
+    // sits on its baseline, ~4 points below the row's middle, and neither Inter nor egui's
+    // proportional fonts have the midline `⋯`.
     let dots = egui::Atom::paint(
         egui::vec2(2.0 * (DOT + DOTS_APART), 2.0 * DOT),
         |ui, args| {
@@ -1222,11 +1221,13 @@ fn component_menu(
     });
 }
 
-/// Says which instance of a prefab the entity of ID `id` is of, as `instance` has it: an
-/// outermost instance's root by its prefab, with Unlink, which unlinks it, the operation going in
-/// `operations`; a root of an instance inside another's prefab by its prefab and the outer
-/// instance's, which an unlink of the outer's alone takes; and an entity an instance's prefab gives
-/// by that instance's prefab and root.
+/// Says which instance of a prefab `id` is of, as `instance` has it:
+///
+/// - An outermost instance's root: by its prefab, with Unlink, whose operation goes in
+///   `operations`.
+/// - A root of an instance inside another's prefab: by its prefab and the outer instance's. Only
+///   an unlink of the outer takes it.
+/// - An entity an instance's prefab gives: by that instance's prefab and root.
 fn instance_line(
     world: &dyn Inspected,
     ui: &mut egui::Ui,
@@ -1264,10 +1265,10 @@ fn instance_line(
     });
 }
 
-/// Marks a field's label or a component's header, where `rect` is, as differing from the
-/// entity's prefab's, or as a component the prefab doesn't give: a bar of the selection's color
-/// along its left edge, as Unity's Inspector marks an instance's overrides, just left of it, or
-/// over its edge where that's cut off, as a header's is, which is as wide as the panel.
+/// Marks a field's label or component's header at `rect` as differing from the prefab's, or as a
+/// component it doesn't give: a bar of the selection's color along its left edge, as Unity's
+/// Inspector marks overrides. It's just left of it, or over its edge where that's cut off, as a
+/// header's is (panel-wide).
 pub(super) fn mark(ui: &egui::Ui, rect: egui::Rect) {
     let left = (rect.left() - 4.0).max(ui.clip_rect().left());
     let bar = egui::Rect::from_min_max(
@@ -1278,18 +1279,17 @@ pub(super) fn mark(ui: &egui::Ui, rect: egui::Rect) {
         .rect_filled(bar, 0.0, ui.visuals().selection.bg_fill);
 }
 
-/// Where what `ui` shows ends on the right: its end, but no further than where it's cut off, since
-/// rows wider than the panel, as a narrow Inspector's axes are, widen it past its edge; and short
-/// of the strip along that edge where a scroll area's bar floats over its contents, which takes
-/// the clicks there.
+/// Where what `ui` shows ends on the right: its end, but no further than where it's cut off
+/// (rows wider than the panel, as a narrow Inspector's axes are, widen it), and short of the
+/// strip where a scroll bar floats over the contents and takes the clicks.
 fn shown_right(ui: &egui::Ui) -> f32 {
     let scroll = &ui.spacing().scroll;
     let bar = scroll.bar_width + scroll.bar_outer_margin;
     ui.max_rect().right().min(ui.clip_rect().right()) - bar
 }
 
-/// The command that creates an empty entity, the last of `parent`'s children, or a root: a name
-/// that says so, and a transform that leaves it where its parent is.
+/// The command that creates an empty entity, the last of `parent`'s children or a root, with a
+/// name that says so and a transform that leaves it where its parent is.
 fn empty(parent: Option<EntityId>) -> Command {
     let name = Name("Empty Entity".to_owned());
     Command::Create {
@@ -1301,8 +1301,8 @@ fn empty(parent: Option<EntityId>) -> Command {
     }
 }
 
-/// The children of the entity of ID `id`, by their IDs, as "Children: 5f3a9c0e12b47d68,
-/// 0c41b2e79d6a3f15": the first 16 of them, then how many more there are; `None` if it has none.
+/// `id`'s children by ID, as "Children: 5f3a9c0e12b47d68, 0c41b2e79d6a3f15": the first 16, then
+/// how many more there are. `None` if it has none.
 fn children(world: &dyn Inspected, id: EntityId) -> Option<String> {
     let mut children = world.children(id).peekable();
     children.peek()?;

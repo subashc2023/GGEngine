@@ -1,4 +1,4 @@
-//! The Inspector's commands: what its panels and its link did, which its next tick makes in order,
+//! The Inspector's commands: what its panels and link did, which its next tick makes in order,
 //! and the values a recording keeps them as.
 
 use gg_core::Result;
@@ -7,54 +7,55 @@ use super::{Edit, Step};
 use crate::reflect::{self, Ident, Value};
 use crate::{Commands, EntityId};
 
-/// What the panels did, which the next tick makes in the order they did it: the Inspector's
-/// commands.
+/// What the panels did, which the next tick makes in order.
 pub(super) enum Command {
-    /// Sets a field of the entity with this ID, the one picked as the field was drawn, as part of
-    /// the edit going on.
+    /// Sets a field of the entity (the one picked as the field was drawn) as part of the edit
+    /// going on.
     Set(EntityId, Edit),
-    /// Ends the edit going on, so that the next set begins another.
+    /// Ends the edit going on, so the next set begins another.
     Seal,
     Step(Step),
-    /// Creates an entity with `components`, each a type's name and its whole value: the last of
+    /// Creates an entity with `components`, each a type's name and whole value: the last of
     /// `parent`'s children, or a root.
     Create {
         parent: Option<EntityId>,
         components: Vec<(Ident, Value)>,
     },
-    /// Deletes the entities with these IDs, and their descendants, as one edit: none of them under
-    /// another, whose delete would take it.
+    /// Deletes the entities and their descendants as one edit. None is under another, whose
+    /// delete would take it.
     Delete(Vec<EntityId>),
-    /// Copies the entities with these IDs, and their descendants, as one edit: none of them under
-    /// another, whose copy would copy it.
+    /// Copies the entities and their descendants as one edit. None is under another, whose copy
+    /// would copy it.
     Duplicate(Vec<EntityId>),
-    /// Gives the entity with this ID a component of the type named, made from the value.
+    /// Gives the entity a component of the type named, made from the value.
     Add(EntityId, String, Value),
-    /// Takes the component of the type named away from the entity with this ID.
+    /// Takes the component of the type named away from the entity.
     Remove(EntityId, String),
-    /// Sets the field at the path, or the whole component for an empty one, of the component of the
-    /// type named of the entity with this ID back to its prefab's.
+    /// Sets the field at the path (the whole component for an empty one) of the entity's component
+    /// of the type named back to its prefab's.
     Revert(EntityId, String, String),
-    /// Unlinks the instance whose root is the entity with this ID.
+    /// Unlinks the instance whose root is the entity.
     Unlink(EntityId),
-    /// Makes the entity with this ID the last of the second's children, or a root for `None`,
-    /// keeping where it is in the world, as [`World::reparent_in_place`](crate::World::reparent_in_place)
-    /// says.
+    /// Makes the entity the last of the second's children, or a root for `None`, keeping where it
+    /// is in the world, as [`World::reparent_in_place`](crate::World::reparent_in_place) says.
     Reparent(EntityId, Option<EntityId>),
-    /// Names the entity with this ID: sets its [`Name`](crate::Name), or gives it one.
+    /// Sets the entity's [`Name`](crate::Name), or gives it one.
     Rename(EntityId, String),
 }
 
-/// The Inspector's commands, which a recording reads as values: variants `Set`, with the
-/// entity's ID as text, the component and the path, and the value; `Seal`; `Undo`; `Redo`;
-/// `Create`, with its parent's ID as text, if it has one, and its components as a struct, a field
-/// each named as its type; `Delete` and `Duplicate`, with the entities' IDs as a list of texts,
-/// `entities`, or, as recordings before multiselect have them, one entity's, `entity`; `Unlink`,
-/// with the entity's ID as text; `Add`,
-/// with the entity's ID as text, the component and its value; `Remove`, with the entity's ID as
-/// text and the component; `Revert`, with the entity's ID as text, the component and the path;
-/// `Reparent`, with the entity's ID as text and its parent's, if it's to have one; and `Rename`,
-/// with the entity's ID as text and its name.
+/// The commands as a recording reads them, as variants. Entity IDs are text.
+///
+/// - `Set`: `entity`, `component`, `path`, `value`.
+/// - `Seal`, `Undo`, `Redo`: no fields.
+/// - `Create`: `parent` (an option) and `components`, a struct with a field per component, named
+///   as its type.
+/// - `Delete`, `Duplicate`: `entities`, a list. Recordings before multiselect have `entity`.
+/// - `Unlink`: `entity`.
+/// - `Add`: `entity`, `component`, `value`.
+/// - `Remove`: `entity`, `component`.
+/// - `Revert`: `entity`, `component`, `path`.
+/// - `Reparent`: `entity`, `parent` (an option).
+/// - `Rename`: `entity`, `name`.
 #[derive(Default)]
 pub(super) struct Queue(pub(super) Vec<Command>);
 
@@ -63,7 +64,7 @@ impl Commands for Queue {
         self.0.len()
     }
 
-    /// The Inspector's tick keeps its log of what they did, which it undoes and redoes through.
+    /// The Inspector's tick keeps a log of them, which it undoes and redoes through.
     fn edits(&self) -> bool {
         true
     }
@@ -145,7 +146,7 @@ impl Commands for Queue {
             let id = text(value, field)?.parse();
             id.map_err(|error| reflect::within(error, field))
         };
-        // A parent's, as a create's and a reparent's have it.
+        // A create's and a reparent's parent.
         let parent = |value: &Value| -> Result<Option<EntityId>> {
             match value {
                 Value::Option(parent) => {
@@ -194,7 +195,7 @@ impl Commands for Queue {
                 let [entity] = reflect::pick(fields, ["entity"])?;
                 Command::Unlink(id(entity, "entity")?)
             }
-            // A list of entities, or one, as a recording before multiselect has it.
+            // A list of entities, or one, as recordings before multiselect have.
             "Delete" | "Duplicate" => {
                 let ids = match fields {
                     [(field, entity)] if field == "entity" => vec![id(entity, "entity")?],

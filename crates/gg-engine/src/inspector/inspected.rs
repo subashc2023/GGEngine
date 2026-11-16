@@ -1,5 +1,5 @@
-//! What the panels show: a world, by its entities' IDs, as a [`World`] has it, or as the tool API
-//! gives a game's in another process; and what waits to change it, which they draw as it will be.
+//! What the panels show: a world by its entities' IDs, a [`World`] or a game's in another process
+//! through the tool API; and what waits to change it, which they draw as it will be.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -11,72 +11,67 @@ use crate::{EntityId, World};
 /// A world as the panels read it, by its entities' IDs: [`World`]'s own, and the remote
 /// Inspector's copy of a game's.
 pub(super) trait Inspected {
-    /// The types its components are, and hold.
     fn types(&self) -> &Types;
 
-    /// Its component types, in the order they registered.
+    /// Component types, in the order they registered.
     fn component_types(&self) -> Box<dyn Iterator<Item = &str> + '_>;
 
-    /// Whether the entity of ID `id` is alive: `None` while that isn't known, as of an entity
-    /// another process has just made.
+    /// `None` while that isn't known, as for an entity another process has just made.
     fn alive(&self, id: EntityId) -> Option<bool>;
 
-    /// What the entity is called, as [`World::name`] says: its [`Name`](crate::Name), or a model's
-    /// node's name in the model's file.
+    /// As [`World::name`] says: its [`Name`](crate::Name), or a model's node's name in the model's
+    /// file.
     fn name(&self, id: EntityId) -> Option<String>;
 
-    /// The entity's parent, if it has one.
     fn parent(&self, id: EntityId) -> Option<EntityId>;
 
-    /// The entity's children, in their order.
+    /// In their order.
     fn children(&self, id: EntityId) -> Box<dyn Iterator<Item = EntityId> + '_>;
 
-    /// The entity's components' types, in the order they registered.
+    /// Component types, in the order they registered.
     fn components(&self, id: EntityId) -> Vec<&str>;
 
-    /// The entity's component `name`, whole: `None` while it isn't known, and why it can't be read
-    /// if it can't.
+    /// The component `name`, whole: `None` while it isn't known, `Err` with why it can't be read.
     fn component(&self, id: EntityId, name: &str) -> Option<Result<Cow<'_, Value>, String>>;
 
     /// What an add of component type `name` gives, or why an add would be refused.
     fn default_of(&self, name: &str) -> Result<Value, String>;
 
-    /// How many entities have component `with`, or how many there are, or why they can't be
-    /// listed.
+    /// How many entities have component `with`, or how many there are; `Err` says why they can't
+    /// be listed.
     fn count(&self, with: Option<&str>) -> Result<usize, String>;
 
-    /// The entities with component `with`, or of them all, at places `rows` among them, in the
-    /// order queries find them.
+    /// The entities with component `with`, or all, at places `rows` among them, in query order.
     fn page(&self, with: Option<&str>, rows: Range<usize>) -> Vec<EntityId>;
 
     /// How many entities have no parent.
     fn roots(&self) -> usize;
 
-    /// The entities without a parent at places `at` among them, in the order [`World::roots`] lists
-    /// them: a range, so that a page of the tree takes them in one go.
+    /// The entities without a parent at places `at`, in [`World::roots`]' order. A range, so a
+    /// page of the tree takes them in one go.
     fn roots_page(&self, at: Range<usize>) -> Vec<EntityId>;
 
-    /// The place of the entity among those without a parent, if it's one.
+    /// The entity's place among those without a parent, if it's one.
     fn root_index(&self, id: EntityId) -> Option<usize>;
 
-    /// What a field of an entity holding `value` shows.
+    /// What an entity field holding `value` shows.
     fn entity_label(&self, value: &Value) -> String;
 
-    /// What a field of a texture, a model or a font holding `value` shows.
+    /// What a texture, model or font field holding `value` shows.
     fn asset_label(&self, value: &Value) -> String;
 
-    /// What of the entity differs from its prefab, as the tool API's `entity` answers it, if it's
-    /// an instance's: `None` for any other, and while that isn't known.
+    /// What differs from its prefab, as the tool API's `entity` has it. `None` for a
+    /// non-instance, or while unknown.
     fn instance(&self, id: EntityId) -> Option<Cow<'_, gg_api::Instanced>>;
 
-    /// Whether the Entities panel saves an entity as a prefab, as the tool API's `save_prefab` does:
-    /// a game's, through the API, alone, since a save writes files, which neither a replay nor a
-    /// lockstep peer of a game's own Inspector's commands would have.
+    /// Whether the Entities panel saves prefabs, like the tool API's `save_prefab`. Only a game's,
+    /// through the API: a save writes files, which a replay or lockstep peer of a game's own
+    /// Inspector's commands wouldn't have.
     fn saves_prefabs(&self) -> bool {
         false
     }
 
-    /// Why the world isn't shown yet, if it isn't, as while another process is reached.
+    /// Why the world isn't shown yet, as while another process is reached.
     fn waiting(&self) -> Option<&str> {
         None
     }
@@ -182,17 +177,15 @@ impl Inspected for World {
         }
     }
 
-    /// Found again each frame it's asked, which parses the instance's prefab's text: for the
-    /// entity picked alone.
+    /// Found again each frame, parsing the prefab's text: for the picked entity alone.
     fn instance(&self, id: EntityId) -> Option<Cow<'_, gg_api::Instanced>> {
         crate::api::instanced(self, self.entity(id)?).map(Cow::Owned)
     }
 }
 
 /// What waits to change what the panels show, which they draw as it will be: the sets of the
-/// picked entity's fields, in the order they were made; the adds and removes of components, each
-/// with whether it adds, in the order they were asked for; and the edits Undo and Redo would step
-/// through, in words.
+/// picked entity's fields, in order; the adds and removes of components (`true` for an add), in
+/// order; and the edits Undo and Redo would step through, in words.
 #[derive(Default)]
 pub(super) struct Pending {
     pub(super) waiting: Vec<Edit>,
@@ -202,8 +195,8 @@ pub(super) struct Pending {
 }
 
 impl Pending {
-    /// Whether an add, `Some(true)`, or a remove, `Some(false)`, of component `name` of the entity
-    /// of ID `id` waits, the last if several do.
+    /// Whether an add (`Some(true)`) or a remove (`Some(false)`) of component `name` of entity
+    /// `id` waits, the last if several do.
     pub(super) fn change(&self, id: EntityId, name: &str) -> Option<bool> {
         let changes = self.changes.iter().rev();
         let mut of = changes.filter(|(entity, component, _)| *entity == id && component == name);

@@ -1,20 +1,25 @@
-//! A remote Inspector's world: a game's in another process, as the tool API gives it, which the
-//! panels show as they show their own, and edit through the API, as the game's client.
+//! A remote Inspector's world: a game's in another process, as the tool API gives it. The panels
+//! show it as they show their own and edit it through the API, as the game's client.
 //!
-//! One connection, on a thread of its own, carries a request at a time, each answered in turn, so
-//! that what's read after an edit's answer shows the edit. The types go first, once, and again if
-//! a type not described comes, since values are read and written by them; then edits, but for a
-//! read of the picked entity between two of them, as during a drag, the sets of one field of
-//! several entities in a gesture going in one apply; then the active pick, every 50 ms; the others
-//! picked, every quarter of a second; the list of entities, 10,000 a page, as often; and the
-//! client's edits in words, for the Edit menu, after each edit and each list. A set waits, drawn as it will be, until
-//! an `entity` answer after its own; an add or a remove likewise. The game answers a request as its
-//! frame starts, so a request takes a frame of the game's, and of the editor's, which a game run
-//! `--embedded` paces its frames by.
+//! One connection, on a thread of its own, carries one request at a time, each answered in turn,
+//! so that a read after an edit's answer shows the edit. Requests go in this order:
 //!
-//! The panels read the game's whole list of entities every quarter of a second, which costs its
-//! main thread a few steps an entity, and keeps the list in memory; reading only the rows a panel
-//! shows would bound both by its height, which a game of tens of thousands of entities would want.
+//! 1. The types: first, once, and again if a type not described comes. Values are read and
+//!    written by them.
+//! 2. Edits. A read of the picked entity due goes between two of them, as during a drag. The sets
+//!    of one field of several entities in a gesture go in one apply.
+//! 3. The active pick, every 50 ms.
+//! 4. The others picked, every 250 ms.
+//! 5. The list of entities, 10,000 a page, every 250 ms.
+//! 6. The client's edits in words, for the Edit menu, after each edit and each list.
+//!
+//! A set waits, drawn as it will be, until an `entity` answer after its own; an add or remove
+//! likewise. The game answers a request as its frame starts, so a request takes a frame of the
+//! game's and of the editor's, which a game run `--embedded` paces its frames by.
+//!
+//! The panels read the game's whole list of entities every 250 ms. That costs its main thread a
+//! few steps an entity and keeps the list in memory. Reading only the rows a panel shows would
+//! bound both by its height, which a game of tens of thousands of entities would want.
 
 pub(super) use imp::Remote;
 
@@ -44,15 +49,15 @@ mod imp {
     use crate::{EntityId, Name, Pose, Transform};
 
     /// How long the connection waits to connect. It waits for each answer as long as it takes: a
-    /// script stopped in the game holds the answers for as long as it's debugged, and `gg run` ends
-    /// a game that hangs, which closes the connection.
+    /// script stopped in the game holds answers while debugged, and `gg run` ends a game that
+    /// hangs, closing the connection.
     const CONNECT: Duration = Duration::from_secs(10);
 
-    /// How often the picked entity, and the list of entities, are read again.
+    /// How often the picked entity and the list are read again.
     pub(super) const ENTITY_EVERY: Duration = Duration::from_millis(50);
     pub(super) const LIST_EVERY: Duration = Duration::from_millis(250);
 
-    /// The most entities a page of the list asks for: as many as `entities` lists.
+    /// The most entities a page of the list asks for: the most `entities` lists.
     pub(super) const PAGE: usize = 10_000;
 
     /// A game's world, as the tool API gives it, with what's been asked of it.
@@ -60,67 +65,59 @@ mod imp {
         /// The client it is to the game, the author of its edits.
         client: String,
         connection: Option<Connection>,
-        /// Why the game's world isn't shown, if it isn't, as while it's reached: `None` once it's
-        /// connected; and why the last read of each kind failed, if it did, until one of that kind
-        /// doesn't, by [`Of`].
+        /// Why the world isn't shown (`None` once connected), and why the last read of each
+        /// [`Of`] kind failed, until one of that kind doesn't.
         state: Option<String>,
         troubles: [Option<String>; 3],
-        /// The types the game described, and its component types, in the order they registered,
-        /// each with what an add gives, or why there's nothing; `typed` once they're read.
+        /// The game's types, and its component types in registration order, each with what an add
+        /// gives or why nothing; `typed` once read.
         types: Types,
         components: Vec<(String, Result<Value, String>)>,
         typed: bool,
-        /// The entities as the last list read gave them, and the pages of the one being read.
+        /// The entities of the last list read, and the pages of the one being read.
         list: List,
         reading: Option<Vec<gg_api::Listed>>,
-        /// The picked entity, as the last `entity` answer of it gave it while it stayed picked; the
-        /// entity the panels have picked, as of the last pass, whose answer may not have come; and
-        /// those the link asks them to pick, as of this pass's update, which the list may not have
-        /// yet either.
+        /// The picked entity as the last `entity` answer gave it while picked; the panels' pick as
+        /// of the last pass, whose answer may not have come; and the link's asked-for picks as of
+        /// this update, which the list may not have yet.
         picked: Option<(EntityId, Option<Known>)>,
         wanted: Option<EntityId>,
         linking: Vec<EntityId>,
-        /// The other entities the panels have picked, beside the active one, as of the last pass,
-        /// each with where it is.
+        /// The other picked entities, as of the last pass, each with where it is.
         others: Vec<Other>,
-        /// What a duplicate of several made, its entities' copies and their descendants', and the
-        /// active pick as it was answered: the copies of the entities are picked once the list has
-        /// them all, as those among them with no parent among them, unless the pick changes first.
+        /// The copies a duplicate of several made (with descendants) and the active pick as
+        /// answered. The copies with no parent among them are picked once the list has them all,
+        /// unless the pick changes first.
         copied: Option<(Vec<EntityId>, Option<EntityId>)>,
         /// The edits to send, in order, and the request waiting for its answer.
         queued: VecDeque<Ask>,
         sent: Option<Ask>,
-        /// Whether the request sent last was an edit, after which a read of the picked entity
-        /// that's due goes first.
+        /// Whether the last request sent was an edit; a due read of the picked entity then goes
+        /// first.
         edited: bool,
-        /// When the picked entity, and the list, were last asked for: `None` to ask at once.
+        /// When the picked entity and the list were last asked for; `None` asks at once.
         entity_at: Option<Instant>,
         list_at: Option<Instant>,
-        /// When the types were last asked for, which a read that failed asks again for no sooner
-        /// than a list.
+        /// When the types were last asked for; a failed read asks again no sooner than a list.
         types_at: Option<Instant>,
         /// Whether the types, or the client's edits in words, are to be asked for.
         types_due: bool,
         edits_due: bool,
-        /// The revision of the types last read, as `types` answered it, which a list of another
-        /// has them asked for again, as a script's reload changes them.
+        /// The types' revision last read; a list of another (a script's reload) has them re-asked.
         revision: u64,
-        /// Whose gesture goes on, and its number, which the client gives each of its own, from
-        /// one drawn at random, so that another connection of its name, as after a game's
-        /// restart, never continues one.
+        /// Whose gesture goes on, and its number. Numbers start from a random draw, so another
+        /// connection of the client's name (after a game restart) never continues one.
         open: Option<(Gesture, u64)>,
         gestures: u64,
-        /// The sets made, until an `entity` answer after their own shows them, each numbered.
+        /// The sets made, numbered, until an `entity` answer after their own shows them.
         waiting: Vec<Waiting>,
         /// The adds and removes asked for, likewise.
         changes: Vec<Changing>,
         made: u64,
-        /// The edits the game's `undo` and `redo` of the client's would step through next, in
-        /// words.
+        /// The edits in words that the client's `undo` and `redo` would step through next.
         undo: Option<String>,
         redo: Option<String>,
-        /// How many times it has been reached, to a game or to none, as [`Placed::generation`]
-        /// counts them.
+        /// How many times it has been reached, to a game or none ([`Placed::generation`]).
         generation: u64,
     }
 
@@ -130,14 +127,14 @@ mod imp {
         heard: Receiver<Heard>,
     }
 
-    /// What the connection's thread hears: that it connected, or couldn't, or an answer.
+    /// What the connection's thread hears: it connected, or couldn't, or an answer.
     enum Heard {
         Connected,
         Failed(Failure),
         Answer(Result<String, Failure>),
     }
 
-    /// The kinds of reads of the game's world, each of which says why it failed until one doesn't.
+    /// The kinds of reads of the game's world.
     #[derive(Clone, Copy)]
     enum Of {
         Types,
@@ -145,16 +142,16 @@ mod imp {
         Entity,
     }
 
-    /// An entity picked beside the active one: where it is, as the last `entity` answer of it gave
-    /// it while it stayed picked, `None` until one has come, and `Some(None)` for one with no
-    /// place, without a transform, or gone; and when it was last asked for, `None` to ask at once.
+    /// An entity picked beside the active one. `read` is its place by the last `entity` answer
+    /// while picked: `None` until one comes, `Some(None)` for none (no transform, or gone).
+    /// `asked`: when last asked for; `None` asks at once.
     struct Other {
         id: EntityId,
         read: Option<Option<Placed>>,
         asked: Option<Instant>,
     }
 
-    /// A set made, by its number, of the field `edit` changes of the entity of ID `id`.
+    /// A set made, by its number, of the field `edit` changes of entity `id`.
     struct Made {
         number: u64,
         id: EntityId,
@@ -170,17 +167,17 @@ mod imp {
         },
         Entity(EntityId),
         Edits,
-        /// A save of the entity with this ID as a prefab, which the Entities panel chose.
+        /// A save of this entity as a prefab, which the Entities panel chose.
         SavePrefab(EntityId),
-        /// Sets of a gesture, each waiting by its number: queued one at a time, and sent, as the
-        /// API takes them in one apply, with those queued just after it of the same field of other
-        /// entities in the same gesture, as a drag of several entities' handles makes them.
+        /// Sets of a gesture, each waiting by number. Queued singly, sent in one apply with the
+        /// sets queued just after of the same field of other entities in the gesture (a drag of
+        /// several handles).
         Set {
             sets: Vec<Made>,
             gesture: u64,
         },
-        /// An operation the menus chose, the entity picked as they chose it, and the parent of
-        /// the entity it may make, whose rows open as it's picked; the change it makes, numbered.
+        /// An operation the menus chose, the entity picked then, the parent of the entity it may
+        /// make (whose rows open as it's picked), and its change's number.
         Operation {
             command: Command,
             picked: Option<EntityId>,
@@ -216,7 +213,7 @@ mod imp {
         applied: bool,
     }
 
-    /// The entities of a list read whole, in the order queries find them, and how to find each.
+    /// The entities of a list read whole, in query order, and how to find each.
     #[derive(Default)]
     struct List {
         entities: Vec<Known>,
@@ -227,11 +224,10 @@ mod imp {
         read: bool,
     }
 
-    /// An entity as the game gave it: its name, parent and children, and its components' types, in
-    /// the order they registered; with, for the picked entity, their values, or why one can't be
-    /// read, where the space its transform is in sits, if that was given, and finite, the sphere
-    /// round what it draws, if it was given, and what of it differs from its prefab, if it's an
-    /// instance's.
+    /// An entity as the game gave it: name, parent, children, component types in registration
+    /// order. The picked entity also has values (or why one can't be read), its transform's space
+    /// if given and finite, its bounding sphere if given, and for an instance what differs from
+    /// its prefab.
     struct Known {
         id: EntityId,
         name: Option<String>,
@@ -244,8 +240,8 @@ mod imp {
         instance: Option<gg_api::Instanced>,
     }
 
-    /// The entity `entity` answers, its `space`, `bounds` and `instance` as they came, which a game
-    /// of an older engine doesn't give.
+    /// What `entity` answers. A game of an older engine doesn't give `space`, `bounds` or
+    /// `instance`.
     #[derive(Deserialize)]
     struct Answered {
         name: Option<String>,
@@ -299,9 +295,8 @@ mod imp {
             }
         }
 
-        /// Shows the game `session` names, connecting to it, or none: what was known of the game
-        /// before goes, but the gesture's numbers, which go on, and the count of reaches, which
-        /// goes up.
+        /// Shows the game `session` names, connecting to it, or none. What was known of the game
+        /// goes, but the gesture numbers go on and the count of reaches goes up.
         fn reach(&mut self, session: Option<Session>) {
             let fresh = Self::new(&self.client);
             let (gestures, generation) = (self.gestures, self.generation);
@@ -314,12 +309,12 @@ mod imp {
             }
         }
 
-        /// Takes in what the game answered since the last pass, changing `inspector`'s pick, open
-        /// rows and refusals as it says, and picking the copies of a duplicate of several once the
-        /// list has them; and first reaches the game its link names, if it names one since, and
-        /// lets go of the read of the entity picked if the pick changed in the last pass, so that a
-        /// read taken before the pick went elsewhere never shows once it's back, and of those of
-        /// the others no longer picked.
+        /// Takes in the game's answers since the last pass, updating `inspector`'s pick, open rows
+        /// and refusals, and picking a duplicate of several's copies once the list has them.
+        ///
+        /// First it reaches the game its link has named since. It drops the picked entity's read
+        /// if the pick changed in the last pass (so a stale read never shows once the pick is
+        /// back) and the reads of others no longer picked.
         pub(in super::super) fn update(&mut self, inspector: &mut Inspector) {
             let reach = inspector.link.borrow_mut().reach.take();
             if let Some(session) = reach {
@@ -328,7 +323,7 @@ mod imp {
             if inspector.picked != self.wanted {
                 self.picked = None;
             }
-            // The others picked as of the last pass, those still picked keeping their reads.
+            // Those still picked keep their reads.
             let ids = self.others.iter().map(|other| other.id);
             if !ids.eq(inspector.others.iter().copied()) {
                 let mut kept = mem::take(&mut self.others);
@@ -433,9 +428,9 @@ mod imp {
                     };
                     let first = !read(&self.picked);
                     self.entity(id, answer, inspector.picked);
-                    // The rows above the pick, as its first read gives them, which a pick of an
-                    // entity the list hadn't yet, as the link's of one just made, couldn't open;
-                    // and not at the reads after, so that they close.
+                    // The rows above the pick, which a pick of an entity the list hadn't yet (the
+                    // link's of one just made) couldn't open. Only at its first read, so that
+                    // they close later.
                     if first && read(&self.picked) {
                         inspector.open_ancestors(&*self, id);
                     }
@@ -510,13 +505,13 @@ mod imp {
                         let kept = inspector.picked == picked;
                         let several = matches!(&command, Command::Duplicate(ids) if ids.len() > 1);
                         if kept && several {
-                            // Copies of several, among those of their descendants, which the
-                            // list tells apart.
+                            // Copies of several, among their descendants', which the list tells
+                            // apart.
                             self.copied = Some((made, picked));
                         } else if let Some(&made) = made.first().filter(|_| kept) {
                             // The entity made, picked unless the pick changed since.
                             inspector.pick(made);
-                            // From the parent it was made under, which the list may not have yet.
+                            // From the parent it was made under; the list may not have it yet.
                             if let Some(parent) = parent {
                                 inspector.expanded.insert(parent);
                                 inspector.open_ancestors(&*self, parent);
@@ -575,8 +570,8 @@ mod imp {
             }
         }
 
-        /// Takes in a page of the list, from the entity at `skip`, which completes it once it has
-        /// them all, as the page counts them.
+        /// Takes in a page of the list, from the entity at `skip`; the list is complete once the
+        /// page's count is reached.
         fn listed(&mut self, skip: usize, answer: Result<String, Failure>) {
             let page = match answer.and_then(|json| read::<gg_api::EntityList>(&json)) {
                 Ok(page) => page,
@@ -599,8 +594,7 @@ mod imp {
                 read: true,
                 ..List::default()
             };
-            // An entity read twice, as entities coming and going between pages may move one from
-            // one page to the next, is listed once.
+            // Entities coming and going between pages may move one to the next page: list it once.
             let mut seen = HashSet::new();
             for listed in read {
                 let Ok(id) = listed.id.parse::<EntityId>() else {
@@ -636,10 +630,9 @@ mod imp {
             self.edits_due = true;
         }
 
-        /// Takes in the entity of ID `id`, if it's still the one `picked`, its components' values
-        /// read by the game's types, or else where it is, if it's still another picked; and lets
-        /// go of the sets and changes the game has applied, of it and of any other not picked,
-        /// which now show: those of another picked wait for a read of their own.
+        /// Takes in entity `id`: its values, read by the game's types, if it's still `picked`; its
+        /// place if another still picked. Drops the applied sets and changes of it and of any
+        /// unpicked entity, which now show; another picked entity's wait for its own read.
         fn entity(
             &mut self,
             id: EntityId,
@@ -712,8 +705,7 @@ mod imp {
             }
         }
 
-        /// Where the entity of ID `picked` is, as the last read of it gave it: if that read was of
-        /// it, and gave its transform and where the space it's in sits.
+        /// Where `picked` is, by the last read of it, if that gave its transform and space.
         pub(in super::super) fn placed(&self, picked: Option<EntityId>) -> Option<Placed> {
             let (id, Some(entity)) = self.picked.as_ref()? else {
                 return None;
@@ -724,8 +716,7 @@ mod imp {
             self.place(entity)
         }
 
-        /// Where `entity` is, as a read of it gave it: if it gave its transform and where the space
-        /// it's in sits.
+        /// Where `entity` is, by a read of it, if that gave its transform and space.
         fn place(&self, entity: &Known) -> Option<Placed> {
             let at = entity
                 .components
@@ -743,11 +734,9 @@ mod imp {
             })
         }
 
-        /// Where the entities of `picks`, those the panels have picked, the active one last, are
-        /// that a drag of a tool's handles moves, as [`InspectorLink::along`] says: those with a
-        /// place, as their last reads gave it, and the sets waiting for the game will leave it,
-        /// but those under another of them; `None` until a read of each has come since it was
-        /// picked, the active one's too.
+        /// [`InspectorLink::along`] for `picks` (the active one last): those with a place, by
+        /// their last reads and the sets waiting for the game, but those under another. `None`
+        /// until a read of each, the active one too, has come since it was picked.
         ///
         /// [`InspectorLink::along`]: crate::InspectorLink::along
         pub(in super::super) fn along(&self, picks: &[EntityId]) -> Option<Vec<Placed>> {
@@ -768,8 +757,8 @@ mod imp {
             Some(along)
         }
 
-        /// Whether an ancestor of the entity of ID `id` is one of `picks`, up to one met again, as
-        /// a hierarchy put together from reads at two moments may have it.
+        /// Whether an ancestor of `id` is in `picks`. The walk stops at an ancestor met again,
+        /// which a hierarchy built from reads at two moments may hold.
         fn under_one_of(&self, id: EntityId, picks: &[EntityId]) -> bool {
             let mut met = HashSet::from([id]);
             let mut up = self.parent(id);
@@ -782,8 +771,8 @@ mod imp {
             false
         }
 
-        /// `placed`, with the sets of its transform's fields that wait for the game made, in the
-        /// order they were: whole, or a vector's component, as a link sets them.
+        /// `placed`, with the waiting sets of its transform's fields applied in order, whole or by
+        /// vector component, as a link sets them.
         fn waited(&self, mut placed: Placed) -> Placed {
             /// A transform's vector a set reaches: its translation, of `f64`s, or its scale.
             enum Axes<'a> {
@@ -828,8 +817,8 @@ mod imp {
             placed
         }
 
-        /// What waits for the game: the sets of the fields of the entity of ID `picked`, the adds
-        /// and removes, and the client's edits Undo and Redo would step through.
+        /// What waits for the game: the sets of `picked`'s fields, the adds and removes, and the
+        /// client's edits Undo and Redo would step through.
         pub(in super::super) fn pending(&self, picked: Option<EntityId>) -> Pending {
             let waiting = self.waiting.iter().filter(|set| Some(set.id) == picked);
             let changes = self.changes.iter();
@@ -843,11 +832,14 @@ mod imp {
             }
         }
 
-        /// Sends the game what a pass of the panels did, as [`Inspector::queue`] queues it for a
-        /// tick: the link's sets, creates and seals, then the pass's sets of the picked entity's
-        /// fields, each gesture's sets of one field joining as one edit, then its operations, each
-        /// of which ends the gesture going on, as the link's creates do, then the step its Edit
-        /// menu or keys chose; and asks for what's next.
+        /// Sends the game what a pass did, queued like [`Inspector::queue`], in order:
+        /// 1. the link's sets, creates and seals;
+        /// 2. the pass's sets of the picked entity's fields (a gesture's sets of one field join
+        ///    as one edit);
+        /// 3. its operations, each ending the gesture going on, like the link's creates;
+        /// 4. the step the Edit menu or keys chose.
+        ///
+        /// Then it asks for what's next.
         pub(in super::super) fn send(&mut self, pass: Pass, inspector: &mut Inspector) {
             let Pass {
                 sets,
@@ -893,8 +885,8 @@ mod imp {
                 self.open = None;
                 inspector.link.borrow_mut().stepped += 1;
             }
-            // Until a read shows each, so that a tool drawing a field as it set it doesn't draw it
-            // as the read before had it.
+            // Until a read shows each, so that a tool drawing a field as it set it doesn't revert
+            // to the earlier read's value.
             let link = &mut *inspector.link.borrow_mut();
             link.queued = !self.waiting.is_empty();
             self.ask_next(inspector.picked);
@@ -903,9 +895,9 @@ mod imp {
             link.unanswered = self.connection.is_some() && (sent || !self.queued.is_empty());
         }
 
-        /// Sets the field `edit` changes of the entity of ID `id`, as part of `gesture`'s, which it
-        /// begins if another goes on, or none: the latest set of the field in the gesture alone
-        /// waits to be sent, after those made since its last.
+        /// Sets the field `edit` changes of `id`, in `gesture`'s edit, which it begins if another
+        /// or none goes on. Only the latest set of a field in the gesture waits to be sent, after
+        /// those made since its last.
         fn set(&mut self, id: EntityId, edit: Edit, gesture: Gesture) {
             let number = match self.open {
                 Some((open, number)) if open == gesture => number,
@@ -943,8 +935,8 @@ mod imp {
             });
         }
 
-        /// The next queued request, `ask`, with, if it's a set, the sets queued just after it of
-        /// the same field of other entities in the same gesture, which go with it in one apply.
+        /// The next queued request `ask`; a set takes with it the sets queued just after of the
+        /// same field of other entities in the same gesture, in one apply.
         fn with_its_gesture(&mut self, mut ask: Ask) -> Ask {
             let Ask::Set { sets, gesture } = &mut ask else {
                 return ask;
@@ -978,8 +970,8 @@ mod imp {
             }
         }
 
-        /// Sends `command`, an operation the menus chose while the entity of ID `picked` was
-        /// picked, which ends the gesture going on.
+        /// Sends `command`, an operation the menus chose while `picked` was picked. It ends the
+        /// gesture going on.
         fn operation(&mut self, command: Command, picked: Option<EntityId>) {
             self.open = None;
             self.made += 1;
@@ -1005,7 +997,7 @@ mod imp {
             });
         }
 
-        /// Sends the next request, if none waits for its answer: as the module says.
+        /// Sends the next request, if none waits for its answer, in the module's order.
         fn ask_next(&mut self, picked: Option<EntityId>) {
             if self.connection.is_none() || self.sent.is_some() {
                 return;
@@ -1046,7 +1038,7 @@ mod imp {
             };
             let request = match self.request(&ask) {
                 Some(request) => request,
-                // A value that couldn't be written, as by types not yet read, isn't sent.
+                // A value that can't be written, as by types not yet read, isn't sent.
                 None => return,
             };
             self.edited = ask.edits();
@@ -1172,8 +1164,8 @@ mod imp {
             }
         }
 
-        /// Says why a read of the game's world of kind `of` failed, `message`, of code `code`,
-        /// until one of that kind doesn't, logging it as it's new.
+        /// Says `message`, of code `code`, as why a read of kind `of` failed, until one of that
+        /// kind doesn't; logs it when new.
         fn trouble(&mut self, of: Of, code: &str, message: String) {
             let kept = &mut self.troubles[of as usize];
             if kept.as_ref() != Some(&message) {
@@ -1182,7 +1174,7 @@ mod imp {
             }
         }
 
-        /// The entity of ID `id`, as the picked entity's answer or the list gives it.
+        /// Entity `id`, as the picked entity's answer or the list gives it.
         fn known(&self, id: EntityId) -> Option<&Known> {
             match &self.picked {
                 Some((of, Some(entity))) if *of == id => Some(entity),
@@ -1194,7 +1186,7 @@ mod imp {
             self.known(id)?.parent
         }
 
-        /// The places among the list of the entities with component `with`, or of them all.
+        /// The list's entities with component `with`, or all.
         fn listed_with<'a>(&'a self, with: Option<&'a str>) -> impl Iterator<Item = EntityId> + 'a {
             let entities = self.list.entities.iter();
             let with = move |entity: &&Known| {
@@ -1213,10 +1205,9 @@ mod imp {
             Box::new(self.components.iter().map(|(name, _)| name.as_str()))
         }
 
-        /// Alive if the picked entity's answer, or the list, has it, and not if the picked
-        /// entity's answer says it's gone, or the list hasn't it; but the entity picked, until its
-        /// answer comes, and the one the link asks to pick, as one just made, which the list may
-        /// not have yet, aren't known.
+        /// Alive if the picked entity's answer or the list has it; not if the answer says it's
+        /// gone or the list lacks it. `None` for the picked entity until its answer comes and for
+        /// one the link asks to pick (just made, say), which the list may not have yet.
         fn alive(&self, id: EntityId) -> Option<bool> {
             match &self.picked {
                 Some((of, entity)) if *of == id => Some(entity.is_some()),
@@ -1301,7 +1292,7 @@ mod imp {
 
         fn asset_label(&self, value: &Value) -> String {
             match value {
-                // Its name, its ID or else its path, as the game's values give it.
+                // Its name, ID or path, as the game's values give it.
                 Value::String(name) => name.clone(),
                 _ => "none".to_owned(),
             }
@@ -1329,15 +1320,15 @@ mod imp {
         }
     }
 
-    /// What the panels say while no game serves, and while its world is first read, and once the
+    /// What the panels say while no game serves, while its world is first read, and once the
     /// connection has closed.
     const NOT_SERVING: &str = "Waiting for the game to serve";
     const READING: &str = "Reading the game's world";
     const CLOSED: &str = "The connection to the game closed";
 
-    /// Connects to the game `session` names as client `client`, on a thread of its own, which
-    /// sends each request it's given in turn, and passes each answer on, until the connection
-    /// breaks or what it hears from goes.
+    /// Connects to the game `session` names as client `client`, on a thread of its own. It sends
+    /// each request in turn and passes each answer on, until the connection breaks or its
+    /// listener goes.
     fn connect(session: Session, client: String) -> Connection {
         let (asks, asked) = mpsc::channel::<(String, JsonValue)>();
         let (hear, heard) = mpsc::channel();
@@ -1364,8 +1355,8 @@ mod imp {
                 }
             }
         };
-        // A thread that doesn't start drops what it would hear through, which the Inspector takes
-        // for the connection closed.
+        // A thread that doesn't start drops its sender, which the Inspector takes for the
+        // connection closed.
         let thread = thread::Builder::new()
             .name("gg-inspector".to_owned())
             .spawn(talking);
@@ -1378,8 +1369,8 @@ mod imp {
         Connection { asks, heard }
     }
 
-    /// The pose `space`, of an `entity` answer, gives, its floats read as a value's are, as `names`
-    /// reads them: if it gives one, finite.
+    /// The pose `space` of an `entity` answer gives, its floats read as `names` reads values';
+    /// `None` unless it gives a finite one.
     fn space_of(space: &JsonValue, names: &Names) -> Option<Pose> {
         let matrix = space.get("matrix")?;
         let matrix = json::read(matrix, &Type::Array(Box::new(Type::F64), 16), names).ok()?;
@@ -1419,8 +1410,8 @@ mod imp {
             format!("{n:016x}").parse().expect("an ID")
         }
 
-        /// A page of a list of `total` entities, each with its parent and children by their
-        /// numbers, as `entities` answers it.
+        /// A page of a list of `total` entities, each with its parent and children by number, as
+        /// `entities` answers it.
         fn page(total: usize, entities: &[(u64, Option<u64>, &[u64])]) -> Result<String, Failure> {
             let listed = entities
                 .iter()
@@ -1442,8 +1433,8 @@ mod imp {
             Ok(serde_json::to_string(&list).expect("a list serializes"))
         }
 
-        /// A list read in pages is whole once it has as many as the page counts, an entity read on
-        /// two pages, as one an entity spawned ahead of it moved to the next, listed once.
+        /// A list read in pages is whole once it has the page's count; an entity on two pages (one
+        /// spawned ahead of it moved it) is listed once.
         #[test]
         fn a_list_read_in_pages_lists_each_entity_once() {
             let mut remote = Remote::new("editor");
@@ -1455,8 +1446,8 @@ mod imp {
             assert_eq!(remote.roots_page(0..3), [id(1), id(2), id(3)]);
         }
 
-        /// A list of another revision of the types than were read, as after a script's reload
-        /// changed them, has them asked for again; one of the same leaves them be.
+        /// A list of another revision of the types (a script's reload changes them) has them asked
+        /// for again; one of the same revision doesn't.
         #[test]
         fn a_list_of_another_revision_of_the_types_has_them_asked_for_again() {
             let listed = |types: u64| {
@@ -1473,9 +1464,8 @@ mod imp {
             assert!(remote.types_due);
         }
 
-        /// A hierarchy put together from reads at two moments that holds a cycle, as one entity's
-        /// answer saying its parent is another whose listing says it's its parent, leaves the
-        /// tree's rows and the walk up an entity's ancestors finite.
+        /// A cycle in a hierarchy built from reads at two moments (an answer names a parent whose
+        /// listing names the entity as its parent) leaves the tree and ancestor walks finite.
         #[test]
         fn a_cycle_between_reads_ends_the_walks() {
             let mut remote = Remote::new("editor");
@@ -1497,9 +1487,9 @@ mod imp {
             assert_eq!(inspector.expanded, HashSet::from([id(4)]));
         }
 
-        /// A set the game has applied waits until an answer of its entity, read after it, shows it,
-        /// while it's picked; a set of an entity not picked goes at any answer once it's applied;
-        /// and an answer saying the entity picked is gone says it's despawned.
+        /// An applied set waits, while its entity is picked, until a later answer of that entity
+        /// shows it. A set of an unpicked entity goes at any answer once applied. An answer that
+        /// the picked entity is gone says it's despawned.
         #[test]
         fn sets_wait_until_a_read_of_their_entity_shows_them() {
             let mut remote = Remote::new("editor");
@@ -1540,9 +1530,8 @@ mod imp {
             assert_eq!(remote.alive(a), Some(false), "despawned");
         }
 
-        /// The link's pick of an entity the list hasn't, as one the game has just made, picks it,
-        /// its first read opening the rows above it, and the reads after leaving them be; and once
-        /// a read of it has found it gone, unpicks.
+        /// The link's pick of an entity the list lacks (one just made) picks it. Its first read
+        /// opens the rows above it, later reads leave them be, and a read finding it gone unpicks.
         #[test]
         fn the_links_pick_of_an_entity_the_list_hasnt_yet_picks_it() {
             let mut remote = Remote::new("editor");
@@ -1572,10 +1561,9 @@ mod imp {
             assert_eq!(inspector.picked, None, "found gone");
         }
 
-        /// The entity picked is placed by a read of it, while it's picked: its transform and the
-        /// space it's in, whose floats are read as values' are; a read without a space, or with
-        /// one that isn't finite, places nothing; each reach counts a generation; and a read taken
-        /// before the pick went elsewhere doesn't place it once it's back.
+        /// A read places the picked entity by its transform and space (floats read as values').
+        /// No space, or a non-finite one, places nothing; each reach counts a generation; a read
+        /// from before the pick went elsewhere doesn't place it once back.
         #[test]
         fn a_pick_is_placed_by_a_read_of_it_alone() {
             let mut remote = Remote::new("editor");
@@ -1614,12 +1602,12 @@ mod imp {
                 generation: 0,
             };
             assert_eq!(placed, expected);
-            // The sphere round what it draws comes with the read, if the game gives one.
+            // The sphere round what it draws, if the game gives one.
             let bounds = r#","bounds":{"center":[1,2,3],"radius":2.5}"#;
             remote.entity(a, answer(&format!("{}{bounds}", space("4"))), Some(a));
             let bounded = remote.placed(Some(a)).expect("placed");
             assert_eq!(bounded.bounds, Some((DVec3::new(1.0, 2.0, 3.0), 2.5)));
-            // A model's node, as its `ModelNode` says, is placed as one.
+            // A `ModelNode` marks a model's node.
             let transform = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
             let components = format!(r#""components":{{"Transform":{transform},"ModelNode":0}}"#);
             let node = format!(
@@ -1652,9 +1640,9 @@ mod imp {
             assert_eq!(remote.placed(Some(a)), None, "back, until a read of it");
         }
 
-        /// The others picked are placed by reads of their own, as the sets that wait for the game
-        /// will leave them, but those under another picked, whose drag carries them; nothing is
-        /// until a read of each has come, the active one's too; and one found gone isn't.
+        /// The others picked are placed by reads of their own, as the waiting sets will leave
+        /// them, but those under another picked, whose drag carries them. Nothing is placed until
+        /// a read of each, the active one too, has come; one found gone isn't.
         #[test]
         fn the_others_picked_are_placed_by_reads_of_their_own() {
             let mut remote = Remote::new("editor");
@@ -1669,7 +1657,7 @@ mod imp {
                     r#"{{"name":null,"parent":{parent},"children":[],"components":{{"Transform":{transform}}},{space}}}"#
                 ))
             };
-            // c under b, as the list has it.
+            // c under b in the list.
             remote.listed(
                 0,
                 page(3, &[(1, None, &[]), (2, None, &[3]), (3, Some(2), &[])]),
@@ -1719,9 +1707,8 @@ mod imp {
             );
         }
 
-        /// The sets of one field of several entities in a gesture, as a drag of several entities'
-        /// handles makes them, go to the game in one apply; one of another field in another; and a
-        /// delete or a duplicate of several entities in one apply too.
+        /// A gesture's sets of one field of several entities (a drag of several handles) go in one
+        /// apply; another field's in another. A delete or duplicate of several is one apply too.
         #[test]
         fn a_gestures_sets_of_one_field_of_several_entities_go_as_one_apply() {
             let mut remote = Remote::new("editor");
@@ -1781,9 +1768,9 @@ mod imp {
             }
         }
 
-        /// A read of the picked entity gives what of it differs from its prefab, while it's picked;
-        /// and a save as a prefab, an unlink and a revert go to the game as the API's `save_prefab`
-        /// and `apply` take them, each an edit, after which the entity is read again.
+        /// A read of the picked entity gives what differs from its prefab. A save as a prefab, an
+        /// unlink and a revert go as the API's `save_prefab` and `apply` take them, each an edit
+        /// after which the entity is read again.
         #[test]
         fn an_instances_read_and_its_prefabs_edits_go_as_the_api_has_them() {
             let mut remote = Remote::new("editor");
@@ -1830,9 +1817,8 @@ mod imp {
             assert_eq!(ask(&operation(revert)), ("apply".to_owned(), operations));
         }
 
-        /// A reparent goes to the game as the API's `reparent` takes it, to a parent or to the
-        /// roots; and a rename as a set of the name the entity has, as the read of it says, or for
-        /// one without, an add of one.
+        /// A reparent goes as the API's `reparent` takes it, to a parent or the roots. A rename is
+        /// a set of the entity's name, or an add of one if it has none.
         #[test]
         fn reparents_and_renames_go_as_the_api_has_them() {
             let mut remote = Remote::new("editor");
@@ -1868,8 +1854,8 @@ mod imp {
             assert_eq!(ask(&remote, rename()), apply(set));
         }
 
-        /// A set through the link waits, as the link says, until a read of its entity after the
-        /// game's answer to it shows it, not only until the answer.
+        /// A set through the link waits until a read of its entity after the game's answer shows
+        /// it, not only until the answer.
         #[test]
         fn the_links_sets_wait_until_a_read_shows_them() {
             let mut remote = Remote::new("editor");
@@ -1899,9 +1885,8 @@ mod imp {
         }
 
         /// The link is idle once the game has answered every edit, operations as sets: not while a
-        /// set made through it waits for the pass, nor while an edit waits to be sent, nor while
-        /// its answer hasn't come, but before a read shows it; and edits that can't be sent,
-        /// without a connection, keep nothing waiting.
+        /// set waits for the pass, an edit waits to be sent, or its answer hasn't come; but before
+        /// a read shows it. Edits that can't be sent, with no connection, keep nothing waiting.
         #[test]
         fn the_link_is_idle_once_the_game_has_answered_every_edit() {
             let mut remote = Remote::new("editor");

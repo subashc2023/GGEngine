@@ -1,5 +1,5 @@
-//! The Entities panel: a row for each of the world's entities, of those with one component as a
-//! list or of them all as the tree of its hierarchy, of which a frame finds only those in view.
+//! The Entities panel: a row per entity, as a list of those with one component or as the tree of
+//! all. A frame finds only the rows in view.
 
 use std::collections::HashSet;
 use std::mem;
@@ -10,8 +10,8 @@ use super::inspected::Inspected;
 use super::{DELETE, DUPLICATE, FRAME, Inspector, Pass, RENAME, Renaming, empty};
 use crate::EntityId;
 
-/// An entity's row dragged, as egui's drag and drop holds it: a row it's let go on makes it a
-/// child of that row's entity, and the space below the rows a root.
+/// An entity's row dragged, as egui's drag and drop holds it. Dropped on a row, it becomes that
+/// entity's child; below the rows, a root.
 struct Moved(EntityId);
 
 /// The side of the header's glyphs, in points.
@@ -20,9 +20,9 @@ const GLYPH: f32 = 12.0;
 /// A glyph of the header's buttons, painted, as neither Inter nor egui's fonts have it.
 #[derive(Clone, Copy)]
 enum Glyph {
-    /// A magnifier: a ring, and its handle, down to the right.
+    /// A magnifier.
     Find,
-    /// Two chevrons pointing up, one over the other, as rows folding away.
+    /// Two chevrons pointing up, one over the other.
     Collapse,
 }
 
@@ -49,8 +49,8 @@ impl Glyph {
     }
 }
 
-/// A button showing `glyph`, square, as tall as one with text, so that the header leaves its
-/// component filter the room a text's padding across would take.
+/// A square button showing `glyph`, as tall as one with text, so that the header leaves the
+/// component filter the room a text button's padding would take.
 fn glyph_button(ui: &mut egui::Ui, glyph: Glyph) -> egui::Response {
     let atom = egui::Atom::paint(egui::Vec2::splat(GLYPH), move |ui, args| {
         glyph.paint(ui.painter(), args.rect, args.fallback_text_color);
@@ -64,15 +64,17 @@ fn glyph_button(ui: &mut egui::Ui, glyph: Glyph) -> egui::Response {
 }
 
 impl Inspector {
-    /// The Entities panel: a header of one row, and a row for each of the entities listed, or for
-    /// each of the tree's, of which only those in view are drawn; and below them, where they leave
-    /// room, space whose click unpicks, whose context menu makes a root, and which a row let go on
-    /// makes a root. The header has the magnifier, which opens the Find field in place of the
-    /// rest of it, as [`find_field`](Self::find_field) says; which component the entities listed
-    /// have, taking the room the rest leaves, its text cut short to fit; how many there are; and,
-    /// for the tree, Collapse All, and the + menu. Its keys, while it has them, frame, rename and
-    /// delete the entity picked. The operations its menus, keys and drags choose, and what the
-    /// input of the window it draws in says of the edits, go in `pass`.
+    /// The Entities panel: a one-row header, a row per entity listed or in the tree (only those in
+    /// view drawn), and the leftover space below.
+    ///
+    /// - The space unpicks on a click, makes a root from its context menu, and makes a root of a
+    ///   row dropped on it.
+    /// - The header has the magnifier (opens [`find_field`](Self::find_field) in place of the
+    ///   rest), the component filter, the count, and, for the tree, Collapse All and the + menu.
+    /// - While the panel has the keys, they frame, rename and delete the entity picked.
+    ///
+    /// Operations from its menus, keys and drags, and what its window's input says of edits, go in
+    /// `pass`.
     pub(super) fn entities(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, pass: &mut Pass) {
         pass.cues.read(ui.ctx());
         let (operations, saves) = (&mut pass.operations, &mut pass.saves);
@@ -160,9 +162,8 @@ impl Inspector {
         });
     }
 
-    /// The Find field, in place of the rest of the header, taking the keys as it opens, and its ×:
-    /// each Enter there finds the next entity whose ID or a part of whose name is typed, as
-    /// [`find`](Self::find) says; the × and Escape close it, emptying it.
+    /// The Find field and its ×, in place of the rest of the header, taking the keys as it opens.
+    /// Each Enter finds the next match ([`find`](Self::find)); × and Escape close and empty it.
     fn find_field(&mut self, world: &dyn Inspected, ui: &mut egui::Ui) {
         let right = egui::Layout::right_to_left(egui::Align::Center);
         ui.with_layout(right, |ui| {
@@ -186,8 +187,7 @@ impl Inspector {
         });
     }
 
-    /// Which component the entities listed have, or All, for all of them, as a tree, taking the
-    /// room left of what `ui` holds already, laid out from its right, its text cut short to fit.
+    /// The component filter, or All as a tree. Fills the room left in `ui`, text cut short.
     fn with_menu(&mut self, world: &dyn Inspected, ui: &mut egui::Ui) {
         egui::ComboBox::from_id_salt("entities with")
             .width(ui.available_width())
@@ -206,9 +206,8 @@ impl Inspector {
             .on_hover_text("Lists all the entities, as a tree, or those with the component picked");
     }
 
-    /// The end of the header, from its right: the + menu, which creates an empty root, or, while
-    /// the entity picked is alive, an empty child of it, the create going in `operations`; and,
-    /// for the tree, Collapse All, which hides the rows under every root.
+    /// The header's right end: the + menu (an empty root, or child of the live picked entity) and,
+    /// for the tree, Collapse All. Creates go in `operations`.
     fn header(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, operations: &mut Vec<Command>) {
         let live = self.picked.filter(|&id| world.alive(id) == Some(true));
         let config = egui::menu::MenuConfig::new().style(crate::menu_style);
@@ -237,18 +236,19 @@ impl Inspector {
         }
     }
 
-    /// Draws the row of the entity of ID `id`: its label, across the rest of the row, which picks
-    /// it alone, with Ctrl (Cmd on macOS) held adds it to what's picked or takes it out, and with
-    /// Shift held returns its ID, for the rows from the active pick's to it to be picked; a double
-    /// click frames it in the view too; and which drags, a row let go on it making
-    /// the entity dragged its child; and whose context menu frames it in the view, while a layer
-    /// takes frames, renames it, copies its ID, makes an empty child of it, duplicates it, makes
-    /// it a root, if it isn't one, or deletes it, the operation chosen going in `operations`, or,
-    /// where `world` saves prefabs, saves it and its descendants as a prefab, linked in their
-    /// place, the entity going in `saves`: Frame in View, Duplicate Entity and Delete Entity act
-    /// on every entity picked if it's one of them. While it's renamed, the field its name is typed
-    /// into in place of its label; in the tree, at `depth`, after an arrow that shows and hides its
-    /// children's rows, if it has any.
+    /// Draws `id`'s row; in the tree, at `depth` after an arrow that shows and hides its
+    /// children's rows. While renamed, the name's field replaces the label.
+    ///
+    /// The label, across the row:
+    /// - A click picks it alone; Ctrl (Cmd on macOS) adds or removes it; Shift returns its ID, for
+    ///   the rows from the active pick's to it to be picked.
+    /// - A double click also frames it.
+    /// - Dropping another row on it makes that entity its child.
+    /// - Its context menu has Frame in View (while a layer takes frames), Rename, Copy ID, Create
+    ///   Empty Child, Duplicate Entity, Move to Root (if not a root), Delete Entity (operations go
+    ///   in `operations`) and, where `world` saves prefabs, Save as Prefab (the entity goes in
+    ///   `saves`; it and its descendants are saved, linked in place). Frame in View, Duplicate and
+    ///   Delete act on every entity picked if it's one.
     fn row(
         &mut self,
         world: &dyn Inspected,
@@ -258,9 +258,8 @@ impl Inspector {
         operations: &mut Vec<Command>,
         saves: &mut Vec<EntityId>,
     ) -> Option<EntityId> {
-        // The entity's own, not its row's, so that its widgets' IDs go with it as rows change, as
-        // tables swap theirs: a context menu open on it acts on it, not on the entity that comes
-        // to its row.
+        // The entity's own ID, not its row's, so that a context menu open on it acts on it, not
+        // on the entity that comes to its row as rows change.
         let scope = egui::UiBuilder::new().scope_id(ui.make_persistent_id(id));
         let mut ranged = None;
         ui.scope_builder(scope, |ui| {
@@ -274,12 +273,10 @@ impl Inspector {
                     return;
                 }
                 let picked = self.is_picked(id);
-                // On one line, as a horizontal row has it, since the rows' paging takes each to be
-                // one tall: a vertical layout would wrap it.
+                // One line, as the rows' paging takes each to be one tall.
                 let label = egui::Button::selectable(picked, row_label(world, id))
                     .wrap_mode(egui::TextWrapMode::Extend);
-                // Dragged as well as clicked, as one widget: one that senses drags alone over it
-                // would take its clicks.
+                // One widget senses both: a drag-only one over it would take its clicks.
                 let label = ui.with_layout(across, |ui| ui.add(label)).inner;
                 let label = label.interact(egui::Sense::drag());
                 label.dnd_set_drag_payload(Moved(id));
@@ -345,9 +342,8 @@ impl Inspector {
         ranged
     }
 
-    /// What a row's Duplicate Entity and Delete Entity act on, the row of the entity of ID `id`:
-    /// every entity picked, if it's one of them, but those under another picked, as the Entity
-    /// menu's do; or else it alone.
+    /// What Duplicate and Delete on `id`'s row act on: the picked entities not under another
+    /// picked, if `id` is picked; else `id` alone.
     fn acted(&self, world: &dyn Inspected, id: EntityId) -> Vec<EntityId> {
         match self.is_picked(id) {
             true => self.uppermost(world),
@@ -355,10 +351,9 @@ impl Inspector {
         }
     }
 
-    /// Picks the rows `rows` list, the panel's in their order, from the active pick's to `to`'s,
-    /// as a click with Shift held on `to`'s does, `to`'s the active one; or `to` alone if the
-    /// active pick has no row there, as under a row that's closed. A click's, not a frame's, so
-    /// that a list of every row is no frame's cost.
+    /// Shift click: picks `rows` (the panel's, in order) from the active pick's to `to`'s, `to`
+    /// active; or `to` alone if the active pick has no row, as under a closed row. `rows` is built
+    /// per click, so no frame pays for a list of all.
     fn pick_rows(&mut self, rows: &[EntityId], to: EntityId) {
         let at = |id: EntityId| rows.iter().position(|&row| row == id);
         let (Some(from), Some(end)) = (self.picked.and_then(at), at(to)) else {
@@ -372,10 +367,9 @@ impl Inspector {
         self.pick_all(range);
     }
 
-    /// The field the name of the entity being renamed is typed into, across its row: it takes the
-    /// keys as it's first drawn, its text all selected, so that what's typed replaces it; then
-    /// Enter, or a click elsewhere, names the entity what's typed, if that's another name, the
-    /// rename going in `operations`, and Escape leaves it as it was.
+    /// The name field across the renamed entity's row, focused and all selected when first drawn.
+    /// Enter or a click elsewhere renames it if the name differs (into `operations`); Escape
+    /// leaves it.
     fn rename_field(
         &mut self,
         world: &dyn Inspected,
@@ -403,12 +397,11 @@ impl Inspector {
         }
     }
 
-    /// Takes the panel's keys at a press in it, `ui`'s whole, and lets them go at a press
-    /// elsewhere; and while it has them, and no text field has the keys, has F frame the entities
-    /// picked in the view, F2 rename the active one in its row, and Delete delete them, while the
-    /// active one is alive, the delete going in `operations`.
+    /// The panel takes the keys at a press in `ui` and loses them at a press elsewhere. While it
+    /// has them, no text field does and the active entity is alive: F frames the picked entities,
+    /// F2 renames the active one, Delete deletes them (into `operations`).
     fn take_keys(&mut self, world: &dyn Inspected, ui: &egui::Ui, operations: &mut Vec<Command>) {
-        // Where the pointer is, as a tap's release in the same frame forgets where it pressed.
+        // A tap's release in the same frame forgets where it pressed.
         let pressed = ui.input(|input| {
             let at = input.pointer.interact_pos();
             at.filter(|_| input.pointer.any_pressed())
@@ -434,9 +427,8 @@ impl Inspector {
         }
     }
 
-    /// Asks the link to frame what's picked in the view, as
-    /// [`InspectorLink::framed`](super::InspectorLink::framed) says: every entity picked, if the
-    /// entity of ID `id` is one of them, or else it, picked alone.
+    /// Asks the link to frame ([`InspectorLink::framed`](super::InspectorLink::framed)) the picked
+    /// entities if `id` is one, else `id`, picked alone.
     fn frame(&mut self, id: EntityId) {
         if !self.is_picked(id) {
             self.pick(id);
@@ -444,9 +436,8 @@ impl Inspector {
         self.link.borrow_mut().frame = self.picked;
     }
 
-    /// Makes the entity of ID `id` the active pick, keeping the rest picked if it's one of them, or
-    /// else picks it alone, and has its row show the field its name is typed into, holding its
-    /// name, as `world` has it.
+    /// Makes `id` the active pick (alone, unless it's already picked) and its row show the name
+    /// field.
     fn rename(&mut self, world: &dyn Inspected, id: EntityId) {
         match self.is_picked(id) {
             true => self.add(id),
@@ -460,10 +451,9 @@ impl Inspector {
         });
     }
 
-    /// Makes the entity of a row let go on `target`, a row's label or the space below the rows,
-    /// the last child of `parent`, the row's entity, opening its row, or a root for `None`, the
-    /// reparent going in `operations`; and outlines `target` while a row is held over it, if its
-    /// entity would go there: not onto itself, one of its descendants, or the parent it has.
+    /// A row dropped on `target` (a label or the space below the rows) becomes the last child of
+    /// `parent`, opening its row, or a root for `None` (into `operations`). Outlines `target`
+    /// while a row held over it would go there: not onto itself, a descendant or its parent.
     fn drop_on(
         &mut self,
         world: &dyn Inspected,
@@ -486,9 +476,8 @@ impl Inspector {
         }
     }
 
-    /// Indents a row of the tree to `depth`, and draws the arrow of the entity of ID `id`, if it
-    /// has children, which shows and hides their rows; or, if it hasn't, space as wide, so that the
-    /// labels line up.
+    /// Indents a tree row to `depth` and draws `id`'s arrow, which shows and hides its children;
+    /// with none, equal space, so labels line up.
     fn arrow(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, id: EntityId, depth: usize) {
         let size = egui::vec2(ui.spacing().indent, ui.spacing().interact_size.y);
         ui.add_space(depth as f32 * size.x);
@@ -511,10 +500,8 @@ impl Inspector {
         egui::collapsing_header::paint_default_icon(ui, openness, &arrow.with_new_rect(icon));
     }
 
-    /// Picks the entity whose ID is in the Find field, which may be quoted, as a scene writes it,
-    /// or else whose name has what's there, ignoring case, the next such after the one picked at
-    /// each Enter, as [`named`] finds it; and opens the rows of its ancestors; or says why it finds
-    /// none.
+    /// Picks the entity whose ID is in the Find field (quoted, as a scene writes it, or not), else
+    /// the next [`named`] with the text. Opens its ancestors' rows; or says why none.
     fn find(&mut self, world: &dyn Inspected) -> Result<(), String> {
         let text = self.find.trim().trim_matches('"');
         let id = match text.parse::<EntityId>() {
@@ -530,9 +517,8 @@ impl Inspector {
     }
 }
 
-/// The entity whose name has `text`, ignoring case, next after `after` in the order queries find
-/// them, and from the first again past the last, so that each Enter in the Find field finds the
-/// next; `None` if no name has it.
+/// The next entity after `after`, in query order and wrapping, whose name has `text`, ignoring
+/// case; `None` if none does.
 fn named(world: &dyn Inspected, text: &str, after: Option<EntityId>) -> Option<EntityId> {
     let text = text.to_lowercase();
     let ids = world.page(None, 0..world.count(None).ok()?);
@@ -543,10 +529,9 @@ fn named(world: &dyn Inspected, text: &str, after: Option<EntityId>) -> Option<E
     from.iter().chain(before).copied().find(has)
 }
 
-/// Whether making the entity of ID `moved` the last child of `parent`, or a root for `None`,
-/// changes its parent and makes no cycle: `parent` neither it nor one of its descendants, up to
-/// an ancestor met again, as a hierarchy put together from reads of a game's world at two moments
-/// may have it.
+/// Whether making `moved` the last child of `parent` (a root for `None`) changes its parent and
+/// makes no cycle. The walk up stops at an ancestor met again, which a hierarchy built from reads
+/// at two moments may hold.
 fn moves(world: &dyn Inspected, moved: EntityId, parent: Option<EntityId>) -> bool {
     if world.parent(moved) == parent {
         return false;
@@ -562,12 +547,10 @@ fn moves(world: &dyn Inspected, moved: EntityId, parent: Option<EntityId>) -> bo
     true
 }
 
-/// The rows of the Entities panel's tree, for a frame: the roots, in the order [`World::roots`]
-/// lists them, each open one followed by the rows of its descendants, depth first in the order of
-/// their parents' children, as far down as their parents' rows are open. Only the open roots'
-/// rows are listed, and only the page in view found, so that a frame costs a few steps a table, a
-/// step a table for each open root, one for each row under an open root, and one for each row of
-/// the page: never one for each root.
+/// The tree's rows: the roots in [`World::roots`]' order, each open one followed by its open
+/// descendants, depth first in children's order. Only open roots' rows are listed and only the
+/// page in view found, so a frame costs a few steps a table, one per open root, per row under
+/// one, and per page row: never one per root.
 ///
 /// [`World::roots`]: crate::World::roots
 pub(super) struct Tree {
@@ -580,7 +563,7 @@ pub(super) struct Tree {
 }
 
 impl Tree {
-    /// The tree of `world`, whose open rows `expanded` holds, by their entities' IDs.
+    /// The tree of `world`; `expanded` holds the open rows' entity IDs.
     pub(super) fn new(world: &dyn Inspected, expanded: &HashSet<EntityId>) -> Self {
         let open = expanded
             .iter()
@@ -604,7 +587,7 @@ impl Tree {
         shown: Range<usize>,
     ) -> Vec<(EntityId, usize)> {
         let places: Vec<Place> = shown.map(|row| locate(row, &self.spans)).collect();
-        // The page's roots, which are next to each other among the roots, in one go.
+        // The page's roots are adjacent among the roots: one query.
         let mut at = places.iter().filter_map(|place| match *place {
             Place::Root(at) => Some(at),
             Place::Under(..) => None,
@@ -629,10 +612,9 @@ impl Tree {
     }
 }
 
-/// The rows under `root`: its descendants, depth first in the order of their parents' children,
-/// each with its depth, as far down as `expanded` holds their parents' IDs. An entity met again,
-/// as a hierarchy put together from reads of a game's world at two moments may have it, its own
-/// ancestor, isn't opened again.
+/// The rows under `root`: its descendants with depths, depth first, as far down as `expanded`
+/// holds their parents. An entity that is its own ancestor (a hierarchy built from reads at two
+/// moments may hold one) isn't opened again.
 fn descendants(
     world: &dyn Inspected,
     expanded: &HashSet<EntityId>,
@@ -663,9 +645,8 @@ enum Place {
     Under(usize, usize),
 }
 
-/// Where row `row` of a tree is, whose `spans` are each open root's place among the roots, in
-/// order, and how many rows are under it: each open root's rows follow it, and push the roots
-/// after it down.
+/// Where row `row` is. `spans` are each open root's place among the roots and its row count; its
+/// rows follow it and push later roots down.
 fn locate(row: usize, spans: &[(usize, usize)]) -> Place {
     // How many rows under open roots come before.
     let mut before = 0;
@@ -682,8 +663,8 @@ fn locate(row: usize, spans: &[(usize, usize)]) -> Place {
     Place::Root(row - before)
 }
 
-/// What the row of the entity of ID `id` in the Entities panel says: its name alone, leaving its
-/// ID and components to the Inspector; or, without a name, or with an empty one, "Entity", faintly.
+/// What `id`'s row says: its name alone, leaving the ID and components to the Inspector; with no
+/// name or an empty one, "Entity", faintly.
 pub(super) fn row_label(world: &dyn Inspected, id: EntityId) -> egui::WidgetText {
     match world.name(id).filter(|name| !name.trim().is_empty()) {
         Some(name) => name.into(),

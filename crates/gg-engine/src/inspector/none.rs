@@ -1,7 +1,7 @@
-//! What a build without `dev`, which has no UI, has of the Inspector: the items games name, so that
-//! a game's code compiles unchanged in both builds. The Inspector is a layer with [`Layer`]'s
-//! defaults, which does nothing, and its link a handle whose calls change nothing; [`Placed`] is a
-//! development build's, which the link never gives.
+//! What a build without `dev` has of the Inspector: the items games name, so a game's code
+//! compiles unchanged in both builds. The Inspector is a layer with [`Layer`]'s defaults, its link
+//! a handle whose calls change nothing. [`Placed`] is a development build's, which the link never
+//! gives.
 
 use crate::reflect::{Ident, Value};
 use crate::{EntityId, Layer};
@@ -11,9 +11,9 @@ mod placed;
 
 pub use placed::Placed;
 
-/// The Entities and Inspector panels in a development build, which an app adds as an overlay,
-/// `.overlay(gg_engine::Inspector::default())`; in this one, which has no UI, a layer that does
-/// nothing. A game makes one through `default` alone, as in a development build.
+/// The Entities and Inspector panels in a development build, added as an overlay with
+/// `.overlay(gg_engine::Inspector::default())`. Here, a layer that does nothing. A game makes one
+/// through `default` alone, as in a development build.
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Inspector;
@@ -21,16 +21,16 @@ pub struct Inspector;
 impl Layer for Inspector {}
 
 impl Inspector {
-    /// A link to the Inspector, as [`InspectorLink`] says.
+    /// A link to the Inspector.
     pub fn link(&self) -> InspectorLink {
         InspectorLink
     }
 }
 
-/// A link to an [`Inspector`], through which another layer picks and edits as its panels do, in a
-/// development build; in this one, which has no panels, a handle whose calls change nothing:
-/// nothing is ever picked, placed or framed (`None`, or no picks), nothing waits (`waiting` is
-/// false, `idle` true), nothing is stepped through (0), and nothing is pending.
+/// A link to an [`Inspector`], through which another layer picks and edits as its panels do. Here,
+/// a handle whose calls change nothing: nothing is picked, placed or framed (`None`, or no
+/// picks), nothing waits (`waiting` is false, `idle` true), nothing is stepped through (0) or
+/// pending.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct InspectorLink;

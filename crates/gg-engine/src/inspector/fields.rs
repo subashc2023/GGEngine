@@ -1,5 +1,5 @@
-//! The Inspector panel's fields: a widget for each field of a component, for its type and hints,
-//! which draws it as the sets waiting for a tick will make it, and keeps the edits it makes.
+//! The Inspector panel's fields: a widget per field by its type and hints, drawn as the sets
+//! waiting for a tick will make it, keeping the edits it makes.
 
 use std::borrow::Cow;
 use std::f64::consts::PI;
@@ -26,17 +26,16 @@ pub(super) struct Fields<'a> {
     pub(super) edits: &'a mut Vec<Edit>,
     /// The sets of the entity's fields that wait for a tick, in the order they were made.
     pub(super) waiting: &'a [Edit],
-    /// The component's own fields that differ from those of the prefab of the instance whose entity
-    /// it is, `prefab`, by name, each marked, its label's context menu reverting it, the revert
-    /// going in `operations`; none for an entity no instance gives.
+    /// The component's own fields, by name, that differ from the instance's `prefab`: marked, and
+    /// reverted from the label's context menu (into `operations`). None if no instance.
     pub(super) overridden: &'a [String],
     pub(super) prefab: &'a str,
     pub(super) operations: &'a mut Vec<Command>,
 }
 
-/// What's drawn at a path: its type; the hints of the field it's in, which its parts and elements
-/// inherit; and its default there, if one is left, by reference, so that a frame clones none: the
-/// default of what holds it, narrowed to it, or else its field's own.
+/// What's drawn at a path: its type, its field's hints (inherited by parts and elements), and its
+/// default if any, by reference so a frame clones none: the container's default narrowed to it,
+/// else its field's own.
 #[derive(Clone, Copy)]
 pub(super) struct Slot<'s> {
     pub(super) ty: &'s Type,
@@ -45,8 +44,8 @@ pub(super) struct Slot<'s> {
 }
 
 impl<'s> Slot<'s> {
-    /// Where `field` is drawn, its default the one of its name in `defaults`, the fields of the
-    /// default of what holds it, or else its own.
+    /// Where `field` is drawn; its default is the one named in `defaults` (the container's), else
+    /// its own.
     fn of(field: &'s Field, defaults: &'s [(Ident, Value)]) -> Self {
         let given = defaults.iter().find(|(name, _)| *name == field.name);
         Self {
@@ -57,9 +56,8 @@ impl<'s> Slot<'s> {
     }
 }
 
-/// Each axis of a vector, and of a rotation's angles: its component's name, as a path names it;
-/// its button's label; and the button's color, then its color hovered, in RGB: Hazel's, and grays
-/// for `w`.
+/// Each axis of a vector or a rotation's angles: its path name, its button's label, and the
+/// button's RGB color, then hovered. Hazel's colors, grays for `w`.
 pub(super) const AXES: [(&str, &str, [u8; 3], [u8; 3]); 4] = [
     ("x", "X", [204, 25, 38], [230, 51, 51]),
     ("y", "Y", [51, 179, 51], [77, 204, 77]),
@@ -68,15 +66,17 @@ pub(super) const AXES: [(&str, &str, [u8; 3], [u8; 3]); 4] = [
 ];
 
 impl Fields<'_> {
-    /// Draws `value`, the field at `path`, as `slot` says, and returns its new value if a widget
-    /// changed it and it's set `whole`, as the inside of an option or an enum is; otherwise its
-    /// parts set themselves, each at its own path. A field is set only when its widget says it
-    /// changed, never by comparing values: drawing it changes nothing. A field that a set waits for
-    /// a tick to set is drawn as the last such set will make it, so that its widget, which keeps
-    /// what it shows from frame to frame, goes on from there; and a vector as the sets of it and of
-    /// its components will make it, in the order they were made, since recordings hold sets of it
-    /// whole. Other than a vector, a field is set at its own path or whole with what's around it,
-    /// never both, so the sets of one field and of what's around it never wait together.
+    /// Draws `value`, the field at `path`, as `slot` says. Returns its new value if a widget
+    /// changed it and it's set `whole` (inside an option or enum); otherwise parts set themselves
+    /// at their own paths.
+    ///
+    /// - A field is set only when its widget says it changed, never by comparing values.
+    /// - A field with a set waiting for a tick is drawn as the last such set will make it, so its
+    ///   widget, which keeps its shown state between frames, goes on from there.
+    /// - A vector is drawn as the sets of it and of its components will make it, in order, since
+    ///   recordings hold sets of it whole.
+    /// - Other than a vector, a field is set at its own path or whole with its container, never
+    ///   both, so their sets never wait together.
     pub(super) fn value(
         &mut self,
         ui: &mut egui::Ui,
@@ -108,7 +108,7 @@ impl Fields<'_> {
         self.draw(ui, slot, &drawn, path, whole)
     }
 
-    /// Draws `value` as [`value`](Self::value) does, as it's given.
+    /// Like [`value`](Self::value), but draws `value` as given.
     fn draw(
         &mut self,
         ui: &mut egui::Ui,
@@ -244,10 +244,9 @@ impl Fields<'_> {
         }
     }
 
-    /// Draws `given`, the values of `fields` at `path`, a row each, with the doc of each field on
-    /// its name, and its default the one of its name in `defaults`, the fields of the default of
-    /// what holds them, or else its own. Returns them, with what changed, if they're set `whole`;
-    /// otherwise each field that changed is set at its own path.
+    /// Draws `given`, the values of `fields` at `path`, a row each, the doc on the name. Defaults
+    /// are from `defaults` (the container's), else the field's own. Returns the values with
+    /// changes if set `whole`; else each changed field is set at its own path.
     fn fields(
         &mut self,
         ui: &mut egui::Ui,
@@ -288,9 +287,8 @@ impl Fields<'_> {
         changed
     }
 
-    /// Draws the label of `field`, at `path`, one of the component's own that differs from its
-    /// prefab's: strong, marked, saying so on hover, above the field's doc, and with a context menu
-    /// whose Revert to Prefab sets it back to the prefab's.
+    /// Draws the label of `field` at `path`, which differs from the prefab's: strong, marked, a
+    /// hover saying so above the doc, and a context menu whose Revert to Prefab sets it back.
     fn overridden_label(&mut self, ui: &mut egui::Ui, field: &Field, path: &str) {
         let text = egui::RichText::new(field.name.as_ref()).strong();
         let label = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
@@ -310,10 +308,8 @@ impl Fields<'_> {
         });
     }
 
-    /// Draws the only field of a tuple struct, `field`, with its value from `given`, and its
-    /// default as [`fields`](Self::fields) finds it in `defaults`, as that draws a field, but
-    /// without a label, which would only say `0`, and in a group of its own, so that a refusal goes
-    /// under it, not into the row of a grid it's in.
+    /// Like [`fields`](Self::fields) for a tuple struct's only field, with no label (it would say
+    /// `0`) and in its own group, so a refusal goes under it, not into a grid row.
     fn only_field(
         &mut self,
         ui: &mut egui::Ui,
@@ -341,9 +337,8 @@ impl Fields<'_> {
         }
     }
 
-    /// Draws `items`, the elements at `path` of a list or an array, each as `item` says but for its
-    /// default, which is the one of its index in `defaults`, the default's elements, if there's
-    /// one; a row each, as [`fields`](Self::fields) does.
+    /// Like [`fields`](Self::fields) for `items`, the elements at `path` of a list or array, each
+    /// as `item` says but with its default from `defaults` by index, if any.
     fn elements(
         &mut self,
         ui: &mut egui::Ui,
@@ -379,7 +374,7 @@ impl Fields<'_> {
         changed.map(Value::List)
     }
 
-    /// A choice of an enum's unit variants, `names`, of which `picked` is the one it is.
+    /// A choice among an enum's unit variants `names`; `picked` is the current one.
     fn choice<'n>(
         &self,
         ui: &mut egui::Ui,
@@ -404,13 +399,13 @@ impl Fields<'_> {
             .then(|| Value::Variant(chosen, Vec::new()))
     }
 
-    /// A choice of the variants of an enum with fields, `variants`, at `path`, where its default is
-    /// `default`, of which `name` is the one it is, with fields `given`; returns the one picked, as
-    /// [`switched`](Self::switched) makes it. One that can't be switched to shows disabled, saying
-    /// why on hover. The fields each variant last had are kept as they're drawn, which a set
-    /// waiting for a tick makes them, under an id of the component's field, not the entity's, so
-    /// that what's kept doesn't grow as entities are picked: they're the entity's, and go as
-    /// another is drawn.
+    /// A choice among an enum's variants at `path`; `name` is the current one, with fields
+    /// `given`. Returns the one picked, made by [`switched`](Self::switched). A variant that can't
+    /// be switched to is disabled, saying why on hover.
+    ///
+    /// Each variant's last fields are kept as drawn (as a waiting set makes them), under an id of
+    /// the component's field, not the entity's, so the store doesn't grow as entities are picked.
+    /// They're the entity's, and go as another is drawn.
     fn variant(
         &self,
         ui: &mut egui::Ui,
@@ -464,10 +459,9 @@ impl Fields<'_> {
         picked
     }
 
-    /// `variant`, as a switch to it makes it: with the fields it last had on the entity, which
-    /// `kept` holds, if it had any; or else `default`, if it's of that variant; or else with its
-    /// fields' defaults. Fails, saying why, if its default fails, or if it holds what's opaque,
-    /// which reflection doesn't make, so that a set of it would be refused.
+    /// `variant` as a switch makes it: with its last fields on the entity (`kept`); else
+    /// `default`, if of that variant; else its fields' defaults. Fails, saying why, if its default
+    /// fails or it holds what's opaque, which reflection can't make, so a set would be refused.
     fn switched(
         &self,
         variant: &Variant,
@@ -488,14 +482,14 @@ impl Fields<'_> {
         makeable(made)
     }
 
-    /// An option, `given`, at `path`, holding `inner` when it's on, under the hints and default at
-    /// `slot`: a checkbox, labeled `Some` or `None`, that turns it on or off, and, while it's on,
-    /// what it holds, which is set whole with it. Turned on, it holds what it last held while the
-    /// entity was drawn, kept as [`variant`](Self::variant) keeps a variant's fields; or else its
-    /// default's, if that's on; or else its inside's type's default under the hints. One that can't
-    /// be turned on, as its inside has no default, as a texture, or holds what's opaque, shows its
-    /// checkbox disabled, saying why on hover: what it would hold is made each frame it's off, to
-    /// know.
+    /// An option `given` at `path`, holding `inner` when on: a `Some`/`None` checkbox and, while
+    /// on, what it holds, set whole with it.
+    ///
+    /// Turned on, it holds what it last held for the entity (kept like
+    /// [`variant`](Self::variant)'s fields); else its default's, if on; else `inner`'s default
+    /// under the hints. One that can't be turned on (no default inside, as a texture, or opaque)
+    /// has its checkbox disabled, saying why on hover. What it would hold is made each frame it's
+    /// off, to know.
     fn option(
         &mut self,
         ui: &mut egui::Ui,
@@ -539,9 +533,9 @@ impl Fields<'_> {
             meta: slot.meta,
             default,
         };
-        // In a vertical, which starts at the top of a grid's row: the grid centers a horizontal in
-        // the row's height of the frame before as if it were a line high, which put what's taller,
-        // as a struct's fields, half a row down, over the rows below.
+        // In a vertical, which starts at the top of a grid's row: a grid centers a horizontal as if
+        // a line high, which put taller content (a struct's fields) half a row down, over the
+        // rows below.
         let new = ui.vertical(|ui| {
             let new = ui.horizontal(|ui| {
                 let mut on = true;
@@ -557,10 +551,8 @@ impl Fields<'_> {
         new.inner
     }
 
-    /// What an option holding `inner`, under the hints and default at `slot`, holds as it's turned
-    /// on, as [`option`](Self::option) says: `kept`, what it last held on the entity, if it held
-    /// anything; or else its default's inside, if that's on; or else `inner`'s default under the
-    /// hints. Fails, saying why, as [`switched`](Self::switched) does.
+    /// What an option holds when turned on ([`option`](Self::option)): `kept`; else its default's
+    /// inside, if on; else `inner`'s default. Fails like [`switched`](Self::switched).
     fn turned_on(
         &self,
         slot: Slot<'_>,
@@ -575,13 +567,14 @@ impl Fields<'_> {
         makeable(made)
     }
 
-    /// A rotation as angles about x, y and z, in degrees, applied z first, each joined to a button
-    /// of its axis that sets it to the angle of the default rotation at `slot`; it's set whole. The
-    /// angles are kept with the rotation they made, so that those typed stay as they are, rather
-    /// than jump to the same rotation's other angles, while the rotation stays within float noise
-    /// of it: a system that renormalizes it at each tick can change its last bits, which would
-    /// reset the text being typed. They're kept under an id of the component's field, not the
-    /// entity's, so that what's kept doesn't grow as entities are picked.
+    /// A rotation as angles about x, y and z, in degrees, applied z first, each with a button that
+    /// sets it to the default rotation's angle at `slot`. Set whole.
+    ///
+    /// The angles are kept with the rotation they made, so typed ones stay rather than jump to the
+    /// same rotation's other angles, while it stays within float noise of it: a system
+    /// renormalizing it each tick changes its last bits, which would reset the text being typed.
+    /// They're kept under an id of the component's field, not the entity's, so the store doesn't
+    /// grow as entities are picked.
     fn rotation(&self, ui: &mut egui::Ui, slot: Slot<'_>, q: Quat, path: &str) -> Option<Value> {
         type Kept = (Quat, [f32; 3]);
         let id = egui::Id::unique(("inspector rotation", self.component, path));
@@ -590,8 +583,8 @@ impl Fields<'_> {
             Some((kept, angles)) if same_rotation(kept, q) => angles,
             _ => {
                 let angles = angles_of(q);
-                // Shown as text, as NaN is: a drag over NaN would change it every frame. A
-                // rotation that isn't finite has NaN angles.
+                // Text, as NaN is: a drag over NaN would change it every frame. A rotation that
+                // isn't finite has NaN angles.
                 if !angles.iter().all(|angle| angle.is_finite()) {
                     ui.label(q.to_string());
                     return None;
@@ -629,9 +622,8 @@ impl Fields<'_> {
         Some(Value::Quat(q))
     }
 
-    /// Drags each of a vector's `components`, at `path`, under the hints at `slot`, each joined to
-    /// a button of its axis that sets it to the default's there. Each that changes is set at its
-    /// own path, as `x` is, unless they're set `whole`: then they're returned, if one changed.
+    /// Drags a vector's `components` at `path`, each with a button that sets it to the default's.
+    /// A changed one is set at its own path (`x`), unless set `whole`: then all are returned.
     fn vector<const N: usize>(
         &mut self,
         ui: &mut egui::Ui,
@@ -675,9 +667,8 @@ impl Fields<'_> {
         changed.then_some(components)
     }
 
-    /// The default at `slot`, of the field at `path`: the one there, or else its type's under its
-    /// field's bounds, made as it's asked for, which a reset does, so that a frame makes none;
-    /// `None` if its type has none there, which is logged.
+    /// The default at `slot`: the one there, else its type's under the field's bounds, made on
+    /// request (a reset), so a frame makes none. `None`, logged, if its type has none.
     fn default_at<'s>(&self, slot: Slot<'s>, path: &str) -> Option<Cow<'s, Value>> {
         if let Some(default) = slot.default {
             return Some(Cow::Borrowed(default));
@@ -697,12 +688,13 @@ impl Fields<'_> {
         }
     }
 
-    /// A linear color, alpha not multiplied in, `rgba`, the field at `path`, with alpha as `alpha`
-    /// says. It's edited as `Hsva`, which keeps the color of what's transparent, where egui's
-    /// button of unmultiplied RGBA multiplies alpha in and loses it; and the `Hsva` is kept with
-    /// the color it made, as a rotation's angles are, so that a gray's hue, which its color doesn't
-    /// hold, stays as it's picked. What egui's popup gives back for it untouched isn't an edit: it
-    /// passes the color through gamma and back each frame it's open, which moves its last bits.
+    /// A linear color `rgba` (alpha not multiplied in) at `path`, with `alpha` mode.
+    ///
+    /// Edited as `Hsva`, which keeps a transparent color (egui's unmultiplied RGBA button
+    /// multiplies alpha in and loses it). The `Hsva` is kept with the color it made, like a
+    /// rotation's angles, so a gray's hue stays as picked. What egui's popup returns untouched
+    /// isn't an edit: it round-trips the color through gamma each frame it's open, moving its
+    /// last bits.
     fn color(
         &self,
         ui: &mut egui::Ui,
@@ -741,8 +733,8 @@ impl Fields<'_> {
         });
     }
 
-    /// Shows, each on a row of its own, why the field at `path`, of type `ty`, last refused a
-    /// value, if it did, and, if it's a vector, why each of its components did.
+    /// Shows, a row each, why the field at `path` (and, for a vector, each component) last
+    /// refused a value.
     pub(super) fn refusal(&self, ui: &mut egui::Ui, ty: &Type, path: &str) {
         let vector = matches!(ty, Type::Vec2 | Type::Vec3 | Type::Vec4 | Type::DVec3);
         let refused = self.refusals.iter().filter(|refusal| {
@@ -757,8 +749,8 @@ impl Fields<'_> {
     }
 }
 
-/// Whether `a` and `b` are one rotation, within float noise: a millionth in each component, about
-/// a ten-thousandth of a degree, below the three decimals shown. `q` and `-q` are one rotation.
+/// Whether `a` and `b` are one rotation within float noise: 1e-6 in each component, about a
+/// ten-thousandth of a degree, below the three decimals shown. `q` and `-q` are one rotation.
 fn same_rotation(a: Quat, b: Quat) -> bool {
     let near = |b: Quat| (Vec4::from(a) - Vec4::from(b)).abs().max_element() < 1e-6;
     near(b) || near(-b)
@@ -776,7 +768,7 @@ fn opaque(ui: &mut egui::Ui) -> Option<Value> {
     None
 }
 
-/// The least and the most an integer of `bits` may be, within `meta`'s bounds.
+/// The range an integer of `bits` may have, within `meta`'s bounds.
 fn int_range(bits: u8, signed: bool, meta: &Meta) -> (i128, i128) {
     let (mut min, mut max) = if signed {
         (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
@@ -796,8 +788,8 @@ fn int_range(bits: u8, signed: bool, meta: &Meta) -> (i128, i128) {
     (min, max.max(min))
 }
 
-/// Drags `n` within `range`, which the field's bounds give, a speed for which they pick. Showing a
-/// value outside them leaves it as it is.
+/// Drags `n` within `range`, the field's bounds, at the speed they pick. A value outside them is
+/// shown as it is.
 fn drag<N: egui::emath::Numeric>(
     ui: &mut egui::Ui,
     n: &mut N,
@@ -805,7 +797,7 @@ fn drag<N: egui::emath::Numeric>(
     meta: &Meta,
 ) -> bool {
     let speed = speed(meta, 0.25);
-    // A value outside the bounds, which it keeps, may be negative too.
+    // A kept value outside the bounds may be negative too.
     let negative = range.start().to_f64() < 0.0 || n.to_f64() < 0.0;
     let mut drag = egui::DragValue::new(n)
         .range(range)
@@ -818,10 +810,9 @@ fn drag<N: egui::emath::Numeric>(
 }
 
 /// A number as egui shows one, with the fewest decimals in `decimals` that give it back, after a
-/// minus sign, U+2212, if it's negative, or else a figure space, U+2007, which egui's parser
-/// skips: each as wide as a digit in the UI's Inter, so that its digits hold still as its sign
-/// comes and goes. A negative number that shows as zero shows as zero, without a sign that would
-/// flicker as it crosses it.
+/// minus sign (U+2212) if negative, else a figure space (U+2007), which egui's parser skips. Both
+/// are as wide as an Inter digit, so digits hold still as the sign comes and goes. A negative
+/// number showing as zero has no sign, which would flicker as it crosses zero.
 fn signed(n: f64, decimals: std::ops::RangeInclusive<usize>) -> String {
     let text = egui::emath::format_with_decimals_in_range(n.abs(), decimals);
     let zero = text.bytes().all(|byte| matches!(byte, b'0' | b'.'));
@@ -833,17 +824,15 @@ fn signed(n: f64, decimals: std::ops::RangeInclusive<usize>) -> String {
     format!("{sign}{text}")
 }
 
-/// How far apart the axes of a row are, and how far a number is padded across in its field, at
-/// the least, in points: half egui's spacing and a quarter of its padding, which leaves the fields
-/// of a panel as narrow as the editor's Inspector is at first wide enough for numbers such as
-/// −1.875, each centered in its field.
+/// The gap between a row's axes and the least padding of a number in its field, in points: half
+/// egui's spacing and a quarter of its padding, so the editor's Inspector is at first just wide
+/// enough for numbers such as −1.875, centered in their fields.
 const AXIS_GAP: f32 = 4.0;
 const FIELD_PADDING: f32 = 2.0;
 
-/// Spaces `ui`, a row of `axes` axes, each a button and a field, [`AXIS_GAP`] apart; returns how
-/// wide each field is, after its axis's button: what shows of the row, from `ui`'s cursor, shared
-/// out equally, as Unity's vectors' fields are, so that a number that widens doesn't push the
-/// fields after it; or egui's narrowest, in a row too narrow for that, which runs past its edge.
+/// Spaces `ui`, a row of `axes` axes (button and field), [`AXIS_GAP`] apart. Returns each field's
+/// width: the visible row from `ui`'s cursor shared equally, as Unity does, so a widening number
+/// doesn't push later fields; or egui's narrowest, running past the edge of a too-narrow row.
 fn axes_row(ui: &mut egui::Ui, axes: usize) -> f32 {
     ui.spacing_mut().item_spacing.x = AXIS_GAP;
     let spacing = ui.spacing();
@@ -853,9 +842,8 @@ fn axes_row(ui: &mut egui::Ui, axes: usize) -> f32 {
     (axis - spacing.interact_size.y).max(spacing.interact_size.x)
 }
 
-/// Spaces `ui`, an axis of a row whose fields are `width` wide: its button against its field, and
-/// its field's number padded [`FIELD_PADDING`] across; a field takes the least size it may be
-/// from egui's `interact_size`.
+/// Spaces `ui`, an axis of a row whose fields are `width` wide: button against field, the number
+/// padded [`FIELD_PADDING`]. A field takes its least size from egui's `interact_size`.
 fn axis_spacing(ui: &mut egui::Ui, width: f32) {
     let spacing = ui.spacing_mut();
     spacing.item_spacing.x = 0.0;
@@ -863,8 +851,8 @@ fn axis_spacing(ui: &mut egui::Ui, width: f32) {
     spacing.button_padding.x = FIELD_PADDING;
 }
 
-/// How much a drag of a pixel changes a number of a field with `meta`: a 200th of its range if it
-/// has bounds both ways, and `otherwise` if it hasn't.
+/// How much a drag of a pixel changes a field's number: a 200th of its range if bounded both
+/// ways, else `otherwise`.
 fn speed(meta: &Meta, otherwise: f64) -> f64 {
     match (meta.min, meta.max) {
         (Some(min), Some(max)) if max.as_f64() > min.as_f64() => {
@@ -874,10 +862,10 @@ fn speed(meta: &Meta, otherwise: f64) -> f64 {
     }
 }
 
-/// Drags `x`, an `f32`'s if `is_f32`, in degrees if `meta` says, and returns it if it changed: no
-/// further than the field's bounds, as [`World::set_field`](crate::World::set_field) compares
-/// them, and finite, so that what's dragged or typed is a value the field takes. NaN is shown as
-/// text, as wide as a field: a drag over it would change it every frame.
+/// Drags `x` (an `f32`'s if `is_f32`, in degrees if `meta` says), returning it if changed. It's
+/// within the bounds as [`World::set_field`](crate::World::set_field) compares them, and finite,
+/// so the field takes it. NaN shows as text as wide as a field: a drag over it would change it
+/// every frame.
 fn float(ui: &mut egui::Ui, x: f64, meta: &Meta, is_f32: bool) -> Option<f64> {
     if x.is_nan() {
         ui.add_sized(ui.spacing().interact_size, egui::Label::new(x.to_string()));
@@ -907,16 +895,15 @@ fn float(ui: &mut egui::Ui, x: f64, meta: &Meta, is_f32: bool) -> Option<f64> {
     ui.add(drag).changed().then(|| shown / scale)
 }
 
-/// The button of axis `axis`, in its color, as high and as wide as a field's widget is high, its
-/// label egui's strong text, the brightest against the color, in the family [`crate::BOLD`] names
-/// where the context binds it: a game may set fonts of its own, and egui draws text in a family it
-/// hasn't bound as boxes. Whether it was clicked.
+/// The axis `axis` button, in its color, square at a field's height, labeled in strong text in
+/// the family [`crate::BOLD`] names where the context binds it (a game may set its own fonts, and
+/// egui draws an unbound family as boxes). Whether it was clicked.
 fn axis_button(ui: &mut egui::Ui, axis: usize) -> bool {
     let (_, label, fill, hovered) = AXES[axis];
     let rgb = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
     let size = egui::Vec2::splat(ui.spacing().interact_size.y);
-    // Found among the few families bound, rather than looked up by a key made of the name, which
-    // would allocate for each button each frame; the family found is shared, not copied.
+    // Found among the few families bound: a key made of the name would allocate per button per
+    // frame.
     let bold = ui.ctx().fonts(|fonts| {
         let mut families = fonts.definitions().families.keys();
         let bold = |family: &&egui::FontFamily| {
@@ -929,8 +916,8 @@ fn axis_button(ui: &mut egui::Ui, axis: usize) -> bool {
         Some(bold) => label.family(bold),
         None => label,
     };
-    // Its own colors, in a scope of its own: `Button::fill` would keep it from lighting up as
-    // it's hovered; and no padding beside its label, which would widen it past its height.
+    // Colors in a scope of their own: `Button::fill` would stop it lighting up on hover. No
+    // padding beside the label, which would widen it past its height.
     ui.scope(|ui| {
         ui.spacing_mut().button_padding.x = 0.0;
         let widgets = &mut ui.visuals_mut().widgets;
@@ -943,8 +930,8 @@ fn axis_button(ui: &mut egui::Ui, axis: usize) -> bool {
     .inner
 }
 
-/// Which component of the vector at `path` the path `at` leads to: 0 for `x` to 3 for `w`; `None`
-/// if it leads elsewhere.
+/// Which component of the vector at `path` the path `at` leads to, 0 for `x` to 3 for `w`; `None`
+/// if elsewhere.
 fn axis_of(path: &str, at: &str) -> Option<usize> {
     let rest = at.strip_prefix(path)?;
     let name = if path.is_empty() {
@@ -955,7 +942,7 @@ fn axis_of(path: &str, at: &str) -> Option<usize> {
     AXES.iter().position(|&(axis, ..)| axis == name)
 }
 
-/// Component `axis` of `value`, a vector; `None` if it's of another kind, or hasn't that one.
+/// Component `axis` of the vector `value`; `None` if it's another kind or lacks that one.
 fn component_of(value: &Value, axis: usize) -> Option<f64> {
     match value {
         Value::Vec2(v) if axis < 2 => Some(v[axis].into()),
@@ -966,8 +953,8 @@ fn component_of(value: &Value, axis: usize) -> Option<f64> {
     }
 }
 
-/// Sets component `axis` of `value`, a vector, to `x`; leaves it as it is if it's of another kind,
-/// or hasn't that one.
+/// Sets component `axis` of the vector `value` to `x`; no change if it's another kind or lacks
+/// that one.
 fn set_component(value: &mut Value, axis: usize, x: f64) {
     match value {
         Value::Vec2(v) if axis < 2 => v[axis] = x as f32,
@@ -978,8 +965,8 @@ fn set_component(value: &mut Value, axis: usize, x: f64) {
     }
 }
 
-/// Where in `value` the first thing it holds that's opaque is, which reflection keeps but doesn't
-/// make, as a path, such as `rect[1]`; `None` if it holds nothing opaque.
+/// The path, such as `rect[1]`, of the first opaque thing in `value`, which reflection keeps but
+/// doesn't make; `None` if there is none.
 fn opaque_at(value: &Value) -> Option<String> {
     match value {
         Value::Opaque => Some(String::new()),
@@ -998,8 +985,8 @@ fn opaque_at(value: &Value) -> Option<String> {
     }
 }
 
-/// `made`, as a switch to it or a turn on of it makes it, or why it can't be: it holds what's
-/// opaque, which reflection doesn't make, so that a set of it would be refused, as a make of it is.
+/// `made`, as a switch or turn on makes it, or why it can't be: it holds what's opaque, which
+/// reflection doesn't make, so a set of it would be refused, as a make of it is.
 fn makeable(made: Value) -> Result<Value, String> {
     match opaque_at(&made) {
         Some(at) => {
