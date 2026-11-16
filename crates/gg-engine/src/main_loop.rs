@@ -436,7 +436,7 @@ pub(crate) fn run_frame(
         cx.stream_stopped();
     }
     // A script that stopped in a tick paused the frames while it waited.
-    if cx.script_stopped() {
+    if cx.hosts.took_stop() {
         cx.paused = true;
     }
     let ticked = Instant::now();

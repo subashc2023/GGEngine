@@ -639,17 +639,4 @@ impl Context {
         );
         picked
     }
-
-    /// Whether a script has stopped in a tick since this last answered, pausing the frames while it
-    /// waited, as [`Hosts::took_stop`](crate::luau::Hosts::took_stop) says.
-    #[cfg(feature = "dev")]
-    pub(crate) fn script_stopped(&self) -> bool {
-        self.hosts.took_stop()
-    }
-
-    /// Never: a build without `dev` stops no script.
-    #[cfg(not(feature = "dev"))]
-    pub(crate) fn script_stopped(&self) -> bool {
-        false
-    }
 }

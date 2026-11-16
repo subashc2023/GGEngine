@@ -586,6 +586,12 @@ impl Hosts {
             .is_some_and(|debugger| debugger.took_stop())
     }
 
+    /// Never: a build without `dev` stops no script.
+    #[cfg(not(feature = "dev"))]
+    pub(crate) fn took_stop(&self) -> bool {
+        false
+    }
+
     /// Reloads the script at `path`, its text now `text`, in `world`, through the host that loaded
     /// it, between ticks, as an edit asks: it runs from the next tick, and its component's fields
     /// change, as [`Scripts`] says. Logs `Script reloaded`, or why it's refused, the script running
