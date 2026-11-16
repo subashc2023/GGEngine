@@ -127,7 +127,8 @@ impl Lit {
     /// Finds the lights of `world` as [`lights`] does, for `alpha`, `past`, `placed` and `origin`;
     /// `started` is the latest tick's change tick. It finds them again if the world is another or
     /// has changed rows, a light, its transform or its parent changed, `placed` placed one again,
-    /// one is moving between ticks or was last frame, or `origin` moved. Else they stay.
+    /// one is moving between ticks or was last frame, or `origin` moved. Else they stay. Its
+    /// checks cost the lights, not what `placed` placed or moved.
     pub(crate) fn find(
         &mut self,
         world: &World,
@@ -146,7 +147,11 @@ impl Lit {
             return;
         };
         let parent = world.component::<Parent>();
-        let lit = |entity| world.get::<Light>(entity).is_some();
+        // Every entity with a light, with or without a transform.
+        let lit = || {
+            let tables = world.tables().iter().filter(|table| table.has(light));
+            tables.flat_map(|table| table.entities().iter().copied())
+        };
         let tables = || {
             let tables = world.tables().iter().enumerate();
             tables.filter(|(_, table)| table.has(light) && table.has(transform))
@@ -156,7 +161,7 @@ impl Lit {
             let blends = alpha < 1.0 && past.from(world, index).is_some();
             !past.instead_of(index).is_empty() || blends && marks.since(started.saturating_sub(1))
         };
-        let moving = tables().any(moved) || placed.moving().iter().any(|&entity| lit(entity));
+        let moving = tables().any(moved) || lit().any(|entity| placed.is_moving(entity));
         let same = seen.is_some_and(|(was, then, tick, from)| {
             let changed = |table: &crate::ecs::Table| {
                 let ids = [Some(light), Some(transform), parent].into_iter().flatten();
@@ -167,7 +172,7 @@ impl Lit {
                 && !self.moving
                 && !moving
                 && !tables().any(|(_, table)| changed(table))
-                && !placed.changed().iter().any(|&entity| lit(entity))
+                && !lit().any(|entity| placed.placed_again(entity))
         });
         self.moving = moving;
         if !same {
@@ -284,7 +289,8 @@ mod tests {
     }
 
     /// Kept lights equal those found afresh, across frames that change nothing, move a carrier,
-    /// change a light, move one between ticks and after, and remove one.
+    /// change a light, move one between ticks and after, carry one on its way through frames
+    /// between ticks, and remove one.
     #[test]
     fn kept_lights_are_found_again_as_they_change() {
         let mut world = World::default();
@@ -300,7 +306,7 @@ mod tests {
         let (mut past, mut placed, mut kept) = (Past::default(), Placed::default(), Lit::default());
         let mut started = 0;
         type Change = fn(&mut World, [Entity; 3]);
-        let frames: [(&str, bool, f32, Change); 7] = [
+        let frames: [(&str, bool, f32, Change); 10] = [
             ("the first", false, 1.0, |_, _| {}),
             ("nothing", false, 1.0, |_, _| {}),
             ("a carrier moved", false, 1.0, |world, [_, parent, _]| {
@@ -326,6 +332,20 @@ mod tests {
                 0.5,
                 |_, _| {},
             ),
+            (
+                "a carrier moved in a tick",
+                true,
+                0.5,
+                |world, [_, parent, _]| {
+                    world
+                        .get_mut::<Transform>(parent)
+                        .expect("alive")
+                        .translation
+                        .x = 6.0;
+                },
+            ),
+            ("a frame later in that tick", false, 0.75, |_, _| {}),
+            ("a frame later still", false, 0.9, |_, _| {}),
             ("one taken away", false, 1.0, |world, [lone, ..]| {
                 world.despawn(lone).expect("alive");
             }),

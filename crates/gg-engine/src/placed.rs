@@ -32,6 +32,9 @@ pub(crate) struct Placed {
     /// it on its way.
     found: Vec<u32>,
     placed: Vec<u32>,
+    /// By slot: the last placing that placed its entity again; `placing` is the latest's pass.
+    again: Vec<u32>,
+    placing: u32,
     /// The pass under way: each placing and each drawing is one.
     pass: u32,
     list: Vec<Entity>,
@@ -100,7 +103,7 @@ impl Placed {
             _ => None,
         };
         self.seen = Some((world.serial(), world.change_tick()));
-        self.next_pass(world);
+        self.placing = self.next_pass(world);
         self.drawing = 0;
         self.changed.clear();
         let mut list = mem::take(&mut self.list);
@@ -150,6 +153,7 @@ impl Placed {
             return;
         }
         self.placed[slot] = self.pass;
+        self.again[slot] = self.pass;
         self.entities[slot] = entity;
         self.own[slot] = true;
         self.changed.push(entity);
@@ -265,6 +269,7 @@ impl Placed {
                 self.entities[slot] = entity;
                 self.kept[slot] = place;
                 self.own[slot] = false;
+                self.again[slot] = pass;
                 self.changed.push(entity);
             }
             let children = world.children(entity).expect("a placed entity is alive");
@@ -308,6 +313,19 @@ impl Placed {
         &self.moving
     }
 
+    /// Whether `entity` is among [`changed`](Self::changed), found by its slot.
+    pub(crate) fn placed_again(&self, entity: Entity) -> bool {
+        let slot = entity.slot();
+        self.placing != 0
+            && self.again.get(slot) == Some(&self.placing)
+            && self.entities[slot] == entity
+    }
+
+    /// Whether `entity` is among [`moving`](Self::moving), found by its slot.
+    pub(crate) fn is_moving(&self, entity: Entity) -> bool {
+        self.drawing != 0 && self.placed.get(entity.slot()) == Some(&self.drawing)
+    }
+
     /// Starts a pass, with room for every slot, and returns its number.
     fn next_pass(&mut self, world: &World) -> u32 {
         let slots = world.slots();
@@ -318,12 +336,14 @@ impl Placed {
             self.drawn.resize(slots, None);
             self.found.resize(slots, 0);
             self.placed.resize(slots, 0);
+            self.again.resize(slots, 0);
         }
         // Numbered from 1: 0 is none. After 2^32 passes, from 1 again, none counting.
         self.pass = self.pass.checked_add(1).unwrap_or_else(|| {
             self.found.fill(0);
             self.placed.fill(0);
-            self.drawing = 0;
+            self.again.fill(0);
+            (self.drawing, self.placing) = (0, 0);
             1
         });
         self.pass
@@ -403,6 +423,8 @@ mod tests {
             let pose = world.pose(entity).expect("alive");
             let place = kept.kept(world, entity).expect("placed");
             assert_eq!(format!("{:?}", pose.matrix), format!("{:?}", place.matrix));
+            let listed = kept.changed().contains(&entity);
+            assert_eq!(kept.placed_again(entity), listed, "{entity}");
         }
         world.advance();
         let mut changed = kept.changed().to_vec();
@@ -514,6 +536,13 @@ mod tests {
         let mut moving = placed.moving().to_vec();
         moving.sort();
         assert_eq!(moving, sorted([mover, kid]));
+        for entity in [mover, kid, still, calm] {
+            assert_eq!(
+                placed.is_moving(entity),
+                moving.contains(&entity),
+                "{entity}"
+            );
+        }
         let local = |entity| world.get::<Transform>(entity).expect("it has one").matrix();
         let way = interpolation::between(&from, &to, 0.5).matrix();
         let drawn = |entity| placed.drawn(&world, entity).expect("placed").matrix;
@@ -528,6 +557,7 @@ mod tests {
 
         placed.draw(&world, &past, 1.0, started, None);
         assert_eq!(placed.moving(), []);
+        assert!(!placed.is_moving(mover));
         assert_eq!(placed.drawn(&world, kid), placed.kept(&world, kid));
     }
 
