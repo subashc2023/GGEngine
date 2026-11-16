@@ -1,9 +1,9 @@
-//! Preparing cells ahead of the ticks that bring them in: each cell's file read, what its texts
-//! name that isn't loaded found, the models among it read, and its texts parsed, on threads of
-//! their own, `gg-cells`, so that the main thread only adds what was read and spawns what was
-//! parsed; or, in a test's or a replay's context, on the calling thread as each is asked for.
-//! Preparing changes nothing in the world: what comes in, and when, is the world's, as
-//! [`Cells`](crate::Cells) says; a tick whose cells aren't prepared waits for them.
+//! Preparing cells ahead of the ticks that bring them in: reading each cell's file, finding what
+//! its texts name that isn't loaded, reading the models among it, and parsing the texts. It runs on
+//! `gg-cells` threads, so the main thread only adds what was read and spawns what was parsed; in a
+//! test's or replay's context it runs on the calling thread as asked. It changes nothing in the
+//! world: what comes in, and when, is the world's ([`Cells`](crate::Cells)); a tick whose cells
+//! aren't prepared waits for them.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::panic;
@@ -22,13 +22,12 @@ use crate::gltf::Imported;
 use crate::package::Files;
 use crate::{World, cooked, gltf};
 
-/// How many threads prepare cells: two, so that one reading a large model's files, which takes tens
-/// of ms, doesn't hold up the next cell's file.
+/// How many threads prepare cells: two, so one reading a large model's files (tens of ms) doesn't
+/// hold up the next cell's file.
 const THREADS: usize = 2;
 
-/// A model's files as read for [`Context::add_model`](crate::Context::add_model), on a thread as a
-/// cell's preparing reads them or as it adds the model, and when the read began, which hot reload
-/// watches its files from.
+/// A model's files as read for [`Context::add_model`](crate::Context::add_model), by a cell's
+/// preparing or by the add itself, and when the read began, which hot reload watches from.
 pub(crate) struct ModelRead {
     #[cfg_attr(
         not(feature = "dev"),
@@ -39,8 +38,8 @@ pub(crate) struct ModelRead {
 }
 
 impl ModelRead {
-    /// Reads model `name`'s files at `path`, from `files`: as the cooker cooked it, from a game's
-    /// package, listing no files, as nothing watches a package; or as glTF, listing those it read.
+    /// Reads model `name`'s files at `path` from `files`: as cooked from a package, listing no
+    /// files since nothing watches a package; else as glTF, listing the files read.
     pub(crate) fn now(name: &str, path: &Path, files: &Files) -> Self {
         let at = SystemTime::now();
         let read = match files.packaged() {
@@ -51,9 +50,8 @@ impl ModelRead {
     }
 }
 
-/// A cell's texts as its preparing read them, with their digests: its file's at `path`, if its file
-/// is to come in, or the text the game made of it, if `made`, for one without; and those it keeps,
-/// in turn.
+/// A cell's texts with digests: its file's at `path` if it is to come in (the game's making if
+/// `made`), and those it keeps, in turn.
 #[derive(Clone)]
 pub(crate) struct Texts {
     pub(crate) path: String,
@@ -69,22 +67,20 @@ impl Prep {
 }
 
 impl Texts {
-    /// Its texts, the file's first, in turn.
     pub(crate) fn each(&self) -> impl Iterator<Item = &str> {
         let file = self.file.iter().map(|(text, _)| &**text);
         file.chain(self.kept.iter().map(|(text, _)| &**text))
     }
 
-    /// `error`, its message begun with the cell's path, as a cell's refusal says it.
+    /// `error` with the cell's path first in its message.
     pub(crate) fn named(&self, error: Error) -> Error {
         let message = format!("{}:{error}", self.path);
         error.with_message(message)
     }
 }
 
-/// A cell prepared to come in: its texts parsed, and the digests of those texts, which the cell
-/// must still have as it comes in for these to stand for them, its file's text the game's making
-/// if `made`.
+/// A cell prepared to come in: texts parsed, with digests the cell must still have as it comes in;
+/// `made` if its file's text is the game's making.
 pub(crate) struct Prepared {
     pub(crate) file: Option<u64>,
     pub(crate) made: bool,
@@ -92,9 +88,8 @@ pub(crate) struct Prepared {
     pub(crate) entering: Entering,
 }
 
-/// A cell being prepared, numbered so that what a thread finishes for one dropped meanwhile isn't
-/// taken for another of the same cell; when it started, and how long the main thread has spent on
-/// it.
+/// A cell being prepared, numbered so a thread's result for a dropped preparing isn't taken for a
+/// later one of the same cell; when it started, and the main thread's time on it.
 pub(crate) struct Prep {
     number: u64,
     pub(crate) started: Instant,
@@ -103,21 +98,20 @@ pub(crate) struct Prep {
 }
 
 pub(crate) enum Stage {
-    /// Its texts reading on a thread, and parsing if nothing they name is missing.
+    /// Texts reading on a thread, then parsing if nothing they name is missing.
     Reading,
-    /// What its texts name loading: `models`' files reading on threads, the rest loading on the
-    /// main thread once they're read.
+    /// `models`' files reading on threads; the rest of what the texts name loads on the main
+    /// thread once read.
     Loading { texts: Texts, models: Vec<PathBuf> },
-    /// Its texts parsing on a thread, what they name loaded.
+    /// Texts parsing on a thread.
     Parsing,
-    /// Prepared, or why it couldn't be, which the cell's coming in says again.
+    /// Prepared, or why not, which the cell's coming in repeats.
     Ready(Result<Prepared>),
 }
 
 /// What a thread finished.
 pub(crate) enum Finished {
-    /// Cell `cell`'s texts read, for its preparing numbered `number`, with what they name that
-    /// isn't loaded, and, if nothing is, parsed.
+    /// Texts read, with what they name that isn't loaded, and, if nothing is, parsed.
     Read {
         cell: Cell,
         number: u64,
@@ -127,7 +121,6 @@ pub(crate) enum Finished {
     },
     /// A model's files read.
     Model { path: PathBuf, read: ModelRead },
-    /// Cell `cell`'s texts parsed, for its preparing numbered `number`.
     Parsed {
         cell: Cell,
         number: u64,
@@ -137,9 +130,9 @@ pub(crate) enum Finished {
 
 type Job = Box<dyn FnOnce() -> Finished + Send>;
 
-/// What a run prepares of the cells near its viewers, as the module says: each cell being
-/// prepared; the models' files read for them, by path, until a model's add takes them, and those
-/// reading; and since when a tick has waited for its cells, if one is waiting.
+/// What a run prepares of the cells near its viewers: the cells being prepared; model files read
+/// for them, by path, until a model's add takes them, and those reading; and since when a tick has
+/// waited for its cells.
 #[derive(Default)]
 pub(crate) struct Preparing {
     workers: Workers,
@@ -150,8 +143,8 @@ pub(crate) struct Preparing {
     pub(crate) waiting: Option<Instant>,
 }
 
-/// Where jobs run: as they're sent, their results queued, as a test's or a replay's context runs
-/// them; or on threads, which the first job starts.
+/// Where jobs run: as sent, results queued (a test's or replay's context); or on threads, which
+/// the first job starts.
 enum Workers {
     Inline(VecDeque<Finished>),
     Threads(Option<Threads>),
@@ -163,17 +156,16 @@ impl Default for Workers {
     }
 }
 
-/// The threads, from the main thread's side. Dropped, it lets them go, unjoined: each ends once the
-/// job it's on is done, as it finds no one to send it to.
+/// The threads, from the main thread's side. Dropped, it lets them go unjoined: each ends after its
+/// current job, finding no one to send to.
 struct Threads {
     jobs: Sender<Job>,
     done: Receiver<Finished>,
-    /// Each thread, until it's joined, as it panicked.
     threads: Vec<JoinHandle<()>>,
 }
 
 impl Preparing {
-    /// What prepares cells on threads of its own, which the first cell starts.
+    /// Prepares on threads, started by the first job.
     pub(crate) fn threaded() -> Self {
         Self {
             workers: Workers::Threads(None),
@@ -181,8 +173,7 @@ impl Preparing {
         }
     }
 
-    /// Starts preparing `cell`, at its first stage, [`Stage::Reading`], and returns the number of
-    /// its preparing, which its jobs carry.
+    /// Starts preparing `cell` at [`Stage::Reading`]; returns the number its jobs carry.
     pub(crate) fn begin(&mut self, cell: Cell) -> u64 {
         let number = self.next;
         self.next += 1;
@@ -196,13 +187,11 @@ impl Preparing {
         number
     }
 
-    /// The cell being prepared whose preparing is numbered `number`, if it's still being prepared.
     pub(crate) fn prep(&mut self, cell: Cell, number: u64) -> Option<&mut Prep> {
         (self.cells.get_mut(&cell)).filter(|prep| prep.number == number)
     }
 
-    /// Runs `job`, as [`Workers`] says; on the calling thread, warning `engine.loader`, if the
-    /// threads can't start.
+    /// Runs `job`; on the calling thread, warning `engine.loader`, if the threads can't start.
     pub(crate) fn send(&mut self, job: impl FnOnce() -> Finished + Send + 'static) {
         if let Workers::Threads(None) = self.workers {
             match Threads::start() {
@@ -226,10 +215,9 @@ impl Preparing {
         }
     }
 
-    /// Reads cell `cell`'s file through `read`, if its file is to come in, or makes its text through
-    /// it, if `made`, its texts' path `path`, and those it keeps, `kept`; finds what they name that
-    /// `world`, a scratch world of the world's types and assets, hasn't loaded; and parses them in
-    /// it, if nothing is missing: on a thread, for its preparing numbered `number`.
+    /// On a thread: gets the file text through `read` (the file, or the game's making if `made`;
+    /// `path` names it), adds `kept`, finds what they name that `world` (a scratch world of the
+    /// world's types and assets) hasn't loaded, and parses them in it if nothing is missing.
     pub(crate) fn read(
         &mut self,
         (cell, number): (Cell, u64),
@@ -275,8 +263,7 @@ impl Preparing {
         });
     }
 
-    /// Reads model `name`'s files at `path` from `files` on a thread, unless they're read or being
-    /// read already.
+    /// Reads model `name`'s files on a thread, unless already read or reading.
     pub(crate) fn read_model(&mut self, name: Arc<str>, path: PathBuf, files: Files) {
         if self.models.contains_key(&path) || !self.reading.insert(path.clone()) {
             return;
@@ -288,19 +275,17 @@ impl Preparing {
         });
     }
 
-    /// Notes that a model's files at `path` have been read, as `read`, for a model's add to take.
+    /// Notes the model at `path` as `read`, for a model's add to take.
     pub(crate) fn model_read(&mut self, path: PathBuf, read: ModelRead) {
         self.reading.remove(&path);
         self.models.insert(path, read);
     }
 
-    /// Whether a model's files at `path` are reading.
     pub(crate) fn reading(&self, path: &Path) -> bool {
         self.reading.contains(path)
     }
 
-    /// Parses `texts` in `world`, a scratch world of the world's types and assets, on a thread, for
-    /// cell `cell`'s preparing numbered `number`.
+    /// Parses `texts` on a thread in `world`, a scratch world of the world's types and assets.
     pub(crate) fn parse(&mut self, (cell, number): (Cell, u64), texts: Texts, world: World) {
         self.send(move || {
             let _zone = gg_core::zone!("parse a cell");
@@ -313,11 +298,11 @@ impl Preparing {
         });
     }
 
-    /// The next thing a thread finished, if one has.
+    /// The next thing a thread finished, if any.
     ///
     /// # Panics
     ///
-    /// If a thread panicked, which this resumes.
+    /// - A thread panicked: this resumes it.
     pub(crate) fn take(&mut self) -> Option<Finished> {
         match &mut self.workers {
             Workers::Inline(done) => done.pop_front(),
@@ -338,7 +323,7 @@ impl Preparing {
         }
     }
 
-    /// Drops the model files read that no cell loading waits for, as a cell dropped meanwhile left.
+    /// Drops read model files no loading cell waits for, left by a cell dropped meanwhile.
     pub(crate) fn forget_models(&mut self) {
         if self.models.is_empty() {
             return;
@@ -357,8 +342,8 @@ impl Preparing {
 }
 
 impl Threads {
-    /// Starts the threads, each of which runs the next job sent, and sends back what it made, until
-    /// the run lets go. Fails with `engine.loader` if one can't start.
+    /// Starts threads that run jobs and send back results until the run lets go. Fails with
+    /// `engine.loader` if one can't start.
     fn start() -> Result<Self> {
         let (jobs, to_run) = mpsc::channel::<Job>();
         let to_run = Arc::new(Mutex::new(to_run));
@@ -370,7 +355,7 @@ impl Threads {
                     .name("gg-cells".to_owned())
                     .spawn(move || {
                         loop {
-                            // Held while it waits for a job alone, so that the others run theirs.
+                            // Held only while waiting for a job, so the others run theirs.
                             let queue = to_run.lock().unwrap_or_else(PoisonError::into_inner);
                             let Ok(job) = queue.recv() else {
                                 return;
@@ -395,9 +380,9 @@ impl Threads {
     }
 }
 
-/// What `texts` name that `world` hasn't loaded, each once, in the order they first name them.
+/// What `texts` name that `world` hasn't loaded, each once, in first-named order.
 ///
-/// Fails as [`World::scene_assets`] does, the cell's path beginning the message.
+/// Fails like [`World::scene_assets`], with the cell's path first in the message.
 fn missing(world: &World, texts: &Texts) -> Result<Vec<Asset<String>>> {
     let mut missing = Vec::new();
     for text in texts.each() {
@@ -410,10 +395,10 @@ fn missing(world: &World, texts: &Texts) -> Result<Vec<Asset<String>>> {
     Ok(missing)
 }
 
-/// `texts` parsed in `world`, as [`World::parse_scene`] parses each, with what the cell's roots
-/// come as, as [`came_as`](super::came_as) finds it, if it brings its file's text alone.
+/// `texts` parsed in `world` by [`World::parse_scene`], with what the roots come as
+/// ([`came_as`](super::came_as)) if the cell brings only its file's text.
 ///
-/// Fails as `parse_scene` does, the cell's path beginning the message.
+/// Fails like `parse_scene`, with the cell's path first in the message.
 pub(crate) fn parse(world: &World, texts: &Texts) -> Result<Prepared> {
     let parse = |text: &str| world.parse_scene(text).map_err(|e| texts.named(e));
     let file = (texts.file.as_ref())

@@ -1,10 +1,8 @@
-//! Worlds of cells: a world's scene whose [`Cells`] cuts space into cubes, each cell's entities in a
-//! scene file of its own, which come into the world as a [`Viewer`] comes near and go out, kept as
-//! text, as every viewer goes away. Which cells are in is the simulation's own, decided from the
-//! world alone as each tick ends, as `Context::stream_cells` says, so that a replay, a tick run
-//! again by rollback or a SyncTest, and each lockstep peer bring the same cells in at the same
-//! tick, and what the world keeps of them is a saved resource, which the hash reads, so that a
-//! snapshot, a lockstep joiner and a server's client take it with the world.
+//! Worlds of cells: [`Cells`] cuts space into cubes, each with its entities in a scene file. A cell
+//! comes in as a [`Viewer`] nears and goes out, kept as text, when every viewer leaves. The world
+//! alone decides which cells are in, as each tick ends (`Context::stream_cells`), so replays,
+//! rollback, SyncTest reruns and lockstep peers bring the same cells in at the same tick. What the
+//! world keeps is a saved resource the hash reads, so snapshots, joiners and clients carry it.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
@@ -21,20 +19,18 @@ use crate::ecs::{Parsed, text_digest};
 use crate::package::{self, Files};
 use crate::{Component, Entity, EntityId, Owner, Saved, Transform, World};
 
-/// The most cells in a world at once: past it the nearest come in, and the run warns
-/// (`cells.full`), so that a radius set too wide can't load a world into memory.
+/// The most cells in a world at once. Past it the nearest come in and the run warns (`cells.full`),
+/// so a too-wide radius can't load a world into memory.
 pub(crate) const MOST_CELLS: usize = 4096;
 
-/// The most made cells looked for around a viewer each tick, as [`looked`] bounds the box of them:
-/// eight times [`MOST_CELLS`], so that the box holds the [`MOST_CELLS`] nearest, a sphere of about
-/// 10 cells' radius or, of a world one cell deep, a disc of about 36, while a radius set too wide
-/// costs a bounded search.
+/// The most cells in [`looked`]'s box per viewer per tick: eight times [`MOST_CELLS`], so the box
+/// holds the nearest [`MOST_CELLS`] (a sphere of about 10 cells' radius, a disc of about 36 in a
+/// one-cell-deep world) at bounded cost.
 const MOST_LOOKED: u64 = 8 * MOST_CELLS as u64;
 
-/// The box of cells, its first and last on each axis, within `reach` of `at` on each axis, of
-/// cells `size` on a side, clipped to `within`, its first and last, and to as many cells either way
-/// of the cell `at` is in as keeps it to [`MOST_LOOKED`] cells at most: so a flat world's search
-/// reaches farther than a deep one's for the same cost.
+/// The box of cells (first, last on each axis) of side `size` within `reach` of `at`, clipped to
+/// `within` and to as many cells either way of `at`'s as fit [`MOST_LOOKED`]: a flat world's search
+/// reaches farther than a deep one's.
 fn looked(at: [f64; 3], reach: f64, size: f64, within: (IVec3, IVec3)) -> (IVec3, IVec3) {
     let cell_of = |x: f64| (x / size).floor() as i32;
     let [low, high] = [-reach, reach].map(|by| IVec3::from_array(at.map(|x| cell_of(x + by))));
@@ -48,7 +44,7 @@ fn looked(at: [f64; 3], reach: f64, size: f64, within: (IVec3, IVec3)) -> (IVec3
         let side = |axis: usize| (i64::from(high[axis]) - i64::from(low[axis]) + 1).max(0);
         (0..3).fold(1u64, |cells, axis| cells.saturating_mul(side(axis) as u64))
     };
-    // The farthest either way that keeps to the most, by halving: a box of one cell does.
+    // Binary search for the farthest reach that fits; one cell always does.
     let (mut fits, mut over) = (0, i32::MAX);
     if cells(clip(over)) <= MOST_LOOKED {
         return clip(over);
@@ -63,25 +59,20 @@ fn looked(at: [f64; 3], reach: f64, size: f64, within: (IVec3, IVec3)) -> (IVec3
     clip(fits)
 }
 
-/// On an entity of a world's scene: space is cut into cubes `size` units on a side from the origin,
-/// each a cell whose entities are in the scene file of `folder` named by its place on the grid, as
-/// `cells/3_0_-2.ron` for the cell from (768, 0, -512) to (1024, 256, -256) of a size of 256; a cell
-/// without a file is empty, unless the game makes it, as
-/// [`Context::make_cells`](crate::Context::make_cells) says. As each tick ends, the cells near a
-/// [`Viewer`] come into the world, and
-/// those far from every viewer go out, as [`Streamed`] says, kept as text, until a viewer comes
-/// near again. One a world; of several, the one of the lowest ID, warning (`cells.tie`), as
-/// [`Environment`](crate::Environment) has it. A 2D game's cells are those whose z is 0.
+/// On an entity of a world's scene: cuts space into cubes `size` units on a side from the origin.
+/// A cell's entities are in `folder`'s scene file named by its grid place: the cube (768, 0, -512)
+/// to (1024, 256, -256) at size 256 is `cells/3_0_-2.ron`. A cell without a file is empty unless
+/// the game [makes it](crate::Context::make_cells). As each tick ends, cells near a [`Viewer`] come
+/// in and cells far from every viewer go out, kept as text ([`Streamed`]). One a world; of several
+/// the lowest ID wins, warning (`cells.tie`). A 2D game's cells have z 0.
 ///
-/// A cell's roots come in as its file holds them, each given [`Streamed`], so that each belongs
-/// where it stands: one a file places outside its cell's cube belongs to the cell it's in. The
-/// folder is listed once a run, as a world first needs it, from the game's package in a run that
-/// reads one and else from the disk, its files' names those of cells alone counting; one that
-/// can't be listed brings no cell in from a file, warning (`cells.listing`), but one that isn't
-/// there of cells the game makes, which needn't be.
+/// Roots come in as the file holds them, each given [`Streamed`]; one placed outside its cell's
+/// cube belongs to the cell it's in. The folder is listed once a run, from the package if the run
+/// reads one, else the disk; only cell file names count. An unlistable folder brings no cell in
+/// from a file, warning (`cells.listing`); a missing one is fine for made cells.
 #[derive(Clone, Debug, PartialEq, Component)]
 pub struct Cells {
-    /// The folder of the cells' scene files, from the asset root, `/` between its parts.
+    /// The cells' scene files' folder, from the asset root, `/` between its parts.
     pub folder: String,
     /// A cell's side, in units: finite and positive, else no cell comes in or goes out, warning
     /// (`cells.bad_size`).
@@ -89,33 +80,31 @@ pub struct Cells {
     pub size: f32,
 }
 
-/// On an entity the world streams cells around: as each tick ends, each cell within `radius` of
-/// where it is, as [`World::pose`] has it, to the cell's nearest point, comes in, and each farther
-/// than `radius` and half a cell from every viewer goes out, so that a viewer on a cell's edge
-/// doesn't bring it in and take it out tick after tick. A viewer never goes out with a cell, nor
-/// what holds one.
+/// On an entity the world streams cells around. As each tick ends, cells whose nearest point is
+/// within `radius` of its [`World::pose`] come in, and those farther than `radius` plus half a cell
+/// from every viewer go out, so a viewer on a cell's edge doesn't flip it in and out. A viewer, or
+/// what holds one, never goes out with a cell.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Viewer {
-    /// How far from it, in units, cells come in: 512 by default, two cells of the default size.
+    /// How far from it, in units, cells come in: 512 by default, two default cells.
     #[reflect(min = 0.0, default = 512.0)]
     pub radius: f32,
 }
 
-/// On a root that streams: as each tick ends, it goes out with the cell where it is, as its
-/// [`Transform`] has it, the origin without one, when that cell goes out, or at once if the tick
-/// left it in a cell that's out, kept with what the cell keeps, and comes back with the cell, as
-/// it was. A cell's load gives it to the cell's roots; a game gives it to what it spawns that
-/// should stream, as a dropped item or an enemy. What's under a root goes with it. What refers to
-/// a streamed entity from outside it finds it gone once it's out, as one despawned is, and doesn't
-/// find it again as it comes back.
+/// On a root that streams. It goes out, kept with what its cell keeps, when its cell (by its
+/// [`Transform`], the origin without one) goes out, or at once if the tick left it in a cell that's
+/// out. It comes back with the cell as it was. A cell's load gives it to the cell's roots; a game
+/// gives it to what it spawns that should stream, like a dropped item. What's under a root goes
+/// with it. References from outside find it gone while it's out, as if despawned, and don't find it
+/// again on return.
 ///
-/// A root that refers to an entity going with neither it nor its cell, which no scene could save,
-/// holds its cell in, warning (`cells.held`), as does one whose texture wasn't loaded from a file.
+/// A root referring to an entity going with neither it nor its cell, which no scene could save,
+/// holds its cell in, warning (`cells.held`); so does one whose texture wasn't loaded from a file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
 pub struct Streamed;
 
-/// A cell's place on the grid: the cube from `0 * size` to `(0 + 1) * size` on each axis, its
-/// [`Cells`]'s `size`. Cells are ordered by x, then y, then z.
+/// A cell's place on the grid: the cube from `n * size` to `(n + 1) * size` on each axis. Ordered
+/// by x, then y, then z.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Cell(pub IVec3);
 
@@ -131,7 +120,7 @@ impl PartialOrd for Cell {
     }
 }
 
-/// As its file's name has it, without `.ron`: its x, y and z, `_` between, as `3_0_-2`.
+/// Its file's name without `.ron`: x, y and z, `_` between, like `3_0_-2`.
 impl fmt::Display for Cell {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let IVec3 { x, y, z } = self.0;
@@ -140,16 +129,16 @@ impl fmt::Display for Cell {
 }
 
 impl Cell {
-    /// The cell `point` is in, of cells `size` on a side: each axis's `floor(point / size)`, in
-    /// `f64`, as positions are, held to an `i32`'s range, a NaN at 0.
+    /// The cell `point` is in: each axis's `floor(point / size)`, in `f64` like positions, clamped
+    /// to `i32`, a NaN at 0.
     pub(crate) fn at(point: DVec3, size: f32) -> Self {
         let size = f64::from(size);
         let axis = |x: f64| (x / size).floor() as i32;
         Self(IVec3::new(axis(point.x), axis(point.y), axis(point.z)))
     }
 
-    /// The cell whose file is named `name`, as `3_0_-2.ron`, if it's a cell's: three integers, `_`
-    /// between, written as Rust writes them, so that each cell has one name.
+    /// The cell whose file is `name`, like `3_0_-2.ron`: three integers, `_` between, written as
+    /// Rust writes them, so each cell has one name.
     pub(crate) fn of_file(name: &str) -> Option<Self> {
         let stem = name.strip_suffix(".ron")?;
         let mut axes = stem.split('_').map(|axis| {
@@ -160,8 +149,8 @@ impl Cell {
         axes.next().is_none().then_some(Self(IVec3::new(x, y, z)))
     }
 
-    /// The square of the distance from `point` to the cell's nearest point, of cells `size` on a
-    /// side, in `f64`, whose arithmetic is IEEE's on every platform, as the world's is.
+    /// The squared distance from `point` to the cell's nearest point, in `f64` for IEEE arithmetic
+    /// on every platform, like the world's.
     fn distance_squared(self, point: [f64; 3], size: f64) -> f64 {
         let low = self.0.to_array().map(|n| f64::from(n) * size);
         (0..3)
@@ -174,9 +163,9 @@ impl Cell {
     }
 }
 
-/// What a game makes the cells of a folder of that have no file, as
-/// [`Context::make_cells`](crate::Context::make_cells) gives it: the first and the last cell it
-/// makes, on each axis, and what makes each one's text, on any thread.
+/// What a game makes of a folder's fileless cells
+/// ([`Context::make_cells`](crate::Context::make_cells)): the first and last cell on each axis, and
+/// a thread-safe function making each one's text.
 #[derive(Clone)]
 pub(crate) struct MadeCells {
     pub(crate) from: Cell,
@@ -185,31 +174,29 @@ pub(crate) struct MadeCells {
 }
 
 impl MadeCells {
-    /// Whether it makes `cell`.
     pub(crate) fn makes(&self, cell: Cell) -> bool {
         cell.0.cmpge(self.from.0).all() && cell.0.cmple(self.to.0).all()
     }
 }
 
-/// Where a cell's entities come from before it first comes in: its file, or, for one without, what
-/// the game makes of it.
+/// Where a cell's entities come from before it first comes in: its file, or what the game makes.
 #[derive(Clone)]
 pub(crate) enum CellSource {
     File,
     Made(MadeCells),
 }
 
-/// What a world of cells holds of them beside its entities, as the module says: the cells in; those
-/// coming in as the next tick starts, as the last ended; the digest of the file of each cell whose
-/// file has come in, or of the text the game made of one without, so that what the cell keeps
-/// stands for it after, and a peer or a replay with another file is told; of each cell in that
-/// came from that text alone, the digest of what its roots save as just as they came, as
-/// [`came_as`] finds it, so that one going out as it came keeps nothing and comes back from its
-/// file or the game's making; what each cell out keeps of its entities; and the cells whose load
-/// was refused while a viewer stays near, which don't try again until every viewer has gone. So
-/// what it holds follows the cells in and those changed, not the cells a viewer crossed. Saved, so
-/// that a snapshot, a lockstep joiner and a server's client have it; and no world without
-/// [`Cells`] has one with anything in it, so that the hash of such a world reads none.
+/// What a world holds of its cells beside its entities:
+/// - the cells in, and those coming in as the next tick starts;
+/// - the digest of each came-in cell's file (or the game's text), so what the cell keeps stands for
+///   it and a peer or replay with another file is told;
+/// - for a cell in that came from that text alone, the digest of what its roots save as they came
+///   ([`came_as`]): one going out unchanged keeps nothing and returns from its source;
+/// - what each cell out keeps;
+/// - cells whose load was refused; they retry only after every viewer has gone.
+///
+/// Saved, so snapshots, joiners and server clients have it. A world without [`Cells`] holds
+/// nothing, so its hash reads none.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct CellState {
     pub(crate) cells_in: BTreeSet<Cell>,
@@ -220,15 +207,14 @@ pub(crate) struct CellState {
     pub(crate) refused: BTreeSet<Cell>,
 }
 
-/// What a cell out keeps: its entities as they went out, as scene texts, each in turn, which come
-/// back in that order.
+/// What a cell out keeps: its entities as scene texts that come back in order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Kept {
     pub(crate) texts: Vec<KeptText>,
 }
 
-/// A scene text a cell keeps, shared, so that rollback's copies and a joiner's snapshot copy a
-/// pointer, and its digest, which the world's hash reads in its place.
+/// A scene text a cell keeps, shared so copies copy a pointer, and its digest, which the world's
+/// hash reads in its place.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct KeptText {
     pub(crate) text: Arc<str>,
@@ -245,8 +231,7 @@ impl KeptText {
 }
 
 impl CellState {
-    /// Whether it holds nothing, as a world's whose cells never came in or that a scene change
-    /// emptied, which the world's hash leaves out.
+    /// Whether it holds nothing; the world's hash then leaves it out.
     pub(crate) fn is_empty(&self) -> bool {
         self.cells_in.is_empty()
             && self.coming.is_empty()
@@ -263,7 +248,7 @@ struct SavedCells {
     cells_in: Vec<[i32; 3]>,
     coming: Vec<[i32; 3]>,
     files: Vec<([i32; 3], u64)>,
-    // Of a snapshot from before it was saved, none: each cell in keeps what it holds as it goes.
+    // Empty in older snapshots: each cell in keeps what it holds as it goes.
     #[serde(default)]
     came_as: Vec<([i32; 3], u64)>,
     kept: Vec<SavedKept>,
@@ -276,7 +261,7 @@ struct SavedKept {
     texts: Vec<String>,
 }
 
-/// As JSON, whose strings keep a scene text's line breaks escaped, on one line.
+/// As JSON on one line: its strings keep a scene text's line breaks escaped.
 impl Saved for CellState {
     const NAME: &'static str = "cells";
 
@@ -332,20 +317,19 @@ impl Saved for CellState {
     }
 }
 
-/// What a server's client sees of the world, as [`World::seen_by`] finds it, which its states hold,
-/// as [`World::save_seen`] writes them and [`World::hash_seen`] hashes them: by slot, whether the
-/// entity there is hidden, a streamed root of a cell it doesn't see or what's under one, so that no
-/// entity shown has a child hidden, none past its end; and the cells' state its world holds in
-/// place of the server's, the cells it sees in and nothing else, what the cells out keep staying
-/// on the server.
+/// What a server's client sees ([`World::seen_by`]), held by its states ([`World::save_seen`],
+/// [`World::hash_seen`]):
+/// - by slot, whether the entity is hidden: a streamed root of an unseen cell, or under one, so no
+///   shown entity has a hidden child and none lies past the end;
+/// - the cells' state in place of the server's: the cells it sees in, nothing else.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Seen {
     pub(crate) hidden: Vec<bool>,
     pub(crate) cells: CellState,
 }
 
-/// The square of the distance from `cell`, of cells `size` on a side, to the nearest of `viewers`,
-/// each where it is and its radius, whose radius and `reach` reach it, if one does.
+/// The squared distance from `cell` to the nearest of `viewers` (position, radius) whose radius
+/// plus `reach` reaches it.
 fn nearest_viewer(viewers: &[([f64; 3], f64)], cell: Cell, reach: f64, size: f64) -> Option<f64> {
     let near = viewers.iter().filter_map(|&(at, radius)| {
         let distance = cell.distance_squared(at, size);
@@ -355,21 +339,19 @@ fn nearest_viewer(viewers: &[([f64; 3], f64)], cell: Cell, reach: f64, size: f64
     near.min_by(f64::total_cmp)
 }
 
-/// What a cell brings in as it comes in, each text parsed as [`World::parse_scene`] parses it: its
-/// file's, with the file's digest, while its file is yet to come in, as what the cell keeps then
-/// stands for it; each text it keeps, in turn; and, if it brings its file's alone, what its roots
-/// save as just as they come, as [`came_as`] finds it.
+/// What a cell brings in, each text parsed by [`World::parse_scene`]: its file's with the digest,
+/// if yet to come in; each text it keeps, in turn; and, if only its file's, what its roots save as
+/// they come ([`came_as`]).
 pub(crate) struct Entering {
     pub(crate) file: Option<(u64, Parsed)>,
     pub(crate) kept: Vec<Parsed>,
     pub(crate) came_as: Option<u64>,
 }
 
-/// The digest of what the roots of `file`, a cell's file's text or the game's making of it, save
-/// as once they've come in, given [`Streamed`], loaded in a scratch world of `world`'s types and
-/// assets, on any thread: what the cell's roots save as going out if nothing changed them. `None`
-/// for a text that doesn't load or save there, as one that refers to an entity outside it, so
-/// that its cell keeps what it holds as it goes out, as one that changed does.
+/// The digest of what `file`'s roots (a cell's file text or the game's making) save as once given
+/// [`Streamed`], loaded in a scratch world of `world`'s types and assets, on any thread: what they
+/// save as going out if nothing changed them. `None` for a text that doesn't load or save there,
+/// such as one referring to an outside entity; its cell then keeps what it holds as it goes out.
 pub(crate) fn came_as(world: &World, file: &str) -> Option<u64> {
     let _zone = gg_core::zone!();
     let mut loaded = world.scratch();
@@ -381,33 +363,29 @@ pub(crate) fn came_as(world: &World, file: &str) -> Option<u64> {
     Some(text_digest(&saved))
 }
 
-/// What the cells' step does as a tick ends, which [`World::plan_cells`] finds from the world: kept
-/// from tick to tick, so that a tick that changes nothing allocates nothing once it has grown.
+/// What the cells' step does as a tick ends ([`World::plan_cells`]). Kept between ticks so a quiet
+/// tick allocates nothing once it has grown. Cells are in order.
 #[derive(Default)]
 pub(crate) struct Plan {
-    /// The cells in that go out, in order.
     pub(crate) leaving: Vec<Cell>,
-    /// The cells out that come in, in order.
     pub(crate) entering: Vec<Cell>,
-    /// The streamed roots the tick left in cells out, which go out at once into what their cells
-    /// keep, by cell, then ID; and those of the cells going out, likewise.
+    /// The streamed roots the tick left in cells out, which go out at once into their cells' keep,
+    /// and those of the cells going out; each by cell, then ID.
     pub(crate) strays: Vec<(Cell, Entity)>,
     pub(crate) leavers: Vec<(Cell, Entity)>,
-    /// The cells refused whose viewers have gone, which may try again.
+    /// The refused cells whose viewers have gone, which may retry.
     pub(crate) forgotten: Vec<Cell>,
-    /// Whether more cells would be in than [`MOST_CELLS`].
+    /// Whether more cells than [`MOST_CELLS`] would be in.
     pub(crate) full: bool,
-    /// The cells out, coming in or not, within a viewer's radius and one and a half cells, each
-    /// with how far it is past the radius of the viewer it's nearest the edge of, the nearest first,
-    /// at most [`MOST_CELLS`]: those to prepare ahead, as [`Preparing`] does, which changes nothing
-    /// in the world.
+    /// The cells out within a viewer's radius plus 1.5 cells, each with how far past that radius it
+    /// is, nearest first, at most [`MOST_CELLS`]: those to prepare ahead ([`Preparing`]), which
+    /// changes nothing in the world.
     pub(crate) ahead: Vec<(f64, Cell)>,
-    /// The cells of head, in order, to find one among.
+    /// `ahead`'s cells, in order, to search.
     pub(crate) nearby: Vec<Cell>,
-    /// The viewers, where each is and its radius; the streamed roots, each with its cell and ID;
-    /// the made cells near a viewer; the cells that would come in, each with the square of its
-    /// distance to the nearest viewer; and what's under a root, for the walk that finds a viewer
-    /// under it.
+    /// Scratch for [`World::plan_cells`]: viewers (position, radius); streamed roots with cell and
+    /// ID; made cells near a viewer; would-be cells in with squared distance to the nearest viewer;
+    /// the walk under a root for a viewer.
     viewers: Vec<([f64; 3], f64)>,
     roots: Vec<(Cell, EntityId, Entity)>,
     made: Vec<Cell>,
@@ -416,7 +394,6 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// Whether it changes nothing.
     pub(crate) fn is_empty(&self) -> bool {
         self.leaving.is_empty()
             && self.entering.is_empty()
@@ -427,7 +404,7 @@ impl Plan {
 }
 
 impl World {
-    /// The cells in, ordered as [`Cell`] says; none in a world without [`Cells`].
+    /// The cells in, in order; none without [`Cells`].
     pub fn cells_in(&self) -> impl Iterator<Item = Cell> + '_ {
         let state = self.resource::<CellState>();
         state
@@ -435,24 +412,23 @@ impl World {
             .flat_map(|state| state.cells_in.iter().copied())
     }
 
-    /// The cell `point` is in, under the world's [`Cells`]: `None` in a world without one, or
-    /// whose size isn't finite and positive.
+    /// The cell `point` is in, under the world's [`Cells`]: `None` without one or if its size isn't
+    /// finite and positive.
     pub fn cell_at(&self, point: DVec3) -> Option<Cell> {
         let (_, cells, _) = self.world_cells()?;
         let size = cells.size;
         (size.is_finite() && size > 0.0).then(|| Cell::at(point, size))
     }
 
-    /// How many cells are in, and how many out keep something, as the tool API's `status` says;
-    /// `None` in a world whose cells never came in.
+    /// Cells in and cells out that keep something, for the tool API's `status`; `None` if no cell
+    /// ever came in.
     #[cfg(feature = "dev")]
     pub(crate) fn cell_counts(&self) -> Option<(usize, usize)> {
         let state = self.resource::<CellState>()?;
         Some((state.cells_in.len(), state.kept.len()))
     }
 
-    /// The world's [`Cells`], that of the lowest ID among its entities with one, with that ID and
-    /// how many have one; `None` in a world without.
+    /// The world's [`Cells`] (the lowest ID's), that ID, and how many entities have one.
     pub(crate) fn world_cells(&self) -> Option<(EntityId, &Cells, usize)> {
         let mut lowest: Option<(EntityId, &Cells)> = None;
         let mut count = 0;
@@ -466,25 +442,25 @@ impl World {
         lowest.map(|(id, cells)| (id, cells, count))
     }
 
-    /// Empties what the world holds of its cells, as a scene change does with its entities, keeping
-    /// the resource, so that a client's copy, which keeps a resource its server's state holds none
-    /// of, is emptied too.
+    /// Empties what the world holds of its cells, like a scene change its entities. The resource
+    /// stays: a client keeps a resource its server's state lacks, so its copy empties too.
     pub(crate) fn empty_cells(&mut self) {
         if let Some(state) = self.resource_mut::<CellState>() {
             *state = CellState::default();
         }
     }
 
-    /// Fills `plan` with what the cells' step does as this tick ends, of cells `size` on a side,
-    /// `listed` those with files, in order, and `made` the first and last the game makes, if it
-    /// makes some: each cell in farther than a viewer's radius and half a cell from every viewer
-    /// goes out, with the streamed roots in it but those that are or hold a viewer; each cell out
-    /// within a viewer's radius comes in, of those with a file, those made, those that keep
-    /// something and those a streamed root is in, but a cell refused, the nearest first past
-    /// [`MOST_CELLS`]; each streamed root in a cell out that doesn't come in goes out at once; and
-    /// each cell refused farther than a radius and half a cell from every viewer is forgotten.
-    /// `extra`, where it is and its radius, is a viewer too, as a development build's look's
-    /// viewpoint is while the run is stopped, as `Context::stream_stopped` says.
+    /// Fills `plan` with what the cells' step does as this tick ends, for cells of side `size`.
+    /// `listed` are the cells with files, in order; `made` the first and last the game makes.
+    /// - A cell farther than a viewer's radius plus half a cell from every viewer goes out, with
+    ///   its streamed roots except those that are or hold a viewer.
+    /// - A cell out within a viewer's radius comes in if it has a file, is made, keeps something or
+    ///   holds a streamed root, and isn't refused; past [`MOST_CELLS`], the nearest first.
+    /// - A streamed root in a cell out that doesn't come in goes out at once.
+    /// - A refused cell beyond that reach of every viewer is forgotten.
+    ///
+    /// `extra` (position, radius) is a viewer too: a development build's look viewpoint while the
+    /// run is stopped (`Context::stream_stopped`).
     pub(crate) fn plan_cells(
         &self,
         size: f32,
@@ -530,7 +506,7 @@ impl World {
         viewers.extend(extra);
         self.streamed_roots(size, roots);
         let size = f64::from(size);
-        // Those within each viewer's reach, for those prepared ahead, by the box around it.
+        // The made cells within each viewer's reach, for preparing ahead, by [`looked`]'s box.
         made_near.clear();
         if let Some((from, to)) = made {
             for &(at, radius) in viewers.iter() {
@@ -565,9 +541,8 @@ impl World {
         };
         let kept = state.kept.keys();
         let rooted = roots.iter().map(|&(cell, ..)| cell);
-        // How far `cell` is past the radius of the viewer it's nearest the edge of, if it's within
-        // one's radius and one and a half cells: a square root, which the plan's own choices
-        // never take, as only what's prepared ahead goes by it.
+        // How far `cell` is past the nearest viewer's radius, if within one's radius plus 1.5
+        // cells. A square root, so only for ordering what's prepared ahead, never the plan.
         let past = |cell: Cell| {
             let past = viewers.iter().filter_map(|&(at, radius)| {
                 let reach = radius + 1.5 * size;
@@ -622,8 +597,8 @@ impl World {
         }
     }
 
-    /// Fills `roots` with the streamed roots, each with the cell it's in, of cells `size` on a side,
-    /// as its [`Transform`] has it, the origin without one, and its ID, by cell, then ID.
+    /// Fills `roots` with the streamed roots, each with its cell (by its [`Transform`], the origin
+    /// without one) and ID, ordered by cell, then ID.
     pub(crate) fn streamed_roots(&self, size: f32, roots: &mut Vec<(Cell, EntityId, Entity)>) {
         roots.clear();
         for (entity, _) in self.query::<(Entity, &Streamed)>() {
@@ -639,13 +614,15 @@ impl World {
         roots.sort_unstable_by_key(|&(cell, id, _)| (cell, id));
     }
 
-    /// What player `player`'s client sees of the world, as a server's states send it, `had` the
-    /// cells it saw: of the cells in, each within the radius of a [`Viewer`] of its own, one that
-    /// it or an ancestor's [`Owner`] says is the player's, and each it saw within the radius and
-    /// half a cell, as the cells' own step has them; and every entity but the streamed roots of
-    /// the cells it doesn't see, but one that is or holds a viewer of its own, with what's under
-    /// them. A viewer no player owns is no client's. Nothing hidden and no cell seen in a world
-    /// without [`Cells`], or whose size isn't finite and positive.
+    /// What player `player`'s client sees, as a server's states send it; `had` are the cells it
+    /// saw. It sees:
+    /// - of the cells in, each within the radius of a [`Viewer`] of its own (its or an ancestor's
+    ///   [`Owner`] names the player), and each it saw within the radius plus half a cell;
+    /// - every entity but the streamed roots of unseen cells, with what's under them, except one
+    ///   that is or holds a viewer of its own.
+    ///
+    /// A viewer no player owns is no client's. Without [`Cells`], or with a size that isn't finite
+    /// and positive, nothing is hidden and no cell seen.
     pub(crate) fn seen_by(&self, player: u8, had: &BTreeSet<Cell>) -> Seen {
         let _zone = gg_core::zone!();
         let mut seen = Seen::default();
@@ -720,15 +697,14 @@ impl World {
         false
     }
 
-    /// Takes `roots`, streamed roots of cell `cell`, out of the world with everything under them,
-    /// into what the cell keeps, as a scene text of their own, after what it keeps: as the cell goes
-    /// out with them, if `leaving`, or at once, into a cell out. A cell going out whose roots save
-    /// as they did as they came from its file, or the game's making of it, alone, as [`came_as`]
-    /// says, keeps nothing, and its file is no longer noted as having come in, so that it comes
-    /// back from them. Returns how many roots went.
+    /// Takes `roots`, streamed roots of `cell`, out of the world with everything under them, into
+    /// the cell's keep as a scene text after its others: with the cell going out if `leaving`, else
+    /// at once into a cell out. A cell going out whose roots save as they came ([`came_as`]) keeps
+    /// nothing, and its file is no longer noted as come in, so it returns from its source. Returns
+    /// how many roots went.
     ///
-    /// Fails, taking none out, as [`save_scene`](Self::save_scene) does, as for a root that refers
-    /// to an entity that doesn't go with it.
+    /// Fails like [`save_scene`](Self::save_scene), taking none out: a root may refer to an entity
+    /// that doesn't go with it.
     pub(crate) fn keep_cell(
         &mut self,
         cell: Cell,
@@ -765,10 +741,10 @@ impl World {
         Ok(roots.len())
     }
 
-    /// Takes cell `cell` out as its file has it, while the run is stopped, as
-    /// [`Context::stream_stopped`](crate::Context::stream_stopped) says: `roots`, its streamed
-    /// roots, go with everything under them, keeping nothing, and its file is no longer noted as
-    /// having come in, so that the cell comes in from its file again.
+    /// Takes `cell` out while the run is stopped
+    /// ([`Context::stream_stopped`](crate::Context::stream_stopped)): `roots`, its streamed roots,
+    /// go with everything under them, keeping nothing, and its file is no longer noted as come in,
+    /// so the cell comes in from its file again.
     #[cfg(feature = "dev")]
     pub(crate) fn forget_cell(&mut self, cell: Cell, roots: &[Entity]) {
         for &root in roots {
@@ -780,27 +756,23 @@ impl World {
         state.came_as.remove(&cell);
     }
 
-    /// Notes that cell `cell`'s file, of digest `digest`, holds what the world holds of the cell,
-    /// as a world's save leaves it, so that it doesn't come in from the file; and forgets what its
-    /// roots came as, which the file no longer holds.
+    /// Notes that `cell`'s file, of digest `digest`, now holds the cell as the world does, so the
+    /// cell doesn't come in from it; forgets what its roots came as.
     #[cfg(feature = "dev")]
     pub(crate) fn note_filed(&mut self, cell: Cell, digest: u64) {
         self.cell_state_mut().files.insert(cell, digest);
         self.forget_came_as(cell);
     }
 
-    /// Forgets what cell `cell`'s roots came as, as [`came_as`] found it, as the text it came from
-    /// changes, so that it keeps what it holds as it goes out, rather than coming back from the
-    /// text it didn't come from, which would lose an edit since, as one undoing a save of its
-    /// file.
+    /// Forgets what `cell`'s roots came as ([`came_as`]) when their source text changes, so the
+    /// cell keeps what it holds as it goes out: returning from the old text would lose an edit.
     pub(crate) fn forget_came_as(&mut self, cell: Cell) {
         if let Some(state) = self.resource_mut::<CellState>() {
             state.came_as.remove(&cell);
         }
     }
 
-    /// The cell whose file's path from the asset root is `author`, under the world's [`Cells`], if
-    /// it names one.
+    /// The cell whose file has path `author` from the asset root, under the world's [`Cells`].
     pub(crate) fn cell_of_file(&self, author: &str) -> Option<Cell> {
         let (_, cells, _) = self.world_cells()?;
         let name = author
@@ -809,8 +781,8 @@ impl World {
         Cell::of_file(name)
     }
 
-    /// The cell whose file's path from the asset root is `author`, under the world's [`Cells`], if
-    /// it's in and its file has come in, so that a save of the file applies to it.
+    /// Like [`cell_of_file`](Self::cell_of_file), but only if the cell is in and its file has come
+    /// in, so a save of the file applies.
     #[cfg(feature = "dev")]
     pub(crate) fn filed_cell_in(&self, author: &str) -> Option<Cell> {
         let cell = self.cell_of_file(author)?;
@@ -818,14 +790,12 @@ impl World {
         (state.cells_in.contains(&cell) && state.files.contains_key(&cell)).then_some(cell)
     }
 
-    /// What a cell's file is written as, as a world's save writes it, of `roots`, the streamed
-    /// roots in it, with everything under them, if that differs from `file`, the text its file held
-    /// as last applied, `None` for a cell whose file hasn't come in: nothing for a cell without
-    /// roots whose file hasn't come in. A file is compared, and written, canonical, its roots
-    /// without [`Streamed`], as [`cell_canonical`](Self::cell_canonical) gives it; one whose text
-    /// no longer loads differs.
+    /// What a cell's file should be written as, from `roots` (its streamed roots, with everything
+    /// under them), if that differs from `file`, its text as last applied (`None` if it hasn't come
+    /// in). Nothing for a rootless cell whose file hasn't come in. Texts are compared and written
+    /// [canonical](Self::cell_canonical); a `file` that no longer loads differs.
     ///
-    /// Fails as [`save_scene`](Self::save_scene) does for `roots`.
+    /// Fails like [`save_scene`](Self::save_scene) for `roots`.
     #[cfg(feature = "dev")]
     pub(crate) fn cell_written(
         &self,
@@ -840,11 +810,10 @@ impl World {
         Ok((!matches!(was, Some(Ok(was)) if was == now)).then_some(now))
     }
 
-    /// Scene `text` as a cell's file holds it: canonical, as
-    /// [`scene_canonical`](Self::scene_canonical) gives it, but with its roots without
-    /// [`Streamed`], which a cell's load gives them.
+    /// Scene `text` as a cell's file holds it: [canonical](Self::scene_canonical), roots without
+    /// the [`Streamed`] a cell's load gives them.
     ///
-    /// Fails as `scene_canonical` does.
+    /// Fails like `scene_canonical`.
     #[cfg(feature = "dev")]
     pub(crate) fn cell_canonical(&self, text: &str) -> Result<String> {
         let mut loaded = self.scratch();
@@ -855,10 +824,10 @@ impl World {
         loaded.save_scene(&roots)
     }
 
-    /// Scene `text` with its roots given [`Streamed`], as a cell brings them in, canonical, so
-    /// that a cell file's save is compared with the cell in as the world holds it.
+    /// Scene `text` canonical with its roots given [`Streamed`], as a cell brings them in, to
+    /// compare a cell file's save with the cell in.
     ///
-    /// Fails as [`scene_canonical`](Self::scene_canonical) does.
+    /// Fails like [`scene_canonical`](Self::scene_canonical).
     #[cfg(feature = "dev")]
     pub(crate) fn streamed_text(&self, text: &str) -> Result<String> {
         let mut loaded = self.scratch();
@@ -869,24 +838,22 @@ impl World {
         loaded.save_scene(&roots)
     }
 
-    /// Notes that `cells` come in as the next tick starts, as [`enter_cell`](Self::enter_cell)
-    /// brings each in.
+    /// Notes that `cells` come in as the next tick starts ([`enter_cell`](Self::enter_cell)).
     pub(crate) fn note_coming(&mut self, cells: &[Cell]) {
         self.cell_state_mut().coming.extend(cells);
     }
 
-    /// The cells coming in, which it no longer notes, in order; none without.
+    /// The cells coming in, in order, no longer noted.
     pub(crate) fn take_coming(&mut self) -> BTreeSet<Cell> {
         let state = self.resource_mut::<CellState>();
         state.map_or_else(BTreeSet::new, |state| mem::take(&mut state.coming))
     }
 
-    /// Brings cell `cell` in, with what `entering` holds of it, in turn, each root given
-    /// [`Streamed`], noting its file's digest if its file came, and what its roots came as, if
-    /// `entering` has it; and returns how many roots came. All of it, or, if a text is refused,
-    /// none, the cell staying as it was.
+    /// Brings `cell` in with `entering`'s texts in turn, each root given [`Streamed`], noting the
+    /// file's digest and what the roots came as, if given. Returns how many roots came. All or
+    /// none: if a text is refused the cell stays as it was.
     ///
-    /// Fails as [`commit_scene`](Self::commit_scene) does, for an ID an entity alive has
+    /// Fails like [`commit_scene`](Self::commit_scene), such as for an ID a live entity has
     /// (`ecs.id_taken`).
     pub(crate) fn enter_cell(&mut self, cell: Cell, entering: Entering) -> Result<usize> {
         let Entering {
@@ -922,13 +889,12 @@ impl World {
         Ok(roots.len())
     }
 
-    /// Notes that cell `cell`'s load was refused, so that it doesn't try again while a viewer stays
-    /// near.
+    /// Notes that `cell`'s load was refused, so it doesn't retry while a viewer stays near.
     pub(crate) fn refuse_cell(&mut self, cell: Cell) {
         self.cell_state_mut().refused.insert(cell);
     }
 
-    /// Forgets that `cells` were refused, so that they try again as a viewer comes near.
+    /// Forgets that `cells` were refused, so they retry as a viewer comes near.
     pub(crate) fn forget_refused(&mut self, cells: &[Cell]) {
         let state = self.cell_state_mut();
         for cell in cells {
@@ -936,8 +902,8 @@ impl World {
         }
     }
 
-    /// The path of cell `cell`'s file from the asset root, under the world's [`Cells`]; with the
-    /// folder `?` in a world without.
+    /// `cell`'s file's path from the asset root, under the world's [`Cells`]; the folder is `?`
+    /// without.
     pub(crate) fn cell_file(&self, cell: Cell) -> String {
         let folder = self
             .world_cells()
@@ -945,9 +911,8 @@ impl World {
         format!("{}/{cell}.ron", folder.unwrap_or("?"))
     }
 
-    /// The first cell, in order, whose file both this world and `other` brought in, from files of
-    /// other digests: its file's path, as [`cell_file`](Self::cell_file) gives it, and the digests
-    /// of this world's file and `other`'s.
+    /// The first cell, in order, that both worlds brought in from files of different digests: its
+    /// [path](Self::cell_file) and the digests of this world's file and `other`'s.
     pub(crate) fn cell_file_parted(&self, other: &World) -> Option<(String, u64, u64)> {
         let (ours, theirs) = (
             self.resource::<CellState>()?,
@@ -968,12 +933,10 @@ impl World {
     }
 }
 
-/// What a run keeps of its worlds' cells beside the world: each folder it listed, with its cells'
-/// files, in order, once a run, as [`Cells`] says; what the game makes of each folder's cells that
-/// makes some, as [`Context::make_cells`](crate::Context::make_cells) says; the warnings it gave, by
-/// code and what each is about, each once a run, so that neither a cell refused tick after tick nor
-/// a tick run again warns again; the tie of [`Cells`] it last warned of; and the plan of the cells'
-/// step.
+/// What a run keeps of its worlds' cells beside the world: each folder listed ([`Cells`]) with its
+/// cells' files in order; what the game [makes](crate::Context::make_cells) of each folder's cells;
+/// the warnings given, by code and subject, each once a run, so a cell refused every tick or a tick
+/// rerun doesn't warn again; the [`Cells`] tie last warned of; and the cells' step's plan.
 #[derive(Default)]
 pub(crate) struct CellRun {
     pub(crate) listed: Vec<(String, Arc<[Cell]>)>,
@@ -985,27 +948,25 @@ pub(crate) struct CellRun {
     /// The cells whose files came in as the tick started, with their digests, for a recording.
     pub(crate) came: Vec<(Cell, u64)>,
     /// While the run is stopped, the cells found unlike their files as no viewer was near, which
-    /// stay in, and the count of the scene files' changes they were found at, as
-    /// [`SceneFiles::changes`](crate::scene_files::SceneFiles::changes) counts them, after which
-    /// they're looked at again.
+    /// stay in, and the scene files' [change count](crate::scene_files::SceneFiles::changes) when
+    /// found, after which they're looked at again.
     #[cfg(feature = "dev")]
     pub(crate) held: (Vec<Cell>, u64),
 }
 
 impl CellRun {
-    /// Whether the warning of `code` about `about` is yet to be given, which it now counts as given.
+    /// Whether the warning of `code` about `about` is yet to be given; it now counts as given.
     pub(crate) fn first(&mut self, code: &'static str, about: impl fmt::Display) -> bool {
         self.warned.insert((code, about.to_string()))
     }
 
-    /// What the game makes of the cells of folder `folder`, if it makes some.
     pub(crate) fn made(&self, folder: &str) -> Option<&MadeCells> {
         let mut made = self.made.iter();
         made.find(|(made, _)| made == folder).map(|(_, made)| made)
     }
 
-    /// Where cell `cell` of folder `folder` comes from before it first comes in, `listed` the
-    /// cells with files: its file, if it has one, else what the game makes of it, if it makes it.
+    /// Where `cell` of `folder` comes from before it first comes in: its file (`listed` are the
+    /// cells with files), else what the game makes of it.
     pub(crate) fn source(&self, folder: &str, listed: &[Cell], cell: Cell) -> Option<CellSource> {
         if listed.binary_search(&cell).is_ok() {
             return Some(CellSource::File);
@@ -1014,8 +975,8 @@ impl CellRun {
         made.map(|made| CellSource::Made(made.clone()))
     }
 
-    /// The cells whose files the folder `folder` holds, as [`list_cells`] lists them under `root`
-    /// from `files`, once a run; none, warning `cells.listing`, for one it can't list.
+    /// The cells [`list_cells`] lists in `folder`, once a run; none, warning `cells.listing`, for
+    /// a folder it can't list.
     pub(crate) fn listed(
         &mut self,
         root: Option<&Path>,
@@ -1045,11 +1006,11 @@ impl CellRun {
     }
 }
 
-/// The cells whose files the folder `folder` holds, its path from the asset root `root`, `/`
-/// between its parts, in order: those its files' names, as [`Cell::of_file`] reads them, are, from
-/// the game's package in a run that reads one, `files`, and else from the disk.
+/// The cells whose files `folder` holds, in order: its path from the asset root `root`, `/` between
+/// its parts. The cells are those its file names ([`Cell::of_file`]) give, from the game's package
+/// (`files`) in a run that reads one, else the disk.
 ///
-/// Fails with `cells.listing` for a path that isn't one inside the asset root, in a run without a
+/// Fails with `cells.listing` for a path that isn't inside the asset root, in a run without a
 /// root, and for a folder the disk can't list.
 pub(crate) fn list_cells(root: Option<&Path>, files: &Files, folder: &str) -> Result<Arc<[Cell]>> {
     if !package::inside(folder) || folder.chars().any(char::is_control) {

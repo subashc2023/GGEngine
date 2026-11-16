@@ -16,8 +16,8 @@ pub(crate) enum Walk {
     Crate(f32),
 }
 
-/// Builds a world of cells as it attaches, as [`streaming`] builds one, of the folder `cells` of
-/// the asset root [`project`] makes, and moves what its commands say at each tick.
+/// Builds a world of cells on attach, like [`streaming`], over [`project`]'s `cells` folder, and
+/// moves what its commands say each tick.
 #[derive(Default)]
 pub(crate) struct Walker(Vec<Walk>);
 
@@ -49,8 +49,8 @@ impl Layer for Walker {
     }
 }
 
-/// A walk across [`project`]'s cells: out to cell 3, cell 1's entity moved, away from them all and
-/// back, so that cells come in and go out, and cell 1 comes back from what it keeps.
+/// A walk across [`project`]'s cells: out to cell 3, cell 1's entity moved, away from all and back,
+/// so cells come and go and cell 1 returns from its keep.
 pub(crate) const WALK: [Option<Walk>; 7] = [
     None,
     Some(Walk::Viewer(25.0)),
@@ -61,7 +61,7 @@ pub(crate) const WALK: [Option<Walk>; 7] = [
     None,
 ];
 
-/// A scene of an entity of each of `entities`' IDs, at its x, as a cell's file holds them.
+/// A cell file's scene: an entity at each x, with its ID.
 pub(crate) fn scene(entities: &[(u64, f32)]) -> String {
     let mut text = "(\n    entities: {\n".to_owned();
     for (id, x) in entities {
@@ -73,13 +73,13 @@ pub(crate) fn scene(entities: &[(u64, f32)]) -> String {
     text + "    },\n)\n"
 }
 
-/// The ID of the entity a cell's file gives: 0x10 for cell 0, and so on.
+/// The ID of a cell file's entity: 0x10 for cell 0, and so on.
 pub(crate) fn id_of(cell: i32) -> EntityId {
     EntityId::new(0x10 + cell as u64).expect("an ID")
 }
 
-/// A project's asset root in `dir`, whose folder `cells` holds four cells along x of 10 units, each
-/// of an entity at its middle, as [`id_of`] names it, and a file that isn't a cell's.
+/// An asset root in `dir` whose `cells` folder holds four 10-unit cells along x, each with an
+/// entity at its middle (ID by [`id_of`]), and a file that isn't a cell's.
 pub(crate) fn project(dir: &Path) -> PathBuf {
     let root = dir.join("game");
     fs::create_dir_all(root.join("cells")).expect("a directory");
@@ -91,8 +91,8 @@ pub(crate) fn project(dir: &Path) -> PathBuf {
     root
 }
 
-/// A context of the asset root `root`, whose world has `Cells` of `folder`, 10 units on a side, and
-/// a viewer of a radius of 10 at x 5, which it returns.
+/// A context over asset root `root` whose world has `Cells` of `folder`, 10 units a side, and a
+/// viewer of radius 10 at x 5, which it returns.
 fn streaming(root: &Path, folder: &str) -> (Context, Entity) {
     let mut cx = Context::seeded(1).root(root.to_owned());
     let world = cx.world_mut();
@@ -111,23 +111,21 @@ fn at(x: f32) -> Transform {
     }
 }
 
-/// Moves `entity` to x `x`.
 fn move_to(cx: &mut Context, entity: Entity, x: f32) {
     let transform = cx.world_mut().get_mut::<Transform>(entity);
     transform.expect("placed").translation.x = f64::from(x);
 }
 
-/// The x of each cell in, in order.
 fn cells_in(cx: &Context) -> Vec<i32> {
     xs(cx.world())
 }
 
-/// The x of each of `world`'s cells in, in order.
+/// The x of each of `world`'s cells in.
 pub(crate) fn xs(world: &World) -> Vec<i32> {
     world.cells_in().map(|cell| cell.0.x).collect()
 }
 
-/// Where the entity of ID `id` is along x, if it's alive, and whether it streams.
+/// The x of entity `id` if alive, and whether it streams.
 fn found(cx: &Context, id: EntityId) -> Option<(f32, bool)> {
     let world = cx.world();
     let entity = world.entity(id)?;
@@ -143,27 +141,26 @@ fn state(cx: &Context) -> &CellState {
     cx.world().resource::<CellState>().expect("streamed")
 }
 
-/// The cells' step from one tick to the next: the end of one, which takes cells out and notes those
-/// coming, and the start of the next, which brings them in.
+/// The cells' step across a tick boundary: the end of one tick takes cells out and notes those
+/// coming; the start of the next brings them in.
 fn step(cx: &mut Context) {
     cx.stream_cells();
     cx.enter_coming();
 }
 
-/// The x of each cell coming in, in order.
+/// The x of each cell coming in.
 fn coming(cx: &Context) -> Vec<i32> {
     state(cx).coming.iter().map(|cell| cell.0.x).collect()
 }
 
-/// The x of each cell prepared, in order.
+/// The x of each cell prepared.
 fn prepared(cx: &Context) -> Vec<i32> {
     let cells = cx.cells.preparing.cells.iter();
     let ready = cells.filter(|(_, prep)| matches!(prep.stage, Stage::Ready(Ok(_))));
     ready.map(|(cell, _)| cell.0.x).collect()
 }
 
-/// A cell's file names it by its place on the grid, each integer as Rust writes it, and nothing
-/// else names one.
+/// A cell's file is named by its grid place, each integer as Rust writes it; no other name is one.
 #[test]
 fn a_cell_s_file_names_it_by_its_place() {
     let cell = Cell(IVec3::new(3, 0, -2));
@@ -181,13 +178,13 @@ fn a_cell_s_file_names_it_by_its_place() {
     }
 }
 
-/// A point is in the cell of each axis's floor over the size, below the origin too; a world
-/// without `Cells`, or of a size that isn't finite and positive, has no cells.
+/// A point's cell is each axis's floor over the size, below the origin too; a world without
+/// `Cells`, or with a size that isn't finite and positive, has none.
 #[test]
 fn a_point_is_in_the_cell_of_its_floor_over_the_size() {
     let cell = Cell::at(DVec3::new(25.0, -0.5, 0.0), 10.0);
     assert_eq!(cell, Cell(IVec3::new(2, -1, 0)));
-    // 1,000 km out, a millimeter either side of a cell's edge, which `f32` would round onto it.
+    // 1,000 km out, a millimeter either side of an edge, which `f32` would round onto it.
     let edge = 1.0e6 + 10.0;
     let sides = [edge - 0.001, edge + 0.001].map(|x| Cell::at(DVec3::new(x, 0.0, -x), 10.0));
     assert_eq!(sides[0], Cell(IVec3::new(100_000, 0, -100_001)));
@@ -207,12 +204,12 @@ fn a_point_is_in_the_cell_of_its_floor_over_the_size() {
     assert_eq!(world.cell_at(DVec3::ZERO), None);
 }
 
-/// Cells come in as a viewer comes within its radius, with their files' entities, which stream,
-/// and go out past its radius and half a cell, keeping their entities as they were: one a tick
-/// moved within its cell comes back where it was left, not where the file has it; one moved into a
-/// cell that's out goes out at once, and comes back with that cell; a cell that goes out as it
-/// came keeps nothing, and comes back from its file; and what doesn't stream, or holds a viewer,
-/// stays. A file whose name isn't a cell's counts for nothing.
+/// Cells come in, with their files' streaming entities, as a viewer comes within its radius, and
+/// go out past its radius plus half a cell, keeping their entities as they were: one moved within
+/// its cell returns where it was left, not where the file has it; one moved into a cell that's out
+/// goes out at once and returns with that cell; a cell that goes out as it came keeps nothing and
+/// returns from its file; what doesn't stream, or holds a viewer, stays. A file whose name isn't a
+/// cell's counts for nothing.
 #[test]
 fn cells_come_in_near_a_viewer_and_go_out_keeping_what_they_held() {
     let logged = crate::testing::logged();
@@ -302,10 +299,10 @@ fn cells_come_in_near_a_viewer_and_go_out_keeping_what_they_held() {
     assert_eq!(cells.len(), 11, "nothing else: {cells:?}");
 }
 
-/// A cell that goes out as it came from its file keeps nothing, its file no longer noted as come
-/// in, so that what the world holds of its cells follows the cells in and those changed, not those
-/// a viewer crossed, and it comes back from its file; one changed keeps what it holds, and keeps it
-/// again as it goes out as it came back, which its file no longer stands for.
+/// A cell that goes out as it came from its file keeps nothing and its file is no longer noted as
+/// come in, so the world holds only cells in and changed, not those a viewer crossed; it returns
+/// from its file. One changed keeps what it holds, and keeps it again as it goes out as it came
+/// back, which its file no longer stands for.
 #[test]
 fn a_cell_going_out_as_it_came_keeps_nothing() {
     let dir = Scratch::new("cells-as-they-came");
@@ -346,9 +343,9 @@ fn a_cell_going_out_as_it_came_keeps_nothing() {
     assert_eq!(kept, [0], "kept again");
 }
 
-/// A cell whose file's text the run takes again while it's in, as a save of the file applies, no
-/// longer goes out as it came, keeping what it holds, so that an edit since, as one undoing what
-/// the save applied, stays; another cell's goes out as it came.
+/// A cell whose file text the run takes again while in, as a file save applies, no longer goes out
+/// as it came but keeps what it holds, so an edit since (even one undoing the save) stays; another
+/// cell's goes out as it came.
 #[test]
 fn a_cell_whose_file_changed_since_it_came_keeps_what_it_holds() {
     let dir = Scratch::new("cells-file-changed");
@@ -374,8 +371,7 @@ fn a_cell_whose_file_changed_since_it_came_keeps_what_it_holds() {
     );
 }
 
-/// Makes the cells of folder `cells` that have no file, from -2 to 5 along x, as it loads, as
-/// [`make`] does.
+/// Like [`make`], as it loads.
 struct Maker;
 
 impl Layer for Maker {
@@ -384,8 +380,8 @@ impl Layer for Maker {
     }
 }
 
-/// Makes the cells of folder `cells` that have no file, from -2 to 5 along x: each an entity at
-/// its middle, of the ID [`made_id`] gives.
+/// Makes the fileless cells of `cells` from -2 to 5 along x: an entity at each middle, with ID
+/// [`made_id`].
 fn make(cx: &mut Context) {
     let [from, to] = [-2, 5].map(|x| Cell(IVec3::new(x, 0, 0)));
     cx.make_cells("cells", from, to, |cell| {
@@ -394,15 +390,14 @@ fn make(cx: &mut Context) {
     });
 }
 
-/// The ID of the entity the game makes cell `x` of.
+/// The ID of cell `x`'s made entity.
 fn made_id(x: i32) -> EntityId {
     EntityId::new((0x100 + x) as u64).expect("an ID")
 }
 
-/// The cells a game makes come in around a viewer as those of files do, from what it makes of
-/// each, a file standing for its cell in place of the game's making, none outside what it makes;
-/// the run keeps none of their texts; and each goes out as it came, keeping nothing, so that a
-/// viewer that crossed them leaves nothing behind.
+/// Made cells come in around a viewer like file cells, from the game's making; a file replaces the
+/// making for its cell; none comes in outside what's made; the run keeps none of their texts; each
+/// goes out as it came, keeping nothing, so a viewer crossing them leaves nothing behind.
 #[test]
 fn the_cells_a_game_makes_come_in_as_those_of_files_do() {
     let dir = Scratch::new("cells-made");
@@ -452,10 +447,9 @@ fn the_cells_a_game_makes_come_in_as_those_of_files_do() {
     assert_eq!(found(&cx, made_id(5)), Some((56.0, true)), "as it was left");
 }
 
-/// The cells within a viewer's radius and a cell more are prepared ahead, as a tick ends, and come
-/// in from what was prepared; a tick whose cells coming in aren't prepared waits, and runs once they
-/// are, logging how long it waited; and what's prepared of cells no viewer is near any more is
-/// dropped.
+/// Cells within a viewer's radius plus a cell are prepared ahead as a tick ends and come in from
+/// that; a tick whose cells coming in aren't prepared waits, runs once they are, and logs how long
+/// it waited; what's prepared of cells no viewer is near any more is dropped.
 #[test]
 fn cells_are_prepared_ahead_and_a_tick_waits_for_its_own() {
     let logged = crate::testing::logged();
@@ -477,8 +471,7 @@ fn cells_are_prepared_ahead_and_a_tick_waits_for_its_own() {
     cx.enter_coming();
     assert_eq!(cells_in(&cx), [0, 1]);
     assert_eq!(prepared(&cx), [2], "taken as they came in");
-    // What was prepared of cell 2 stands for its file, which says x 25: as it comes in, it puts
-    // the entity at 99.
+    // Cell 2's preparing stands for its file (x 25): as it comes in, it puts the entity at 99.
     let two = Cell(IVec3::new(2, 0, 0));
     let moved = scene(&[(id_of(2).get(), 99.0)]);
     let parsed = cx.world().scratch().parse_scene(&moved).expect("parsed");
@@ -494,8 +487,8 @@ fn cells_are_prepared_ahead_and_a_tick_waits_for_its_own() {
     cx.enter_coming();
     assert_eq!(cells_in(&cx), [0, 1, 2]);
     assert_eq!(found(&cx, id_of(2)), Some((99.0, true)), "as prepared");
-    // What was prepared of cell 3 stands for a file it no longer has, as after a save: it comes in
-    // from its file.
+    // Cell 3's preparing stands for a file it no longer has, as after a save: it comes in from its
+    // file.
     let three = Cell(IVec3::new(3, 0, 0));
     let moved = scene(&[(id_of(3).get(), 99.0)]);
     let parsed = cx.world().scratch().parse_scene(&moved).expect("parsed");
@@ -533,9 +526,9 @@ fn cells_are_prepared_ahead_and_a_tick_waits_for_its_own() {
     assert_eq!(count("cells.prepared"), 5, "{codes:?}");
 }
 
-/// Cells prepared on threads, of one whose file names a model no layer loaded, which a thread
-/// reads, come in as they would prepared then and there: a SyncTest, which runs each tick again on
-/// a copy of the world, preparing the cells it brings in on the spot, finds every tick alike.
+/// Cells prepared on threads, one naming a model no layer loaded (a thread reads it), come in as if
+/// prepared on the spot: a SyncTest, which reruns each tick on a world copy, preparing cells there,
+/// finds every tick alike.
 #[test]
 fn cells_prepared_on_threads_come_in_as_prepared_on_the_spot() {
     use crate::App;
@@ -590,8 +583,8 @@ fn cells_prepared_on_threads_come_in_as_prepared_on_the_spot() {
     run.stack.detach(&mut cx);
 }
 
-/// A model's add takes its files as a cell's preparing read them on a thread, if it did, rather than
-/// reading them again, and reads them itself after.
+/// A model's add takes the files a cell's preparing read on a thread, if it did, instead of reading
+/// again, and reads them itself after.
 #[test]
 fn a_model_s_add_takes_its_files_as_a_thread_read_them() {
     let dir = Scratch::new("cells-model-read");
@@ -611,8 +604,7 @@ fn a_model_s_add_takes_its_files_as_a_thread_read_them() {
     cx.add_model("m", &file).expect("read again, here");
 }
 
-/// A server's client brings no cell in itself, nor takes one out: its cells come and go with its
-/// server's states.
+/// A server's client streams no cells itself: they come and go with its server's states.
 #[test]
 fn a_server_s_client_brings_no_cells_in() {
     let dir = Scratch::new("cells-client");
@@ -624,9 +616,8 @@ fn a_server_s_client_brings_no_cells_in() {
     assert!(cx.world().resource::<CellState>().is_none());
 }
 
-/// A cell whose file gives an entity's ID that's alive is refused, warning once, and stays out
-/// without trying again while a viewer stays near; once every viewer has gone, it tries again as
-/// one comes back.
+/// A cell whose file gives an ID that's alive is refused, warning once, and stays out without
+/// retrying while a viewer stays near; once every viewer has gone, it retries as one returns.
 #[test]
 fn a_cell_refused_stays_out_until_its_viewers_go() {
     let logged = crate::testing::logged();
@@ -656,9 +647,9 @@ fn a_cell_refused_stays_out_until_its_viewers_go() {
     assert_eq!(found(&cx, id_of(0)), Some((5.0, true)));
 }
 
-/// A scene change empties what the world keeps of its cells with its entities, and a world whose
-/// cells' state is empty hashes as one that never had cells; two worlds alike but for what a cell
-/// keeps hash apart, by their layout alone.
+/// A scene change empties the world's cells' state with its entities, and a world with empty cell
+/// state hashes as one that never had cells; worlds differing only in a cell's keep hash apart, by
+/// layout alone.
 #[test]
 fn a_scene_change_empties_the_cells_and_what_cells_keep_is_hashed() {
     let dir = Scratch::new("cells-hashed");
@@ -678,8 +669,7 @@ fn a_scene_change_empties_the_cells_and_what_cells_keep_is_hashed() {
     let (one, other) = (one.world().hash(), other.world().hash());
     assert_eq!(one.content, other.content, "neither holds the entity");
     assert_ne!(one.layout, other.layout, "the texts kept differ");
-    // Alike but for a cell coming, for the digest of a file that came, or for what a cell in came
-    // as.
+    // Alike but for a cell coming, a came-in file's digest, or what a cell in came as.
     let [mut coming, mut filed, mut came] = [kept(6.0), kept(6.0), kept(6.0)];
     let alike = coming.world().hash();
     let two = Cell(IVec3::new(2, 0, 0));
@@ -712,8 +702,8 @@ fn a_scene_change_empties_the_cells_and_what_cells_keep_is_hashed() {
     assert_eq!(cx.world().hash(), emptied);
 }
 
-/// A world's text, as a snapshot, a lockstep joiner's world and a server's state hold it, holds
-/// what its cells keep, which a world read from it has alike, hashing alike.
+/// A world's text (snapshot, lockstep joiner's world, server state) holds what its cells keep; a
+/// world read from it has the same, and hashes alike.
 #[test]
 fn a_world_s_text_holds_what_its_cells_keep() {
     let dir = Scratch::new("cells-saved");
@@ -735,7 +725,7 @@ fn a_world_s_text_holds_what_its_cells_keep() {
     read.world_mut().load_whole(lines, false).expect("read");
     assert_eq!(state(&read), state(&cx));
     assert_eq!(read.world().hash(), cx.world().hash());
-    // Of a snapshot from before what cells came as was saved, none came as their files have them.
+    // A snapshot from before came-as was saved: none came as their files have them.
     let old = r#"{"cells_in":[[1,0,0]],"coming":[],"files":[],"kept":[],"refused":[]}"#;
     let old = CellState::load(old, read.world()).expect("read");
     assert_eq!(old.came_as.len(), 0);
@@ -746,11 +736,10 @@ fn a_world_s_text_holds_what_its_cells_keep() {
 #[derive(Clone, Component)]
 struct Aim(Entity);
 
-/// A server's client's view of a world, written as its states are and read as its copy reads them,
-/// hashes as `hash_seen` says: the streamed roots of the cells it doesn't see gone, with what's
-/// under them, a reference to one dead, and their slots retired, so that the next entity spawned
-/// takes the slot the server's would; its cells' state its own, the cells it sees in and nothing
-/// kept. A view of a world without cells is the world whole.
+/// A server's client's view of a world, written as its states are and read as its copy reads it,
+/// hashes as `hash_seen` does: unseen cells' streamed roots gone with what's under them, references
+/// to them dead, their slots retired so the next spawn takes the server's slot; the cells' state
+/// its own: the cells it sees in, nothing kept. A world without cells is seen whole.
 #[test]
 fn a_client_s_view_loads_as_it_hashes() {
     let dir = Scratch::new("cells-seen");
@@ -768,7 +757,7 @@ fn a_client_s_view_loads_as_it_hashes() {
     world.set_parent(child, Some(far)).expect("no cycle");
     let aimed = world.entity(id_of(2)).expect("in");
     let aimer = world.spawn(Aim(aimed));
-    // A slot freed, which the server's next spawn takes, as the client's must.
+    // A freed slot, which the server's next spawn takes, so the client's must.
     let freed = world.spawn(at(0.0));
     world.despawn(freed).expect("alive");
 
@@ -816,10 +805,10 @@ fn a_client_s_view_loads_as_it_hashes() {
     assert_eq!(world.hash_seen(Some(&seen)), world.hash());
 }
 
-/// A server's client sees the cells in within its own viewers' radius, a viewer being its own where
-/// it or an ancestor is its player's, as `Owner` says, and keeps one it saw to the radius and half a
-/// cell, as the cells' step does; it sees none of a viewer no player owns, and none without a
-/// viewer; and no view hides a streamed root holding a viewer of the client's own.
+/// A server's client sees the cells in within its own viewers' radius (a viewer is its own if it
+/// or an ancestor is its player's, per `Owner`) and keeps one it saw to the radius plus half a
+/// cell, like the cells' step; it sees none through a viewer no player owns, or without a viewer;
+/// and no view hides a streamed root holding the client's own viewer.
 #[test]
 fn a_client_sees_the_cells_near_its_own_viewers() {
     let dir = Scratch::new("cells-seen-by");
@@ -827,7 +816,7 @@ fn a_client_sees_the_cells_near_its_own_viewers() {
     // A viewer no player owns, at x 5, keeping cells 0 and 1 in.
     let (mut cx, _) = streaming(&root, "cells");
     step(&mut cx);
-    // The cells player `player` sees, `had` those it saw, and the cells in whose roots it hides.
+    // What `player` sees, given `had`, and the cells in whose roots it hides.
     let seen = |cx: &Context, player: u8, had: &[i32]| {
         let world = cx.world();
         let had = had.iter().map(|&x| Cell(IVec3::new(x, 0, 0))).collect();
@@ -874,9 +863,9 @@ fn a_client_sees_the_cells_near_its_own_viewers() {
     );
 }
 
-/// Past [`MOST_CELLS`], the nearest come in, and the plan says it's full; of cells a game makes
-/// everywhere, a radius of thousands of cells looks within a bounded box, of which the nearest
-/// come in, as far as a flat world's reach.
+/// Past [`MOST_CELLS`] the nearest come in and the plan says full; with cells made everywhere, a
+/// radius of thousands of cells searches a bounded box, whose nearest come in as far as a flat
+/// world's reach.
 #[test]
 fn past_the_most_cells_the_nearest_come_in() {
     let mut cx = Context::seeded(1);
@@ -901,7 +890,7 @@ fn past_the_most_cells_the_nearest_come_in() {
         away.map(|cell| (cell.0 - middle).abs().max_element()).max()
     };
     assert!(away(&plan) <= Some(10), "the nearest");
-    // Of a world one cell deep, a disc, the 4,096 nearest reach some 36 cells away.
+    // In a one-cell-deep world, a disc: the 4,096 nearest reach some 36 cells away.
     let flat = (
         Cell(IVec3::new(i32::MIN, 0, i32::MIN)),
         Cell(IVec3::new(i32::MAX, 0, i32::MAX)),
@@ -916,9 +905,9 @@ fn past_the_most_cells_the_nearest_come_in() {
     );
 }
 
-/// `Cells` of a size that isn't finite and positive bring nothing in, warning once; of several,
-/// the world streams by the one of the lowest ID, warning as the tie comes to be; and a folder
-/// that can't be listed brings no cell in from a file, warning once.
+/// `Cells` with a size that isn't finite and positive bring nothing in, warning once; of several,
+/// the lowest ID streams, warning as the tie arises; a folder that can't be listed brings no cell
+/// in from a file, warning once.
 #[test]
 fn cells_that_can_t_stream_warn_once() {
     let logged = crate::testing::logged();
@@ -950,8 +939,8 @@ fn cells_that_can_t_stream_warn_once() {
     assert_eq!(count("cells.listing"), 1, "{codes:?}");
 }
 
-/// A run from a game's package, as a build without `dev` runs, lists the cells' folder there, and
-/// reads each cell's file from it, though none is on the disk.
+/// A run from a game's package, as a build without `dev` runs, lists the cells' folder and reads
+/// each file from it, though none is on the disk.
 #[test]
 fn a_run_from_a_package_lists_and_reads_its_cells_there() {
     use crate::package::{Kind, Package, Writer};
@@ -967,7 +956,7 @@ fn a_run_from_a_package_lists_and_reads_its_cells_there() {
     let path = dir.0.join("game.ggpk");
     fs::create_dir_all(&dir.0).expect("a directory");
     writer.write(&path).expect("written");
-    // Never made: what's read, is read from the package.
+    // Never made: read from the package.
     let root = dir.0.join("game");
     let (mut cx, _) = streaming(&root, "cells");
     let package = Arc::new(Package::open(&path).expect("opened"));
@@ -977,9 +966,9 @@ fn a_run_from_a_package_lists_and_reads_its_cells_there() {
     assert_eq!(found(&cx, id_of(1)), Some((15.0, true)));
 }
 
-/// Cells go out as each tick ends, and those found coming then come in as the next starts, which a
-/// SyncTest runs again on a copy of the world, alike, and a recording of the run replays to every
-/// hash, its cells coming and going at the ticks the run's did.
+/// Cells go out as each tick ends and those found coming come in as the next starts; a SyncTest
+/// reruns that on a world copy alike, and a recording replays to every hash, its cells coming and
+/// going at the ticks the run's did.
 #[test]
 fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
     use crate::App;
@@ -1033,13 +1022,13 @@ fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
     }
     assert_eq!((ran, replay.world().hash()), (WALK.len() as u64, ended));
     assert_eq!(xs(replay.world()), [0, 1]);
-    // Each cell's file as it came in: cell 0's again, as it went out as it came.
+    // Each cell's file as it came in: cell 0's again, since it went out as it came.
     let files: Vec<&str> = (text.lines())
         .filter_map(|line| Some(line.strip_prefix("cell ")?.split_once(' ')?.0))
         .collect();
     assert_eq!(files, ["0_0_0", "1_0_0", "2_0_0", "3_0_0", "0_0_0"]);
 
-    // Cell 2's file changed since: the replay, as `--replay` runs it, stops as it comes in, naming
+    // Cell 2's file changed since: the replay (as `--replay` runs it) stops as it comes in, naming
     // it.
     let two = root.join("cells/2_0_0.ron");
     let changed = fs::read_to_string(&two)
@@ -1056,8 +1045,7 @@ fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
     );
 }
 
-/// A world whose cells the game makes needs no folder: one that isn't there warns of nothing, and
-/// its cells come in.
+/// A world whose cells the game makes needs no folder: a missing one warns of nothing.
 #[test]
 fn a_made_world_needs_no_folder() {
     let logged = crate::testing::logged();
@@ -1073,9 +1061,9 @@ fn a_made_world_needs_no_folder() {
     );
 }
 
-/// A run whose game makes cells runs again alike in a SyncTest, and its recording replays to its
-/// hashes, naming the cells whose files came in, as they came, cells 2 and 3 going out again, as
-/// they came, at the end of the tick they came in at, and no cell the game made.
+/// A run whose game makes cells reruns alike in a SyncTest, and its recording replays to its
+/// hashes, naming the cells whose files came in as they came; cells 2 and 3 go out again as they
+/// came at the end of their tick, and no made cell is named.
 #[test]
 fn a_run_of_made_cells_replays_naming_no_made_cell() {
     const WALK: [Option<Walk>; 6] = [
@@ -1144,7 +1132,7 @@ fn a_run_of_made_cells_replays_naming_no_made_cell() {
     );
 }
 
-/// Has the look's viewpoint at x `x`, as the editor's camera is.
+/// Puts the look's viewpoint (the editor's camera) at x `x`.
 #[cfg(feature = "dev")]
 pub(crate) fn look_at(cx: &mut Context, x: f32) {
     cx.dev.look.viewpoint = Some(gg_renderer::Viewpoint {
@@ -1153,10 +1141,10 @@ pub(crate) fn look_at(cx: &mut Context, x: f32) {
     });
 }
 
-/// While the run is stopped, as a world is edited, cells come in around the look's viewpoint, 512
-/// across without a viewer of a larger radius, as they're prepared; as it goes, a cell edited stays
-/// in, and those as their files have them go, keeping nothing, and come back from their files; and
-/// a root moved into a cell out brings the cell's file in with it.
+/// While the run is stopped and a world edited, cells come in around the look's viewpoint, 512
+/// across unless a viewer's radius is larger, as they're prepared; as it leaves, an edited cell
+/// stays in, those as their files have them go, keeping nothing, and return from their files; a
+/// root moved into a cell out brings the cell's file in with it.
 #[cfg(feature = "dev")]
 #[test]
 fn stopped_cells_come_and_go_around_the_look_s_viewpoint() {
@@ -1167,7 +1155,7 @@ fn stopped_cells_come_and_go_around_the_look_s_viewpoint() {
         folder: "cells".to_owned(),
         size: 10.0,
     });
-    // One frame notes the cells coming and prepares them, the next brings them in.
+    // One frame notes and prepares the cells coming, the next brings them in.
     let frames = |cx: &mut Context| {
         cx.stream_stopped();
         cx.stream_stopped();
