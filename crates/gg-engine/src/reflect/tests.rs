@@ -1,7 +1,6 @@
 use super::*;
 use crate::{Component, EntityId, MeshDraw, Name, Sampler, Sprite, Transform, World};
 
-/// A struct a field holds.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 pub(crate) struct Inner {
     #[reflect(min = -1, max = 1)]
@@ -64,7 +63,7 @@ pub(crate) struct Everything {
     pub(crate) handle: Handle,
 }
 
-/// Built on [`everything`], which gives it its handle, as a component with an opaque field is.
+/// Built by [`everything`], as a component with an opaque field is.
 impl Component for Everything {
     fn base() -> Option<Self> {
         Some(everything())
@@ -80,7 +79,7 @@ pub(crate) fn everything() -> Everything {
         byte: 7,
         weight: 2.5,
         angle: 0.5,
-        // Transparent, so that its color is lost if alpha is multiplied in.
+        // Transparent: premultiplying alpha would lose its color.
         tint: Vec4::new(0.3, 0.6, 0.9, 0.0),
         offset: Vec3::new(1.0, -0.0, 3.0),
         turn: Quat::from_rotation_x(0.25),
@@ -99,7 +98,7 @@ pub(crate) fn everything() -> Everything {
     }
 }
 
-/// Whether `a` and `b` are the same, their numbers compared by their bits.
+/// Whether `a` and `b` are equal, numbers compared by bits.
 pub(crate) fn same(a: &Value, b: &Value) -> bool {
     let floats = |a: &[f32], b: &[f32]| {
         a.iter()
@@ -129,7 +128,7 @@ pub(crate) fn same(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Every component of every entity of `world`, read by name, beside the entity's handle and ID.
+/// Every component of every entity of `world`, read by name, with the entity's handle and ID.
 pub(crate) fn snapshot(world: &World) -> Vec<(Entity, EntityId, String, Value)> {
     let mut all = Vec::new();
     for entity in world.entities(None).expect("every entity") {
@@ -178,7 +177,7 @@ fn types_describe_their_fields_once_each() {
         registered.expect("described");
     }
     let types = world.types();
-    // Each as it's first reached, the types of a type's fields after it.
+    // First-reached order: a type, then its fields' types.
     let names: Vec<&str> = types.iter().map(|(_, info)| &*info.name).collect();
     let expected = [
         "Parent",
@@ -324,8 +323,8 @@ fn a_recursive_type_describes_itself_once() {
     assert_eq!(Node::from_value(&tree.to_value()).expect("a tree"), tree);
 }
 
-/// Derived beside consts named as what the derives' code binds, which would turn those
-/// bindings into patterns of the consts, which don't compile.
+/// Consts named as the derives' bindings turn those bindings into const patterns, which don't
+/// compile.
 mod beside_lowercase_consts {
     #![allow(
         dead_code,
@@ -344,7 +343,7 @@ mod beside_lowercase_consts {
     const error: u8 = 0;
     const default: u8 = 0;
 
-    /// A field with a default, an enum's and an opaque type's.
+    /// Holds a defaulted field, an enum and an opaque type.
     #[derive(Clone, Debug, PartialEq, crate::Component)]
     struct Held {
         #[reflect(default = 3)]
@@ -394,7 +393,7 @@ mod other {
     }
 }
 
-/// Its second field's type takes a name that's taken, after its first's is described.
+/// Its second field's type takes a name already taken, after its first's is described.
 #[derive(Clone, Reflect)]
 struct Holder {
     pair: Pair,
@@ -419,7 +418,7 @@ fn a_type_that_fails_to_describe_itself_leaves_the_types_as_they_were() {
         assert_eq!(names, ["Inner"]);
         assert_eq!(types.find("Holder").or(types.find("Pair")), None);
     }
-    // Undone by its type too, so that it describes itself afresh.
+    // Undone too, so it describes itself afresh.
     let pair = Pair::describe(&mut types).expect("described");
     assert_eq!(pair, Type::Named(TypeIndex(1)));
     let Shape::Struct { fields, .. } = &types.info(TypeIndex(1)).shape else {
@@ -554,7 +553,7 @@ fn paths_lead_to_fields_and_their_hints() {
     assert_eq!((to.steps, to.ty), (vec![0], Type::F32));
 }
 
-/// `value` read and made again, which must give back the same value, bit for bit.
+/// `value` read and made again must come back bit for bit.
 fn round_trip<T: Reflect>(value: T) {
     let read = value.to_value();
     let made = T::from_value(&read).unwrap_or_else(|error| panic!("{read:?}: {error}"));
@@ -606,10 +605,10 @@ fn values_come_back_bit_for_bit() {
     for name in Sampler::ALL {
         round_trip(name);
     }
-    // An integer of either sign sets one of either, if it fits.
+    // An integer of either sign sets either, if it fits.
     assert_eq!(u8::from_value(&Value::Int(5)).expect("fits"), 5);
     assert_eq!(i8::from_value(&Value::UInt(5)).expect("fits"), 5);
-    // What's opaque comes back from what it was.
+    // Opaque fields keep their value.
     let all = everything();
     let kept = all.with_value(&all.to_value()).expect("its own value");
     assert!(same(&kept.to_value(), &all.to_value()));
@@ -643,7 +642,7 @@ fn a_value_refused_partway_changes_nothing() {
     assert_eq!(error.code(), "reflect.opaque");
     assert!(error.to_string().starts_with("at `b.handle`: "), "{error}");
     assert_eq!(partly, Partly { a: 1.0, b: None });
-    // Kept, it's set.
+    // With the opaque field kept, it's set.
     let mut partly = Partly {
         a: 1.0,
         b: Some(WithOpaque { handle: Handle(3) }),
@@ -667,7 +666,7 @@ fn bounds_apply_to_numbers_components_and_elements() {
     };
     let check = |ty: &Type, meta: &Meta, value: Value| check(&types, ty, meta, &value);
     let within = meta(Some(Bound::Int(-2)), Some(Bound::Int(2)));
-    // Integers compare exactly, past what an f64 holds.
+    // Integers compare exactly, beyond f64's precision.
     let huge = meta(None, Some(Bound::Int(i128::from(i64::MAX) - 1)));
     assert!(check(&int, &huge, Value::Int(i64::MAX - 1)).is_ok());
     assert!(check(&int, &huge, Value::Int(i64::MAX)).is_err());
@@ -698,8 +697,8 @@ fn bounds_apply_to_numbers_components_and_elements() {
         assert_eq!(error.code(), "reflect.out_of_range", "{value:?}");
         assert!(error.to_string().starts_with(at), "{error}");
     }
-    // An f32 compares with its bounds rounded to an f32: 3.2f32, a little more than 3.2, is
-    // the f32 that `max = 3.2` means. An f64 compares with them as they are.
+    // An f32 compares with bounds rounded to f32: `max = 3.2` means 3.2f32, a little over 3.2.
+    // An f64 compares with them as they are.
     let decimal = meta(Some(Bound::Float(-3.2)), Some(Bound::Float(3.2)));
     assert!(check(&Type::F32, &decimal, Value::F32(3.2)).is_ok());
     assert!(check(&Type::F32, &decimal, Value::F32(-3.2)).is_ok());
@@ -707,7 +706,6 @@ fn bounds_apply_to_numbers_components_and_elements() {
     assert!(check(&Type::Vec2, &decimal, corner).is_ok());
     assert!(check(&Type::F32, &decimal, Value::F32(3.2f32.next_up())).is_err());
     assert!(check(&Type::F64, &decimal, Value::F64(3.2f32.into())).is_err());
-    // Without bounds, any number is in range.
     assert!(check(&Type::F32, &Meta::default(), Value::F32(f32::NAN)).is_ok());
     let half = meta(Some(Bound::Float(0.5)), None);
     assert!(check(&int, &half, Value::Int(0)).is_err());
@@ -766,7 +764,7 @@ fn a_type_defaults_to_zero_or_the_bound_nearest_it() {
             Value::Int(i64::MIN),
         ),
         (Type::F32, none(), Value::F32(0.0)),
-        // As `check` compares with it: rounded to an f32.
+        // Rounded to f32, as `check` does.
         (
             Type::F32,
             meta(Some(Bound::Float(0.1)), None),
@@ -856,7 +854,7 @@ fn a_type_defaults_to_zero_or_the_bound_nearest_it() {
             meta(Some(Bound::Int(2)), Some(Bound::Int(1))),
             "a Vec2",
         ),
-        // Beyond an f32's range, which rounds it to an infinite bound, outside every range.
+        // Beyond f32's range: rounds to an infinite bound, outside every range.
         (
             Type::F32,
             meta(Some(Bound::Float(1e39)), None),
@@ -872,7 +870,7 @@ fn a_type_defaults_to_zero_or_the_bound_nearest_it() {
     }
 }
 
-/// Lit by its hints' defaults, but for `spare`'s, which is its type's, as `shade`'s is.
+/// Fields take their hints' defaults; `spare`, like `shade`, takes its type's.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 struct Lamp {
     #[reflect(min = 0.0, default = 2.5)]
@@ -898,9 +896,9 @@ enum Shade {
     Dome(#[reflect(min = 0.5)] f32),
 }
 
-/// A struct's default is its fields', each the one its hint gives, or else its type's under
-/// its bounds; an enum's is its first variant, with its fields' defaults; and a type held
-/// twice is no cycle.
+/// - A struct's default is its fields': the hint's, else the type's under its bounds.
+/// - An enum's is its first variant, with its fields' defaults.
+/// - A type held twice is no cycle.
 #[test]
 fn defaults_are_the_hints_or_else_the_types() {
     let mut types = Types::default();
@@ -928,7 +926,6 @@ fn defaults_are_the_hints_or_else_the_types() {
     assert!(same(&made, &expected), "{made:?}");
     let made = Lamp::from_value(&made).expect("made");
     assert_eq!(made.watts, Watts(60));
-    // The hints are the fields' defaults, as their types' own values.
     let intensity = field(&types, &lamp, "intensity");
     assert_eq!(intensity.default, Some(Value::F32(2.5)));
     assert_eq!(field(&types, &lamp, "shade").default, None);
@@ -948,15 +945,14 @@ fn defaults_are_the_hints_or_else_the_types() {
         types.variant_default(&variants[1]).expect("a default"),
         dome
     );
-    // A field without one has its type's, under its own bounds.
     let rings = types.field_default(&variants[0].fields[1]);
     assert_eq!(rings.expect("a default"), Value::UInt(1));
 }
 
-/// What a description written by hand makes a struct that holds itself, without end.
+/// Described by hand as a struct holding itself.
 enum Loop {}
 
-/// What a description written by hand makes an enum without variants.
+/// Described by hand as an enum without variants.
 enum Never {}
 
 #[test]
@@ -1000,7 +996,7 @@ struct Light {
     intensity: f32,
 }
 
-/// Registered, it describes its field's type, whose default its own bounds refuse.
+/// Registering describes `Light`, whose default its own bounds refuse.
 #[derive(Clone, crate::Component)]
 struct Dim {
     light: Light,
@@ -1012,8 +1008,8 @@ enum Glow {
     Tinted(#[reflect(color, max = 1, default = Vec3::new(1.0, 2.0, 1.0))] Vec3),
 }
 
-/// Registered, it describes `Moons`, whose default holds an orbit its bounds refuse, which
-/// only `Orbit`'s description, finished after it, says.
+/// Registering describes `Moons`, whose default holds an orbit its bounds refuse; only `Orbit`'s
+/// later-finished description says so.
 #[derive(Clone, crate::Component)]
 struct Orbit {
     moons: Moons,
@@ -1027,7 +1023,7 @@ struct Moons {
     orbits: Vec<Orbit>,
 }
 
-/// Opaque as a whole, so that a default gives it nothing.
+/// Opaque as a whole: a default gives it nothing.
 #[derive(Clone, Reflect)]
 #[reflect(opaque)]
 struct Socket;
@@ -1038,9 +1034,9 @@ struct Plugged {
     socket: Socket,
 }
 
-/// A default its field's bounds refuse is refused as its type registers, even one holding the
-/// type registering, checked once that's described; and so is one opaque as a whole, which
-/// would give nothing. Either leaves the type unregistered, and every type described with it.
+/// Registering refuses a default its field's bounds refuse (even one holding the registering
+/// type, checked once described) and one opaque as a whole. Either leaves the type and every
+/// type described with it unregistered.
 #[test]
 fn a_bad_default_is_refused_as_its_type_registers() {
     let mut world = World::default();
@@ -1079,10 +1075,9 @@ fn a_bad_default_is_refused_as_its_type_registers() {
     assert_eq!(types.iter().len(), 0);
 }
 
-/// Each of the engine's components' default makes it, as an add makes it: a transform the
-/// identity, a sprite the default one and a name empty, and one with an opaque field, from
-/// its base; while a mesh, opaque as a whole without a base, and a parent, which holds an
-/// entity, have none.
+/// An engine component's default makes it as an add does: `Transform` the identity, `Sprite`
+/// its default, `Name` empty, one with an opaque field from its base. `MeshDraw` (opaque, no
+/// base) and `Parent` (holds an entity) have none.
 #[test]
 fn the_engines_components_defaults_make_them() {
     let mut world = World::default();

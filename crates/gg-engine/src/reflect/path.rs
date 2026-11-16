@@ -1,5 +1,5 @@
-//! Paths, such as `rect[1].y`: where one leads in a reflected type's description, and the part of
-//! a value it reaches, which `World::get_field` and `World::set_field` read and set.
+//! Paths, such as `rect[1].y`: where one leads in a type's description, and the part of a value it
+//! reaches, which `World::get_field` and `World::set_field` read and set.
 
 use std::fmt;
 
@@ -7,8 +7,8 @@ use super::{
     COMPONENTS, Error, Meta, Reflect, Result, Shape, Show, Type, Types, Value, list, what_is,
 };
 
-/// Where a path leads in a type: the parts to take, from the outside in, the type it reaches, and
-/// the hints of the field it's in, whose bounds its components and elements inherit.
+/// Where a path leads: the parts to take, outside in, the type reached, and the hints of the
+/// field it's in, whose bounds its components and elements inherit.
 #[derive(Debug)]
 pub(crate) struct Resolved {
     pub(crate) steps: Vec<u32>,
@@ -17,12 +17,12 @@ pub(crate) struct Resolved {
 }
 
 /// Where `path` leads in a value of `root`: a field's name, then `.name` for a struct's field,
-/// `.x` to `.w` for a vector's component, and `[i]` for an array's or a list's element, such as
-/// `rect[1].y`. An empty path is the whole value.
+/// `.x` to `.w` for a vector's component, `[i]` for an array's or list's element. An empty path is
+/// the whole value.
 ///
-/// Fails with `reflect.bad_path` for a path it can't read, and `reflect.no_field` for a step to
-/// a part there isn't, saying what's there: enums, options and quaternions are set whole, so a
-/// step into one is one. An index past a list's end only fails as the list is reached.
+/// Fails with `reflect.bad_path` for a path it can't read, and `reflect.no_field` for a step to a
+/// part there isn't, saying what's there. Enums, options and quaternions are set whole, so a step
+/// into one fails. An index past a list's end only fails as the list is reached.
 pub(crate) fn resolve(types: &Types, root: &Type, path: &str) -> Result<Resolved> {
     let mut to = Resolved {
         steps: Vec::new(),
@@ -64,8 +64,7 @@ pub(crate) fn resolve(types: &Types, root: &Type, path: &str) -> Result<Resolved
             if name.is_empty() {
                 return Err(bad("a step names no field".to_owned()));
             }
-            // Any identifier's: those that aren't ASCII are left to the lookup, as Rust's
-            // identifiers take so many characters.
+            // Non-ASCII characters are left to the lookup: Rust identifiers allow many.
             if !name
                 .chars()
                 .all(|c| !c.is_ascii() || c.is_ascii_alphanumeric() || c == '_')
@@ -80,7 +79,6 @@ pub(crate) fn resolve(types: &Types, root: &Type, path: &str) -> Result<Resolved
     Ok(to)
 }
 
-/// One step of a path.
 #[derive(Clone, Copy)]
 enum Step<'a> {
     Field(&'a str),
@@ -97,7 +95,7 @@ impl fmt::Display for Step<'_> {
 }
 
 impl Resolved {
-    /// Takes `step` from where it's reached, `walked` along the path.
+    /// Takes `step`, `walked` along the path.
     fn take(&mut self, types: &Types, step: Step<'_>, walked: &str) -> Result<()> {
         let none = |what: String| Err(Error::new("reflect.no_field", what));
         let here = |types: &Types, ty: &Type| match walked {
@@ -166,7 +164,7 @@ impl Resolved {
     }
 }
 
-/// The part of `root` that `steps`, a resolved path's, lead to.
+/// The part of `root` that a resolved path's `steps` lead to.
 ///
 /// Fails with `reflect.no_field` at an index past a list's end.
 pub(crate) fn reach<'a>(root: &'a dyn Reflect, steps: &[u32]) -> Result<&'a dyn Reflect> {
@@ -183,8 +181,7 @@ pub(crate) fn reach_mut<'a>(
 ) -> Result<&'a mut dyn Reflect> {
     let mut at = root;
     for &step in steps {
-        // Asked first, since the borrow checker keeps `at` borrowed in the branch where
-        // `part_mut` returns nothing.
+        // Asked first: the borrow checker keeps `at` borrowed where `part_mut` returns nothing.
         if at.part(step).is_none() {
             return Err(past_end(at, step));
         }
@@ -193,7 +190,6 @@ pub(crate) fn reach_mut<'a>(
     Ok(at)
 }
 
-/// The error that `list` has no element `index`.
 fn past_end(list: &dyn Reflect, index: u32) -> Error {
     let len = match list.to_value() {
         Value::List(items) => items.len(),

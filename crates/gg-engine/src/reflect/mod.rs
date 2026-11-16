@@ -1,8 +1,8 @@
-//! Reflection: what the engine knows of its types' fields while it runs, so that the inspector,
-//! scenes, operations, snapshots, replication, Luau's bindings and the tool API reach components by
-//! name, without their Rust types. A type describes itself once to [`Types`], by name; its values
-//! go in and out as [`Value`]s, checked against that description. Types derive [`Reflect`], with
-//! `#[derive(Reflect)]`, or `#[derive(Clone, Component)]` for components.
+//! Reflection: the engine's runtime knowledge of its types' fields. The inspector, scenes,
+//! operations, snapshots, replication, Luau's bindings and the tool API reach components by name
+//! through it, without Rust types. A type describes itself once to [`Types`]. Its values go in and
+//! out as [`Value`]s, checked against that description. Derive [`Reflect`], or
+//! `#[derive(Clone, Component)]` for components.
 
 mod impls;
 mod path;
@@ -16,66 +16,61 @@ use std::fmt;
 
 use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 
-/// The error and result types reflection returns, `gg-core`'s.
+/// `gg-core`'s error and result types.
 pub use gg_core::{Error, Result};
-/// Describes a struct or an enum to reflection: [`Reflect`] says how.
+/// Describes a struct or enum to reflection.
 pub use gg_macros::Reflect;
 
 pub use crate::ecs::Digest;
 use crate::{Entity, Font, Model, Prefab, Texture};
 pub(crate) use path::{Resolved, reach, reach_mut, resolve};
 
-/// An identifier: a type's, a field's or a variant's name, borrowed for Rust's types, and owned
-/// where it's read from text, as a recording's values are, or copied, as operations copy theirs,
-/// and for the types Luau scripts will declare.
+/// A type's, field's or variant's name. Borrowed for Rust's types; owned when read from text,
+/// copied or declared by Luau scripts.
 pub type Ident = Cow<'static, str>;
 
-/// A value of a reflected type, without its Rust type: what reflection reads from a field, and sets
-/// one to. The field's [`Type`] says which of these its values are.
+/// A value of a reflected type, without its Rust type. The field's [`Type`] says which variant.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Bool(bool),
-    /// A signed integer's.
     Int(i64),
-    /// An unsigned integer's. Either sets an integer field of either sign that it fits.
+    /// Either variant sets an integer field of either sign that it fits.
     UInt(u64),
-    /// Kept apart from `F64`, so that an `f32`'s bits come back as they went.
+    /// Kept apart from `F64` so an `f32`'s bits come back unchanged.
     F32(f32),
     F64(f64),
     String(String),
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
-    /// Kept apart from `Vec3`, as `F64` is from `F32`: an entity's translation, which keeps its
+    /// Kept apart from `Vec3`, as `F64` is from `F32`: an entity's translation keeps its
     /// precision far from the origin.
     DVec3(DVec3),
     /// A unit quaternion.
     Quat(Quat),
-    /// The entity's handle in this process: scenes, recordings, the tool API and replication map
+    /// The entity's handle in this process. Scenes, recordings, the tool API and replication map
     /// it to its persistent ID where values cross into them.
     Entity(Entity),
-    /// A texture's handle, which the renderer alone hands out, so that no value makes an index
-    /// that shaders sample unchecked: scenes, recordings, snapshots and the tool API name it by its
-    /// asset ID, or else its path, which the world's [assets](crate::App::root) map it to where
-    /// values cross into them.
+    /// Only the renderer hands out texture handles, so no value makes an index shaders sample
+    /// unchecked. Where values cross out of the process (scenes, recordings, snapshots, the tool
+    /// API) the world's [assets](crate::App::root) map it to an asset ID, else a path.
     Texture(Texture),
-    /// A model's handle, which only a model added hands out, named where values cross out of the
-    /// process as a texture is.
+    /// Only adding a model hands out its handle. Named like a texture where values cross out.
     Model(Model),
-    /// A font's handle, which only a font added hands out, named as a texture is.
+    /// Only adding a font hands out its handle. Named like a texture.
     Font(Font),
-    /// A prefab's handle, which only a prefab added hands out, named as a texture is.
+    /// Only adding a prefab hands out its handle. Named like a texture.
     Prefab(Prefab),
     Option(Option<Box<Value>>),
-    /// A list's elements, or an array's.
+    /// A list's or array's elements.
     List(Vec<Value>),
-    /// A struct's fields by name, each once: a tuple struct's are named `0`, `1` and so on.
+    /// A struct's fields by name, each once. A tuple struct's are named `0`, `1`, and so on.
     Struct(Vec<(Ident, Value)>),
-    /// An enum's variant by name, with its fields, as a struct's.
+    /// An enum's variant by name, with its fields as a struct's.
     Variant(Ident, Vec<(Ident, Value)>),
-    /// What reflection doesn't read, such as a [`MeshDraw`](crate::MeshDraw): an opaque field reads
-    /// as this, and set to it keeps what it has, so that what's opaque doesn't keep a value read
-    /// whole from setting back whole. Anywhere else it's `reflect.wrong_kind`.
+    /// What reflection doesn't read, such as a [`MeshDraw`](crate::MeshDraw). An opaque field
+    /// reads as this, and set to it keeps what it has, so a value read whole sets back whole.
+    /// Anywhere else it's `reflect.wrong_kind`.
     Opaque,
 }
 
@@ -83,8 +78,8 @@ pub enum Value {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
     Bool,
-    /// An integer of `bits`, 8 to 64; there are none whose size differs by platform, so that a
-    /// value means the same everywhere it's saved or sent.
+    /// An integer of `bits`, 8 to 64. None varies by platform, so values mean the same wherever
+    /// saved or sent.
     Int {
         bits: u8,
         signed: bool,
@@ -98,29 +93,29 @@ pub enum Type {
     DVec3,
     Quat,
     Entity,
-    /// A texture, named by its path: it has no default, so a component that shows none, as a
-    /// sprite does by default, holds one in an `Option`.
+    /// Named by its path. No default, so a field that may show none, as a sprite's does, holds an
+    /// `Option`.
     Texture,
-    /// A model, named as a texture is, which has no default either.
+    /// Named like a texture. No default.
     Model,
-    /// A font, named as a texture is, which has no default either: a field that may name none, as
-    /// a text's does for the engine's own font, holds one in an `Option`.
+    /// Named like a texture. No default: a field that may name none, as a text's does for the
+    /// engine's font, holds an `Option`.
     Font,
-    /// A prefab, named as a texture is, which has no default either.
+    /// Named like a texture. No default.
     Prefab,
     Option(Box<Type>),
     List(Box<Type>),
     /// This many elements, always.
     Array(Box<Type>, u32),
-    /// A struct or an enum, which [`Types`] describes.
+    /// A struct or enum, described by [`Types`].
     Named(TypeIndex),
-    /// A field marked `#[reflect(opaque)]`, which reflection keeps but doesn't read.
+    /// A field marked `#[reflect(opaque)]`: kept, not read.
     Opaque,
 }
 
 impl Type {
-    /// Whether reflection leaves values of the type as they are: an opaque field's, or an opaque
-    /// type's. Reading one gives [`Value::Opaque`], and only that sets one, keeping it as it is.
+    /// Whether values of the type are an opaque field's or type's. Reading one gives
+    /// [`Value::Opaque`]; only that sets one, keeping it.
     pub fn is_opaque(&self, types: &Types) -> bool {
         match self {
             Self::Opaque => true,
@@ -130,71 +125,70 @@ impl Type {
     }
 }
 
-/// A named type's place among [`Types`]' own, in the order they were described.
+/// A named type's place among [`Types`]', in description order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TypeIndex(u32);
 
-/// A struct or an enum, as reflection describes it.
+/// A struct or enum, as reflection describes it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeInfo {
-    /// Its identifier, unless `#[reflect(name = "...")]` gives another: no other type has it.
+    /// Its identifier, or `#[reflect(name = "...")]`. No other type has it.
     pub name: Ident,
-    /// Its doc comment, its lines joined into paragraphs.
+    /// Its doc comment, lines joined into paragraphs.
     pub doc: Cow<'static, str>,
-    /// What it holds: its fields or its variants, unless it's opaque.
+    /// Its fields or variants, unless opaque.
     pub shape: Shape,
 }
 
-/// What a named type holds, as reflection describes it: a struct's fields, an enum's variants, or
-/// nothing it reads.
+/// What a named type holds.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
-    /// Its fields, in the order it declares them; a tuple struct's are named `0`, `1` and so on.
+    /// Fields in declaration order. A tuple struct's are named `0`, `1`, and so on.
     Struct { fields: Vec<Field>, tuple: bool },
-    /// Its variants, in the order it declares them.
+    /// Variants in declaration order.
     Enum(Vec<Variant>),
-    /// Marked `#[reflect(opaque)]`: kept and listed, but not read or set.
+    /// `#[reflect(opaque)]`: kept and listed, not read or set.
     Opaque,
 }
 
-/// A field of a struct or of an enum's variant, as reflection describes it.
+/// A field of a struct or enum variant.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
-    /// Its identifier, or its index in a tuple, such as `0`: what paths and values name it by.
+    /// Its identifier, or its tuple index such as `0`: what paths and values name it by.
     pub name: Ident,
     pub ty: Type,
     pub meta: Meta,
-    /// What it is unless something says otherwise, as in a component added, if its description
-    /// gives it, as `#[reflect(default = ..)]` does: otherwise its type's, under its bounds, as
+    /// What it is unless something says otherwise, as in a component added: its description's
+    /// (`#[reflect(default = ..)]`), else its type's under its bounds, as
     /// [`Types::field_default`] makes it. The field's, not its [`Meta`]'s, which reaches its parts
     /// and elements: a vector's default isn't its components'.
     pub default: Option<Value>,
 }
 
-/// An enum's variant, as reflection describes it.
+/// An enum's variant.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Variant {
     pub name: Ident,
     pub fields: Vec<Field>,
-    /// Whether its fields are a tuple's, named `0`, `1` and so on, which scenes write by position.
+    /// Whether its fields are a tuple's, named `0`, `1`, and so on. Scenes write them by position.
     pub tuple: bool,
 }
 
-/// What a field's hints say of it, beyond its type.
+/// A field's hints, beyond its type.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Meta {
-    /// The least and the most its numbers may be, and the components of its vectors, and its
-    /// elements': a value set outside them is refused.
+    /// The least and most its numbers, its vectors' components and its elements may be. A value
+    /// outside them is refused.
     pub min: Option<Bound>,
     pub max: Option<Bound>,
     pub show: Show,
-    /// Its doc comment, its lines joined into paragraphs.
+    /// Its doc comment, lines joined into paragraphs.
     pub doc: Cow<'static, str>,
 }
 
-/// A field's `min` or `max`, as it's written: integers apart from floats, so that they compare
-/// with integers exactly. An `f32`, and a vector's component, compares with it rounded to an
-/// `f32`, so that `max = 0.1` takes `0.1f32`, which is a little more than 0.1.
+/// A field's `min` or `max` as written. Integers stay apart from floats to compare exactly. An
+/// `f32` or vector component compares with it rounded to `f32`, so `max = 0.1` takes `0.1f32`, a
+/// little more than 0.1.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Bound {
     Int(i128),
@@ -202,7 +196,7 @@ pub enum Bound {
 }
 
 impl Bound {
-    /// It as an `f32` compares with it: the nearest `f32`.
+    /// The nearest `f32`.
     pub(crate) fn as_f32(self) -> f32 {
         match self {
             Self::Int(n) => n as f32,
@@ -210,7 +204,6 @@ impl Bound {
         }
     }
 
-    /// It as an `f64` compares with it.
     pub(crate) fn as_f64(self) -> f64 {
         match self {
             Self::Int(n) => n as f64,
@@ -239,9 +232,8 @@ pub enum Show {
     Color,
 }
 
-/// The named types, structs and enums, in the order they were described. Each describes itself
-/// once, under a name no other has; a type of fields is described with the first type that has
-/// one.
+/// The named types (structs and enums) in description order. Each describes itself once, under a
+/// name no other has. A field's type is described with the first type that has one.
 #[derive(Clone, Default)]
 pub struct Types {
     entries: Vec<Entry>,
@@ -259,14 +251,14 @@ struct Entry {
 }
 
 impl Types {
-    /// Describes `T`, a struct or an enum, under `name`, and returns it as a [`Type::Named`]; its
-    /// [`Reflect::describe`] calls this. `describe` describes its fields or variants, with the
-    /// types they hold. A type already described isn't again, so that a recursive type, such as
+    /// Describes `T`, a struct or enum, under `name`, returning a [`Type::Named`]. Called by
+    /// [`Reflect::describe`]. `describe` describes its fields or variants and their types. A type
+    /// already described isn't again, so a recursive type, such as
     /// `struct Node { kids: Vec<Node> }`, describes itself once.
     ///
     /// Fails with `reflect.name_taken` if another type has `name`; with `reflect.bad_default` if a
-    /// field's [`default`](Field::default) is outside its bounds, or opaque; and as `describe`
-    /// does: either way it leaves the types as they were, without `T` or any type described since.
+    /// field's [`default`](Field::default) is outside its bounds or opaque; and as `describe`
+    /// does. Either way the types are left as they were, without `T` or any type described since.
     pub fn add<T: ?Sized + 'static>(
         &mut self,
         name: Ident,
@@ -288,8 +280,7 @@ impl Types {
                 ),
             ));
         }
-        // Reserved first, so that the fields' types find it, and so that undoing it undoes
-        // everything after it.
+        // Reserved first, so the fields' types find it and undoing it undoes everything after.
         let index = TypeIndex(u32::try_from(self.entries.len()).expect("fewer than 2^32 types"));
         self.entries.push(Entry {
             info: TypeInfo {
@@ -302,8 +293,8 @@ impl Types {
         });
         self.by_name.insert(name, index);
         self.by_type.insert(type_id, index);
-        // Every type described since too, now that each has its shape: a default that holds this
-        // type, in a type it holds, was checked against its placeholder.
+        // Every type described since too, now each has its shape: a default holding this type,
+        // in a type it holds, was checked against its placeholder.
         let described = describe(self).and_then(|shape| {
             self.entries[index.0 as usize].info.shape = shape;
             let len = self.entries.len() as u32;
@@ -316,8 +307,7 @@ impl Types {
         Ok(Type::Named(index))
     }
 
-    /// Forgets the types described since there were `len`, as a description refused once it's
-    /// made is forgotten, with those described for it.
+    /// Forgets the types described since there were `len`.
     pub(crate) fn truncate(&mut self, len: usize) {
         for entry in self.entries.drain(len..) {
             self.by_name.remove(&entry.info.name);
@@ -325,9 +315,8 @@ impl Types {
         }
     }
 
-    /// Checks the defaults that `index`'s fields, and its variants', give against their bounds,
-    /// as [`check`] checks a value set: what's not given is made within them. One that's opaque
-    /// as a whole is refused, since it would give nothing: what's opaque is kept, not made.
+    /// Checks the defaults of `index`'s fields, and its variants', against their bounds like
+    /// [`check`]. An opaque one is refused: what's opaque is kept, not made.
     fn check_defaults(&self, index: TypeIndex) -> Result<()> {
         let info = self.info(index);
         // The fields of the struct, or of its variant `variant`.
@@ -370,45 +359,49 @@ impl Types {
         }
     }
 
-    /// The default of a value of `ty`, in a field of hints `meta`, whose bounds alone it reads, for
-    /// its numbers, its vectors' components and its elements: [`Meta::default`] gives none. A
-    /// number is 0, or the bound nearest 0 if 0 is outside them, rounded to an integer of its
-    /// type inside them, or for an `f32`, to the `f32` it's compared with; a bool is false; a
-    /// quaternion the identity; a string empty; an option `None`; a list empty; an array that many
-    /// of its element's default; a struct each field's [`field_default`](Self::field_default); an
-    /// enum its first variant, as [`variant_default`](Self::variant_default) makes it; and
-    /// what's opaque [`Value::Opaque`], which keeps what a component's
-    /// [`base`](crate::Component::base) gives it.
+    /// The default of a value of `ty` in a field of hints `meta`, of which only the bounds count,
+    /// for its numbers, vectors' components and elements. [`Meta::default`] gives none. A:
     ///
-    /// Fails with `reflect.no_default` for an entity, of which there's none to name; for a number
-    /// whose bounds leave none of its type between them; for an enum without variants; and for a
-    /// type whose default holds one of its own without end, which only a description written by
-    /// hand can give, since a derived type holds itself only in an option or a list. The path to
-    /// where it failed leads the message.
+    /// - number is 0, or the bound nearest 0 if 0 is outside them, rounded to an integer of its
+    ///   type inside them, or for an `f32` to the `f32` it's compared with;
+    /// - bool is false; quaternion the identity; string empty; option `None`; list empty;
+    /// - array is that many of its element's default;
+    /// - struct is each field's [`field_default`](Self::field_default);
+    /// - enum is its first variant's, as [`variant_default`](Self::variant_default);
+    /// - opaque value is [`Value::Opaque`], which keeps what a component's
+    ///   [`base`](crate::Component::base) gives.
+    ///
+    /// Fails with `reflect.no_default` for:
+    ///
+    /// - an entity: there's none to name;
+    /// - a number whose bounds leave none of its type between them;
+    /// - an enum without variants;
+    /// - a type whose default holds one of its own without end. Only a hand-written description
+    ///   gives one: a derived type holds itself only in an option or a list.
+    ///
+    /// The path to where it failed leads the message.
     pub fn default_value(&self, ty: &Type, meta: &Meta) -> Result<Value> {
         self.default_inside(ty, meta, &mut Vec::new())
     }
 
-    /// The default of `field`: the one its description gives, or else its type's under its
-    /// bounds, as [`default_value`](Self::default_value) makes it, and fails.
+    /// The default of `field`: its description's, else its type's under its bounds. Fails like
+    /// [`default_value`](Self::default_value).
     pub fn field_default(&self, field: &Field) -> Result<Value> {
         self.field_inside(field, &mut Vec::new())
     }
 
-    /// `variant`, with each field's [`field_default`](Self::field_default), as switching an enum
-    /// to it makes it; an enum's default is its first variant's.
-    ///
-    /// Fails as `field_default` does, at the field that failed.
+    /// `variant` with each field's [`field_default`](Self::field_default), as switching an enum to
+    /// it makes it. Fails like `field_default`, at the failing field.
     pub fn variant_default(&self, variant: &Variant) -> Result<Value> {
         self.variant_inside(variant, &mut Vec::new())
     }
 
-    /// [`default_value`](Self::default_value), inside the defaults of `named`, from the outside
-    /// in: a cycle is found as a type it holds already, rather than by how deep it goes.
+    /// [`default_value`](Self::default_value) inside the defaults of `named`, outside in: a cycle
+    /// is found as a type already held, not by depth.
     fn default_inside(&self, ty: &Type, meta: &Meta, named: &mut Vec<TypeIndex>) -> Result<Value> {
         let none = || no_number(self, ty, meta);
-        // Finite, as `check` takes only finite numbers: a bound beyond an `f32`'s range rounds to
-        // an infinite one.
+        // Finite, as `check` takes only finite numbers: a bound beyond `f32`'s range rounds to
+        // infinity.
         let component = || {
             let x = nearest_zero(meta, Bound::as_f32, Bound::as_f32);
             x.filter(|x| x.is_finite()).ok_or_else(none)
@@ -527,7 +520,6 @@ impl Types {
         }
     }
 
-    /// Each of `fields`' defaults, by name.
     fn fields_inside(
         &self,
         fields: &[Field],
@@ -549,12 +541,12 @@ impl Types {
     }
 
     #[cfg(feature = "dev")]
-    /// Types another process described, as the tool API's `types` gives them, each by its name and
-    /// doc, in their order, opaque until [`info_mut`](Self::info_mut) gives each its shape, whose
-    /// [`Type::Named`]s [`find`](Self::find) finds among them: values are read, drawn and written
-    /// by them, but no Rust type is any of them. A name given again is skipped.
+    /// Types another process described, as the tool API's `types` gives them: name and doc, in
+    /// order. Opaque until [`info_mut`](Self::info_mut) gives each its shape, whose
+    /// [`Type::Named`]s [`find`](Self::find) finds among them. Values are read, drawn and written
+    /// by them, though no Rust type is any of them. A repeated name is skipped.
     pub(crate) fn described(names: impl IntoIterator<Item = (Ident, Cow<'static, str>)>) -> Self {
-        /// What stands for the Rust type of each, of which there's none.
+        /// Stands for the Rust type of each, of which there's none.
         struct Described;
 
         let mut types = Self::default();
@@ -578,14 +570,13 @@ impl Types {
     }
 
     #[cfg(feature = "dev")]
-    /// The description of the type `index` names, to describe a type of
-    /// [`described`](Self::described)'s.
+    /// To describe a type of [`described`](Self::described)'s.
     pub(crate) fn info_mut(&mut self, index: TypeIndex) -> &mut TypeInfo {
         &mut self.entries[index.0 as usize].info
     }
 
-    /// Describes `info`, a struct that a script declares, which no Rust type is, under its name,
-    /// which the caller has checked no type has, and returns where it is.
+    /// Describes `info`, a script's struct, which no Rust type is. The caller has checked no type
+    /// has its name.
     pub(crate) fn declare(&mut self, info: TypeInfo) -> TypeIndex {
         debug_assert!(
             !self.by_name.contains_key(&info.name),
@@ -601,8 +592,8 @@ impl Types {
         index
     }
 
-    /// Describes the struct a script declared at `index` again, as `info`, which the caller has
-    /// checked is under its name, its fields having changed.
+    /// Describes the struct a script declared at `index` again, its fields changed. The caller has
+    /// checked `info` has its name.
     pub(crate) fn redeclare(&mut self, index: TypeIndex, info: TypeInfo) {
         let entry = &mut self.entries[index.0 as usize];
         debug_assert!(
@@ -626,20 +617,20 @@ impl Types {
         &self.entries[index.0 as usize].info
     }
 
-    /// The Rust type that `index` describes, and its name, for errors.
+    /// The Rust type `index` describes, and its name for errors.
     pub(crate) fn rust_type(&self, index: TypeIndex) -> (TypeId, &'static str) {
         let entry = &self.entries[index.0 as usize];
         (entry.type_id, entry.rust)
     }
 
-    /// Every type, in the order they were described.
+    /// Every type, in description order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (TypeIndex, &TypeInfo)> {
         let entries = self.entries.iter().enumerate();
         entries.map(|(i, entry)| (TypeIndex(i as u32), &entry.info))
     }
 
-    /// Whether `other` has described the same Rust types as these, and declared the same types of
-    /// scripts', in the same order, so that its indices name the same types.
+    /// Whether `other` has described the same Rust types, and declared the same script types, in
+    /// the same order, so its indices name the same types.
     pub(crate) fn same(&self, other: &Self) -> bool {
         let same = |ours: &Entry, theirs: &Entry| {
             ours.type_id == theirs.type_id
@@ -651,34 +642,36 @@ impl Types {
     }
 }
 
-/// What stands for the Rust type of each type a script declares, of which there's none.
+/// Stands for the Rust type of each type a script declares, of which there's none.
 struct Declared;
 
-/// A type whose values reflection reads and sets, without its Rust type: one that describes
-/// itself to [`Types`]. Structs and enums derive it, with `#[derive(Reflect)]`, or with
-/// `#[derive(Clone, Component)]` for components, which reads each field's type's own, and writes
-/// what each field's doc comment says as its doc. Hints in `#[reflect(...)]` say more:
+/// A type reflection reads and sets without its Rust type: it describes itself to [`Types`].
+/// Structs and enums derive it with `#[derive(Reflect)]`, components with
+/// `#[derive(Clone, Component)]`. The derive takes each field's type's description and its doc
+/// comment as its doc. Hints in `#[reflect(...)]`:
 ///
-/// - on a type, `name = "..."` names it in place of its identifier, as two types of one name
-///   need; and `opaque`, on a `Clone` type, has reflection keep its values but not read them, as
-///   for a handle that a value must never make;
-/// - on a field, `min = ..` and `max = ..` bound its numbers, and its vectors' components, in its
-///   own unit, such as radians: a value set outside them is refused; `default = ..` gives its
-///   [`default`](Field::default), an expression of its type in its own unit, run as the type
-///   registers, which its bounds must take, though a field of a type opaque as a whole takes none
-///   (`reflect.bad_default`), and without it its type's is its default, under its bounds, as
-///   [`Types::default_value`] makes it; `degrees` shows an `f32` of radians, or of radians a
-///   second, in degrees; `color` shows a `Vec3` or `Vec4` as a linear color, alpha not multiplied
-///   in; `opaque` keeps a field of a `Clone` type that isn't reflected, which reads as
-///   [`Value::Opaque`], and takes no other hint; and `hashed_when_set`, beside `default = ..`, on
-///   a component's own integer or bool field, has the world's hash read it, after its index, only
-///   while it isn't its default, so that a field added to a component leaves the hash of a world
-///   that doesn't set it as it was, as a reference hash checks. The derive refuses it elsewhere:
-///   in a type nested in another, a field left out can't be told from the words of what follows,
-///   as a list's, and a float's default compares equal to its other zero, 0.0 to -0.0, which the
-///   hash tells apart.
+/// - On a type:
+///   - `name = "..."` replaces its identifier, as two types of one name need.
+///   - `opaque`, on a `Clone` type, keeps its values unread, as for a handle no value may make.
+/// - On a field:
+///   - `min = ..`, `max = ..` bound its numbers and its vectors' components, in its own unit,
+///     such as radians. A value outside them is refused.
+///   - `default = ..` is its [`default`](Field::default): an expression of its type in its own
+///     unit, run as the type registers. Its bounds must take it, and a field of a type opaque as
+///     a whole takes none (`reflect.bad_default`). Without it, its type's under its bounds,
+///     per [`Types::default_value`].
+///   - `degrees` shows an `f32` of radians, or radians a second, in degrees.
+///   - `color` shows a `Vec3` or `Vec4` as a linear color, alpha not multiplied in.
+///   - `opaque` keeps a field of a `Clone` type that isn't reflected. It reads as
+///     [`Value::Opaque`] and takes no other hint.
+///   - `hashed_when_set`, beside `default = ..`, on a component's own integer or bool field: the
+///     world's hash reads it, after its index, only while it isn't its default. A field added to
+///     a component then leaves the hash of a world that doesn't set it unchanged, as a reference
+///     hash checks. The derive refuses it elsewhere: in a nested type, a field left out can't
+///     be told from the words that follow, as a list's; and a float's default compares equal to
+///     its other zero (0.0 to -0.0), which the hash tells apart.
 ///
-/// Each hint is given once, and a variant takes none, nor does a field of an opaque type.
+/// Each hint is given once. A variant takes none, nor does a field of an opaque type.
 ///
 /// ```
 /// use gg_engine::Component;
@@ -704,8 +697,8 @@ struct Declared;
 /// struct Pair<T>(T, T);
 /// ```
 ///
-/// Nor does a hint it doesn't know, one that doesn't suit its field, one given twice or beside
-/// `opaque`, or one on a variant or inside an opaque type:
+/// Nor does an unknown hint, one that doesn't suit its field, one given twice or beside `opaque`,
+/// or one on a variant or inside an opaque type:
 ///
 /// ```compile_fail,E0277
 /// #[derive(Clone, gg_engine::Component)]
@@ -717,10 +710,13 @@ struct Declared;
 /// struct Speed(#[reflect(default = 1)] f32);
 /// ```
 ///
-/// Implemented by hand, `describe` calls [`Types::add`] for its own type, a struct or an enum,
-/// never another's, and the rest keep to its description: `with_value` checks the value's kinds,
-/// fields and variants, and makes what it's given whole before anything changes, keeping what's
-/// opaque; `digest` writes what `to_value` reads; and `entities_mut` reaches the entities it reads.
+/// Implemented by hand, `describe` calls [`Types::add`] for its own type (a struct or enum) only,
+/// and the rest keep to its description:
+///
+/// - `with_value` checks the value's kinds, fields and variants, and makes it whole before
+///   anything changes, keeping what's opaque.
+/// - `digest` writes what `to_value` reads.
+/// - `entities_mut` reaches the entities `to_value` reads.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't reflected",
     note = "a type of fields describes itself with `#[derive(gg_engine::Reflect)]`, and a \
@@ -728,76 +724,87 @@ struct Declared;
             reflected can be kept with `#[reflect(opaque)]`"
 )]
 pub trait Reflect: std::any::Any + Send + Sync + Swap {
-    /// The type's description, which it adds to `types` if it's a struct or an enum.
+    /// Adds the type's description to `types` if it's a struct or enum.
     fn describe(types: &mut Types) -> Result<Type>
     where
         Self: Sized;
 
-    /// Its value, in the shape its description gives: what's opaque reads as [`Value::Opaque`].
+    /// Its value in its description's shape. What's opaque reads as [`Value::Opaque`].
     fn to_value(&self) -> Value;
 
-    /// One made from `value`. Fails with `reflect.opaque` where it would have to make something
-    /// opaque, and as [`with_value`](Self::with_value) does.
+    /// One made from `value`. Fails with `reflect.opaque` where it would make something opaque,
+    /// and like [`with_value`](Self::with_value).
     fn from_value(value: &Value) -> Result<Self>
     where
         Self: Sized;
 
-    /// One like this one, with `value`'s parts, keeping its own opaque ones where they are, a
-    /// list's by which element each is: set to a list of another length, the elements alike at
-    /// its start and at its end, by their values, keep their own, so that an element taken out
-    /// or put in moves no other's to the wrong one; set to a list of the same length, each keeps
-    /// its place's. Values are all that tell elements apart, as no set says which it took out,
-    /// moved or changed: so elements swapped in a list of the same length trade what's opaque;
-    /// elements alike keep theirs first to last; and an element taken out in the same set as one
-    /// after it changes, as `[a, b, c]` set to `[a, c2]`, leaves its own to the one that changed,
-    /// whose own is gone. A variant of an enum switched to, an option's value that was `None`, and a
-    /// list's elements that are new are made with [`from_value`](Self::from_value), so what's
-    /// opaque of the variant left or the element taken out is gone: an operation's undo puts it
-    /// back from the component it keeps. Fails, at the part that failed, with
-    /// `reflect.wrong_kind` for a value of another kind; `reflect.out_of_range` for an integer that
-    /// doesn't fit; `reflect.not_normalized` for a quaternion that isn't a unit;
-    /// `reflect.missing_field`, `reflect.no_field` and `reflect.duplicate_field` for a struct's
-    /// fields that aren't each given once; `reflect.no_variant` for a variant the enum hasn't;
-    /// `reflect.wrong_length` for an array's elements; and `reflect.opaque` for something
-    /// opaque set to anything but [`Value::Opaque`].
+    /// One like this with `value`'s parts, keeping its own opaque ones. A list's are kept by
+    /// element:
+    ///
+    /// - Set to a list of another length, the elements alike (by value) at its start and end keep
+    ///   their own, so an element taken out or put in moves no other's to the wrong one.
+    /// - Set to a list of the same length, each keeps its place's.
+    ///
+    /// Only values tell elements apart: no set says which it took out, moved or changed. So
+    /// swapped elements of a same-length list trade what's opaque; elements alike keep theirs
+    /// first to last; and an element taken out in the same set as one after it changes (`[a, b,
+    /// c]` set to `[a, c2]`) leaves its own to the changed one, whose own is gone.
+    ///
+    /// A variant switched to, an option's value that was `None`, and a list's new elements are
+    /// made by [`from_value`](Self::from_value): the opaque state of the variant left or the
+    /// element taken out is gone. An operation's undo restores it from the component it keeps.
+    ///
+    /// Fails, at the failing part, with:
+    ///
+    /// - `reflect.wrong_kind`: a value of another kind;
+    /// - `reflect.out_of_range`: an integer that doesn't fit;
+    /// - `reflect.not_normalized`: a quaternion that isn't a unit;
+    /// - `reflect.missing_field`, `reflect.no_field`, `reflect.duplicate_field`: a struct's
+    ///   fields aren't each given once;
+    /// - `reflect.no_variant`: a variant the enum hasn't;
+    /// - `reflect.wrong_length`: an array's elements;
+    /// - `reflect.opaque`: something opaque set to anything but [`Value::Opaque`].
     fn with_value(&self, value: &Value) -> Result<Self>
     where
         Self: Sized;
 
-    /// Sets this to `value` as [`with_value`](Self::with_value) makes it, all or nothing: a value
-    /// refused changes nothing. The bounds of fields are
+    /// Sets this to [`with_value`](Self::with_value)'s result, all or nothing. Fields' bounds are
     /// [`World::set_field`](crate::World::set_field)'s to check.
     fn set_value(&mut self, value: &Value) -> Result<()>;
 
-    /// Its part `index`: a struct's field, a vector's component, or a list's or an array's
-    /// element; `None` past its parts, for what's opaque, and for enums, options and quaternions,
-    /// which are set whole.
+    /// Its part `index`: a struct's field, a vector's component, or a list's or array's element.
+    /// `None` past its parts, for what's opaque, and for enums, options and quaternions, which are
+    /// set whole.
     fn part(&self, index: u32) -> Option<&dyn Reflect>;
 
-    /// Its part `index`, as [`part`](Self::part) finds it, to change.
+    /// [`part`](Self::part), to change.
     fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect>;
 
-    /// Writes it into `to`, for the world's hash: what [`to_value`](Self::to_value) reads, in the
-    /// order it reads it, but for what's opaque, which it leaves out. A float goes by its bits,
-    /// every NaN as one; an entity by its ID, or 0 if it isn't alive; a variant by its index,
-    /// then its fields; and an option, a list and a string with what tells where they end, so that
-    /// values moved from one field to the next give another hash. Implemented by hand, it writes
-    /// its parts' own, as `to_value` reads them, and a variant's index as a `u32` does:
-    /// `<u32 as Reflect>::digest(&index, to)`.
+    /// Writes it into `to` for the world's hash: what [`to_value`](Self::to_value) reads, in its
+    /// order, without what's opaque.
+    ///
+    /// - A float goes by its bits, every NaN as one.
+    /// - An entity goes by its ID, or 0 if it isn't alive.
+    /// - A variant goes by its index, then its fields.
+    /// - An option, list and string go with what tells where they end, so values moved from one
+    ///   field to the next give another hash.
+    ///
+    /// By hand, write its parts' digests as `to_value` reads them, and a variant's index as a
+    /// `u32`: `<u32 as Reflect>::digest(&index, to)`.
     fn digest(&self, to: &mut Digest<'_>);
 
     /// Calls `each` with each entity it holds, to change: those [`to_value`](Self::to_value) reads
-    /// as [`Value::Entity`], in the order it reads them. So code points a reference elsewhere, as a
-    /// duplicate points its copies' at each other, keeping every other bit as it is, where setting
-    /// a value again would check it all, and refuse what code stored that a set refuses.
+    /// as [`Value::Entity`], in its order. Code repoints references this way, as a duplicate
+    /// points its copies' at each other. Unlike setting a value again, every other bit stays and
+    /// nothing is re-checked, so what code stored that a set would refuse survives.
     fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity));
 }
 
-/// Swaps a value with another of its type through `dyn Reflect`, which no generic swap reaches, as
-/// an operation's undo puts a field back whole, what's opaque in it too. Every type has it.
+/// Swaps a value with another of its type through `dyn Reflect`, which no generic swap reaches:
+/// an operation's undo puts a field back whole, opaque state too. Every type has it.
 #[doc(hidden)]
 pub trait Swap {
-    /// Swaps this with `other`, if it's of this type; returns whether it was.
+    /// Swaps this with `other` if it's of this type. Returns whether it was.
     fn swap_reflected(&mut self, other: &mut dyn std::any::Any) -> bool;
 }
 
@@ -811,7 +818,7 @@ impl<T: std::any::Any> Swap for T {
 }
 
 /// Types whose fields `#[reflect(min = ..)]` and `#[reflect(max = ..)]` bound: numbers, vectors,
-/// and options, lists and arrays of them, whose elements the bounds apply to.
+/// and options, lists and arrays of them (the bounds apply to elements).
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`#[reflect(min)]` and `#[reflect(max)]` bound numbers and vectors, not `{Self}`"
@@ -834,7 +841,7 @@ pub trait Angle {}
 )]
 pub trait Color {}
 
-/// The fields of `value`, a struct's, in the order of `names`, each given once; for the derives.
+/// The fields of the struct `value`, in the order of `names`, each given once; for the derives.
 #[doc(hidden)]
 pub fn fields<'v, const N: usize>(value: &'v Value, names: [&str; N]) -> Result<[&'v Value; N]> {
     match value {
@@ -854,8 +861,7 @@ pub fn pick<'v, const N: usize>(
     Ok(found.map(|value| value.expect("every field is found")))
 }
 
-/// Puts the fields in `given` in `found`, in the order of `names`, as [`pick`] does: each given
-/// once, so that every place in `found` is filled.
+/// [`pick`] into `found`, whose every place is filled.
 pub(crate) fn pick_into<'v, N: AsRef<str>>(
     given: &'v [(Ident, Value)],
     names: &[N],
@@ -897,7 +903,7 @@ pub fn variant(value: &Value) -> Result<(&str, &[(Ident, Value)])> {
     }
 }
 
-/// The error that an enum of variants `names` has no variant `name`; for the derives.
+/// The error that an enum of variants `names` lacks `name`; for the derives.
 #[doc(hidden)]
 pub fn no_variant(name: &str, names: &[&str]) -> Error {
     Error::new(
@@ -909,8 +915,7 @@ pub fn no_variant(name: &str, names: &[&str]) -> Error {
     )
 }
 
-/// Fails: reflection doesn't make what's opaque. For the derives, which make an opaque field with
-/// it, whatever its type.
+/// Fails: reflection doesn't make what's opaque. The derives make any opaque field with it.
 #[doc(hidden)]
 pub fn make_opaque<T>(value: &Value) -> Result<T> {
     let _ = value;
@@ -920,8 +925,8 @@ pub fn make_opaque<T>(value: &Value) -> Result<T> {
     ))
 }
 
-/// `current`, which is opaque, as `value` sets it: only [`Value::Opaque`] does, keeping it as it
-/// is. For the derives.
+/// The opaque `current` as `value` sets it: only [`Value::Opaque`] does, keeping it. For the
+/// derives.
 #[doc(hidden)]
 pub fn keep<T: Clone>(current: &T, value: &Value) -> Result<T> {
     match value {
@@ -930,7 +935,6 @@ pub fn keep<T: Clone>(current: &T, value: &Value) -> Result<T> {
     }
 }
 
-/// The error that something opaque is given `value`, which isn't [`Value::Opaque`].
 pub(crate) fn not_opaque(value: &Value) -> Error {
     Error::new(
         "reflect.opaque",
@@ -941,8 +945,8 @@ pub(crate) fn not_opaque(value: &Value) -> Error {
     )
 }
 
-/// `error`, from part `step` of a value, such as `rotation` or `[1]`, as from the whole value;
-/// for the derives. The path it happened at leads its message, as `` at `rect[1].y`: ``.
+/// `error` from part `step` of a value (`rotation`, `[1]`) as from the whole; for the derives.
+/// Its message leads with the path, as `` at `rect[1].y`: ``.
 #[doc(hidden)]
 pub fn within(error: Error, step: &str) -> Error {
     let (path, what) = located(&error);
@@ -950,7 +954,7 @@ pub fn within(error: Error, step: &str) -> Error {
     error.with_message(message)
 }
 
-/// Where in a value `error` happened, from [`within`]'s prefix of its message, and the rest of it.
+/// Where in a value `error` happened, from [`within`]'s prefix, and the rest of its message.
 pub(crate) fn located(error: &Error) -> (String, String) {
     let message = error.to_string();
     if let Some(rest) = message.strip_prefix("at `")
@@ -961,8 +965,7 @@ pub(crate) fn located(error: &Error) -> (String, String) {
     (String::new(), message)
 }
 
-/// Path `inner`, from where path `outer` leads: such as `rect` and `[1].y`, or `translation` and
-/// `x`.
+/// Path `inner` from where `outer` leads: `rect` and `[1].y`, or `translation` and `x`.
 pub(crate) fn join(outer: &str, inner: &str) -> String {
     if outer.is_empty() {
         inner.to_owned()
@@ -973,7 +976,7 @@ pub(crate) fn join(outer: &str, inner: &str) -> String {
     }
 }
 
-/// The error that `value` isn't of the kind `expected`, named as [`Value`]'s variants are.
+/// The error that `value` isn't the kind `expected`, named as [`Value`]'s variants are.
 pub(crate) fn wrong_kind(expected: &str, value: &Value) -> Error {
     Error::new(
         "reflect.wrong_kind",
@@ -981,7 +984,6 @@ pub(crate) fn wrong_kind(expected: &str, value: &Value) -> Error {
     )
 }
 
-/// The name of `value`'s variant.
 pub(crate) fn kind(value: &Value) -> &'static str {
     match value {
         Value::Bool(_) => "Bool",
@@ -1018,10 +1020,9 @@ pub(crate) fn list<T: fmt::Display>(names: impl IntoIterator<Item = T>) -> Strin
     }
 }
 
-/// Checks `value`, for a field of type `ty` with hints `meta`, against what only the description
-/// knows: the bounds of its numbers, and of its fields' and elements', which inherit their field's
-/// bounds. A number that isn't finite is outside every range. The impls check the rest, its
-/// kinds, as they set it.
+/// Checks `value` of a field of type `ty` and hints `meta` against the bounds only the
+/// description knows: its numbers', and its fields' and elements', which inherit the field's. A
+/// non-finite number is outside every range. The impls check kinds as they set.
 pub(crate) fn check(types: &Types, ty: &Type, meta: &Meta, value: &Value) -> Result<()> {
     let bounded = meta.min.is_some() || meta.max.is_some();
     match (ty, value) {
@@ -1075,7 +1076,6 @@ fn check_fields(types: &Types, fields: &[Field], given: &[(Ident, Value)]) -> Re
     Ok(())
 }
 
-/// Checks each of a vector's `components` against `meta`'s bounds.
 fn components(meta: &Meta, components: impl Iterator<Item = Number>) -> Result<()> {
     for (x, name) in components.zip(COMPONENTS) {
         in_range(meta, x).map_err(|error| within(error, name))?;
@@ -1100,8 +1100,8 @@ impl fmt::Display for Number {
     }
 }
 
-/// Whether `number` is below `bound`: integers compared exactly, and an `f32` with the bound
-/// rounded to one.
+/// Whether `number` is below `bound`: integers compared exactly, an `f32` with the bound rounded
+/// to one.
 fn below(number: Number, bound: Bound) -> bool {
     match (number, bound) {
         (Number::Int(n), Bound::Int(b)) => n < b,
@@ -1120,7 +1120,7 @@ fn above(number: Number, bound: Bound) -> bool {
     }
 }
 
-/// Checks `number` against `meta`'s bounds, which it has.
+/// Checks `number` against `meta`, which has bounds.
 fn in_range(meta: &Meta, number: Number) -> Result<()> {
     let out = |what: String| Err(Error::new("reflect.out_of_range", what));
     let finite = match number {
@@ -1145,7 +1145,7 @@ fn in_range(meta: &Meta, number: Number) -> Result<()> {
     Ok(())
 }
 
-/// `meta`'s bounds, which it has, as a phrase: such as `from 0 to 1`.
+/// `meta`'s bounds as a phrase, such as `from 0 to 1`.
 fn range(meta: &Meta) -> String {
     match (meta.min, meta.max) {
         (Some(min), Some(max)) => format!("from {min} to {max}"),
@@ -1155,8 +1155,8 @@ fn range(meta: &Meta) -> String {
     }
 }
 
-/// The number nearest 0 within `meta`'s bounds, its min as `least` rounds it and its max as
-/// `most` does: 0, or the bound nearest it if it's outside them; `None` if they leave none.
+/// The number nearest 0 within `meta`'s bounds, the min as `least` rounds it and the max as `most`
+/// does: 0, or the bound nearest it if 0 is outside; `None` if they leave none.
 fn nearest_zero<T: Copy + Default + PartialOrd>(
     meta: &Meta,
     least: fn(Bound) -> T,
@@ -1189,7 +1189,6 @@ fn floored(bound: Bound) -> i128 {
     }
 }
 
-/// The error that `meta`'s bounds leave no value of `ty`, a number or a vector, between them.
 fn no_number(types: &Types, ty: &Type, meta: &Meta) -> Error {
     Error::new(
         "reflect.no_default",
@@ -1201,11 +1200,11 @@ fn no_number(types: &Types, ty: &Type, meta: &Meta) -> Error {
     )
 }
 
-/// The names of a vector's components, in order: what paths, dumps, differences and scenes' errors
-/// name them by, as scenes' errors name a quaternion's too.
+/// A vector's component names, in order, as paths, dumps, differences and scenes' errors name
+/// them, and scenes' errors a quaternion's.
 pub(crate) const COMPONENTS: [&str; 4] = ["x", "y", "z", "w"];
 
-/// What a value of `ty` is, as a phrase: such as `an f32`, or `a struct, Transform`.
+/// What a value of `ty` is, as a phrase, such as `an f32` or `a struct, Transform`.
 fn what_is(types: &Types, ty: &Type) -> String {
     match ty {
         Type::Bool => "a bool".to_owned(),

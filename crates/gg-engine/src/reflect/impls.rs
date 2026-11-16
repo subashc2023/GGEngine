@@ -1,7 +1,7 @@
-//! Reflection of the types fields hold: `bool`, the integers of fixed sizes, `f32`, `f64` and
-//! `String`; glam's vectors and quaternion; entities, textures, models and fonts; and options,
-//! lists and arrays of any reflected type. `usize` and `isize` aren't, since their size differs by
-//! platform, and a value saved or sent must mean the same everywhere.
+//! Reflection of field types: `bool`, fixed-size integers, `f32`, `f64`, `String`; glam's vectors
+//! and quaternion; entities, textures, models, fonts; options, lists and arrays of reflected
+//! types. Not `usize` and `isize`: their size varies by platform, and saved or sent values must
+//! mean the same everywhere.
 
 use std::any::Any;
 
@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{Entity, Font, Model, Prefab, Texture};
 
-/// `set_value` as all of them have it, and no parts.
+/// `set_value` as all have it, and no parts.
 macro_rules! whole {
     () => {
         fn set_value(&mut self, value: &Value) -> Result<()> {
@@ -82,8 +82,7 @@ integers! {
     u8 false UInt word, u16 false UInt word, u32 false UInt word, u64 false UInt word,
 }
 
-/// Types whose values are one variant of [`Value`], taken as they are: such as `bool`, by
-/// `Value::Bool`, which reflection describes as `Type::Bool`.
+/// Types that are one [`Value`] variant as they are: `bool` is `Value::Bool`, `Type::Bool`.
 macro_rules! plain {
     ($($T:ty => $Variant:ident $digest:ident,)*) => {$(
         impl Reflect for $T {
@@ -110,7 +109,7 @@ macro_rules! plain {
                 to.$digest(*self);
             }
 
-            /// Of these, an entity alone holds one: itself.
+            /// Only an entity holds one: itself.
             fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity)) {
                 let any: &mut dyn Any = self;
                 if let Some(entity) = any.downcast_mut::<Entity>() {
@@ -167,7 +166,7 @@ impl Ranged for f32 {}
 impl Ranged for f64 {}
 impl Angle for f32 {}
 
-/// Vectors, whose components, each a `$S`, are their parts, digested as `$S`s are.
+/// Vectors: their `$S` components are their parts, digested as `$S`s are.
 macro_rules! vectors {
     ($($T:ident: $S:ident,)*) => {$(
         impl Reflect for $T {
@@ -229,7 +228,7 @@ vectors! {
 impl Color for Vec3 {}
 impl Color for Vec4 {}
 
-/// Set whole, and never to one that isn't a unit, so that it has no parts.
+/// Set whole, and never to a non-unit, so it has no parts.
 impl Reflect for Quat {
     fn describe(_: &mut Types) -> Result<Type> {
         Ok(Type::Quat)
@@ -317,7 +316,6 @@ impl<T: Ranged> Ranged for Option<T> {}
 impl<T: Angle> Angle for Option<T> {}
 impl<T: Color> Color for Option<T> {}
 
-/// The elements of a value of [`Value::List`], or the error that it isn't one.
 fn elements(value: &Value) -> Result<&[Value]> {
     match value {
         Value::List(items) => Ok(items),
@@ -329,17 +327,18 @@ fn index(i: usize) -> String {
     format!("[{i}]")
 }
 
-/// Which of `current`'s elements each of `items`, a list set in its place, is: the one whose
-/// opaque state it keeps, by its index, or `None` for one that's new. A list of the same length
-/// keeps each in its place. Otherwise, as an element taken out, put in or replaced leaves the
-/// rest as they were, those alike at the start, by their values, which read what's opaque as
-/// [`Value::Opaque`], are the same ones, and so are those alike at the end, after the same; those
-/// between keep their places from the first of them, as a set of one of them changed in place
-/// does, and those past the elements between are new. So an element taken out takes its state
-/// with it, rather than leaving it to the one after; of elements alike, whose values can't tell
-/// them apart, the first keep theirs. Neither the Inspector, which sets an element in its place,
-/// nor the tool API, which sets values whole, knows more of which element a set took out, so the
-/// limits [`Reflect::with_value`] gives hold.
+/// Which of `current`'s elements each of `items` (a list set in its place) is: the index whose
+/// opaque state it keeps, or `None` if new.
+///
+/// - Same length: each keeps its place's.
+/// - Otherwise an element taken out, put in or replaced leaves the rest as they were. Elements
+///   alike at the start, by value (opaque state reads as [`Value::Opaque`]), are the same ones,
+///   and so are those alike at the end. Those between keep their places from the first of them,
+///   as a set of one changed in place does; those past them are new.
+/// - So a taken-out element takes its state with it. Of elements alike, the first keep theirs.
+///
+/// The Inspector sets an element in its place and the tool API sets values whole, so neither
+/// knows more of which element a set took out: [`Reflect::with_value`]'s limits hold.
 fn kept_from<T: Reflect>(current: &[T], items: &[Value]) -> impl Fn(usize) -> Option<usize> {
     let (old, new) = (current.len(), items.len());
     let (mut start, mut end) = (old.min(new), 0);
@@ -380,7 +379,7 @@ impl<T: Reflect> Reflect for Vec<T> {
         made.collect()
     }
 
-    // Each element keeps what's opaque of the one it is, as `kept_from` finds it.
+    // Each keeps the opaque state of the element `kept_from` finds.
     fn with_value(&self, value: &Value) -> Result<Self> {
         let items = elements(value)?;
         let from = kept_from(self, items);
@@ -425,7 +424,7 @@ impl<T: Ranged> Ranged for Vec<T> {}
 impl<T: Angle> Angle for Vec<T> {}
 impl<T: Color> Color for Vec<T> {}
 
-/// Its elements are its parts, and a value of it has `N` of them.
+/// Its `N` elements are its parts.
 impl<T: Reflect, const N: usize> Reflect for [T; N] {
     fn describe(types: &mut Types) -> Result<Type> {
         let len = const {
@@ -468,7 +467,7 @@ impl<T: Reflect, const N: usize> Reflect for [T; N] {
         Some(self.get_mut(index as usize)?)
     }
 
-    /// Its elements, without their number, which its type says.
+    /// Its elements, without their number: its type says it.
     fn digest(&self, to: &mut Digest<'_>) {
         for item in self {
             item.digest(to);
@@ -486,7 +485,7 @@ impl<T: Ranged, const N: usize> Ranged for [T; N] {}
 impl<T: Angle, const N: usize> Angle for [T; N] {}
 impl<T: Color, const N: usize> Color for [T; N] {}
 
-/// The elements of `value`, a list of `N` of them.
+/// The elements of `value`, a list of exactly `N`.
 fn sized<const N: usize>(value: &Value) -> Result<&[Value]> {
     let items = elements(value)?;
     if items.len() != N {
@@ -498,7 +497,6 @@ fn sized<const N: usize>(value: &Value) -> Result<&[Value]> {
     Ok(items)
 }
 
-/// `items`, `N` of them, as an array.
 fn array<T, const N: usize>(items: Vec<T>) -> Result<[T; N]> {
     let len = items.len();
     items.try_into().map_err(|_| {
