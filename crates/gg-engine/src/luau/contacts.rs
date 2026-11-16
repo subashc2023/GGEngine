@@ -16,7 +16,8 @@
 
 use mlua::{LightUserData, Lua, Table, Value as Lua_};
 
-use super::{denied, entity_of, handle, shared};
+use super::fields::{entity_of, handle};
+use super::{denied, shared};
 use crate::grant::Capability;
 use crate::{Contact, Entity, World};
 

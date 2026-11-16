@@ -22,7 +22,8 @@
 use gg_core::{Error, Result};
 use mlua::{LightUserData, Lua, Table, Value as Lua_};
 
-use super::{Field, Shared, bits, handle, named, shared, ungranted, value_of};
+use super::fields::{bits, handle, named, value_of};
+use super::{Field, Shared, shared, ungranted};
 use crate::ecs::ComponentId;
 use crate::grant::Capability;
 use crate::reflect::{Ident, Reflect, Value, list};
@@ -447,7 +448,8 @@ mod tests {
     use gg_core::math::{DVec3, Quat, Vec3};
     use mlua::{FromLuaMulti, IntoLuaMulti};
 
-    use super::super::{BUDGET, Held, Host, Scripts, lent};
+    use super::super::host::lent;
+    use super::super::{BUDGET, Held, Host, Scripts};
     use super::*;
     use crate::dirs::tests::Scratch;
     use crate::grant::Grant;

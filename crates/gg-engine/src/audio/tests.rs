@@ -1,13 +1,21 @@
+use std::io::Cursor;
+use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use kira::backend::mock::{MockBackend, MockBackendSettings};
+use kira::sound::streaming::Decoder;
 use kira::track::TrackPlaybackState;
+use symphonia::core::audio::GenericAudioBufferRef;
 use symphonia::core::codecs::CodecInfo;
+use symphonia::core::codecs::audio::AudioDecoder;
 use symphonia::core::codecs::audio::{AudioCodecParameters, FinalizeResult};
 use symphonia::core::packet::PacketRef;
 
+use super::decode::{Decoding, MAX_SOUND_FRAMES, decode_bytes};
 use super::*;
 use crate::Transform;
+use crate::package::Files;
 use gg_core::math::{Quat, Vec3};
 
 /// A WAV file of `samples`, 16-bit mono at 48 kHz.

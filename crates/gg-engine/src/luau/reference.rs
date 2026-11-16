@@ -13,8 +13,12 @@ use crate::grant::Grant;
 const REFERENCE: &str = include_str!("../../../../docs/LUAU.md");
 
 /// The sources whose diagnostic codes a script or a mod's load can see.
-const SOURCES: [&str; 5] = [
+const SOURCES: [&str; 9] = [
     include_str!("mod.rs"),
+    include_str!("api.rs"),
+    include_str!("compile.rs"),
+    include_str!("fields.rs"),
+    include_str!("host.rs"),
     include_str!("mods.rs"),
     include_str!("entities.rs"),
     include_str!("contacts.rs"),

@@ -1,7 +1,14 @@
 use std::fs;
 
 use gg_core::math::DVec3;
+use gg_core::math::{Quat, Vec3, libm};
+use mlua::Value as Lua_;
 
+use super::api::{PARAMS, PRINTED, printed};
+use super::compile::check;
+use super::fields::{handle, set};
+#[cfg(feature = "dev")]
+use super::host::lent;
 use super::*;
 use crate::Component;
 use crate::dirs::tests::Scratch;

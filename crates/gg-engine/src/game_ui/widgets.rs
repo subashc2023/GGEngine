@@ -9,11 +9,9 @@ use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{Sprite, Texture};
 
+use super::draw::{corners, on_canvas, paint, write};
 use super::layout::Rect;
-use super::{
-    Canvas, FOCUSED, Kind, Look, Node, Open, State, UiValue, Widget, corners, on_canvas, paint,
-    write,
-};
+use super::{Canvas, FOCUSED, Kind, Look, Node, Open, State, UiValue, Widget};
 use crate::Align;
 use crate::font::Fonts;
 

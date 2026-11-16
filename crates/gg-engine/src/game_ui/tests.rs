@@ -3,7 +3,9 @@ use std::cell::RefCell;
 use gg_renderer::Textures;
 
 use super::file::parse;
+use super::layout::Rect;
 use super::*;
+use crate::{Key, MouseButton, PadButton, Stick};
 
 thread_local! {
     /// The fonts each test's layouts and events measure text with, Inter baked once a thread.
