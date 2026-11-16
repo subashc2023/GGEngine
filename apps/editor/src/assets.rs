@@ -1,5 +1,4 @@
-//! The Assets panel: the files in the project's asset root, a folder at a time, as a content
-//! browser shows them.
+//! The Assets panel: the project's asset root, a folder at a time, as a content browser shows it.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -23,45 +22,42 @@ const ICON: f32 = 48.0;
 const PAD: f32 = 4.0;
 /// The side of Back's icon, in points, as the toolbar's.
 const BACK: f32 = 16.0;
-/// How long a listing of the folder shown lasts, after which it's listed again, so that what else
-/// adds, removes or renames there shows, such as an agent's scene.
+/// How long a listing lasts before the folder is listed again, so others' changes there show, such
+/// as an agent's scene.
 const RELIST: Duration = Duration::from_secs(1);
 
-/// A texture, a model, a font or a prefab dragged from the Assets panel, by its file, as egui's drag
-/// and drop holds it: what the game's view takes as it's let go there, as [`game`](crate::game)
-/// says.
+/// A texture, model, font or prefab dragged from the panel, by its file, as egui's drag and drop
+/// holds it. The view takes it as [`game`](crate::game) says.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dragged {
     pub path: PathBuf,
     pub kind: AssetKind,
 }
 
-/// The Assets panel: the files in a folder, its root, and in the folders under it, one folder at a
-/// time, as a content browser shows them: folders first, then files, each by its name, in rows as
-/// many across as fit. A double click on a folder shows it, and Back the folder above, as far up as
-/// the root. A texture, a model, a font or a prefab drags, as a [`Dragged`], egui drawing its cell
-/// under the cursor; other files show dimmed, since nothing opens or drags them yet. An asset's ID
-/// file, `<file>.meta` beside it, doesn't show.
+/// The Assets panel: a folder under its root at a time, folders first, then files, by name, in rows
+/// as many across as fit.
+///
+/// - A double click on a folder shows it; Back, the folder above, up to the root.
+/// - A texture, model, font or prefab drags as a [`Dragged`], egui drawing its cell under the
+///   cursor. Other files show dimmed: nothing opens or drags them yet.
+/// - An asset's ID file, `<file>.meta` beside it, doesn't show.
 pub struct Assets {
     root: PathBuf,
-    /// The folder shown: the root, or a folder under it.
+    /// The root or a folder under it.
     folder: PathBuf,
-    /// What the folder held as it was last listed: `None` until it's listed, as it is again once
-    /// that's a second old, or another folder shows.
+    /// `None` until listed. Listed again after [`RELIST`] or once another folder shows.
     listed: Option<Listed>,
 }
 
-/// A folder, as it was listed.
 struct Listed {
     at: Instant,
-    /// Its entries, as [`entries`] orders them; or why it couldn't be listed.
+    /// In [`entries`]' order, or why the folder couldn't be listed.
     entries: Result<Vec<Entry>, String>,
 }
 
-/// A file or folder in the folder shown.
 struct Entry {
     path: PathBuf,
-    /// Its name, as it shows: what of it isn't Unicode replaced.
+    /// As shown, its non-Unicode parts replaced.
     name: String,
     kind: Kind,
 }
@@ -69,14 +65,13 @@ struct Entry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Folder,
-    /// A texture, a model, a font or a prefab, by its file's extension, which drags.
+    /// A texture, model, font or prefab, by extension: it drags.
     Asset(AssetKind),
     File,
 }
 
 impl Assets {
-    /// The panel, showing the folder `root`, which needn't be there: the panel says why it can't
-    /// list one that isn't.
+    /// The panel at folder `root`, which needn't exist: the panel then says why it can't list it.
     pub fn new(root: PathBuf) -> Self {
         Self {
             folder: root.clone(),
@@ -85,9 +80,9 @@ impl Assets {
         }
     }
 
-    /// Draws the panel into `ui`: Back, which shows the folder above, but at the root, and where
-    /// the folder shown is; then its entries, or why it couldn't be listed. Lists the folder first,
-    /// unless that was less than a second ago. What a click chooses shows from the next frame.
+    /// Draws the panel: Back, off at the root, and where the folder shown is; then its entries, or
+    /// why it couldn't be listed. Lists first if the listing is older than [`RELIST`]. A click's
+    /// choice shows from the next frame.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let now = Instant::now();
         let fresh = |listed: &Listed| now.duration_since(listed.at) < RELIST;
@@ -125,8 +120,8 @@ impl Assets {
         }
     }
 
-    /// Where the folder shown is: the root's name, then the folders under it down to the one
-    /// shown, such as `assets/scenes`.
+    /// Where the folder shown is: the root's name, then the folders down to it, such as
+    /// `assets/scenes`.
     fn place(&self) -> String {
         let name = |path: &Path| path.file_name().unwrap_or(path.as_os_str()).to_owned();
         let mut place = name(&self.root).to_string_lossy().into_owned();
@@ -138,8 +133,8 @@ impl Assets {
         place
     }
 
-    /// Lists the folder shown, as of `now`, and warns if it can't, unless it couldn't the last time
-    /// either, for the same reason.
+    /// Lists the folder as of `now`. Warns if it can't, unless it couldn't last time for the same
+    /// reason.
     fn list(&mut self, now: Instant) {
         let folder = &self.folder;
         let listed = entries(folder);
@@ -154,13 +149,12 @@ impl Assets {
     }
 }
 
-/// The files and folders in `folder`, but each asset's ID file beside it,
-/// folders first, then files, each by its name regardless of case, then as it's spelled. A link is
-/// what it leads to, and one that leads nowhere a file; a link to an asset is a file too, as the
-/// game's scan takes no asset through a link.
+/// `folder`'s entries but assets' ID files beside them: folders first, then files, each by name
+/// regardless of case, then as spelled. A link is what it leads to, and a file if it leads nowhere.
+/// A link to an asset is a file too, as the game's scan takes no asset through a link.
 ///
-/// It's listed on the main thread, which a folder of many thousands of files would hold up for
-/// some milliseconds each second it shows; a thread watching the folder wouldn't.
+/// Listed on the main thread: a folder of many thousands of files would hold it up some
+/// milliseconds each second it shows. A watching thread wouldn't.
 fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
     // The regular files, links not followed, as the game's scan takes its assets.
@@ -178,7 +172,7 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
         if file_type.is_file() {
             files.insert(path.clone());
         }
-        // An asset a regular file, as the game's scan takes them.
+        // An asset is a regular file, as the game's scan takes them.
         let kind = match AssetKind::of(&path) {
             _ if is_folder => Kind::Folder,
             // A UI's file, which nothing in the view takes, doesn't drag.
@@ -188,9 +182,9 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
         let name = entry.file_name().to_string_lossy().into_owned();
         entries.push(Entry { path, name, kind });
     }
-    // An ID file beside its asset goes with it, which it would only double; one without its asset,
-    // or named for it but for case, or beside a link, which the game warns of, shows. Names match
-    // exactly, as the game's scan matches them, whatever the file system ignores.
+    // An ID file beside its asset goes, as it would only double it. One without its asset, named
+    // for it but for case, or beside a link, which the game warns of, shows. Names match exactly,
+    // as the game's scan does, whatever the file system ignores.
     entries.retain(|entry| {
         let asset = entry.path.with_extension("");
         let id_file = entry.kind != Kind::Folder
@@ -205,8 +199,8 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// Draws `entries`, those of `folder`, into `ui`, in rows as many across as fit, scrolling down,
-/// and gives the folder a double click chose, if one did.
+/// Draws `folder`'s `entries` in rows as many across as fit, scrolling down. Gives the folder a
+/// double click chose.
 fn cells(ui: &mut egui::Ui, folder: &Path, entries: &[Entry]) -> Option<PathBuf> {
     let gap = ui.spacing().item_spacing.x;
     let across = (ui.available_width() + gap) / (CELL + gap);
@@ -231,9 +225,8 @@ fn cells(ui: &mut egui::Ui, folder: &Path, entries: &[Entry]) -> Option<PathBuf>
     chosen
 }
 
-/// Draws `entry`'s cell into `ui`, and gives its folder if it's a folder double-clicked. An asset's
-/// cell is a drag source, as [`Assets`] says. A name cut short to fit gives itself whole as the
-/// cell's tooltip.
+/// Draws `entry`'s cell, giving its folder if double-clicked. An asset's cell is a drag source. A
+/// name cut short gives itself whole as the tooltip.
 fn cell(ui: &mut egui::Ui, entry: &Entry) -> Option<PathBuf> {
     // By its path, so that no two cells share one, however alike they look.
     let id = Id::unique(("gg editor asset", &entry.path));
@@ -256,14 +249,13 @@ fn cell(ui: &mut egui::Ui, entry: &Entry) -> Option<PathBuf> {
     (entry.kind == Kind::Folder && response.double_clicked()).then(|| entry.path.clone())
 }
 
-/// The height of a cell in `ui`: its icon, and a line of text under it.
+/// A cell's height: its icon and a line of text.
 fn cell_height(ui: &egui::Ui) -> f32 {
     3.0 * PAD + ICON + ui.text_style_height(&TextStyle::Body)
 }
 
-/// Places `entry`'s cell in `ui` and paints it: lit while the pointer's over it, its icon, and
-/// under it its name, cut short with an ellipsis if it's wider than the cell. Gives the cell's
-/// rect, and whether the name was cut short.
+/// Places and paints `entry`'s cell: lit under the pointer, its icon, and its name, cut short with
+/// an ellipsis if wider than the cell. Gives the cell's rect and whether the name was cut.
 fn draw(ui: &mut egui::Ui, entry: &Entry) -> (Rect, bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(CELL, cell_height(ui)), Sense::hover());
     let width = CELL - 2.0 * PAD;
@@ -292,8 +284,8 @@ fn draw(ui: &mut egui::Ui, entry: &Entry) -> (Rect, bool) {
     (rect, cut)
 }
 
-/// Paints the icon of an entry of `kind` in `rect`, a square, in `color`, as shapes, as the
-/// toolbar's are: a folder, or a page with its corner folded.
+/// Paints a `kind` entry's icon in square `rect`, in `color`, as shapes like the toolbar's: a
+/// folder, or a page with a folded corner.
 fn paint(painter: &Painter, rect: Rect, kind: Kind, color: Color32) {
     let scale = rect.width() / 16.0;
     // From the top left of a square 16 across.
@@ -321,7 +313,7 @@ fn paint(painter: &Painter, rect: Rect, kind: Kind, color: Color32) {
     }
 }
 
-/// Back's icon: an arrow pointing left, painted as the toolbar's icons are.
+/// Back's icon: a left arrow, painted as the toolbar's icons are.
 fn back() -> Atom<'static> {
     Atom::paint(Vec2::splat(BACK), |ui, args| {
         let (rect, color) = (args.rect, args.fallback_text_color);
@@ -340,8 +332,8 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// A directory of a test's own in the OS's temporary directory, made empty, and removed as the
-    /// test ends, failed or not.
+    /// A test's own empty directory in the OS's temp directory, removed as the test ends, failed or
+    /// not.
     pub(crate) struct Scratch(pub(crate) PathBuf);
 
     impl Scratch {
@@ -359,7 +351,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The text drawn in `shapes`, a frame's output, each with where it was drawn.
+    /// The text in `shapes`, a frame's output, with where each was drawn.
     pub(crate) fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect)> {
         fn find(shape: &egui::Shape, texts: &mut Vec<(String, Rect)>) {
             match shape {
@@ -387,14 +379,14 @@ pub(crate) mod tests {
         found.unwrap_or_else(|| panic!("no {text}: {texts:?}")).1
     }
 
-    /// Folders come first, then files, each by its name regardless of case, then as it's spelled,
-    /// names that aren't Latin among them; a folder's name never makes it a file, nor an asset.
-    /// Textures, models, fonts and prefabs are assets, by their extensions in any case, and a UI's
-    /// file a file, which doesn't drag. An asset's ID file beside it doesn't show, a UI's too; one
-    /// named for it but for case does, as the game warns of it, and so
-    /// do one without its asset, a folder at its name and any other `.meta` file, even beside the
-    /// file it's named for, and, where links can be made, one beside a link to a file, which the
-    /// game's scan doesn't take as an asset, nor does the panel.
+    /// Folders come first, then files, by name regardless of case, then as spelled, non-Latin names
+    /// among them. A folder's name never makes it a file or an asset. Textures, models, fonts and
+    /// prefabs are assets by extension, in any case; a UI's file is a file that doesn't drag.
+    ///
+    /// An asset's ID file beside it doesn't show, nor a UI's. These do: one named for its asset but
+    /// for case, which the game warns of; one without its asset; a folder at its name; any other
+    /// `.meta` file, even beside its namesake; and, where links can be made, one beside a link to a
+    /// file, which neither the game's scan nor the panel takes as an asset.
     #[test]
     fn a_folder_lists_its_folders_then_its_files_by_name() {
         let scratch = Scratch::new("assets-listed");
@@ -470,7 +462,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A frame of `assets` filling a window 400 points across, with `events`; the text it drew.
+    /// A frame of `assets` 400 points wide, with `events`: the text it drew.
     fn frame(ctx: &egui::Context, assets: &mut Assets, events: Vec<Event>) -> Vec<(String, Rect)> {
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
@@ -483,7 +475,7 @@ pub(crate) mod tests {
         texts(&output.shapes)
     }
 
-    /// Clicks at `at`, `times` over, a frame an event, as egui gets them.
+    /// Clicks at `at`, `times` over, an event a frame.
     fn click(ctx: &egui::Context, assets: &mut Assets, at: Pos2, times: usize) {
         let button = |pressed| Event::PointerButton {
             pos: at,
@@ -498,8 +490,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// A double click on a folder shows it from the next frame, where the panel says where it is,
-    /// and Back the folder above, as far up as the root, where Back is off.
+    /// A double click on a folder shows it from the next frame, with where it is. Back shows the
+    /// folder above, up to the root, where Back is off.
     #[test]
     fn a_double_click_shows_a_folder_and_back_the_one_above() {
         let scratch = Scratch::new("assets-browsed");
@@ -528,14 +520,14 @@ pub(crate) mod tests {
         find(&frame(&ctx, &mut assets, Vec::new()), "scenes");
     }
 
-    /// Has `assets`' listing be a second old, as though it was listed a second earlier.
+    /// Ages `assets`' listing a second.
     fn age(assets: &mut Assets) {
         let listed = assets.listed.as_mut().expect("listed");
         listed.at = listed.at.checked_sub(RELIST).expect("a second earlier");
     }
 
-    /// The folder shown is listed again once its listing is a second old, so that a file added
-    /// shows then; and one that can't be listed, as once it's gone, says why.
+    /// The folder shown is listed again once its listing is a second old, so a file added shows.
+    /// One that can't be listed, as once gone, says why.
     #[test]
     fn the_folder_shown_is_listed_again_a_second_on() {
         let scratch = Scratch::new("assets-relisted");

@@ -1,17 +1,17 @@
-//! The editor's side of a game's look: the view settings the game keeps, its viewpoint, an outline,
-//! a grid, whether colliders' outlines show, what the view shows in place of its light and the
-//! passes it leaves out, which any client sets, part by part, the last to
-//! set a part winning, as the tool API's `look` says. A part goes to the game only as the user
-//! changes it, or as it follows one the editor took, as the grid follows the camera that drives the
-//! view; and every answer is a read of the look: the parts another client set since, the editor
-//! takes, but for those changed since it asked, which it sends next. It talks to no game itself:
-//! the layer sends what it asks for, and hands it what the game answers.
+//! The editor's side of a game's look: the view settings the game keeps. They are the viewpoint, an
+//! outline, a grid, colliders' outlines, what the view shows in place of its light, and the passes
+//! it leaves out. Any client sets them part by part, the last to set a part winning, as the tool
+//! API's `look` says.
+//!
+//! A part goes to the game only as the user changes it, or as it follows one the editor took, as
+//! the grid follows the camera driving the view. Every answer is a read of the look. The editor
+//! takes the parts another client set since, except those changed since it asked, which it sends
+//! next. It talks to no game itself: the layer sends its asks and hands it the answers.
 
 use std::mem;
 
 use gg_api::{By, Look, Looked, Outline, Pass, Plane, Shown, Viewpoint};
 
-/// One of the look's parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Viewpoint,
@@ -22,8 +22,8 @@ pub enum Part {
     Skip,
 }
 
-/// The look's parts, each `None` where it's the game's own: what the editor wants of them, or knows
-/// the game holds.
+/// The look's parts, each `None` where it's the game's own: what the editor wants, or knows the
+/// game holds.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Parts {
     pub viewpoint: Option<Viewpoint>,
@@ -35,20 +35,17 @@ pub struct Parts {
     pub skip: Option<Vec<Pass>>,
 }
 
-/// What the editor knows of a game's look, and what it asks of it: the look as the game last
-/// answered, who set each part, and its revision; the latest revision a frame drew with; the parts
-/// the user changed since the editor last asked; and the look it asked for, until the game answers.
+/// What the editor knows of a game's look, and asks of it.
 pub struct Looking {
-    /// The client the editor is to the game, as the game names a part's setter.
+    /// The editor's client name, as the game names a part's setter.
     client: &'static str,
     known: Parts,
     by: By,
     revision: u64,
     drawn: u64,
-    /// Whether each part changed since the last look was asked for, by the user or as it follows
-    /// one taken, by [`Part`].
+    /// Per [`Part`], whether it changed since the last ask, by the user or following one taken.
     changed: [bool; 6],
-    /// The parts the look asked for sets, all left out for a read.
+    /// The look asked for, until answered. A read sets no part.
     asked: Option<Look>,
 }
 
@@ -66,22 +63,22 @@ impl Looking {
         }
     }
 
-    /// Forgets the look and what was asked of it, for a game that serves anew, whose run starts
-    /// with none, or as the game goes: so that the parts the editor wants that aren't the game's
-    /// own go to the next to serve.
+    /// Forgets the look and what was asked, for a game serving anew, whose run starts with none, or
+    /// as the game goes. The parts the editor wants that aren't the game's own then go to the next
+    /// to serve.
     pub fn reset(&mut self) {
         *self = Self::new(self.client);
     }
 
-    /// Has the user's change of `part`, what the editor wants of it, go to the game, unless the
-    /// look already holds what it wants, as the next [`ask`](Self::ask) finds it.
+    /// Sends the user's change of `part` to the game, unless the look holds it by the next
+    /// [`ask`](Self::ask).
     pub fn change(&mut self, part: Part) {
         self.changed[part as usize] = true;
     }
 
-    /// Has `part` go to the game as what the editor wants of it follows another part the editor
-    /// took, as the grid follows the camera that drives the view, as [`change`](Self::change)
-    /// does; but not if another client set it last, whose it stays.
+    /// Sends `part` as it follows another part the editor took, such as the grid following the
+    /// camera driving the view, like [`change`](Self::change). Not if another client set it last:
+    /// it stays theirs.
     pub fn follow(&mut self, part: Part) {
         let by = match part {
             Part::Viewpoint => &self.by.viewpoint,
@@ -96,16 +93,16 @@ impl Looking {
         }
     }
 
-    /// Notes that a frame drew with the look's `revision`, which past what the editor knows has it
-    /// read the look.
+    /// Notes that a frame drew with look `revision`. One past what the editor knows has it read the
+    /// look.
     pub fn drew(&mut self, revision: u64) {
         self.drawn = revision;
     }
 
-    /// Whether a frame that drew with the look's revision `drawn` drew through the game's own
-    /// camera, as far as the editor knows: the look it last read, the one the frame drew with, has
-    /// no viewpoint, and the editor hasn't changed the viewpoint since, nor asked to set it in a
-    /// look whose answer waits. A frame of a later look waits for the editor to read it.
+    /// Whether a frame drawn with look revision `drawn` drew through the game's own camera, as far
+    /// as the editor knows. It did if the look last read, the frame's, has no viewpoint, and the
+    /// editor hasn't changed the viewpoint since or asked to set it in a look awaiting its answer.
+    /// A frame of a later look waits for the editor to read it.
     pub fn through_games_camera(&self, drawn: u64) -> bool {
         let asked = (self.asked.as_ref()).is_some_and(|look| look.viewpoint.is_some());
         drawn == self.revision
@@ -114,9 +111,9 @@ impl Looking {
             && !asked
     }
 
-    /// The look to send the game, while none waits for its answer: the parts changed since the
-    /// last, of those `wanted` that the look doesn't hold, as they're wanted now; or else, if a
-    /// frame drew with a later look than the editor knows, a read, which sets nothing.
+    /// The look to send, while none awaits its answer: the parts changed since the last that the
+    /// look doesn't hold as `wanted`, as wanted now. Else, if a frame drew with a later look than
+    /// the editor knows, a read, which sets nothing.
     pub fn ask(&mut self, wanted: &Parts) -> Option<Look> {
         if self.asked.is_some() {
             return None;
@@ -138,10 +135,10 @@ impl Looking {
         Some(look)
     }
 
-    /// Takes `looked`, the game's answer to the look asked for, and returns what the editor takes of
-    /// it, as a [`Look`] sets parts: each part another client set or gave back since the editor last
-    /// knew it, but those the user changed since the look went out, which go next instead. The
-    /// parts the editor set, in that look or before, are its own.
+    /// Takes `looked`, the game's answer, and returns what the editor takes of it, as a [`Look`]
+    /// sets parts: each part another client set or gave back since the editor knew it. The parts
+    /// the user changed since the look went out go next instead. The parts the editor set, in that
+    /// look or before, are its own.
     pub fn read(&mut self, looked: Looked) -> Look {
         let asked = self.asked.take().unwrap_or_default();
         let Looked {
@@ -200,15 +197,15 @@ impl Looking {
         taken
     }
 
-    /// Notes that the game refused the look asked for, or answered it with what isn't one: the
-    /// look is as the editor knew it.
+    /// Notes that the game refused the look, or answered with what isn't one: the look stays as the
+    /// editor knew it.
     pub fn failed(&mut self) {
         self.asked = None;
     }
 }
 
-/// The part to send, if the user `changed` it and the look doesn't hold what's `wanted` of it, as
-/// the editor `known` it to: a value sets it, and `None` gives it back to the game.
+/// The part to send, if the user `changed` it and the `known` look doesn't hold what's `wanted`: a
+/// value sets it, `None` gives it back to the game.
 fn sent<T: Clone + PartialEq>(
     changed: bool,
     wanted: &Option<T>,
@@ -217,10 +214,9 @@ fn sent<T: Clone + PartialEq>(
     (changed && wanted != known).then(|| wanted.clone())
 }
 
-/// What the editor takes of a part the game answered with, `value` and who set it, `by`, in place
-/// of the part as it's `known`, and who set it: the part, if another client set it or gave it back
-/// since, but not if it's `kept`, set by the look asked for or changed by the user since. A part
-/// that `client`, the editor, set is its own.
+/// What the editor takes of a part the game answered, `value` set `by`, in place of the `known`
+/// one. It takes the part if another client set it or gave it back since, but not if `kept`: set by
+/// the look asked for, or changed by the user since. A part `client`, the editor, set is its own.
 fn take<T: Clone + PartialEq>(
     (known, setter): (&mut Option<T>, &mut Option<String>),
     (value, by): (Option<T>, Option<String>),
@@ -239,7 +235,7 @@ mod tests {
 
     const CLIENT: &str = "editor";
 
-    /// What the game answers with the look of `parts`, set as `by` says, at `revision`.
+    /// The game's answer with the look of `parts`, set as `by` says, at `revision`.
     fn looked(parts: &Parts, by: By, revision: u64) -> Looked {
         Looked {
             viewpoint: parts.viewpoint,
@@ -255,8 +251,8 @@ mod tests {
         }
     }
 
-    /// Who set each part but what the view shows and the passes it leaves out, which none did:
-    /// `viewpoint`'s, the outline's, the grid's and the colliders' setters.
+    /// Who set `viewpoint`, the outline, the grid and the colliders. None set what the view shows
+    /// or the passes it leaves out.
     fn by(setters: [Option<&str>; 4]) -> By {
         let [viewpoint, outline, grid, colliders] = setters.map(|by| by.map(str::to_owned));
         By {
@@ -277,7 +273,7 @@ mod tests {
         }
     }
 
-    /// A look the editor serves anew, its colliders' outlines set: they're wanted, and the game's.
+    /// A look the editor serves anew, its colliders' outlines set: wanted, and the game's.
     fn served(wanted: &Parts) -> Looking {
         let mut looking = Looking::new(CLIENT);
         let sent = looking.ask(wanted).expect("the parts not the game's own");
@@ -296,10 +292,10 @@ mod tests {
         looking
     }
 
-    /// A part goes to the game only as the user changes it, and only while the look doesn't hold
-    /// what's wanted of it, a look at a time, the latest wanted as the last is answered; while
-    /// nothing goes, a frame drawn with a later look than the editor knows has it read the look.
-    /// A game that serves anew gets the parts the editor wants that aren't the game's own again.
+    /// A part goes only as the user changes it, and only while the look doesn't hold it; a look at
+    /// a time, the latest wanted as the last is answered. While nothing goes, a frame drawn with a
+    /// later look than known has it read. A game serving anew again gets the parts wanted that
+    /// aren't its own.
     #[test]
     fn a_part_goes_only_as_the_user_changes_it() {
         let mut wanted = Parts {
@@ -364,9 +360,8 @@ mod tests {
     }
 
     /// Every answer is a read: each part another client set or gave back since is taken, the
-    /// viewpoint and the outline as the grid and the colliders; a part unchanged since isn't taken
-    /// again, nor one the editor set, nor one the user changed since the look went out, which goes
-    /// next instead.
+    /// viewpoint and the outline as the grid and the colliders. Not taken: a part unchanged since,
+    /// one the editor set, or one the user changed since the look went out, which goes next.
     #[test]
     fn the_parts_others_set_are_taken() {
         let wanted = Parts {
@@ -453,9 +448,8 @@ mod tests {
         assert_eq!(read, Look::default(), "its own grid");
     }
 
-    /// What the view shows goes as the others' parts do: once as the user picks it, null as they
-    /// give it back; one an agent set is taken, but not over a pick of the user's since, which goes
-    /// next; and an agent's null is taken too.
+    /// What the view shows goes as the other parts do: once as the user picks it, null as they give
+    /// it back. An agent's is taken, null too, but not over the user's pick since, which goes next.
     #[test]
     fn what_the_view_shows_goes_and_is_taken_as_the_others_parts() {
         let mut wanted = Parts {
@@ -528,8 +522,8 @@ mod tests {
         assert_eq!(taken.show, Some(None), "the agent's null");
     }
 
-    /// The passes the view leaves out go as the others' parts do: once as the user changes them,
-    /// null as they draw every pass again; and an agent's are taken, and its null too.
+    /// The passes left out go as the other parts do: once as the user changes them, null as every
+    /// pass draws again. An agent's are taken, and its null too.
     #[test]
     fn the_passes_left_out_go_and_are_taken_as_the_others_parts() {
         let mut wanted = Parts {

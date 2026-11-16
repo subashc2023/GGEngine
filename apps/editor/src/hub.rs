@@ -1,14 +1,17 @@
-//! The hub, the editor's start screen, which it shows over its panels while it has no project open,
-//! and from its File menu's Open Project, which goes back to the project open: the projects it
-//! knows, those opened lately, the latest first, then the rest of those in the engine's workspace,
-//! each a card that a click opens in the editor; a search through them; Open, whose dialog picks a
-//! project elsewhere by its manifest; New Project, which `gg new` makes in a folder the OS's
-//! dialog picks, the workspace's games as it starts: a member of the workspace in its games folder,
-//! for a folder in the engine's workspace, and elsewhere a game of its own, which builds against
-//! the engine typed, the one the editor is built from as it starts; and whether the editor opens
-//! the latest project as it starts, skipping the hub. The editor keeps the projects opened, and
-//! that choice, for the user from run to run. It does what Unity Hub does, but as a screen over
-//! the editor's panels rather than a launcher of its own.
+//! The hub: the editor's start screen. It shows over the panels while no project is open, or from
+//! File > Open Project, whose Back returns to the open one. It's Unity Hub as a screen over the
+//! editor rather than a launcher.
+//!
+//! - Cards of the projects it knows, a click opening one: those opened lately, latest first, then
+//!   the rest of the engine's workspace's.
+//! - A search through them.
+//! - Open: the OS's dialog picks a project elsewhere by its manifest.
+//! - New Project: `gg new` makes a game in a folder the OS's dialog picks, from the workspace's
+//!   games. Inside the engine's workspace that's a member in its games folder. Elsewhere it's a
+//!   game of its own, built against the engine typed, which starts as the editor's.
+//! - Whether the editor opens the latest project as it starts, skipping the hub.
+//!
+//! The editor keeps the projects opened, and that choice, per user across runs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,12 +30,12 @@ use gg_engine::{BOLD, Context};
 use serde_json::{Value, json};
 use tracing::warn;
 
-/// The file the editor keeps the projects in, as [`Context::read_state`] names it.
+/// Where [`Context::read_state`] keeps the projects.
 const FILE: &str = "projects.json";
 /// The most projects it keeps, past which the one opened longest ago goes.
 const KEPT: usize = 16;
-/// How long a listing of the projects lasts, after which they're listed again, so that a project
-/// made or removed elsewhere shows.
+/// How long a listing lasts before the projects are listed again, so one made or removed elsewhere
+/// shows.
 const RELIST: Duration = Duration::from_secs(1);
 /// The widest the hub's column gets, and the least room around it, in points.
 const WIDTH: f32 = 760.0;
@@ -54,29 +57,25 @@ const AVATARS: [Color32; 8] = [
     Color32::from_rgb(0x84, 0xcc, 0x16),
 ];
 
-/// What the user chose on the hub.
 #[derive(Debug, PartialEq)]
 pub enum Chosen {
     /// Open the project in this folder.
     Open(PathBuf),
-    /// Pick a project's manifest with the OS's dialog, whose folder opens.
+    /// Pick a project's manifest with the OS's dialog, and open its folder.
     Browse,
-    /// Pick the folder New Project makes its game in with the OS's dialog, starting in this one,
-    /// and hand it to [`Hub::make_in`].
+    /// Pick New Project's folder with the OS's dialog, starting here, for [`Hub::make_in`].
     Folder(Option<PathBuf>),
-    /// Go back to the project open, hiding the hub.
+    /// Hide the hub, back to the project open.
     Back,
 }
 
-/// The hub, as the module says: what the editor keeps of the projects, the workspace's folder, the
-/// projects as they were last listed, and what's typed in its fields.
 #[derive(Default)]
 pub struct Hub {
     kept: Kept,
     /// Whether `kept` changed since it was last saved.
     changed: bool,
-    /// The engine's workspace, whose `games` folder holds projects and gets those `gg new` makes,
-    /// if the editor runs in one.
+    /// The engine's workspace, if the editor runs in one. Its `games` folder holds projects and
+    /// gets those `gg new` makes.
     workspace: Option<PathBuf>,
     listed: Option<Listed>,
     search: String,
@@ -84,50 +83,48 @@ pub struct Hub {
     making: Option<Making>,
     /// Why the last project picked couldn't open, until another opens, or it's dismissed.
     refused: Option<String>,
-    /// Whether the File menu's Open Project shows it over the project open.
+    /// Whether File > Open Project shows it over the open project.
     pub asked: bool,
 }
 
-/// What the editor keeps of the projects for the user: those opened, the latest first, and whether
-/// it opens the latest as it starts.
+/// What the editor keeps of the projects per user: those opened, latest first, and whether it opens
+/// the latest as it starts.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Kept {
     opened: Vec<Opened>,
     skip: bool,
 }
 
-/// A project opened, by its folder, and when, in seconds since the Unix epoch.
+/// A project opened, by folder, and when, in seconds since the Unix epoch.
 #[derive(Clone, Debug, PartialEq)]
 struct Opened {
     dir: PathBuf,
     at: u64,
 }
 
-/// The projects as they were last listed: those opened, the latest first, then the rest of the
-/// workspace's, by their folders' names.
+/// The projects as last listed: those opened, latest first, then the workspace's others, by folder
+/// name.
 struct Listed {
     at: Instant,
     recent: Vec<Shown>,
     workspace: Vec<Shown>,
 }
 
-/// A project the hub shows.
 struct Shown {
-    /// Its folder, and that as the file system finds it, as [`found`] says, which tells the
-    /// project open's card without asking the file system each frame.
+    /// Its folder, and that as the file system finds it ([`found`]), which picks out the open
+    /// project's card without asking the file system each frame.
     dir: PathBuf,
     found: PathBuf,
-    /// Its game's name, as its manifest gives it, or its folder's, if that doesn't read.
+    /// Its game's name from its manifest, or its folder's if that doesn't read.
     name: String,
     /// Its manifest, or why it doesn't read.
     project: Result<Project, Failure>,
-    /// When it was last opened, if the editor keeps it.
+    /// When last opened, if kept.
     opened: Option<u64>,
 }
 
-/// The New Project form: the name typed, where the game is made, if that's chosen, and the engine
-/// typed, which a game of its own builds against; and while `gg new` makes it, what its run will
-/// send, the folder it made or why it made none; and why the last made none.
+/// The New Project form. While `gg new` runs, it holds what the run will send: the folder made, or
+/// why none was.
 struct Making {
     name: String,
     place: Option<Place>,
@@ -137,18 +134,17 @@ struct Making {
     failed: Option<String>,
 }
 
-/// Where New Project makes its game: the folder picked, and the engine's workspace that's in, if
-/// it is, as [`workspace`] finds it, found once as the folder's picked. In a workspace, `gg new`
-/// makes a member in its games folder, whichever of its folders was picked; elsewhere, a game of
-/// its own in the folder.
+/// Where New Project makes its game: the folder picked, and the engine's workspace it's in, if any,
+/// found once as it's picked ([`workspace`]). In a workspace, `gg new` makes a member in its games
+/// folder, whichever of its folders was picked. Elsewhere it makes a game of its own in the folder.
 struct Place {
     folder: PathBuf,
     workspace: Option<PathBuf>,
 }
 
 impl Making {
-    /// The form as it shows: no name, the game made in `workspace`'s games folder, if the editor
-    /// runs in one, and the engine the editor is built from.
+    /// The form as it opens: no name, the game made in `workspace`'s games folder if any, and the
+    /// editor's engine.
     fn new(workspace: Option<&Path>) -> Self {
         let games = workspace.map(|workspace| workspace.join("games"));
         Self {
@@ -167,9 +163,8 @@ impl Making {
         place.is_some_and(|place| place.workspace.is_some() || !self.engine.trim().is_empty())
     }
 
-    /// `gg new` making the game the form describes, run as [`crate::gg`] runs gg, in the folder
-    /// picked: a member of the workspace that's in, if it is; else a game of its own there, which
-    /// builds against the engine typed. `None` while no folder is picked.
+    /// `gg new` for the form, run as [`crate::gg`] runs gg, in the folder picked. `None` while no
+    /// folder is picked.
     fn command(&self) -> Option<Command> {
         let place = self.place.as_ref()?;
         let mut command = crate::gg(&place.folder);
@@ -182,13 +177,12 @@ impl Making {
 }
 
 impl Place {
-    /// The place of a game made in `folder`.
     fn new(folder: PathBuf) -> Self {
         let workspace = workspace(Some(&folder), None);
         Self { folder, workspace }
     }
 
-    /// The folder the game's own folder is made in: its workspace's games, or the folder picked.
+    /// Where the game's folder goes: its workspace's games, or the folder picked.
     fn dir(&self) -> PathBuf {
         match &self.workspace {
             Some(workspace) => workspace.join("games"),
@@ -198,8 +192,7 @@ impl Place {
 }
 
 impl Kept {
-    /// What `text`, the file's, holds: what of it reads, a project without a folder or a time left
-    /// out.
+    /// What file `text` holds: what of it reads, leaving out a project without a folder or a time.
     fn parse(text: &str) -> serde_json::Result<Self> {
         let value: Value = serde_json::from_str(text)?;
         let opened = value["opened"].as_array().into_iter().flatten();
@@ -216,8 +209,8 @@ impl Kept {
         })
     }
 
-    /// Its file's text, which [`parse`](Self::parse) reads back: but a folder whose path isn't
-    /// Unicode, which JSON can't hold.
+    /// Its file's text, for [`parse`](Self::parse). Folders whose paths aren't Unicode are left
+    /// out: JSON can't hold them.
     fn text(&self) -> String {
         let opened = self
             .opened
@@ -227,8 +220,7 @@ impl Kept {
         format!("{value:#}\n")
     }
 
-    /// Notes that the project in `dir` was opened `at`: first, in place of where it was, the one
-    /// opened longest ago going past [`KEPT`].
+    /// Notes `dir` opened `at`: it goes first, the oldest going past [`KEPT`].
     fn open(&mut self, dir: &Path, at: u64) {
         self.opened.retain(|opened| !same(&opened.dir, dir));
         self.opened.insert(
@@ -243,8 +235,7 @@ impl Kept {
 }
 
 impl Hub {
-    /// The hub of the editor running in `workspace`, if it runs in one, keeping no projects until
-    /// it [`read`](Self::read)s those it kept.
+    /// The hub for `workspace`, keeping no projects until it [`read`](Self::read)s them.
     pub fn new(workspace: Option<PathBuf>) -> Self {
         Self {
             workspace,
@@ -252,8 +243,7 @@ impl Hub {
         }
     }
 
-    /// Reads what the editor kept of the projects, as `cx` keeps it for the user, warning
-    /// (`editor.projects`) if it can't, the hub then keeping none.
+    /// Reads the kept projects, per user. Warns `editor.projects` and keeps none if it can't.
     pub fn read(&mut self, cx: &Context) {
         let read = match cx.read_state(FILE) {
             Ok(None) => return,
@@ -272,8 +262,7 @@ impl Hub {
         self.listed = None;
     }
 
-    /// Saves what the editor keeps of the projects, as `cx` keeps it for the user, if it changed
-    /// since, warning (`editor.projects`) if it can't.
+    /// Saves the kept projects per user, if changed. Warns `editor.projects` if it can't.
     pub fn save(&mut self, cx: &Context) {
         if !self.changed {
             return;
@@ -284,7 +273,7 @@ impl Hub {
         }
     }
 
-    /// Notes that the project in `dir` opened now, as the latest, which the hub goes back from.
+    /// Notes `dir` opened now, as the latest, which the hub goes back to.
     pub fn opened(&mut self, dir: &Path) {
         self.kept.open(dir, now());
         self.changed = true;
@@ -293,21 +282,20 @@ impl Hub {
         self.asked = false;
     }
 
-    /// The project the editor opens as it starts, skipping the hub: the latest opened, if it's
-    /// chosen to and that's still a project whose manifest reads.
+    /// The project to open at start, skipping the hub: the latest, if so chosen and its manifest
+    /// still reads.
     pub fn skip_to(&self) -> Option<PathBuf> {
         let latest = self.kept.opened.first().filter(|_| self.kept.skip)?;
         let found = Project::find(&latest.dir).is_some_and(|dir| dir == latest.dir);
         (found && Project::read(&latest.dir).is_ok()).then(|| latest.dir.clone())
     }
 
-    /// Shows why the project picked can't open, until another opens.
+    /// Shows why the picked project can't open, until another opens.
     pub fn refuse(&mut self, why: String) {
         self.refused = Some(why);
     }
 
-    /// Has New Project make its game in `folder`, as the OS's dialog picked it, while its form
-    /// shows.
+    /// Has New Project make its game in `folder`, from the OS's dialog, while its form shows.
     pub fn make_in(&mut self, folder: PathBuf) {
         if let Some(making) = &mut self.making {
             making.place = Some(Place::new(folder));
@@ -315,16 +303,16 @@ impl Hub {
         }
     }
 
-    /// The workspace's `games` folder, if the editor runs in one.
+    /// The workspace's `games` folder, if any.
     pub fn games(&self) -> Option<PathBuf> {
         self.workspace
             .as_ref()
             .map(|workspace| workspace.join("games"))
     }
 
-    /// Draws the hub into `ui`, the editor's cover, over the project in `current` if one's open,
-    /// which its Back goes back to, as Escape does; and returns what the user chose this frame, if
-    /// anything. Lists the projects first, unless that was less than a second ago.
+    /// Draws the hub, the editor's cover, over the project in `current` if one's open, which Back
+    /// and Escape go back to. Returns this frame's choice. Lists the projects first if the listing
+    /// is older than [`RELIST`].
     pub fn show(&mut self, ui: &mut egui::Ui, current: Option<&Path>) -> Option<Chosen> {
         let now = Instant::now();
         if !(self.listed.as_ref()).is_some_and(|listed| now.duration_since(listed.at) < RELIST) {
@@ -379,8 +367,8 @@ impl Hub {
         chosen
     }
 
-    /// What `gg new` made, once it's done: the folder of the project it made, to open; or why it
-    /// made none, which the form shows.
+    /// What `gg new` made, once done: the project's folder, to open, or why it made none, which the
+    /// form shows.
     fn made(&mut self) -> Option<Chosen> {
         let making = self.making.as_mut()?;
         let made = match making.run.as_ref()?.try_recv() {
@@ -401,8 +389,8 @@ impl Hub {
         }
     }
 
-    /// The name the hub shows for the project in `dir`, which the file system finds at `found`:
-    /// its game's, as listed, or its folder's.
+    /// The name shown for project `dir`, which the file system finds at `found`: its game's, as
+    /// listed, or its folder's.
     fn name_of(&self, dir: &Path, found: &Path) -> String {
         let listed = self.listed.iter().flat_map(|listed| {
             let all = listed.recent.iter().chain(&listed.workspace);
@@ -414,8 +402,8 @@ impl Hub {
         }
     }
 
-    /// Draws the hub's header: the engine's mark and name, and Open and New Project, which shows
-    /// the form, and returns Browse for Open's click.
+    /// The header: the engine's mark and name, Open, which gives Browse, and New Project, which
+    /// shows the form.
     fn header(&mut self, ui: &mut egui::Ui) -> Option<Chosen> {
         let mut chosen = None;
         ui.horizontal(|ui| {
@@ -455,11 +443,9 @@ impl Hub {
         chosen
     }
 
-    /// Draws why the last project picked couldn't open, while it can't, and the New Project form,
-    /// while it shows: the name, why it isn't a game's, if it isn't, Create, which has `gg new`
-    /// make the game, and Cancel; the folder it's made in, and Choose, which picks another; for a
-    /// game of its own, the engine; or while `gg new` makes it, a spinner. Returns Folder for
-    /// Choose's click.
+    /// Draws why the last project picked couldn't open, and the New Project form while it shows:
+    /// the name, why it can't be a game's, Create and Cancel; the folder and Choose; for a game of
+    /// its own, the engine; while `gg new` runs, a spinner. Returns Folder for Choose's click.
     fn forms(&mut self, ui: &mut egui::Ui) -> Option<Chosen> {
         let error = ui.visuals().error_fg_color;
         if let Some(why) = &self.refused {
@@ -521,8 +507,8 @@ impl Hub {
                     let start = making.place.as_ref().map(|place| place.folder.clone());
                     chosen = Some(Chosen::Folder(start));
                 }
-                // Cut short, the whole folder showing as the pointer's over it, rather than widening
-                // the hub's column.
+                // Cut short, the whole folder showing under the pointer, rather than widening the
+                // hub's column.
                 match &making.place {
                     Some(place) => {
                         ui.add(Label::new(place.folder.display().to_string()).truncate())
@@ -570,10 +556,10 @@ impl Hub {
         chosen
     }
 
-    /// Draws the projects whose names or folders' names hold the search, whatever their case,
-    /// those opened then the workspace's, each a card, as [`card`] draws it, the one open, which
-    /// the file system finds at `current`, outlined; and returns the one a click chose, or Back for
-    /// a click on the one open. A card's menu has Open, and for one opened, Remove From List.
+    /// Draws the cards ([`card`]) whose names or folders hold the search, in any case: those
+    /// opened, then the workspace's. The one open, at `current` as the file system finds it, is
+    /// outlined. Returns a click's project, or Back for the open one's. A card's menu has Open, and
+    /// for one opened, Remove From List.
     fn lists(&mut self, ui: &mut egui::Ui, current: Option<&Path>) -> Option<Chosen> {
         let listed = self.listed.as_ref()?;
         let search = self.search.trim().to_lowercase();
@@ -641,8 +627,7 @@ impl Hub {
 }
 
 /// The engine's workspace that `from`, the working directory, or else `exe`, the editor's
-/// executable, is in: the nearest of their ancestors with a `games` folder and the `Cargo.toml` of
-/// a workspace, where `gg new` makes games.
+/// executable, is in: their nearest ancestor with a `games` folder and a workspace's `Cargo.toml`.
 pub fn workspace(from: Option<&Path>, exe: Option<&Path>) -> Option<PathBuf> {
     let mut ancestors = from.into_iter().chain(exe).flat_map(Path::ancestors);
     let found = ancestors.find(|dir| {
@@ -652,9 +637,9 @@ pub fn workspace(from: Option<&Path>, exe: Option<&Path>) -> Option<PathBuf> {
     found.map(Path::to_owned)
 }
 
-/// The projects to show, as of `now`, as [`Listed`] orders them: those `kept` has opened, which
-/// show whether their manifests read or not, then the rest of those in `workspace`'s `games`
-/// folder, each a project's folder, with its manifest beside a `Cargo.toml`.
+/// The projects to show as of `now`, in [`Listed`]'s order: those `kept` has opened, whether their
+/// manifests read or not, then the others in `workspace`'s `games`. A project is a folder with its
+/// manifest beside a `Cargo.toml`.
 fn list(kept: &Kept, workspace: Option<&Path>, now: Instant) -> Listed {
     let recent: Vec<Shown> = (kept.opened.iter())
         .map(|opened| shown(&opened.dir, Some(opened.at)))
@@ -676,7 +661,6 @@ fn list(kept: &Kept, workspace: Option<&Path>, now: Instant) -> Listed {
     }
 }
 
-/// The project in `dir` as the hub shows it, opened `opened`, if it was.
 fn shown(dir: &Path, opened: Option<u64>) -> Shown {
     let project = Project::read(dir);
     let name = match &project {
@@ -692,16 +676,15 @@ fn shown(dir: &Path, opened: Option<u64>) -> Shown {
     }
 }
 
-/// Folder `dir` as the file system finds it, links and `..` resolved, and in its case on a file
-/// system that ignores case; as it's written if it isn't there.
+/// Folder `dir` as the file system finds it: links and `..` resolved, and in its case on a file
+/// system that ignores case. As written if it isn't there.
 fn found(dir: &Path) -> PathBuf {
     fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned())
 }
 
-/// Draws `shown`'s card into `ui`, as wide as it, lit while the pointer's over it, and outlined
-/// in the accent while it's the project `open`: its avatar, its name, and its folder, or why its
-/// manifest doesn't read; and at its right, when it was opened, `now` being the time, and the scene
-/// it starts in.
+/// Draws `shown`'s card, as wide as `ui`, lit under the pointer and outlined in the accent if
+/// `open`: its avatar, name, and folder, or why its manifest doesn't read. At its right: when it
+/// was opened, `now` being the time, and its start scene.
 fn card(ui: &mut egui::Ui, shown: &Shown, open: bool, now: u64) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, CARD), Sense::click());
@@ -831,14 +814,12 @@ fn card_frame(ui: &egui::Ui) -> egui::Frame {
         .inner_margin(INSET)
 }
 
-/// The UI's bold.
 fn bold() -> FontFamily {
     FontFamily::Name(BOLD.into())
 }
 
-/// The color of the avatar of a project named `name`: one of [`AVATARS`], by the top three bits
-/// of its name's FNV-1a hash, which tell short names apart better than its low bits, so that a
-/// project keeps its color.
+/// A project's avatar color: one of [`AVATARS`], by the top three bits of its name's FNV-1a hash,
+/// which tell short names apart better than its low bits. A project keeps its color.
 fn avatar_color(name: &str) -> Color32 {
     let hash = (name.bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
@@ -846,8 +827,7 @@ fn avatar_color(name: &str) -> Color32 {
     AVATARS[(hash >> 61) as usize % AVATARS.len()]
 }
 
-/// When a project was opened, `at`, as its card says, `now` being the time, in seconds since the
-/// Unix epoch.
+/// When `at` was, as a card says, `now` being the time; both in seconds since the Unix epoch.
 fn ago(at: u64, now: u64) -> String {
     let seconds = now.saturating_sub(at);
     match seconds {
@@ -859,8 +839,7 @@ fn ago(at: u64, now: u64) -> String {
     }
 }
 
-/// Why `name` can't be a new game's, as `gg new` checks it: its project's, which a name that isn't
-/// a package's fails.
+/// Why `name` can't be a new game's, as `gg new` checks: a name that isn't a package's fails.
 fn new_project(name: &str) -> Result<(), String> {
     let project = Project {
         game: name.to_owned(),
@@ -873,8 +852,7 @@ fn new_project(name: &str) -> Result<(), String> {
     project.check().map_err(|failure| failure.message)
 }
 
-/// Runs `command`, `gg new` as [`Making::command`] gives it, on a thread of its own, whose result
-/// comes back as [`made`] reads it.
+/// Runs `command`, `gg new` from [`Making::command`], on its own thread; [`made`] reads its result.
 fn make(mut command: Command) -> Receiver<Result<PathBuf, String>> {
     let (send, made_it) = mpsc::channel();
     thread::spawn(move || {
@@ -887,8 +865,8 @@ fn make(mut command: Command) -> Receiver<Result<PathBuf, String>> {
     made_it
 }
 
-/// What `gg new`'s `output` says: the folder of the game it made, as the line of JSON it prints
-/// names it; or why it made none: its error, as it prints one, or else what it printed.
+/// What `gg new`'s `output` says: the folder made, named by the line of JSON it prints; or why it
+/// made none: its error, else what it printed.
 fn made(output: &Output) -> Result<PathBuf, String> {
     let lines = |bytes: &[u8]| -> Vec<Value> {
         let text = String::from_utf8_lossy(bytes);
@@ -923,7 +901,7 @@ pub fn same(a: &Path, b: &Path) -> bool {
     a == b || matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
-/// The name of folder `dir`, as it shows.
+/// Folder `dir`'s name, as shown.
 fn folder_name(dir: &Path) -> String {
     let name = dir.file_name().unwrap_or(dir.as_os_str());
     name.to_string_lossy().into_owned()
@@ -967,8 +945,8 @@ mod tests {
         fs::remove_file(dir.join("games/c/Cargo.toml")).expect("removed");
     }
 
-    /// Each project opened goes first, once, the oldest going past sixteen; and what's kept reads
-    /// back as it was, but for what of a file doesn't read, which is left out.
+    /// Each project opened goes first, once, the oldest going past sixteen. What's kept reads back,
+    /// leaving out what of a file doesn't read.
     #[test]
     fn the_projects_opened_read_back_the_latest_first() {
         let mut kept = Kept::default();
@@ -1005,10 +983,10 @@ mod tests {
         assert!(Kept::parse("not json").is_err());
     }
 
-    /// The workspace is the nearest ancestor of where the editor runs, or else of its executable,
-    /// with a `games` folder and a workspace's `Cargo.toml`; its projects show after those opened,
-    /// by name, each once, a folder that isn't a project left out, and one opened that's gone
-    /// showing why. The latest opened is skipped to only while that's chosen and it's a project.
+    /// The workspace is the nearest ancestor of where the editor runs, else of its executable, with
+    /// a `games` folder and a workspace's `Cargo.toml`. Its projects show after those opened, by
+    /// name, once each. A folder that isn't a project is left out; one opened that's gone says why.
+    /// The latest is skipped to only while so chosen and it's a project.
     #[test]
     fn the_hub_lists_those_opened_then_the_workspaces_projects() {
         let scratch = Scratch::new("hub-listed");
@@ -1044,8 +1022,8 @@ mod tests {
         assert_eq!(hub.skip_to(), None, "gone");
     }
 
-    /// A frame of `hub` over the project in `current`, if one's open, filling a window 800 points
-    /// across, with `events`; what it chose, and the text it drew.
+    /// A frame of `hub` over `current`, 800 points wide, with `events`: what it chose, and the text
+    /// drawn.
     fn frame(
         ctx: &egui::Context,
         hub: &mut Hub,
@@ -1063,8 +1041,7 @@ mod tests {
         (chosen, texts(&output.shapes))
     }
 
-    /// A click at `at` on `hub`, over the project in `current`, as three frames give it: the
-    /// pointer moving there, pressing and letting go; and what the last chose.
+    /// A click at `at` over three frames (move, press, let go): what the last chose.
     fn click(
         ctx: &egui::Context,
         hub: &mut Hub,
@@ -1082,9 +1059,8 @@ mod tests {
         frame(ctx, hub, current, vec![button(false)]).0
     }
 
-    /// A click on a project's card opens it, and on the open project's goes back to it, as Back
-    /// does, and Escape; Open asks for the dialog; and the search shows only the projects that
-    /// match it.
+    /// A click on a card opens it, and on the open project's goes back, as Back and Escape do. Open
+    /// asks for the dialog. The search shows only the projects that match it.
     #[test]
     fn a_click_on_a_card_opens_its_project() {
         let scratch = Scratch::new("hub-clicked");
@@ -1125,8 +1101,8 @@ mod tests {
         assert!(!shown.iter().any(|(text, _)| text == "a"), "{shown:?}");
     }
 
-    /// A new game's name is checked as `gg new` checks it; and what `gg new` printed says the
-    /// folder it made, or why it made none.
+    /// A new game's name is checked as `gg new` checks it. What `gg new` printed gives the folder
+    /// made, or why none was.
     #[test]
     fn gg_news_output_says_what_it_made() {
         assert_eq!(new_project("my_game"), Ok(()));
@@ -1155,12 +1131,14 @@ mod tests {
         );
     }
 
-    /// New Project makes its game in the folder chosen. Outside a workspace, the form starts with
-    /// none, Create off until Choose's dialog picks one, and then makes a game of its own there,
-    /// `gg new <NAME> --engine <ENGINE>`, the engine the editor is built from as the form starts,
-    /// none typed leaving Create off; a folder of a long name keeps to the hub's column. In a
-    /// workspace, it starts in the workspace's games folder and makes a member there, `gg new
-    /// <NAME>`, whichever of the workspace's folders is chosen.
+    /// New Project makes its game in the folder chosen.
+    ///
+    /// - Outside a workspace, the form starts with no folder, Create off until Choose picks one. It
+    ///   then makes a game of its own, `gg new <NAME> --engine <ENGINE>`, the engine the editor's
+    ///   as the form opens; none typed leaves Create off. A long folder name keeps to the hub's
+    ///   column.
+    /// - In a workspace, it starts at the games folder and makes a member, `gg new <NAME>`,
+    ///   whichever of the workspace's folders is chosen.
     #[test]
     fn new_project_makes_its_game_in_the_folder_chosen() {
         let elsewhere = Scratch::new("hub-new-outside");
@@ -1240,7 +1218,7 @@ mod tests {
         }
     }
 
-    /// An exit status of `code`, as a process that ended so gives.
+    /// A process's exit status of `code`.
     fn exit_status(code: i32) -> std::process::ExitStatus {
         #[cfg(unix)]
         let status = std::os::unix::process::ExitStatusExt::from_raw(code << 8);

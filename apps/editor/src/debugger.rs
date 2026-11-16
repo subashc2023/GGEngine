@@ -1,10 +1,12 @@
-//! The Debugger panel: the game's Luau scripts, debugged through the tool API's `debug`, on a
-//! connection of its own, which a stopped script doesn't hold up, as it holds up the editor's
-//! requests that the game's main thread answers. It shows the source of a script the game runs, as
-//! the project's asset root has it, a click on a line's number setting or clearing a breakpoint
-//! there; the breakpoints are the editor's, which it gives each game as it serves. While a script
-//! has stopped, it shows the stack, the function stopped in first, and the locals and upvalues of
-//! the one picked, its script's source at its line; with Continue, Pause and the steps.
+//! The Debugger panel: the game's Luau scripts, debugged through the tool API's `debug`.
+//!
+//! It has its own connection, since a stopped script holds up the game's main thread, which answers
+//! the editor's other requests. It shows:
+//!
+//! - the source of a script the game runs, from the asset root. A click on a line's number sets or
+//!   clears a breakpoint. The breakpoints are the editor's, given to each game as it serves.
+//! - while a script is stopped: the stack, the function stopped in first; the picked function's
+//!   locals and upvalues, and its source at its line; Continue, Pause and the steps.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -17,49 +19,47 @@ use gg_api::{Client, DebugAction, Debugging, Failure, Session, StopReason, Varia
 use gg_engine::egui::{self, Align, Color32, RichText, ScrollArea};
 use serde_json::{Value, json};
 
-/// How often the panel asks the game how its scripts are, while it asks nothing else.
+/// How often the panel polls the scripts' state while it asks nothing else.
 const POLL: Duration = Duration::from_millis(250);
 
-/// How long the panel's connection waits to connect, and for each answer, which the connection's
-/// own thread gives at once.
+/// How long the connection waits to connect and for each answer, which the game's connection thread
+/// gives at once.
 const WAIT: Duration = Duration::from_secs(10);
 
-/// The share of the panel's width the source takes, the stack and its variables the rest.
+/// The source's share of the panel's width; the stack and its variables take the rest.
 const SOURCE: f32 = 0.6;
 
-/// The color of a breakpoint's mark, and of the line a script has stopped at.
+/// The color of a breakpoint's mark and of the line stopped at.
 const MARK: Color32 = Color32::from_rgb(220, 70, 60);
 const STOPPED: Color32 = Color32::from_rgba_premultiplied(90, 80, 20, 90);
 
-/// The Debugger panel, as the module says: the asset root, which the game names its scripts from;
-/// the editor's breakpoints, by script; the connection to the game that serves, while one does,
-/// and its debugger as it last answered; the script shown and the function picked in the stack.
+/// The Debugger panel. Its breakpoints are the editor's, by script, and its asset root names
+/// scripts as the game does.
 pub(crate) struct Debugger {
     root: Option<PathBuf>,
     client: String,
     breakpoints: BTreeMap<String, BTreeSet<u32>>,
     link: Option<Link>,
     seen: Option<Debugging>,
-    /// The script whose source shows, as the game names it, and its lines, as last read.
+    /// The script shown, as the game names it, and its lines as last read.
     shown: Option<(String, Vec<String>)>,
-    /// The function picked in the stack, by its place, and the stop it's of, by its number, at
-    /// which the source scrolls to its line.
+    /// The function picked, by its place in the stack, and its stop's number, at which the source
+    /// scrolls to its line.
     picked: usize,
     scrolled: u64,
     /// Why the game refused the last request, until another is answered.
     refused: Option<String>,
 }
 
-/// A connection to the game, on a thread of its own: the requests sent, in order, and their
-/// answers, which come back in order.
+/// A connection to the game on its own thread: requests sent in order, and their answers in order.
 struct Link {
     asks: Sender<Value>,
     answers: Receiver<Result<Debugging, Failure>>,
 }
 
 impl Debugger {
-    /// The panel of the scripts of the game whose asset root is `root`, outside a project none,
-    /// which talks to it as `client`.
+    /// A panel for the game whose asset root is `root`, `None` outside a project, talking to it as
+    /// `client`.
     pub(crate) fn new(root: Option<PathBuf>, client: &str) -> Self {
         Self {
             root,
@@ -74,14 +74,13 @@ impl Debugger {
         }
     }
 
-    /// Connects to the game `session` names, in place of the one before, which has ended, giving
-    /// it the editor's breakpoints.
+    /// Connects to `session`'s game in place of the ended one, giving it the breakpoints.
     pub(crate) fn serve(&mut self, session: Session) {
         self.reach(connect(session, self.client.clone()));
     }
 
-    /// Talks to the game through `link`, in place of the one before, giving it the editor's
-    /// breakpoints, which a game restarted starts without.
+    /// Talks through `link` instead, giving the game the breakpoints, which a restarted game starts
+    /// without.
     fn reach(&mut self, link: Link) {
         self.disconnect();
         for (script, lines) in &self.breakpoints {
@@ -90,7 +89,7 @@ impl Debugger {
         self.link = Some(link);
     }
 
-    /// Lets go of the connection to the game, which has gone, and of what it last answered.
+    /// Drops the gone game's connection and its last answers.
     pub(crate) fn disconnect(&mut self) {
         self.link = None;
         self.seen = None;
@@ -144,7 +143,6 @@ impl Debugger {
         }
     }
 
-    /// Draws the panel, as the module says.
     pub(crate) fn show(&mut self, ui: &mut egui::Ui) {
         let serves = self.link.is_some();
         let stopped = self.seen.as_ref().and_then(|seen| seen.stopped.clone());
@@ -190,8 +188,8 @@ impl Debugger {
             ui.colored_label(MARK, refused);
         }
         ui.separator();
-        // A new stop picks the function stopped in, whose script shows, read again, as it runs,
-        // scrolled to its line; a function picked since shows its script.
+        // A new stop picks the function stopped in and shows its script, read again, scrolled to
+        // its line. A function picked since shows its own.
         let number = stopped.as_ref().map_or(0, |stop| stop.number);
         let fresh = number != 0 && number != self.scrolled;
         if fresh {
@@ -229,7 +227,7 @@ impl Debugger {
         }
     }
 
-    /// Whether a script has stopped in the game, as it last answered.
+    /// Whether a script is stopped, as the game last answered.
     pub(crate) fn stopped(&self) -> bool {
         (self.seen.as_ref()).is_some_and(|seen| seen.stopped.is_some())
     }
@@ -257,7 +255,7 @@ impl Debugger {
         }
     }
 
-    /// Reads the source of `script`, as the game names it, from the asset root, to show.
+    /// Reads `script`'s source from the asset root to show.
     fn show_script(&mut self, script: &str) {
         let text = (self.root.as_ref()).and_then(|root| fs::read_to_string(root.join(script)).ok());
         let lines = text.map_or_else(
@@ -267,9 +265,8 @@ impl Debugger {
         self.shown = Some((script.to_owned(), lines));
     }
 
-    /// The source shown, with a pick of the scripts the game runs, each line's number setting or
-    /// clearing a breakpoint there as it's clicked, and the line `at` lit, where the function
-    /// picked is, scrolled to if it's a stop's `fresh`.
+    /// The source, with a pick of the game's scripts. A click on a line's number toggles its
+    /// breakpoint. Line `at`, the picked function's, is lit, and scrolled to if `fresh`.
     fn source(
         &mut self,
         ui: &mut egui::Ui,
@@ -354,8 +351,7 @@ impl Debugger {
         }
     }
 
-    /// The stack of `stopped`, a click picking a function, and the locals and upvalues of the one
-    /// picked.
+    /// `stopped`'s stack, a click picking a function, and the picked one's locals and upvalues.
     fn stack(&mut self, ui: &mut egui::Ui, stopped: Option<&gg_api::Stop>) {
         let Some(stop) = stopped else {
             ui.weak("No script has stopped: set a breakpoint, or pause");
@@ -381,7 +377,7 @@ impl Debugger {
     }
 }
 
-/// A grid of `variables` under `title`, each its name and its value as JSON.
+/// `variables` under `title`: each name, and its value as JSON.
 fn variables(ui: &mut egui::Ui, title: &str, variables: &[Variable]) {
     ui.add_space(4.0);
     ui.strong(title);
@@ -407,9 +403,9 @@ fn breakpoints(script: &str, lines: &BTreeSet<u32>) -> Value {
     json!({ "breakpoints": { "script": script, "lines": lines } })
 }
 
-/// Connects to the game `session` names as `client`, on a thread of its own, which sends each
-/// request it's given in turn, and else asks how the scripts are every [`POLL`], passing each
-/// answer on, until the connection breaks or the panel lets go of it.
+/// Connects to `session`'s game as `client`, on its own thread. The thread sends each request in
+/// turn, else polls the scripts every [`POLL`], and passes each answer on, until the connection
+/// breaks or the panel drops it.
 fn connect(session: Session, client: String) -> Link {
     let (asks, asked) = mpsc::channel::<Value>();
     let (answer, answers) = mpsc::channel();
@@ -457,8 +453,8 @@ mod tests {
         (panel, asked, answer)
     }
 
-    /// A breakpoint toggled on and off tells the game the script's lines each time, and the editor
-    /// keeps them; a click's action goes to the game; an answer is taken, and a refusal said.
+    /// Toggling a breakpoint sends the game the script's lines each time, and the editor keeps
+    /// them. A click's action goes to the game; an answer is taken, and a refusal shown.
     #[test]
     fn breakpoints_and_actions_go_to_the_game_and_answers_come_back() {
         let (mut panel, asked, answer) = linked();
@@ -502,8 +498,8 @@ mod tests {
         assert!(panel.link.is_none() && panel.seen.is_none());
     }
 
-    /// The editor's breakpoints go to each game as it serves, which a game restarted needs, as it
-    /// starts without them.
+    /// The editor's breakpoints go to each game as it serves, as a restarted game starts without
+    /// them.
     #[test]
     fn the_editors_breakpoints_go_to_each_game_as_it_serves() {
         let (mut panel, _asked, _answer) = linked();

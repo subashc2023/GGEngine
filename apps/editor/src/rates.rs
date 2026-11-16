@@ -1,8 +1,9 @@
-//! The frame rates the view shows at its bottom right while the settings' "Show frame rates" is on:
-//! the game's, as it publishes frames to the view's memory, and the editor's own, each over the
-//! last second. The Performance panel times the editor's frames alone, and the game, which renders
-//! a frame once the editor has taken its last, goes no faster and may go slower: what depends on
-//! the game's frame rate, as antialiasing's settling does, goes by the game's here.
+//! The game's and the editor's frame rates over the last second, at the view's bottom right while
+//! the settings' "Show frame rates" is on.
+//!
+//! The Performance panel times only the editor's frames. The game renders a frame once the editor
+//! has taken its last, so it may run slower. What depends on its rate, such as antialiasing's
+//! settling, goes by the game's.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -14,29 +15,27 @@ use tracing::warn;
 
 use crate::overlay;
 
-/// The file the editor keeps whether the rates show in, as [`Context::read_state`] names it.
+/// Where [`Context::read_state`] keeps whether the rates show.
 const FILE: &str = "frame_rates.json";
 
 /// How far back the rates count frames.
 const OVER: Duration = Duration::from_secs(1);
 
-/// What the settings' switch is, which its tooltip says.
+/// The settings switch's tooltip.
 const TIP: &str = "Show at the view's bottom right how many frames a second the game renders, and \
                    how long each takes, beside the editor's own, over the last second";
 
-/// The frame rates, and whether the view shows them.
 #[derive(Default)]
 pub struct Rates {
-    /// Whether the view shows them.
     pub shown: bool,
-    /// The last second's frames of the editor: when each updated, and how many frames the game had
-    /// published to the view by then, while a game's view was published.
+    /// The editor's frames over the last [`OVER`]: when each updated, and the game's published
+    /// frame count then, while a game's view was published.
     seen: VecDeque<(Instant, Option<u64>)>,
 }
 
 impl Rates {
-    /// Reads whether they show, as `cx` keeps it for the user, warning (`editor.frame_rates`) if it
-    /// can't, and then not showing them.
+    /// Reads whether they show, kept per user. Warns `editor.frame_rates` and hides them if it
+    /// can't.
     pub fn read(&mut self, cx: &Context) {
         let read = match cx.read_state(FILE) {
             Ok(None) => return,
@@ -58,8 +57,8 @@ impl Rates {
         }
     }
 
-    /// Notes an editor frame at `now`, the game having published `published` frames to the view by
-    /// then, while a game's view is published, and forgets those more than [`OVER`] before.
+    /// Notes an editor frame at `now`, with the game's published frame count, and forgets frames
+    /// older than [`OVER`].
     pub fn see(&mut self, now: Instant, published: Option<u64>) {
         self.seen.push_back((now, published));
         while (self.seen.front()).is_some_and(|&(at, _)| now.duration_since(at) > OVER) {
@@ -67,9 +66,9 @@ impl Rates {
         }
     }
 
-    /// The editor's frames a second over the frames noted, and the game's: `None` before two
-    /// frames, and the game's while no game's view was published at the first and the last, or
-    /// where the count went back, as it does for a new view.
+    /// The editor's and the game's frames a second. Both are `None` before two frames. The game's
+    /// is also `None` if no view was published at the first or the last, or if its count went
+    /// back, as for a new view.
     pub fn rates(&self) -> (Option<f64>, Option<f64>) {
         let (Some(&(first, from)), Some(&(last, to))) = (self.seen.front(), self.seen.back())
         else {
@@ -87,8 +86,8 @@ impl Rates {
         )
     }
 
-    /// Adds the switch that shows them to the title bar's settings, keeping what it's set to for
-    /// the user, warning (`editor.frame_rates`) if it can't.
+    /// Adds their switch to the title bar's settings, kept per user, warning `editor.frame_rates`
+    /// if it can't.
     pub fn settings(&mut self, ui: &mut Ui<'_>, cx: &Context) {
         let mut changed = false;
         ui.settings(|ui| {
@@ -101,7 +100,7 @@ impl Rates {
         }
     }
 
-    /// Shows them at the bottom right of `view`, while they show, as [`overlay::label`] does.
+    /// Paints them at `view`'s bottom right while shown, as [`overlay::label`] does.
     pub fn paint(&self, egui: &egui::Context, view: &Response) {
         if self.shown {
             let text = text(self.rates());
@@ -110,8 +109,7 @@ impl Rates {
     }
 }
 
-/// What the view says of the editor's frames a second and the game's, as [`Rates::rates`] gives
-/// them, each with its frame time.
+/// [`Rates::rates`] as text, each rate with its frame time.
 fn text((editor, game): (Option<f64>, Option<f64>)) -> String {
     let rate = |rate: Option<f64>| match rate {
         Some(rate) if rate > 0.0 => format!("{rate:5.1} fps {:6.2} ms", 1000.0 / rate),
@@ -125,8 +123,8 @@ fn text((editor, game): (Option<f64>, Option<f64>)) -> String {
 mod tests {
     use super::*;
 
-    /// A second of frames `every` apart from `start`, the game publishing a frame each `per` of
-    /// them, as `published` counts, or none.
+    /// A second of editor frames `every` apart, the game publishing one per `per` of them, or no
+    /// view.
     fn second(every: Duration, per: Option<u64>) -> Rates {
         let mut rates = Rates::default();
         let start = Instant::now();

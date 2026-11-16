@@ -1,6 +1,5 @@
-//! The editor of the game's project it's started in, as [`game`] describes; started elsewhere, of
-//! the project its [`hub`] picks. It takes the flags every app shares, and one of its own,
-//! [`RELEASE_GAME`].
+//! The editor of the project it's started in, as [`game`] describes, or else of the one its [`hub`]
+//! picks. It takes the flags every app shares, and [`RELEASE_GAME`].
 
 mod assets;
 mod camera;
@@ -22,9 +21,7 @@ use std::process::{Command, ExitCode};
 
 use gg_engine::App;
 
-/// The editor's own flag: its game built optimized, as `gg run --release` builds it, so that it
-/// runs as fast as a player's, without Vulkan's validation and without patches, each edit to its
-/// code restarting it. The editor itself is built as it was.
+/// The editor's own flag, as [`USAGE`] says. It changes only the game's build.
 const RELEASE_GAME: &str = "--release-game";
 
 /// What `--help` adds, after the flags every app shares.
@@ -45,16 +42,15 @@ fn main() -> ExitCode {
     status
 }
 
-/// Whether `args`, those after the program's name, give [`RELEASE_GAME`], and the rest, in order,
-/// for the engine.
+/// Whether `args`, after the program's name, give [`RELEASE_GAME`], and the rest, in order, for the
+/// engine.
 fn own_flags(args: impl IntoIterator<Item = OsString>) -> (bool, Vec<OsString>) {
     let (own, rest): (Vec<_>, Vec<_>) = args.into_iter().partition(|arg| arg == RELEASE_GAME);
     (!own.is_empty(), rest)
 }
 
-/// The editor of the project it's started in, if it's started in one, its hub finding projects in
-/// the engine's workspace, where it runs, or where its executable is; its game built optimized if
-/// `release_game`.
+/// The editor of the project it's started in, if any. Its hub finds projects in the engine's
+/// workspace: where it runs, or where its executable is.
 fn app(release_game: bool) -> App {
     let dir = std::env::current_dir().ok();
     let exe = std::env::current_exe().ok();
@@ -63,17 +59,15 @@ fn app(release_game: bool) -> App {
     game::app(project, workspace, release_game)
 }
 
-/// The engine the editor is built from: the directory of its checkout, two folders above the
-/// editor's.
+/// The engine's checkout, two folders above the editor.
 fn engine() -> &'static Path {
     let editor = Path::new(env!("CARGO_MANIFEST_DIR"));
     (editor.ancestors().nth(2)).expect("the editor is at apps/editor in the engine")
 }
 
-/// Cargo running gg in directory `dir`, whose cargo config and toolchain apply, gg's arguments to
-/// follow: gg built from the source of the [`engine`] the editor is built from, by its manifest, as
-/// `cargo gg` builds it in the engine's workspace, and as no alias can in a game's own workspace.
-/// Cargo is the one `CARGO` names, as cargo sets it for what it runs, else the first on the `PATH`.
+/// Cargo running the [`engine`]'s gg by its manifest, in `dir`, whose cargo config and toolchain
+/// apply; gg's arguments follow. It is `cargo gg`, which no alias gives in a game's own workspace.
+/// Cargo is `CARGO`'s, which cargo sets for what it runs, else the `PATH`'s.
 fn gg(dir: &Path) -> Command {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
@@ -93,8 +87,7 @@ mod tests {
     use crate::camera::Screen;
     use crate::handles::Reading;
 
-    /// `--release-game` comes off the arguments wherever it is, the rest going to the engine as
-    /// they were given; without it, all of them do.
+    /// `--release-game` comes off the arguments wherever it is; the rest go to the engine as given.
     #[test]
     fn the_editor_takes_its_own_flag_and_leaves_the_engine_the_rest() {
         let args = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
@@ -107,8 +100,7 @@ mod tests {
         assert_eq!(super::own_flags(given.clone()), (false, given));
     }
 
-    /// gg runs, in the directory given, from the manifest of the engine's gg, wherever the
-    /// directory is.
+    /// gg runs in the directory given, from the engine's gg manifest, wherever the directory is.
     #[test]
     fn gg_runs_from_the_engines_manifest_in_the_directory_given() {
         let dir = std::env::temp_dir();
@@ -121,17 +113,15 @@ mod tests {
         assert_eq!(gg.get_current_dir(), Some(dir.as_path()));
     }
 
-    /// A view whose top left isn't the window's, at [`SCALE`] pixels a point: through the editor's
-    /// camera as it starts, 10 units tall, the origin at its middle, (500, 350), and a unit 60
-    /// pixels across.
+    /// A view offset from the window's top left, at [`SCALE`] pixels a point. The editor's starting
+    /// camera shows 10 units tall, the origin at its middle (500, 350), a unit 60 pixels across.
     pub(crate) const VIEW: Viewport = Viewport {
         origin: [100, 50],
         size: [800, 600],
     };
     pub(crate) const SCALE: f32 = 1.5;
 
-    /// What the editor reads of the window, [`VIEW`] at [`SCALE`] pixels a point, with the cursor
-    /// at `at`, in its pixels, and neither Alt, the command key nor Shift held.
+    /// [`VIEW`] as the editor reads the window, the cursor at pixel `at`, no modifier held.
     pub(crate) fn reading(at: impl Into<DVec2>) -> Reading {
         Reading {
             screen: Screen {
@@ -145,8 +135,8 @@ mod tests {
         }
     }
 
-    /// A probe's answer at pixel `at` of a view 800 by 600: a material's, its light as the view
-    /// shows it, of entity Crate, with depth but, as an orthographic view's, no distance.
+    /// A probe's answer at pixel `at` of an 800 by 600 view: a material's light as shown, of entity
+    /// Crate, with depth but no distance, as an orthographic view's.
     pub(crate) fn probe(at: [f64; 2]) -> gg_api::probe::Probe {
         gg_api::probe::Probe {
             at,

@@ -1,32 +1,30 @@
-//! The File menu's items and their shortcuts, and what the editor shows for them in front of its
-//! UI: the prompt that asks whether to save the open scene's unsaved edits first, and a message
-//! that says why a scene couldn't be opened or saved.
+//! The File menu's items and shortcuts, and what the editor shows for them over its UI: the prompt
+//! to save unsaved edits first, and a message saying why a scene couldn't be opened or saved.
 
 use gg_engine::egui::{self, Button, Id, KeyboardShortcut, Modal};
 
 use crate::shortcuts::{Does, SHORTCUTS};
 
-/// The widest the prompt and a message get, in points, so that a long error wraps.
+/// The widest the prompt and a message get, in points, so a long error wraps.
 const WIDTH: f32 = 400.0;
 
-/// An item of the File menu, which its shortcut chooses too; Quit, below them, has none.
+/// A File menu item, which its shortcut chooses too. Quit, below them, has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
-    /// Has the game empty the open scene, which is untitled until it's saved.
+    /// Empties the open scene, untitled until saved.
     New,
-    /// Picks a scene, which the game opens in place of the open one.
+    /// Opens a picked scene in place of the open one.
     Open,
-    /// Has the game save the open scene to its file, or, without one, as Save As does.
+    /// Saves the open scene to its file, or without one, as Save As.
     Save,
-    /// Picks a file, which the game saves the open scene to, and which is then its file.
+    /// Saves the open scene to a picked file, which becomes its file.
     SaveAs,
 }
 
 impl Item {
-    /// The items, in the menu's order.
+    /// In the menu's order.
     pub const MENU: [Self; 4] = [Self::New, Self::Open, Self::Save, Self::SaveAs];
 
-    /// What the menu calls it.
     pub fn label(self) -> &'static str {
         match self {
             Self::New => "New",
@@ -36,9 +34,7 @@ impl Item {
         }
     }
 
-    /// The keys that choose it, as the menu names them: N, O or S with Ctrl, or Cmd on macOS, and
-    /// for Save As, S with Shift too; each the key at that position, as [`shortcut`] says, and as
-    /// [`SHORTCUTS`] has them.
+    /// Its keys from [`SHORTCUTS`], as the menu names them.
     pub fn shortcut(self) -> KeyboardShortcut {
         let shortcut = SHORTCUTS
             .iter()
@@ -47,14 +43,14 @@ impl Item {
     }
 }
 
-/// Which item of the File menu a shortcut pressed among `events`, a frame's input to egui,
-/// chooses, if one does: the first's. A shortcut's key is the one at N, O or S's position, as the
-/// engine's keys are positions, whatever the layout calls it, so that the editor's view takes out
-/// the same keys of what the game gets. Takes out the shortcuts' presses and their repeats, which
-/// choose nothing, so that one held down saves, or shows a dialog, once.
+/// The File menu item that the first shortcut pressed among `events`, a frame's egui input,
+/// chooses.
+///
+/// A shortcut's key is a position, whatever the layout calls it, so the view takes the same keys
+/// out of what the game gets. Takes out the shortcuts' presses and their repeats, which choose
+/// nothing, so one held down acts once.
 pub fn shortcut(events: &mut Vec<egui::Event>) -> Option<Item> {
-    // In the table's order, Save As's before Save's, since a shortcut matches with Shift held as
-    // well.
+    // The table's order matters: Save As's comes first.
     let shortcuts = SHORTCUTS.iter().filter_map(|shortcut| match shortcut.does {
         Does::File(item) => Some(item),
         _ => None,
@@ -99,10 +95,9 @@ pub enum Choice {
     Cancel,
 }
 
-/// Shows the prompt that asks whether to save the open scene's unsaved edits first, which `title`
-/// asks and `text` says more of, in front of the UI, which it keeps clicks from: with Save, while
-/// `saves`, Don't Save and Cancel, which Escape or a click outside it chooses too. Returns what was
-/// chosen this frame, if anything was.
+/// Shows the save-first prompt, `title` and `text`, blocking clicks to the UI. Its buttons: Save
+/// (if `saves`), Don't Save and Cancel, which Escape or a click outside also chooses. Returns this
+/// frame's choice.
 pub fn prompt(egui: &egui::Context, title: &str, text: &str, saves: bool) -> Option<Choice> {
     let shown = Modal::new(Id::unique("editor prompt")).show(egui, |ui| {
         ui.set_max_width(WIDTH);
@@ -126,18 +121,18 @@ pub fn prompt(egui: &egui::Context, title: &str, text: &str, saves: bool) -> Opt
     shown.inner.or(cancelled)
 }
 
-/// Why a scene couldn't be opened, saved or made, which the editor shows until it's dismissed.
+/// Why a scene couldn't be opened, saved or made, shown until dismissed.
 #[derive(Debug)]
 pub struct Message {
-    /// What couldn't be done, to which file, such as "Can't save arena.ron".
+    /// What failed, on which file, such as "Can't save arena.ron".
     pub title: String,
     /// Why: the refusal's code and message.
     pub text: String,
 }
 
 impl Message {
-    /// Shows it in front of the UI, which it keeps clicks from; returns whether it was dismissed
-    /// this frame: by its OK, Escape or a click outside it.
+    /// Shows it, blocking clicks to the UI. Returns whether its OK, Escape or a click outside
+    /// dismissed it this frame.
     pub fn show(&self, egui: &egui::Context) -> bool {
         let shown = Modal::new(Id::unique("editor message")).show(egui, |ui| {
             ui.set_max_width(WIDTH);
@@ -155,7 +150,7 @@ mod tests {
 
     use super::*;
 
-    /// `key` pressed with `modifiers`, as egui gets it, or repeating as it's held, if `repeat`.
+    /// `key` pressed with `modifiers`, or held and repeating if `repeat`.
     fn pressed(key: egui::Key, modifiers: Modifiers, repeat: bool) -> egui::Event {
         egui::Event::Key {
             key,
@@ -166,9 +161,9 @@ mod tests {
         }
     }
 
-    /// Each of the File menu's shortcuts chooses its item, Ctrl+Shift+S Save As rather than Save,
-    /// and is taken from egui's input; a repeat chooses nothing, and is taken too; and keys without
-    /// Ctrl, or Cmd on macOS, or another's shortcut, are left as they were.
+    /// Each File menu shortcut chooses its item, Ctrl+Shift+S Save As rather than Save, and is
+    /// taken from egui's input. A repeat chooses nothing and is taken too. Keys without the command
+    /// key, and other shortcuts, are left.
     #[test]
     fn the_shortcuts_choose_the_file_menus_items() {
         // The command key as egui-winit sends it: with Ctrl on Windows and Linux, Cmd on macOS.
@@ -200,9 +195,8 @@ mod tests {
         }
     }
 
-    /// A shortcut goes by where its key is, as the engine's keys do: the key at S's chooses Save
-    /// whatever the layout calls it, and one the layout calls S elsewhere, as Colemak's at D's,
-    /// chooses nothing, and is left as it was.
+    /// A shortcut goes by its key's position: the key at S's chooses Save whatever the layout calls
+    /// it. The key a layout calls S elsewhere, as Colemak's at D's, chooses nothing and is left.
     #[test]
     fn the_shortcuts_go_by_where_their_keys_are() {
         let command = Modifiers::CTRL.plus(Modifiers::COMMAND);
@@ -222,8 +216,8 @@ mod tests {
         assert_eq!(events, elsewhere);
     }
 
-    /// A message shows until it's dismissed, by Escape or a click outside it; the prompt, until
-    /// it's answered, which they cancel.
+    /// A message shows until Escape or a click outside dismisses it; the prompt until it's
+    /// answered, which those cancel.
     #[test]
     fn a_message_and_the_prompt_show_until_theyre_dismissed() {
         let message = Message {

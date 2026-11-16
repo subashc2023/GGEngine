@@ -1,4 +1,4 @@
-//! The editor's keyboard shortcuts, in one table that the File menu, its labels and the view read.
+//! The editor's keyboard shortcuts: one table for the File menu, its labels and the view.
 
 use gg_engine::Key;
 use gg_engine::egui::{self, KeyboardShortcut, Modifiers};
@@ -6,25 +6,21 @@ use gg_engine::egui::{self, KeyboardShortcut, Modifiers};
 use crate::camera::Tool;
 use crate::file::Item;
 
-/// What a shortcut does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Does {
-    /// Chooses the File menu's item, whichever panel has the keys, as [`file::shortcut`] matches
-    /// it.
+    /// Chooses a File menu item, whichever panel has the keys ([`file::shortcut`]).
     ///
     /// [`file::shortcut`]: crate::file::shortcut
     File(Item),
-    /// Picks the view's tool.
     Tool(Tool),
-    /// Flips the space of Move's and Rotate's axes between the entity's own and the world's.
+    /// Flips Move's and Rotate's axes between the entity's own and the world's.
     FlipSpace,
     /// Frames what's picked, as the Entities panel asks too.
     Frame,
 }
 
-/// A shortcut: its key, the one at that position whatever the layout calls it, as the engine's
-/// keys are positions; whether it takes the command key, Ctrl or Cmd on macOS, and Shift; and what
-/// it does.
+/// A shortcut. Its key is a position, whatever the layout calls it, as the engine's keys are.
+/// `command` is Ctrl, or Cmd on macOS.
 #[derive(Clone, Copy, Debug)]
 pub struct Shortcut {
     pub key: Key,
@@ -33,8 +29,8 @@ pub struct Shortcut {
     pub does: Does,
 }
 
-/// The editor's shortcuts. Save As's comes before Save's, as a File menu's shortcut matches with
-/// Shift held as well. The view's take no command key, which leaves them to the menu's.
+/// The editor's shortcuts. Save As's comes before Save's, as a File menu shortcut matches with
+/// Shift held too. The view's take no command key, leaving those to the menu.
 pub const SHORTCUTS: [Shortcut; 10] = [
     file(Key::KeyS, true, Item::SaveAs),
     file(Key::KeyS, false, Item::Save),
@@ -48,7 +44,6 @@ pub const SHORTCUTS: [Shortcut; 10] = [
     view(Key::KeyF, Does::Frame),
 ];
 
-/// A File menu's shortcut, `key` with the command key, and with Shift if `shift`, choosing `item`.
 const fn file(key: Key, shift: bool, item: Item) -> Shortcut {
     Shortcut {
         key,
@@ -58,7 +53,6 @@ const fn file(key: Key, shift: bool, item: Item) -> Shortcut {
     }
 }
 
-/// A view's shortcut, `key` alone, doing `does`.
 const fn view(key: Key, does: Does) -> Shortcut {
     Shortcut {
         key,
@@ -69,8 +63,7 @@ const fn view(key: Key, does: Does) -> Shortcut {
 }
 
 impl Shortcut {
-    /// It as egui has it, for the File menu, which matches its shortcuts in egui's input and names
-    /// them in its labels.
+    /// As egui's, which the File menu matches and names in its labels.
     pub fn egui(self) -> KeyboardShortcut {
         let mut modifiers = Modifiers::NONE;
         if self.command {
@@ -83,7 +76,7 @@ impl Shortcut {
     }
 }
 
-/// egui's key at `key`'s position, for a key [`SHORTCUTS`] has.
+/// egui's key at `key`'s position.
 ///
 /// # Panics
 ///

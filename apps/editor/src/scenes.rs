@@ -1,10 +1,12 @@
-//! The Scenes panel: the scene files in the project's scenes folders, a row each, a click on which
-//! has the game open it in place of the open scene, as the File menu's Open does, the Entities
-//! panel then showing its entities: the open scene's row lit, and marked while it has unsaved
-//! edits, and the start scene's tagged; with New, as the File menu's. An open world of cells, as
-//! the tool API's `cells` reads it, is tagged, its cells listed under it, folded, each marked while
-//! it's in and while a save would write its file, and nowhere else, a click on one framing it in the
-//! editor's camera.
+//! The Scenes panel: a row per scene file in the project's scenes folders.
+//!
+//! - A click opens the scene in place of the open one, as File > Open does.
+//! - The open scene's row is lit, and marked while it has unsaved edits. The start scene's is
+//!   tagged.
+//! - New, as the File menu's.
+//! - An open world of cells, as the tool API's `cells` reads it, is tagged. Its cells are listed
+//!   only under it, folded, each marked while it's in and while a save would write its file. A
+//!   click on one frames it in the editor's camera.
 
 use std::fs;
 use std::io;
@@ -17,8 +19,8 @@ use gg_engine::egui::{
 };
 use tracing::warn;
 
-/// How long a listing of the scenes lasts, after which they're listed again, so that what else
-/// adds, removes or renames there shows, such as an agent's scene.
+/// How long a listing lasts before the scenes are listed again, so others' changes there show, such
+/// as an agent's new scene.
 const RELIST: Duration = Duration::from_secs(1);
 /// The side of a row's icon, and the height of a row, in points.
 const ICON: f32 = 14.0;
@@ -27,17 +29,15 @@ const ROW: f32 = 24.0;
 /// What a click in the panel chose.
 #[derive(Debug, PartialEq)]
 pub enum Chosen {
-    /// Open the scene at this path in place of the open one.
+    /// Open this scene in place of the open one.
     Open(PathBuf),
-    /// Empty the open scene, as the File menu's New does.
+    /// Empty the open scene, as File > New.
     New,
-    /// Frame the sphere round a cell, its center in the world and its radius, in the editor's
-    /// camera.
+    /// Frame a cell's bounding sphere, center and radius, in the editor's camera.
     Frame([f64; 3], f32),
 }
 
-/// The Scenes panel, as the module says: the scenes folders, the asset root, which names a scene as
-/// the game does, the start scene, and the scenes as they were last listed.
+/// The Scenes panel. Its asset root names scenes as the game does.
 pub struct Scenes {
     root: PathBuf,
     folders: Vec<PathBuf>,
@@ -46,27 +46,26 @@ pub struct Scenes {
     listed: Option<Listed>,
 }
 
-/// The scenes, as they were last listed: each folder's in the manifest's order, and why each
-/// folder that couldn't be listed couldn't.
+/// The scenes as last listed: each folder's in the manifest's order, and why each folder that
+/// couldn't be listed couldn't.
 struct Listed {
     at: Instant,
     scenes: Vec<Scene>,
     unlisted: Vec<String>,
 }
 
-/// A scene file.
 struct Scene {
     path: PathBuf,
-    /// As the asset root names it, with `/` between its parts, as the game names the open scene,
-    /// such as `scenes/arena.ron`.
+    /// As the asset root names it, `/`-separated, as the game names the open scene:
+    /// `scenes/arena.ron`.
     name: String,
-    /// What its row says: its file's name without `.ron`, after the folders it's in inside its
-    /// scenes folder, such as `levels/one`.
+    /// Its row's text: the file's name without `.ron`, after its folders inside its scenes folder,
+    /// such as `levels/one`.
     label: String,
 }
 
 impl Scenes {
-    /// The panel of the scenes in `folders`, inside the asset root `root`, which start in `start`.
+    /// The scenes in `folders`, inside asset root `root`. The game starts in `start`.
     pub fn new(root: PathBuf, folders: Vec<PathBuf>, start: Option<&Path>) -> Self {
         let start = start.map(|start| name_under(&root, start));
         Self {
@@ -77,12 +76,15 @@ impl Scenes {
         }
     }
 
-    /// Draws the panel into `ui`: how many scenes there are and New, then a row for each scene,
-    /// `open` naming the open scene, as the asset root names it, which has unsaved edits if
-    /// `unsaved`, and is a world of `cells`, as the game last read them, if they're given, whose
-    /// folder's scenes go under its row, as [`show_cells`] shows them; and returns what a click
-    /// chose, which only the open scene's row and none while not `enabled` does, but a cell's. Lists
-    /// the scenes first, unless that was less than a second ago.
+    /// Draws the panel: the scene count and New, then a row per scene. Lists the scenes first if
+    /// the listing is older than [`RELIST`].
+    ///
+    /// - `open`: the open scene, as the asset root names it. `unsaved` marks it.
+    /// - `cells`: the open world's cells, as the game last read them. Its folder's scenes go under
+    ///   its row ([`show_cells`]).
+    ///
+    /// Returns what a click chose. The open scene's row chooses nothing, and while not `enabled`
+    /// only a cell does.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -163,8 +165,8 @@ impl Scenes {
         chosen
     }
 
-    /// Lists the scenes, as of `now`, each once, as [`scene_files`] finds them, and warns of a
-    /// folder it can't list, unless it couldn't the last time either, for the same reason.
+    /// Lists the scenes as of `now`, each once, as [`scene_files`] finds them. Warns of a folder it
+    /// can't list, unless it couldn't last time for the same reason.
     fn list(&mut self, now: Instant) {
         let mut scenes: Vec<Scene> = Vec::new();
         let mut unlisted = Vec::new();
@@ -201,9 +203,9 @@ impl Scenes {
     }
 }
 
-/// Draws a world's `cells` into `ui`, folded under a header saying how many are in of how many
-/// there are: a row each, named as its file is, marked `in` while it's in, and with `*` while a save
-/// would write its file; and returns a click on one, which frames it.
+/// Draws a world's `cells`, folded under a header of how many are in, of how many. A row each,
+/// named as its file, marked `in` while in and `*` while a save would write its file. Returns a
+/// click on one, which frames it.
 fn show_cells(ui: &mut egui::Ui, cells: &WorldCells) -> Option<Chosen> {
     let cells_in = cells.cells.iter().filter(|cell| cell.is_in).count();
     let header = format!("{cells_in} of {} cells in", cells.cells.len());
@@ -232,11 +234,11 @@ fn show_cells(ui: &mut egui::Ui, cells: &WorldCells) -> Option<Chosen> {
     shown.body_returned.flatten()
 }
 
-/// The scene files in `folder` and the folders inside it: the regular files whose names end in
-/// `.ron`, in any case, links not followed, as the game's scan takes no asset through one.
+/// The scene files in `folder` and its folders: regular files ending in `.ron`, in any case. Links
+/// aren't followed, as the game's scan takes no asset through one.
 ///
-/// They're listed on the main thread, which a scenes folder of many thousands of files would hold
-/// up for some milliseconds each second the panel shows; a thread watching it wouldn't.
+/// They're listed on the main thread: a folder of many thousands of files would hold it up some
+/// milliseconds each second the panel shows. A watching thread wouldn't.
 fn scene_files(folder: &Path) -> io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     let mut folders = vec![folder.to_owned()];
@@ -257,20 +259,20 @@ fn scene_files(folder: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
-/// `path` as directory `root` names what's in it: the parts after it, with `/` between them, or
-/// `path` whole if it isn't inside.
+/// `path` as named under directory `root`: its parts after `root`, `/`-separated, or `path` whole
+/// if outside.
 fn name_under(root: &Path, path: &Path) -> String {
     let under = path.strip_prefix(root).unwrap_or(path);
     let parts = under.iter().map(|part| part.to_string_lossy());
     parts.collect::<Vec<_>>().join("/")
 }
 
-/// What the row of the scene at `path`, in scenes folder `folder`, says, as [`Scene`]'s `label`.
+/// The [`Scene::label`] of `path` in scenes folder `folder`.
 fn label(folder: &Path, path: &Path) -> String {
     name_under(folder, &path.with_extension(""))
 }
 
-/// A row's icon: a frame round a hill and a sun, a scene's, painted as the toolbar's icons are.
+/// A scene's icon, a hill and a sun in a frame, painted as the toolbar's icons are.
 fn icon() -> Atom<'static> {
     Atom::paint(Vec2::splat(ICON), |ui, args| {
         let (rect, color) = (args.rect, args.fallback_text_color);
@@ -299,9 +301,8 @@ mod tests {
     use super::*;
     use crate::assets::tests::{Scratch, find, texts};
 
-    /// A project's root holding scenes folders `scenes` and `menus`: `scenes` holds `b.ron`,
-    /// `A.RON`, a note and `levels/one.ron`; `menus` holds `title.ron`; and another folder a scene
-    /// too.
+    /// A project root with scenes folders `scenes` (holding `b.ron`, `A.RON`, a note and
+    /// `levels/one.ron`) and `menus` (`title.ron`), and a scene in another folder.
     fn root(scratch: &Scratch) -> Vec<PathBuf> {
         let root = &scratch.0;
         for folder in ["scenes/levels", "menus", "other"] {
@@ -320,9 +321,8 @@ mod tests {
         vec![root.join("scenes"), root.join("menus")]
     }
 
-    /// The scenes folders list their scenes, each folder's by name regardless of case, the folders
-    /// inside them among them, each named as the asset root names it; and one that isn't there
-    /// says why.
+    /// Each scenes folder lists its scenes by name, regardless of case, its folders' among them,
+    /// named as the asset root names them. A missing folder says why.
     #[test]
     fn the_scenes_folders_list_their_scenes() {
         let scratch = Scratch::new("scenes-listed");
@@ -349,8 +349,8 @@ mod tests {
         );
     }
 
-    /// A frame of `panel` filling a window 300 points across, `b.ron` open, a world of `cells` if
-    /// they're given, while `enabled`, with `events`; what it chose, and the text it drew.
+    /// A frame of `panel` 300 points wide, `b.ron` open, with `cells` if given, while `enabled`,
+    /// with `events`: what it chose, and the text it drew.
     fn frame(
         ctx: &egui::Context,
         panel: &mut Scenes,
@@ -370,7 +370,7 @@ mod tests {
         (chosen, texts(&output.shapes))
     }
 
-    /// A click at `at` in frames of `panel`, as [`frame`] draws them with `given`: what it chose.
+    /// What a click at `at` chooses, in [`frame`]s with `given`.
     fn click(
         ctx: &egui::Context,
         panel: &mut Scenes,
@@ -388,8 +388,8 @@ mod tests {
         frame(ctx, panel, given, vec![button(false)]).0
     }
 
-    /// A click on a scene's row opens it, but on the open scene's, marked unsaved, and none while
-    /// the panel isn't enabled; New chooses New; and the start scene's row is tagged.
+    /// A click on a row opens it, except the open scene's, marked unsaved, and none while the panel
+    /// is disabled. New chooses New. The start scene's row is tagged.
     #[test]
     fn a_click_on_a_scene_opens_it() {
         let scratch = Scratch::new("scenes-clicked");
@@ -414,9 +414,9 @@ mod tests {
         );
     }
 
-    /// The open world's row is tagged, its cells' files listed under it and nowhere else, folded
-    /// until its header's clicked, each marked while it's in and while it's unsaved; a click on one
-    /// frames it, while the panel isn't enabled too.
+    /// The open world's row is tagged, its cells' files listed only under it, folded until its
+    /// header's clicked, each marked while in and while unsaved. A click on one frames it, even
+    /// while the panel is disabled.
     #[test]
     fn a_worlds_cells_are_listed_under_it() {
         let scratch = Scratch::new("scenes-cells");
