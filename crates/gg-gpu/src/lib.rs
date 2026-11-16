@@ -13,6 +13,10 @@ mod buffer;
 mod capture;
 mod device;
 mod frame;
+// Public for the GPU tests' mains alone, gg-gpu's and gg-renderer's, as a feature would have to be
+// on for gg-gpu's own tests, which Cargo does only by skipping them while it's off.
+#[doc(hidden)]
+pub mod harness;
 mod image;
 mod instance;
 mod pipeline;

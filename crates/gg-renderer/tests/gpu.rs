@@ -13,7 +13,6 @@ use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, SQRT_2};
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::num::NonZeroU64;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -21,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytemuck::NoUninit;
 use gg_core::math::{self, DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_gpu::harness::{self, Tests};
 use gg_renderer::{
     Adaptation, AlphaMode, AmbientOcclusion, Antialiasing, Atmosphere, Births, Blend, Bursts,
     Channel, Circle, DEFAULT_UPLOAD_BUDGET, DepthOfField, DrawCounts, Draws, Emission, Fog,
@@ -48,34 +48,13 @@ macro_rules! run {
 }
 
 fn main() -> ExitCode {
-    if gg_core::profile::ENABLED {
-        panic!(
-            "the GPU tests set the environment before any other thread exists, and Tracy's start \
-             before main; run them without the tracy feature"
-        );
-    }
-    // CI runners without a GPU or a Vulkan driver, Windows' and macOS's, set this. Linux CI runs
-    // the tests on lavapipe instead.
-    if std::env::var_os("GG_SKIP_GPU_TESTS").is_some_and(|value| !value.is_empty()) {
-        println!("GPU tests skipped: GG_SKIP_GPU_TESTS is set");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
+    // SAFETY: no other thread exists yet.
+    if unsafe { harness::begin("renderer-gpu-tests", &dir) }.is_none() {
         return ExitCode::SUCCESS;
     }
-    // Overlays such as Steam's and OBS's load into every instance as implicit layers, and can
-    // add validation errors of their own. Unless `RUST_LOG` is set, only warnings and errors are
-    // logged, and of the loader's and other layers' messages, such as its warning for each
-    // implicit layer it leaves out, only errors, so that a passing run's output is its tests'
-    // results rather than what each instance, device and pipeline logs as it's made.
-    // SAFETY: no other thread exists yet to read the environment.
-    unsafe {
-        std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~");
-        if std::env::var_os("RUST_LOG").is_none() {
-            std::env::set_var("RUST_LOG", "warn,gg_gpu::vulkan::general=error");
-        }
-    }
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
-    gg_core::log::init("renderer-gpu-tests", &dir, true);
 
-    let mut tests = Tests::new();
+    let mut tests = Tests::from_args();
     run!(
         tests,
         ui_matches_its_reference,
@@ -250,72 +229,6 @@ fn main() -> ExitCode {
     tests.finish()
 }
 
-/// Runs the tests the arguments pick, one after another, and counts how they go.
-struct Tests {
-    /// The arguments that aren't libtest's flags, nor the values they take: a test runs if its
-    /// name contains one of them, or if there are none.
-    filters: Vec<String>,
-    passed: usize,
-    failed: usize,
-}
-
-impl Tests {
-    fn new() -> Self {
-        let mut filters = Vec::new();
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
-            let takes_value = matches!(
-                arg.as_str(),
-                "--test-threads"
-                    | "--skip"
-                    | "--logfile"
-                    | "--format"
-                    | "--color"
-                    | "--shuffle-seed"
-                    | "-Z"
-            );
-            if takes_value {
-                args.next();
-            } else if !arg.starts_with('-') {
-                filters.push(arg);
-            }
-        }
-        Self {
-            filters,
-            passed: 0,
-            failed: 0,
-        }
-    }
-
-    /// Runs `test` if the filters pick it, and prints whether it passed. A test that fails goes
-    /// no further, and the log shows its panic, but the tests after it still run.
-    fn run(&mut self, name: &str, test: impl FnOnce()) {
-        let picked = self.filters.is_empty()
-            || (self.filters.iter()).any(|filter| name.contains(filter.as_str()));
-        if !picked {
-            return;
-        }
-        if panic::catch_unwind(AssertUnwindSafe(test)).is_ok() {
-            self.passed += 1;
-            println!("test {name} ... ok");
-        } else {
-            self.failed += 1;
-            println!("test {name} ... FAILED");
-        }
-    }
-
-    /// Prints how many tests passed and failed, and fails the run if any failed.
-    fn finish(self) -> ExitCode {
-        let Self { passed, failed, .. } = self;
-        println!("test result: {passed} passed; {failed} failed");
-        if failed == 0 {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        }
-    }
-}
-
 /// What the tests clear to, in linear RGBA.
 const CLEAR: [f32; 4] = [0.02, 0.03, 0.05, 1.0];
 
@@ -356,15 +269,7 @@ fn renderer_within(width: u32, height: u32, uploads: Option<UploadPath>, budget:
         ..settings(uploads)
     };
     let renderer = Renderer::headless(&settings, width, height).expect("a renderer");
-    assert!(
-        renderer.validation().enabled(),
-        "GPU tests run under validation; install the Vulkan SDK's validation layer"
-    );
-    assert!(
-        renderer.validation().synchronization(),
-        "GPU tests run under synchronization validation; install a newer Vulkan SDK, whose \
-         validation layer takes VK_EXT_layer_settings"
-    );
+    harness::assert_validating(&renderer.validation());
     if let Some(uploads) = uploads {
         assert_eq!(
             renderer.upload_path(),
@@ -13181,11 +13086,7 @@ fn check(mut renderer: Renderer, name: &str, width: u32, height: u32) {
 fn shut_down(renderer: Renderer) {
     let validation = renderer.validation();
     drop(renderer);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    harness::check(&validation);
 }
 
 /// Compares RGBA8 `pixels` with the reference image `name`, allowing for how GPUs differ in
