@@ -607,7 +607,7 @@ impl Lockstep {
             // Gathered whatever the joiner's world, so that its lines aren't read as others.
             "parted" if !self.hosts() => match tick_of(rest) {
                 Some(tick) => self.parting = Some((tick, String::new())),
-                None => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+                None => self.bad_line(line),
             },
             // Sent against a world the joiner no longer has, as the host's comes.
             _ if !joined => {}
@@ -632,7 +632,7 @@ impl Lockstep {
                             }
                         }
                     }
-                    _ => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+                    _ => self.bad_line(line),
                 }
             }
             "t" => match tick_of(rest).filter(|&tick| self.near(tick)) {
@@ -640,7 +640,7 @@ impl Lockstep {
                     self.theirs.entry(tick).or_default().whole = true;
                     self.came_whole();
                 }
-                None => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+                None => self.bad_line(line),
             },
             "h" => {
                 let hash = rest.split_once(' ').and_then(|(tick, hash)| {
@@ -657,7 +657,7 @@ impl Lockstep {
                         self.hashes[1].insert(tick, hash);
                         self.compare();
                     }
-                    None => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+                    None => self.bad_line(line),
                 }
             }
             #[cfg(feature = "dev")]
@@ -673,17 +673,22 @@ impl Lockstep {
                             self.patches.due.push((number, tick));
                         }
                     }
-                    _ => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+                    _ => self.bad_line(line),
                 }
             }
             #[cfg(feature = "dev")]
             "n" if !self.hosts() => match text::read_named(rest, "n ".len() + 1) {
                 Some(named) => self.names.push(named),
-                None => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+                None => self.bad_line(line),
             },
-            _ => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+            _ => self.bad_line(line),
         }
         None
+    }
+
+    /// Loses the other peer for `line`, a line that isn't one.
+    fn bad_line(&mut self, line: &str) {
+        self.lose(&format!("the peer sent a line that isn't one: {line}"));
     }
 
     /// Takes the joiner's hello, `line`, refusing it unless it's of this protocol, app, engine,
