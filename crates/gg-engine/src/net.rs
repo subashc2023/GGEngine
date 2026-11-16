@@ -838,7 +838,7 @@ impl Session {
         match self {
             Self::Peer(net) => net.rolled_back(from, next),
             Self::Server(_) => {}
-            Self::Client(client) => client.corrected(from, next),
+            Self::Client(client) => client.rolled_back(from, next),
         }
     }
 

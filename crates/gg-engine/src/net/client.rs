@@ -680,7 +680,7 @@ impl Client {
 
     /// Counts a correction from tick `from` to `next`, the next to run, the ticks between run
     /// again.
-    pub(crate) fn corrected(&mut self, from: u64, next: u64) {
+    pub(crate) fn rolled_back(&mut self, from: u64, next: u64) {
         let ticks = next.saturating_sub(from);
         let [corrections, again, most, _] = &mut self.corrected;
         *corrections += 1;
