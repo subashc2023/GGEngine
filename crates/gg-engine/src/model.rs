@@ -1,7 +1,7 @@
-//! Models: glTF files' scenes, whose meshes and textures a context adds once, and whose nodes a
-//! world spawns under each entity whose [`ModelRoot`] names the model, as many times as it likes;
-//! and, in development builds, read again as their files change, their meshes and textures replaced
-//! under the same handles.
+//! Models: glTF files' scenes. A context adds their meshes and textures once; a world spawns their
+//! nodes under each entity whose [`ModelRoot`] names the model, as often as it likes. Development
+//! builds read them again as their files change, replacing meshes and textures under the same
+//! handles.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,9 +19,9 @@ use crate::loader::Loader;
 use crate::{Component, Entity, Reflect, Transform, World};
 
 /// A model that [`Context::add_model`](crate::Context::add_model) added, or that text named and the
-/// engine loaded: its index among its context's, which a [`ModelRoot`] holds, and which scenes,
-/// recordings, snapshots and the tool API name as they name a texture, by its asset ID, or else its
-/// path. [`spawn`](Self::spawn) places it in a world.
+/// engine loaded: its index among its context's, held by a [`ModelRoot`]. Scenes, recordings,
+/// snapshots and the tool API name it as they name a texture: by asset ID, else path.
+/// [`spawn`](Self::spawn) places it in a world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Model(u32);
 
@@ -36,58 +36,60 @@ impl Model {
         self.0 as usize
     }
 
-    /// Spawns an entity at `at` with a [`ModelRoot`] of the model, and under it the model's nodes,
-    /// as `ModelRoot` says, and returns it. Its ID is drawn from the world's stream, and its nodes'
-    /// are mixed from it, so that a world seeded alike spawns the model alike.
+    /// Spawns an entity at `at` with a [`ModelRoot`] of the model and the model's nodes under it
+    /// (see `ModelRoot`), and returns it. Its ID is drawn from the world's stream and its nodes'
+    /// are mixed from it, so a world seeded alike spawns the model alike.
     ///
     /// # Panics
     ///
-    /// If `world` doesn't share the assets of the context that added the model, as a world a layer
-    /// makes doesn't until it's the context's.
+    /// If `world` doesn't share the assets of the context that added the model (a world a layer
+    /// makes doesn't until it's the context's).
     pub fn spawn(self, world: &mut World, at: Transform) -> Entity {
         world.spawn_model(self, at)
     }
 }
 
-/// The entity a model's nodes are spawned under: the world spawns them as the entity comes with it,
-/// as [`Model::spawn`], a scene loaded or a tool's create makes it, and again as it's given another
-/// model; and takes them away with it. Each node of the model's default scene is an entity under
-/// it, with its transform in its parent's space, and a [`ModelNode`] saying which part of the model
-/// it is, called by its glTF node's name, as [`World::name`] says; one with a mesh draws it, as a
-/// child for each primitive of a mesh with several, since an entity draws one. The nodes are the
-/// model's, which a scene names the root's alone of, so that scenes don't save them, tools don't
-/// change them, and a pick in the view gives the root, or the node within the root or one of its
-/// nodes, as `pick`'s `within` says. Code may change them as the game runs, as snapshots keep them,
-/// until the model's nodes change: in a development run that serves the tool API, neither recorded
-/// nor in a lockstep session, as the model's file changes, each node still the model's keeps what
-/// code gave it, taking what changed of the model's, and the rest come and go.
+/// The entity a model's nodes are spawned under. The world spawns them with the entity
+/// ([`Model::spawn`], a loaded scene, a tool's create) and again when it's given another model,
+/// and removes them with it.
 ///
-/// The world keeps it, as it keeps [`Parent`](crate::Parent): a scene, the tool API's operations
-/// and [`Model::spawn`] give it, and code reads it but can't change it, since the nodes would then
-/// be another model's.
+/// Each node of the default scene is an entity under it, with its transform in its parent's space,
+/// a [`ModelNode`] and its glTF node's name ([`World::name`]). A node with a mesh draws it, as a
+/// child per primitive for several (an entity draws one).
+///
+/// The nodes are the model's: scenes don't save them, tools don't change them, and a pick in the
+/// view gives the root or a node within it (`pick`'s `within`). Code may change them as the game
+/// runs, and snapshots keep them, until the model's nodes change. In a development run serving
+/// the tool API (neither recorded nor lockstep), when the file changes, nodes still the model's
+/// keep what code gave them and take what changed of the model's; the rest come and go.
+///
+/// The world keeps it, like [`Parent`](crate::Parent). Code reads it but can't change it: the
+/// nodes would be another model's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Reflect)]
 pub struct ModelRoot(pub Model);
 
-// And not `Writable`, so that only the world changes it, spawning its nodes as it does.
+// Not `Writable`: only the world changes it, spawning its nodes as it does.
 impl Component for ModelRoot {}
 
-/// A node of the model that its root's [`ModelRoot`] names, or a primitive of a node's mesh: which
-/// part of the model it is, in the order of the model's nodes, each after its parent. The world
-/// keeps it, as it keeps the root's, and tools change no entity that has it, as `ModelRoot` says.
+/// Which part of the model its root's [`ModelRoot`] names this entity is: a node or a primitive of
+/// a node's mesh, by index in the model's node order (each after its parent). Kept by the world;
+/// tools change no entity that has it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Reflect)]
 pub struct ModelNode(pub u32);
 
-// And not `Writable`, so that only the world changes it.
+// Not `Writable`: only the world changes it.
 impl Component for ModelNode {}
 
 /// What a model's root spawns under it, as [`Assets`](crate::assets::Assets) keeps it for the
-/// worlds: the scene's nodes, and a part for each primitive of a mesh with more than one, in
-/// pre-order, each after its parent; each primitive's draw, with its material; each
-/// primitive's surface, which physics collides with as a
-/// [`MeshCollider3D`](crate::MeshCollider3D) says, shared by every copy, so that physics tells the
-/// model read again, as its file changes, from the one it made a collider of; the skins that move
-/// skinned parts' vertices; and the clips an [`Animator`](crate::Animator) plays on its parts,
-/// shared too, so that each tick reaches them without copying them.
+/// worlds:
+///
+/// - the scene's nodes, plus a part per primitive of a mesh with several, in pre-order;
+/// - each primitive's draw, with its material;
+/// - each primitive's surface, which physics collides with
+///   ([`MeshCollider3D`](crate::MeshCollider3D)), shared by every copy so physics tells a model
+///   read again from the one it made a collider of;
+/// - the skins that move skinned parts' vertices;
+/// - the clips an [`Animator`](crate::Animator) plays, shared so ticks needn't copy them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Nodes {
     pub(crate) parts: Vec<Part>,
@@ -97,9 +99,9 @@ pub(crate) struct Nodes {
     pub(crate) clips: Arc<Vec<Clip>>,
 }
 
-/// A primitive's triangles as physics collides with them: level 0's, its whole mesh's, and its
-/// vertices' positions as packed, which unpack as the renderer's do, so that a run from glTF and
-/// one from its package, whose meshes the cooker optimized, give physics the same surface.
+/// A primitive's triangles as physics collides with them: level 0's (its whole mesh), with
+/// positions as packed and unpacked as the renderer does, so a run from glTF and one from its
+/// package (optimized by the cooker) give physics the same surface.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Surface {
     offset: Vec3,
@@ -110,7 +112,7 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
-    /// The surface of `mesh`, which holds together, as the renderer checks it.
+    /// The surface of `mesh`, which holds together as the renderer checks.
     fn of(mesh: &ModelMesh) -> Self {
         let whole = mesh.lods.levels.first().map_or(0..0, |level| {
             level.start as usize..(level.start + level.count) as usize
@@ -131,13 +133,11 @@ impl Surface {
 }
 
 impl Nodes {
-    /// The model's triangles, in its own space, as physics collides with them: each primitive's
-    /// surface where its part puts it, a triangle whose corners aren't three apart, which covers
-    /// nothing, or that another is too, left out; each turned to start at its least corner by
-    /// their coordinates' bits, keeping the way round they go, and in the order of their corners'
-    /// bits, of vertices in the order of their bits, none twice. So that the triangles depend on
-    /// where they are alone, not on the order their mesh holds them in, which the cooker changes
-    /// as it optimizes the mesh.
+    /// The model's triangles in its own space, as physics collides with them: each primitive's
+    /// surface where its part puts it. Triangles covering nothing (corners not three apart) or
+    /// repeating another are left out. Each starts at its least corner by coordinate bits, keeping
+    /// its winding; triangles and vertices are ordered by bits, none twice. So they depend on
+    /// where they are alone, not on their mesh's order (the cooker changes it).
     pub(crate) fn triangles(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
         let mut placed: Vec<Mat4> = Vec::with_capacity(self.parts.len());
         let mut corners: Vec<[Vec3; 3]> = Vec::new();
@@ -161,12 +161,10 @@ impl Nodes {
     }
 }
 
-/// `corners` as [`Nodes::triangles`] gives them: canonical vertices, and triangles of them. Each
-/// corner goes by its coordinates' bits, made once and packed into one number in their order, so
-/// that it's compared and found at a word's cost: ordering Sponza's 262,267 triangles by bits made
-/// again at each comparison took 9.6 s in a debug build, at each Play's first tick, against 1.1 s
-/// so. The vertices are found first, so that a triangle orders by its vertices' indices, which
-/// are in the order of their bits.
+/// `corners` as [`Nodes::triangles`] gives them. Each corner goes by its coordinates' bits, packed
+/// once into one number so comparing costs a word: Sponza's 262,267 triangles took 9.6 s in a
+/// debug build at Play's first tick with bits remade per comparison, 1.1 s so. Vertices are found
+/// first, so triangles order by vertex index, which follows bits.
 fn canonical(corners: Vec<[Vec3; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
     let key = |point: Vec3| {
         let [x, y, z] = point.to_array().map(|at| u128::from(at.to_bits()));
@@ -199,13 +197,12 @@ fn canonical(corners: Vec<[Vec3; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
     (keys.into_iter().map(unpack).collect(), indices)
 }
 
-/// What a model is made of on the renderer, which a reload replaces under the same handles, and a
-/// removal removes: each primitive's mesh and material, each image's texture and the texels its
-/// levels are made from, which say what it holds; how many primitives and images the model has
-/// now, as a reload that drops some keeps their meshes, materials and textures for their places,
-/// which a later one gives back; each skinned primitive's mesh, which each of its skinned parts'
-/// entities draws a copy of, posed apart; and, in development builds, each primitive's material
-/// as it was read, which a reload compares its own with.
+/// What a model is made of on the renderer; a reload replaces it under the same handles, a removal
+/// removes it: each primitive's mesh and material; each image's texture and the texels its levels
+/// are made from (what it holds); the counts of primitives and images now (a reload that drops
+/// some keeps their meshes, materials and textures for a later one to give back); each skinned
+/// primitive's mesh, which skinned parts draw copies of; in development builds, each material as
+/// read, for a reload to compare with.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Made {
     pub(crate) meshes: Vec<Mesh<PackedVertex>>,
@@ -218,7 +215,7 @@ pub(crate) struct Made {
     read: Vec<gltf::Material>,
 }
 
-/// The renderer's stores that a model adds to, and replaces in as it's read again.
+/// The renderer's stores a model adds to, and replaces in when read again.
 pub(crate) struct Stores<'a> {
     pub(crate) meshes: &'a mut Meshes,
     pub(crate) shaders: &'a mut Shaders,
@@ -226,16 +223,14 @@ pub(crate) struct Stores<'a> {
     pub(crate) materials: &'a mut Materials,
 }
 
-/// Adds what model `name`, as `read` gave it from `path`, draws, to `stores`: its images as
-/// textures, through `loader`, which decodes them, each with mip levels as [`texels`] says, then
-/// each primitive's mesh, and its material, which it's drawn with through the model shader, which
-/// it adds for every alpha mode, so that a material changed later adds none. Gives what its root
-/// spawns, and what it's made of, its images' textures in the model's order.
+/// Adds what model `name` (`imported`, from `path`) draws to `stores`: images as textures through
+/// `loader`, with mip levels per [`texels`], then each primitive's mesh and material, drawn
+/// through the model shader (added for every alpha mode, so a later material change adds none).
+/// Gives what its root spawns and what it's made of.
 ///
-/// Fails, adding nothing, with `renderer.too_many_textures` if the textures haven't room for its
-/// images, and as [`model_meshes`] does for a primitive whose mesh doesn't pack or hold together;
-/// an image whose pixels don't decode warns as the loader decodes it, and its texture keeps its
-/// stand-in.
+/// Fails, adding nothing, with `renderer.too_many_textures` if the textures lack room for its
+/// images, and as [`model_meshes`] does. An image whose pixels don't decode warns as the loader
+/// decodes it; its texture keeps its stand-in.
 pub(crate) fn add(
     name: &str,
     path: &Path,
@@ -257,8 +252,7 @@ pub(crate) fn add(
         textures,
         materials,
     } = stores;
-    // Checked first, so that a model adds all of itself or nothing: what `read` gave can't fail to
-    // add otherwise.
+    // Checked first, so a model adds all of itself or nothing; nothing else can fail.
     room(name, images.len(), textures)?;
     let packed = model_meshes(name, &primitives)?;
     let surfaces = Arc::new(packed.iter().map(|(_, mesh)| Surface::of(mesh)).collect());
@@ -305,35 +299,41 @@ pub(crate) fn add(
     Ok((nodes, made))
 }
 
-/// Each of `packed`'s meshes that's skinned, by its primitive, shared.
 fn skinned(packed: &[(String, ModelMesh)]) -> Vec<Option<Arc<ModelMesh>>> {
     (packed.iter())
         .map(|(_, mesh)| (!mesh.skin.is_empty()).then(|| Arc::new(mesh.clone())))
         .collect()
 }
 
-/// What [`reload`] gives: what the model's root spawns, what changed of the model, and the textures
-/// of the images added, with their places in the model.
+/// What [`reload`] gives: what the root spawns, what changed, and the images' textures added, with
+/// their places.
 #[cfg(feature = "dev")]
 pub(crate) type Reread = (Nodes, Vec<&'static str>, Vec<(usize, Texture)>);
 
-/// Puts what `imported`, model `name` read again, draws in place of what `made` drew, under the
-/// same handles, so that every entity drawing it draws it once frames have streamed it: each
-/// primitive's vertices and indices, and each image, with its mip levels made as its materials
-/// have them. If `whole`, the model takes all of it: primitives and images past those it had are
-/// added, or take back the meshes, materials and textures of their places, which those it has no
-/// more keep, unused, for when they come back; its materials take what they're read as; and it
-/// gives what its root spawns now, its nodes and its draws, with their materials, which adds no
-/// shader, as [`add`] added them all. Otherwise it takes only those, and gives back `was`, what its
-/// root spawned, which its nodes keep, their materials as they were. Gives too what changed of the
-/// model, as "nodes" and "materials", the materials compared as they were read, and the textures
-/// of the images added, with their places in the model, which no image of the model had before.
+/// Puts what `imported` (model `name` read again) draws in place of what `made` drew, under the
+/// same handles, so entities drawing it draw the new once frames have streamed it: each
+/// primitive's vertices and indices, and each image with its mip levels.
 ///
-/// Fails, replacing nothing, with `asset.model_changed` unless `whole` if it has other numbers of
-/// primitives or images, which a model's handles don't hold, and either way if an image holds
-/// other than it held, as colors where it held a normal map, which its texture keeps; with
-/// `renderer.too_many_textures` if the textures haven't room for the images added; and as
-/// [`model_meshes`] does for a primitive whose mesh doesn't pack or hold together.
+/// If `whole`, the model takes all of it:
+/// - primitives and images past those it had are added, or take back the meshes, materials and
+///   textures of their places (dropped ones keep theirs, unused, for a return);
+/// - its materials take what they're read as;
+/// - it gives what its root spawns now, nodes and draws with materials, adding no shader ([`add`]
+///   added them all).
+///
+/// Otherwise it takes only the meshes and images and gives back `was`, what its root spawned,
+/// which its nodes keep, materials as they were.
+///
+/// Gives too what changed, as "nodes" and "materials" (compared as read), and the textures of
+/// images added, with their places in the model.
+///
+/// Fails, replacing nothing, with:
+/// - `asset.model_changed`, unless `whole`, for other numbers of primitives or images (a model's
+///   handles don't hold them);
+/// - `asset.model_changed`, either way, if an image holds other than it held, as colors where it
+///   held a normal map (its texture keeps what it held);
+/// - `renderer.too_many_textures` if the textures lack room for the images added;
+/// - what [`model_meshes`] does.
 #[cfg(feature = "dev")]
 pub(crate) fn reload(
     name: &str,
@@ -374,8 +374,8 @@ pub(crate) fn reload(
         );
         return Err(Error::new("asset.model_changed", message));
     }
-    // A texture keeps what it holds, so an image that holds something else now, as colors where it
-    // held a normal map, takes one of its own, as the model's files are read afresh.
+    // A texture keeps what it holds, so an image holding something else now (colors where it
+    // held a normal map) takes a texture of its own when the file is read afresh.
     let held = |texels| match texels {
         Texels::Map(map) => Some(map),
         _ => None,
@@ -394,7 +394,7 @@ pub(crate) fn reload(
         return Err(Error::new("asset.model_changed", message));
     }
     room(name, counts.1.saturating_sub(made.images.len()), textures)?;
-    // Read again from its files, as a development run does, each has one level.
+    // Read again from files, as a development run does, each has one level.
     let packed = model_meshes(name, &primitives)?;
     let surfaces = Arc::new(packed.iter().map(|(_, mesh)| Surface::of(mesh)).collect());
     let skinned = skinned(&packed);
@@ -484,8 +484,6 @@ fn room(name: &str, images: usize, textures: &Textures) -> Result<()> {
     Ok(())
 }
 
-/// Each primitive's draw, of its mesh with its material, as `made` holds them, as many as the
-/// model's primitives now are, as `made`'s counts say.
 fn draws(made: &Made, materials: &Materials, shaders: &mut Shaders) -> Vec<MeshDraw> {
     (made.meshes.iter().zip(&made.materials))
         .take(made.counts.0)
@@ -493,12 +491,9 @@ fn draws(made: &Made, materials: &Materials, shaders: &mut Shaders) -> Vec<MeshD
         .collect()
 }
 
-/// Each of `primitives`' meshes, model `name`'s, as [`model_mesh`] gives it, with the name the
-/// renderer knows it by, checked as the renderer checks one it adds: so that a model adds, or
-/// replaces, all of itself or nothing.
-///
-/// Fails with `engine.bad_model`, naming the model and the mesh, as `model_mesh` and
-/// [`check_mesh`] do.
+/// Each of `primitives`' meshes ([`model_mesh`]) with the renderer's name for it, checked as it
+/// checks one it adds, so a model adds or replaces all of itself or nothing. Fails with
+/// `engine.bad_model` as `model_mesh` and [`check_mesh`] do.
 fn model_meshes(name: &str, primitives: &[Primitive]) -> Result<Vec<(String, ModelMesh)>> {
     (primitives.iter())
         .map(|primitive| {
@@ -509,8 +504,8 @@ fn model_meshes(name: &str, primitives: &[Primitive]) -> Result<Vec<(String, Mod
         .collect()
 }
 
-/// `primitive`'s mesh, model `name`'s, as the cooker made it, or else packed as glTF has it, of
-/// one level, all its indices, which a development run draws whole.
+/// `primitive`'s mesh as the cooker made it, else packed from glTF as one level of all its
+/// indices (a development run draws it whole).
 ///
 /// Fails as [`pack`] does.
 pub(crate) fn model_mesh(name: &str, primitive: &Primitive) -> Result<ModelMesh> {
@@ -520,15 +515,14 @@ pub(crate) fn model_mesh(name: &str, primitive: &Primitive) -> Result<ModelMesh>
     }
 }
 
-/// `primitive`'s vertices, model `name`'s, as glTF has them, packed, with its indices, of `levels`
-/// among them, or of one level, all of them, for none: those its triangles use alone, in their
-/// order, as the cooker keeps them, so that a run from glTF packs them on the grid a run from its
-/// package does, which physics' surfaces need, rather than on one that vertices no triangle uses
-/// stretch, as those of an accessor that several primitives share do.
+/// `primitive`'s vertices, model `name`'s, packed, with its indices: `levels` among them, or one
+/// level of all for none. Only vertices its triangles use are kept, in their order, as the cooker
+/// keeps them, so a run from glTF packs on the grid a run from its package does (physics'
+/// surfaces need it), not one stretched by unused vertices (as an accessor several primitives
+/// share has).
 ///
-/// Fails with `engine.bad_model`, naming the model and the mesh, for vertices that don't pack, as
-/// [`ModelMesh::pack`] says: those that span more than packed vertices reach with what an f32
-/// holds.
+/// Fails with `engine.bad_model`, naming the model and the mesh, for vertices that don't pack
+/// ([`ModelMesh::pack`]): those spanning more than packed vertices reach with an f32.
 pub(crate) fn pack(
     name: &str,
     primitive: &Primitive,
@@ -550,8 +544,8 @@ pub(crate) fn pack(
     packed.map_err(|error| refused(name, &error))
 }
 
-/// Which of `primitive`'s vertices its triangles use, in their order, and its indices of them; all
-/// of them where they use each, or where it has no triangles, as a mesh of none packs as it did.
+/// Which of `primitive`'s vertices its triangles use, in their order, and its indices of them. All
+/// of them if the triangles use each or there are none (a mesh of none packs as it did).
 fn used(primitive: &Primitive) -> (Vec<usize>, Vec<u32>) {
     let count = primitive.positions.len();
     let mut uses = vec![false; count];
@@ -575,29 +569,23 @@ fn used(primitive: &Primitive) -> (Vec<usize>, Vec<u32>) {
     (kept, indices)
 }
 
-/// Checks `mesh`, `primitive`'s of model `name`, as the renderer checks one it adds, as
-/// [`ModelMesh::check`] says.
-///
-/// Fails with `engine.bad_model`, naming the model and the mesh, for one that doesn't hold
-/// together.
+/// Checks `mesh` as the renderer does ([`ModelMesh::check`]). Fails with `engine.bad_model`,
+/// naming the model and the mesh, if it doesn't hold together.
 pub(crate) fn check_mesh(name: &str, primitive: &Primitive, mesh: &ModelMesh) -> Result<()> {
     let checked = mesh.check(&mesh_name(name, primitive));
     checked.map_err(|error| refused(name, &error))
 }
 
-/// The name the renderer knows `primitive`'s mesh, of model `name`, by.
 fn mesh_name(name: &str, primitive: &Primitive) -> String {
     format!("{name} {}", primitive.name)
 }
 
-/// The `engine.bad_model` of model `name`, whose mesh the renderer refuses, as its `error` says,
-/// which names the mesh.
+/// `engine.bad_model` for model `name`; `error` names the mesh the renderer refuses.
 fn refused(name: &str, error: &Error) -> Error {
     let message = format!("model {name:?} has a mesh the renderer can't draw: {error}");
     Error::new("engine.bad_model", message)
 }
 
-/// The vertices of `primitive`, as glTF has them, to pack.
 fn vertices(primitive: &Primitive) -> Vec<ModelVertex> {
     (primitive.positions.iter())
         .zip(&primitive.uvs)
@@ -616,7 +604,6 @@ fn vertices(primitive: &Primitive) -> Vec<ModelVertex> {
         .collect()
 }
 
-/// The material `read` gives, sampling its images among `images`, the model's textures.
 fn material(read: &gltf::Material, images: &[(Texture, Texels)]) -> Material {
     let sampled = |slot: Slot| {
         read.texture(slot).map(|sampling| Sampled {
@@ -643,12 +630,11 @@ fn material(read: &gltf::Material, images: &[(Texture, Texels)]) -> Material {
     }
 }
 
-/// What image `image` of `primitives`' model holds, and so the texels its levels are made from: a
-/// map of data, as the first texture to sample it says, its levels averaging its values; or
-/// colors, weighted by alpha where a masked or blended material samples them as its base color,
-/// since their alpha is then how much it covers, and plainly averaged where opaque ones alone do,
-/// as glTF has them ignore its alpha, or where they're emitted. Reading the model left no image
-/// sampled as two of those.
+/// What image `image` of `primitives`' model holds, so the texels its levels are made from: a map
+/// (by the first slot sampling it), levels averaging its values; or colors, alpha-weighted where
+/// a masked or blended material samples them as base color (alpha is then coverage), else plainly
+/// averaged (opaque materials ignore alpha in glTF; emitted too). Reading the model left no image
+/// sampled as two of these.
 pub(crate) fn texels(primitives: &[Primitive], image: usize) -> Texels {
     let mut uses = (primitives.iter()).flat_map(|primitive| {
         let material = &primitive.material;
@@ -700,7 +686,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// A material that samples `image` as its base color.
     fn colored(image: usize) -> gltf::Material {
         let mut material = gltf::Material::default();
         material.textures[Slot::Color as usize] = Some(gltf::Sampling {
@@ -711,9 +696,8 @@ pub(crate) mod tests {
         material
     }
 
-    /// A model of a node turned, drawing a mesh of two primitives, the first masked; and a node
-    /// moved and mirrored, drawing the second primitive again. Each primitive samples an image of
-    /// its own.
+    /// A turned node drawing a mesh of two primitives (the first masked), and a moved, mirrored
+    /// node drawing the second again. Each primitive samples its own image.
     pub(crate) fn imported() -> Imported {
         let triangle = |name: &str, material| gltf::Primitive {
             name: name.to_owned(),
@@ -762,7 +746,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// The renderer's stores, which a model adds to.
     #[derive(Default)]
     struct Owned {
         meshes: Meshes,
@@ -781,7 +764,6 @@ pub(crate) mod tests {
             }
         }
 
-        /// How many meshes, textures, shaders and materials there are.
         fn counts(&self) -> (u32, u32, u32, u32) {
             (
                 self.meshes.count(),
@@ -792,7 +774,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A model of one node, of no texture, its primitive of `positions` and `indices`, at `at`.
+    /// A textureless model of one node at `at`, its primitive of `positions` and `indices`.
     pub(crate) fn surface(positions: Vec<[f32; 3]>, indices: Vec<u32>, at: Transform) -> Imported {
         let count = positions.len();
         let primitive = gltf::Primitive {
@@ -827,8 +809,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A level's floor: a square 20 units across in the XZ plane, at y 0, facing up, of two
-    /// triangles.
+    /// A level's floor: two triangles, a square 20 units across in the XZ plane at y 0, facing up.
     pub(crate) fn level() -> Imported {
         let corners = vec![
             [-10.0, 0.0, -10.0],
@@ -839,11 +820,10 @@ pub(crate) mod tests {
         surface(corners, vec![0, 1, 2, 0, 2, 3], Transform::IDENTITY)
     }
 
-    /// A model's triangles are where its nodes put its primitives' surfaces, whatever order its
-    /// mesh holds them in: a mesh as the cooker leaves it, its vertices merged and reordered, its
-    /// triangles reordered and turned, a coarser level after them, and without a vertex no triangle
-    /// used, which the run from glTF packs without too, gives the same triangles; a triangle
-    /// covering nothing, or another's twin, is left out.
+    /// A model's triangles are where its nodes put its surfaces, whatever order the mesh holds
+    /// them in: a mesh as the cooker leaves it (vertices merged and reordered, triangles
+    /// reordered and turned, a coarser level after, no unused vertex) gives the glTF run's
+    /// triangles. Triangles covering nothing, or twins, are left out.
     #[test]
     fn a_models_triangles_are_where_its_surfaces_are_whatever_their_order() {
         let at = Transform {
@@ -851,22 +831,21 @@ pub(crate) mod tests {
             rotation: Quat::from_rotation_y(0.5),
             scale: Vec3::new(2.0, 1.0, 1.0),
         };
-        // Off the grid that the vertex no triangle uses would stretch, so that they'd pack apart.
+        // Off the grid the unused vertex would stretch, so they'd pack apart.
         let corners = [
             [0.0, 0.0, 0.0],
             [1.1, 0.0, 0.0],
             [1.1, 0.0, 0.9],
             [0.0, 0.3, 0.9],
         ];
-        // A vertex no triangle uses, far off, and a corner twice; a triangle covering nothing,
-        // and one twice.
+        // An unused vertex far off, a corner twice, a triangle covering nothing, one twice.
         let mut read = corners.to_vec();
         read.extend([[50.0, -50.0, 50.0], corners[2]]);
         let indices = vec![0, 1, 2, 0, 5, 3, 0, 0, 1, 2, 0, 1];
         let mut cx = Context::seeded(1);
         let (from_gltf, _) = added(&mut cx, "read", surface(read, indices, at));
-        // As the cooker leaves it: the corners in another order, the triangles in another, each
-        // turned, and a level of one triangle after them.
+        // As the cooker leaves it: corners and triangles reordered, each turned, a one-triangle
+        // level after them.
         let moved = vec![corners[3], corners[2], corners[1], corners[0]];
         let mut cooked = surface(moved, vec![2, 1, 3, 1, 0, 3, 3, 2, 1], at);
         let level = |start, count, error| gg_renderer::Lod {
@@ -878,7 +857,6 @@ pub(crate) mod tests {
         let mesh = pack("cooked", &cooked.primitives[0], levels).expect("packs");
         let primitive = &mut cooked.primitives[0];
         primitive.mesh = Some(mesh);
-        // A package's primitive holds its mesh alone.
         primitive.positions.clear();
         primitive.uvs.clear();
         primitive.colors.clear();
@@ -902,8 +880,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// `imported`, model `name`, added to `cx`'s world's assets, as a context adds one, and what
-    /// it's made of.
+    /// `imported` added to `cx`'s assets as a context does, and what it's made of.
     pub(crate) fn added(cx: &mut Context, name: &str, imported: Imported) -> (Model, Made) {
         let mut owned = Owned::default();
         let (path, loader) = (Path::new("m.glb"), &mut Loader::inline());
@@ -924,7 +901,6 @@ pub(crate) mod tests {
         };
         let root = model.spawn(cx.world_mut(), at);
         model.spawn(again.world_mut(), at);
-        // A world seeded alike spawns it alike.
         assert_eq!(cx.world().hash(), again.world().hash());
 
         let world = cx.world();
@@ -939,7 +915,7 @@ pub(crate) mod tests {
             (transform(node), draw(node), part(node)),
             (Some(turned()), None, Some(0))
         );
-        // A child at the node for each primitive of its mesh, since an entity draws one.
+        // A child per primitive of its mesh: an entity draws one.
         let parts = <[Entity; 2]>::try_from(children(node)).expect("a part for each primitive");
         assert_eq!(parts.map(part), [Some(1), Some(2)]);
         for part in parts {
@@ -948,7 +924,7 @@ pub(crate) mod tests {
         }
         let [first, second] = parts.map(|part| draw(part).expect("a draw"));
         assert_ne!(first, second);
-        // The second primitive again, the same mesh, so that its draws batch.
+        // The second primitive again, the same mesh, so its draws batch.
         assert_eq!(
             (transform(mirror), draw(mirror), part(mirror)),
             (Some(mirrored()), Some(second), Some(3))
@@ -962,11 +938,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// A model read again replaces its meshes and images under their handles, and gives its nodes
-    /// and draws now, adding no shader, not even the engine's for a material's alpha mode that none
-    /// had, and says which of its nodes and materials changed. Unless it's to take all of it, it
-    /// gives the nodes it had, and refuses other numbers of primitives or images; otherwise it
-    /// adds the primitives and images past those it had.
+    /// A model read again replaces its meshes and images under their handles, gives its nodes and
+    /// draws now, adds no shader (not even for an alpha mode none had), and says which nodes and
+    /// materials changed. Unless it takes all, it gives the nodes it had and refuses other counts
+    /// of primitives or images; else it adds those past what it had.
     #[cfg(feature = "dev")]
     #[test]
     fn a_model_read_again_replaces_its_meshes_and_images_and_says_what_else_changed() {
@@ -975,7 +950,6 @@ pub(crate) mod tests {
         let added = add("m", path, imported(), owned.stores(), loader);
         let (was, mut made) = added.expect("a model");
         let counts = owned.counts();
-        // Each read's, with how many meshes, textures, shaders and materials there are after it.
         let mut again = |imported, whole| {
             let reloaded = reload("m", imported, &mut made, &was, whole, owned.stores());
             (reloaded, owned.counts())
@@ -1039,9 +1013,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// An image's texture holds what the first texture to sample it samples: colors, whose levels
-    /// are weighted by alpha where a masked or blended material samples them as its base color,
-    /// or a map, as its slot says.
+    /// An image's texture holds what the first slot sampling it says ([`texels`]).
     #[test]
     fn images_hold_what_their_materials_sample_them_as() {
         let Imported { mut primitives, .. } = imported();
@@ -1050,7 +1022,6 @@ pub(crate) mod tests {
         assert_eq!(texels(&primitives, 1), colors(Mipmaps::Averaged));
         primitives[1].material.alpha = AlphaMode::Blend;
         assert_eq!(texels(&primitives, 1), colors(Mipmaps::AlphaWeighted));
-        // Emitted, its alpha covers nothing.
         let textures = &mut primitives[1].material.textures;
         textures.swap(Slot::Color as usize, Slot::Emissive as usize);
         assert_eq!(texels(&primitives, 1), colors(Mipmaps::Averaged));
@@ -1075,8 +1046,8 @@ pub(crate) mod tests {
         assert_eq!(texels(&primitives, 1), colors(Mipmaps::Averaged));
     }
 
-    /// A primitive's material goes into the table as it's read: its factors, and each texture as
-    /// the model's image's, or white without one, but its normal map, which it hasn't.
+    /// A primitive's material goes into the table as read: its factors, and each texture as the
+    /// model's image, or white without one (but no normal map without one).
     #[test]
     fn a_material_takes_its_images_textures() {
         let workflow = Workflow::SpecularGlossiness {
@@ -1129,10 +1100,10 @@ pub(crate) mod tests {
         assert!(error.to_string().contains("\"m\" has 2 images"), "{error}");
     }
 
-    /// A model whose second primitive's vertices span more than packed vertices reach with what an
-    /// f32 holds, -f32::MAX beside 0, is refused, naming it and its mesh, rather than panicking,
-    /// adding nothing, not even its first primitive's mesh or its images; and, in development
-    /// builds, read again so, it replaces nothing.
+    /// A model whose second primitive spans more than packed vertices reach with an f32
+    /// (-f32::MAX beside 0) is refused, naming it and its mesh, not panicking, and adds nothing,
+    /// not even its first mesh or images. In development builds, read again so, it replaces
+    /// nothing.
     #[test]
     fn a_model_whose_mesh_doesnt_pack_is_refused() {
         let mut far = imported();

@@ -1,7 +1,6 @@
-//! The world's opaque meshes, as the renderer's scene holds them: each entity with a transform and a
-//! [`MeshDraw`] whose shader writes depth, in the scene's slot of the entity's own, set as its draw,
-//! its place or its table changes, and taken away as it goes; so that drawing them costs what
-//! changed of them, rather than all of them every frame.
+//! The world's opaque meshes in the renderer's scene: each entity with a transform and a
+//! [`MeshDraw`] whose shader writes depth has a scene slot, set as its draw, place or table
+//! changes and cleared as it goes, so drawing costs what changed.
 
 use gg_core::math::DVec3;
 use gg_renderer::{MeshDraw, Scene};
@@ -11,36 +10,38 @@ use crate::skins::Skins;
 use crate::transform::from_origin;
 use crate::{Entity, Transform, World};
 
-/// What the renderer's scene holds of the world's opaque meshes, as the module says, by the
-/// entities' slots: kept from frame to frame, so that it allocates nothing once it's grown.
+/// What the scene holds of the world's opaque meshes, by entity slot. Kept from frame to frame, so
+/// it allocates nothing once grown.
 #[derive(Default)]
 pub(crate) struct OpaqueMeshes {
-    /// The world held, by its serial, and its version and change tick as it was, the changes
-    /// after which it holds again; `None` before it holds one.
+    /// The world held (by serial) with its version and change tick then; the changes after them
+    /// are what it holds again. `None` before it holds one.
     seen: Option<(u64, u64, u64)>,
     /// The frame's origin the scene's matrices are from.
     origin: DVec3,
     /// By slot: the entity whose mesh the scene holds there, [`Entity::DEAD`] for none.
     held: Vec<Entity>,
-    /// The entities drawn on their way between ticks last frame, set again where the tick left
-    /// them once they aren't on their way.
+    /// Entities drawn between ticks last frame; set again where the tick left them once they
+    /// aren't.
     moved: Vec<Entity>,
-    /// By slot: the last pass that set it, so that a pass sets each once.
+    /// By slot: the last pass that set it, so a pass sets each once.
     set_in: Vec<u32>,
     pass: u32,
 }
 
 impl OpaqueMeshes {
-    /// Has `scene` hold `world`'s opaque meshes as `placed` has them draw this frame, a skinned
-    /// entity's of the mesh of its own that `skins` gives it, setting and
-    /// taking away what changed since it last did: everything, in another world; else each whose
-    /// mesh changed, or that joined a table, as one spawned or given a mesh or a transform does;
-    /// each that `placed` placed again, or draws on its way between ticks, or drew so last frame
-    /// and doesn't now; each that `skins` gave a mesh of its own this frame; and, as entities' rows
-    /// changed, each held that went, or lost its transform
-    /// or its mesh, or whose mesh no longer writes depth, which it looks over all held for; and
-    /// every one held, from `origin`, the frame's, once it's another than the last frame's. Called
-    /// once a frame, after `placed` has drawn it and `skins` found it.
+    /// Has `scene` hold `world`'s opaque meshes as `placed` has them draw this frame (a skinned
+    /// entity's with `skins`' mesh of its own), setting and removing what changed since the last
+    /// call: everything, in another world; else each entity
+    ///
+    /// - whose mesh changed or that joined a table (spawned, or given a mesh or transform);
+    /// - that `placed` placed again, or that draws between ticks or did last frame and doesn't now;
+    /// - that `skins` gave a mesh of its own this frame;
+    /// - held that went, lost its transform or mesh, or whose mesh no longer writes depth (found
+    ///   by looking over all held, once entities' rows changed);
+    /// - held, from `origin` (the frame's), once it differs from the last frame's.
+    ///
+    /// Called once a frame, after `placed` has drawn the world and `skins` found its entities.
     pub(crate) fn hold(
         &mut self,
         world: &World,
@@ -70,7 +71,6 @@ impl OpaqueMeshes {
         ) else {
             return;
         };
-        // Those that went, or no longer draw opaque.
         if since.is_some_and(|(was, _)| was != version) {
             for (slot, held) in (0..).zip(&mut self.held) {
                 if *held != Entity::DEAD && opaque(world, *held).is_none() {
@@ -79,7 +79,6 @@ impl OpaqueMeshes {
                 }
             }
         }
-        // Every one held, from the frame's origin, once it moved.
         if moved_origin && since.is_some() {
             for slot in 0..self.held.len() {
                 let entity = self.held[slot];
@@ -90,7 +89,6 @@ impl OpaqueMeshes {
                 }
             }
         }
-        // Those whose meshes changed, or that joined their tables.
         for table in world.tables() {
             let Some(meshes) = table.column::<MeshDraw>(mesh) else {
                 continue;
@@ -118,8 +116,6 @@ impl OpaqueMeshes {
                 }
             }
         }
-        // Those placed again, or on their way between ticks, this frame or the last, and those
-        // given a mesh of their own.
         let mut moved = std::mem::take(&mut self.moved);
         let placed_again = placed.changed().iter().chain(placed.moving()).chain(&moved);
         for &entity in placed_again.chain(skins.fresh()) {
@@ -135,8 +131,8 @@ impl OpaqueMeshes {
         self.moved = moved;
     }
 
-    /// Sets `entity`'s mesh, `draw`, or the mesh of its own `skins` gives it, in its slot of
-    /// `scene`, where `placed` has it draw, unless pass `pass` has.
+    /// Sets `entity`'s `draw` (or its skinned mesh) in its slot of `scene`, unless pass `pass`
+    /// already has.
     #[expect(
         clippy::too_many_arguments,
         reason = "what setting a slot reads, each apart"
@@ -163,14 +159,14 @@ impl OpaqueMeshes {
         scene.set(slot as u32, matrix, &skins.draw_of(entity, draw), id);
     }
 
-    /// Starts a pass, with room for each of `world`'s slots, and returns its number.
+    /// Starts a pass, with room for `world`'s slots; returns its number.
     fn next_pass(&mut self, world: &World) -> u32 {
         let slots = world.slots();
         if self.held.len() < slots {
             self.held.resize(slots, Entity::DEAD);
             self.set_in.resize(slots, 0);
         }
-        // Numbered from 1, so that 0 is none's; after 2^32 passes, from 1 again, none counting.
+        // Numbered from 1, so 0 means none; after 2^32 passes, from 1 again with none counted.
         self.pass = self.pass.checked_add(1).unwrap_or_else(|| {
             self.set_in.fill(0);
             1
@@ -179,7 +175,7 @@ impl OpaqueMeshes {
     }
 }
 
-/// `entity`'s mesh, if it's alive, with a transform, and its mesh's shader writes depth.
+/// `entity`'s mesh, if alive with a transform and a shader that writes depth.
 fn opaque(world: &World, entity: Entity) -> Option<&MeshDraw> {
     world.get::<Transform>(entity)?;
     world
@@ -205,7 +201,7 @@ mod tests {
         }
     }
 
-    /// A draw whose shader writes depth, if `opaque`, or blends.
+    /// A draw that writes depth if `opaque`, else blends.
     fn draw(opaque: bool) -> MeshDraw {
         MeshDraw::from_parts(0, 0, opaque, false, &[1, 2, 3, 4]).expect("four bytes")
     }
@@ -213,10 +209,9 @@ mod tests {
     /// What a scene holds: each slot's transform, ID and draw.
     type Held = BTreeMap<u32, (Mat4, u64, MeshDraw)>;
 
-    /// What drawing the world has a renderer's scene hold, as each frame does, at `alpha` of the
-    /// way on from `past`, the latest tick having started at change tick `started`, taking what
-    /// it changed into `held`; and the slots it changed, as the frame's drawing moves the world's
-    /// change tick on.
+    /// Draws a frame as the app does, `alpha` of the way on from `past` (the latest tick started
+    /// at change tick `started`), applies the scene's changes to `held`, and returns the slots
+    /// changed.
     fn frame(
         world: &mut World,
         (placed, opaque, scene): &mut (Placed, OpaqueMeshes, Scene),
@@ -246,10 +241,9 @@ mod tests {
         changed
     }
 
-    /// The scene holds each opaque mesh with a transform in its entity's slot, where it's placed,
-    /// with its ID, and changes only what changed: a mesh placed again, as its parent moves; one
-    /// that came, went, or blends now; everything, in a restored world; and one on its way between
-    /// ticks, each frame, and once more as it stops.
+    /// The scene holds each opaque mesh with a transform, placed, with its ID, and changes only
+    /// what changed: a mesh placed again (its parent moved), one that came, went or blends now,
+    /// everything in a restored world, one between ticks each frame and once more as it stops.
     #[test]
     fn the_scene_holds_the_opaque_meshes_as_they_change() {
         let mut world = World::default();
@@ -305,7 +299,7 @@ mod tests {
             |world: &World, matrix| Held::from([(slot(e), (matrix, id(world, e), draw(true)))]);
         assert_eq!(held, only_e(&world, at(5.0).matrix_from(DVec3::ZERO)));
 
-        // A tick that moves it, drawn on its way over two frames; then a tick that doesn't.
+        // A tick that moves it, drawn on its way for two frames; then a tick that doesn't.
         let mut past = Past::default();
         past.capture(&mut world);
         let started = world.change_tick();
@@ -331,9 +325,8 @@ mod tests {
         assert_eq!(after, [0; 0]);
     }
 
-    /// As the frame's origin moves, the scene holds every opaque mesh again from the new origin,
-    /// though none moved, a child where its parent carries it; and a frame from that origin after
-    /// changes nothing.
+    /// A moved frame origin has the scene hold every opaque mesh again from it, though none moved
+    /// (a child where its parent carries it); a later frame from that origin changes nothing.
     #[test]
     fn the_scene_holds_every_mesh_again_from_a_moved_origin() {
         let mut world = World::default();

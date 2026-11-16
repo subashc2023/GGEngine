@@ -1,12 +1,12 @@
-//! The loader: decodes the images of the textures layers add, models' among them, off the main
-//! thread, on threads of its own, `gg-load`, several at once, and makes their mip levels there too,
-//! so that an add hands out a texture's handle once its file's header has read, which gives its
-//! size, and the texture shows its stand-in until its pixels have come and frames have streamed
-//! them to the GPU; or, in a test's or a replay's context, which draws nothing, on the calling
-//! thread as each is added. Either way, an image whose header read but whose pixels don't decode
-//! warns and keeps its texture's stand-in, its add having succeeded, so that a replay's adds go as
-//! its run's did; and one that decodes logs how long that took, `asset.texture_decoded`, at the
-//! debug level, from the thread that decoded it, as it's done.
+//! The loader decodes the images of the textures layers add (models' too) and makes their mip
+//! levels, several at once on `gg-load` threads off the main thread. An add hands out the
+//! texture's handle once its header has read (which gives its size); the texture shows its
+//! stand-in until its pixels have come and frames have streamed them to the GPU. In a test's or a
+//! replay's context, which draws nothing, each image decodes on the calling thread as it's added.
+//!
+//! Either way, an image whose header read but whose pixels don't decode warns and keeps its
+//! texture's stand-in: the add succeeded, so a replay's adds go as its run's did. One that
+//! decodes logs `asset.texture_decoded` with its time at the debug level, from its thread.
 
 use std::collections::HashSet;
 use std::panic;
@@ -23,47 +23,45 @@ use tracing::{debug, warn};
 use crate::image::{self, Format, Image};
 use crate::perf;
 
-/// The most threads that decode images. Each holds the image it's on whole, its levels and the
-/// floats they're made from among it, some 150 MiB for an image of 4,096 pixels square, so that
-/// they could hold more than a GiB at once, as a scene's large images all come at once.
+/// The most threads that decode images. Each holds its image whole, with its levels and the
+/// floats they're made from: some 150 MiB for 4,096 pixels square. A scene's large images all come
+/// at once, so they could hold over a GiB.
 const MOST_THREADS: usize = 8;
 
-/// Decodes textures' images, as the module says, in the order their textures were added, as many
-/// at a time as it has threads, and fills each texture as its image is done, as the renderer
-/// streams them.
+/// Decodes textures' images (see the module) in the order added, as many at a time as it has
+/// threads, and fills each texture as its image is done.
 pub(crate) struct Loader {
     kind: Kind,
-    /// The textures whose images it's decoding, by their indices, which take their pixels as they
-    /// come; one forgotten, as one removed or given another image meanwhile, takes none. Handles
-    /// are never given out again, so an index names one texture for good.
+    /// The textures whose images it's decoding, by index; they take their pixels as they come.
+    /// One forgotten (removed, or given another image meanwhile) takes none. Handles are never
+    /// reused, so an index names one texture for good.
     pending: HashSet<u32>,
 }
 
 enum Kind {
-    /// Decodes each image on the calling thread as its texture is added, after its handle, leaving
-    /// its levels to the frames that stream it: a test's or a replay's context's, which renders
-    /// none, and a run's whose threads couldn't start.
+    /// Decodes each image on the calling thread as its texture is added, after its handle, and
+    /// leaves its levels to the streaming frames: a test's or a replay's context (which renders
+    /// none), or a run whose threads couldn't start.
     Inline,
-    /// Decodes each image on one of `count` threads, which the first starts, `None` until then.
+    /// Decodes on `count` threads, started by the first image (`None` until then).
     Threads {
         count: usize,
         workers: Option<Workers>,
     },
 }
 
-/// The threads, from the main thread's side. Dropped, it lets them go, unjoined: each ends once
-/// the decode it's on is done, as it finds no one to send it to, and holds no file or GPU object
-/// meanwhile, so that a run's end doesn't wait for a long decode.
+/// The threads, from the main thread's side. Dropped, it lets them go unjoined: each ends once its
+/// current decode is done (it finds no one to send to) and holds no file or GPU object meanwhile,
+/// so a run's end doesn't wait for a long decode.
 struct Workers {
     jobs: Sender<Job>,
     done: Receiver<Done>,
-    /// Each thread, until it's joined, as it panicked.
+    /// Each thread, until joined because it panicked.
     threads: Vec<JoinHandle<()>>,
 }
 
-/// An image to decode: `texture`'s, `name`'s from `path`, read as far as its header, with the mip
-/// levels made from it that `levels` says, as [`add_levels`] makes them, if it's given, as its
-/// texture was reserved for.
+/// An image to decode: `texture`'s, `name`'s from `path`, read as far as its header. If given,
+/// `levels` says which mip levels to make ([`add_levels`]); the texture was reserved for them.
 struct Job {
     texture: Texture,
     name: String,
@@ -72,7 +70,7 @@ struct Job {
     levels: Option<Texels>,
 }
 
-/// An image decoded, or why it didn't decode: `texture`'s pixels, its levels among them.
+/// `texture`'s pixels (levels included) decoded, or why they didn't.
 struct Done {
     texture: Texture,
     name: String,
@@ -81,7 +79,7 @@ struct Done {
 }
 
 impl Loader {
-    /// A loader that decodes each image on the calling thread, as [`load`](Self::load) says.
+    /// A loader that decodes each image on the calling thread.
     pub(crate) fn inline() -> Self {
         Self {
             kind: Kind::Inline,
@@ -89,16 +87,15 @@ impl Loader {
         }
     }
 
-    /// A loader that decodes images on threads of its own, which the first image starts: half as
-    /// many as the hardware runs at once, leaving the rest to the main and render threads and the
-    /// game's own, but at least one, and [`MOST_THREADS`] at most. Threads that can't start leave
-    /// decoding to the main thread, warning `engine.loader`.
+    /// A loader with threads the first image starts: half the hardware's (the rest are for the
+    /// main, render and game threads), at least one, at most [`MOST_THREADS`]. If they can't
+    /// start, decoding falls to the main thread, warning `engine.loader`.
     pub(crate) fn threaded() -> Self {
         let count = thread::available_parallelism().map_or(1, |count| count.get() / 2);
         Self::on_threads(count.clamp(1, MOST_THREADS))
     }
 
-    /// A loader that decodes images on `count` threads, which the first image starts.
+    /// A loader with `count` threads, started by the first image.
     fn on_threads(count: usize) -> Self {
         Self {
             kind: Kind::Threads {
@@ -109,14 +106,16 @@ impl Loader {
         }
     }
 
-    /// Hands out a texture of `textures` for `image`, texture `name`'s from `path`, read as far as
-    /// its header as [`image::load_image`] reads it, whose pixels it decodes, as
-    /// [`image::decode_texture`] does, as `texels`, a [`Texels::Color`] or a [`Texels::Map`], say,
-    /// with their mip levels, as [`Image::texels`] has them: on a thread, the texture showing its
-    /// stand-in until [`take`](Self::take) fills it, its levels made there too; or, inline, at once,
-    /// its levels left to the frames that stream it. Pixels that don't decode warn
-    /// `engine.bad_texture`, as they're taken or at once, and the texture keeps its stand-in: the
-    /// handle is the texture's whether they decode or not.
+    /// Hands out a texture of `textures` for `image` (`name`'s from `path`, read as far as its
+    /// header by [`image::load_image`]) and decodes its pixels as [`image::decode_texture`] does,
+    /// as `texels` ([`Texels::Color`] or [`Texels::Map`]) with mip levels per [`Image::texels`].
+    ///
+    /// - On a thread: the texture shows its stand-in until [`take`](Self::take) fills it; levels
+    ///   are made there too.
+    /// - Inline: filled at once; levels are left to the streaming frames.
+    ///
+    /// Pixels that don't decode warn `engine.bad_texture`, when taken or at once; the texture
+    /// keeps its stand-in and the handle stays its own.
     ///
     /// Fails as [`Textures::reserve`] does.
     pub(crate) fn load(
@@ -146,9 +145,8 @@ impl Loader {
                 }
             };
         }
-        // On a thread, colors and maps get their levels made with their pixels, as what's
-        // cooked comes with its own; inline, the frames that stream them make them, as no frame
-        // waits for these threads.
+        // On a thread, colors and maps get their levels with their pixels (cooked ones bring
+        // their own); inline, the streaming frames make them, as no frame waits for these threads.
         let threaded = matches!(self.kind, Kind::Threads { .. });
         let texels = image.texels(texels.into());
         let (reserved, levels) = if threaded {
@@ -179,13 +177,13 @@ impl Loader {
         Ok(texture)
     }
 
-    /// Fills each texture whose image the threads have decoded since, as each was done, warning
-    /// `engine.bad_texture` of each that didn't decode, which keeps its stand-in: as a frame is
-    /// handed off, so that the frame takes them. One that finds none allocates nothing.
+    /// Fills each texture whose image the threads have decoded since the last call, warning
+    /// `engine.bad_texture` of each that didn't (it keeps its stand-in). Called as a frame is
+    /// handed off. A call that finds none allocates nothing.
     ///
     /// # Panics
     ///
-    /// If a thread panicked, which this resumes.
+    /// - If a thread panicked: the panic is resumed.
     pub(crate) fn take(&mut self, textures: &mut Textures) {
         let Self { kind, pending } = self;
         let Kind::Threads {
@@ -200,7 +198,7 @@ impl Loader {
                 fill(textures, done);
             }
         }
-        // A thread ends while the loader holds it only as it panics.
+        // A thread ends while the loader holds it only by panicking.
         if let Some(at) = workers.threads.iter().position(JoinHandle::is_finished) {
             match workers.threads.swap_remove(at).join() {
                 Err(panic) => panic::resume_unwind(panic),
@@ -209,21 +207,20 @@ impl Loader {
         }
     }
 
-    /// Has `texture`, removed or given another image, take nothing of what its image decodes to,
-    /// if it's decoding it.
+    /// Has `texture` (removed, or given another image) take nothing of its decoding image.
     pub(crate) fn forget(&mut self, texture: Texture) {
         self.pending.remove(&texture.index());
     }
 
-    /// How many textures' images it's decoding.
+    /// How many images it's decoding.
     pub(crate) fn pending(&self) -> u32 {
         self.pending.len() as u32
     }
 }
 
 impl Workers {
-    /// Starts `count` threads, each of which decodes the next job sent, and sends it back, until
-    /// the loader lets go. Fails with `engine.loader` if one can't start.
+    /// Starts `count` threads that decode jobs and send them back until the loader lets go. Fails
+    /// with `engine.loader` if one can't start.
     fn start(count: usize) -> Result<Self> {
         let (jobs, to_decode) = mpsc::channel::<Job>();
         let to_decode = Arc::new(Mutex::new(to_decode));
@@ -236,8 +233,7 @@ impl Workers {
                     .name("gg-load".to_owned())
                     .spawn(move || {
                         loop {
-                            // Held while it waits for a job alone, so that the others decode
-                            // meanwhile.
+                            // Held only while waiting for a job, so the others decode meanwhile.
                             let queue = to_decode.lock().unwrap_or_else(PoisonError::into_inner);
                             let Ok(job) = queue.recv() else {
                                 return;
@@ -262,9 +258,9 @@ impl Workers {
     }
 }
 
-/// Decodes `job`'s image, and makes its mip levels, as its texture was reserved for: a PNG's or a
-/// JPEG's, but not what's cooked, which comes with its own. Logs `asset.texture_decoded` once
-/// they're made, with how long they took, and of it to make their levels, if they were made.
+/// Decodes `job`'s image and makes the mip levels its texture was reserved for (PNG or JPEG;
+/// cooked images bring their own). Logs `asset.texture_decoded` with how long it took, and how
+/// much of that the levels took, if made.
 fn decode(job: Job) -> Done {
     let _zone = gg_core::zone!("decode an image");
     let started = Instant::now();
@@ -307,8 +303,8 @@ fn decode(job: Job) -> Done {
     }
 }
 
-/// Fills `done`'s texture with its pixels, or warns that they didn't decode, as their error says,
-/// the texture keeping its stand-in.
+/// Fills `done`'s texture with its pixels, or warns with the decode's error; the texture keeps its
+/// stand-in.
 fn fill(textures: &mut Textures, done: Done) {
     let Done {
         texture,
@@ -336,8 +332,7 @@ mod tests {
 
     use super::*;
 
-    /// A PNG of `width` pixels in a row, cut short of its last `cut` bytes, read as far as its
-    /// header.
+    /// A one-row PNG of `width` pixels, its last `cut` bytes cut off, read as far as its header.
     fn read(width: u32, cut: usize) -> Image {
         let pixels = vec![9; width as usize * 4];
         let rgba = (png::ColorType::Rgba, png::BitDepth::Eight);
@@ -346,7 +341,7 @@ mod tests {
         image::read(file).expect("its header")
     }
 
-    /// Takes what `loader` decodes, as frames do, until it's decoding nothing.
+    /// Takes what `loader` decodes, as frames do, until it has nothing pending.
     fn settle(loader: &mut Loader, textures: &mut Textures) {
         let until = Instant::now() + Duration::from_secs(30);
         while loader.pending() > 0 {
@@ -356,7 +351,7 @@ mod tests {
         }
     }
 
-    /// Whether `texture` has its pixels, as a fill of it again, a bug, panics for; one reserved
+    /// Whether `texture` has its pixels: filling it again (a bug) panics, while a reserved one
     /// still refuses pixels of no bytes, which no texture has.
     fn filled(textures: &mut Textures, texture: Texture) -> bool {
         let fill = AssertUnwindSafe(|| {
@@ -365,10 +360,8 @@ mod tests {
         panic::catch_unwind(fill).is_err()
     }
 
-    /// Textures' handles come at once, as their images' headers read, before they decode, on the
-    /// loader's threads, one or several, which fill each as it's taken, a model's image with its
-    /// levels, of colors or a map; and inline, as a test's context decodes, each is filled as it's
-    /// added.
+    /// Handles come at once, before the images decode on one or several threads and are filled as
+    /// taken (a model's image with its levels, colors or a map). Inline, each fills as added.
     #[test]
     fn textures_decode_off_the_main_thread_and_fill_as_taken() {
         let mut textures = Textures::default();
@@ -404,10 +397,8 @@ mod tests {
         }
     }
 
-    /// A texture whose image's header reads but whose rows don't decode loads all the same, its
-    /// handle handed out, and warns, keeping its stand-in, unfilled: once its image comes to be
-    /// taken from the loader's threads, or, inline, at once, so that a test's context or a
-    /// replay's adds it as a run's does.
+    /// A texture whose header reads but whose rows don't decode still loads: handle handed out, a
+    /// warning (when taken, or at once inline), stand-in kept, unfilled.
     #[test]
     fn pixels_that_dont_decode_warn_and_keep_the_stand_in() {
         let logged = crate::testing::logged();
@@ -423,9 +414,8 @@ mod tests {
         }
     }
 
-    /// A texture forgotten while its image decodes, as one removed or given another image is,
-    /// takes nothing of it as it comes: here, its image decodes before the next's, which a loader
-    /// of one thread decodes in order.
+    /// A texture forgotten while its image decodes takes nothing of it. One thread decodes in
+    /// order, so its image comes before the next's.
     #[test]
     fn a_texture_forgotten_while_decoding_takes_no_late_pixels() {
         let mut textures = Textures::default();
@@ -442,10 +432,9 @@ mod tests {
         assert!(!filled(&mut textures, forgotten), "no late pixels");
     }
 
-    /// A thread that panics as it decodes resumes its panic on the main thread as frames take what
-    /// the threads decoded, of a loader of several threads too, whose others keep the channel
-    /// back open: here, as levels are made of a pixel said to be an image of 4 pixels square, a
-    /// broken invariant no file's image breaks.
+    /// A decoding thread's panic resumes on the main thread when frames take, even with several
+    /// threads, whose others keep the channel open. Here levels are made of one pixel said to be
+    /// 4 pixels square: a broken invariant no file's image breaks.
     #[test]
     fn a_decode_that_panics_resumes_on_the_main_thread() {
         let mut textures = Textures::default();

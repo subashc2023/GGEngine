@@ -1,9 +1,9 @@
-//! Skinned models in the frame: each entity of a model's skinned part draws a mesh of its own, a
-//! copy of its model's skinned mesh, so that each instance of the model poses apart; and each frame
-//! gives the renderer its joints' matrices, from where the joints draw, which its skin pass moves
-//! the copy's vertices by, as [`Draws::skin`] says. The skin pass moves a copy into the frame's own
-//! buffer, leaving the copy as it was, so a copy whose entity went is kept a while for the next
-//! entity of the same model's mesh, which draws it at once, streaming nothing and adding no mesh.
+//! Skinned models in the frame. Each entity of a model's skinned part draws its own copy of the
+//! model's skinned mesh, so instances pose apart. Each frame gives the renderer the joints'
+//! matrices, from where they draw, and its skin pass moves the copy's vertices by them
+//! ([`Draws::skin`]). The pass writes into the frame's own buffer, leaving the copy as it was, so
+//! a copy whose entity went is kept a while: the next entity of that mesh draws it at once,
+//! streaming nothing and adding no mesh.
 
 use std::sync::Arc;
 
@@ -15,27 +15,26 @@ use crate::model::Made;
 use crate::placed::Placed;
 use crate::{Entity, ModelRoot, World};
 
-/// The skinned entities' own meshes, by their slots, kept from frame to frame, so that a frame
-/// allocates nothing once each has its own, and copies a model's mesh only for an entity that
-/// hasn't one of it while no copy of it is spare.
+/// The skinned entities' own meshes, kept from frame to frame so a frame allocates nothing once
+/// each has one. A model's mesh is copied only for an entity with none, when no copy is spare.
 #[derive(Default)]
 pub(crate) struct Skins {
-    /// By slot: the entity that has a mesh of its own there, if one does.
+    /// By slot: the entity with a mesh of its own there, if any.
     own: Vec<Option<Own>>,
     /// The slots `own` holds a mesh in.
     held: Vec<u32>,
-    /// The copies whose entities went, each with the frame it went in, each kept for
-    /// [`SPARE_FRAMES`] while its model's mesh is the one it's a copy of.
+    /// Copies whose entities went, with the frame they went in; kept for [`SPARE_FRAMES`] while
+    /// they copy their model's current mesh.
     spare: Vec<(Copied, u64)>,
     /// The entities given a mesh of their own this frame, which the scene sets again.
     fresh: Vec<Entity>,
-    /// The frames found so far, the last of which each held mesh was found in.
+    /// Frames found so far.
     frame: u64,
 }
 
-/// How many frames a copy is kept spare, some ten seconds at 60 a second: long enough that an
-/// entity spawned as another of its model goes, as one respawned is, takes its copy, and short
-/// enough that the copies of a crowd that went soon go, and their memory with them.
+/// How long a copy is kept spare: some ten seconds at 60 a second. Long enough that an entity
+/// spawned as another goes (as a respawn is) takes its copy, short enough that a departed crowd's
+/// copies and memory soon go.
 pub(crate) const SPARE_FRAMES: u64 = 600;
 
 /// An entity's own mesh, and the frame it was last found in.
@@ -45,8 +44,7 @@ struct Own {
     found: u64,
 }
 
-/// A copy of a model's skinned mesh: the mesh it's a copy of, the model's and the primitive's
-/// indices it was found at, and the copy.
+/// A copy of a model's skinned mesh, with its source and the model's and primitive's indices.
 struct Copied {
     of: Arc<ModelMesh>,
     from: (usize, usize),
@@ -54,8 +52,8 @@ struct Copied {
 }
 
 impl Copied {
-    /// Whether it's still a copy of model `from`'s primitive's mesh, as `made` has it, which its
-    /// model read again, or another model in its place, leaves it not.
+    /// Whether it still copies model `from`'s primitive's mesh as `made` has it: a model read
+    /// again, or another in its place, leaves it not.
     fn current(&self, made: &[Made]) -> bool {
         let (model, primitive) = self.from;
         let of = made.get(model).and_then(|made| made.skinned.get(primitive));
@@ -65,16 +63,18 @@ impl Copied {
 }
 
 impl Skins {
-    /// Finds `world`'s skinned entities this frame, each a model's part whose node has a skin and
-    /// draws a skinned mesh, as `made` has its model made, and gives each that hasn't one a mesh of
-    /// its own, a spare copy of its model's, or else a copy that `meshes` adds, and has `draws`
-    /// skin it by its joints, where `placed` has them draw, each joint's matrix taking the mesh's
-    /// space, as it was bound, to the entity's own, as the joint draws now: a joint gone, as code
-    /// can despawn one, as where it was bound. A mesh of its own whose entity went is spare for
-    /// [`SPARE_FRAMES`]; one whose entity is alive and isn't skinned now, which the scene may still
-    /// draw, goes, which `meshes` removes, as does a spare one whose time is up or whose model's
-    /// mesh changed, as it was read again. Called once a frame, after `placed` has drawn the
-    /// world.
+    /// Finds `world`'s skinned entities (parts of a model, as `made` has it, whose node has a skin
+    /// and draws a skinned mesh).
+    ///
+    /// - One with no mesh of its own gets a spare copy of its model's, else a copy `meshes` adds.
+    /// - `draws` skins each by its joints where `placed` has them draw. A joint's matrix takes the
+    ///   mesh's space as bound to the entity's as the joint draws now; a despawned joint stays as
+    ///   bound.
+    /// - A mesh whose entity went is spare for [`SPARE_FRAMES`].
+    /// - A mesh whose entity is alive but no longer skinned (the scene may still draw it) is
+    ///   removed from `meshes`, as is a spare one past its time or whose model's mesh changed.
+    ///
+    /// Called once a frame, after `placed` has drawn the world.
     pub(crate) fn find(
         &mut self,
         world: &World,
@@ -151,8 +151,8 @@ impl Skins {
         });
     }
 
-    /// `entity`'s own mesh, a copy of `of`, model `from`'s primitive's mesh, marked found this
-    /// frame: a spare copy of it, or one `meshes` adds, if it hasn't one of it.
+    /// `entity`'s own copy of `of`, marked found this frame: a spare one or one `meshes` adds, if
+    /// it has none.
     fn own(
         &mut self,
         entity: Entity,
@@ -170,8 +170,8 @@ impl Skins {
                 own.copy.mesh
             }
             held => {
-                // Another entity in the slot went, and its copy is spare; this one's own, of its
-                // model's mesh before, goes.
+                // Another entity's copy in the slot goes spare; this entity's own copy of its
+                // model's earlier mesh is removed.
                 match held.take() {
                     Some(gone) if gone.entity != entity => self.spare.push((gone.copy, self.frame)),
                     Some(gone) => {
@@ -203,7 +203,7 @@ impl Skins {
         }
     }
 
-    /// `draw`, `entity`'s, of the entity's own mesh in place of its model's, if it has one.
+    /// `draw`, `entity`'s, with its own mesh in place of its model's, if it has one.
     pub(crate) fn draw_of(&self, entity: Entity, draw: &MeshDraw) -> MeshDraw {
         match self.own.get(entity.slot()) {
             Some(Some(own)) if own.entity == entity => draw.with_mesh(own.copy.mesh),
@@ -211,12 +211,11 @@ impl Skins {
         }
     }
 
-    /// The entities given a mesh of their own this frame.
     pub(crate) fn fresh(&self) -> &[Entity] {
         &self.fresh
     }
 
-    /// How many meshes of their own it holds, and how many spare: for tests.
+    /// Own and spare mesh counts, for tests.
     #[cfg(test)]
     pub(crate) fn held(&self) -> (usize, usize) {
         (self.held.len(), self.spare.len())

@@ -1,6 +1,6 @@
-//! The engine's components that `gg-renderer` defines, the tonemapper, antialiasing, grade, ambient
-//! occlusion, fog and reflections an environment holds, which it does too, and the sampler a sprite
-//! holds, which `gg-gpu` does, described to reflection here, since neither crate can derive it.
+//! Reflection for what `gg-renderer` defines: the sprite and circle components, the tonemapper,
+//! antialiasing, grade, ambient occlusion, fog and reflections an environment holds, and
+//! `gg-gpu`'s sampler. Neither crate can derive it.
 
 use std::fmt::Write as _;
 
@@ -19,10 +19,10 @@ use crate::{Component, Entity, Writable};
 impl Component for Sprite {}
 impl Writable for Sprite {}
 
-/// Taken apart whole, so that a field `gg-renderer` adds fails to compile here until it's
-/// described. Its texture is named by its path, as [`Value::Texture`] says, and only a texture the
-/// renderer handed out sets it, so that no value makes an index that shaders would sample
-/// unchecked. Its fields' defaults are the default sprite's.
+/// Taken apart whole, so a field `gg-renderer` adds fails to compile here until described. The
+/// texture is named by its path ([`Value::Texture`]); only a texture the renderer handed out sets
+/// it, so no value makes an index shaders would sample unchecked. Defaults are the default
+/// sprite's.
 impl Reflect for Sprite {
     fn describe(types: &mut Types) -> Result<Type> {
         let field = |name: &'static str, ty, show, default, doc: &'static str| Field {
@@ -169,15 +169,14 @@ impl Reflect for Sprite {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// A sprite's fields, in the order its description gives them.
+/// A sprite's fields, in description order.
 const SPRITE_FIELDS: [&str; 4] = ["color", "texture", "rect", "sampler"];
 
 impl Component for Circle {}
 impl Writable for Circle {}
 
-/// Taken apart whole, as a sprite is, so that a field `gg-renderer` adds fails to compile here until
-/// it's described. Its fields' defaults are the default circle's, and its thickness and its fade
-/// run from 0 to 1, a whole radius.
+/// Taken apart whole, like a sprite. Defaults are the default circle's; thickness and fade run
+/// from 0 to 1, a whole radius.
 impl Reflect for Circle {
     fn describe(types: &mut Types) -> Result<Type> {
         let field = |name: &'static str, ty, show, unit: bool, default, doc: &'static str| Field {
@@ -315,12 +314,11 @@ impl Reflect for Circle {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// A circle's fields, in the order its description gives them.
+/// A circle's fields, in description order.
 const CIRCLE_FIELDS: [&str; 3] = ["color", "thickness", "fade"];
 
-/// Taken apart whole, as a sprite is, so that a field `gg-renderer` adds fails to compile here until
-/// it's described. Its fields' defaults are the default fog's, its amounts no less than 0, and its
-/// opacity and its sharpness within what [`Fog`] takes.
+/// Taken apart whole, like a sprite. Defaults are the default fog's; amounts are at least 0;
+/// opacity and sharpness stay within what [`Fog`] takes.
 impl Reflect for Fog {
     fn describe(types: &mut Types) -> Result<Type> {
         let field =
@@ -491,7 +489,7 @@ impl Reflect for Fog {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// Fog's fields, in the order its description gives them.
+/// Fog's fields, in description order.
 const FOG_FIELDS: [&str; 9] = [
     "density",
     "falloff",
@@ -504,8 +502,8 @@ const FOG_FIELDS: [&str; 9] = [
     "sharpness",
 ];
 
-/// `fog`'s fields, in the order of [`FOG_FIELDS`], taken apart whole, so that a field `gg-renderer`
-/// adds fails to compile here until it's described.
+/// `fog`'s fields in [`FOG_FIELDS`]' order, taken apart whole, so a field `gg-renderer` adds fails
+/// to compile here until described.
 fn fog_parts(fog: &Fog) -> [&dyn Reflect; 9] {
     let Fog {
         density,
@@ -523,8 +521,8 @@ fn fog_parts(fog: &Fog) -> [&dyn Reflect; 9] {
     ]
 }
 
-/// A sampler's variant name, by a match that names each, so that a sampler `gg-gpu` adds fails to
-/// compile here until it's named.
+/// A sampler's variant name, by a match naming each, so a sampler `gg-gpu` adds fails to compile
+/// here until named.
 fn sampler_name(sampler: Sampler) -> &'static str {
     match sampler {
         Sampler::LinearClamp => "LinearClamp",
@@ -588,8 +586,8 @@ impl Reflect for Sampler {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// A tonemapper's variant name, by a match that names each, so that one `gg-renderer` adds fails to
-/// compile here until it's named.
+/// A tonemapper's variant name, by a match naming each, so one `gg-renderer` adds fails to compile
+/// here until named.
 fn tonemapper_name(tonemapper: Tonemapper) -> &'static str {
     match tonemapper {
         Tonemapper::PbrNeutral => "PbrNeutral",
@@ -657,7 +655,7 @@ impl Reflect for Tonemapper {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// A way of antialiasing's variant name, by a match that names each, as [`tonemapper_name`] does.
+/// An antialiasing's variant name, like [`tonemapper_name`].
 fn antialiasing_name(antialiasing: Antialiasing) -> &'static str {
     match antialiasing {
         Antialiasing::Taa => "Taa",
@@ -726,9 +724,8 @@ impl Reflect for Antialiasing {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// Taken apart whole, as a sprite is, so that a field `gg-renderer` adds fails to compile here until
-/// it's described. Its fields' defaults are the identity's; its white balance runs from -1 to 1,
-/// its saturation from 0, and its contrast, slope and power from 0 to [`Grade::MOST`].
+/// Taken apart whole, like a sprite. Defaults are the identity's. White balance runs from -1 to 1,
+/// saturation from 0, contrast, slope and power from 0 to [`Grade::MOST`].
 impl Reflect for Grade {
     fn describe(types: &mut Types) -> Result<Type> {
         let field =
@@ -943,7 +940,7 @@ impl Reflect for Grade {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// A grade's fields, in the order its description gives them.
+/// A grade's fields, in description order.
 const GRADE_FIELDS: [&str; 7] = [
     "temperature",
     "tint",
@@ -954,9 +951,8 @@ const GRADE_FIELDS: [&str; 7] = [
     "power",
 ];
 
-/// Taken apart whole, as a circle is, so that a field `gg-renderer` adds fails to compile here until
-/// it's described. Its fields' defaults are XeGTAO's, the default's, and neither goes below 0, at
-/// which it darkens nothing.
+/// Taken apart whole, like a circle. Defaults are XeGTAO's (the default's); neither field goes
+/// below 0, which darkens nothing.
 impl Reflect for AmbientOcclusion {
     fn describe(types: &mut Types) -> Result<Type> {
         let field = |name: &'static str, default: f32, doc: &'static str| Field {
@@ -1048,12 +1044,11 @@ impl Reflect for AmbientOcclusion {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// Ambient occlusion's fields, in the order its description gives them.
+/// Ambient occlusion's fields, in description order.
 const AMBIENT_OCCLUSION_FIELDS: [&str; 2] = ["radius", "strength"];
 
-/// Taken apart whole, as ambient occlusion is, so that a field `gg-renderer` adds fails to compile
-/// here until it's described. Its fields' defaults are the default reflections', each no less than
-/// 0, and its roughness no more than 1.
+/// Taken apart whole, like ambient occlusion. Defaults are the default reflections'; each field is
+/// at least 0, roughness at most 1.
 impl Reflect for Reflections {
     fn describe(types: &mut Types) -> Result<Type> {
         let field =
@@ -1154,11 +1149,11 @@ impl Reflect for Reflections {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// Reflections' fields, in the order their description gives them.
+/// Reflections' fields, in description order.
 const REFLECTIONS_FIELDS: [&str; 3] = ["distance", "thickness", "roughness"];
 
-/// `reflections`' fields, in the order of [`REFLECTIONS_FIELDS`], taken apart whole, so that a field
-/// `gg-renderer` adds fails to compile here until it's described.
+/// `reflections`' fields in [`REFLECTIONS_FIELDS`]' order, taken apart whole, so a field
+/// `gg-renderer` adds fails to compile here until described.
 fn reflections_parts(reflections: &Reflections) -> [&dyn Reflect; 3] {
     let Reflections {
         distance,
@@ -1168,10 +1163,10 @@ fn reflections_parts(reflections: &Reflections) -> [&dyn Reflect; 3] {
     [distance, thickness, roughness]
 }
 
-/// A snapshot keeps its mesh's and its shader's indices, whether its shader is opaque and whether
-/// it culls, and its parameters' bytes in hex, as `1 2 true false x0a0b`: what a restart takes back
-/// into a run whose layers added the same assets in the same order, which the indices name there
-/// too, as the snapshot's `asset` lines check.
+/// A snapshot keeps the mesh's and shader's indices, whether the shader is opaque, whether it
+/// culls, and the parameters' bytes in hex, as `1 2 true false x0a0b`. A restart takes it back
+/// into a run whose layers added the same assets in the same order, so the indices name the same
+/// ones; the snapshot's `asset` lines check that.
 impl Component for MeshDraw {
     fn save_opaque(&self) -> Option<String> {
         let (mesh, shader, opaque, culls, params) = self.parts();
@@ -1209,7 +1204,7 @@ impl Component for MeshDraw {
 
 impl Writable for MeshDraw {}
 
-/// Opaque: its mesh and its shader are indices private to `gg-renderer`, which no value may make.
+/// Opaque: the mesh and shader are `gg-renderer`'s private indices; no value may make them.
 impl Reflect for MeshDraw {
     fn describe(types: &mut Types) -> Result<Type> {
         let doc = "A mesh drawn with a shader and its parameters, which code sets.";

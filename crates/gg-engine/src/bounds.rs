@@ -1,24 +1,25 @@
-//! The sphere round what an entity and every entity under it draw, which the tool API's `entity`
-//! answers as `bounds` and the editor frames.
+//! The sphere round what an entity and its descendants draw: the tool API's `entity` answers it as
+//! `bounds`, and the editor frames it.
 
 use gg_core::math::{DVec3, Vec3};
 use gg_renderer::{Circle, MeshDraw, Meshes, Sprite};
 
 use crate::{Entity, Transform, World};
 
-/// A sphere: its center, in `f64`, as positions are, and radius.
+/// A sphere: center (`f64`, like positions) and radius.
 pub(crate) type Sphere = (DVec3, f64);
 
-/// The radius of the sphere round a sprite's or a circle's unit square, centered on its origin: the
-/// square's half diagonal.
+/// The radius of the sphere round a unit square centered on its origin: its half diagonal.
 const SQUARE: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
-/// The smallest sphere round what `root` and everything under it draws, in the world, as the latest
-/// tick left them: each draw's own sphere through its entity's pose, merged. A mesh's is the one
-/// `meshes` keeps; a sprite's and a circle's is round its unit square, so that an uneven scale is
-/// covered by its largest axis's. Text, whose extent only laying it out gives, particles and lines
-/// are left out, and so is a mesh without a finite sphere. `None` if nothing there draws, or
-/// `root` isn't alive.
+/// The smallest sphere round what `root` and its descendants draw, as the latest tick left them:
+/// each draw's sphere through its entity's pose, merged.
+///
+/// - Mesh: the sphere `meshes` keeps.
+/// - Sprite or circle: round its unit square, scaled by the pose's largest axis.
+/// - Left out: text (its extent needs layout), particles, lines, meshes without a finite sphere.
+///
+/// `None` if nothing draws or `root` isn't alive.
 pub(crate) fn of(world: &World, meshes: &Meshes, root: Entity) -> Option<Sphere> {
     let mut bounds: Option<Sphere> = None;
     let mut stack = vec![root];
@@ -75,7 +76,7 @@ mod tests {
 
     use super::*;
 
-    /// A mesh added to `meshes` whose sphere is `radius` round `center`, drawn by a component.
+    /// A mesh in `meshes` with the sphere `radius` round `center`, as a draw component.
     fn mesh(meshes: &mut Meshes, center: Vec3, radius: f32) -> MeshDraw {
         let lods = Lods {
             levels: vec![Lod {
@@ -116,8 +117,8 @@ mod tests {
             scale: Vec3::new(2.0, 3.0, 1.0),
         };
         let entity = world.spawn((turned, draw));
-        // (1, 0, 0) scaled to (2, 0, 0), turned a quarter about Z to (0, 2, 0), then moved up 10;
-        // the radius is scaled by the largest scale.
+        // (1, 0, 0) scales to (2, 0, 0), turns to (0, 2, 0), moves up 10; the radius takes the
+        // largest scale.
         close(of(&world, &meshes, entity), DVec3::new(0.0, 12.0, 0.0), 6.0);
     }
 
@@ -132,7 +133,7 @@ mod tests {
         }
         let root = world.spawn(at(100.0));
         world.set_parent(crate_, Some(root)).expect("alive");
-        // Two unit spheres 10 apart, under parents at 100: one of radius 6 between them.
+        // Two unit spheres 10 apart, under parents at 100: radius 6 between them.
         close(of(&world, &meshes, root), DVec3::new(105.0, 0.0, 0.0), 6.0);
         close(
             of(&world, &meshes, crate_),
@@ -167,7 +168,7 @@ mod tests {
         let child = world.spawn(at(1.0));
         world.set_parent(child, Some(empty)).expect("alive");
         assert_eq!(of(&world, &meshes, empty), None);
-        // A mesh whose extent isn't known is left out.
+        // A mesh without a known extent is left out.
         let whole = (meshes.add("whole", &[[0.0_f32; 3]; 3], &[0, 1, 2])).expect("a triangle");
         let draw = MeshDraw::from_parts(whole.index(), 0, false, false, &[]).expect("none");
         world.insert(child, draw).expect("alive");
@@ -182,7 +183,7 @@ mod tests {
         let a = (DVec3::ZERO, 1.0);
         let b = (DVec3::new(4.0, 0.0, 0.0), 1.0);
         close(Some(union(a, b)), DVec3::new(2.0, 0.0, 0.0), 3.0);
-        // One inside the other gives the larger, whichever way round.
+        // One inside the other gives the larger, in either order.
         let big = (DVec3::new(1.0, 0.0, 0.0), 5.0);
         for (x, y) in [(a, big), (big, a)] {
             close(Some(union(x, y)), big.0, big.1);
