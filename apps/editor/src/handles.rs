@@ -1,9 +1,9 @@
-//! The editor's transform handles: what the Move, Rotate and Scale tools show over the entity the
-//! Inspector has picked last, at its origin, along its own axes, or Move's and Rotate's along the
-//! world's, as the toolbar's space says, and as big on screen however far it is, which the left
-//! button drags to move, turn and scale it, and the others picked with it by the same change, each
-//! drag one edit of the Inspector's, through its link; and the press over the view off them, which
-//! asks for a pick of what's under the cursor.
+//! The editor's transform handles: Move's, Rotate's and Scale's, at the origin of the entity the
+//! Inspector picked last, along its own axes or the world's, as the toolbar's space says. They keep
+//! their size on screen.
+//!
+//! The left button drags them to move, turn or scale it and the others picked with it, by the same
+//! change: one Inspector edit per drag. A press off them asks for a pick.
 
 use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
@@ -28,24 +28,23 @@ const WIDTH: f32 = 2.5;
 const CENTER: f32 = 6.0;
 /// Half the side of the squares at the ends of Scale's axes, in points.
 const SQUARE: f32 = 4.5;
-/// How long the heads of Move's arrows are, and half how wide, in points.
+/// Move's arrowheads' length and half their width, in points.
 const HEAD: (f32, f32) = (14.0, 5.0);
-/// Where Move's squares are along each of their plane's two axes, from the origin, in the
-/// handles' lengths.
+/// Where Move's squares are along each of their plane's two axes from the origin, in handles'
+/// lengths.
 const PLANE: (f32, f32) = (0.2, 0.4);
 /// The radius of Rotate's outer ring, in the handles' lengths.
 const OUTER: f32 = 1.2;
 /// How many segments a ring is drawn and hit in.
 const SEGMENTS: usize = 64;
-/// How much of a ring's half away from the camera shows, of the half toward it.
+/// How much of a ring's far half shows, of its near half.
 const BACK: f32 = 0.35;
-/// The angles, from pointing at the camera for an axis and from edge-on for a plane, within which
-/// one isn't drawn or hit, and from which it shows whole: 8° and 20°, fading between.
+/// The angles within which an axis (from pointing at the camera) or a plane (from edge-on) isn't
+/// drawn or hit, and from which it shows whole: 8° and 20°, fading between.
 const HIDDEN: f32 = 8.0 * PI / 180.0;
 const SHOWN: f32 = 20.0 * PI / 180.0;
-/// How squarely a ring's plane faces the camera, as |a · d| for its axis and the way to the
-/// camera, below which a drag turns it by the cursor's travel across it rather than by the angle
-/// about it: cos 85°, Godot's.
+/// Below this |a · d|, for a ring's axis a and the way to the camera d, a drag turns the ring by
+/// the cursor's travel across it, not by the angle about it: cos 85°, Godot's.
 const EDGE_ON: f32 = 0.087_155_74;
 /// The least of a ray's direction across a plane, |r · n|, at which it meets the plane.
 const GRAZE: f32 = 1e-6;
@@ -56,22 +55,22 @@ const TURN_STEP: f32 = FRAC_PI_4;
 const SCALE_STEP: f32 = 0.5;
 /// The least a drag scales by, ImGuizmo's: so that none mirrors or flattens what it scales.
 const LEAST: f32 = 0.001;
-/// The most steps [`orthogonal`] takes, past the handful it settles in however unevenly the matrix
-/// scales: a cap for one that isn't finite, which never settles.
+/// The most steps [`orthogonal`] takes. It settles in a handful however unevenly the matrix scales;
+/// this caps one that isn't finite, which never settles.
 const STEPS: usize = 10;
 /// The color of the handle under the cursor, or dragged.
 const LIT: Color32 = Color32::from_rgb(255, 210, 0);
 /// The color of the handles no axis has: Move's center, Scale's and Rotate's outer ring.
 const PLAIN: Color32 = Color32::from_gray(220);
 
-/// One of the handles: what a press grabs, and what's lit under the cursor.
+/// A handle: what a press grabs, lit under the cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
-    /// Along one of the entity's axes, 0 to 2 for X to Z: Move's arrows and Scale's axes.
+    /// Along one of the entity's axes, 0 to 2 for X to Z: Move's arrows, Scale's axes.
     Axis(usize),
-    /// Across the plane square to one of its axes: Move's squares.
+    /// Across the plane square to an axis: Move's squares.
     Plane(usize),
-    /// At its origin: Move's, in the view's plane, and Scale's, all three ways at once.
+    /// At the origin: Move's, in the view's plane, and Scale's, all three ways at once.
     Center,
     /// About one of its axes: Rotate's rings.
     Ring(usize),
@@ -79,8 +78,8 @@ pub enum Handle {
     Outer,
 }
 
-/// The entity the Inspector has picked last, the active one, while it's alive with a transform,
-/// as the handles see it through the Inspector's link: the handles sit at it.
+/// The entity the Inspector picked last, the active one, while it's alive with a transform, as the
+/// link shows it. The handles sit at it.
 #[derive(Clone, Copy, Debug)]
 pub struct Picked {
     pub entity: EntityId,
@@ -90,18 +89,17 @@ pub struct Picked {
     pub local: Transform,
     /// Where its parent carries it: the parent's pose, or the identity for a root.
     pub parent: Pose,
-    /// How many undos and redos the Inspector has asked for, at another of which a drag ends.
+    /// How many undos and redos the Inspector has asked for. A drag ends when that changes.
     pub stepped: u64,
     /// Whether a set made through the link waits for the Inspector's tick.
     pub waiting: bool,
-    /// Whether a drag moves it, as it doesn't one under another entity picked, whose drag carries
-    /// it: the handles then show it as the link places it, a drag's value aside.
+    /// Whether a drag moves it: not if it's under another picked entity, whose drag carries it. The
+    /// handles then show it as the link places it, ignoring a drag's value.
     pub moves: bool,
 }
 
-/// Another entity picked, which a drag of the handles moves, turns or scales with the active one,
-/// by the same change, as the Inspector's link places it: its own transform, and where its parent
-/// carries it.
+/// Another entity picked, which a drag changes with the active one, by the same change, as the link
+/// places it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Along {
     pub entity: EntityId,
@@ -109,10 +107,8 @@ pub struct Along {
     pub parent: Pose,
 }
 
-/// What the handles read of the window as an event comes, beside the event: what the camera
-/// reads, the view, the scale and Alt; whether the command key is held, Ctrl, or Cmd on macOS,
-/// which snaps, and Shift, which with it has a pick add to what's picked; and where the cursor is,
-/// in the main window's pixels.
+/// What the handles read of the window with an event. `command`, Ctrl or Cmd on macOS, snaps, and
+/// like `shift` has a pick add to what's picked. `cursor` is in the main window's pixels.
 #[derive(Clone, Copy, Debug)]
 pub struct Reading {
     pub screen: Screen,
@@ -121,12 +117,9 @@ pub struct Reading {
     pub cursor: Option<[f64; 2]>,
 }
 
-/// What else the handles go by as an event comes: the toolbar's tool, and the space Move's and
-/// Rotate's axes are in; what the view on screen sees from, while it sees through the editor's
-/// camera; the pick, the active one, and the others a drag moves with it; whether the camera
-/// drags, which no drag of theirs nor pick starts while it does; and whether it eases, as Home and
-/// the gizmo's snaps have it, which no drag of theirs starts while it does, since the view would
-/// turn under it.
+/// What else the handles go by. `viewpoint` is set while the view sees through the editor's camera.
+/// While the `camera` drags, no drag or pick starts. While it's `easing`, as after Home or the
+/// gizmo's snaps, no drag starts: the view would turn under it.
 #[derive(Clone, Copy, Debug)]
 pub struct Aim<'a> {
     pub tool: Tool,
@@ -138,27 +131,24 @@ pub struct Aim<'a> {
     pub easing: bool,
 }
 
-/// What the editor does with an event, as the handles say.
+/// What the editor does with an event.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reply {
     /// Nothing of the handles': the camera has it.
     Pass,
-    /// Takes it from the camera: a press that grabs a handle, or another press, the wheel or Home
-    /// while a drag lasts.
+    /// Takes it from the camera: a press that grabs a handle, or, during a drag, another press, the
+    /// wheel or Home.
     Take,
-    /// Sets the field of the entity whose ID it is, the pick's, to the value the drag gives it, and
-    /// the same field of the others it moves with it, as [`Handles::sets`] gives them all, the
-    /// camera still seeing the event, such as the cursor's move.
+    /// Sets the pick's field to the drag's value, and the others' same field ([`Handles::sets`]).
+    /// The camera still sees the event, such as a cursor move.
     Set(EntityId, Field),
-    /// Ends the drag's edit, the camera still seeing the event, such as the button's release.
+    /// Ends the drag's edit. The camera still sees the event, such as the release.
     Seal,
-    /// Asks which entity the view shows at the cursor, in the main window's pixels: a press of the
-    /// left button over the view off the handles, with a tool that picks, which the camera still
-    /// sees.
+    /// Asks which entity the view shows at the cursor, in the main window's pixels: a left press
+    /// over the view off the handles, with a tool that picks. The camera still sees it.
     Pick([f64; 2]),
-    /// Asks what shading took and made at the cursor, in the main window's pixels: a press of the
-    /// left button over the view with the Probe tool, which shows no handles; the camera doesn't
-    /// see it.
+    /// Asks what shading took and made at the cursor, in the main window's pixels: a left press
+    /// over the view with Probe, which shows no handles. The camera doesn't see it.
     Probe([f64; 2]),
 }
 
@@ -216,7 +206,7 @@ impl Field {
         }
     }
 
-    /// Whether a transform takes it: finite, and a rotation a unit, as reflection has it.
+    /// Whether a transform takes it: finite, and a rotation a unit.
     fn takes(self) -> bool {
         match self {
             Self::Translation(v) => v.is_finite(),
@@ -226,9 +216,9 @@ impl Field {
     }
 }
 
-/// The transform handles, which the editor's layer feeds its events, as it does its camera, and
-/// paints over the view: the drag under way, if one is, and the value the last one set, which the
-/// handles show until the Inspector's tick has made it.
+/// The transform handles. The layer feeds them events, as it does its camera, and they paint over
+/// the view. They hold the drag under way, and the value the last one set, shown until the
+/// Inspector's tick has made it.
 #[derive(Default)]
 pub struct Handles {
     drag: Option<Drag>,
@@ -244,21 +234,17 @@ struct Kept {
 }
 
 impl Handles {
-    /// Whether a drag of the handles goes on.
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
     }
 
-    /// Acts on `event`, as the editor reads the window, `reading`, and as `aim` says, and returns
-    /// what the editor does with it. A press of the left button over the view grabs a handle under
-    /// it, with Move, Rotate or Scale, and drags it until it's let go, or the window loses the
-    /// focus; each move of the cursor sets the dragged field to what the drag gives it from where
-    /// it started, when that changes and a transform takes it, and pressing or letting go of the
-    /// command key, which snaps, sets it again. While it lasts, it takes every other press, the
-    /// wheel and Home from the camera. Off the handles, with a tool that picks, the press asks for
-    /// a pick of what's under the cursor, and with Probe, which shows none, for a probe of the
-    /// pixel; but none starts with Alt held, which orbits, nor while the camera drags; and while
-    /// the camera eases, a press on a handle grabs nothing.
+    /// Returns what the editor does with `event`; [`Reply`]'s variants say when each comes. With
+    /// Alt held, which orbits, or while the camera drags, a press does nothing. While it eases, a
+    /// press on a handle is taken but grabs nothing.
+    ///
+    /// A grab lasts until the left button's let go or the window loses focus. Each cursor move sets
+    /// the field when the drag's value changes and a transform takes it; so does the command key's
+    /// press or release, which snaps.
     pub fn event(&mut self, event: &Event<'_>, reading: &Reading, aim: &Aim) -> Reply {
         if let Some(drag) = &mut self.drag {
             return match *event {
@@ -321,7 +307,7 @@ impl Handles {
             return Reply::Take;
         }
         // A handle that can't be dragged from there, as past its plane's horizon, takes the press
-        // all the same.
+        // anyway.
         let start = self.shown(&picked);
         self.drag = Drag::start(grabbed, &picked, start, reading.command);
         if let Some(drag) = &mut self.drag {
@@ -330,8 +316,8 @@ impl Handles {
         Reply::Take
     }
 
-    /// Ends the drag, if one goes on, keeping the value it set to show until the Inspector's tick
-    /// has made it, for a pick it moved; and returns whether one did, whose edit the editor seals.
+    /// Ends the drag, if any, keeping its value shown until the Inspector's tick has made it, for a
+    /// pick it moved. Returns whether one ended; the editor seals its edit.
     pub fn end(&mut self) -> bool {
         let Some(drag) = self.drag.take() else {
             return false;
@@ -344,12 +330,10 @@ impl Handles {
         true
     }
 
-    /// The sets the drag going on made last, as it replied [`Reply::Set`]: the pick's field, if
-    /// the drag moves it, and the same field of each of the others it moves with it, changed as
-    /// the pick's is from where each was as the drag started: moved by the same move in the world,
-    /// under a parent whose 3x3 has an inverse; turned about its own origin by the same turn,
-    /// about the world's axis, or under Local about its own axis as the pick's ring is; or scaled
-    /// along its own axes by the same factors.
+    /// The sets the drag made last ([`Reply::Set`]): the pick's field, if the drag moves it, and
+    /// each other's, changed from its own start as the pick's is: by the same move in the world,
+    /// under a parent whose 3x3 has an inverse; the same [`Change::Turn`] about its own origin; or
+    /// the same factors along its own axes.
     pub fn sets(&self) -> Vec<(EntityId, Field)> {
         let Some(drag) = &self.drag else {
             return Vec::new();
@@ -365,11 +349,9 @@ impl Handles {
         own.into_iter().chain(along).collect()
     }
 
-    /// Keeps the handles to the pick, `picked`: a drag ends as the pick changes or dies, the world
-    /// is another, or the Inspector undoes or redoes, which ends the drag's edit, the handles
-    /// showing the world's from then on; and the value a drag set shows, for the pick it set it
-    /// for, until the Inspector's tick has made it. Returns whether a drag ended, whose edit the
-    /// editor seals.
+    /// Keeps the handles to `picked`. A drag ends as the pick changes or dies, the world is
+    /// another, or the Inspector undoes or redoes; the handles then show the world's. Returns
+    /// whether a drag ended, whose edit the editor seals.
     pub fn hold(&mut self, picked: Option<&Picked>) -> bool {
         let same = |entity, serial| {
             picked.is_some_and(|picked| (picked.entity, picked.serial) == (entity, serial))
@@ -389,11 +371,9 @@ impl Handles {
         true
     }
 
-    /// Paints the handles `tool` shows for `picked` with `painter`, the view's layer's, as `sight`
-    /// sees them, `ppp` egui's pixels per point, Move's and Rotate's along `space`'s axes, the
-    /// pair `(tool, space)` as the toolbar has it: lighting the one being dragged, or else the one
-    /// at `hover`, in pixels, which the editor gives while the cursor is over the view, the camera
-    /// neither drags nor eases, and Alt isn't held.
+    /// Paints `tool`'s handles for `picked` as `sight` sees them, `ppp` being egui's pixels per
+    /// point. Lights the dragged handle, else the one at `hover`, in pixels, which the editor gives
+    /// while the cursor's over the view, the camera neither drags nor eases, and Alt isn't held.
     pub fn paint(
         &self,
         painter: &Painter,
@@ -476,8 +456,7 @@ impl Handles {
         }
     }
 
-    /// The set the drag makes with the cursor where it last was, if the value it gives changed
-    /// and a transform takes it.
+    /// The set for the cursor's last place, if the value changed and a transform takes it.
     fn apply(&mut self) -> Reply {
         let Some(drag) = &mut self.drag else {
             return Reply::Pass;
@@ -492,9 +471,8 @@ impl Handles {
         }
     }
 
-    /// The transform the handles show `picked` at: the drag's value while it lasts, and after it,
-    /// the value it set until the Inspector's tick has made it, for a pick the drag moves;
-    /// otherwise its own.
+    /// The transform the handles show `picked` at: the drag's value while it lasts; then, for a
+    /// pick the drag moves, the value it set until the Inspector's tick has made it; else its own.
     fn shown(&self, picked: &Picked) -> Transform {
         if let Some(drag) = &self.drag
             && drag.entity == picked.entity
@@ -513,9 +491,9 @@ impl Handles {
         }
     }
 
-    /// Where the handles `tool` shows for `picked` are, as `sight` sees them, Move's and Rotate's
-    /// along `space`'s axes, and Scale's along the entity's own: none for a tool without handles,
-    /// nor for Move while the parent's space has no room to move in.
+    /// Where `tool`'s handles for `picked` are, as `sight` sees them: Move's and Rotate's along
+    /// `space`'s axes, Scale's along the entity's own. None for a tool without handles, nor for
+    /// Move while the parent's space has no room to move in.
     fn placed(&self, sight: &Sight, tool: Tool, space: Space, picked: &Picked) -> Option<Placed> {
         let local = self.shown(picked);
         match tool {
@@ -526,8 +504,8 @@ impl Handles {
         }
     }
 
-    /// The handle under `at`, in pixels, of those `aim` shows for its pick as the view on screen
-    /// sees them: the pick, and what a press there grabs.
+    /// The handle under `at`, in pixels, of those `aim` shows as the view sees them: the pick, and
+    /// what a press there grabs.
     fn under(&self, at: Vec2, reading: &Reading, aim: &Aim) -> Option<(Picked, Grabbed)> {
         let picked = aim.picked?;
         let sight = Sight::new(aim.viewpoint?, reading.screen.view?, reading.screen.scale)?;
@@ -553,9 +531,8 @@ struct Grabbed {
     placed: Placed,
 }
 
-/// A drag of a handle.
 struct Drag {
-    /// The entity, its world, and the Inspector's steps, as the drag started.
+    /// As the drag started: the entity, its world and the Inspector's steps.
     entity: EntityId,
     serial: u64,
     stepped: u64,
@@ -570,26 +547,26 @@ struct Drag {
     grab: Grab,
     /// The press, in pixels.
     press: Vec2,
-    /// Where the cursor last was, in pixels, and whether the command key was held then, for the
-    /// drag to apply again as the command key changes.
+    /// The cursor's last place, in pixels, and whether the command key was held then, to apply
+    /// again as the key changes.
     cursor: Vec2,
     snap: bool,
     /// The value it set last, or else the start's, and the change from the start that gave it,
-    /// which the others it moves take too.
+    /// which the others take too.
     last: Field,
     change: Option<Change>,
-    /// Whether it moves the pick, and the others it moves with it, as they were as it started.
+    /// Whether it moves the pick, and the others it moves, as at its start.
     moves: bool,
     along: Vec<Along>,
 }
 
-/// The change a drag makes, from where it started, which it makes to each entity it moves.
+/// A drag's change from its start, made to each entity it moves.
 #[derive(Clone, Copy, Debug)]
 enum Change {
     /// A move by this, in the world.
     Move(Vec3),
-    /// A turn about each entity's own origin by `angle`: about the world's axis `about`, or
-    /// about each one's own axis, X to Z, as Local's rings turn.
+    /// A turn about each entity's own origin by `angle`: about the world's axis `about`, or about
+    /// each one's own axis, X to Z, as Local's rings turn.
     Turn { about: About, angle: f32 },
     /// A scale by these factors along each entity's own axes.
     Scale(Vec3),
@@ -603,8 +580,8 @@ enum About {
 }
 
 impl Change {
-    /// The field it gives `along` from where it was as the drag started, as
-    /// [`Handles::sets`] says: `None` for a move under a parent whose 3x3 has no inverse.
+    /// The field this gives `along` from its start, as [`Handles::sets`] says. `None` for a move
+    /// under a parent whose 3x3 has no inverse.
     fn of(self, along: &Along) -> Option<Field> {
         let Along { local, parent, .. } = along;
         Some(match self {
@@ -637,10 +614,10 @@ impl Change {
 enum Grab {
     /// A plane through the origin square to `normal`, which the press's ray met at `from`.
     Plane { normal: Vec3, from: Vec3 },
-    /// A ring's point, `grabbed`: where the press's ray met the ring's plane, while the plane
-    /// faces the camera more than edge-on and the ray met it; where it met the plane through the
-    /// point facing the camera, which an edge-on ring's drag goes by; and which way the point
-    /// goes, across the view, as the ring turns.
+    /// A ring's point `grabbed`: where the press's ray met the ring's plane, while the plane isn't
+    /// edge-on and the ray met it; where it met the plane through the point facing the camera,
+    /// which an edge-on ring's drag goes by; and which way the point goes across the view as the
+    /// ring turns.
     Ring {
         open: Option<Vec3>,
         grabbed: Vec3,
@@ -653,8 +630,8 @@ enum Grab {
 }
 
 impl Drag {
-    /// The drag of what `grabbed` says, of `picked`, at `start` as the press found it, snapping
-    /// if `snap`; `None` where the press's ray doesn't meet the plane it goes by.
+    /// The drag of `grabbed`, of `picked`, from `start`, snapping if `snap`. `None` where the
+    /// press's ray doesn't meet the plane it goes by.
     fn start(grabbed: Grabbed, picked: &Picked, start: Transform, snap: bool) -> Option<Self> {
         let Grabbed {
             tool,
@@ -718,9 +695,9 @@ impl Drag {
         })
     }
 
-    /// The value the drag gives its field with the cursor at `cursor`, in pixels, from where it
-    /// started, snapping from there if `snap`, and the change from there that gives it; `None`
-    /// where it gives none, as past its plane's horizon, where the drag keeps its last value.
+    /// The field's value and the change that gives it, with the cursor at `cursor`, in pixels,
+    /// snapping from the start if `snap`. `None` where there's none, as past its plane's horizon;
+    /// the drag then keeps its last value.
     fn value(&self, cursor: Vec2, snap: bool) -> Option<(Field, Change)> {
         let Placed {
             origin,
@@ -816,8 +793,8 @@ fn stepped(x: f32, step: f32) -> f32 {
     (x / step).round() * step
 }
 
-/// The ratio a scale goes by, `ratio` from a drag's travel, no less than [`LEAST`], and in steps
-/// of [`SCALE_STEP`], at least one, if `snap`.
+/// A scale's ratio from a drag's travel: at least [`LEAST`], and if `snap`, in steps of
+/// [`SCALE_STEP`], at least one.
 fn ratio(ratio: f32, snap: bool) -> f32 {
     let ratio = ratio.max(LEAST);
     if snap {
@@ -839,13 +816,12 @@ fn angle_about(from: Vec3, to: Vec3, axis: Vec3) -> f32 {
     libm::atan2f(from.cross(to).dot(axis), from.dot(to))
 }
 
-/// How the view sees the world, for the handles: what it sees from, where it is in the main
-/// window, in pixels, and how many pixels a point spans.
+/// How the view sees the world, for the handles: its viewpoint, its place in the main window, in
+/// pixels, and pixels per point.
 #[derive(Clone, Copy, Debug)]
 pub struct Sight {
-    /// Where its viewpoint is, in the world, which every point it takes and gives is from, in
-    /// `f32`, so that what's near the camera is placed as precisely far from the world's origin as
-    /// at it.
+    /// Its viewpoint's place in the world. Every point it takes and gives is from here, in `f32`,
+    /// so what's near the camera is as precise far from the world's origin as at it.
     eye: DVec3,
     /// Its viewpoint, at `eye`, its position the origin.
     viewpoint: Viewpoint,
@@ -856,8 +832,8 @@ pub struct Sight {
     aspect: f32,
 }
 
-/// A line from the camera through a pixel: where it starts, and which way it goes, a unit vector;
-/// in perspective, it goes only forward.
+/// A ray from the camera through a pixel: its start and unit direction. In perspective it goes only
+/// forward.
 #[derive(Clone, Copy, Debug)]
 struct Ray {
     from: Vec3,
@@ -951,8 +927,8 @@ impl Sight {
     }
 
     /// The point pixel `at` shows on the plane through the world's origin square to `normal`, as
-    /// the grid lies, in the world, in `f64`: `None` where its ray runs along the plane, and in
-    /// perspective, where it meets it behind the camera.
+    /// the grid lies, in `f64`. `None` where the ray runs along the plane, or in perspective meets
+    /// it behind the camera.
     pub fn on_plane(&self, at: Vec2, normal: Vec3) -> Option<DVec3> {
         let ray = self.ray(at);
         let (from, toward) = (self.eye + ray.from.as_dvec3(), ray.toward.as_dvec3());
@@ -1007,7 +983,7 @@ impl Sight {
     }
 }
 
-/// The handles as a sight sees them about an entity.
+/// The handles placed about an entity, as a sight sees them.
 #[derive(Clone, Copy, Debug)]
 struct Placed {
     /// Where its origin is, from its sight's eye, and in pixels.
@@ -1029,21 +1005,19 @@ struct Placed {
     length: f32,
     /// Which way the camera is from the origin.
     toward: Vec3,
-    /// How much of each axis's handle shows, from 0, hidden, to 1, and of each plane's, by the
-    /// axis square to it.
+    /// How much of each axis's handle shows, from 0, hidden, to 1; a plane's goes by the axis
+    /// square to it.
     axis: [f32; 3],
     plane: [f32; 3],
 }
 
-/// The handles placed about an entity whose own transform is `local`, carried by a parent at
-/// `parent`, as `sight` sees them: at its origin in the world; along the world's axes in
-/// [`Space::World`], and otherwise along its own axes as drawing
-/// places them, its rotation carried by the [`orthogonal`] factor of the parent's 3x3, which takes
-/// the parent's scale out but keeps its signs; and as long in the world as [`LENGTH`] points along
-/// the camera's right there. Under a parent that scales unevenly, a turned entity's drawn axes
-/// aren't square to each other, and the handles' are the nearest that are; under a flat one,
-/// whose 3x3 has no inverse, its rotation and its ancestors' turn them, their scales aside. `None`
-/// while the origin isn't past the near plane, or the origin, the axes or the length isn't finite.
+/// The handles about an entity at `local` under `parent`, as `sight` sees them: at its origin,
+/// along the world's axes in [`Space::World`], else along its own as drawn ([`carry`]), and as long
+/// in the world as [`LENGTH`] points along the camera's right there.
+///
+/// Under a parent scaling unevenly, a turned entity's drawn axes aren't square, and the handles
+/// take the nearest that are. `None` while the origin isn't past the near plane, or the origin, the
+/// axes or the length isn't finite.
 fn place(sight: &Sight, space: Space, parent: &Pose, local: &Transform) -> Option<Placed> {
     let origin = (parent.matrix.transform_point3(local.translation) - sight.eye).as_vec3();
     let carry = carry(parent);
@@ -1094,9 +1068,8 @@ fn carried(parent: &Pose) -> Option<DMat3> {
     (determinant.is_finite() && determinant != 0.0).then_some(carries)
 }
 
-/// What carries an entity's own axes under `parent`, as [`place`] places them: the [`orthogonal`]
-/// factor of the parent's 3x3, which takes its scale out but keeps its signs; or, for a flat one,
-/// whose 3x3 has no inverse, its rotation.
+/// What carries an entity's own axes under `parent` ([`place`]): the [`orthogonal`] factor of the
+/// parent's 3x3, or for a flat one, its rotation.
 fn carry(parent: &Pose) -> Mat3 {
     match carried(parent) {
         Some(carries) => orthogonal(carries),
@@ -1104,14 +1077,15 @@ fn carry(parent: &Pose) -> Mat3 {
     }
 }
 
-/// The orthogonal polar factor of `matrix`, which isn't singular: the nearest matrix to it whose
-/// columns are a unit long and square to each other, a rotation, and a mirror too where its
-/// determinant is negative; of a rotation times a scale, the rotation times the scale's signs, a
-/// mirror where one or three are negative and a half turn where two are. Higham's scaled Newton
-/// iteration (Computing the polar decomposition, with applications, 1986), which settles in a
-/// handful of steps however unevenly the matrix scales; in f64, since f32's inverse of a matrix
-/// scaled tens of thousands of times more one way than the others, once turned, can lose its
-/// determinant's sign, and the factor an axis.
+/// The orthogonal polar factor of non-singular `matrix`: the nearest matrix whose columns are a
+/// unit long and square to each other. That's a rotation, and a mirror too where the determinant is
+/// negative. Of a rotation times a scale, it's the rotation times the scale's signs: a mirror where
+/// one or three are negative, a half turn where two are.
+///
+/// Higham's scaled Newton iteration (Computing the polar decomposition, with applications, 1986)
+/// settles in a handful of steps however unevenly the matrix scales. It runs in f64: f32's inverse
+/// of a turned matrix scaled tens of thousands of times more one way can lose its determinant's
+/// sign, and the factor an axis.
 fn orthogonal(matrix: DMat3) -> Mat3 {
     let squares = |m: DMat3| m.to_cols_array().iter().map(|x| x * x).sum::<f64>();
     let mut x = matrix;
@@ -1422,7 +1396,6 @@ mod tests {
         Sight::new(viewpoint, VIEW, SCALE).expect("the view shows")
     }
 
-    /// An entity at `local`, carried by a parent at `parent`.
     fn picked(local: Transform, parent: Pose) -> Picked {
         Picked {
             entity: "0123456789abcdef".parse().expect("an ID"),
@@ -1507,9 +1480,8 @@ mod tests {
         }
     }
 
-    /// The handles' replies to the cursor moved to `from`, the left button pressed there, the
-    /// cursor moved to each of `to` in turn and the button let go, with the command key held if
-    /// `command`.
+    /// The replies to a drag: the cursor to `from`, a left press, moves to each of `to`, then a
+    /// release, the command key held if `command`.
     fn drag(
         handles: &mut Handles,
         aim: &Aim,
@@ -1551,9 +1523,9 @@ mod tests {
         field
     }
 
-    /// A point shows where the renderer's matrix puts it, the ray through that pixel goes through
-    /// it, away from where the camera is from it; and a segment that runs behind the camera in
-    /// perspective ends at its near plane.
+    /// A point shows where the renderer's matrix puts it, and the ray through that pixel goes
+    /// through it, away from the camera. A segment running behind the camera in perspective ends at
+    /// the near plane.
     #[test]
     fn rays_and_pixels_agree_with_the_viewpoints_matrix() {
         for perspective in [false, true] {
@@ -1610,10 +1582,10 @@ mod tests {
         assert!(sight.segment(behind, behind - forward).is_none());
     }
 
-    /// A press on each handle hits it, of each tool's, in either projection; one far from them hits
-    /// none, nor does one with a tool without handles. An axis pointing at the camera, and a plane
-    /// edge-on to it, are hidden, and hit by nothing, fading in between; and Move shows nothing of
-    /// an entity whose parent is flat, which no move would take it across.
+    /// A press on each handle of each tool hits it, in either projection; one far off hits none,
+    /// nor one with a tool without handles. An axis pointing at the camera and a plane edge-on to
+    /// it are hidden and unhit, fading in between. Move shows nothing for an entity under a flat
+    /// parent, which no move would take it across.
     #[test]
     fn presses_hit_each_handle_and_none_hidden() {
         for perspective in [false, true] {
@@ -1723,9 +1695,8 @@ mod tests {
         }
     }
 
-    /// Each move puts the point of the handle that the press grabbed under the cursor: along an
-    /// axis, wherever on screen the axis goes, and across a plane, or the view's, anywhere; in
-    /// either projection.
+    /// Each move keeps the grabbed point under the cursor: along an axis, wherever on screen it
+    /// goes, and across a plane, or the view's, anywhere; in either projection.
     #[test]
     fn a_move_keeps_the_point_grabbed_under_the_cursor() {
         for perspective in [false, true] {
@@ -1776,8 +1747,8 @@ mod tests {
     }
 
     /// Dragged up toward the ground's horizon in perspective, a move goes further the nearer the
-    /// cursor gets to it, finite all the way; past it, where the ray would meet the ground behind
-    /// the camera, the drag keeps its last value rather than jump.
+    /// cursor gets, finite all the way. Past it, where the ray meets the ground behind the camera,
+    /// the drag keeps its last value rather than jump.
     #[test]
     fn past_a_planes_horizon_a_drag_keeps_its_last_value() {
         // 15° down, which puts the ground's horizon 15° above the view's middle, in view.
@@ -1813,10 +1784,9 @@ mod tests {
         assert!(away > 10.0, "{away}");
     }
 
-    /// A ring's drag turns about its axis by the angle the cursor goes round it, which brings the
-    /// point grabbed along under it; seen edge-on, by the cursor's travel across the view, which
-    /// brings the point grabbed on the near half along too: either side of where the one gives way
-    /// to the other, in either projection.
+    /// A ring's drag turns by the angle the cursor goes round its axis, bringing the grabbed point
+    /// along under it. Edge-on, it turns by the cursor's travel across the view, bringing the near
+    /// half's grabbed point along too. Both hold either side of the switch, in either projection.
     #[test]
     fn a_ring_turns_by_the_angle_or_edge_on_by_the_travel() {
         // Turned off the axes about the world's up, so that ring Y's point nearest the camera,
@@ -1902,10 +1872,9 @@ mod tests {
         }
     }
 
-    /// Scale's axis scales its component by how far the drag goes along it, a handles' length
-    /// doubling it, and back past the origin no further than a thousandth; one that's 0 stays 0;
-    /// and the middle square scales all three by how far the cursor goes right, a handles' length
-    /// doubling them.
+    /// Scale's axis scales its component by the drag's travel along it, a handles' length doubling
+    /// it, and back past the origin no lower than a thousandth. A 0 stays 0. The middle square
+    /// scales all three by the cursor's travel right, a handles' length doubling them.
     #[test]
     fn scale_goes_by_the_travel() {
         let viewpoint = aside(Vec3::ZERO, false);
@@ -1962,10 +1931,9 @@ mod tests {
         );
     }
 
-    /// With the command key held, a drag snaps from where it started: a move to half units along
-    /// the handles' axes, a turn to 45° and a scale to halves of where it started, at least one
-    /// half; and pressing the key, or letting it go, as a drag goes on sets its value again,
-    /// snapped or not.
+    /// With the command key held, a drag snaps from its start: a move to half units along the
+    /// handles' axes, a turn to 45°, a scale to halves of its start, at least one half. Pressing or
+    /// letting go of the key mid-drag sets the value again, snapped or not.
     #[test]
     fn the_command_key_snaps_from_where_a_drag_started() {
         let viewpoint = aside(Vec3::ZERO, false);
@@ -2048,10 +2016,10 @@ mod tests {
         assert_eq!(again, unsnapped);
     }
 
-    /// A child under a turned parent scaled unevenly moves in the world along its own axis, as the
-    /// handles show it, as far as the cursor goes along it: the move is taken into the parent's
-    /// space. So does one whose grandparent, turned too, scales a hundred times more one way and a
-    /// hundred times less another, which skews the 3x3 that carries it.
+    /// A child under a turned parent scaled unevenly moves in the world along its own axis as
+    /// shown, as far as the cursor goes: the move is taken into the parent's space. So does one
+    /// whose turned grandparent scales a hundred times more one way and a hundred times less
+    /// another, skewing the 3x3 that carries it.
     #[test]
     fn a_child_under_a_turned_scaled_parent_moves_along_its_axis_in_the_world() {
         let parent_at = Transform {
@@ -2078,10 +2046,9 @@ mod tests {
         }
     }
 
-    /// In the world's space, Move's arrows run along the world's X, Y and Z, and a drag of one
-    /// moves an entity turned 45° about Z, under a parent turned another way, scaled unevenly,
-    /// and under that one's, which skews the 3x3 that carries it, along that axis in the world
-    /// alone: the world X arrow changes its world position in X only.
+    /// In the world's space, Move's arrows run along the world's axes. A drag of the X arrow
+    /// changes only world X for an entity turned 45° about Z, under a turned, unevenly scaled
+    /// parent, itself under one that skews the 3x3 that carries it.
     #[test]
     fn in_the_worlds_space_a_move_goes_along_the_worlds_axes_under_a_turned_parent() {
         let parent_at = Transform {
@@ -2108,8 +2075,8 @@ mod tests {
         }
     }
 
-    /// Checks that `local`, under `parent`, moves in the world along each axis the handles show in
-    /// `space`, as far as the cursor goes along it, in either projection.
+    /// Checks that `local` under `parent` moves in the world along each axis the handles show in
+    /// `space`, as far as the cursor goes, in either projection.
     fn moves_along_its_axes(parent: Pose, local: Transform, space: Space) {
         let world = parent.matrix.transform_point3(local.translation);
         for perspective in [false, true] {
@@ -2149,10 +2116,10 @@ mod tests {
         }
     }
 
-    /// Under a parent that scales negatively, the handles' axes run along the entity's as drawing
-    /// places them, mirrored or turned half round, whether it's turned or not. Under a turned
-    /// parent that scales unevenly, which skews a turned entity's, they're its own turned by the
-    /// parent's rotation, and mirrored where the parent's scale mirrors.
+    /// Under a parent scaling negatively, the handles' axes run along the entity's as drawn,
+    /// mirrored or turned half round, turned or not. Under a turned parent scaling unevenly, which
+    /// skews a turned entity's, they're its own turned by the parent's rotation, mirrored where the
+    /// parent's scale mirrors.
     #[test]
     fn the_axes_run_along_the_drawn_ones() {
         let sight = sight(aside(Vec3::ZERO, false));
@@ -2193,10 +2160,9 @@ mod tests {
         }
     }
 
-    /// Under a parent that scales negatively, a ring's drag turns the entity as drawing places it
-    /// the way the cursor goes, about the axis the ring shows by the angle the cursor goes round
-    /// it, and the outer ring's about the view's axis by the angle it goes round the origin on
-    /// screen: whether it's turned or not, in either projection.
+    /// Under a parent scaling negatively, a ring's drag turns the entity as drawn the way the
+    /// cursor goes: about the ring's axis by the angle round it, and the outer ring's about the
+    /// view's axis by the angle round the origin on screen. Turned or not, in either projection.
     #[test]
     fn under_a_negative_scale_the_rings_turn_it_the_way_the_cursor_goes() {
         for perspective in [false, true] {
@@ -2265,10 +2231,9 @@ mod tests {
         }
     }
 
-    /// Under a parent that scales negatively, Move's arrows and Scale's axes run along a turned
-    /// entity's axes as drawing places them: a move along one keeps the point grabbed under the
-    /// cursor, and a scale along one scales the component that drawing scales the entity along it
-    /// by; in either projection.
+    /// Under a parent scaling negatively, Move's arrows and Scale's axes run along a turned
+    /// entity's axes as drawn. A move along one keeps the grabbed point under the cursor; a scale
+    /// along one scales the component that drawing scales it by; in either projection.
     #[test]
     fn under_a_negative_scale_move_and_scale_go_along_the_drawn_axes() {
         let local = turned();
@@ -2318,10 +2283,10 @@ mod tests {
         }
     }
 
-    /// In the world's space, a ring's drag turns an entity about the world's axis the ring shows by
-    /// the angle the cursor goes round it, and the outer ring's about the view's axis: so that its
-    /// world rotation is the turn times the one it had, under a parent that is turned, mirrored,
-    /// or both, whether the entity is turned or not, in either projection.
+    /// In the world's space, a ring's drag turns an entity about the ring's world axis by the angle
+    /// the cursor goes round it, and the outer ring's about the view's axis. Its world rotation
+    /// becomes the turn times its own, under a parent turned, mirrored or both, turned or not, in
+    /// either projection.
     #[test]
     fn in_the_worlds_space_the_rings_turn_it_about_the_worlds_axes() {
         let turned_parent = carrying(Transform {
@@ -2383,11 +2348,11 @@ mod tests {
         }
     }
 
-    /// A drag changes the others picked with the active one, each under a parent of its own, by the
-    /// same change, about its own origin: Move by the same move in the world; Rotate by the same
-    /// turn about the world's axis, or under Local about its own axis, as the active one's ring
-    /// is; Scale by the same factor along its own axis. A pick the drag doesn't move, as one under
-    /// another picked, sets nothing of its own, the others all the same.
+    /// A drag changes the others picked with the active one, each under its own parent, by the same
+    /// change about its own origin: Move by the same move in the world; Rotate by the same turn
+    /// about the world's axis, or under Local about its own, as the active one's ring; Scale by the
+    /// same factor along its own axis. A pick the drag doesn't move, as one under another picked,
+    /// sets nothing; the others still do.
     #[test]
     fn a_drag_changes_the_others_picked_by_the_same_change() {
         let parent = carrying(Transform {
@@ -2508,9 +2473,8 @@ mod tests {
         assert!(its.abs_diff_eq(expected, 1e-4), "{its}, not {expected}");
     }
 
-    /// Scale shows and drags the entity's own axes in the world's space too, as in its own, since
-    /// scaling a turned entity along the world's would shear it; while Move's and Rotate's go
-    /// along the world's.
+    /// Scale shows and drags the entity's own axes in the world's space too, since scaling a turned
+    /// entity along the world's would shear it. Move's and Rotate's go along the world's.
     #[test]
     fn in_the_worlds_space_scale_keeps_the_entitys_own_axes() {
         let parent = carrying(Transform {
@@ -2575,8 +2539,8 @@ mod tests {
         }
     }
 
-    /// Each tool's handles paint, at 1.5 of egui's pixels a point, as the window's are, the one
-    /// under the cursor lit, and none without one.
+    /// Each tool's handles paint at 1.5 egui pixels a point, as the window's do, the one under the
+    /// cursor lit, and none without one.
     #[test]
     fn the_handles_paint_the_one_under_the_cursor_lit() {
         let sight = sight(aside(Vec3::ZERO, true));
@@ -2612,9 +2576,8 @@ mod tests {
         }
     }
 
-    /// A drag ends as the Inspector undoes or redoes, as the pick changes or dies, and as the
-    /// world is another; and the value a drag set shows, for the pick it set it for, until the
-    /// Inspector's tick has made it.
+    /// A drag ends as the Inspector undoes or redoes, the pick changes or dies, or the world is
+    /// another. A drag's value shows, for its pick, until the Inspector's tick has made it.
     #[test]
     fn a_drag_ends_with_the_pick_the_world_or_a_step() {
         let viewpoint = aside(Vec3::ZERO, false);
@@ -2675,8 +2638,8 @@ mod tests {
         assert_eq!(handles.shown(&waiting), local);
     }
 
-    /// While the camera eases, as after Home, a press on a handle grabs nothing, since the view
-    /// turns under it, but is taken all the same; one off the handles still asks for a pick.
+    /// While the camera eases, as after Home, a press on a handle grabs nothing, as the view turns
+    /// under it, but is taken anyway. One off the handles still asks for a pick.
     #[test]
     fn a_press_while_the_camera_eases_grabs_nothing() {
         let viewpoint = aside(Vec3::ZERO, false);
@@ -2700,8 +2663,8 @@ mod tests {
         }
     }
 
-    /// With Probe, a press over the view asks for a probe of its pixel, where a handle of what's
-    /// picked would have been too, since Probe shows none; not with Alt held, which orbits.
+    /// With Probe, a press over the view asks for a probe of its pixel, even where a handle would
+    /// be, since Probe shows none. Not with Alt held, which orbits.
     #[test]
     fn a_press_with_probe_asks_for_a_probe_of_its_pixel() {
         let viewpoint = aside(Vec3::ZERO, false);

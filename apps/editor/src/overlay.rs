@@ -1,9 +1,9 @@
-//! What the editor draws over its view: a toolbar at the view's top left, or where its grip moves
-//! it, whose controls [`Toolbar::show`] lists; a gizmo at its top right, which shows which way the
-//! camera faces, and turns it; at its bottom left, the name of what the view shows under the
-//! cursor; and round its edges, while a texture or a model from the Assets panel is held over it,
-//! an outline. And the controls at the middle of the title bar, which play the game, pause it,
-//! step it and stop it.
+//! What the editor draws over its view, and the title bar's run controls ([`show_run`]):
+//!
+//! - the toolbar, at the top left or where its grip moves it ([`Toolbar::show`]);
+//! - the gizmo, at the top right, which shows and turns the camera's facing ([`gizmo`]);
+//! - the name of what's under the cursor, at the bottom left;
+//! - an outline round its edges while an asset from the Assets panel is held over it.
 
 use std::f32::consts::{PI, TAU};
 
@@ -22,7 +22,7 @@ use tracing::warn;
 
 use crate::camera::{OrbitCamera, Side, Space, Tool};
 
-/// The file the editor keeps the toolbar's [`Placement`] in, as [`Context::read_state`] names it.
+/// Where [`Context::read_state`] keeps the toolbar's [`Placement`].
 const FILE: &str = "toolbar.json";
 /// The side of a toolbar icon, in points.
 const ICON: f32 = 16.0;
@@ -32,7 +32,7 @@ const REACH: f32 = 34.0;
 const BALL: f32 = 8.0;
 /// Half the side of the gizmo's cube, in points.
 const CUBE: f32 = 10.0;
-/// The side of the gizmo, in points.
+/// The gizmo's side, in points.
 const GIZMO: f32 = 2.0 * (REACH + BALL) + 4.0;
 /// The height of the label under the gizmo, in points.
 const LABEL: f32 = 18.0;
@@ -40,8 +40,8 @@ const LABEL: f32 = 18.0;
 /// [`Ui::over_view`](gg_engine::Ui::over_view) places the toolbar and the gizmo.
 const INSET: f32 = 8.0;
 
-/// The entries of the list of what the view shows before its images, as the toolbar names them:
-/// the game's own light, `None`, then the parts of how it's shaded.
+/// The list of what the view shows, before its images, as the toolbar names them: the game's own
+/// light, `None`, then the parts of its shading.
 const CHANNELS: &[(&str, Option<Shown>)] = &[
     ("Lit", None),
     ("Base color", Some(Shown::BaseColor)),
@@ -60,8 +60,7 @@ const CHANNELS: &[(&str, Option<Shown>)] = &[
     ("Specular light", Some(Shown::SpecularLight)),
 ];
 
-/// What the list calls the images the frame makes that it has a name of its own for, by their
-/// debug names; it calls the rest by theirs.
+/// The list's own names for the frame's images, by debug name; the rest go by theirs.
 const IMAGE_LABELS: &[(&str, &str)] = &[
     ("view depth", "Depth"),
     ("view motion", "Motion"),
@@ -75,7 +74,6 @@ const IMAGE_LABELS: &[(&str, &str)] = &[
     ("view colors", "Before tonemapping"),
 ];
 
-/// What the list calls the image the frame makes by debug name `name`.
 fn image_label(name: &str) -> &str {
     IMAGE_LABELS
         .iter()
@@ -83,7 +81,7 @@ fn image_label(name: &str) -> &str {
         .map_or(name, |(_, label)| label)
 }
 
-/// What an image the frame makes holds, as its entry's tooltip says.
+/// What a frame image holds, as its entry's tooltip says.
 fn kind_label(kind: ImageKind) -> &'static str {
     match kind {
         ImageKind::Color => "colors",
@@ -96,7 +94,6 @@ fn kind_label(kind: ImageKind) -> &'static str {
     }
 }
 
-/// What the toolbar's list of the passes the view can leave out calls `pass`.
 fn pass_label(pass: Pass) -> &'static str {
     match pass {
         Pass::AmbientOcclusion => "Ambient occlusion",
@@ -113,39 +110,33 @@ fn pass_label(pass: Pass) -> &'static str {
     }
 }
 
-/// What the toolbar sets: what the left button does over the view, which axes Move's and Rotate's
-/// handles go along, whether the grid shows, and in
-/// which plane, whether the view sees through the game's camera, whether the game's colliders'
-/// outlines show, what the view shows in place of its light and the passes it leaves out; and
-/// where it is over the view, and whether it's folded.
+/// What the toolbar sets, and where it sits over the view.
 pub struct Toolbar {
     pub tool: Tool,
-    /// Which axes Move's and Rotate's handles go along: the entity's own, or the world's.
+    /// The entity's own axes or the world's, for Move's and Rotate's handles.
     pub space: Space,
     pub grid: bool,
     pub plane: Plane,
-    /// Whether the view sees through the game's own camera rather than the editor's, and shows
-    /// neither the grid nor the gizmo: while the game plays, whether it's Play rather than
-    /// Simulate.
+    /// Whether the view sees through the game's own camera, showing neither the grid nor the gizmo.
+    /// While the game plays: Play rather than Simulate.
     pub world_camera: bool,
-    /// Whether the game's colliders' outlines show, over the rest of the view but a nearer
-    /// opaque mesh, through either camera.
+    /// Whether the game's colliders' outlines show, over all but a nearer opaque mesh, through
+    /// either camera.
     pub colliders: bool,
-    /// What the view shows in place of its light, to see how it's made, through either camera;
-    /// `None` for the game's own light.
+    /// What the view shows in place of its light, through either camera; `None` for the game's own.
     pub show: Option<Shown>,
-    /// The images the game's frame made that the view can show, as the game last answered them,
-    /// which the list of what the view shows lists after its parts; empty until it answers.
+    /// The images of the game's frame the view can show, as last answered, listed after the parts;
+    /// empty until the game answers.
     pub images: Vec<FrameImage>,
-    /// Why the game didn't list them, if it refused, as an older game that doesn't know `images`
-    /// does, which the list says in their place.
+    /// Why the game refused to list them, as an older game without `images` does; the list says it
+    /// in their place.
     pub images_refused: Option<String>,
-    /// Whether the pointer came over that list's button, or clicked it, since this was last taken,
-    /// for the images to be asked for again.
+    /// Whether the pointer came over the list's button, or clicked it, since this was last taken:
+    /// the images are then asked for again.
     pub ask_images: bool,
-    /// The passes the view leaves out, to narrow down which one makes what it shows, through
-    /// either camera, in [`Pass::ALL`]'s order, as the game answers them; empty for none. Not kept
-    /// from run to run, so that none is left out unawares.
+    /// The passes the view leaves out, to find which one makes what it shows, through either
+    /// camera; in [`Pass::ALL`]'s order, as the game answers; empty for none. Not kept between
+    /// runs, so none is left out unawares.
     pub skip: Vec<Pass>,
     pub placement: Placement,
 }
@@ -169,26 +160,25 @@ impl Default for Toolbar {
     }
 }
 
-/// Where the toolbar is over the view, which a drag of its grip moves, as [`Toolbar::place`] keeps
-/// it, and whether it's folded to its grip and the button that unfolds it: which the editor keeps
-/// for the user from run to run, as [`Toolbar::save`] does.
+/// Where the toolbar is over the view, which a drag of its grip moves ([`Toolbar::place`]), and
+/// whether it's folded to its grip. Kept per user across runs ([`Toolbar::save`]).
 #[derive(Debug, Default, PartialEq)]
 pub struct Placement {
-    /// Where a drag of its grip last left it, from where
-    /// [`Ui::over_view`](gg_engine::Ui::over_view) places it, the view's top left, in points.
+    /// Where its grip's drag last left it, from the view's top left, where
+    /// [`Ui::over_view`](gg_engine::Ui::over_view) places it, in points.
     offset: egui::Vec2,
     folded: bool,
     /// Its size as it last showed, in points.
     size: egui::Vec2,
-    /// The offset as a drag of the grip started, while it lasts.
+    /// The offset as the grip's drag started, while it lasts.
     from: Option<egui::Vec2>,
-    /// Whether it's moved or folded since it was last saved.
+    /// Whether it's moved or folded since it was saved.
     changed: bool,
 }
 
 impl Placement {
-    /// What `text`, the file's, holds: where the toolbar was and whether it was folded, either
-    /// left as it starts if it doesn't read.
+    /// What file `text` holds: where the toolbar was and whether it was folded, each left as it
+    /// starts if it doesn't read.
     fn parse(text: &str) -> serde_json::Result<Self> {
         let value: Value = serde_json::from_str(text)?;
         let offset = value["offset"]
@@ -204,7 +194,7 @@ impl Placement {
         })
     }
 
-    /// Its file's text, which [`parse`](Self::parse) reads back.
+    /// Its file's text, for [`parse`](Self::parse).
     fn text(&self) -> String {
         let value = json!({"offset": [self.offset.x, self.offset.y], "folded": self.folded});
         format!("{value:#}\n")
@@ -214,21 +204,20 @@ impl Placement {
 /// How the game runs, as the title bar's Play, Simulate and Stop set it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Stopped: its world is the world as edited, which only edits, scene files' saves and the
-    /// File menu's New and Open change.
+    /// Stopped: its world is the world as edited, which only edits, scene files' saves and File >
+    /// New and Open change.
     Edit,
-    /// A copy of the world as edited plays in its place, the view seeing through the game's
-    /// camera, which gets the view's input.
+    /// A copy of the world as edited plays in its place. The view sees through the game's camera,
+    /// which gets the view's input.
     Play,
-    /// A copy plays as in Play, but the view sees through the editor's camera, to watch from
-    /// anywhere, and the game gets no input.
+    /// A copy plays as in Play, but the view sees through the editor's camera, and the game gets no
+    /// input.
     Simulate,
 }
 
 impl Toolbar {
-    /// Reads where the toolbar was and whether it was folded, as `cx` keeps it for the user,
-    /// warning (`editor.toolbar`) if it can't, the toolbar then starting at the view's top left,
-    /// unfolded.
+    /// Reads the toolbar's [`Placement`], kept per user. Warns `editor.toolbar` if it can't, the
+    /// toolbar then at the view's top left, unfolded.
     pub fn read(&mut self, cx: &Context) {
         let read = match cx.read_state(FILE) {
             Ok(None) => return,
@@ -246,8 +235,7 @@ impl Toolbar {
         }
     }
 
-    /// Saves where the toolbar is and whether it's folded, as `cx` keeps it for the user, if it's
-    /// moved or folded since, warning (`editor.toolbar`) if it can't.
+    /// Saves the toolbar's [`Placement`] per user, if changed. Warns `editor.toolbar` if it can't.
     pub fn save(&mut self, cx: &Context) {
         let placement = &mut self.placement;
         if !placement.changed {
@@ -259,13 +247,11 @@ impl Toolbar {
         }
     }
 
-    /// Moves the toolbar as far as the pointer has gone since a drag of its grip started, which
-    /// egui saw as the frame began, within `view`, where the view is, as far in from its edges as
-    /// from its top left. Returns how far it's moved, for
-    /// [`Ui::over_view`](gg_engine::Ui::over_view) to show it there, kept within the view as it is
-    /// now: unfolded, or in a smaller view, it shows further in than its grip left it, and goes
-    /// back as it folds or the view grows. Called before it shows, so that it keeps up with the
-    /// pointer.
+    /// Moves the toolbar by the pointer's travel since its grip's drag started, as egui saw it at
+    /// the frame's start, within `view`, as far in from its edges as from its top left. Returns the
+    /// offset for [`Ui::over_view`](gg_engine::Ui::over_view), kept within the view as it is now:
+    /// unfolded, or in a smaller view, it shows further in than its grip left it, going back as it
+    /// folds or the view grows. Call it before the toolbar shows, so it keeps up with the pointer.
     pub fn place(&mut self, egui: &egui::Context, view: Rect) -> egui::Vec2 {
         let placement = &mut self.placement;
         let room = view.size() - egui::Vec2::splat(2.0 * INSET) - placement.size;
@@ -283,18 +269,20 @@ impl Toolbar {
         within(placement.offset)
     }
 
-    /// Draws the toolbar into `ui`: its grip, which a drag of moves it, as [`place`](Self::place)
-    /// has it; the button that folds it to the grip and itself, and unfolds it; the tools, Probe
-    /// last, whose tooltips name the keys that pick them, the space of Move's and Rotate's axes,
-    /// Local or World, which a click or X switches, the camera's projection, which a click
-    /// switches, the
-    /// grid's switch and its plane, the switch that sees through the game's camera, and the
-    /// colliders' switch, the list of what the view shows in place of its light, and the Passes
-    /// button, lit while the view leaves any out, each with a tooltip. While the view sees through
-    /// the game's camera, the projection's and the grid's buttons are off, since what they change
-    /// doesn't show. It opens nothing but that list, and the Passes button's list of the passes,
-    /// ticked while drawn, which stays open as they're ticked, until a click outside it: each a
-    /// popup that takes the view's keys while it's open.
+    /// Draws the toolbar, each control with a tooltip:
+    ///
+    /// - its grip ([`place`](Self::place)) and the button that folds and unfolds it;
+    /// - the tools, Probe last, their tooltips naming their keys;
+    /// - the space of Move's and Rotate's axes, Local or World, which a click or X switches;
+    /// - the camera's projection; the grid's switch and plane; the game's camera's switch; the
+    ///   colliders' switch;
+    /// - the list of what the view shows in place of its light;
+    /// - Passes, lit while any is left out, whose list, ticked while drawn, stays open as they're
+    ///   ticked, until a click outside it.
+    ///
+    /// While the view sees through the game's camera, the projection's and the grid's buttons are
+    /// off: what they change doesn't show. The two lists are popups that take the view's keys while
+    /// open.
     pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera) {
         // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
         let snaps = if cfg!(target_os = "macos") {
@@ -501,8 +489,7 @@ impl Toolbar {
         self.placement.size = shown.response.rect.size();
     }
 
-    /// Draws the passes the view can leave out into `ui`, each ticked while it's drawn, which a
-    /// click leaves out or draws again, then Draw all, which draws them all again.
+    /// Draws the passes, each ticked while drawn, a click toggling it, then Draw all.
     fn show_passes(&mut self, ui: &mut egui::Ui) {
         for pass in Pass::ALL {
             let mut drawn = !self.skip.contains(&pass);
@@ -528,8 +515,8 @@ fn grip_id() -> Id {
     Id::unique("gg editor toolbar grip")
 }
 
-/// Draws the toolbar's grip into `ui`, as tall as its buttons: dots in two columns, lit as the
-/// pointer comes onto it, as a button lights.
+/// Draws the grip: two columns of dots, as tall as the buttons, lit under the pointer as a button
+/// is.
 fn grip(ui: &mut egui::Ui) {
     let size = vec2(ICON / 2.0, ICON + 2.0 * ui.spacing().button_padding.y);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
@@ -549,9 +536,8 @@ fn grip(ui: &mut egui::Ui) {
     response.on_hover_text("Move the toolbar: drag it within the view");
 }
 
-/// What a click of the title bar's controls asks: Play or Simulate, which play the game, or switch
-/// between them while it plays, or Stop, as [`Mode::Edit`]; a pause, the game playing; a resume,
-/// the game paused; or a step.
+/// What a click of the run controls asks: Play or Simulate, which play the game, or switch between
+/// them while it plays; Stop, as [`Mode::Edit`]; a pause, a resume or a step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Clicked {
     To(Mode),
@@ -560,12 +546,15 @@ pub enum Clicked {
     Step,
 }
 
-/// Draws the controls of how the game runs into `ui`, the title bar's middle, each with a tooltip,
-/// as `current`, how it runs, and `paused` have them, as other editors' are: Play, which plays the
-/// game while it's stopped, and while it plays pauses it, or resumes it while it's paused;
-/// Simulate, lit while the game plays through the editor's camera, which plays it so while it's
-/// stopped, and switches between the two while it plays; Stop, while it plays; and Step, while
-/// it's paused or stopped. Returns what a click asks.
+/// Draws the run controls in the title bar's middle, as other editors' are, each with a tooltip,
+/// for `current` and `paused`. Returns what a click asks.
+///
+/// - Play: plays the game while it's stopped; while it plays, pauses it, or resumes it while
+///   paused.
+/// - Simulate: lit while the game plays through the editor's camera. Plays it so while stopped, and
+///   switches between the two while it plays.
+/// - Stop: while it plays.
+/// - Step: while it's paused or stopped.
 pub fn show_run(ui: &mut egui::Ui, current: Mode, paused: bool) -> Option<Clicked> {
     let stopped = current == Mode::Edit;
     let (icon, tip, play) = match (stopped, paused) {
@@ -689,7 +678,7 @@ enum Icon {
 }
 
 impl Icon {
-    /// Paints it in `rect`, a square, in `color`.
+    /// Paints it in square `rect`, in `color`.
     fn paint(self, painter: &Painter, rect: Rect, color: Color32) {
         let scale = rect.width() / 16.0;
         // From the top left of a square 16 across.
@@ -817,11 +806,13 @@ impl Icon {
     }
 }
 
-/// Draws the gizmo into `ui`: the world's axes and a cube, turned as `camera` sees them, without
-/// perspective whatever its projection, and under them a label of the projection and of `aligned`,
-/// the side the camera looks squarely from, if it does. Clicking an axis eases the camera to look
-/// back along it, or, looking along it already, from the other side; clicking the cube or the
-/// label switches the projection; dragging it orbits the camera's pivot.
+/// Draws the gizmo: the world's axes and a cube as `camera` sees them, without perspective, over a
+/// label of the projection and of `aligned`, the side the camera looks squarely from, if any.
+///
+/// - A click on an axis eases the camera to look back along it, or from the other side if it
+///   already does.
+/// - A click on the cube or the label switches the projection.
+/// - A drag orbits the camera's pivot.
 pub fn gizmo(ui: &mut egui::Ui, camera: &mut OrbitCamera, aligned: Option<Side>) {
     let (rect, _) = ui.allocate_exact_size(vec2(GIZMO, GIZMO + LABEL), Sense::hover());
     let (axes, label) = rect.split_top_bottom_at_y(rect.min.y + GIZMO);
@@ -919,8 +910,8 @@ pub fn gizmo(ui: &mut egui::Ui, camera: &mut OrbitCamera, aligned: Option<Side>)
     }
 }
 
-/// The short name of `camera`'s projection, and the tip of a switch to the other: what the
-/// toolbar's button and the gizmo's label say.
+/// The short name of `camera`'s projection, and the tip of a switch to the other, for the toolbar's
+/// button and the gizmo's label.
 fn projection(camera: &OrbitCamera) -> (&'static str, &'static str) {
     if camera.perspective {
         ("Persp", "Perspective: click for orthographic")
@@ -1029,15 +1020,13 @@ fn letter(side: Side) -> Option<&'static str> {
     }
 }
 
-/// Names `name`, what the view shows under the cursor, at the bottom left of `view`, as
-/// [`label`] shows it.
+/// Names `name`, what's under the cursor, at `view`'s bottom left, as a [`label`].
 pub fn name_hovered(egui: &egui::Context, view: &Response, name: String) {
     label(egui, view, Align2::LEFT_BOTTOM, name, TextStyle::Body);
 }
 
-/// Shows `text`, in `style`, at `corner` of `view`, in a frame as the toolbar's: painted on the
-/// view's own layer, over the world it shows and the handles, rather than shown over the view as
-/// the toolbar is, so that the cursor over it is still over the view.
+/// Shows `text` in `style` at `corner` of `view`, framed as the toolbar is. It paints on the view's
+/// own layer, over the world and the handles, so the cursor over it is still over the view.
 pub fn label(
     egui: &egui::Context,
     view: &Response,
@@ -1058,10 +1047,9 @@ pub fn label(
     painter.galley(inner.min, galley, color);
 }
 
-/// What the Probe tool's panel says of a probe of the view, `probed`, its answer, or, while it's
-/// `None`, that it waits for it: a line for each part, as the list of what the view shows names
-/// them, its numbers as [`Probe`] says, values and colors linear, light as the view's sRGB bytes,
-/// `-` outside the view.
+/// The Probe panel's text for `probed`, or that it waits while `None`: a line per part, named as
+/// the view's list names them, numbers as [`Probe`] says, values and colors linear, light as the
+/// view's sRGB bytes, `-` outside the view.
 pub fn probe_text(probed: Option<&Result<Probe, Failure>>) -> String {
     let probe = match probed {
         None => return "Probing…".to_owned(),
@@ -1110,9 +1098,8 @@ pub fn probe_text(probed: Option<&Result<Probe, Failure>>) -> String {
     text
 }
 
-/// Shows `text`, a probe's as [`probe_text`] says, beside `at`, the pixel probed, in points, kept
-/// inside `view`, with a ring round the pixel: on the view's own layer, as [`label`] shows its
-/// text.
+/// Shows [`probe_text`]'s `text` beside pixel `at`, in points, kept inside `view`, with a ring
+/// round the pixel, on the view's own layer as a [`label`].
 pub fn probe_readout(egui: &egui::Context, view: &Response, at: Pos2, text: String) {
     let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
     let global = egui.global_style();
@@ -1134,10 +1121,9 @@ pub fn probe_readout(egui: &egui::Context, view: &Response, at: Pos2, text: Stri
     painter.galley(inner.min, galley, color);
 }
 
-/// Outlines `view` inside its edges in the selection's color, as egui lights its drop zones: while
-/// an asset from the Assets panel is held over it, which it takes let go there, and in Play while it
-/// has the keys, which go to the game. Painted on the view's own layer, as the name under the cursor
-/// is.
+/// Outlines `view` inside its edges in the selection's color, as egui lights drop zones: while an
+/// asset from the Assets panel is held over it, and in Play while it has the keys, which go to the
+/// game. Painted on the view's own layer.
 pub fn outline_view(egui: &egui::Context, view: &Response) {
     let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
     let color = egui.global_style().visuals.selection.stroke.color;
@@ -1199,9 +1185,9 @@ mod tests {
         assert_eq!(hit(turned, vec2(9.0, 0.0)), Some(Hit::Cube));
     }
 
-    /// Runs passes of the gizmo at (100, 100) on `camera`: the pointer moved to `from`, pressed
-    /// there, moved to `to` and let go there, which is a click where they're the same and a drag
-    /// where they're further apart than a click goes.
+    /// Passes of the gizmo at (100, 100): the pointer moved to `from`, pressed, moved to `to` and
+    /// let go. That's a click where they're the same, and a drag where they're further apart than a
+    /// click goes.
     fn press(camera: &mut OrbitCamera, from: Pos2, to: Pos2) {
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0));
@@ -1272,8 +1258,8 @@ mod tests {
         assert!(seen.position.abs_diff_eq(want.position, 1e-5));
     }
 
-    /// Runs a pass of `toolbar` over `view`, placed as [`Ui::over_view`](gg_engine::Ui::over_view)
-    /// places it, with `events`. Returns the middle of its grip as it showed.
+    /// A pass of `toolbar` over `view`, placed as [`Ui::over_view`](gg_engine::Ui::over_view)
+    /// places it, with `events`. Returns its grip's middle.
     fn show_toolbar(
         ctx: &egui::Context,
         toolbar: &mut Toolbar,
@@ -1350,9 +1336,8 @@ mod tests {
         assert_eq!(shown, grip + by);
     }
 
-    /// What a click of the title bar's control `i`, of Play, Simulate, Stop and Step, asks, as
-    /// `current` and `paused` have them: a pass each of the pointer moving onto it, pressing and
-    /// letting go, the controls laid out from (10, 10).
+    /// What a click of title bar control `i` (Play, Simulate, Stop, Step) asks, for `current` and
+    /// `paused`: a pass each to move, press and let go, the controls from (10, 10).
     fn click_control(current: Mode, paused: bool, i: usize) -> Option<Clicked> {
         let ctx = egui::Context::default();
         let spacing = ctx.global_style().spacing.clone();
@@ -1386,9 +1371,9 @@ mod tests {
         clicked
     }
 
-    /// The title bar's controls, as other editors' are: stopped, Play and Simulate play the game,
-    /// Stop is off and Step steps it; playing, Play pauses it, Simulate switches between the
-    /// cameras, Stop stops it and Step is off; and paused, Play resumes it and Step steps it.
+    /// The run controls, as other editors' are. Stopped: Play and Simulate play, Stop is off, Step
+    /// steps. Playing: Play pauses, Simulate switches cameras, Stop stops, Step is off. Paused:
+    /// Play resumes, Step steps.
     #[test]
     fn the_title_bars_controls_play_pause_stop_and_step_as_the_game_runs() {
         use Clicked::{Pause, Resume, Step, To};
@@ -1437,8 +1422,8 @@ mod tests {
         }
     }
 
-    /// Runs a pass of `toolbar` at the top left of a view of 1400 by 800 points, tall enough for
-    /// the list of what the view shows, with `events`; returns what it drew.
+    /// A pass of `toolbar` at the top left of a 1400 by 800 point view, tall enough for the view's
+    /// list, with `events`: what it drew.
     fn toolbar_pass(
         ctx: &egui::Context,
         toolbar: &mut Toolbar,
@@ -1459,8 +1444,7 @@ mod tests {
         output
     }
 
-    /// Clicks `toolbar` at `at`: a pass each of the pointer moving there, pressing and letting go.
-    /// Returns what the last drew.
+    /// Clicks `toolbar` at `at` over three passes: move, press, let go. Returns what the last drew.
     fn click_toolbar(ctx: &egui::Context, toolbar: &mut Toolbar, at: Pos2) -> egui::FullOutput {
         let button = |pressed| egui::Event::PointerButton {
             pos: at,
@@ -1486,9 +1470,9 @@ mod tests {
             })
     }
 
-    /// The Passes button opens the passes, each ticked while drawn: a click on one leaves it out,
-    /// the list staying open for the next, kept in the order the game answers them, and a click
-    /// again draws it again; Draw all draws them all again; and the button counts those left out.
+    /// The Passes button opens the passes, each ticked while drawn. A click leaves one out, the
+    /// list staying open, kept in the game's order; another draws it again. Draw all draws them
+    /// all. The button counts those left out.
     #[test]
     fn the_passes_list_leaves_passes_out_and_draws_them_all_again() {
         let ctx = egui::Context::default();
@@ -1511,10 +1495,9 @@ mod tests {
         assert_eq!(toolbar.skip, [], "all drawn again");
     }
 
-    /// The list of what the view shows asks for the images the game lists as the pointer comes
-    /// over it, and again as it opens, and lists them after the parts, by their labels or their
-    /// names, showing the one clicked; and says why there are none where the game refused to list
-    /// them.
+    /// The view's list asks for the game's images as the pointer comes over it and again as it
+    /// opens. It lists them after the parts, by label or name, showing the one clicked, and says
+    /// why there are none where the game refused.
     #[test]
     fn the_list_shows_the_images_the_game_lists() {
         let ctx = egui::Context::default();
@@ -1558,9 +1541,8 @@ mod tests {
         assert!(text_at(&opened, why).is_some(), "says why");
     }
 
-    /// The Probe tool's numbers: that it waits, why it failed, or a line for each part, values and
-    /// colors to three places, light as its bytes, depth as an exponent, `-` for what there's none
-    /// of, and the entity by its name and ID.
+    /// The Probe numbers: waiting, why it failed, or a line per part: values and colors to three
+    /// places, light as bytes, depth as an exponent, `-` for none, the entity by name and ID.
     #[test]
     fn a_probes_numbers_read_as_the_list_names_them() {
         assert_eq!(probe_text(None), "Probing…");
@@ -1585,8 +1567,7 @@ mod tests {
         }
     }
 
-    /// The list of what the view shows names each part by its label, as it shows on the closed
-    /// list while the view shows it.
+    /// The view's list names each part by its label, on the closed list too while shown.
     #[test]
     fn the_list_names_what_the_view_shows() {
         let ctx = egui::Context::default();
@@ -1604,8 +1585,8 @@ mod tests {
         }
     }
 
-    /// Where the toolbar is and whether it's folded read back as they were, and what of a file
-    /// doesn't read is left as it starts.
+    /// The toolbar's place and fold read back, and what of a file doesn't read is left as it
+    /// starts.
     #[test]
     fn where_the_toolbar_is_and_whether_it_s_folded_read_back() {
         let placement = Placement {
