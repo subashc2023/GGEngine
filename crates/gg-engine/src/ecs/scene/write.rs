@@ -1,6 +1,5 @@
 //! The canonical writer: a scene's text as the engine writes it, so that its bytes depend on the
-//! entities alone, never on a library's formatting, the platform's line endings or the escapes of
-//! a Rust release.
+//! entities alone, never on a library's formatting, line endings or a Rust release's escapes.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
@@ -22,8 +21,7 @@ pub(in crate::ecs) const WORDS: [&str; 10] = [
     "true", "false", "Some", "None", "inf", "inff32", "inff64", "NaN", "NaNf32", "NaNf64",
 ];
 
-/// `roots`, and their descendants if `descendants`, as a scene's text, as [`World::save_scene`]
-/// says.
+/// `roots`, and their descendants if `descendants`, as [`World::save_scene`] says.
 pub(super) fn save(world: &World, roots: &[Entity], descendants: bool) -> Result<String> {
     for &root in roots {
         world.locate(root)?;
@@ -61,12 +59,11 @@ pub(super) fn save(world: &World, roots: &[Entity], descendants: bool) -> Result
     Ok(writer.out)
 }
 
-/// The instances among `saved` whose roots are, each by the outermost; and the entities they give,
-/// which go into `saved` with their roots.
+/// The instances among `saved` whose roots are, each claimed by the outermost. The entities they
+/// give join `saved` with their roots.
 ///
-/// Fails as an instance's template does, as [`Expanding::template`] says, and with
-/// `scene.prefab_missing` for an entity an instance's prefab gives that isn't alive, as one code
-/// despawned, which a scene can't save the instance without.
+/// Fails like [`Expanding::template`], and with `scene.prefab_missing` for an entity the prefab
+/// gives that code despawned.
 fn instances(world: &World, saved: &mut Vec<(EntityId, Entity)>) -> Result<Claims> {
     let depth = |mut entity: Entity| {
         let mut depth = 0;
@@ -114,9 +111,8 @@ fn instances(world: &World, saved: &mut Vec<(EntityId, Entity)>) -> Result<Claim
     Ok(claims)
 }
 
-/// Fails with `scene.model_node` if anything under `node`, a model's node, which the world spawns
-/// under the model's root and scenes don't save, isn't a node of the model too: what a scene can't
-/// save, as its parent isn't saved.
+/// Fails with `scene.model_node` if anything under `node`, a model's node, isn't a node too: a
+/// scene can't save it, as its parent isn't saved.
 fn only_nodes(world: &World, node: Entity) -> Result<()> {
     let mut next = vec![node];
     while let Some(entity) = next.pop() {
@@ -149,8 +145,8 @@ struct Writer<'w> {
     /// The instances whose roots are saved, and the entities they give.
     claims: &'w Claims,
     out: String,
-    /// A column of each component type saved, in which each component is made again, as a load
-    /// makes it, and taken out of again.
+    /// A column per component type saved, in which each component is made again as a load makes
+    /// it, then taken out.
     built: HashMap<ComponentId, Box<dyn AnyColumn>>,
 }
 
@@ -168,10 +164,9 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// Writes entity `id` and its components, in the order of their names: of an instance's root,
-    /// or of an entity an instance saved gives, those that differ from what the prefab gives it,
-    /// each struct of named fields with the fields that differ alone, and of an entity an instance
-    /// gives where none does, nothing.
+    /// Writes entity `id` and its components in name order. For an instance's root or an entity a
+    /// saved instance gives, only what differs from the prefab (a named-field struct as its
+    /// differing fields); nothing if none differs.
     fn entity(&mut self, id: EntityId, entity: Entity) -> Result<()> {
         let world = self.world;
         let at = world.location(entity).expect("a saved entity is alive");
@@ -185,8 +180,8 @@ impl Writer<'_> {
             root.map(|at| (at, 0))
         });
         let instance = base.map(|(at, part)| (&claims.instances[at].1, part));
-        // An entity an instance gives is saved under a parent the scene saves: a load puts one
-        // whose parent the text leaves out under its prefab's.
+        // An entity an instance gives needs a saved parent: a load puts one without it under its
+        // prefab's.
         if let Some((at, part)) = base
             && part > 0
         {
@@ -309,10 +304,9 @@ impl Writer<'_> {
         id.is_some_and(|id| self.saved.binary_search_by_key(&id, |&(id, _)| id).is_ok())
     }
 
-    /// Writes `value`, of type `ty`, which is `depth` levels deep, from a line indented `indent`
-    /// levels: a block, which a struct or a variant with saved fields and a list with elements
-    /// are, opens at the line's end, its parts on their own lines a level deeper, and closes on a
-    /// line of its own, so that each part has lines of its own.
+    /// Writes `value` of type `ty`, `depth` levels deep, from a line indented `indent` levels. A
+    /// block (struct or variant with saved fields, list with elements) opens at the line's end,
+    /// puts each part on its own line a level deeper, and closes on its own line.
     fn value(&mut self, ty: &Type, value: &Value, indent: usize, depth: u32) -> Result<()> {
         if depth > MAX_DEPTH {
             return Err(Error::new(
@@ -405,8 +399,7 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// The fields of `given` that a scene saves, those of `fields` that aren't opaque, in their
-    /// order.
+    /// The fields of `given` a scene saves: `fields`' non-opaque ones, in order.
     fn saved_parts<'v>(
         &self,
         fields: &'v [Field],
@@ -428,8 +421,8 @@ impl Writer<'_> {
         parts.collect()
     }
 
-    /// Writes `parts`, at least one, of a struct or a variant, a tuple's by position: one part of a
-    /// tuple around it, keeping its own form, as `(v)`; more as a block.
+    /// Writes `parts` (at least one) of a struct or variant, a tuple's by position: a lone tuple
+    /// part as `(v)`, keeping its form; otherwise a block.
     fn block(
         &mut self,
         parts: &[(&Field, &Value)],
@@ -464,7 +457,6 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// Writes a reference to `entity` as its ID, which it must be saved for.
     fn reference(&mut self, entity: Entity) -> Result<()> {
         let Some(id) = self.world.id(entity) else {
             return Err(Error::new(
@@ -489,23 +481,23 @@ impl Writer<'_> {
     }
 }
 
-/// What a scene writes of a component: all of it, or the fields of a struct of named fields that
-/// differ from its prefab's, by their names.
+/// What a scene writes of a component: all of it, or the names of fields differing from the
+/// prefab's.
 enum Written {
     Whole,
     Fields(Vec<reflect::Ident>),
 }
 
-/// Indents a line `indent` levels, of 4 spaces each.
+/// Indents `indent` levels of 4 spaces.
 fn pad(out: &mut String, indent: usize) {
     for _ in 0..indent {
         out.push_str("    ");
     }
 }
 
-/// Writes a float as Rust's `Display` does, the shortest text that reads back to the same bits and
-/// never an exponent, with `.0` if it has no point; `inf` and `-inf`; and `NaN` and `-NaN`, which
-/// keep a NaN's sign but not its payload.
+/// Writes a float as Rust's `Display` does: the shortest text that reads back to the same bits,
+/// never an exponent, `.0` if it has no point; `inf` and `-inf`; `NaN` and `-NaN`, which keep a
+/// NaN's sign but not its payload.
 pub(crate) fn float(
     out: &mut String,
     x: impl fmt::Display,
@@ -524,7 +516,6 @@ pub(crate) fn float(
     }
 }
 
-/// Writes a vector's or a quaternion's components, as `(x, y, z)`.
 fn floats<F: Float>(out: &mut String, xs: &[F]) {
     out.push('(');
     for (i, &x) in xs.iter().enumerate() {
@@ -536,7 +527,6 @@ fn floats<F: Float>(out: &mut String, xs: &[F]) {
     out.push(')');
 }
 
-/// An `f32` or an `f64`, as a vector's components are.
 trait Float: Copy + fmt::Display {
     fn is_nan(self) -> bool;
     fn is_sign_negative(self) -> bool;
@@ -564,7 +554,7 @@ macro_rules! floats {
 floats!(f32, f64);
 
 /// Writes `text` quoted, by the scene's own escapes: `\\`, `\"`, `\n`, `\r` and `\t`; `\u{..}` for
-/// the other characters that are [`hidden`]; and everything else as it is.
+/// other [`hidden`] characters; everything else as it is.
 pub(crate) fn quote(out: &mut String, text: &str) {
     out.push('"');
     for c in text.chars() {
@@ -583,14 +573,14 @@ pub(crate) fn quote(out: &mut String, text: &str) {
     out.push('"');
 }
 
-/// Whether `c` draws nothing of its own, or changes how the text around it reads, so that a scene
-/// writes it as an escape, where it shows: a control (Unicode's category Cc); a format character
-/// (Cf), such as a bidirectional control, a joiner or a tag; the line and paragraph separators (Zl
-/// and Zp); or a default-ignorable code point, which renderers may drop, such as a variation
-/// selector, a filler or a reserved code point among them. By Unicode 18.0's tables, kept here
-/// rather than read from a crate's, so that the bytes depend on no library's Unicode: a character
-/// a later Unicode adds to them stays bare until the arms below are updated, which changes the
-/// bytes of the strings that hold it.
+/// Whether `c` draws nothing or changes how the surrounding text reads, so a scene escapes it: a
+/// control (Cc); a format character (Cf) such as a bidirectional control, joiner or tag; a line or
+/// paragraph separator (Zl, Zp); or a default-ignorable code point renderers may drop, such as a
+/// variation selector, filler or reserved code point.
+///
+/// By Unicode 18.0's tables, kept here so the bytes depend on no library's Unicode. A character a
+/// later Unicode adds stays bare until the arms below are updated, which changes the bytes of
+/// strings holding it.
 fn hidden(c: char) -> bool {
     match c {
         // The C0 and C1 controls, and DEL.
@@ -628,8 +618,7 @@ fn hidden(c: char) -> bool {
     }
 }
 
-/// Refuses a name that a scene can't write: one that isn't an ASCII identifier, or is one of RON's
-/// words.
+/// Refuses a name that isn't an ASCII identifier or is one of RON's words.
 fn writable(name: &str) -> Result<()> {
     let mut bytes = name.bytes();
     let identifier = bytes
@@ -648,7 +637,6 @@ fn writable(name: &str) -> Result<()> {
     ))
 }
 
-/// The error that something opaque is where a scene can't leave it out.
 fn opaque_part() -> Error {
     Error::new(
         "reflect.opaque",
@@ -656,7 +644,7 @@ fn opaque_part() -> Error {
     )
 }
 
-/// The error that `value` isn't of its type, as a hand-written description's might not be.
+/// `value` isn't of its type, as a hand-written description's might not be.
 fn mismatch(value: &Value) -> Error {
     Error::new(
         "reflect.wrong_kind",

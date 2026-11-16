@@ -1,6 +1,6 @@
-//! What tells two worlds apart, as their hashes' content does: the first entity, component and
-//! field where they differ, which names where a replay went another way; and a world written a
-//! field a line, so that the dumps of two machines' worlds diff to the field where they part.
+//! What tells two worlds apart, as their hashes' content does: the first differing entity,
+//! component and field (where a replay diverged), and a world written a field a line, so two
+//! machines' dumps diff to the field where they part.
 
 #[cfg(feature = "dev")]
 use std::collections::{HashMap, HashSet};
@@ -25,34 +25,32 @@ pub struct Difference {
     pub entity: EntityId,
     /// Its component's type, by name; `None` where one world alone has the entity.
     pub component: Option<String>,
-    /// The field's path in the component, as [`World::get_field`] reads it: empty for the whole
-    /// component, as where one world alone has it.
+    /// The field's path, as [`World::get_field`] reads it: empty for the whole component, as
+    /// where one world alone has it.
     pub path: String,
-    /// The field's value in the world `difference` was called on; `None` where it hasn't the
-    /// entity, or its component.
+    /// The field's value in the world `difference` was called on; `None` if it lacks the entity
+    /// or component.
     pub ours: Option<Value>,
-    /// The field's value in the other world, as `ours` is.
+    /// The field's value in the other world.
     pub theirs: Option<Value>,
 }
 
 /// A [`Difference`] as a diagnostic writes it, by [`Difference::written`].
 pub(crate) struct Written {
-    /// The component's field, as [`reflect::join`] writes it: empty where one world alone has the
+    /// The component's field as [`reflect::join`] writes it; empty where one world alone has the
     /// entity.
     pub(crate) field: String,
-    /// Where it is, as a message says it: the entity's ID, and its field, if it has one.
+    /// Where it is: the entity's ID and its field, if any.
     pub(crate) at: String,
-    /// The world `difference` was called on, there: the field's value, as recordings write values,
-    /// or `none` where it hasn't the component; or, for an entity one world alone has, `alive` or
-    /// `none`.
+    /// The value in the world `difference` was called on, as recordings write values; `none`
+    /// without the component. For an entity one world alone has: `alive` or `none`.
     pub(crate) ours: String,
-    /// The other world, there, as `ours` is.
+    /// The same in the other world.
     pub(crate) theirs: String,
 }
 
 impl Difference {
-    /// Itself, as a diagnostic writes it, `ours` being the world [`World::difference`] was called
-    /// on and `theirs` the other.
+    /// As a diagnostic writes it; `ours` is the world [`World::difference`] was called on.
     pub(crate) fn written(&self, ours: &World, theirs: &World) -> Written {
         let entity = self.entity;
         let Some(component) = &self.component else {
@@ -86,18 +84,19 @@ impl Difference {
 }
 
 impl World {
-    /// The first place where this world's content and `other`'s differ, as their hashes'
-    /// [`content`](crate::WorldHash::content) tells them apart: the entities in the order of their
-    /// IDs, each one's components in the order of their types' names, and each component's fields
-    /// in the order its type declares them, down through structs, lists, arrays and vectors;
-    /// options, variants and quaternions are compared whole, as paths take them. Floats are
-    /// compared by their bits, every NaN as one and -0.0 apart from 0.0, an entity held by its ID
-    /// in each world, or as none if it's dead there, and what's opaque as the same. An entity in one
-    /// world alone differs, even without components, which the content leaves to the layout.
-    /// `None` where nothing differs, though the layouts may: where the worlds hold their entities,
-    /// and where their streams of IDs are.
+    /// The first place this world's content and `other`'s differ, as their hashes'
+    /// [`content`](crate::WorldHash::content) tells them apart.
     ///
-    /// It reads the worlds by name, and allocates, for a replay that has gone another way.
+    /// The walk goes by entity ID, component type name, then fields in declared order, down
+    /// through structs, lists, arrays and vectors. Options, variants and quaternions compare
+    /// whole, as paths take them. Floats compare by bits, every NaN as one, -0.0 apart from 0.0;
+    /// an entity by its ID in each world, or none if dead there; opaque values as equal.
+    ///
+    /// An entity in one world alone differs, even without components, which the content leaves to
+    /// the layout. `None` where nothing differs, though layouts (where entities sit, where ID
+    /// streams are) may.
+    ///
+    /// It reads by name and allocates, for a replay that has diverged.
     pub fn difference(&self, other: &World) -> Option<Difference> {
         let _zone = gg_core::zone!();
         let mut ids: Vec<EntityId> = ids(self).chain(ids(other)).collect();
@@ -106,29 +105,33 @@ impl World {
         ids.into_iter().find_map(|id| differs(id, self, other))
     }
 
-    /// The operations that take this world's entities from what scene `old` held to what scene
-    /// `new` holds, as a scene file a game loaded is saved while it runs: an entity the file holds
-    /// now created, one it held no more deleted with its descendants, a component it gives an
-    /// entity added and one it takes away removed, each field it changes set, through structs,
-    /// lists, arrays and vectors, as [`difference`](Self::difference) walks them, and a parent it
-    /// changes changed. What the world holds already, as a game's own change may have made it, is
-    /// left out, and an entity the file held that the world has deleted since is left alone, so
-    /// that the world keeps what the file doesn't change, as where its game moved an entity.
+    /// The operations taking this world from what scene `old` held to what `new` holds, as when a
+    /// scene file a game loaded is saved while it runs:
     ///
-    /// Those entities the file holds now that the world hasn't come first, alone, as
-    /// [`SceneEdit::Creates`], so that the rest may hold them once they're made: whoever applies
-    /// them asks again for the rest. So do the links of instances the file changes: a link it takes
-    /// away unlinks the instance, whose entities the rest then sets or deletes as the file holds
-    /// them; and a link it gives or changes deletes first the world's own entities that hold the
-    /// IDs the prefab gives, as an unlink leaves them, with what's under them. The rest then takes
-    /// each such instance's root, and the entities its link gives, for what the file held, as
-    /// without `old` below, since the world holds them as the link gave them.
+    /// - an entity the file now holds is created; one it held no more is deleted with its
+    ///   descendants;
+    /// - a component it gives is added, one it takes away is removed;
+    /// - each field it changes is set, as [`difference`](Self::difference) walks them;
+    /// - a parent it changes is changed.
     ///
-    /// Without `old`, as where the file as last applied no longer loads, as after a rebuild took a
-    /// field away that it holds, the world's entities are taken for what the file held: each field
-    /// of `new`'s entities that the world holds otherwise is set, and nothing is removed or deleted.
+    /// What the world holds already (a game's own change) is left out, and so is an entity the
+    /// file held that the world has since deleted. The world keeps what the file doesn't change.
     ///
-    /// Fails as [`load_scene`](Self::load_scene) does for `new`, and for `old`.
+    /// New entities come first, alone, as [`SceneEdit::Creates`], so the rest may hold them once
+    /// made; the caller asks again for the rest. So do changed instance links:
+    ///
+    /// - a removed link unlinks the instance; the rest then sets or deletes its entities as the
+    ///   file holds them;
+    /// - a given or changed link first deletes the world's own entities holding the IDs the
+    ///   prefab gives, as an unlink leaves them, with what's under them. The rest then treats
+    ///   the instance's root and link-given entities as without `old`, as the world holds them
+    ///   as the link gave them.
+    ///
+    /// Without `old` (the last applied file no longer loads, say after a rebuild removed a field)
+    /// the world's entities stand for what the file held: each field of `new`'s entities the
+    /// world holds otherwise is set, and nothing is removed or deleted.
+    ///
+    /// Fails like [`load_scene`](Self::load_scene) for `new` and `old`.
     #[cfg(feature = "dev")]
     pub(crate) fn scene_edit(&self, old: Option<&str>, new: &str) -> Result<SceneEdit> {
         let _zone = gg_core::zone!();
@@ -170,8 +173,7 @@ impl World {
             }
             let linked = link(&after, after.entity(id));
             if let Some(entity) = self.entity(id) {
-                // A link the file changes, which the world takes first, so that the rest may set
-                // what the prefab gives.
+                // A link the file changes, taken first so the rest may set what the prefab gives.
                 let was = match old {
                     Some(_) => link(&before, before.entity(id)),
                     None => link(self, Some(entity)),
@@ -182,14 +184,12 @@ impl World {
                     continue;
                 }
                 let Some(value) = linked else {
-                    // Its entities stay, its own, which the rest sets as the file holds them, or
-                    // deletes.
+                    // Its entities stay its own; the rest sets or deletes them as the file holds.
                     creates.push(Operation::Unlink { entity: id });
                     continue;
                 };
-                // The entities of its own that hold the IDs the link gives, as an unlink left
-                // them, which the file holds as the prefab's: an entity of its own under one goes
-                // with it.
+                // Its own entities that hold the IDs the link gives, as an unlink left them: the
+                // file holds them as the prefab's; an entity of its own under one goes with it.
                 let mut expanding = Expanding::default();
                 let giving = self.instance(entity, &mut expanding)?;
                 let giving = giving.map_or_else(Vec::new, |instance| instance.ids);
@@ -231,13 +231,13 @@ impl World {
                 continue;
             }
             let parent = parent_id(&after, after.entity(id).expect("alive"));
-            // Under an entity the game has deleted, which the world has moved on from.
+            // Under an entity the game deleted: the world moved on.
             if parent.is_some_and(|parent| self.entity(parent).is_none() && !made.contains(&parent))
             {
                 continue;
             }
             made.push(id);
-            // With its link, so that the entities its prefab gives come with it.
+            // With its link, so the entities its prefab gives come with it.
             let components = linked.map(|value| (reflect::Ident::from(LINK), value));
             creates.push(Operation::Create {
                 entity: Some(id),
@@ -248,13 +248,13 @@ impl World {
         if !creates.is_empty() {
             return Ok(SceneEdit::Creates(creates));
         }
-        // The entities the world's instances give, whose links the file's match now, which come and
-        // go with them; an entity the file gave through a link the world has let go of since is
-        // the world's own, as any other.
+        // The entities the world's instances give, whose links match the file's now; they come and
+        // go with them. One the file gave through a link the world has since dropped is the
+        // world's own.
         let given_now = given(self)?;
-        // The roots of the instances whose links the file changed, which the world has taken, and
-        // the entities those links give now, which the world holds as the links gave them, not as
-        // the file held them: each is taken for what the file held, as without `old`.
+        // Roots of instances whose links the file changed and the world took, with the entities
+        // those links give now: the world holds them as the links gave them, so each stands for
+        // what the file held, as without `old`.
         let mut relinked = HashSet::new();
         if old.is_some() {
             let mut expanding = Expanding::default();
@@ -276,12 +276,12 @@ impl World {
         }
         let mut operations = Vec::new();
         for &id in &order {
-            // Deleted since, which the world has moved on from.
+            // Deleted since: the world moved on.
             let Some(entity) = self.entity(id) else {
                 continue;
             };
             let b = after.entity(id).expect("alive");
-            // What the file held of the entity, or without it, the world's.
+            // What the file held of the entity; without `old`, the world's.
             let (held, a) = match old {
                 Some(_) if !relinked.contains(&id) => (&before, before.entity(id)),
                 _ => (self, Some(entity)),
@@ -348,8 +348,8 @@ impl World {
                 operations.push(Operation::Reparent { entity: id, parent });
             }
         }
-        // The file's entities no more, but those that will be under another of them, once the
-        // reparents before have moved what they move, which goes with it.
+        // The file's entities no more, except those that will be under another of them once the
+        // reparents above have moved what they move: those go with it.
         let mut gone: Vec<EntityId> = scene_ids(&before)
             .filter(|&id| after.entity(id).is_none() && self.entity(id).is_some())
             .filter(|id| !given_now.contains(id))
@@ -383,20 +383,18 @@ impl World {
         Ok(SceneEdit::Changes(operations))
     }
 
-    /// Checks that the scene `text` would load into this world, as [`load_scene`](Self::load_scene)
-    /// would load it into the world without its entities.
+    /// Checks that scene `text` would load, by [`load_scene`](Self::load_scene) into this world
+    /// without its entities.
     ///
-    /// Fails as `load_scene` does, but for the IDs the world has.
+    /// Fails like `load_scene`, except for IDs the world has.
     pub(crate) fn scene_loads(&self, text: &str) -> gg_core::Result<()> {
         self.emptied().load_scene(text).map(drop)
     }
 
-    /// The scene `text` in its canonical form: loaded into this world without its entities, as
-    /// [`scene_loads`](Self::scene_loads) checks it would, and saved again, as
-    /// [`save_scene`](Self::save_scene) writes it, so that a text written by hand compares with
-    /// one the engine saves.
+    /// Scene `text` in canonical form: loaded as [`scene_loads`](Self::scene_loads) checks, saved
+    /// again by [`save_scene`](Self::save_scene), so hand-written text compares with engine-saved.
     ///
-    /// Fails as `scene_loads` does, and as `save_scene` does.
+    /// Fails like `scene_loads` and `save_scene`.
     #[cfg(feature = "dev")]
     pub(crate) fn scene_canonical(&self, text: &str) -> Result<String> {
         let mut loaded = self.emptied();
@@ -404,11 +402,11 @@ impl World {
         loaded.save_scene(&roots)
     }
 
-    /// The world's content as text, a line for each field, as [`difference`](Self::difference)
-    /// walks them: the entity's ID, the component's type and the field's path, joined as an error
-    /// names them, such as `Sprite.color.x`, and the value, as a recording writes it, with every NaN
-    /// as one, as the hash takes them; and a line of its ID alone for an entity without components.
-    /// Two machines' dumps of worlds that should be the same, diffed, give the field where they part.
+    /// The world's content as text, a line per field as [`difference`](Self::difference) walks
+    /// them: entity ID, component and field path as an error names them (`Sprite.color.x`), and
+    /// the value as a recording writes it, every NaN as one. An entity without components gets
+    /// its ID alone. Two machines' dumps of worlds that should match, diffed, give where they
+    /// part.
     pub(crate) fn dump(&self) -> String {
         let _zone = gg_core::zone!();
         let mut ids: Vec<EntityId> = ids(self).collect();
@@ -431,29 +429,29 @@ impl World {
     }
 }
 
-/// What [`World::scene_edit`] finds: the entities to create first, or, once they're made, the rest.
+/// What [`World::scene_edit`] finds: entities to create first, then the rest.
 #[cfg(feature = "dev")]
 #[derive(Debug, PartialEq)]
 pub(crate) enum SceneEdit {
-    /// Creates of the entities a scene holds that the world hasn't, bare, each parent's before its
-    /// children's, under its parent.
+    /// Bare creates, under their parents, of entities the scene holds and the world lacks; each
+    /// parent before its children.
     Creates(Vec<Operation>),
-    /// With every entity there, the rest: adds, removes, sets and reparents, then deletes.
+    /// With every entity there: adds, removes, sets, reparents, then deletes.
     Changes(Vec<Operation>),
 }
 
-/// The name of [`Parent`](super::Parent)'s type, which reparents change rather than sets.
+/// The name of [`Parent`](super::Parent)'s type, which reparents change, not sets.
 #[cfg(feature = "dev")]
 const PARENT: &str = "Parent";
 
-/// The name of [`PrefabRoot`](crate::PrefabRoot)'s type, which a scene edit changes before the
-/// rest, as the entities an instance's prefab gives come with it.
+/// The name of [`PrefabRoot`](crate::PrefabRoot)'s type, changed before the rest as the
+/// instance's prefab entities come with it.
 #[cfg(feature = "dev")]
 const LINK: &str = "PrefabRoot";
 
-/// The IDs of the entities the instances in `world` give, as [`World::claims`] finds them.
+/// The IDs of the entities `world`'s instances give, per [`World::claims`].
 ///
-/// Fails as an instance's template does.
+/// Fails if an instance's template does.
 #[cfg(feature = "dev")]
 fn given(world: &World) -> Result<HashSet<EntityId>> {
     let tops = world.query::<Entity>();
@@ -473,8 +471,8 @@ fn ids(world: &World) -> impl Iterator<Item = EntityId> + '_ {
     ids.map(|id| id.expect("a living entity has an ID"))
 }
 
-/// The IDs of `world`'s entities that a scene names, in no order: all but models' nodes, which the
-/// world spawns under their roots as it spawns the roots, and edits no other way.
+/// The IDs of `world`'s entities a scene names, in no order: all but models' nodes, which the
+/// world spawns with their roots.
 #[cfg(feature = "dev")]
 fn scene_ids(world: &World) -> impl Iterator<Item = EntityId> + '_ {
     let entities = world.query::<Entity>();
@@ -482,8 +480,7 @@ fn scene_ids(world: &World) -> impl Iterator<Item = EntityId> + '_ {
     named.map(|entity| world.id(entity).expect("a living entity has an ID"))
 }
 
-/// The paths, from `path`, of the parts where `a`, in `ours`, and `b`, in `theirs`, differ, each
-/// with `b`'s value there, as [`first`] finds the first.
+/// Like [`first`], but every path under `path` where `a` and `b` differ, with `b`'s value.
 #[cfg(feature = "dev")]
 fn changes(
     a: &Value,
@@ -532,8 +529,8 @@ fn changes(
     }
 }
 
-/// `value`, of world `from`, with each entity it holds the one of the same ID in world `to`, or a
-/// dead one if none is alive there, as a game's own reference to an entity it deleted is.
+/// `value` of world `from` with each entity it holds replaced by the one of the same ID in `to`,
+/// or a dead one, like a game's reference to a deleted entity.
 #[cfg(feature = "dev")]
 fn rehome(value: &Value, from: &World, to: &World) -> Value {
     let fields = |fields: &[(reflect::Ident, Value)]| {
@@ -557,13 +554,11 @@ fn rehome(value: &Value, from: &World, to: &World) -> Value {
     }
 }
 
-/// The names of the types of `entity`'s components, which is alive.
 fn components(world: &World, entity: Entity) -> impl Iterator<Item = &str> {
     world.components_of(entity).expect("the entity is alive")
 }
 
-/// Where the entity whose ID is `id`, which one world at least has, first differs between `ours`
-/// and `theirs`.
+/// Where entity `id`, which a world at least has, first differs between `ours` and `theirs`.
 fn differs(id: EntityId, ours: &World, theirs: &World) -> Option<Difference> {
     let at = |component: Option<&str>, path: String, ours, theirs| {
         let component = component.map(str::to_owned);
@@ -594,8 +589,8 @@ fn differs(id: EntityId, ours: &World, theirs: &World) -> Option<Difference> {
     None
 }
 
-/// The path, from `path`, of the first part where `a`, in `ours`, and `b`, in `theirs`, differ,
-/// and their values there.
+/// The first path under `path` where `a` (in `ours`) and `b` (in `theirs`) differ, with their
+/// values.
 fn first(
     a: &Value,
     ours: &World,
@@ -632,8 +627,7 @@ fn first(
     }
 }
 
-/// Whether `a`, in `ours`, and `b`, in `theirs`, are the same, as the world's hash tells values
-/// apart.
+/// Whether `a` (in `ours`) and `b` (in `theirs`) are the same, as the hash tells values apart.
 pub(super) fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
     let floats = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(&x, &y)| same_f32(x, y));
     let fields = |x: &[(reflect::Ident, Value)], y: &[(reflect::Ident, Value)]| {
@@ -679,7 +673,7 @@ pub(super) fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
     }
 }
 
-/// By their bits, every NaN as one, and -0.0 apart from 0.0, as the hash takes them.
+/// By bits, every NaN as one, -0.0 apart from 0.0, as the hash takes them.
 fn same_f32(x: f32, y: f32) -> bool {
     x.to_bits() == y.to_bits() || x.is_nan() && y.is_nan()
 }
@@ -689,12 +683,12 @@ fn same_f64(x: f64, y: f64) -> bool {
     x.to_bits() == y.to_bits() || x.is_nan() && y.is_nan()
 }
 
-/// Whether two structs' or variants' fields are the same fields, in the same order.
+/// Whether two structs' or variants' fields have the same names, in order.
 fn same_names(x: &[(reflect::Ident, Value)], y: &[(reflect::Ident, Value)]) -> bool {
     x.len() == y.len() && x.iter().zip(y).all(|((m, _), (n, _))| m == n)
 }
 
-/// Writes a line to `out` for each field of `value`, at `at`, as [`World::dump`] does.
+/// Writes a line per field of `value` at `at`, for [`World::dump`].
 fn leaves(out: &mut String, world: &World, at: &str, value: &Value) {
     let floats = |out: &mut String, xs: &[f32]| {
         for (name, &x) in reflect::COMPONENTS.into_iter().zip(xs) {
@@ -745,8 +739,8 @@ mod tests {
     #[derive(Clone, Copy, crate::Component)]
     struct Count(u32);
 
-    /// Two worlds of the same entities, by their IDs, the second loaded from the first's scene
-    /// into other slots: one that holds another, which is a third's child.
+    /// Two worlds of the same entities by ID, the second loaded from the first's scene into other
+    /// slots: one holds another, a third's child.
     fn twins() -> (World, World, [Entity; 3]) {
         let mut world = World::seeded(5);
         let child = world.spawn(Transform::IDENTITY);
@@ -768,7 +762,6 @@ mod tests {
         (world, other, [holder, child, parent])
     }
 
-    /// The twin in `other` of `entity`, of `world`.
     fn twin(world: &World, other: &World, entity: Entity) -> Entity {
         other
             .entity(world.id(entity).expect("alive"))
@@ -912,10 +905,9 @@ mod tests {
         assert_eq!(difference.path, "0");
     }
 
-    /// A scene file's edit takes the world's entities from what it held to what it holds, keeping
-    /// what the world changed that the file doesn't, and leaving alone what the world deleted:
-    /// entities it holds now made first, which the rest may hold, then sets, an add, a remove, a
-    /// reparent and a delete, all of which one undo takes back. Asked again, it finds nothing left.
+    /// A scene edit keeps what the world changed that the file doesn't and leaves alone what the
+    /// world deleted: new entities first, then sets, an add, a remove, a reparent and a delete,
+    /// which one undo reverses. Asked again, it finds nothing left.
     #[cfg(feature = "dev")]
     #[test]
     fn a_scene_edit_takes_the_world_from_the_files_old_text_to_its_new() {
@@ -927,8 +919,8 @@ mod tests {
         let d = file.spawn(Count(4));
         file.set_parent(b, Some(a)).expect("no cycle");
         let old = file.save_scene(&[a, c, d]).expect("saved");
-        // The game's world, loaded from it, which the game changes: it turns a, takes c away and
-        // gives d a transform.
+        // The game's world, loaded from it: the game turns a, takes c away and gives d a
+        // transform.
         let mut world = World::seeded(11);
         world.register::<Transform>().expect("registered");
         world.register::<Everything>().expect("registered");
@@ -946,7 +938,7 @@ mod tests {
             .insert(here(&world, d_id), Transform::IDENTITY)
             .expect("alive");
         // The file saved again: a moved and counted on, b gone, c moved, d under a without its
-        // count, and two entities more, one under the other, which holds a, and the other it.
+        // count, and two entities more, e holding a and its child f holding e.
         let moved = |x| Transform {
             translation: DVec3::new(x, 0.0, 0.0),
             ..Transform::IDENTITY
@@ -1045,9 +1037,9 @@ mod tests {
         log.clear(&mut world);
     }
 
-    /// A scene file's edit leaves alone what the game took away that the file doesn't change, as a
-    /// component, and what goes under an entity the game deleted; and deletes what the file no
-    /// longer holds under an entity it moves out from under another it deletes.
+    /// A scene edit leaves alone a component the game took away that the file doesn't change, and
+    /// what goes under an entity the game deleted. It deletes what the file no longer holds under
+    /// an entity it moves out from under another it deletes.
     #[cfg(feature = "dev")]
     #[test]
     fn a_scene_edit_leaves_alone_what_the_game_took_away() {

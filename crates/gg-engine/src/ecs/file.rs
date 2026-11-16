@@ -1,15 +1,23 @@
-//! The world saved whole as text, and loaded back, as a snapshot file holds it, so that a restart in
-//! another process goes on where the world was: each slot under its generation, the free ones in
-//! the order they're taken, and the rest that hold no entity, those a log keeps vacant and those
-//! retired, so that every slot is named, and a load makes no more than its lines name; each table
-//! in the order it was made, empty ones too, and its rows in their order, each its entity's slot,
-//! ID and components' values, as a recording's text writes values, by their fields' names; each
-//! parent's children in their order; the stream the IDs come from; and the resources that save
-//! themselves, as [`Saved`](super::Saved) says. Loaded, it's the world saved, hash for hash, but
-//! for the slots a log kept vacant, which no log in another process gives back, so that they're
-//! freed; and for what's opaque, which comes back only into a process whose layers added the same
-//! assets in the same order, and is otherwise left out. A component whose type changed since is
-//! matched to the type as it is by its fields' names, as [`World::load_whole`] says.
+//! The world saved whole as text and loaded back, so a restart in another process goes on where
+//! the world was. A snapshot holds:
+//!
+//! - Each slot with its generation: the free ones in the order they're taken, and every other
+//!   entity-less slot (kept vacant by a log, or retired), so a load makes no more slots than lines
+//!   name.
+//! - Each table in creation order, empty ones too, with its rows in order: the entity's slot, ID
+//!   and component values, written as a recording writes values, by field names.
+//! - Each parent's children in order.
+//! - The ID stream.
+//! - The resources that save themselves ([`Saved`](super::Saved)).
+//!
+//! A load is the world saved, hash for hash, except:
+//!
+//! - Slots a log kept vacant are freed: no log in another process gives them back.
+//! - What's opaque comes back only into a process whose layers added the same assets in the same
+//!   order; otherwise it's left out.
+//!
+//! A component whose type changed since is matched to the new type by field names
+//! ([`World::load_whole`]).
 
 use std::any::{TypeId, type_name};
 use std::collections::{BTreeMap, HashMap};
@@ -28,8 +36,8 @@ use crate::cells::Seen;
 use crate::recording::text::Text;
 use crate::reflect::{Field, Ident, Meta as Hints, Shape, Type, Value};
 
-/// What a load changed of what it read, to match the types as they are: each change once, with how
-/// many times it came, for warnings that say what a restart gave up.
+/// What a load changed to match the types as they are: each change once, with its count, for
+/// warnings about what a restart gave up.
 #[derive(Debug, Default)]
 pub(crate) struct Changes(BTreeMap<String, u64>);
 
@@ -42,7 +50,7 @@ impl Changes {
         self.0.is_empty()
     }
 
-    /// Each change, with how many times it came, in the order of their text.
+    /// Each change with its count, in text order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, u64)> {
         self.0
             .iter()
@@ -50,15 +58,13 @@ impl Changes {
     }
 }
 
-/// A table as a load reads it: its line's number, its types' names, and its rows.
 struct ReadTable<'t> {
     line: usize,
     types: Vec<&'t str>,
     rows: Vec<ReadRow<'t>>,
 }
 
-/// A row as a load reads it: its line's number, its entity's slot and ID, its components' values,
-/// in its table's order, and the opaque state of those that keep one, by their place in it.
+/// A row as a load reads it: values in table order, and opaque state by column place.
 struct ReadRow<'t> {
     line: usize,
     slot: u32,
@@ -68,25 +74,24 @@ struct ReadRow<'t> {
 }
 
 impl World {
-    /// Writes the world whole after `out`, a line at a time, as the module says, its values as a
-    /// recording's text writes them.
+    /// Writes the world whole, as the module says.
     ///
-    /// Fails as a resource's [`Saved::save`](super::Saved::save) does; with `snapshot.bad_name`
-    /// for a component's or a saved resource's type whose name isn't a word, which its line
-    /// couldn't be read by; with `snapshot.too_deep` for a value nested deeper than a scene's may,
-    /// as no load reads; and with `snapshot.line_break` for opaque state or a resource's text that
-    /// breaks its line.
+    /// Fails like [`Saved::save`](super::Saved::save), and with:
+    ///
+    /// - `snapshot.bad_name`: a component's or saved resource's type name isn't a word, so its line
+    ///   wouldn't read back.
+    /// - `snapshot.too_deep`: a value nests deeper than a scene's limit, which no load reads.
+    /// - `snapshot.line_break`: opaque state or a resource's text breaks its line.
     pub(crate) fn save_whole(&self, out: &mut String) -> Result<()> {
         self.save_seen(out, None)
     }
 
-    /// Writes what `seen` sees of the world after `out`, as [`save_whole`](Self::save_whole)
-    /// writes the world, as a server's client's state: the entities it hides left out, each
-    /// slot of theirs written as retired, at the highest generation, so that a load spawns no
-    /// entity there and the entities spawned after take the slots this world's would; and its
-    /// cells' state in place of the world's, in a world that has one. `None` is the world whole.
+    /// Like [`save_whole`](Self::save_whole), but only what `seen` sees: a server's client's state.
+    /// Hidden entities' slots are written retired at the highest generation, so a load spawns
+    /// nothing there and later spawns take the same slots as here. In a world with cells, their
+    /// state replaces the world's. `None` sees everything.
     ///
-    /// Fails as `save_whole` does.
+    /// Fails like `save_whole`.
     pub(crate) fn save_seen(&self, out: &mut String, seen: Option<&Seen>) -> Result<()> {
         use std::fmt::Write as _;
 
@@ -103,9 +108,9 @@ impl World {
         Ok(())
     }
 
-    /// Writes the head of what [`save_seen`](Self::save_seen) writes after `out`, its lines before
-    /// the tables': the stream, the slots, their generations, and the free and the vacant ones, of
-    /// the world but for the entities whose slots `hidden` says, as [`Seen`]'s does.
+    /// Writes [`save_seen`](Self::save_seen)'s lines before the tables: the stream, slots,
+    /// generations, and free and vacant slots, with the entities `hidden` marks hidden as
+    /// [`Seen`]'s do.
     pub(crate) fn save_head(&self, out: &mut String, hidden: &[bool]) {
         use std::fmt::Write as _;
 
@@ -137,11 +142,10 @@ impl World {
         out.push('\n');
     }
 
-    /// Writes table `table` after `out`, as [`save_seen`](Self::save_seen) writes it: its `table`
-    /// line and its rows, each row's `opaque` lines after it, but for the entities whose slots
-    /// `hidden` says.
+    /// Writes table `table`: its `table` line and rows, each followed by its `opaque` lines,
+    /// skipping entities `hidden` marks.
     ///
-    /// Fails as `save_seen` does for a table's names and values.
+    /// Fails like `save_seen` for names and values.
     pub(crate) fn save_table(&self, out: &mut String, table: usize, hidden: &[bool]) -> Result<()> {
         use std::fmt::Write as _;
 
@@ -190,15 +194,14 @@ impl World {
         Ok(())
     }
 
-    /// Writes the `children` lines of what [`save_seen`](Self::save_seen) writes after `out`: each
-    /// parent's, in the order of the tables and their rows, but for the entities whose slots
-    /// `hidden` says.
+    /// Writes [`save_seen`](Self::save_seen)'s `children` lines: each parent's, in table and row
+    /// order, skipping entities `hidden` marks.
     pub(crate) fn save_children(&self, out: &mut String, hidden: &[bool]) {
         use std::fmt::Write as _;
 
         let text = "a string takes any text";
         let id = |entity: Entity| self.id(entity).expect("a row's entity is alive");
-        // A view hides an entity with what's under it, so that a parent shown has its children.
+        // A view hides an entity with its subtree, so a shown parent has all its children.
         for table in &self.tables {
             let shown = |&&entity: &&Entity| !super::hash::hidden(hidden, entity);
             for &entity in table.entities().iter().filter(shown) {
@@ -215,13 +218,12 @@ impl World {
         }
     }
 
-    /// The text of each resource that saves itself, by its name, as [`save_seen`](Self::save_seen)
-    /// writes its `resource` lines, in the order their types first came: of what `seen` sees, as
-    /// [`Saved::save_seen`](super::Saved::save_seen) writes a resource for it, and its cells'
-    /// state in place of the world's.
+    /// The text of each self-saving resource, by name, for [`save_seen`](Self::save_seen)'s
+    /// `resource` lines, in the order their types first came. Each shows what `seen` sees
+    /// ([`Saved::save_seen`](super::Saved::save_seen)), with cells' state replacing the world's.
     ///
-    /// Fails as a resource's `save_seen` does, with `snapshot.bad_name` for a name that isn't a
-    /// word, and with `snapshot.line_break` for text with a line break.
+    /// Fails like a resource's `save_seen`; `snapshot.bad_name` for a name that isn't a word,
+    /// `snapshot.line_break` for text with a line break.
     pub(crate) fn save_resources(
         &self,
         seen: Option<&Seen>,
@@ -229,25 +231,28 @@ impl World {
         self.resources.save(self, seen)
     }
 
-    /// Puts the world that `lines` give, as [`save_whole`](Self::save_whole) wrote them, each with
-    /// its number in its file, in place of this one's entities, resources and stream of IDs,
-    /// keeping its component types and its assets; and returns what it changed of what it read to
-    /// match the types as they are, which leaves the world otherwise than it was saved. Where a
-    /// component's type changed since, its value is matched to the type by its fields' and its
-    /// variants' names: a field the type hasn't is dropped, and one it has that the value hasn't
-    /// takes its default; a number of another kind is taken where it's exactly a number of the
-    /// field's; a texture is found by its name or a path to its file; and an entity by its ID. A
-    /// component whose value that can't give, or whose type no longer is, is left out, its entity
-    /// going on without it,
-    /// as is one opaque as a whole unless `opaque` says the process's layers added the same assets
-    /// in the same order as the saved one's did, so that its state names them. A resource is made
-    /// by the [`Saved`](super::Saved) type of its name, and left out if there's none; one the world
-    /// holds of a type the file holds none of stays, as the layers made it as they loaded.
+    /// Replaces this world's entities, resources and ID stream with the world `lines` give (each
+    /// with its file line number, as [`save_whole`](Self::save_whole) wrote them), keeping its
+    /// component types and assets. Returns what it changed to match the types as they are, so the
+    /// world may differ from what was saved.
+    ///
+    /// A component whose type changed is matched by field and variant names:
+    ///
+    /// - A field the type lacks is dropped; one the value lacks takes its default.
+    /// - A number of another kind is taken where it's exactly a number of the field's.
+    /// - A texture is found by name or file path; an entity by ID.
+    /// - A component whose value can't be given, or whose type is gone, is left out; its entity
+    ///   goes on without it.
+    ///
+    /// A component opaque as a whole is left out too, unless `opaque` says the process's layers
+    /// added the same assets in the same order, so its state names them. A resource is made by the
+    /// [`Saved`](super::Saved) type of its name, and left out if there's none. A held resource
+    /// whose type the file lacks stays as the layers made it.
     ///
     /// Fails, changing nothing, with `snapshot.syntax` for a line that isn't one, and with
-    /// `snapshot.bad` for lines that don't make a world: a count of slots other than those they
-    /// name, a slot past the slots, one given twice, an ID given twice, a child given two parents,
-    /// a parent its child doesn't name, or an entity among its own ancestors.
+    /// `snapshot.bad` for lines that don't make a world: a slot count other than the slots named,
+    /// a slot past the count or given twice, an ID given twice, a child with two parents, a parent
+    /// its child doesn't name, or an entity among its own ancestors.
     pub(crate) fn load_whole<'t>(
         &mut self,
         lines: impl IntoIterator<Item = (usize, &'t str)>,
@@ -440,8 +445,8 @@ impl World {
                 return Err(bad(row.line, format!("entity {} is given twice", row.id)));
             }
         }
-        // Each table in its place, empty ones too, so that the tables made afterwards, of rows that
-        // lost a component, come after them.
+        // Each table in place, empty ones too, so tables made later (of rows that lost a component)
+        // come after.
         let mut changes = Changes::default();
         let mut mapped = Vec::with_capacity(tables.len());
         for table in &tables {
@@ -529,8 +534,8 @@ impl World {
                 }
             }
         }
-        // Each entity's parents end at one without a parent, or every walk up the hierarchy would
-        // go round for good: each slot is unseen, on the walk going on, or reaches the top.
+        // Each entity's parents must end at one without a parent, or a walk up would never end:
+        // each slot is unseen (0), on the current walk (1), or known to reach the top (2).
         let (mut walked, mut walk) = (vec![0u8; slots], Vec::new());
         for &entity in world.tables.iter().flat_map(|table| table.entities()) {
             let mut at = Some(entity);
@@ -550,8 +555,7 @@ impl World {
                 walked[up.slot()] = 2;
             }
         }
-        // Those a log kept vacant, which no log here gives back, in their order; a retired one
-        // stays retired.
+        // Log-vacant slots are freed in order, as no log here gives them back; retired ones stay.
         vacant.sort_unstable();
         for index in vacant {
             world.free_slot(index);
@@ -571,8 +575,8 @@ impl World {
             }
         }
         world.resources.keep(std::mem::take(&mut self.resources));
-        // Models' nodes as the snapshot kept them, code's changes among them, but for their draws,
-        // which a run of other assets leaves out, as it leaves out what's opaque.
+        // Models' nodes as kept, code's changes included, but not their draws: a run of other
+        // assets leaves those out, like other opaque state.
         if !opaque {
             world.redraw_nodes();
         }
@@ -580,13 +584,12 @@ impl World {
         Ok(changes)
     }
 
-    /// The component of type `T` that `text` gives, a value as a recording's text writes values,
-    /// written for `T` as it was, matched to `T` as it is as [`load_whole`](Self::load_whole)
-    /// matches components: for a resource that keeps components, as physics keeps what its last
-    /// step left in them.
+    /// The `T` that `text` gives: a recording-style value written for `T` as it was, matched to `T`
+    /// as it is, like [`load_whole`](Self::load_whole). For a resource that keeps components, as
+    /// physics keeps what its last step left in them.
     ///
-    /// Fails with `snapshot.syntax` for text that isn't a value, and with `snapshot.changed` for one
-    /// that no longer makes a `T`, or if `T` isn't registered.
+    /// Fails with `snapshot.syntax` for text that isn't a value, and `snapshot.changed` if it no
+    /// longer makes a `T` or `T` isn't registered.
     pub(crate) fn component_from_text<T: Component>(&self, text: &str) -> Result<T> {
         let changed = |why: String| Error::new("snapshot.changed", why);
         let parsed = Text::parse(text, 1)
@@ -602,11 +605,11 @@ impl World {
     }
 }
 
-/// The value of type `ty`, under `hints`, its field's, that `text`, written for the type as it was,
-/// gives as the type is, as [`World::load_whole`] matches them, in `world`, whose entities are all
-/// there, noting in `changes` what it changed of it on the way, at `path`. A note says what kind of
-/// value it was, never the value, and a list's or an array's elements are all at `[..]`, so that
-/// one change to a type is noted once, however many values it changed.
+/// The value of type `ty` (under its field's `hints`) that `text`, written for the type as it was,
+/// gives as the type is, matched as [`World::load_whole`] does, in `world`, whose entities are all
+/// there. Notes each change in `changes` at `path`. A note names the value's kind, never the value,
+/// and list or array elements share `[..]`, so one change to a type is noted once however many
+/// values it changed.
 ///
 /// Fails, saying why, where it gives none, as for a variant the type no longer has.
 fn migrate(
@@ -619,8 +622,8 @@ fn migrate(
 ) -> Result<Value, String> {
     let types = world.components.types();
     let unheld = || "it's no longer a number its type holds".to_owned();
-    // A number taken as one of another kind, which the hash digests otherwise, is noted, so that a
-    // restore whose values are all as they were but for it isn't taken to have lost something.
+    // A number taken as another kind hashes differently, so it's noted: a restore otherwise equal
+    // isn't mistaken for a lossy one.
     let mut converted = |to: &str| {
         changes.note(format!("`{path}`: its `{}` taken as {to}", text.kind()));
     };
@@ -659,8 +662,8 @@ fn migrate(
         }
         (Type::F32, &Text::F32(x)) => Value::F32(x),
         (Type::F64, &Text::F64(x)) => Value::F64(x),
-        // Compared in `i128`, which holds every integer of 64 bits, and the cast back of a float
-        // past them, so that a cast that saturates doesn't pass for exact.
+        // Compared in `i128`, which holds every 64-bit integer and a float's cast back, so a
+        // saturating cast isn't taken for exact.
         (Type::F32, Text::F64(_) | Text::Int(_) | Text::UInt(_)) => {
             let x = match *text {
                 Text::F64(x) if x.is_nan() || f64::from(x as f32) == x => Some(x as f32),
@@ -699,8 +702,8 @@ fn migrate(
             if rotation.is_normalized() {
                 Value::Quat(rotation)
             } else if length.is_finite() && length > 0.0 {
-                // As rounding takes one off unit length that's multiplied by others tick after
-                // tick, which a rotation can't be set to.
+                // Rounding takes a rotation off unit length as it's multiplied tick after tick,
+                // which a rotation can't be set to.
                 changes.note(format!(
                     "`{path}`: it wasn't a unit quaternion, so it's normalized"
                 ));
@@ -804,8 +807,8 @@ fn migrate(
     Ok(value)
 }
 
-/// The values of `fields` that `given` gives, matched by name as [`migrate`] matches them: each
-/// that `given` hasn't, or whose value gives none, at its default.
+/// The values of `fields` that `given` gives, matched by name as [`migrate`] does; each field
+/// `given` lacks, or whose value gives none, takes its default.
 ///
 /// Fails, saying why, if such a field has no default.
 fn fields_of(
@@ -858,18 +861,17 @@ fn fields_of(
     Ok(values)
 }
 
-/// A default, or why there's none.
 fn default(made: Result<Value>) -> Result<Value, String> {
     made.map_err(|error| format!("{error:#}"))
 }
 
-/// `x` as an integer, if it's exactly one: a cast that rounds it, or saturates, gives another.
+/// `x` as an integer, if it's exactly one: a cast that rounds or saturates gives another.
 fn whole(x: f64) -> Option<i128> {
     let n = x as i128;
     (n as f64 == x).then_some(n)
 }
 
-/// Refuses `name`, a type's, which a snapshot's lines split at whitespace, unless it's a word.
+/// Refuses a type's `name` unless it's a word: a snapshot's lines split at whitespace.
 pub(super) fn one_word(name: &str) -> Result<()> {
     if !name.is_empty() && !name.contains(char::is_whitespace) {
         return Ok(());
@@ -880,7 +882,7 @@ pub(super) fn one_word(name: &str) -> Result<()> {
     ))
 }
 
-/// Refuses `text`, what `what` keeps on a line of a snapshot's, if it breaks the line.
+/// Refuses `text`, which `what` keeps on a snapshot's line, if it breaks the line.
 pub(super) fn one_line(text: &str, what: &str) -> Result<()> {
     if !text.contains(['\n', '\r']) {
         return Ok(());
@@ -891,8 +893,7 @@ pub(super) fn one_line(text: &str, what: &str) -> Result<()> {
     ))
 }
 
-/// How many levels `value` nests, as [`MAX_DEPTH`] counts them: it's the first, and each value it
-/// holds a level deeper than it.
+/// How many levels `value` nests, counted as [`MAX_DEPTH`] counts.
 fn depth(value: &Value) -> u32 {
     let inner = match value {
         Value::Option(Some(value)) => depth(value),
@@ -918,13 +919,11 @@ mod tests {
     use crate::reflect::tests::{Everything, same_snapshots, snapshot};
     use crate::{Component, Log, Operation, Reflect, Saved, Sprite, Transform, Writable};
 
-    /// `text`'s lines, each with its number.
     fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
         (1..).zip(text.lines())
     }
 
-    /// A world of the fixture's types, registered in its order, sharing `assets`, which saves
-    /// [`Count`].
+    /// The fixture's types in its registration order, `from`'s assets, and saved [`Count`].
     fn fixture_types(seed: u64, from: &World) -> World {
         let mut world = World::seeded(seed);
         let registered = [
@@ -941,7 +940,6 @@ mod tests {
         world
     }
 
-    /// A resource that saves itself.
     #[derive(Clone, Debug, PartialEq)]
     struct Count(u32);
 
@@ -960,11 +958,9 @@ mod tests {
         }
     }
 
-    /// A world loaded from its file is the world saved: the same slots under the same
-    /// generations, the free ones in the same order, the same entities under their handles and
-    /// IDs, in the same tables and rows, with the same values, parents and children, the same
-    /// stream of IDs to come, the resources that save themselves, and so the same hash; and it
-    /// goes on as the world saved does, spawning the same handles with the same IDs.
+    /// A loaded world equals the saved one: slots, generations, free order, handles, IDs, tables,
+    /// rows, values, hierarchy, ID stream, saved resources, hash. Later spawns give the same
+    /// handles and IDs.
     #[test]
     fn a_world_loaded_from_its_file_is_the_world_saved() {
         let mut x = fixture();
@@ -980,8 +976,7 @@ mod tests {
         let mut text = String::new();
         x.world.save_whole(&mut text).expect("saved");
         let mut loaded = fixture_types(99, &x.world);
-        // As layers make them as they load: the file's of a type it saves takes the place of the
-        // world's, and one of a type it doesn't stays.
+        // As layers make them: the file's resource replaces the world's of its type; others stay.
         loaded.insert_resource(Count(0));
         loaded.insert_resource("loaded");
         let changes = loaded.load_whole(lines(&text), true).expect("loaded");
@@ -1017,8 +1012,7 @@ mod tests {
         assert_eq!(loaded.entity_ids, x.world.entity_ids, "a spawn after");
     }
 
-    /// The slots a log keeps vacant for its undo are freed, since no log in the world loaded gives
-    /// them back.
+    /// Slots a log keeps vacant for undo are freed: no log in the loaded world gives them back.
     #[test]
     fn the_slots_a_log_kept_are_freed() {
         let mut x = fixture();
@@ -1038,7 +1032,7 @@ mod tests {
         check_ids(&loaded);
     }
 
-    /// A component as it was saved, which [`After`] takes the place of.
+    /// A component as saved; [`After`] replaces it.
     #[derive(Clone, crate::Component)]
     #[reflect(name = "Shape")]
     struct Before {
@@ -1087,9 +1081,8 @@ mod tests {
         Kept,
     }
 
-    /// A component whose type changed since it was saved is matched to its type by its fields'
-    /// names and its variants', each change said once, whatever the values, with how many times it
-    /// came; one whose type is gone is left out, its entity going on without it.
+    /// A component whose type changed is matched by field and variant names, each change said once
+    /// with its count whatever the values; one whose type is gone is left out, its entity going on.
     #[test]
     fn a_component_whose_type_changed_is_matched_by_its_fields_names() {
         let mut saved = World::seeded(3);
@@ -1204,8 +1197,8 @@ mod tests {
 
     impl Writable for Kept {}
 
-    /// A component opaque as a whole comes back from what it keeps, into a world whose assets
-    /// are those it was saved with, and is left out otherwise, as one that keeps nothing is.
+    /// An opaque component comes back from what it keeps only into a world with the assets it was
+    /// saved with; otherwise it's left out, as one that keeps nothing is.
     #[test]
     fn what_is_opaque_comes_back_only_where_the_assets_are_the_same() {
         let mut saved = World::seeded(6);
@@ -1266,8 +1259,7 @@ mod tests {
             .replace(children, &format!("children {} {}", id(child), id(child)));
         for (text, code) in [
             (text.replace("slots 2", "slots 1"), "snapshot.bad"),
-            // More slots than it names, as many as a slot's index takes, refused before they're
-            // made.
+            // More slots than it names, as many as an index takes: refused before they're made.
             (text.replace("slots 2", "slots 4294967295"), "snapshot.bad"),
             (text.replace("slots 2", "slots 3"), "snapshot.bad"),
             (text.replacen("free", "free 0", 1), "snapshot.bad"),
@@ -1295,12 +1287,11 @@ mod tests {
         assert!(error.to_string().contains("its own ancestors"), "{error}");
     }
 
-    /// A type whose name isn't a word.
     #[derive(Clone, crate::Component)]
     #[reflect(name = "Two Words")]
     struct Spaced;
 
-    /// Opaque as a whole, keeping text that breaks its line.
+    /// Opaque, keeping text that breaks its line.
     #[derive(Clone, Reflect)]
     #[reflect(opaque)]
     struct Broken;
@@ -1313,14 +1304,13 @@ mod tests {
 
     impl Writable for Broken {}
 
-    /// As deep as it's made.
     #[derive(Clone, crate::Component)]
     struct Nest {
         kids: Vec<Nest>,
     }
 
-    /// A world that holds what no load could read isn't saved: a type whose name isn't a word,
-    /// opaque state that breaks its line, and a value nested deeper than a load reads.
+    /// A world no load could read isn't saved: a type whose name isn't a word, opaque state that
+    /// breaks its line, a value nested deeper than a load reads.
     #[test]
     fn a_world_no_load_could_read_is_refused() {
         let mut nest = Nest { kids: Vec::new() };

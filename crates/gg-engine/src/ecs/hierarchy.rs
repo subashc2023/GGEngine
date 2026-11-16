@@ -1,10 +1,14 @@
-//! The hierarchy: entities with parents, which carry their children along. A child has its parent
-//! as its [`Parent`] component, and the world keeps each entity's links to its children, so that
-//! despawning one takes its descendants with it; both change only through [`World::set_parent`]
-//! and [`World::despawn`]; as a scene's entities are spawned with theirs, by
-//! [`World::load_scene`] and [`World::place_prefab`]; and through operations, as a create spawns
-//! an entity with its parent, which its undo takes out again, and a delete takes a subtree out,
-//! which its undo puts back. Where its ancestors carry an entity is its pose.
+//! The hierarchy: entities with parents, which carry their children along.
+//!
+//! A child has its parent as a [`Parent`] component, and the world links each entity to its
+//! children, so despawning one takes its descendants. Both change only through:
+//!
+//! - [`World::set_parent`] and [`World::despawn`];
+//! - [`World::load_scene`] and [`World::place_prefab`];
+//! - operations: a create spawns an entity with its parent, a delete takes a subtree out, and
+//!   their undos reverse them.
+//!
+//! Where an entity's ancestors carry it is its pose.
 
 use std::iter;
 
@@ -15,9 +19,8 @@ use super::{Component, Entity, EntityId, Operation, World};
 use crate::Transform;
 use crate::reflect::Reflect;
 
-/// The entity this one is a child of, which carries it along: its [`Transform`] is relative to its
-/// parent's. The world keeps it, so that the hierarchy stays whole: a scene's entities are spawned
-/// with theirs, [`World::set_parent`] gives it, changes it and takes it away, and code reads it but
+/// The entity this one is a child of; its [`Transform`] is relative to its parent's. The world
+/// keeps the hierarchy whole: only scenes and [`World::set_parent`] change it. Code reads it but
 /// can't change it, nor can tools by name.
 ///
 /// ```
@@ -79,21 +82,17 @@ pub struct Parent(pub Entity);
 // And not `Writable`, so that only the world changes it.
 impl Component for Parent {}
 
-/// Where an entity is in the world, as [`World::pose`] gives it, as the latest tick left it: where
-/// frames draw it once they've drawn up to the tick, rather than where they draw it on the way.
+/// Where an entity is in the world, as [`World::pose`] gives it: as the latest tick left it, where
+/// frames draw it once they've drawn up to that tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
-    /// The matrix from its own space to the world's, in `f64`: its root's [`Transform`]'s times
-    /// each of its descendants' in turn down to its own, as drawing places it, bit for bit. An
-    /// ancestor without a transform carries its children as though its transform were the identity,
-    /// at its parent's origin, unturned and unscaled, and an entity without one is placed so too.
-    /// Its last column is where its origin is.
+    /// The `f64` matrix from its space to the world's: its root's [`Transform`] times each
+    /// descendant's down to its own, bit for bit as drawing places it. A missing transform is the
+    /// identity: at the parent's origin, unturned and unscaled. The last column is the origin.
     pub matrix: DAffine3,
-    /// Which way it faces: its own rotation turned by each of its ancestors' in turn, their scales
-    /// aside, as the world's camera faces from it, so that a mirrored ancestor mirrors where it is
-    /// but not which way it faces; multiplied from its root down, as the matrix is. A root's is
-    /// its own; a child's is normalized, since each product of unit quaternions rounds a little
-    /// off a unit.
+    /// Which way it faces: its rotation turned by each ancestor's, scales aside, as the world's
+    /// camera faces, so a mirrored ancestor mirrors position but not facing. Multiplied from the
+    /// root down; a child's is normalized, as products of unit quaternions drift.
     pub rotation: Quat,
 }
 
@@ -108,10 +107,9 @@ impl Pose {
 /// No slot.
 const NONE: u32 = u32::MAX;
 
-/// Where a slot's entity is in the hierarchy, by slots rather than handles, since a linked slot's
-/// entity is alive: its parent, as its [`Parent`] has it, so that walks up the hierarchy read only
-/// the world's slots; its first child; and the children before and after it among its parent's,
-/// who ring round, the first's `prev` being the last. [`NONE`] where there's none.
+/// A slot's place in the hierarchy, by slots, not handles (a linked slot's entity is alive): its
+/// parent (as [`Parent`] has it, so walks up read only slots), first child, and siblings before
+/// and after, who ring round: the first's `prev` is the last. [`NONE`] where there's none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Links {
     parent: u32,
@@ -136,15 +134,14 @@ fn some(slot: u32) -> Option<u32> {
 }
 
 impl World {
-    /// Makes `child` a child of `parent`, the last of its children, or a root if `parent` is
-    /// `None`, and returns its old parent, which sets it back, as that parent's last child. It
-    /// keeps its [`Transform`], which is relative to its parent's, so that it moves in the world as
-    /// its new parent is placed. Making it a child of the parent it has changes nothing, not even
-    /// its place among its siblings. Spawning a child from code is spawning it, then setting its
-    /// parent, which moves it to another table.
+    /// Makes `child` the last child of `parent`, or a root if `None`, returning its old parent;
+    /// setting that back makes it that parent's last child. It keeps its [`Transform`], so it
+    /// moves in the world with its new parent. Setting its current parent changes nothing, not
+    /// even its sibling order. Spawning a child from code is spawning, then setting its parent,
+    /// which moves it to another table.
     ///
-    /// Fails with `ecs.no_entity` if `child` or `parent` isn't alive, and with `ecs.parent_cycle`
-    /// if `parent` is `child` or one of its descendants. A refusal changes nothing.
+    /// Fails, changing nothing, with `ecs.no_entity` if `child` or `parent` isn't alive, and
+    /// `ecs.parent_cycle` if `parent` is `child` or a descendant.
     pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) -> Result<Option<Entity>> {
         let name = self.name_of(child);
         let refused = |error: Error| {
@@ -194,8 +191,8 @@ impl World {
         Ok(old)
     }
 
-    /// `entity`'s children, in the order they became its children: an order that follows from the
-    /// changes made, as queries' does, and means nothing a game should depend on.
+    /// `entity`'s children, in the order they became its children. Like query order, it follows
+    /// from changes made: games shouldn't depend on it.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
     pub fn children(&self, entity: Entity) -> Result<impl Iterator<Item = Entity> + '_> {
@@ -207,10 +204,9 @@ impl World {
         Ok(iter::successors(first, next).map(|slot| self.entity_at(slot)))
     }
 
-    /// Replaces the contents of `ids` with the IDs of the entities whose IDs are `roots` and of
-    /// every entity under each, children, theirs and so on, sorted and each once, which draws' IDs
-    /// are searched by: none for an ID no entity has. `pending` is scratch space for the walk, which empties it. Neither
-    /// allocates once it has held as many entities.
+    /// Replaces `ids` with the sorted, unique IDs of the entities `roots` name and everything
+    /// under them; an ID no entity has gives none. `pending` is the walk's scratch, left empty.
+    /// Neither allocates once it has held as many entities.
     pub(crate) fn fill_subtree_ids(
         &self,
         roots: &[EntityId],
@@ -229,7 +225,7 @@ impl World {
         ids.dedup();
     }
 
-    /// `entity`'s parent, as its [`Parent`] has it; `None` if it's a root.
+    /// `entity`'s parent; `None` for a root.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
     pub fn parent(&self, entity: Entity) -> Result<Option<Entity>> {
@@ -237,8 +233,7 @@ impl World {
         Ok(self.parent_of(entity.index))
     }
 
-    /// Where `entity` is in the world, as the latest tick left it, as [`Pose`] says: such as for a
-    /// tool's handles, which show where it is and which way it faces.
+    /// Where `entity` is in the world, as [`Pose`] says; for a tool's handles, say.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
     pub fn pose(&self, entity: Entity) -> Result<Pose> {
@@ -262,16 +257,20 @@ impl World {
         })
     }
 
-    /// The operations that make the entity of ID `entity` the last of `parent`'s children, or a
-    /// root for `None`, keeping where it is in the world, as an editor's reparent does: the
-    /// reparent, which keeps its own [`Transform`], so that it moves as its new parent is placed,
-    /// and a set of that transform to where it is in its new parent's space, from its matrix in the
-    /// world and the new parent's, decomposed, which loses any shear the two give it between them
-    /// and rounds a little. Applied as one edit, they undo as one. The reparent alone where there's
-    /// nothing to keep, or nothing can be: for an entity without a transform, which goes to its
-    /// new parent's origin as one does; for one whose parent stays; under a parent flattened to no
-    /// size; and for an entity or a parent that isn't alive, or a parent that's the entity or one
-    /// of its descendants, which the reparent's apply refuses.
+    /// The operations that make `entity` the last child of `parent` (a root for `None`) keeping
+    /// its place in the world, as an editor's reparent does:
+    ///
+    /// - the reparent, which keeps its [`Transform`], so it moves with its new parent;
+    /// - a set of its transform to its place in the new parent's space, decomposed from the two
+    ///   world matrices. That loses any shear and rounds a little.
+    ///
+    /// Applied as one edit, they undo as one. Only the reparent where there's nothing to keep, or
+    /// nothing can be:
+    ///
+    /// - no transform: it goes to the new parent's origin;
+    /// - the parent stays, or is flattened to no size;
+    /// - the entity or parent isn't alive, or the parent is the entity or a descendant, which
+    ///   the reparent refuses when applied.
     pub fn reparent_in_place(&self, entity: EntityId, parent: Option<EntityId>) -> Vec<Operation> {
         let reparent = Operation::Reparent { entity, parent };
         let Some(child) = self.entity(entity) else {
@@ -312,13 +311,11 @@ impl World {
         vec![reparent, set]
     }
 
-    /// Where `entity`, which is alive, is as the latest tick left it, as drawing places it: its
-    /// parent's matrix and rotation times its transform's, from its root down; `None` at the
-    /// origin, unturned, at its own size, as a root without a transform is, and what it carries
-    /// without one. Its lineage is walked, however deep it goes, rather than recursed, which a
-    /// chain some thousands deep would overflow the stack with: kept on the stack to the depths
-    /// games nest to, so that it allocates nothing, as a sound that follows an entity reads it each
-    /// frame, and in a list past them.
+    /// Where live `entity` is, as drawing places it: its parent's matrix and rotation times its
+    /// transform's, from the root down. `None` is the identity. The lineage is walked, not
+    /// recursed, as a chain some thousands deep would overflow the stack. Up to the depth games
+    /// nest to it stays on the stack and allocates nothing (a sound following an entity reads it
+    /// each frame); deeper goes in a list.
     fn placed(&self, entity: Entity) -> Option<(DAffine3, Quat)> {
         const NEAR: usize = 32;
         let (mut near, mut far) = ([NONE; NEAR], Vec::new());
@@ -353,17 +350,17 @@ impl World {
         Ok(())
     }
 
-    /// Takes `entity`, which is alive, and its descendants out of the hierarchy, children before
-    /// their parents, each parent's first to last: each is unlinked, a root without children, and
-    /// given to `out` beside its parent, if it had one, to take it out of the world.
+    /// Unlinks live `entity` and its descendants, children before parents, each parent's first to
+    /// last. Each, now a root without children, goes to `out` with its old parent, if any, to be
+    /// taken out of the world.
     pub(super) fn take_apart(
         &mut self,
         entity: Entity,
         mut out: impl FnMut(&mut Self, Entity, Option<Entity>),
     ) {
-        // Leaves first: down through first children to one without any, which is removed, and
-        // then from its parent again, which needs no stack. Each removal moves a table's last row,
-        // which may be one of the subtree's, so each is found where it is as it's removed.
+        // Leaves first: down first children to one without any, remove it, then again from its
+        // parent; no stack. A removal moves a table's last row, which may be the subtree's, so
+        // each is found where it is as it's removed.
         let mut at = entity.index;
         loop {
             while let Some(first) = some(self.meta[at as usize].links.first) {
@@ -380,10 +377,9 @@ impl World {
         }
     }
 
-    /// `root`, which is alive, and its descendants, breadth first: each parent before its
-    /// children, each parent's children in order, each beside its parent's index here. It's the
-    /// order a [`Duplicate`](super::Operation::Duplicate)'s copies take their IDs in, which logs
-    /// keep.
+    /// Live `root` and its descendants, breadth first, each with its parent's index here. A
+    /// [`Duplicate`](super::Operation::Duplicate)'s copies take their IDs in this order, which
+    /// logs keep.
     pub(super) fn subtree(&self, root: Entity) -> Vec<(Entity, Option<usize>)> {
         let mut subtree = vec![(root, None)];
         let mut at = 0;
@@ -395,7 +391,7 @@ impl World {
         subtree
     }
 
-    /// The entity in slot `index`, which is alive.
+    /// The live entity in slot `index`.
     fn entity_at(&self, index: u32) -> Entity {
         Entity {
             index,
@@ -403,13 +399,11 @@ impl World {
         }
     }
 
-    /// The parent of the entity in slot `index`, if it has one.
     fn parent_of(&self, index: u32) -> Option<Entity> {
         some(self.meta[index as usize].links.parent).map(|parent| self.entity_at(parent))
     }
 
-    /// Takes slot `index` out of its parent's children, if it has a parent, and leaves it a root
-    /// with no siblings; its own children stay its.
+    /// Makes slot `index` a root without siblings; its children stay.
     fn unlink(&mut self, index: u32) {
         let Links {
             parent, prev, next, ..
@@ -471,10 +465,13 @@ pub(super) mod tests {
     #[derive(Clone, Copy, Debug, PartialEq, crate::Component)]
     struct Mark(u32);
 
-    /// Panics unless the world's links agree with its `Parent`s: each living entity's parent, as
-    /// its links have it, is the one its `Parent` names, which is alive and lists it among its
-    /// children once, between siblings who list it as theirs; a root has no siblings; no entity is
-    /// its own ancestor; and a free, vacant or retired slot has no links.
+    /// Panics unless links match `Parent`s:
+    ///
+    /// - a living entity's parent is the one its `Parent` names, alive, listing it once among
+    ///   its children, between siblings who list it as theirs;
+    /// - a root has no siblings;
+    /// - no entity is its own ancestor;
+    /// - a free, vacant or retired slot has no links.
     pub(in crate::ecs) fn check_links(world: &World) {
         let slots = world.meta.len();
         for (index, meta) in world.meta.iter().enumerate() {
@@ -523,7 +520,7 @@ pub(super) mod tests {
         world.children(entity).expect("alive").collect()
     }
 
-    /// Every component of every entity, by entity, whichever tables they're in.
+    /// Every component of every entity, across tables.
     fn state(world: &World) -> Vec<(Entity, EntityId, String, Value)> {
         let mut state = snapshot(world);
         state.sort_by(|a, b| (a.0, &a.2).cmp(&(b.0, &b.2)));
@@ -590,8 +587,8 @@ pub(super) mod tests {
         };
         let before = seen(&world);
         let (root, last) = (chain[0], chain[3]);
-        // Each refusal, and the entities its message names: the living by their IDs alone, and the
-        // dead by their handles.
+        // Each refusal and the entities its message names: the living by ID alone, the dead by
+        // handle.
         let refusals = [
             (
                 root,
@@ -666,9 +663,9 @@ pub(super) mod tests {
         check_links(&world);
     }
 
-    /// The subtree goes with its root, leaves first. It shares a table with the root, which is
-    /// a child itself, after them, so that each removal moves another of them to another row: a
-    /// location kept from before would remove the wrong entity.
+    /// The subtree goes with its root, leaves first. The root, itself a child, shares a table
+    /// after them, so each removal moves another row: a stale location would remove the wrong
+    /// entity.
     #[test]
     fn despawning_takes_the_subtree_with_it() {
         let mut world = World::default();
@@ -760,10 +757,9 @@ pub(super) mod tests {
         check_links(&world);
     }
 
-    /// An entity's pose is where drawing draws it, bit for bit, while it doesn't move: a child under
-    /// ancestors that turn and scale unevenly, one mirrored and one without a transform; its origin
-    /// and the way it faces are where the world's camera would see from. A root's is its
-    /// transform's, and an entity without one is at its parent's origin.
+    /// A still entity's pose is where drawing draws it, bit for bit: a child under ancestors that
+    /// turn and scale unevenly, one mirrored and one without a transform. A root's pose is its
+    /// transform's; an entity without one is at its parent's origin.
     #[test]
     fn a_pose_is_where_drawing_draws_an_entity() {
         use gg_core::math::Vec3;
@@ -832,9 +828,8 @@ pub(super) mod tests {
         assert_eq!(error.code(), "ecs.no_entity");
     }
 
-    /// An entity's pose is found however deep it is, as code or a scene may nest one, and so is its
-    /// subtree despawned: by walks along its lineage, never a call for each level, which a chain
-    /// some thousands deep would overflow the stack with.
+    /// Poses and despawns work at any depth: they walk the lineage, never call per level, which
+    /// would overflow the stack in a chain some thousands deep.
     #[test]
     fn a_pose_is_found_however_deep_its_entity_is() {
         let mut world = World::default();
@@ -842,7 +837,7 @@ pub(super) mod tests {
             translation: DVec3::X,
             ..Transform::IDENTITY
         };
-        // Each made the parent of the root before, so that no reparent walks the chain.
+        // Each is made the parent of the last root, so no reparent walks the chain.
         let deepest = world.spawn(step);
         let mut root = deepest;
         for _ in 1..100_000 {
@@ -856,11 +851,10 @@ pub(super) mod tests {
         assert!(!world.contains(deepest));
     }
 
-    /// A reparent in place keeps where its entity is in the world, as its pose has it, under
-    /// another parent, moved, turned and scaled, and at the roots, a set of its transform joining
-    /// the reparent in one edit, which an undo takes back exactly; and is the reparent alone where
-    /// there's nothing to keep: for an entity without a transform, one whose parent stays, and
-    /// under a parent flattened to no size.
+    /// A reparent in place keeps the entity's pose under another moved, turned and scaled parent,
+    /// and at the roots, a set of its transform joining the reparent in one edit that an undo takes
+    /// back exactly. It's the reparent alone where there's nothing to keep: no transform, the
+    /// parent stays, or a parent flattened to no size.
     #[test]
     fn a_reparent_in_place_keeps_where_its_entity_is_in_the_world() {
         use gg_core::math::Vec3;

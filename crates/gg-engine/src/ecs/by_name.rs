@@ -1,6 +1,6 @@
-//! The world as tools reach it, without the Rust types of its components: component types by name,
-//! their fields by path, and their values as reflection's [`Value`]s. The inspector is built on
-//! these, the world's IDs and its hierarchy, and so will the tool API be.
+//! The world as tools reach it, without its components' Rust types: component types by name,
+//! fields by path, values as reflection's [`Value`]s. The inspector is built on these, the world's
+//! IDs and its hierarchy, and so will the tool API be.
 
 use std::any::TypeId;
 use std::slice;
@@ -15,15 +15,17 @@ use crate::reflect::{self, Ident, Reflect, Resolved, Shape, Type, Types, Value};
 use crate::{ModelNode, ModelRoot, PrefabRoot};
 
 impl World {
-    /// Registers component type `T`, describing it to reflection, if it hasn't registered yet: a
-    /// type registers the first time an entity has one too, so this is for those that tools should
-    /// list before then.
+    /// Registers component type `T` with reflection, if it hasn't registered. A type also
+    /// registers when an entity first has one; call this to list a type before then.
     ///
-    /// Fails with `ecs.registered_late` once the world has loaded mods, as [`Mods`](crate::Mods)
-    /// says; with `reflect.name_taken` if another type has its name; with `reflect.unnamed` if it
-    /// describes itself as something other than a struct or an enum; with `reflect.bad_default` if
-    /// a field's default is outside its bounds, or opaque; and with `ecs.bad_exclusive` if it
-    /// names an exclusive field that isn't a `bool` of its own, as [`Component::exclusive`] says.
+    /// Fails with:
+    ///
+    /// - `ecs.registered_late` once the world has loaded mods ([`Mods`](crate::Mods)).
+    /// - `reflect.name_taken`: another type has its name.
+    /// - `reflect.unnamed`: it isn't described as a struct or enum.
+    /// - `reflect.bad_default`: a field's default is outside its bounds, or opaque.
+    /// - `ecs.bad_exclusive`: it names an exclusive field that isn't its own `bool`
+    ///   ([`Component::exclusive`]).
     pub fn register<T: Component>(&mut self) -> Result<()> {
         self.components.register::<T>().map(drop)
     }
@@ -43,17 +45,14 @@ impl World {
         self.components.names()
     }
 
-    /// The default of component type `component`, as [`Types::default_value`] makes it, and as
-    /// an add of it makes it: what's opaque, from [`Component::base`]. So what it returns adds,
-    /// as [`Operation::Add`](crate::Operation::Add)'s value; descriptions don't change once
-    /// they're registered, but for a script's as it declares it again, so it's the same each time
-    /// until then.
+    /// The default of component type `component`: [`Types::default_value`], with what's opaque
+    /// from [`Component::base`], so it works as an [`Operation::Add`](crate::Operation::Add)
+    /// value. It's the same each call, unless a script redeclares the type.
     ///
-    /// Fails with `reflect.unknown_type` if no component type is named `component`; as
-    /// `default_value` does, such as with `reflect.no_default` for an entity; and as an add does
-    /// for a value it refuses, such as with `reflect.opaque` for one opaque as a whole without a
-    /// `base`, which a [`MeshDraw`](crate::MeshDraw) is. Every error names the component, and the
-    /// path to where it failed.
+    /// Fails with `reflect.unknown_type` if no component type is named `component`; with
+    /// `default_value`'s errors, such as `reflect.no_default` for an entity; and with an add's,
+    /// such as `reflect.opaque` for a type opaque as a whole without a `base`, like
+    /// [`MeshDraw`](crate::MeshDraw). Every error names the component and the failing path.
     pub fn default_of(&self, component: &str) -> Result<Value> {
         let id = self.named(component)?;
         let about = |error: Error| {
@@ -68,9 +67,8 @@ impl World {
         Ok(value)
     }
 
-    /// The living entities, table by table, in the order queries find them; with `with`, those
-    /// with that component. Skipping entities skips whole tables, so a page of them costs a step a
-    /// table, and one for each entity on the page.
+    /// The living entities in query order, table by table; with `with`, only those with that
+    /// component. Skipping skips whole tables: a page costs a step per table plus one per entity.
     ///
     /// Fails with `reflect.unknown_type` if no component type is named `with`.
     pub fn entities(&self, with: Option<&str>) -> Result<Entities<'_>> {
@@ -78,15 +76,14 @@ impl World {
         Ok(self.listing(with, None))
     }
 
-    /// The roots of the hierarchy: the living entities without a [`Parent`], table by table, in
-    /// the order queries find them, and skipped a table at a time, as
-    /// [`entities`](Self::entities) are.
+    /// The living entities without a [`Parent`], ordered and skipped like
+    /// [`entities`](Self::entities).
     pub fn roots(&self) -> Entities<'_> {
         self.listing(None, Some(self.parent_type()))
     }
 
-    /// `entity`'s place among the [`roots`](Self::roots), which costs a step a table to find;
-    /// `None` if it isn't alive, or is a child.
+    /// `entity`'s place among the [`roots`](Self::roots), found in a step per table; `None` if it
+    /// isn't alive or is a child.
     pub fn root_index(&self, entity: Entity) -> Option<usize> {
         let at = self.location(entity)?;
         let parent = Some(self.parent_type());
@@ -109,17 +106,16 @@ impl World {
         Ok(ids.map(|&id| self.components.name(id)))
     }
 
-    /// The value of the field at `path` of `entity`'s `component`: such as `translation.x`, or
-    /// `rect[1]`; an empty path is the whole component. A path is a field's name, then `.name` for
-    /// a field of a struct, `.x` to `.w` for a vector's component, and `[i]` for an array's or a
-    /// list's element. Enums, options and quaternions are set whole, so a path doesn't go into
-    /// them. What's opaque reads as [`Value::Opaque`].
+    /// The value at `path` in `entity`'s `component`, such as `translation.x` or `rect[1]`; an
+    /// empty path is the whole component. A path is a field name, then `.name` for a struct's
+    /// field, `.x` to `.w` for a vector's component, `[i]` for an array's or list's element. Paths
+    /// don't go into enums, options or quaternions, which are set whole. What's opaque reads as
+    /// [`Value::Opaque`].
     ///
     /// Fails with `ecs.no_entity` if `entity` isn't alive; `reflect.unknown_type` if no component
-    /// type is named `component`; `reflect.missing_component` if `entity` hasn't one;
-    /// `reflect.bad_path` for a path that can't be read; and `reflect.no_field` for one that leads
-    /// to no field. Every error names the entity, by its ID while it's alive, the component and the
-    /// path.
+    /// type is named `component`; `reflect.missing_component` if `entity` lacks it;
+    /// `reflect.bad_path` for an unreadable path; `reflect.no_field` for a path to no field. Every
+    /// error names the entity (by ID while alive), the component and the path.
     pub fn get_field(&self, entity: Entity, component: &str, path: &str) -> Result<Value> {
         let name = self.name_of(entity);
         let about = |error: Error| about(error, "get", name, component, path);
@@ -139,22 +135,23 @@ impl World {
         })
     }
 
-    /// Sets the field at `path` of `entity`'s `component` to `value`, and returns its old value,
-    /// which sets it back, unless code stored one that the checks below refuse, such as a number
-    /// outside its field's bounds. Paths are as [`get_field`](Self::get_field) reads them. `value`
-    /// is checked against the component's description, all of it before anything changes, so that a
-    /// value refused changes nothing: its kinds, the bounds of its fields, which it's outside of if
-    /// a number isn't finite, and a rotation being a unit quaternion. What's opaque is set only to
-    /// [`Value::Opaque`], which keeps it as it is. A [`Parent`] isn't set by name: the world keeps
-    /// it, and [`World::set_parent`] changes it; nor is a [`ModelNode`] or a [`PrefabRoot`], which
-    /// the world keeps too, the tool API's operations changing an instance's link. A [`ModelRoot`]
-    /// given another model has that model's nodes in place of its own, as it says.
+    /// Sets the field at `path` in `entity`'s `component` and returns the old value, which sets it
+    /// back (unless code stored one the checks below refuse, such as a number outside its bounds).
+    /// Paths are as in [`get_field`](Self::get_field).
     ///
-    /// Fails as `get_field` does; with `reflect.read_only` for `Parent`, `ModelNode` and
-    /// `PrefabRoot`, at any path, whether the entity has one or not; with `reflect.out_of_range`
-    /// for a number outside its field's bounds or its type's; and as [`Reflect::with_value`]
-    /// does for a value that doesn't fit the field. Every error names the entity, by its ID while
-    /// it's alive, the component and the path, down to the part refused.
+    /// All of `value` is checked before anything changes, so a refusal changes nothing: its kinds,
+    /// its fields' bounds (a non-finite number is outside them), and unit length for a rotation.
+    /// What's opaque is set only to [`Value::Opaque`], which keeps it as is.
+    ///
+    /// [`Parent`], [`ModelNode`] and [`PrefabRoot`] aren't set by name: the world keeps them.
+    /// [`World::set_parent`] changes a `Parent`; the tool API's operations change an instance's
+    /// link. A [`ModelRoot`] given another model gets that model's nodes in place of its own.
+    ///
+    /// Fails like `get_field`, and with `reflect.read_only` for `Parent`, `ModelNode` and
+    /// `PrefabRoot` at any path, whether or not the entity has one; `reflect.out_of_range` for a
+    /// number outside its field's bounds or its type's; and [`Reflect::with_value`]'s errors for a
+    /// value that doesn't fit. Every error names the entity (by ID while alive), the component and
+    /// the path down to the part refused.
     pub fn set_field(
         &mut self,
         entity: Entity,
@@ -165,9 +162,8 @@ impl World {
         self.write_field(entity, component, path, value, false)
     }
 
-    /// Sets a field as [`set_field`](Self::set_field) does, and a [`PrefabRoot`]'s too if
-    /// `relinks`: as operations and refits set one, spawning its instance's entities again
-    /// themselves, as the world keeps them.
+    /// [`set_field`](Self::set_field), but sets a [`PrefabRoot`] too if `relinks`, as operations
+    /// and refits do; they respawn its instance's entities themselves.
     pub(super) fn write_field(
         &mut self,
         entity: Entity,
@@ -176,7 +172,7 @@ impl World {
         value: &Value,
         relinks: bool,
     ) -> Result<Value> {
-        // Named before the closure, which would otherwise still borrow the world at `row_mut`.
+        // Named before the closure, which would still borrow the world at `row_mut`.
         let name = self.name_of(entity);
         let about = |error: Error| about(error, "set", name, component, path);
         let (id, at) = self.find(entity, component).map_err(about)?;
@@ -220,9 +216,8 @@ impl World {
         Ok(old)
     }
 
-    /// Fails with `reflect.read_only` if component type `id` is one the world keeps, [`Parent`],
-    /// [`ModelNode`] or [`PrefabRoot`], which nothing sets by name, as
-    /// [`set_field`](Self::set_field) says.
+    /// Fails with `reflect.read_only` for [`Parent`], [`ModelNode`] and [`PrefabRoot`]; see
+    /// [`set_field`](Self::set_field).
     fn settable(&self, id: ComponentId) -> Result<()> {
         if Some(id) == self.components.get(TypeId::of::<Parent>()) {
             return Err(Error::new(
@@ -264,13 +259,12 @@ impl World {
         })
     }
 
-    /// Gives `entity` a `component` at its default, as [`default_of`](Self::default_of) makes it:
-    /// as an entity is given a script to run, the component type the script declares, by its name,
-    /// which [`Scripts::load`](crate::Scripts::load) returns.
+    /// Gives `entity` a `component` at its [default](Self::default_of). This is how an entity gets
+    /// a script to run: the component type the script declares, by the name
+    /// [`Scripts::load`](crate::Scripts::load) returns.
     ///
-    /// Fails with `ecs.no_entity` if it isn't alive; `reflect.has_component` if it has one already;
-    /// and as `default_of` does, such as with `reflect.unknown_type` if no component type is named
-    /// `component`.
+    /// Fails with `ecs.no_entity` if it isn't alive; `reflect.has_component` if it has one
+    /// already; and `default_of`'s errors, such as `reflect.unknown_type`.
     pub fn add_default(&mut self, entity: Entity, component: &str) -> Result<()> {
         let value = self.default_of(component)?;
         let id = self.named(component)?;
@@ -289,8 +283,7 @@ impl World {
         Ok(())
     }
 
-    /// Declares a component type that a script declares, as [`Components::declare`] does: `name`,
-    /// of `fields`, each a name, a kind and a default, with `doc` for its doc.
+    /// Declares a script's component type; see [`Components::declare`].
     ///
     /// [`Components::declare`]: super::table::Components::declare
     pub(crate) fn declare(
@@ -302,11 +295,10 @@ impl World {
         self.components.declare(name, doc, fields)
     }
 
-    /// Declares type `id`, which a script declared, again, as [`Components::redeclare`] does: its
-    /// fields now `fields`, and its doc `doc`; and has each of its components hold them, as
-    /// [`declared::migrate`] says.
+    /// Redeclares script type `id` ([`Components::redeclare`]) and migrates each of its components
+    /// to the new fields ([`declared::migrate`]).
     ///
-    /// Fails as `redeclare` does, changing nothing.
+    /// Fails like `redeclare`, changing nothing.
     ///
     /// [`Components::redeclare`]: super::table::Components::redeclare
     pub(crate) fn redeclare(
@@ -325,25 +317,23 @@ impl World {
         Ok(())
     }
 
-    /// What names the world's types as they are, as [`Components::revision`] says.
+    /// See [`Components::revision`].
     ///
     /// [`Components::revision`]: super::table::Components::revision
     pub(crate) fn types_revision(&self) -> u64 {
         self.components.revision()
     }
 
-    /// The id of component type `name`, if there's one.
     pub(crate) fn component_named(&self, name: &str) -> Option<ComponentId> {
         self.components.named(name)
     }
 
-    /// The fields of declared type `id`, its names and kinds; `None` if it's a Rust type.
+    /// The names and kinds of declared type `id`'s fields; `None` if it's a Rust type.
     pub(crate) fn declared(&self, id: ComponentId) -> Option<&Declared> {
         self.components.declared(id).map(|declared| &**declared)
     }
 
-    /// The fields of component type `id`, as its description gives them; none if it isn't a
-    /// struct with named fields.
+    /// The fields of component type `id`; none if it isn't a struct with named fields.
     pub(crate) fn fields_of(&self, id: ComponentId) -> &[reflect::Field] {
         let Type::Named(index) = self.components.ty(id) else {
             return &[];
@@ -357,8 +347,7 @@ impl World {
         }
     }
 
-    /// The doc of component type `id`, as its description gives it: a declared type's names the
-    /// script that declared it.
+    /// The doc of component type `id`; a declared type's names its script.
     pub(crate) fn doc_of(&self, id: ComponentId) -> &str {
         match self.components.ty(id) {
             Type::Named(index) => &self.types().info(index).doc,
@@ -366,11 +355,11 @@ impl World {
         }
     }
 
-    /// Field `index` of `entity`'s component `id`, of a struct with named fields, as reflection
-    /// reads it: without allocating, as a script reads one at its ticks.
+    /// Field `index` of `entity`'s component `id`, a struct with named fields. Doesn't allocate:
+    /// scripts read fields every tick.
     ///
-    /// Fails with `ecs.no_entity` if `entity` isn't alive, and `reflect.missing_component` if it
-    /// hasn't the component.
+    /// Fails with `ecs.no_entity` if `entity` isn't alive, `reflect.missing_component` if it lacks
+    /// the component.
     pub(crate) fn field_at(
         &self,
         entity: Entity,
@@ -383,16 +372,15 @@ impl World {
         Ok(column.part(row, index).expect(FIELD))
     }
 
-    /// Field `index` of `entity`'s component `id`, of a struct with named fields, to be set to
-    /// `value`, which is refused as [`set_field`](Self::set_field) refuses a value: without
-    /// allocating, unless it's refused, as a script sets one at its ticks. `value` is `None` for an
-    /// entity or none, which no bounds apply to, set as an `Option<Entity>` without the `Value` of
-    /// one, which would allocate; and a value of an option's inner type, for an option's field,
-    /// stands for some of it, checked as the option's would be, for the same reason.
+    /// Field `index` of `entity`'s component `id`, a struct with named fields, to be set to
+    /// `value`, checked like [`set_field`](Self::set_field). Doesn't allocate unless it's refused:
+    /// scripts set fields every tick. To avoid allocating a `Value`, `value` is `None` for an
+    /// entity or none (no bounds apply), set as an `Option<Entity>`; for an option's field, a
+    /// value of the inner type stands for `Some` of it, checked as the option's would be.
     ///
-    /// Fails as [`field_at`](Self::field_at) does; with `reflect.read_only` for `Parent`,
-    /// `ModelNode` and `PrefabRoot`; and with `reflect.out_of_range` for a number outside its
-    /// field's bounds, which it's outside of if it isn't finite.
+    /// Fails like [`field_at`](Self::field_at), and with `reflect.read_only` for `Parent`,
+    /// `ModelNode` and `PrefabRoot`; `reflect.out_of_range` for a number outside its field's bounds
+    /// (non-finite is outside).
     pub(crate) fn field_to_set(
         &mut self,
         entity: Entity,
@@ -416,7 +404,6 @@ impl World {
         Ok(column.part_mut(row, index).expect(FIELD))
     }
 
-    /// The table and row of `entity`, which has component `id`.
     fn row_of(&self, entity: Entity, id: ComponentId) -> Result<(usize, usize)> {
         let at = self.location(entity).ok_or_else(|| {
             Error::new(
@@ -433,21 +420,19 @@ impl World {
         Ok((at.table as usize, at.row as usize))
     }
 
-    /// Whether `entity` is alive and has component `id`.
     pub(crate) fn has(&self, entity: Entity, id: ComponentId) -> bool {
         self.location(entity)
             .is_some_and(|at| self.tables[at.table as usize].has(id))
     }
 
-    /// Puts the entities with component `id` in `list`, in the order queries find them, as the
-    /// world's [kept list](World::take_list) holds them, without allocating once it's grown.
+    /// Fills `list` (the world's [kept list](World::take_list)) with the entities with component
+    /// `id`, in query order. Doesn't allocate once the list has grown.
     pub(crate) fn list_with(&self, id: ComponentId, list: &mut Vec<Entity>) {
         list.clear();
         let tables = self.tables.iter().filter(|table| table.has(id));
         list.extend(tables.flat_map(|table| table.entities()));
     }
 
-    /// Where `entity` is, and the id of component type `component`.
     fn find(&self, entity: Entity, component: &str) -> Result<(ComponentId, Location)> {
         let at = self.location(entity).ok_or_else(|| {
             Error::new(
@@ -458,7 +443,6 @@ impl World {
         Ok((self.named(component)?, at))
     }
 
-    /// Which column of the table at `at` holds the entity's `component`, whose id is `id`.
     pub(super) fn column(&self, at: Location, id: ComponentId, component: &str) -> Result<usize> {
         let table = &self.tables[at.table as usize];
         let Some(column) = table.position(id) else {
@@ -477,14 +461,11 @@ impl World {
         Ok(column)
     }
 
-    /// The id of [`Parent`], which every world has registered.
     fn parent_type(&self) -> ComponentId {
         let id = self.component::<Parent>();
         id.expect("every world has registered `Parent`")
     }
 
-    /// The living entities of the tables with component `with` and without `without`, of those
-    /// given.
     fn listing(&self, with: Option<ComponentId>, without: Option<ComponentId>) -> Entities<'_> {
         let len = self
             .tables
@@ -502,8 +483,8 @@ impl World {
     }
 }
 
-/// `error`, from `doing`, such as getting or setting, the field at `path` of `entity`'s
-/// `component`, naming them and the whole path, down to the part where it happened.
+/// `error` from `doing` (getting, setting) the field at `path` of `entity`'s `component`, naming
+/// them and the whole path down to where it happened.
 pub(super) fn about(
     error: Error,
     doing: &str,
@@ -517,15 +498,12 @@ pub(super) fn about(
     error.with_message(message)
 }
 
-/// Why a resolved path's first step is a part of a row: it's a field of the component, a struct,
-/// which every row of its type has.
 const FIELD: &str = "a resolved path's first step is a field of the component";
 
-/// Why a table that has a component has its column.
 const HAS: &str = "the table has the component";
 
-/// The part of `row` of `column` that `steps`, a resolved path's, lead to; `None` for the whole
-/// row, which a declared type's is no Rust value to reach.
+/// The part of `row` of `column` that the resolved path `steps` leads to; `None` for the whole row,
+/// which a declared type has no Rust value for.
 ///
 /// Fails with `reflect.no_field` at an index past a list's end.
 fn reach<'a>(
@@ -540,8 +518,7 @@ fn reach<'a>(
     reflect::reach(field, rest).map(Some)
 }
 
-/// The steps to the opaque part that `to` leads to, which is there as any other is: an opaque field
-/// isn't a part of the struct it's in, so that struct is reached in its place.
+/// The steps to the opaque part `to` leads to: an opaque field isn't a part, so its struct is.
 fn opaque_steps(to: &Resolved) -> &[u32] {
     match to.ty {
         Type::Opaque => to.steps.split_last().map_or(&[][..], |(_, before)| before),
@@ -549,25 +526,21 @@ fn opaque_steps(to: &Resolved) -> &[u32] {
     }
 }
 
-/// Whether `table` has component `with` and hasn't `without`, of those given.
 fn has(table: &Table, with: Option<ComponentId>, without: Option<ComponentId>) -> bool {
     with.is_none_or(|id| table.has(id)) && without.is_none_or(|id| !table.has(id))
 }
 
 /// The entities [`World::entities`] and [`World::roots`] list, table by table.
 pub struct Entities<'w> {
-    /// The tables after the one it's in.
     tables: slice::Iter<'w, Table>,
     with: Option<ComponentId>,
     without: Option<ComponentId>,
-    /// The rows left of the table it's in.
     rows: slice::Iter<'w, Entity>,
-    /// The entities left.
     len: usize,
 }
 
 impl Entities<'_> {
-    /// Moves to the next table it lists, and returns whether there was one.
+    /// Moves to the next listed table; whether there was one.
     fn next_table(&mut self) -> bool {
         let (with, without) = (self.with, self.without);
         match self.tables.find(|table| has(table, with, without)) {
@@ -595,7 +568,7 @@ impl Iterator for Entities<'_> {
         }
     }
 
-    /// Skips whole tables, so that skipping costs a step a table.
+    /// Skips whole tables: a step per table.
     fn nth(&mut self, mut n: usize) -> Option<Entity> {
         loop {
             let left = self.rows.len();
@@ -711,8 +684,7 @@ mod tests {
         assert_eq!(world.get::<Everything>(entity), Some(&everything()));
     }
 
-    /// A sprite's texture reads as its handle, which sets it whole or alone; none is the white
-    /// texture.
+    /// A sprite's texture reads as its handle, set whole or alone; none is the white texture.
     #[test]
     fn a_sprite_reads_and_sets_its_texture() {
         let texture = Textures::default().add("first", [1, 1], &[0; 4], Mipmaps::None);
@@ -1219,8 +1191,7 @@ mod tests {
             .register::<second::Parent>()
             .expect_err("the world's own name");
         assert_eq!(error.code(), "reflect.name_taken");
-        // Nor does a type take another's description, and with it its name, whichever registers
-        // first.
+        // Nor does a type take another's description and name, whichever registers first.
         for _ in 0..2 {
             let error = world
                 .register::<Posing<Transform>>()
@@ -1290,8 +1261,8 @@ mod tests {
     impl<T: Reflect + Clone> Component for Posing<T> {}
     impl<T: Reflect + Clone> crate::Writable for Posing<T> {}
 
-    /// Tools read a child's parent by name, but only the world sets it, whether the entity has one
-    /// or not.
+    /// Tools read a child's parent by name, but only the world sets it, even if the entity has
+    /// none.
     #[test]
     fn a_parent_is_read_by_name_but_not_set() {
         let mut world = World::default();
@@ -1396,9 +1367,8 @@ mod tests {
         );
     }
 
-    /// Panics unless `world`'s roots are its living entities without a parent, in the order
-    /// queries find them, skipped as they're listed, each at its place, and that `gone` and the
-    /// children have none.
+    /// Panics unless `world`'s roots are its parentless living entities in query order, each at
+    /// its place when skipped to, and `gone` and the children aren't among them.
     fn check_roots(world: &World, gone: &[Entity]) {
         let living: Vec<Entity> = world.query::<Entity>().collect();
         let expected: Vec<Entity> = living

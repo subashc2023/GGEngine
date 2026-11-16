@@ -1,10 +1,12 @@
-//! Scenes: entities and their components as text, in a canonical form, so that saving the same
-//! entities always gives the same bytes, and changing a field changes only its lines. The engine
-//! writes the text itself, and `ron` only reads it, through seeds that reflection's descriptions
-//! drive. A prefab is a scene of one subtree: an entity with a [`PrefabRoot`](crate::PrefabRoot)
-//! is an instance of one, linked, which a scene saves as what differs from it, its prefab's
-//! [template](Template) giving the rest as it loads; or it's placed as a copy whose IDs are mixed
-//! from its own. Scene files are written whole or not at all.
+//! Scenes: entities and their components as canonical text, so saving the same entities gives the
+//! same bytes and changing a field changes only its lines. The engine writes the text; `ron` only
+//! reads it, through seeds driven by reflection's descriptions. Files are written whole or not at
+//! all.
+//!
+//! A prefab is a scene of one subtree. An entity with a [`PrefabRoot`](crate::PrefabRoot) is a
+//! linked instance: a scene saves only what differs from its prefab, and the prefab's
+//! [template](Template) gives the rest on load. A placed prefab is a copy with IDs mixed from its
+//! own.
 //!
 //! The canonical form:
 //!
@@ -47,8 +49,8 @@ pub(super) use template::{Expanding, Template};
 pub(super) use write::WORDS;
 pub(crate) use write::{float, quote};
 
-/// The most levels a scene's values nest: a component's value is the first, and each value in a
-/// struct, variant, option, list or array is a level deeper than it.
+/// The most levels a scene's values nest: a component's value is the first; each value inside a
+/// struct, variant, option, list or array is one deeper.
 pub(crate) const MAX_DEPTH: u32 = 64;
 
 /// The hints of a component's value, which has no field's.
@@ -59,13 +61,13 @@ pub(super) static NO_HINTS: Meta = Meta {
     doc: Cow::Borrowed(""),
 };
 
-/// Writes the scene `text`, such as [`World::save_scene`] gives, to the file at `path`, whole or
-/// not at all: to a file of its own beside it, which it flushes to the disk and then renames over
-/// it, so that a save cut short, by a crash or the power going, leaves the last file whole. Through
-/// a link it writes the file the link names, which keeps its permissions. It makes no directories.
+/// Writes scene `text` (as [`World::save_scene`] gives) to the file at `path`, whole or not at
+/// all: to a temporary file beside it, flushed, then renamed over it, so a crash or power loss
+/// leaves the last file whole. Through a link it writes the file the link names, keeping its
+/// permissions. It makes no directories.
 ///
-/// Fails with `scene.file`, naming the path, if the file is read only, or can't be written or
-/// replaced, removing what it wrote beside it.
+/// Fails with `scene.file`, naming the path, if the file is read only or can't be written or
+/// replaced; it removes what it wrote beside it.
 pub fn write_scene(path: &Path, text: &str) -> Result<()> {
     let _zone = gg_core::zone!();
     crate::dirs::write_whole(path, text.as_bytes()).map_err(|e| {
@@ -82,8 +84,7 @@ pub fn read_scene(path: &Path) -> Result<String> {
     read_scene_from(path, &Files::default())
 }
 
-/// The text of the scene file at `path`, as [`read_scene`] reads it, from `files`, the disk or the
-/// game's package.
+/// [`read_scene`] from `files`: the disk or the game's package.
 pub(crate) fn read_scene_from(path: &Path, files: &Files) -> Result<String> {
     let _zone = gg_core::zone!();
     let error = || {
@@ -97,63 +98,76 @@ pub(crate) fn read_scene_from(path: &Path, files: &Files) -> Result<String> {
 }
 
 impl World {
-    /// `roots` and their descendants as a scene's canonical text: a prefab, for one root. Each
-    /// component is saved but those that are opaque as a whole, such as a
-    /// [`MeshDraw`](crate::MeshDraw), and the fields that are opaque; a texture, a model, a font or
-    /// a prefab as its name, its asset ID, or else its path as [`App::root`](crate::App::root)
-    /// names it, as [`Context::add_texture`](crate::Context::add_texture) says; a root's [`Parent`]
-    /// isn't, since its parent isn't saved; and a model's nodes aren't, which its root's load
-    /// spawns again, as [`ModelRoot`] says. An instance of a prefab whose root is saved is saved as
-    /// what differs from its prefab, as [`PrefabRoot`](crate::PrefabRoot) says: its root's
-    /// `PrefabRoot`, `Transform` and what else differs, and each entity its prefab gives where
-    /// something does, a component the prefab gives as a struct of named fields as the fields that
-    /// differ alone, its entities saved with it as a model's nodes go with their root. Each
-    /// component is checked as [`World::set_field`] checks a value, and made again as a load makes
-    /// it, so that every scene saved loads.
+    /// `roots` and their descendants as canonical scene text; one root makes a prefab.
     ///
-    /// Fails with `ecs.no_entity` for a root that isn't alive, or a field that refers to an entity
-    /// that isn't; `ecs.model_node` for a root that's a model's node; `scene.model_node` for an
-    /// entity under a node that isn't one; `scene.prefab_missing` for an instance missing an entity
-    /// or a component its prefab gives, as one code took away; `scene.prefab_parent` for an entity
-    /// an instance gives that code made a root or put under one that isn't saved, which a load
-    /// would put back under its prefab's parent; as an instance's prefab's template fails to load;
-    /// `scene.outside` for one that refers to an entity that isn't saved;
-    /// `reflect.opaque` for something opaque in a list or an option, or in a variant or an option
-    /// that a load would have to make; `asset.unnamed` for a texture that wasn't loaded from a
-    /// file; `scene.bad_name` for a name that isn't an ASCII identifier, or is one of RON's words;
-    /// `scene.too_deep` for a value nested more than 64 levels; and as `set_field` does for a value
-    /// it refuses. Every error names the entity, the component and the path.
+    /// - Opaque components (such as [`MeshDraw`](crate::MeshDraw)) and opaque fields aren't saved.
+    /// - A texture, model, font or prefab is saved by name: its asset ID, else its path as
+    ///   [`App::root`](crate::App::root) names it
+    ///   ([`Context::add_texture`](crate::Context::add_texture)).
+    /// - A root's [`Parent`] isn't saved, since its parent isn't.
+    /// - A model's nodes aren't saved; its root's load respawns them ([`ModelRoot`]).
+    /// - An instance whose prefab root is saved is saved as what differs from its prefab
+    ///   ([`PrefabRoot`](crate::PrefabRoot)): its root's `PrefabRoot`, `Transform` and other
+    ///   differences, and each entity the prefab gives where something differs, a named-field
+    ///   struct as its differing fields. Its prefab's entities go with it, like a model's nodes.
+    ///
+    /// Each component is checked as [`World::set_field`] checks a value, and rebuilt as a load
+    /// builds it, so every saved scene loads.
+    ///
+    /// Fails with:
+    ///
+    /// - `ecs.no_entity` for a root that isn't alive, or a field referring to an entity that isn't.
+    /// - `ecs.model_node` for a root that's a model's node; `scene.model_node` for an entity under
+    ///   a node that isn't one.
+    /// - `scene.prefab_missing` for an instance missing an entity or component its prefab gives,
+    ///   as code took away.
+    /// - `scene.prefab_parent` for an entity an instance gives that code made a root or put under
+    ///   an unsaved one; a load would put it back under its prefab's parent.
+    /// - The error of an instance's prefab's template failing to load.
+    /// - `scene.outside` for a reference to an unsaved entity.
+    /// - `reflect.opaque` for opaque state in a list or option, or in a variant or option a load
+    ///   would have to make.
+    /// - `asset.unnamed` for a texture not loaded from a file.
+    /// - `scene.bad_name` for a name that isn't an ASCII identifier, or is one of RON's words.
+    /// - `scene.too_deep` for a value nested more than 64 levels.
+    /// - `set_field`'s errors for a value it refuses.
+    ///
+    /// Every error names the entity, the component and the path.
     pub fn save_scene(&self, roots: &[Entity]) -> Result<String> {
         let _zone = gg_core::zone!();
         write::save(self, roots, true)
     }
 
-    /// Exactly `entities` as a scene's canonical text, as [`save_scene`](Self::save_scene) writes
-    /// roots but without their descendants: each whose parent isn't among them is written as a
-    /// root, so that a child the game made under one of them isn't saved.
+    /// Like [`save_scene`](Self::save_scene), but exactly `entities`, without descendants: one
+    /// whose parent isn't among them is written as a root, so a child the game made under one isn't
+    /// saved.
     ///
-    /// Fails as `save_scene` does.
+    /// Fails like `save_scene`.
     #[cfg(feature = "dev")]
     pub(crate) fn save_entities(&self, entities: &[Entity]) -> Result<String> {
         let _zone = gg_core::zone!();
         write::save(self, entities, false)
     }
 
-    /// `root` and its descendants as a prefab's canonical text, which linking `root` to, as
-    /// [`Operation::Link`](crate::Operation::Link) does, makes it an instance of it that holds its
-    /// entities as they are, under their IDs: each of the prefab's own entities given the local ID
-    /// that the instance whose root is `root` mixes to its ID, as [`id::unlinked`] finds it, `root`
-    /// too, and each an instance inside gives its ID mixed again from its root's, as a prefab's
-    /// text has those; each saved as [`save_scene`](Self::save_scene) saves it, but the root's
-    /// `Transform`, the instance's own, the identity, so that the prefab sits at its root.
+    /// `root` and its descendants as canonical prefab text. Linking `root` to it
+    /// ([`Operation::Link`](crate::Operation::Link)) makes `root` an instance that keeps its
+    /// entities as they are, under their IDs.
     ///
-    /// Fails as `save_scene` does, for one, as for an entity that refers to one outside the
-    /// subtree (`scene.outside`); with `ecs.prefab_entity` for a root an instance's prefab gives,
-    /// and `scene.prefab_variant` for one that's an instance's root, as a prefab whose root links
-    /// another is refused; with `ecs.bad_id` for the one ID that no local ID mixes to, and for
-    /// two entities that would have the same local ID, which only chance gives; and as a link of
-    /// `root` to the text is refused, as [`linkable`](Self::linkable) says, so that a save that
-    /// couldn't link writes nothing.
+    /// - Each of the prefab's own entities, `root` too, gets the local ID that the instance rooted
+    ///   at `root` mixes to its ID ([`id::unlinked`]).
+    /// - Each inner instance's IDs are mixed again from its root's, as a prefab's text has them.
+    /// - Each is saved as [`save_scene`](Self::save_scene) saves it, but the root's `Transform`
+    ///   (the instance's own) is the identity, so the prefab sits at its root.
+    ///
+    /// Fails like `save_scene` (`scene.outside` for a reference outside the subtree), and with:
+    ///
+    /// - `ecs.prefab_entity` for a root an instance's prefab gives.
+    /// - `scene.prefab_variant` for an instance's root: a prefab whose root links another is
+    ///   refused.
+    /// - `ecs.bad_id` for the one ID no local ID mixes to, and for two entities that would get
+    ///   the same local ID, which only chance gives.
+    /// - The error of linking `root` to the text ([`linkable`](Self::linkable)), so a save that
+    ///   couldn't link writes nothing.
     #[cfg(feature = "dev")]
     pub(crate) fn save_prefab(&self, root: Entity) -> Result<String> {
         let _zone = gg_core::zone!();
@@ -203,44 +217,53 @@ impl World {
         Ok(text)
     }
 
-    /// The IDs the scene `text` gives its entities, as its syntax alone has them, which says what a
-    /// text holds that no longer loads, as after a rebuild took away a field it holds.
+    /// The entity IDs of scene `text` by syntax alone: what a text holds that no longer loads, as
+    /// after a rebuild removed a field it holds.
     ///
-    /// Fails with `scene.syntax` for text that isn't a scene's RON, and with `ecs.bad_id` for a key
-    /// that isn't an ID.
+    /// Fails with `scene.syntax` for text that isn't a scene's RON, `ecs.bad_id` for a key that
+    /// isn't an ID.
     pub(crate) fn scene_ids(text: &str) -> Result<Vec<EntityId>> {
         let _zone = gg_core::zone!();
         read::ids(text)
     }
 
-    /// Spawns the scene `text`'s entities, with the IDs it gives them, and returns its roots, in
-    /// the order of their IDs: all of them, or, if it's refused, none. Each parent's children are
-    /// in the order of their IDs. Every component type it names must be registered, since a world
-    /// knows a type by name once it has; what's opaque, which scenes leave out, comes from
-    /// [`Component::base`](crate::Component::base); a texture, a model, a font or a prefab is found
-    /// by its name or a path to its file among those loaded, as this loads none, where
-    /// `Context::load_scene_file` loads those a scene names first; a field that isn't given, as in
-    /// a scene saved before its type had it, takes its default; each entity with a
-    /// [`PrefabRoot`](crate::PrefabRoot) is an instance of its prefab, whose entities spawn under
-    /// it, their IDs mixed from its, and a field an instance's entity isn't given takes its
-    /// prefab's; and each entity with a [`ModelRoot`] has its model's nodes spawned under it.
+    /// Spawns scene `text`'s entities under the IDs it gives and returns its roots in ID order:
+    /// all of them, or none if it's refused. Each parent's children are in ID order.
+    ///
+    /// - Every component type named must be registered.
+    /// - What's opaque, which scenes leave out, comes from
+    ///   [`Component::base`](crate::Component::base).
+    /// - A texture, model, font or prefab is found by name or file path among those loaded. This
+    ///   loads none; `Context::load_scene_file` first loads those a scene names.
+    /// - A field not given, as in a scene saved before its type had it, takes its default.
+    /// - An entity with a [`PrefabRoot`](crate::PrefabRoot) is an instance: its prefab's entities
+    ///   spawn under it with IDs mixed from its own, and a field an instance's entity isn't given
+    ///   takes its prefab's.
+    /// - An entity with a [`ModelRoot`] gets its model's nodes spawned under it.
     ///
     /// Fails, changing nothing, with an error that begins with the line and column where the text
-    /// is refused: `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions;
-    /// `reflect.unknown_type` for a component type that isn't registered; `ecs.bad_id` for an ID
-    /// that isn't one; `scene.duplicate_id` for an entity, and `reflect.duplicate_component` for an
-    /// entity's component, given twice; `ecs.id_taken` for an ID a living entity has;
-    /// `scene.unknown_id` for a reference to an entity the scene doesn't give; `ecs.parent_cycle`
-    /// for entities that would be their own ancestors; `asset.no_texture`, `asset.no_model`,
-    /// `asset.no_font` or `asset.no_prefab` for a name or path no texture, model, font or prefab
-    /// loaded has; `scene.prefab_cycle` for a prefab that links itself, `scene.prefab_variant` for
-    /// one whose root links another, and as a prefab's text fails to load, the message naming the
-    /// prefab; `scene.prefab_entity` for an instance's entity given a `PrefabRoot` of its own;
-    /// `scene.duplicate_id` for an entity two instances' prefabs give; `reflect.read_only` for a
-    /// `ModelNode`, which the world keeps; `scene.too_deep` for a value nested more than 64
-    /// levels; and as [`World::set_field`] does for a value it refuses, such as `reflect.no_field`
-    /// for a field the type hasn't, and with `reflect.missing_field` for one that isn't given and
-    /// has no default.
+    /// is refused:
+    ///
+    /// - `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions.
+    /// - `reflect.unknown_type` for a component type that isn't registered.
+    /// - `ecs.bad_id` for an ID that isn't one.
+    /// - `scene.duplicate_id` for an entity given twice, and `reflect.duplicate_component` for an
+    ///   entity's component given twice.
+    /// - `ecs.id_taken` for an ID a living entity has.
+    /// - `scene.unknown_id` for a reference to an entity the scene doesn't give.
+    /// - `ecs.parent_cycle` for entities that would be their own ancestors.
+    /// - `asset.no_texture`, `asset.no_model`, `asset.no_font` or `asset.no_prefab` for a name or
+    ///   path no texture, model, font or prefab loaded has.
+    /// - `scene.prefab_cycle` for a prefab that links itself, `scene.prefab_variant` for one whose
+    ///   root links another, and the error of a prefab's text that fails to load, naming the
+    ///   prefab.
+    /// - `scene.prefab_entity` for an instance's entity given a `PrefabRoot` of its own.
+    /// - `scene.duplicate_id` also for an entity two instances' prefabs give.
+    /// - `reflect.read_only` for a `ModelNode`, which the world keeps.
+    /// - `scene.too_deep` for a value nested more than 64 levels.
+    /// - [`World::set_field`]'s errors for a value it refuses, such as `reflect.no_field` for a
+    ///   field the type hasn't, and `reflect.missing_field` for a missing field with no default.
+    ///
     /// Every error but `scene.syntax` names the entity it's about, and the component and the path
     /// if it's about one.
     pub fn load_scene(&mut self, text: &str) -> Result<Vec<Entity>> {
@@ -250,22 +273,21 @@ impl World {
         Ok(self.commit(entities, ids, None))
     }
 
-    /// The entities of scene `text`, parsed as [`load_scene`](Self::load_scene) parses them, but
-    /// spawning nothing: in this world, a [scratch](Self::scratch) one of the types and assets of
-    /// the world they'll spawn in, on any thread, for that world's
-    /// [`commit_scene`](Self::commit_scene).
+    /// Parses scene `text` as [`load_scene`](Self::load_scene) does, spawning nothing. Call it on
+    /// any thread, on a [scratch](Self::scratch) world with the types and assets of the world that
+    /// will [`commit_scene`](Self::commit_scene).
     ///
-    /// Fails as `load_scene` does, but for the IDs a world has, which `commit_scene` checks.
+    /// Fails like `load_scene`, except for taken IDs, which `commit_scene` checks.
     pub(crate) fn parse_scene(&self, text: &str) -> Result<Parsed> {
         let _zone = gg_core::zone!();
         let entities = read::parse(self, text, false, &mut Expanding::default())?;
         Ok(Parsed { entities })
     }
 
-    /// Spawns `parsed`, which [`parse_scene`](Self::parse_scene) parsed in a world of this one's
-    /// types and assets, as [`load_scene`](Self::load_scene) would have spawned its text, and
-    /// returns its roots: each entity under the handle this world gives it, the references between
-    /// them retargeted to those, so that the world is as the load would have left it.
+    /// Spawns `parsed` ([`parse_scene`](Self::parse_scene)'d in a world of this one's types and
+    /// assets) as [`load_scene`](Self::load_scene) would have, and returns its roots. Entities get
+    /// this world's handles and references between them are retargeted, so the world is as the
+    /// load would have left it.
     ///
     /// Fails, spawning nothing, with `ecs.id_taken` for an entity whose ID a living entity has.
     pub(crate) fn commit_scene(&mut self, parsed: Parsed) -> Result<Vec<Entity>> {
@@ -306,23 +328,23 @@ impl World {
     }
 
     /// The textures, models, fonts and prefabs scene `text` names that none loaded has, each once,
-    /// in the order it first names them, and those the loaded prefabs it names name, in turn: those
-    /// [`load_scene`](Self::load_scene) would refuse it for, which the engine loads before it loads
-    /// a scene, as `Context::load_scene_file` does.
+    /// in first-named order, then those the prefabs it names name in turn: what
+    /// [`load_scene`](Self::load_scene) would refuse it for, and `Context::load_scene_file` loads
+    /// first.
     ///
-    /// Fails as `load_scene` does into the world without its entities, but for those.
+    /// Fails like `load_scene` into the world without its entities, except for those.
     pub(crate) fn scene_assets(&self, text: &str) -> Result<Vec<Asset<String>>> {
         let _zone = gg_core::zone!();
         read::assets(&self.emptied(), text)
     }
 
-    /// Replaces the world's entities with the scene `text`'s, as [`load_scene`](Self::load_scene)
-    /// loads it into the world [cleared](Self::clear), and returns its roots: all of them, or, if
-    /// it's refused, none, the world as it was, its serial too. The IDs the world has are no bar,
-    /// since its entities go: the scene it was saved to replaces it, under the same IDs. It's then
-    /// another world, as `clear` says, which keeps the [`Resource`](crate::Resource)s.
+    /// Replaces the world's entities with scene `text`'s, as [`load_scene`](Self::load_scene) would
+    /// into the [cleared](Self::clear) world, and returns its roots: all of them, or none if it's
+    /// refused, leaving the world as it was, serial included. The world's IDs are no bar, since its
+    /// entities go. It's then another world ([`clear`](Self::clear)) that keeps the
+    /// [`Resource`](crate::Resource)s.
     ///
-    /// Fails as `load_scene` does, but for the IDs the world has.
+    /// Fails like `load_scene`, except for taken IDs.
     pub fn replace_scene(&mut self, text: &str) -> Result<Vec<Entity>> {
         let _zone = gg_core::zone!();
         let mut next = self.emptied();
@@ -332,11 +354,11 @@ impl World {
         Ok(roots)
     }
 
-    /// Places the prefab `text`, a scene of one subtree, as a copy of it whose root is the last of
-    /// `parent`'s children, or a root itself, unlinked; and returns the copy's root. Each of the
-    /// copy's IDs is mixed from the prefab's, and another, drawn for the copy, so that each copy's
-    /// are its own, but those of an instance in it, which mix from its root's copy's; references
-    /// between the prefab's entities are to the copy's.
+    /// Places the prefab `text`, a scene of one subtree, as an unlinked copy whose root is the last
+    /// of `parent`'s children, or a root itself, and returns the copy's root. Each of the copy's
+    /// IDs is mixed from the prefab's and another drawn for the copy, so that each copy's are its
+    /// own; an instance in it mixes its IDs from its root's copy's. References between the
+    /// prefab's entities are to the copy's.
     ///
     /// Fails as [`load_scene`](Self::load_scene) does, but for the IDs the world has, which the
     /// copy doesn't keep; with `scene.prefab_roots` for a prefab of more than one root, or of none;
@@ -368,9 +390,9 @@ impl World {
         Ok(roots[0])
     }
 
-    /// Spawns `entities`, which a parse checked, with `ids`, each under its parent, and the roots
-    /// under `parent`; and returns the roots, in the order of their IDs. It can't fail: the parse
-    /// checked everything, and predicted the handles they take.
+    /// Spawns `entities`, which a parse checked, with `ids`, each under its parent and the roots
+    /// under `parent`, and returns the roots in the order of their IDs. It can't fail: the parse
+    /// checked everything and predicted the handles.
     fn commit(
         &mut self,
         entities: Vec<Loaded>,
@@ -422,16 +444,16 @@ impl World {
     }
 }
 
-/// A scene's entities parsed apart from the world they'll spawn in, as [`World::parse_scene`]
-/// parses them, under the handles of the world it parsed them in, for [`World::commit_scene`].
+/// A scene's entities parsed apart from their world by [`World::parse_scene`], under the handles
+/// of the world that parsed them, for [`World::commit_scene`].
 pub(crate) struct Parsed {
     entities: Vec<Loaded>,
 }
 
 /// The IDs of the copy of a prefab's `entities`, placed as `instance`, as
 /// [`place_prefab`](World::place_prefab) gives them: each of the prefab's own mixed from the copy's
-/// and its own, as [`id::placed`] mixes it, and each an instance in it gives mixed from its root's
-/// copy's, as the instance's own are; `None` where one mixes to zero.
+/// and its own, as [`id::placed`] mixes it; each an instance in it gives mixed from its root's
+/// copy's. `None` where one mixes to zero.
 fn copied_ids(entities: &[Loaded], instance: EntityId) -> Option<Vec<EntityId>> {
     fn id_of(
         entities: &[Loaded],
@@ -455,10 +477,10 @@ fn copied_ids(entities: &[Loaded], instance: EntityId) -> Option<Vec<EntityId>> 
         .collect()
 }
 
-/// The ID in a prefab of the entity at `at` among `entities`, a subtree's whose root's ID is `root`,
-/// as [`World::save_prefab`] gives them: each of its own the local ID that the instance whose root
-/// is `root` mixes to its ID, as [`id::unlinked`] finds it, and each an instance in it gives mixed
-/// from its root's in the prefab, as the instance's own are; `None` where one would be 0.
+/// The ID in a prefab of the entity at `at` among `entities`, a subtree's whose root's ID is
+/// `root`, as [`World::save_prefab`] gives it: the local ID that the instance whose root is `root`
+/// mixes to its ID, as [`id::unlinked`] finds it; for an instance's entity, mixed from its root's
+/// in the prefab. `None` where one would be 0.
 #[cfg(feature = "dev")]
 fn local_id(entities: &[Loaded], root: EntityId, at: usize) -> Option<EntityId> {
     match entities[at].spawned {

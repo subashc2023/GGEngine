@@ -1,6 +1,5 @@
-//! A model's nodes in a world: the entities the world spawns under each entity with a
-//! [`ModelRoot`], as `ModelRoot` says, their IDs mixed from the root's, so that the root's ID gives
-//! them wherever it's loaded, made or restored.
+//! A model's nodes in a world: the entities spawned under each [`ModelRoot`]. Their IDs mix from
+//! the root's, so its ID gives them wherever it's loaded, made or restored.
 
 use std::sync::Arc;
 
@@ -12,8 +11,7 @@ use crate::model::Nodes;
 use crate::{Light, MeshDraw, Model, ModelNode, ModelRoot, Name, Transform};
 
 impl World {
-    /// Spawns an entity at `at` with a [`ModelRoot`] of `model`, and its nodes, and returns it, as
-    /// [`Model::spawn`] says.
+    /// Like [`Model::spawn`].
     pub(crate) fn spawn_model(&mut self, model: Model, at: Transform) -> Entity {
         let assets = Arc::clone(&self.assets);
         let nodes = assets.nodes(model).expect(
@@ -39,12 +37,13 @@ impl World {
         root
     }
 
-    /// Makes `root`'s nodes those of the model its [`ModelRoot`] names, as the assets it shares
-    /// hold them, or takes them away if it has none: as it's loaded or made with one, gains or
-    /// loses one, and as its model's nodes change, which were `was`. Its nodes stay while
-    /// they keep their places in the model's hierarchy, as code left them but for each one's draw
-    /// and light, and, given `was`, the transforms the model changed; otherwise they're spawned
-    /// again.
+    /// Makes `root`'s nodes those of its [`ModelRoot`]'s model, or takes them away without one.
+    /// Called when a root is loaded, made, or gains or loses a `ModelRoot`, or its model's nodes
+    /// change from `was`.
+    ///
+    /// Nodes that keep their places in the model's hierarchy stay, with what code gave them, but
+    /// take the model's draw and light and, given `was`, its changed transforms. Others are
+    /// spawned again.
     pub(crate) fn fit_nodes(&mut self, root: Entity, was: Option<&Nodes>) {
         let model = self.get::<ModelRoot>(root).map(|&ModelRoot(model)| model);
         let assets = Arc::clone(&self.assets);
@@ -93,8 +92,7 @@ impl World {
         }
     }
 
-    /// Fits the nodes of each root of `model` to the model's nodes, as [`fit_nodes`] does, `was`
-    /// being what they were: as its file's read again.
+    /// Runs [`fit_nodes`] on each root of `model`; `was` is its nodes before its file was reread.
     ///
     /// [`fit_nodes`]: Self::fit_nodes
     #[cfg(feature = "dev")]
@@ -107,9 +105,8 @@ impl World {
         }
     }
 
-    /// Gives each model's node that has no draw the draw its part has, as the assets the world
-    /// shares hold its model: as a world restored from a snapshot of a run that added other assets
-    /// is, which leaves out what's opaque, draws among it. Nodes keep their places and the rest.
+    /// Gives each model node without a draw its part's. A snapshot leaves out opaque data, draws
+    /// included, so a world restored from a run with other assets needs it.
     pub(crate) fn redraw_nodes(&mut self) {
         let roots = self.query::<(Entity, &ModelRoot)>();
         let roots: Vec<(Entity, Model)> = roots
@@ -134,7 +131,7 @@ impl World {
         }
     }
 
-    /// Takes `root`'s nodes away, with whatever is under them.
+    /// Despawns `root`'s nodes with what's under them.
     pub(crate) fn despawn_nodes(&mut self, root: Entity) {
         let Ok(children) = self.children(root) else {
             return;
@@ -147,9 +144,8 @@ impl World {
         }
     }
 
-    /// Fails with `ecs.model_node` if `entity` is a node of a model, which the world spawns under
-    /// the model's root, as [`ModelRoot`] says: as a tool's change to it, or a child given it, is
-    /// refused.
+    /// Fails with `ecs.model_node` if `entity` is a model's node: tools can't change it or give
+    /// it a child.
     pub(crate) fn not_a_node(&self, entity: Entity) -> Result<()> {
         let Some(&ModelNode(part)) = self.get::<ModelNode>(entity) else {
             return Ok(());
@@ -169,9 +165,8 @@ impl World {
         ))
     }
 
-    /// What `entity` is called, for people, as the Entities panel and the tool API show it: its
-    /// [`Name`], or, for a model's node without one, its node's name in the model's file, which
-    /// follows the file as it's read again. `None` for an entity called nothing, or dead.
+    /// What the Entities panel and tool API call `entity`: its [`Name`], or for a model node
+    /// without one, its name in the model's file, which follows rereads. `None` if unnamed or dead.
     pub fn name(&self, entity: Entity) -> Option<&str> {
         if let Some(Name(name)) = self.get::<Name>(entity) {
             return Some(name);
@@ -182,8 +177,7 @@ impl World {
         nodes.parts.get(part as usize)?.name.as_deref()
     }
 
-    /// The root of the model whose node `entity` is, which tools change in its place; `entity`
-    /// itself if it's no model's node.
+    /// The root of `entity`'s model, which tools change in its place; `entity` if it's no node.
     pub(crate) fn node_root(&self, entity: Entity) -> Entity {
         let mut at = entity;
         while self.get::<ModelNode>(at).is_some() {
@@ -195,10 +189,10 @@ impl World {
         at
     }
 
-    /// Spawns the nodes `nodes` gives under `root`, whose ID is `id`, each with its ID mixed from
-    /// the root's and its place: but a node whose ID a living entity has, as a scene's entity
-    /// might, which goes without, and those under it, warning `ecs.id_taken`. It allocates nothing
-    /// once the world has spawned as many, as a game spawning a model each tick needs.
+    /// Spawns `nodes` under `root` (ID `id`), each with an ID mixed from the root's and its place.
+    /// A node whose ID a living entity has, as a scene's entity might, is skipped with those under
+    /// it, warning `ecs.id_taken`. It allocates nothing once the world has spawned as many, as a
+    /// game spawning a model each tick needs.
     fn spawn_nodes(&mut self, root: Entity, id: EntityId, nodes: &Nodes) {
         // Each part's node, or `Entity::DEAD` for one that goes without.
         let mut spawned = self.take_list();
@@ -236,8 +230,7 @@ impl World {
         self.keep_list(spawned);
     }
 
-    /// `root`'s nodes, each with its part, reached from it through nodes alone, in the order of
-    /// their parts.
+    /// `root`'s nodes with their parts, in part order.
     fn nodes_of(&self, root: Entity) -> Vec<(u32, Entity)> {
         let mut found = Vec::new();
         let mut next = vec![root];
@@ -254,8 +247,8 @@ impl World {
     }
 }
 
-/// The ID of node `part` of the model whose root's ID is `root`: mixed from it, as a prefab's copy's
-/// are, so that a root's ID gives its nodes'. `None` for the one part it mixes to zero.
+/// The ID of node `part` under `root`, mixed from it as a prefab copy's. `None` for the one part
+/// that mixes to zero.
 pub(crate) fn node_id(root: EntityId, part: usize) -> Option<EntityId> {
     id::placed(root, EntityId::new(part as u64 + 1)?)
 }
@@ -272,7 +265,7 @@ mod tests {
     use crate::reflect::{Reflect, Value};
     use crate::{Context, Name, Operation};
 
-    /// A context with model "m", of [`imported`], and a root of it spawned.
+    /// A context with model "m", of [`imported`], and a root spawned.
     fn spawned() -> (Context, Model, Entity) {
         let mut cx = Context::seeded(1);
         let (model, _) = added(&mut cx, "m", imported());
@@ -280,7 +273,7 @@ mod tests {
         (cx, model, root)
     }
 
-    /// The IDs of `root`'s nodes, by their parts, as `world` has them.
+    /// The IDs of `root`'s nodes, by part.
     fn node_ids(world: &World, root: Entity) -> Vec<EntityId> {
         let nodes = world.nodes_of(root).into_iter();
         nodes
@@ -288,8 +281,8 @@ mod tests {
             .collect()
     }
 
-    /// A scene saves a model's root alone, which spawns its nodes again as it loads, under the
-    /// same IDs; one that holds a child the game gave a node is refused, as is saving a node.
+    /// A scene saves a root alone; loading respawns its nodes under the same IDs. Saving a node,
+    /// or a root with a child the game gave a node, is refused.
     #[test]
     fn a_scene_saves_a_models_root_alone_and_its_load_spawns_the_nodes() {
         let (mut cx, model, root) = spawned();
@@ -326,9 +319,9 @@ mod tests {
         assert_eq!(error.code(), "reflect.read_only", "{error:#}");
     }
 
-    /// Tools give a root its model, change it and take it away, its nodes following, undone and
-    /// redone exactly, and copy a root with its nodes, under IDs mixed from the copy's; but change
-    /// no node, nor put anything under one, nor give an entity a `ModelNode`.
+    /// Tools give, change and remove a root's model, its nodes following, with exact undo and
+    /// redo, and copy a root with nodes under IDs mixed from the copy's. They can't change a node,
+    /// put anything under one, or give an entity a `ModelNode`.
     #[test]
     fn tools_change_a_models_root_and_never_its_nodes() {
         let (mut cx, model, root) = spawned();
@@ -404,7 +397,7 @@ mod tests {
             first,
             "its own again, under their IDs"
         );
-        // Rolled back, as an edit refused after it rolls it back, the same.
+        // Rolled back, as a refused edit is: the same.
         let (_, mut inverse) = apply(world, set).expect("set");
         world.roll_back(&mut inverse).expect("rolled back");
         assert_eq!(node_ids(world, root), first);
@@ -439,7 +432,7 @@ mod tests {
         assert_eq!(after, entities - 5, "the root and its nodes");
         world.undo(&mut inverse).expect("made again");
         assert_eq!(node_ids(world, made).len(), 4);
-        // Unmade whichever nodes its model has by then, as after its file changed.
+        // Unmade with whatever nodes its model has by then, as after its file changed.
         #[cfg(feature = "dev")]
         {
             let was = world.assets().nodes(model).expect("added").clone();
@@ -457,7 +450,7 @@ mod tests {
             world.fit_model(model, &world.assets().nodes(model).expect("added").clone());
         }
 
-        // A copy, with nodes of its own, which its copies leave out, as what a scene names.
+        // A copy has its own nodes; `copies` names the root alone, as a scene does.
         let duplicate = Operation::Duplicate {
             entity: root_id,
             copies: Vec::new(),
@@ -477,8 +470,7 @@ mod tests {
         assert_eq!(world.entity(copy_id), None);
         world.undo(&mut inverse).expect("copied again");
         assert_eq!(node_ids(world, copy), mixed);
-        // Applied again with the IDs it was given, as a replay applies it, once its undo has let
-        // them go.
+        // Applied again under the IDs it was given, as a replay does, once its undo let them go.
         world.undo(&mut inverse).expect("uncopied");
         world.release(inverse);
         let mut again = duplicate.clone();
@@ -489,13 +481,13 @@ mod tests {
         );
     }
 
-    /// A duplicate given its copies' IDs gives each to the copy it's given for alone: a node's copy
-    /// whose ID would mix to one of them draws one instead, as one whose mix is taken does.
+    /// A duplicate's given IDs go to their copies alone: a node copy whose mixed ID is one of them
+    /// draws another, as when the mix is taken.
     #[test]
     fn a_duplicates_given_ids_go_to_their_copies_alone() {
         let (mut cx, _, root) = spawned();
         let world = cx.world_mut();
-        // The model's root and s under e, and q under s: copied breadth-first, the nodes before q.
+        // The root and s under e, q under s: copied breadth-first, the nodes before q.
         let [e, s, q] = [(); 3].map(|()| world.spawn(Transform::IDENTITY));
         for (child, parent) in [(root, e), (s, e), (q, s)] {
             world.set_parent(child, Some(parent)).expect("no cycle");
@@ -519,10 +511,9 @@ mod tests {
         world.release(inverse);
     }
 
-    /// As its model changes, a root's nodes keep what code gave them, taking the model's draws and,
-    /// where the model changed them, its transforms; nodes in other places are spawned again, under
-    /// the same IDs. Their draws, left out as a restore of other assets leaves them, come back, to a
-    /// node code took its draw away from too, the rest as it was, a node code despawned among it.
+    /// As its model changes, nodes keep what code gave them but take the model's draws and changed
+    /// transforms; nodes in other places respawn under the same IDs. Draws a restore left out come
+    /// back, even where code took one; a node code despawned stays gone.
     #[cfg(feature = "dev")]
     #[test]
     fn nodes_fit_their_model_as_it_changes_keeping_what_code_gave_them() {
@@ -563,7 +554,7 @@ mod tests {
         let hidden = world.take::<MeshDraw>(nodes[2].1).expect("alive");
         assert!(hidden.is_some(), "code may take a node's draw away");
         world.despawn(mirror).expect("code may");
-        // As a restore of other assets leaves the draws out.
+        // As a restore leaves the draws out.
         world.take::<MeshDraw>(nodes[1].1).expect("alive");
         world.redraw_nodes();
         let draw = |node: usize| world.get::<MeshDraw>(nodes[node].1).copied();
@@ -586,8 +577,7 @@ mod tests {
         assert_eq!(node_ids(world, root), ids[..2]);
     }
 
-    /// A scene file saved with its model's root moved moves the root alone: its nodes, which the
-    /// file doesn't hold, are left as they are.
+    /// A scene edit moving a model's root moves it alone; its nodes, absent from the file, stay.
     #[cfg(feature = "dev")]
     #[test]
     fn a_scene_edit_leaves_a_models_nodes_alone() {
@@ -609,9 +599,8 @@ mod tests {
         assert_eq!(ids, [Some(root_id)], "{operations:?}");
     }
 
-    /// A model's node is called by its name in the model, or by a `Name` code gives it, which
-    /// any entity is called by; one the model leaves unnamed, an entity of neither and a dead one,
-    /// by nothing.
+    /// A node is called by its model name or a `Name` code gives it; an unnamed node, an entity
+    /// with neither and a dead one by nothing.
     #[test]
     fn a_models_node_is_called_by_its_name_in_the_model() {
         let mut cx = Context::seeded(1);

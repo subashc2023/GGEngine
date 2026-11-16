@@ -1,8 +1,8 @@
-//! Component types that scripts declare as they load, which no Rust type is: each a struct of
-//! fields of a few kinds, numbers, bools, vectors and entities, whose values a table keeps flat, a
-//! row's after another's in one `Vec` for the column, so that copying the world allocates no more
-//! for them than for a Rust type's `Vec`. Reflection reaches them as it does Rust's, by their
-//! descriptions, which [`Components::declare`](super::table::Components::declare) makes.
+//! Component types scripts declare as they load, backed by no Rust type.
+//!
+//! Each is a struct of bools, numbers, vectors and entities, kept flat in one `Vec` per column, so
+//! copying the world allocates no more than for a Rust type. Reflection reaches them through
+//! [`Components::declare`](super::table::Components::declare)'s descriptions.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// Its fields' type, as reflection describes it.
+    /// The reflection type of its fields.
     pub fn ty(self) -> Type {
         match self {
             Self::Bool => Type::Bool,
@@ -37,8 +37,7 @@ impl Kind {
         }
     }
 
-    /// A field's value of this kind, made from `value`, as its type's [`Reflect::from_value`]
-    /// makes one, and fails.
+    /// A field of this kind from `value`, by its type's [`Reflect::from_value`].
     pub(super) fn slot(self, value: &Value) -> Result<Slot> {
         Ok(match self {
             Self::Bool => Slot::Bool(bool::from_value(value)?),
@@ -49,8 +48,7 @@ impl Kind {
     }
 }
 
-/// A declared type: its name, and its fields' names and kinds, in their order, with their
-/// defaults.
+/// A declared type: its name, and its fields' names, kinds and defaults, in order.
 #[derive(Debug, PartialEq)]
 pub struct Declared {
     pub name: Ident,
@@ -59,7 +57,7 @@ pub struct Declared {
 }
 
 impl Declared {
-    /// Whether its fields are `fields`, each a name, a kind and a default, in their order.
+    /// Whether its fields are `fields` (name, kind, default), in order.
     pub(crate) fn declares(&self, fields: &[(Ident, Kind, Value)]) -> bool {
         let ours = self.fields.iter().zip(&self.defaults);
         self.fields.len() == fields.len()
@@ -70,8 +68,8 @@ impl Declared {
                 })
     }
 
-    /// Pushes `row`, of `from`'s fields, onto `to` as a row of these: each field of a name and a
-    /// kind `from` has too as `row` holds it, and each other at its default.
+    /// Pushes `row` of `from`'s fields onto `to` as a row of these: fields `from` has by name and
+    /// kind keep their values, the others take defaults.
     fn fit(&self, from: &Self, row: &[Slot], to: &mut Vec<Slot>) {
         for ((name, kind), default) in self.fields.iter().zip(&self.defaults) {
             let kept = (from.fields.iter()).position(|(field, of)| field == name && of == kind);
@@ -80,7 +78,7 @@ impl Declared {
     }
 }
 
-/// A field's value, of a declared type's row.
+/// A field's value in a row.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Slot {
     Bool(bool),
@@ -90,7 +88,7 @@ pub enum Slot {
 }
 
 impl Slot {
-    /// Its value, for reflection, as the Rust type its kind's is.
+    /// The value as its kind's Rust type.
     pub fn reflect(&self) -> &dyn Reflect {
         match self {
             Self::Bool(b) => b,
@@ -110,12 +108,12 @@ impl Slot {
     }
 }
 
-/// A declared type's column: each row's fields, in their order, a row's after another's.
+/// A declared type's column: rows' fields in order, one row after another.
 #[derive(Clone)]
 pub(super) struct Column {
     declared: Arc<Declared>,
     slots: Vec<Slot>,
-    /// Its rows, which a type without fields has none of in `slots`.
+    /// Rows; a type without fields has no `slots`.
     len: usize,
 }
 
@@ -128,7 +126,6 @@ impl Column {
         }
     }
 
-    /// `row`'s fields.
     pub(super) fn row(&self, row: usize) -> &[Slot] {
         let width = self.declared.fields.len();
         &self.slots[row * width..(row + 1) * width]
@@ -139,8 +136,7 @@ impl Column {
         &mut self.slots[row * width..(row + 1) * width]
     }
 
-    /// The fields `value` gives, a struct's, each once, in the order of the type's, made as each
-    /// kind makes its own.
+    /// The fields of struct `value`, each given once, in type order.
     fn slots(&self, value: &Value) -> Result<Vec<Slot>> {
         let Value::Struct(given) = value else {
             return Err(reflect::wrong_kind("Struct", value));
@@ -256,8 +252,8 @@ impl AnyColumn for Column {
             self.row_mut(row).swap_with_slice(with.row_mut(0));
             return;
         }
-        // Kept from before the type's fields changed: it comes back as they are now, and keeps
-        // the row it takes as they are too.
+        // Kept from before the fields changed: it returns refitted, and the row it takes keeps
+        // its fields.
         let mut fitted = Vec::with_capacity(self.declared.fields.len());
         self.declared.fit(&with.declared, with.row(0), &mut fitted);
         with.slots = self.row(row).to_vec();
@@ -288,14 +284,12 @@ impl AnyColumn for Column {
     }
 }
 
-/// Whether `a` and `b` are the same fields, as they are but where a type's fields changed between
-/// the rows of two columns.
+/// Whether `a` and `b` are the same fields; they differ only after a type's fields changed.
 fn same(a: &Arc<Declared>, b: &Arc<Declared>) -> bool {
     Arc::ptr_eq(a, b) || a == b
 }
 
-/// Has `column`, a declared type's, hold its rows as rows of `to`, the type's fields now, each
-/// field it holds of a name and a kind `to` has too as it holds it, and each other at its default.
+/// Refits `column`'s rows to `to`, the type's fields now, as [`Declared::fit`] does.
 pub(super) fn migrate(column: &mut dyn AnyColumn, to: &Arc<Declared>) {
     let column = Column::of(column);
     let mut slots = Vec::with_capacity(column.len * to.fields.len());
@@ -306,8 +300,8 @@ pub(super) fn migrate(column: &mut dyn AnyColumn, to: &Arc<Declared>) {
     column.declared = Arc::clone(to);
 }
 
-/// Whether `name` is an identifier: a letter or `_`, then letters, digits or `_`, as Luau's and
-/// Rust's are, so that a path and a script both name it.
+/// Whether `name` is a Luau and Rust identifier (a letter or `_`, then letters, digits or `_`), so
+/// paths and scripts can both name it.
 pub(crate) fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
@@ -339,7 +333,7 @@ mod tests {
         );
         let twice = vec![number("speed", 0.0), number("speed", 1.0)];
         assert_eq!(refused("Spin", twice), "reflect.bad_name");
-        // Nor one of RON's words, a type's or a field's, which no scene could save it by.
+        // Nor a RON word as a type's or field's name: no scene could save it.
         assert_eq!(refused("None", vec![]), "reflect.bad_name");
         assert_eq!(
             refused("Spin", vec![number("inf", 0.0)]),
@@ -399,9 +393,8 @@ mod tests {
         assert_eq!(refused.code(), "reflect.has_component");
     }
 
-    /// A type declared again holds each of its rows as its fields are now, in every table, those of
-    /// a name and a kind it had keeping their values and the rest taking their defaults; and so
-    /// does a component an undo puts back, which was taken before.
+    /// A type declared again refits its rows in every table, and components an undo puts back:
+    /// fields of the same name and kind keep values, the rest take defaults.
     #[test]
     fn a_type_declared_again_has_its_rows_and_those_put_back_hold_its_fields_as_they_are() {
         use crate::{Log, Operation, Transform};

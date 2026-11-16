@@ -1,6 +1,6 @@
-//! Prefabs' templates: what an instance of a prefab spawns, as the prefab's text loads into a world
-//! of its own, its own instances' entities with it, each field as the prefab has it; and how each
-//! entity's ID in an instance mixes from the instance's root's.
+//! Prefabs' templates: what an instance spawns, as the prefab's text loads into a world of its own
+//! with its own instances' entities, each field as the prefab has it; and how each entity's ID in
+//! an instance mixes from the instance's root's.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -14,32 +14,31 @@ use crate::ecs::id::{self, EntityId};
 use crate::ecs::table::{ComponentId, Row};
 use crate::ecs::{Entity, Parent, World};
 
-/// A prefab's entities as its text loads, which an instance of it takes: its root first, then the
-/// rest, in the order the text first names them, those of the instances in it after.
+/// A prefab's entities as its text loads, which an instance takes: root first, then the rest in
+/// first-named order, then those of the instances in it.
 pub(crate) struct Template {
     pub(crate) parts: Vec<Part>,
 }
 
 /// An entity of a prefab, as its [`Template`] holds it.
 pub(crate) struct Part {
-    /// Its ID in the prefab, as the text gives it, or as it mixes from its instance's root's.
+    /// Its ID in the prefab: as the text gives it, or mixed from its instance's root's.
     pub(crate) id: EntityId,
-    /// Its handle in the world the template loaded into, which its parts' references hold.
+    /// Its handle in the template's world, which references among the parts hold.
     pub(crate) handle: Entity,
-    /// For one an instance inside the prefab gives, the place of that instance's root among the
-    /// parts, and its ID as that instance's prefab gives it, which its own mixes from the root's;
-    /// `None` for one of the prefab's own, whose ID in an instance mixes from the instance's root's
-    /// and its own.
+    /// For an entity of an instance inside the prefab: the place of that instance's root among
+    /// the parts, and its ID in that instance's prefab, which mixes from the root's. `None` for
+    /// the prefab's own, whose ID in an instance mixes from the instance's root's and its own.
     pub(crate) spawner: Option<(usize, EntityId)>,
     /// Its parent's place among the parts; `None` for the root alone.
     pub(crate) parent: Option<usize>,
-    /// Its components, but its `Parent`, which `parent` gives, each a one-row column: references
-    /// to the prefab's entities by their handles in its world.
+    /// Its components but `Parent` (`parent` gives it), each a one-row column; references are to
+    /// the prefab's entities by their handles in its world.
     pub(crate) row: Row,
 }
 
 impl Template {
-    /// A stand-in's, whose instances are their roots alone, as they are.
+    /// A stand-in's: its instances are their roots alone.
     fn empty() -> Self {
         Self {
             parts: vec![Part {
@@ -52,8 +51,7 @@ impl Template {
         }
     }
 
-    /// The template of the prefab whose text's entities are `loaded`, as a parse of a prefab gave
-    /// them, its root among them; `parent_type` is [`Parent`]'s.
+    /// The template of a prefab from its parsed entities `loaded`; `parent_type` is [`Parent`]'s.
     fn of(loaded: Vec<read::Loaded>, parent_type: ComponentId) -> Self {
         let root = (loaded.iter())
             .position(|entity| entity.parent.is_none())
@@ -83,14 +81,14 @@ impl Template {
         }
     }
 
-    /// Its parts' places, the root's first and each part's after its parent's, as the order of its
-    /// parts, by first mention, needn't have them: a child's ID may come before its parent's.
+    /// Its parts' places, the root's first and each part's after its parent's. The parts' own order
+    /// is by first mention, so a child may come before its parent.
     #[cfg(feature = "dev")]
     pub(crate) fn downward(&self) -> Vec<usize> {
         let mut order = Vec::with_capacity(self.parts.len());
         let mut placed = vec![false; self.parts.len()];
         for part in 0..self.parts.len() {
-            // It and those above it not yet placed, from it up, then turned to run down.
+            // It and its unplaced ancestors, pushed upward, then reversed to run down.
             let from = order.len();
             let mut at = Some(part);
             while let Some(of) = at.filter(|&of| !placed[of]) {
@@ -103,8 +101,8 @@ impl Template {
         order
     }
 
-    /// The IDs of its parts in the instance whose root's ID is `root`: the root's, then each other
-    /// part's mixed from its instance's root's, as [`id::linked`] mixes it.
+    /// The IDs of its parts in the instance rooted at `root`: `root`, then each other part mixed
+    /// from its instance's root's ([`id::linked`]).
     ///
     /// Fails with `ecs.bad_id` for the one ID a part mixes to zero under `root`.
     pub(crate) fn ids(&self, root: EntityId) -> Result<Vec<EntityId>> {
@@ -116,7 +114,7 @@ impl Template {
         Ok(ids.into_iter().map(|id| id.expect("each mixed")).collect())
     }
 
-    /// The ID of part `part`, as `ids` holds those mixed so far, the root's among them.
+    /// The ID of part `part`; `ids` holds those mixed so far.
     fn id_of(&self, part: usize, ids: &mut [Option<EntityId>]) -> Result<EntityId> {
         if let Some(id) = ids[part] {
             return Ok(id);
@@ -140,20 +138,19 @@ impl Template {
     }
 }
 
-/// What makes prefabs' templates, as a load, a save or an operation needs them: each once, by the
-/// text of its prefab, and none for a prefab that links itself.
+/// Makes prefabs' templates for a load, save or operation: each once, from its text; none for a
+/// prefab that links itself.
 #[derive(Default)]
 pub(crate) struct Expanding {
     /// The prefabs whose templates are being made, each linking the next.
     making: Vec<Prefab>,
     made: HashMap<Prefab, Rc<Template>>,
-    /// The text to make each prefab here of, in place of what the assets hold, as a reload's.
+    /// The text to make each prefab here from, in place of the assets', as a reload's.
     texts: HashMap<Prefab, Arc<str>>,
 }
 
 impl Expanding {
-    /// What makes templates of `prefab` as `text` holds it, and of the rest as the assets hold
-    /// them.
+    /// Makes `prefab`'s template from `text`, and the rest from the assets.
     #[cfg(feature = "dev")]
     pub(crate) fn with_text(prefab: Prefab, text: Arc<str>) -> Self {
         Self {
@@ -162,10 +159,10 @@ impl Expanding {
         }
     }
 
-    /// The template of a prefab of text `text` that isn't among the assets, as a save as a prefab
-    /// checks what it writes: none names it, so it links none of those it makes.
+    /// The template of a prefab of `text` that isn't among the assets, for a save as a prefab to
+    /// check what it writes. None names it, so it links none of those it makes.
     ///
-    /// Fails as the text fails to load, as [`World::load_scene`] says.
+    /// Fails if the text fails to load ([`World::load_scene`]).
     #[cfg(feature = "dev")]
     pub(crate) fn text_template(&mut self, world: &World, text: &str) -> Result<Rc<Template>> {
         let scratch = world.scratch();
@@ -175,12 +172,12 @@ impl Expanding {
         Ok(Rc::new(Template::of(loaded, parent_type)))
     }
 
-    /// `prefab`'s template, as its text loads into a world of `world`'s types and assets, made the
-    /// first time it's asked for: a stand-in's root alone.
+    /// `prefab`'s template: its text loaded into a world of `world`'s types and assets, made on
+    /// first request. A prefab without text gets a stand-in's root alone.
     ///
-    /// Fails with `scene.prefab_cycle` for a prefab that links itself, through those it links;
-    /// and as the prefab's text fails to load, as [`World::load_scene`] says, its message naming
-    /// the prefab's path.
+    /// Fails with `scene.prefab_cycle` for a prefab that links itself, directly or through those
+    /// it links; and if the text fails to load ([`World::load_scene`]), the message naming the
+    /// prefab's path.
     pub(crate) fn template(&mut self, world: &World, prefab: Prefab) -> Result<Rc<Template>> {
         if let Some(made) = self.made.get(&prefab) {
             return Ok(Rc::clone(made));

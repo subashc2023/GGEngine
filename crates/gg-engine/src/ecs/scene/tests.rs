@@ -76,9 +76,9 @@ const GOLDEN: &str = r#"(
 )
 "#;
 
-/// The golden scene as a person might write it: with comments and CRLFs, its entities, components
-/// and fields out of order, a reference before its entity, raw strings, a hex integer, integers
-/// for floats, and trailing commas left out.
+/// The golden scene as a person might write it: comments, CRLFs, things out of order, a
+/// reference before its entity, raw strings, a hex integer, integers for floats, no trailing
+/// commas.
 const LOOSE: &str = r##"// Written by hand.
 (
   entities: {
@@ -95,7 +95,7 @@ const LOOSE: &str = r##"// Written by hand.
   }
 )"##;
 
-/// A world that knows the golden scene's types, and has free slots, the last freed `left`.
+/// A world that knows the golden scene's types and has free slots, the last freed `left`.
 fn golden_world(seed: u64) -> World {
     let mut world = World::seeded(seed);
     world.register::<GridCell>().expect("registered");
@@ -113,8 +113,8 @@ fn id(text: &str) -> EntityId {
     text.parse().expect("an ID")
 }
 
-/// Panics unless `world` is as `twin` is: its entities, their components and IDs, how many times
-/// its rows have changed, and the next entity it spawns, and the ID it draws for it.
+/// Panics unless `world` matches `twin`: entities, components, IDs, row-change counts, and the
+/// next entity and ID it draws.
 pub(in crate::ecs) fn unchanged(world: &mut World, twin: &mut World, case: &str) {
     assert!(same_snapshots(&snapshot(world), &snapshot(twin)), "{case}");
     assert_eq!(world.version().1, twin.version().1, "{case}");
@@ -154,7 +154,7 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
     let roots = world
         .load_scene(GOLDEN)
         .unwrap_or_else(|error| panic!("{error}"));
-    // So that drawing sorts the rows again.
+    // So drawing sorts the rows again.
     assert_ne!(world.version(), version);
     let cell = world.entity(id("2b7e151628aed2a6")).expect("loaded");
     let mover = world.entity(id("9f86d081884c7d65")).expect("loaded");
@@ -190,7 +190,6 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
         .save_scene(&roots)
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(saved, GOLDEN);
-    // Entities that aren't the roots' subtrees aren't saved.
     assert_eq!(world.save_scene(&[cell, mover]).expect("saved"), GOLDEN);
     assert_eq!(
         world.save_scene(&[]).expect("saved"),
@@ -198,10 +197,10 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
     );
 }
 
-/// A scene parsed apart, in a scratch world on another thread, and committed, leaves the world as
-/// its load leaves a twin: its entities in the slots the load gives them, their references, parents
-/// and children, and a prefab's instance's entities, retargeted to them. Committed again, an ID the
-/// world has refuses it, spawning nothing.
+/// A scene parsed in a scratch world on another thread, then committed, leaves the world as a
+/// load leaves a twin: entities in the load's slots, with references, parents, children and a
+/// prefab instance's entities retargeted. Committed again, an ID the world has refuses it,
+/// spawning nothing.
 #[test]
 fn a_scene_parsed_apart_commits_as_it_loads() {
     let (prefab, _) = prefab();
@@ -265,17 +264,16 @@ fn a_scene_parsed_apart_commits_as_it_loads() {
     assert_eq!((committed.hash(), committed.version()), (hash, version));
 }
 
-/// A scene file reads back as it was written, and a write over it replaces it, through a file of
-/// its own beside it, which it leaves behind neither then nor when it can't replace what's there;
-/// a file of the user's named as such a file might be is left as it was. A file that's read only
-/// is refused, on every OS, and kept. A write into a directory that isn't there and a read of a
-/// file that isn't fail, naming the file.
+/// - A scene file reads back as written. A write replaces it through a temporary file beside
+///   it, left behind neither on success nor on failure.
+/// - A user's file named like such a temporary file is left alone.
+/// - A read-only file is refused, on every OS, and kept.
+/// - A write into a missing directory and a read of a missing file fail, naming the file.
 #[test]
 fn a_scene_file_is_written_whole() {
     let dir = Scratch::new("scene-file");
     fs::create_dir_all(&dir.0).expect("a directory");
     let path = dir.0.join("grid.ron");
-    // A draft of the user's, named as a scene's temporary file might be.
     let draft = dir.0.join("grid.ron.new");
     fs::write(&draft, "a draft").expect("a draft");
     let listed = || {
@@ -291,7 +289,7 @@ fn a_scene_file_is_written_whole() {
         assert_eq!(listed(), ["grid.ron", "grid.ron.new"]);
     }
     assert_eq!(fs::read_to_string(&draft).ok().as_deref(), Some("a draft"));
-    // A directory, which a file can't replace.
+    // A directory: a file can't replace it.
     let taken = dir.0.join("taken");
     fs::create_dir(&taken).expect("a directory");
     let error = write_scene(&taken, GOLDEN).expect_err("a directory in the way");
@@ -319,8 +317,8 @@ fn a_scene_file_is_written_whole() {
     }
 }
 
-/// Through a link, a scene file's write replaces the file the link names, which keeps its
-/// permissions, and the link stays one.
+/// Written through a link, a scene replaces the file it names, keeping its permissions; the
+/// link stays a link.
 #[cfg(unix)]
 #[test]
 fn a_scene_file_is_written_through_a_link_keeping_its_permissions() {
@@ -352,10 +350,10 @@ fn text_written_by_hand_loads_and_saves_canonically() {
     check_links(&world);
 }
 
-/// Exactly the entities given save, without a child of theirs that isn't given, and one whose
-/// parent isn't given as a root, refused if it refers to an entity that isn't; a text written by
-/// hand is the engine's own in canonical form; and the IDs a text gives read from its syntax alone,
-/// whatever types it names.
+/// - Exactly the given entities save: an entity whose parent isn't given is a root; one
+///   referring to an ungiven entity is refused.
+/// - A hand-written text is the engine's own in canonical form.
+/// - A text's IDs read from its syntax alone, whatever types it names.
 #[cfg(feature = "dev")]
 #[test]
 fn exactly_the_entities_given_save_and_a_texts_ids_read_from_its_syntax() {
@@ -569,7 +567,7 @@ fn a_refused_scene_changes_nothing_and_says_where() {
         assert!(message.starts_with(&says), "{message}\nisn't\n{says}");
         unchanged(&mut world, &mut twin, &message);
     }
-    // An ID the world has: here, from a scene loaded before.
+    // An ID the world already has, from an earlier scene load.
     let taken = "(\n    entities: {\n        \"9f86d081884c7d65\": (),\n    },\n)\n";
     for world in [&mut world, &mut twin] {
         world.load_scene(taken).expect("loaded");
@@ -582,9 +580,9 @@ fn a_refused_scene_changes_nothing_and_says_where() {
     unchanged(&mut world, &mut twin, "an ID taken");
 }
 
-/// A scene replaces the world's entities as it loads into the world cleared, byte for byte; one
-/// refused is refused as that load is, and changes nothing, the world's serial neither; and the
-/// scene the world was saved to, which a load refuses for its IDs, replaces it under them.
+/// - A scene replaces the world's entities as a load into a cleared world does, byte for byte.
+/// - A refused scene changes nothing, the world's serial included.
+/// - The scene the world was saved to, refused by a load for its IDs, replaces it under them.
 #[test]
 fn a_scene_replaces_the_worlds_entities_all_or_nothing() {
     let mut world = golden_world(20);
@@ -626,7 +624,6 @@ fn a_scene_replaces_the_worlds_entities_all_or_nothing() {
         assert_eq!(world.save_scene(&roots).expect("saved"), GOLDEN, "{error}");
         unchanged(&mut world, &mut cleared, &error.to_string());
     }
-    // Reopened, as a file the world was saved to is.
     let saved = world.save_scene(&roots).expect("saved");
     let error = world.load_scene(&saved).expect_err("its IDs");
     assert_eq!(error.code(), "ecs.id_taken", "{error}");
@@ -641,7 +638,7 @@ fn a_scene_replaces_the_worlds_entities_all_or_nothing() {
     check_links(&world);
 }
 
-/// Holds what's opaque in a list and an option, which a load can't make unless its base has it.
+/// Holds opaque state in a list and an option; a load can't make it unless its base has it.
 #[derive(Clone, Debug, PartialEq, crate::Reflect)]
 struct Kept {
     sealed: Vec<Sealed>,
@@ -681,9 +678,8 @@ struct Node {
     leaf: Option<u8>,
 }
 
-/// `nodes` nodes, each the only kid of the one before, the last with `leaf`: the first is a
-/// component's value, a level, its kids another, the next node another, and so on, so that it's
-/// `2 * nodes` levels deep, and one more with a leaf.
+/// `nodes` nodes, each the only kid of the previous, the last with `leaf`. A node's value and
+/// its kids are each a level: `2 * nodes` deep, plus one with a leaf.
 fn chain(nodes: usize, leaf: Option<u8>) -> Node {
     let mut node = Node {
         kids: Vec::new(),
@@ -769,7 +765,7 @@ fn a_save_refuses_what_a_load_would_and_says_where() {
             "{message}"
         );
     }
-    // Without what's opaque in them, they save.
+    // Without opaque state in them, they save.
     let kept = world.spawn(Kept {
         sealed: Vec::new(),
         maybe: None,
@@ -819,7 +815,6 @@ fn every_kind_of_value_comes_back_bit_for_bit() {
         .load_scene(&text)
         .unwrap_or_else(|error| panic!("{error}"));
     let loaded = other.get::<Everything>(roots[0]).expect("loaded");
-    // Its handle from its base.
     let expected = Everything {
         target: Some(roots[0]),
         handle: Handle(7),
@@ -828,13 +823,12 @@ fn every_kind_of_value_comes_back_bit_for_bit() {
     assert!(same(&loaded.to_value(), &expected.to_value()), "{text}");
     assert_eq!(loaded.handle, Handle(7));
     assert_eq!(other.save_scene(&roots).expect("saved"), text);
-    // A tuple of more than one part is a block, a part to a line.
     let pair = "\n                pair: (\n                    65535,\n                    -9223372036854775808,\n                ),\n";
     assert!(text.contains(pair), "{text}");
 }
 
-/// A translation far from the origin saves as the shortest numbers that read back to its `f64`s,
-/// and loads back to their bits, where `f32` would round 1,000,000.1 to 1,000,000.125.
+/// A translation far from the origin saves as the shortest numbers that read back to its `f64`s
+/// and loads to their bits; `f32` would round 1,000,000.1 to 1,000,000.125.
 #[test]
 fn a_far_translation_comes_back_bit_for_bit() {
     let mut world = World::seeded(11);
@@ -897,12 +891,12 @@ fn floats_and_strings_are_written_as_they_read_back() {
         "\\ \" \n \r \t",
         "\u{0}\u{1f}\u{7f}\u{85}\u{9f}",
         "\u{61c}\u{200e}\u{200f}\u{2028}\u{2029}\u{202a}\u{202e}\u{2066}\u{2069}\u{feff}",
-        // A soft hyphen, the grapheme joiner, zero-width characters, the word joiner, an invisible
-        // operator, Mongolian's vowel separator and a Hangul filler, which draw nothing.
+        // Draw nothing: a soft hyphen, the grapheme joiner, zero-width characters, the word
+        // joiner, an invisible operator, Mongolian's vowel separator, a Hangul filler.
         "\u{ad}\u{34f}\u{200b}\u{200d}\u{2060}\u{2064}\u{180e}\u{3164}",
         // Variation selectors, an annotation anchor, a number sign, a beam, and tags.
         "❤\u{fe0f}\u{e0100}\u{fff9}\u{600}\u{1d173}\u{e0001}\u{e007f}",
-        // What draws stays as it is: a combining mark, a no-break space and an emoji among them.
+        // What draws stays as is: a combining mark, a no-break space, an emoji.
         "é e\u{301} \u{a0}😀",
     ];
     let numbers = Numbers {
@@ -961,7 +955,7 @@ fn floats_and_strings_are_written_as_they_read_back() {
     let loaded = &other.get::<Numbers>(roots[0]).expect("loaded").singles;
     let bits: Vec<u32> = loaded.iter().map(|x| x.to_bits()).collect();
     assert_eq!(bits, [f32::NAN, -f32::NAN].map(f32::to_bits));
-    // Read as an f32 at once, never through an f64, whose rounding would give 1.
+    // Read as an f32 directly: through an f64, rounding would give 1.
     let close = "(\n    entities: {\n        \"0000000000000001\": (\n            Numbers: (\n                \
          singles: [1.00000005960464477539062500000001],\n                doubles: [],\n                \
          texts: [],\n            ),\n        ),\n    },\n)\n";
@@ -970,7 +964,7 @@ fn floats_and_strings_are_written_as_they_read_back() {
     assert_eq!(loaded[0].to_bits(), 1.0f32.next_up().to_bits());
 }
 
-/// The lines that differ between `a` and `b`: where they start, and how many there are of each.
+/// The lines that differ between `a` and `b`: where they start and how many each has.
 fn changed(a: &str, b: &str) -> (usize, usize, usize) {
     let (a, b): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
     let start = a.iter().zip(&b).take_while(|(a, b)| a == b).count();
@@ -1053,7 +1047,6 @@ fn a_field_set_changes_only_its_lines() {
             .expect("set back");
     }
     assert_eq!(world.save_scene(&roots).expect("saved"), before);
-    // An entity added is a block of its own, and changes nothing else.
     let added = world.spawn(Transform::IDENTITY);
     let after = world.save_scene(&[cell, added]).expect("saved");
     let (start, removed, lines) = changed(&before, &after);
@@ -1077,7 +1070,7 @@ fn values_nest_64_levels_deep() {
     let deeper = world.spawn(chain(32, Some(1)));
     let error = world.save_scene(&[deeper]).expect_err("65 levels");
     assert_eq!(error.code(), "scene.too_deep", "{error}");
-    // Nor does a load take one deeper: the deepest leaf is the first written.
+    // Nor does a load go deeper: the deepest leaf is written first.
     let deeper = text.replacen("leaf: None", "leaf: Some(1)", 1);
     let mut other = World::seeded(13);
     other.register::<Node>().expect("registered");
@@ -1092,7 +1085,7 @@ fn values_nest_64_levels_deep() {
 
 #[test]
 fn a_draw_that_meets_a_loaded_id_reseeds() {
-    // A scene saved by a world seeded as this one, which draws the ID the scene's entity has.
+    // A scene from an identically seeded world, which draws the scene entity's ID.
     let mut first = World::seeded(14);
     let saved = first.spawn(Transform::IDENTITY);
     let text = first.save_scene(&[saved]).expect("saved");
@@ -1107,8 +1100,7 @@ fn a_draw_that_meets_a_loaded_id_reseeds() {
     check_ids(&world);
 }
 
-/// A prefab: a root with two children, the first patrolling to the second; and the IDs of its root
-/// and children.
+/// A prefab: a root with two children, the first patrolling to the second; and their IDs.
 fn prefab() -> (String, [EntityId; 3]) {
     let (text, ids, _) = prefab_and_world();
     (text, ids)
@@ -1137,7 +1129,6 @@ fn a_prefab_is_placed_as_a_copy_with_ids_of_its_own() {
     let (text, locals) = prefab();
     let mut world = golden_world(16);
     let mut stream = IdStream::new(16);
-    // The golden world's three draws.
     for _ in 0..3 {
         stream.draw();
     }
@@ -1169,7 +1160,7 @@ fn a_prefab_is_placed_as_a_copy_with_ids_of_its_own() {
     assert_ne!(copies[0], copies[1]);
     check_ids(&world);
     check_links(&world);
-    // Placed beside the entities it was saved from, its references are to the copy's own.
+    // Placed beside its originals, its references point to the copy's own.
     let (text, locals, mut beside) = prefab_and_world();
     let root = beside.place_prefab(&text, None).expect("placed");
     let kids: Vec<Entity> = beside.children(root).expect("alive").collect();
@@ -1179,7 +1170,6 @@ fn a_prefab_is_placed_as_a_copy_with_ids_of_its_own() {
     let patrol = beside.get::<Patrol>(patrolling).expect("a patrol");
     assert_eq!(patrol.target, Some(target), "the copy's own sibling");
     assert_ne!(Some(target), beside.entity(locals[2]), "not the original");
-    // Saved, the copy is entities as any other.
     let saved = world.save_scene(&[first]).expect("saved");
     let mut other = golden_world(17);
     let roots = other.load_scene(&saved).expect("loaded");
@@ -1195,7 +1185,6 @@ fn a_prefab_refused_changes_nothing() {
     let (text, locals) = prefab();
     let mut world = golden_world(18);
     let mut twin = golden_world(18);
-    // Two roots, and a dead entity, in each.
     let prepare = |world: &mut World| {
         let roots = [0, 1].map(|_| world.spawn(Transform::IDENTITY));
         let dead = world.spawn(());
@@ -1237,14 +1226,14 @@ fn a_prefab_refused_changes_nothing() {
 #[test]
 fn a_copy_that_would_have_a_living_or_kept_entitys_id_is_another() {
     let (text, locals) = prefab();
-    // The entity that has the ID alive, and taken by a delete that keeps it for its undo.
+    // The entity with the ID is alive, then taken by a delete that keeps it for its undo.
     for deleted in [false, true] {
         let mut world = golden_world(19);
         let mut stream = IdStream::new(19);
         for _ in 0..3 {
             stream.draw();
         }
-        // The ID the copy's root would take, which a scene loaded before has.
+        // The ID the copy's root would take, which an earlier scene load has.
         let instance = stream.draw();
         let taken = placed(instance, locals[0]).expect("not zero");
         let scene = format!("(\n    entities: {{\n        \"{taken}\": (),\n    }},\n)\n");
@@ -1266,10 +1255,10 @@ fn a_copy_that_would_have_a_living_or_kept_entitys_id_is_another() {
     }
 }
 
-/// A sprite's texture saves as its name, its ID where it has one, which a load finds the texture by
-/// in a world that has it, as it finds it by a path to its file, as a scene written by hand may
-/// name it, and saves again by its name; a name no texture has refuses the scene, and a texture
-/// without a name refuses the save.
+/// - A sprite's texture saves as its name, plus its ID where it has one.
+/// - A load finds the texture by that ID in a world that has it, or by a file path (a
+///   hand-written scene may name one); it saves again by name.
+/// - An unknown name refuses the scene; a nameless texture refuses the save.
 #[test]
 fn a_sprite_saves_its_texture_by_its_name() {
     let mut textures = Textures::default();
@@ -1306,8 +1295,8 @@ fn a_sprite_saves_its_texture_by_its_name() {
     assert_eq!(refused.code(), "asset.unnamed", "{refused}");
 }
 
-/// A field a scene leaves out, as a scene saved before its type had the field does, takes its
-/// default; and the scene saves again with it.
+/// A field a scene leaves out (as one saved before the field existed) takes its default; the
+/// scene saves again with it.
 #[test]
 fn a_field_a_scene_leaves_out_takes_its_default() {
     let older = GOLDEN

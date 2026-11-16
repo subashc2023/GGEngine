@@ -1,9 +1,8 @@
-//! The reader: one typed parse of a scene's text through `ron`, whose seeds reflection's
-//! descriptions drive, never `ron`'s own values, which can't tell a struct from a map or an `f32`
-//! from an `f64`. It checks everything a load could refuse before anything changes, and builds
-//! each component as it ends. A refusal says where it is: the parse numbers each key and value it
-//! enters, and to locate the one refused, parses again, stopping as it enters it, where `ron`'s
-//! cursor is at its first character.
+//! The reader: one typed `ron` parse of a scene's text, driven by seeds from reflection's
+//! descriptions, never `ron`'s own values, which can't tell a struct from a map or an `f32` from an
+//! `f64`. It checks everything a load could refuse before anything changes, and builds each
+//! component as it ends. To locate a refusal, the parse numbers each key and value it enters, then
+//! parses again and stops as it enters the refused one, with `ron`'s cursor at its first character.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -33,43 +32,42 @@ pub(super) struct Loaded {
     pub(super) id: EntityId,
     /// The handle it takes as it's spawned.
     pub(super) handle: Entity,
-    /// Its components as the text gives them, until the parse has built them into `row`.
+    /// Components as the text gives them, until the parse builds them into `row`.
     given: Vec<Given>,
     pub(super) row: Row,
-    /// Its parent's index among the scene's entities, and the item its `Parent` is, or, for one an
-    /// instance's prefab places, its root's `PrefabRoot`.
+    /// Its parent's index among the scene's entities, and the item its `Parent` is (for an
+    /// instance's entity placed by its prefab: its root's `PrefabRoot` item).
     pub(super) parent: Option<(usize, u32)>,
-    /// For one an instance's prefab gives, the index of the instance's root among the scene's
-    /// entities, or of the root of the instance within it whose prefab gives it, and its ID as that
-    /// prefab gives it, which its own mixes from that root's; `None` for one of the text's own.
+    /// For an entity an instance's prefab gives: the index of the instance's root (or of the inner
+    /// instance's root whose prefab gives it), and its ID in that prefab, which mixes from that
+    /// root's. `None` for the text's own.
     pub(super) spawned: Option<(usize, EntityId)>,
-    /// The item its key is, once it's read.
+    /// The item its key is, once read.
     key: Option<u32>,
-    /// The item it's first named at, as a key or a reference.
+    /// The item it's first named at, as a key or reference.
     first: u32,
 }
 
-/// A component as a scene's text gives it, which the parse builds once it knows whose instance its
-/// entity is of, if it's one: its type, the item its value is, and its value.
+/// A component as the text gives it: type, value item and value. Built once the parse knows
+/// whether its entity is an instance's.
 struct Given {
     component: ComponentId,
     item: u32,
     value: Partial,
 }
 
-/// A component's value as a scene's text gives it: a struct's of named fields, whose fields a load
-/// takes from the prefab where an instance's entity leaves them out, field by field; or another
-/// type's, whole.
+/// A component's value as the text gives it: a struct of named fields, whose missing fields come
+/// from the prefab for an instance's entity; or another type's value, whole.
 enum Partial {
     Fields(Vec<Option<Value>>),
     Whole(Value),
 }
 
-/// The scene `text`'s entities, in the order it first names them, then the instances' entities it
-/// leaves out, with the handles they take in that order: a prefab's, whose IDs are its own, if
-/// `prefab`, and which has one root. Each instance's entities are its prefab's, as `expanding`
-/// makes its prefabs' templates, under IDs mixed from its root's, each field the text leaves out
-/// taking the prefab's, as [`PrefabRoot`] says.
+/// The scene `text`'s entities in the order it first names them, then the instances' entities it
+/// leaves out, with the handles they take in that order. With `prefab`, the text is a prefab's:
+/// its IDs are its own and it has one root. An instance's entities are its prefab's (`expanding`
+/// makes the templates) under IDs mixed from its root's; a field the text leaves out takes the
+/// prefab's ([`PrefabRoot`]).
 pub(super) fn parse(
     world: &World,
     text: &str,
@@ -88,11 +86,11 @@ pub(super) fn parse(
 }
 
 /// The textures, models, fonts and prefabs scene `text` names that none loaded has, each once, in
-/// the order it first names them, as [`parse`] reads it into `world`, but on past them; and those
-/// that the prefabs it names that are loaded name, through the prefabs they name, in turn.
+/// first-named order: [`parse`] into `world`, reading on past them. Then those the loaded prefabs
+/// it names name, through the prefabs they name in turn.
 ///
-/// Fails as the parse does, but for those; a loaded prefab's text that doesn't parse is the parse's
-/// to refuse.
+/// Fails like the parse, except for those. A loaded prefab's text that doesn't parse is the
+/// parse's to refuse.
 pub(super) fn assets(world: &World, text: &str) -> Result<Vec<Asset<String>>> {
     let mut load = Load::new(world, false, None, true);
     let mut reading = deserializer(text)?;
@@ -132,9 +130,8 @@ pub(super) fn assets(world: &World, text: &str) -> Result<Vec<Asset<String>>> {
     Ok(missing)
 }
 
-/// The rest of [`parse`], once the text has parsed: each instance's entities found, by its
-/// prefab's template, and those the text leaves out added; each entity's components built, from
-/// the text and the prefab; and the hierarchy checked.
+/// The rest of [`parse`]: finds each instance's entities by its prefab's template, adds those the
+/// text leaves out, builds components from the text and prefab, and checks the hierarchy.
 fn resolve(
     world: &World,
     text: &str,
@@ -175,8 +172,8 @@ fn resolve(
         }
         roots.push((i, of, link.item));
     }
-    // Each instance's template, and the IDs of its entities, by which the text names them; and
-    // each entity an instance gives, by its ID, with the instance and its place in the template.
+    // Each instance's template and entity IDs; and each entity an instance gives, by ID, with the
+    // instance and its place in the template.
     let mut instances = Vec::with_capacity(roots.len());
     let mut claims: HashMap<EntityId, (usize, usize)> = HashMap::new();
     for (r, &(i, of, item)) in roots.iter().enumerate() {
@@ -239,7 +236,7 @@ fn resolve(
         );
         return refuse(unknown.first, error);
     }
-    // The instances' entities the text names nowhere, which take the handles after its own.
+    // The instances' entities the text names nowhere take the handles after its own.
     for (r, (_, ids)) in instances.iter().enumerate() {
         for &id in &ids[1..] {
             if by_id.contains_key(&id) {
@@ -258,8 +255,8 @@ fn resolve(
             });
         }
     }
-    // Each instance's template's entities, by their handles in it, as their instance has them,
-    // which its references are retargeted to.
+    // Each template entity's handle in it, mapped to the instance's handle: the retarget for its
+    // references.
     let handles: Vec<HashMap<Entity, Entity>> = (instances.iter())
         .map(|(template, ids)| {
             let parts = template.parts.iter().zip(ids);
@@ -385,13 +382,11 @@ fn resolve(
     Ok(entities)
 }
 
-/// The IDs scene `text` gives its entities, its map of entities' keys, read from its syntax alone,
-/// through `ron`'s own reading of what the keys hold, without the world's types: so that a text
-/// that names a component type or a field the world no longer has still says which entities it
-/// holds.
+/// The entity IDs of scene `text`, read from its syntax alone without the world's types, so a text
+/// naming a component type or field the world no longer has still says which entities it holds.
 ///
-/// Fails with `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions, and
-/// with `ecs.bad_id` for a key that isn't an ID.
+/// Fails with `scene.syntax` for text that isn't a scene's RON or enables RON's extensions, and
+/// `ecs.bad_id` for a key that isn't an ID.
 pub(super) fn ids(text: &str) -> Result<Vec<EntityId>> {
     use std::collections::BTreeMap;
 
@@ -412,7 +407,7 @@ pub(super) fn ids(text: &str) -> Result<Vec<EntityId>> {
     keys.entities.keys().map(|id| id.parse()).collect()
 }
 
-/// The item of the `Parent` of an entity that would be its own ancestor, if there's one.
+/// The `Parent` item of an entity that would be its own ancestor, if any.
 fn cycle(entities: &[Loaded]) -> Option<u32> {
     const NEW: u8 = 0;
     const WALKED: u8 = 1;
@@ -420,8 +415,8 @@ fn cycle(entities: &[Loaded]) -> Option<u32> {
     let mut state = vec![NEW; entities.len()];
     let up = |at: usize| entities[at].parent.map(|(up, _)| up);
     for start in 0..entities.len() {
-        // Up from each to a root, or to an entity walked before: one walked on this walk is in a
-        // cycle.
+        // Up from each to a root or an entity walked before; reaching one walked on this walk is
+        // a cycle.
         let mut at = Some(start);
         while let Some(i) = at.filter(|&i| state[i] == NEW) {
             state[i] = WALKED;
@@ -439,16 +434,16 @@ fn cycle(entities: &[Loaded]) -> Option<u32> {
     None
 }
 
-/// A deserializer of `text`, which refuses `ron`'s extensions, since they change its grammar.
+/// A deserializer of `text` that refuses `ron`'s extensions: they change its grammar.
 fn deserializer(text: &str) -> Result<ron::Deserializer<'_>> {
     // Each level of a value takes `ron` at most 4 levels of its recursion.
     let options = Options::default().with_recursion_limit(4 * MAX_DEPTH as usize + 16);
     let deserializer =
         ron::Deserializer::from_str_with_options(text, &options).map_err(|e| syntax(&e))?;
     if deserializer.extensions() != Extensions::empty() {
-        // The attribute that enables one begins at the last `#` before the value that `ron` reads
-        // the text up to with none enabled: the text up to a `#` inside it doesn't read, and up to
-        // one after it reads with one enabled.
+        // The enabling attribute begins at the last `#` before the value `ron` reads the text up
+        // to with none enabled: the text up to a `#` inside it doesn't read, and up to one after it
+        // reads with one enabled.
         let attributes = &text[..text.len() - deserializer.remainder().len()];
         let none_before = |&at: &usize| {
             ron::Deserializer::from_str(&text[..at]).is_ok_and(|d| d.extensions().is_empty())
@@ -471,14 +466,13 @@ fn deserializer(text: &str) -> Result<ron::Deserializer<'_>> {
     Ok(deserializer)
 }
 
-/// Parses the scene, and the end of the text after it.
 fn run(load: &mut Load<'_>, deserializer: &mut ron::Deserializer<'_>) -> Result<(), SpannedError> {
     let parsed = Scene(load).deserialize(&mut *deserializer);
     let parsed = parsed.and_then(|()| deserializer.end());
     parsed.map_err(|error| deserializer.span_error(error))
 }
 
-/// `error`, from `ron`, at the line and column where its parser stopped.
+/// `ron`'s `error` at the line and column where its parser stopped.
 fn syntax(error: &SpannedError) -> Error {
     let at = &error.span.end;
     Error::new(
@@ -487,10 +481,8 @@ fn syntax(error: &SpannedError) -> Error {
     )
 }
 
-/// `refusal`, at item `item`, saying where it is: the text is parsed again, as it was, past the
-/// textures, models, fonts and prefabs none loaded has if `collect`, up to the item, where the
-/// parser is at its first character, and the refusal is carried out from there, gathering the
-/// entity, the component and the path.
+/// `refusal` at item `item`, with its location: parses again (past missing assets if `collect`)
+/// to the item and carries the refusal out from there, gathering entity, component and path.
 fn locate(
     world: &World,
     text: &str,
@@ -511,7 +503,6 @@ fn locate(
     refusal.with_message(message)
 }
 
-/// What the parse knows as it goes.
 struct Load<'w> {
     world: &'w World,
     types: &'w Types,
@@ -522,22 +513,21 @@ struct Load<'w> {
     entities: Vec<Loaded>,
     /// Each entity's index in `entities`; looked up, never iterated.
     by_id: HashMap<EntityId, usize>,
-    /// The entity the last reference read named, which a `Parent`, of one reference, names.
+    /// The entity the last reference named: what a `Parent` names.
     referenced: usize,
-    /// How many keys and values the parse has entered, which numbers each.
+    /// Keys and values entered so far; numbers each.
     items: u32,
-    /// The item the map of entities is.
+    /// The item of the map of entities.
     map: u32,
-    /// The refusal, and the item it's at.
+    /// The refusal and its item.
     refused: Option<(u32, Error)>,
-    /// When the parse locates a refusal: the item it stops at, and the refusal, which is carried
-    /// out from there as `carried`.
+    /// When locating a refusal: the item to stop at and the refusal, carried out from there as
+    /// `carried`.
     stop: Option<(u32, Error)>,
     carried: Option<Error>,
-    /// The textures, models, fonts and prefabs named that none loaded has, while the parse reads on
-    /// past them, as [`assets`] does, rather than refusing them.
+    /// Assets named that none loaded has: [`assets`] collects them instead of refusing.
     missing: Option<Vec<Asset<String>>>,
-    /// The prefabs named that are loaded, each once, whose own names [`assets`] gathers too.
+    /// The loaded prefabs named, each once, whose names [`assets`] gathers too.
     prefabs: Vec<Prefab>,
 }
 
@@ -561,7 +551,7 @@ impl<'w> Load<'w> {
         }
     }
 
-    /// Enters the next item, and returns its number; when locating a refusal, stops at its item.
+    /// Enters the next item and returns its number; stops at the refusal's item when locating.
     fn enter<E: de::Error>(&mut self) -> Result<u32, E> {
         self.items += 1;
         if self
@@ -575,21 +565,20 @@ impl<'w> Load<'w> {
         Ok(self.items)
     }
 
-    /// Refuses the scene at `item`, for `error`, and returns the error that stops the parse.
+    /// Refuses the scene at `item` with `error`; returns the error that stops the parse.
     fn refuse<E: de::Error>(&mut self, item: u32, error: Error) -> E {
         self.refused = Some((item, error));
         E::custom("")
     }
 
-    /// Says more of where the refusal being located is, as it's carried out through a part.
+    /// Adds a part to the location of the refusal being carried out.
     fn wrap(&mut self, with: impl FnOnce(Error) -> Error) {
         if let Some(refusal) = self.carried.take() {
             self.carried = Some(with(refusal));
         }
     }
 
-    /// The index of the entity with ID `id`, named at `item`: a new one, with the next handle, the
-    /// first time it's named.
+    /// The index of entity `id`, named at `item`; the first naming adds it with the next handle.
     fn named(&mut self, id: EntityId, item: u32) -> usize {
         if let Some(&index) = self.by_id.get(&id) {
             return index;
@@ -609,7 +598,6 @@ impl<'w> Load<'w> {
         index
     }
 
-    /// The index of the entity whose key, at `item`, is `id`.
     fn key(&mut self, id: EntityId, item: u32) -> Result<usize> {
         let index = self.named(id, item);
         if self.entities[index].key.is_some() {
@@ -631,7 +619,6 @@ impl<'w> Load<'w> {
         Ok(index)
     }
 
-    /// The handle of the entity with ID `id`, which a reference at `item` names.
     fn reference(&mut self, id: EntityId, item: u32) -> Entity {
         let index = self.named(id, item);
         self.referenced = index;
@@ -639,15 +626,15 @@ impl<'w> Load<'w> {
     }
 }
 
-/// A closure for the error a part's refusal stops the parse with, which has `$load` say the
-/// refusal is in part `$step`, such as a field's name or a list's `[2]`.
+/// A closure for the error a part's refusal stops the parse with: records that the refusal is in
+/// part `$step`, such as a field name or `[2]`.
 macro_rules! within {
     ($load:expr, $step:expr) => {
         |_| $load.wrap(|refusal| reflect::within(refusal, $step))
     };
 }
 
-/// An identifier's or a string's text, borrowed where it can be, as `.0` takes it.
+/// An identifier's or string's text, borrowed where possible, passed to `.0`.
 struct Text<F>(F);
 
 impl<T, F: FnOnce(&str) -> T> Visitor<'_> for Text<F> {
@@ -662,8 +649,7 @@ impl<T, F: FnOnce(&str) -> T> Visitor<'_> for Text<F> {
     }
 }
 
-/// What a tuple is given past its parts, refused as it's entered, at its first character, for the
-/// error `.1` makes.
+/// What a tuple is given past its parts: refused on entry with the error `.1` makes.
 struct Extra<'a, 'w, F>(&'a mut Load<'w>, F);
 
 impl<'de, F: FnOnce() -> Error> DeserializeSeed<'de> for Extra<'_, '_, F> {
@@ -675,7 +661,7 @@ impl<'de, F: FnOnce() -> Error> DeserializeSeed<'de> for Extra<'_, '_, F> {
     }
 }
 
-/// The whole scene: `(entities: {...})`.
+/// `(entities: {...})`.
 struct Scene<'a, 'w>(&'a mut Load<'w>);
 
 impl<'de> DeserializeSeed<'de> for Scene<'_, '_> {
@@ -723,7 +709,7 @@ impl<'de> Visitor<'de> for SceneFields<'_, '_> {
     }
 }
 
-/// The name of the scene's one field, `entities`; returns its item.
+/// The scene's one field name, `entities`; returns its item.
 struct SceneKey<'a, 'w>(&'a mut Load<'w>);
 
 impl<'de> DeserializeSeed<'de> for SceneKey<'_, '_> {
@@ -855,8 +841,7 @@ impl<'de> Visitor<'de> for Components<'_, '_> {
     }
 }
 
-/// A component type's name, of entity `id`'s component: returns the type's id, its name and the
-/// item.
+/// A component type's name in entity `id`; returns its type id, name and item.
 struct ComponentKey<'a, 'w> {
     load: &'a mut Load<'w>,
     id: EntityId,
@@ -901,9 +886,8 @@ impl<'de, 'w> DeserializeSeed<'de> for ComponentKey<'_, 'w> {
     }
 }
 
-/// A component's value, as the text gives it: a struct's of named fields field by field, which the
-/// parse fills in once it knows whose instance its entity is of, if it's one, and builds; another
-/// type's whole. Returns it, and its item.
+/// A component's value with its item: a struct of named fields field by field (the parse fills in
+/// and builds it once it knows whether its entity is an instance's); another type's, whole.
 struct Top<'a, 'w> {
     load: &'a mut Load<'w>,
     component: ComponentId,
@@ -939,8 +923,8 @@ impl<'de> DeserializeSeed<'de> for Top<'_, '_> {
             depth: 1,
         };
         let value = read.deserialize(deserializer)?;
-        // Built as it's read, as a whole value never takes a prefab's fields, so that a value its
-        // type refuses is refused where it's read.
+        // Built as read: a whole value takes none of a prefab's fields, so a value its type
+        // refuses is refused where it's read.
         let mut column = world.components.new_column(self.component);
         let built = column.push_value(&value);
         built.map_err(|error| self.load.refuse(item, error))?;
@@ -948,7 +932,7 @@ impl<'de> DeserializeSeed<'de> for Top<'_, '_> {
     }
 }
 
-/// The fields of the struct of named fields that component type `component` is.
+/// The fields of struct component type `component`.
 ///
 /// # Panics
 ///
@@ -1094,7 +1078,6 @@ impl<'de> DeserializeSeed<'de> for Read<'_, '_> {
     }
 }
 
-/// The error that a scene gives something opaque, which scenes leave out.
 fn opaque() -> Error {
     Error::new(
         "reflect.opaque",
@@ -1102,16 +1085,15 @@ fn opaque() -> Error {
     )
 }
 
-/// The fields of `fields` that a scene saves, those that aren't opaque, and their indices.
+/// The saved (not opaque) fields of `fields`, with their indices.
 fn saved<'f>(types: &Types, fields: &'f [Field]) -> impl Iterator<Item = (usize, &'f Field)> {
     let saved = fields.iter().enumerate();
     saved.filter(move |(_, field)| !field.ty.is_opaque(types))
 }
 
-/// The fields `given` of `fields`, each saved field's from the scene, each opaque one's as
-/// [`Value::Opaque`], and each other the scene leaves out as its default, as a scene saved before
-/// its type had the field leaves it out; in the description's order, for a struct or a variant at
-/// `item`.
+/// The fields `given` of `fields` in description order, for a struct or variant at `item`: saved
+/// fields from the scene, opaque ones as [`Value::Opaque`], any other the scene leaves out (as
+/// one saved before its type had the field) at its default.
 fn assemble<E: de::Error>(
     load: &mut Load<'_>,
     item: u32,
@@ -1121,9 +1103,8 @@ fn assemble<E: de::Error>(
     fill(load.types, fields, given, None).map_err(|error| load.refuse(item, error))
 }
 
-/// The fields `given` of `fields`, as [`assemble`] fills them in, but each one left out that isn't
-/// opaque taken from `base`, the fields of the component of an instance's prefab, where it's given,
-/// rather than its default.
+/// Like [`assemble`], but a non-opaque field left out is taken from `base` (the instance's
+/// prefab's component fields) where it has one, before its default.
 ///
 /// Fails with `reflect.missing_field` for a field left out that has no default.
 fn fill(
@@ -1159,7 +1140,7 @@ fn fill(
     Ok(parts)
 }
 
-/// A number, a bool, a string or a reference.
+/// A number, bool, string or reference.
 struct Leaf<'a, 'w> {
     load: &'a mut Load<'w>,
     item: u32,
@@ -1168,7 +1149,6 @@ struct Leaf<'a, 'w> {
 }
 
 impl Leaf<'_, '_> {
-    /// `value`, checked against its field's bounds.
     fn bounded<E: de::Error>(self, value: Value) -> Result<Value, E> {
         match reflect::check(self.load.types, self.ty, self.meta, &value) {
             Ok(()) => Ok(value),
@@ -1176,7 +1156,6 @@ impl Leaf<'_, '_> {
         }
     }
 
-    /// The integer `n`, as `value`, if it fits its type.
     fn integer<E: de::Error>(self, n: i128, value: Value) -> Result<Value, E> {
         let &Type::Int { bits, signed } = self.ty else {
             unreachable!("an integer is read for an integer's type");
@@ -1263,7 +1242,7 @@ impl Visitor<'_> for Leaf<'_, '_> {
                         if !missing.iter().any(|named| named.as_deref() == asset) {
                             missing.push(asset.owned());
                         }
-                        // Placeholders, of which a read that gathers names builds nothing.
+                        // Placeholders: a read that gathers names builds nothing.
                         Ok(match asset {
                             Asset::Texture(_) => Value::Texture(Texture::WHITE),
                             Asset::Model(_) => Value::Model(Model::new(0)),
@@ -1300,7 +1279,6 @@ impl Visitor<'_> for Leaf<'_, '_> {
     }
 }
 
-/// A vector's or a quaternion's components, inline.
 struct Vector<'a, 'w> {
     load: &'a mut Load<'w>,
     item: u32,
@@ -1386,7 +1364,6 @@ impl<'de> Visitor<'de> for Vector<'_, '_> {
     }
 }
 
-/// `None` or `Some(..)`.
 struct Optional<'a, 'w> {
     load: &'a mut Load<'w>,
     inner: &'a Type,
@@ -1465,8 +1442,7 @@ impl<'de> Visitor<'de> for List<'_, '_> {
     }
 }
 
-/// A struct's or a struct variant's fields, by name: each one's value, if it's given, by its place
-/// among `fields`, which [`assemble`] fills in.
+/// Named fields: each given value at its place among `fields`; [`assemble`] fills in the rest.
 struct Fields<'a, 'w> {
     load: &'a mut Load<'w>,
     fields: &'a [Field],
@@ -1514,7 +1490,7 @@ impl<'de> Visitor<'de> for Fields<'_, '_> {
     }
 }
 
-/// A field's name: returns its index, and the item.
+/// A field's name; returns its index and item.
 struct FieldKey<'a, 'w> {
     load: &'a mut Load<'w>,
     fields: &'a [Field],
@@ -1550,7 +1526,7 @@ impl<'de> DeserializeSeed<'de> for FieldKey<'_, '_> {
     }
 }
 
-/// A tuple struct's or a tuple variant's fields, by position.
+/// Tuple fields, by position.
 struct Parts<'a, 'w> {
     load: &'a mut Load<'w>,
     item: u32,
@@ -1596,7 +1572,6 @@ impl<'de> Visitor<'de> for Parts<'_, '_> {
     }
 }
 
-/// An enum's variant, by name, and its fields.
 struct Choice<'a, 'w> {
     load: &'a mut Load<'w>,
     item: u32,
@@ -1644,7 +1619,7 @@ impl<'de> Visitor<'de> for Choice<'_, '_> {
     }
 }
 
-/// A variant's name: returns its index.
+/// A variant's name; returns its index.
 struct VariantKey<'a, 'w> {
     load: &'a mut Load<'w>,
     variants: &'a [Variant],

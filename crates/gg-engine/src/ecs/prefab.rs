@@ -1,8 +1,7 @@
-//! Prefabs' instances in a world: the entities the world spawns under each entity with a
-//! [`PrefabRoot`], as `PrefabRoot` says, their IDs mixed from the root's, so that the root's ID
-//! gives them wherever it's loaded, made or restored; which of a world's entities an instance
-//! gives, and what its prefab gives each; and, in development builds, what they take as their
-//! prefab's file changes.
+//! Prefabs' instances in a world: the entities spawned under each [`PrefabRoot`]. Their IDs mix
+//! from the root's, so its ID gives them wherever it's loaded, made or restored. Also which
+//! entities an instance gives, what its prefab gives each, and, in development builds, what they
+//! take as the prefab's file changes.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -17,17 +16,16 @@ use super::{Entity, EntityId, Parent, World};
 use crate::reflect::{Shape, Type, Value};
 use crate::{ModelRoot, Prefab, PrefabRoot, Transform};
 
-/// An instance of a prefab in a world: its prefab's template, and the IDs its parts have in it,
-/// its root's first.
+/// An instance of a prefab in a world: its template, and its parts' IDs, the root's first.
 pub(super) struct Instance {
     pub(super) template: Rc<Template>,
     pub(super) ids: Vec<EntityId>,
 }
 
 impl Instance {
-    /// Part `part`'s component `component`, as the prefab gives it, in a one-row column of its own,
-    /// its references to the prefab's entities retargeted to the instance's in `world`, or to none
-    /// for one that isn't alive; `None` if the prefab gives it none.
+    /// Part `part`'s `component` as the prefab gives it, in a one-row column. References to the
+    /// prefab's entities point to the instance's in `world`, or to none if not alive. `None` if
+    /// the prefab gives none.
     pub(super) fn column(
         &self,
         world: &World,
@@ -44,8 +42,7 @@ impl Instance {
         Some(column)
     }
 
-    /// Part `part`'s component `component`, as [`column`](Self::column) gives it, as reflection
-    /// reads it.
+    /// [`column`](Self::column)'s value.
     pub(super) fn value(
         &self,
         world: &World,
@@ -56,8 +53,8 @@ impl Instance {
         Some(column.value(0))
     }
 
-    /// The types of the components the prefab gives part `part`: the root's but its `Transform`,
-    /// which is the instance's own.
+    /// The component types the prefab gives part `part`, but not the root's `Transform`, which is
+    /// the instance's own.
     pub(super) fn components(&self, world: &World, part: usize) -> Vec<ComponentId> {
         let transform = world.component::<Transform>();
         let row = self.template.parts[part].row.iter();
@@ -65,7 +62,6 @@ impl Instance {
         row.map(|&(component, _)| component).collect()
     }
 
-    /// Each part's handle in the template's world, with the instance's entity of it in `world`.
     fn handles(&self, world: &World) -> HashMap<Entity, Entity> {
         let parts = self.template.parts.iter().zip(&self.ids);
         let handles = parts.map(|(part, &id)| (part.handle, world.entity(id)));
@@ -74,17 +70,15 @@ impl Instance {
             .collect()
     }
 
-    /// The parent part `part` has in the prefab, as the instance's entity of it in `world`, if
-    /// it's alive: none for the root.
+    /// Part `part`'s parent as an entity of `world`, if alive; none for the root.
     pub(super) fn parent(&self, world: &World, part: usize) -> Option<Entity> {
         let up = self.template.parts[part].parent?;
         world.entity(self.ids[up])
     }
 }
 
-/// The entities instances give in part of a world, each by its ID, with its instance and its part:
-/// each by the outermost instance that gives it, whose template gives it as the prefabs inside it
-/// have it there.
+/// The entities instances give in part of a world, by ID, with instance and part: each by the
+/// outermost instance giving it, as the prefabs inside it do.
 #[derive(Default)]
 pub(super) struct Claims {
     pub(super) instances: Vec<(Entity, Instance)>,
@@ -92,18 +86,15 @@ pub(super) struct Claims {
 }
 
 impl Claims {
-    /// The instance that gives the entity of ID `id`, by its place among `instances`, and the
-    /// entity's part in its template, if one does.
+    /// The instance giving `id` (its place in `instances`) and the entity's template part.
     pub(super) fn of(&self, id: EntityId) -> Option<(usize, usize)> {
         self.by_id.get(&id).copied()
     }
 
-    /// Whether an instance gives the entity of ID `id`.
     pub(super) fn has(&self, id: EntityId) -> bool {
         self.by_id.contains_key(&id)
     }
 
-    /// Takes in what `instance`, whose root is `root`, gives.
     pub(super) fn claim(&mut self, root: Entity, instance: Instance) {
         let at = self.instances.len();
         for (part, &id) in instance.ids.iter().enumerate().skip(1) {
@@ -113,14 +104,15 @@ impl Claims {
     }
 }
 
-/// What of an instance's entity differs from its prefab, as [`World::overrides`] finds it: the
-/// instance whose prefab gives it, by its root and its prefab, the outermost, or the entity's own
-/// for the root of an instance none gives; each component the prefab gives it that differs, in the
-/// order of its table's, with the fields that differ, by name, for a struct of named fields, as a
-/// scene saves them, and else `""`, the whole component; and each component the entity has that the
-/// prefab doesn't give it, which a scene saves whole, but those that are the instance's own: a
-/// root's `Transform` and `PrefabRoot`, a `Parent`, and those opaque as a whole, which scenes don't
-/// save.
+/// What of an instance's entity differs from its prefab, per [`World::overrides`]:
+///
+/// - the outermost instance whose prefab gives it, by root and prefab; for an instance's root
+///   no instance gives, its own;
+/// - each differing prefab component in table order, with the differing field names for a struct
+///   of named fields, as a scene saves them, else `""` for the whole component;
+/// - each component the prefab doesn't give it, which a scene saves whole, except the
+///   instance's own (a root's `Transform` and `PrefabRoot`, a `Parent`) and wholly opaque ones,
+///   which scenes don't save.
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Overrides {
@@ -130,24 +122,24 @@ pub(crate) struct Overrides {
     pub(crate) added: Vec<String>,
 }
 
-/// What each instance in a world takes as its prefab's file changes, as [`World::refits`] finds
-/// it: each outermost instance as its prefab gave it, and as it gives it now.
+/// What instances take as their prefab's file changes, per [`World::refits`]: each outermost
+/// instance as the prefab gave it and gives it now.
 #[cfg(feature = "dev")]
 pub(crate) struct Refits {
-    /// The serial of the world it was found in, which alone takes it.
+    /// The serial of the only world that takes it.
     world: u64,
     instances: Vec<(Instance, Instance)>,
 }
 
 impl World {
-    /// Spawns an instance of `prefab` at `at`, and returns its root, as [`Prefab::spawn`] says.
+    /// Like [`Prefab::spawn`].
     pub(crate) fn spawn_prefab(&mut self, prefab: Prefab, at: Transform) -> Result<Entity> {
         assert!(
             self.assets.has_prefab(prefab),
             "a prefab spawns into a world that shares the assets of the context that added it"
         );
         let template = Expanding::default().template(self, prefab)?;
-        // Drawn until its entities' IDs are free too, as a model's nodes' are.
+        // Drawn until its entities' IDs are free too, as a model's are.
         let (id, ids) = loop {
             let id = self.stream.draw();
             let ids = template.ids(id).ok();
@@ -168,11 +160,11 @@ impl World {
         Ok(root)
     }
 
-    /// The instance whose root is `root`, which is alive, of the prefab its [`PrefabRoot`] names,
-    /// as `expanding` makes its template; `None` if it has none.
+    /// The instance rooted at live `root`, of its [`PrefabRoot`]'s prefab, with the template
+    /// `expanding` makes; `None` without one.
     ///
-    /// Fails as the template does, as [`Expanding::template`] says, and with `ecs.bad_id` for the
-    /// one ID an entity of it mixes to zero.
+    /// Fails like [`Expanding::template`], and with `ecs.bad_id` for the one ID an entity of it
+    /// mixes to zero.
     pub(super) fn instance(
         &self,
         root: Entity,
@@ -186,10 +178,10 @@ impl World {
         Ok(Some(Instance { template, ids }))
     }
 
-    /// What the instances in `tops`' subtrees, which are alive, give, each by the outermost: as
-    /// each parent's instance, if it has one, before its children's.
+    /// What instances in live `tops`' subtrees give, each by the outermost; a parent's instance
+    /// comes before its children's.
     ///
-    /// Fails as [`instance`](Self::instance) does.
+    /// Fails like [`instance`](Self::instance).
     pub(super) fn claims(&self, tops: &[Entity], expanding: &mut Expanding) -> Result<Claims> {
         let mut claims = Claims::default();
         let mut next: Vec<Entity> = tops.iter().rev().copied().collect();
@@ -206,12 +198,10 @@ impl World {
         Ok(claims)
     }
 
-    /// The instance whose prefab gives `entity`, which is alive, with its root and the entity's
-    /// part in its template: the outermost, whose template gives it as the prefabs inside the
-    /// instance's have it; `None` if none does, as for an instance's root, or an entity given
-    /// under an instance.
+    /// The outermost instance whose prefab gives live `entity`, with its root and the entity's
+    /// template part. `None` if none does, as for an instance's root.
     ///
-    /// Fails as [`instance`](Self::instance) does for the instance of one of its ancestors.
+    /// Fails like [`instance`](Self::instance), for an ancestor's instance.
     pub(super) fn claimer(
         &self,
         entity: Entity,
@@ -240,9 +230,9 @@ impl World {
         Ok(None)
     }
 
-    /// The entity that `entity`, which is alive, goes with, which tools change in its place: the
-    /// root of the model whose node it is, or of the outermost instance whose prefab gives it, in
-    /// turn; `entity` itself if it's neither. An instance whose template doesn't load gives none.
+    /// The entity tools change in place of live `entity`: the root of its model or outermost
+    /// instance, in turn; `entity` itself if neither. An instance whose template doesn't load
+    /// gives none.
     #[cfg(feature = "dev")]
     pub(crate) fn owner(&self, entity: Entity) -> Entity {
         let mut at = self.node_root(entity);
@@ -253,9 +243,8 @@ impl World {
         at
     }
 
-    /// Fails with `ecs.prefab_entity` if an instance's prefab gives `entity`, which is alive, as
-    /// [`claimer`](Self::claimer) finds it: as a tool's delete of it, or a move of it, which would
-    /// take it out of its instance, is refused.
+    /// Fails with `ecs.prefab_entity` if an instance's prefab gives live `entity` (per
+    /// [`claimer`](Self::claimer)): tools can't delete or move it out of its instance.
     pub(super) fn not_a_prefabs(&self, entity: Entity) -> Result<()> {
         let Some((root, _, _)) = self.claimer(entity, &mut Expanding::default())? else {
             return Ok(());
@@ -263,8 +252,8 @@ impl World {
         Err(self.prefabs_own(entity, root, "it"))
     }
 
-    /// The `ecs.prefab_entity` that `what` of `entity` is its prefab's, which the instance whose
-    /// root is `root` gives it: so that tools take none of it away.
+    /// The `ecs.prefab_entity` error: `what` of `entity` is its prefab's, given by the instance
+    /// rooted at `root`.
     pub(super) fn prefabs_own(&self, entity: Entity, root: Entity, what: &str) -> Error {
         let prefab = self
             .get::<PrefabRoot>(root)
@@ -282,14 +271,16 @@ impl World {
         )
     }
 
-    /// The value of `entity`'s `component` at `path` as the prefab of the instance that gives it
-    /// has it: the prefab's root's, but its `Transform`, for an instance's root; and as the
-    /// outermost instance's prefab gives it otherwise, with the prefabs inside it, for an entity
-    /// one gives; its references to the prefab's entities retargeted to the instance's.
+    /// `entity`'s `component` at `path` as its prefab has it: for an instance's root the prefab
+    /// root's, but its `Transform`; for a given entity as the outermost instance's prefab gives
+    /// it, with the prefabs inside. References to the prefab's entities point to the instance's.
     ///
-    /// Fails with `ecs.no_prefab` for an entity no instance gives that's no instance's root, or a
-    /// component its prefab doesn't give it; as [`claimer`](Self::claimer) does; and as
-    /// [`get_field`](Self::get_field) fails for a path the component hasn't.
+    /// Fails:
+    ///
+    /// - with `ecs.no_prefab` for an entity no instance gives that's no instance's root, or a
+    ///   component its prefab doesn't give it;
+    /// - like [`claimer`](Self::claimer);
+    /// - like [`get_field`](Self::get_field), for a path the component hasn't.
     pub(super) fn prefab_value(
         &self,
         entity: Entity,
@@ -337,11 +328,10 @@ impl World {
         scratch.get_field(held, component, path)
     }
 
-    /// What of `entity`, which is alive, differs from its prefab, as [`Overrides`] says, by the
-    /// comparison a scene's save makes; `None` for an entity no instance gives that's no instance's
-    /// root. Reading it changes nothing.
+    /// What of live `entity` differs from its prefab, per [`Overrides`] and a scene save's
+    /// comparison; `None` for an entity no instance gives that's no instance's root.
     ///
-    /// Fails as [`claimer`](Self::claimer) does, as for a prefab whose text no longer loads.
+    /// Fails like [`claimer`](Self::claimer), as for a prefab whose text no longer loads.
     #[cfg(feature = "dev")]
     pub(crate) fn overrides(&self, entity: Entity) -> Result<Option<Overrides>> {
         let mut expanding = Expanding::default();
@@ -400,8 +390,8 @@ impl World {
         }))
     }
 
-    /// Whether component type `component` is a struct of named fields, which a scene saves of an
-    /// instance's entity field by field.
+    /// Whether `component` is a struct of named fields, saved field by field for an instance's
+    /// entity.
     pub(super) fn named_fields(&self, component: ComponentId) -> bool {
         let Type::Named(index) = self.components.ty(component) else {
             return false;
@@ -410,15 +400,16 @@ impl World {
         matches!(shape, Shape::Struct { tuple: false, .. })
     }
 
-    /// Links `root`, which is alive, to `prefab`, as [`Operation::Link`](super::Operation::Link)
-    /// says: gives it a [`PrefabRoot`] of `prefab`, spawning nothing, its subtree holding the
-    /// entities the prefab gives already, under the IDs the instance mixes for them, as an unlink
-    /// left them, or a save as a prefab made them.
+    /// Links live `root` to `prefab` ([`Operation::Link`](super::Operation::Link)): gives it a
+    /// [`PrefabRoot`], spawning nothing. Its subtree already holds the prefab's entities under
+    /// the IDs the instance mixes, as an unlink or a save as a prefab left them.
     ///
-    /// Fails, changing nothing, with `reflect.has_component` for a root with a `PrefabRoot`
-    /// already; with `asset.no_prefab` for a prefab another context added; as the prefab's
-    /// template fails to load, as [`Expanding::template`] says; and as
-    /// [`linkable`](Self::linkable) does.
+    /// Fails, changing nothing:
+    ///
+    /// - with `reflect.has_component` if `root` has a `PrefabRoot`;
+    /// - with `asset.no_prefab` for a prefab another context added;
+    /// - like [`Expanding::template`], if the template fails to load;
+    /// - like [`linkable`](Self::linkable).
     pub(super) fn link(&mut self, root: Entity, prefab: Prefab) -> Result<()> {
         if self.get::<PrefabRoot>(root).is_some() {
             return Err(Error::new(
@@ -438,13 +429,15 @@ impl World {
         Ok(())
     }
 
-    /// Fails unless the subtree of `root`, which is alive, holds what an instance of the prefab of
-    /// template `template`, which messages call `prefab`, gives, so that linking `root` to it
-    /// spawns nothing: with `ecs.bad_id` for the one ID an entity of it mixes to zero; with
-    /// `ecs.prefab_missing` for an entity the prefab gives that isn't alive, or a component it
-    /// gives one, or the root, that it hasn't; with `ecs.prefab_parent` for an entity the prefab
-    /// gives that isn't under its prefab's parent; and with `ecs.prefab_entity` for one with a
-    /// `PrefabRoot` the prefab doesn't give it, which a scene saves and a load refuses.
+    /// Fails unless live `root`'s subtree holds what an instance of `template`'s prefab gives
+    /// (messages name it `prefab`), so linking spawns nothing:
+    ///
+    /// - `ecs.bad_id` for the one ID an entity mixes to zero;
+    /// - `ecs.prefab_missing` for a given entity that isn't alive, or lacks a component given it
+    ///   (the root too);
+    /// - `ecs.prefab_parent` for a given entity not under its prefab parent;
+    /// - `ecs.prefab_entity` for one with a `PrefabRoot` the prefab doesn't give it, which a scene
+    ///   saves and a load refuses.
     pub(super) fn linkable(
         &self,
         root: Entity,
@@ -497,12 +490,11 @@ impl World {
         Ok(())
     }
 
-    /// Gives `root`, which is alive, of `instance`'s ID and with its `PrefabRoot`, each component
-    /// the prefab's root has that it hasn't, but its `Transform`; and spawns the prefab's other
-    /// entities under it, under `instance`'s IDs, which no living entity has, each parent's
-    /// children in the order of their IDs, as a scene's load spawns them, their references to the
-    /// prefab's entities the instance's, and their models' nodes. Returns the types of the
-    /// components given the root, and the IDs of the entities spawned that are its children.
+    /// Gives live `root` (which has `instance`'s ID and `PrefabRoot`) the prefab root's other
+    /// components, but not its `Transform`, and spawns the prefab's other entities under it with
+    /// `instance`'s IDs, which no living entity has. Children spawn in ID order, as a scene's
+    /// load does, with references retargeted to the instance's, and models' nodes. Returns the
+    /// component types given the root and the IDs of the spawned children.
     pub(super) fn spawn_instance(
         &mut self,
         root: Entity,
@@ -574,14 +566,12 @@ impl World {
         (given, children)
     }
 
-    /// What each instance in the world takes as prefab `prefab`'s file holds `text` in place of
-    /// what it held, which [`refit_prefab`](Self::refit_prefab) has it take: each outermost
-    /// instance, as its prefab gave it and as it gives it now, so that a context checks that each
-    /// of its worlds takes the text before any does.
+    /// What each instance takes when `prefab`'s file holds `text` in place of what it held, for
+    /// [`refit_prefab`](Self::refit_prefab): each outermost instance as the prefab gave it and
+    /// gives it now. A context checks every world takes the text before any does.
     ///
-    /// Fails as an instance's template does, of the prefab as it was or as `text` holds it, as
-    /// [`Expanding::template`] says, such as with `scene.prefab_cycle` for a text that links the
-    /// prefab itself.
+    /// Fails like [`Expanding::template`] for the prefab as it was or as `text` holds it:
+    /// `scene.prefab_cycle` for a text that links the prefab itself.
     #[cfg(feature = "dev")]
     pub(crate) fn refits(&self, prefab: Prefab, text: &Arc<str>) -> Result<Refits> {
         let _zone = gg_core::zone!();
@@ -610,16 +600,19 @@ impl World {
         })
     }
 
-    /// Has each instance in the world take what its prefab's file holds now, in place of what it
-    /// held, as `refits`, which [`refits`](Self::refits) found in this world, says: each field of
-    /// an instance's entity that its prefab gave as it was takes what it gives now, and each that
-    /// differed is kept; a component the prefab gives now that an entity hasn't is given, and one
-    /// it gave no more is taken away where it's as the prefab gave it; an entity the prefab gives
-    /// now is spawned, under its parent, and one it gives no more despawned, with what's under it,
-    /// under their IDs; an entity's parent goes where the prefab has it now, where it was where the
-    /// prefab had it, before what the prefab gives no more goes, so that it doesn't go with it;
-    /// and models' nodes follow their roots' models. Instances inside others' prefabs take it
-    /// through the outermost's, and those of other prefabs that link it take it too.
+    /// Has each instance take what its prefab's file holds now, per `refits` from
+    /// [`refits`](Self::refits) in this world:
+    ///
+    /// - a field still as the prefab gave it takes the new value; a differing one is kept;
+    /// - a newly given component is added; a no-longer-given one is removed where it's as given;
+    /// - a newly given entity is spawned under its parent; a no-longer-given one is despawned
+    ///   with what's under it, under their IDs;
+    /// - an entity still under its old prefab parent moves under the new one before the old
+    ///   parent goes, so it doesn't go with it;
+    /// - models' nodes follow their roots' models.
+    ///
+    /// Instances inside others' prefabs take it through the outermost, and so do those of other
+    /// prefabs linking it.
     ///
     /// # Panics
     ///
@@ -636,11 +629,10 @@ impl World {
         }
     }
 
-    /// The outermost instances in `root`'s subtree, which is alive, each by its root's ID with its
-    /// template, as [`claims`](Self::claims) finds them: as an operation that takes them out of
-    /// the world keeps them, so that each can take what its prefab's file changed while it was
-    /// out, as [`refit_kept`](Self::refit_kept) has it, once an undo or a redo puts it back. An
-    /// instance whose template doesn't load gives none.
+    /// The outermost instances in live `root`'s subtree (per [`claims`](Self::claims)), by root
+    /// ID with template. An operation that takes them out keeps these, so
+    /// [`refit_kept`](Self::refit_kept) can apply the prefab's file changes once an undo or redo
+    /// puts them back. An instance whose template doesn't load gives none.
     #[cfg(feature = "dev")]
     pub(super) fn kept_instances(&self, root: Entity) -> Vec<(EntityId, Rc<Template>)> {
         let claims = self.claims(&[root], &mut Expanding::default());
@@ -650,11 +642,10 @@ impl World {
         kept.collect()
     }
 
-    /// Has each instance `kept` names, as [`kept_instances`](Self::kept_instances) found it
-    /// before an operation took it out, and which an undo or a redo has put back, take what its
-    /// prefab gives now in place of what it gave then, as [`refit_prefab`](Self::refit_prefab) has
-    /// a living one take it. An instance gone with one refitted before it is left out, as is one
-    /// whose prefab's template doesn't load now, which a save then refuses.
+    /// Has each instance in `kept` ([`kept_instances`](Self::kept_instances), put back by an undo
+    /// or redo) take what its prefab gives now in place of then, like
+    /// [`refit_prefab`](Self::refit_prefab). Skipped: an instance gone with one refitted before
+    /// it, and one whose template doesn't load now, which a save then refuses.
     #[cfg(feature = "dev")]
     pub(super) fn refit_kept(&mut self, kept: &[(EntityId, Rc<Template>)]) {
         let mut now = Expanding::default();
@@ -671,7 +662,6 @@ impl World {
         }
     }
 
-    /// How many ancestors `entity`, which is alive, has.
     #[cfg(feature = "dev")]
     fn depth(&self, entity: Entity) -> usize {
         let mut depth = 0;
@@ -683,17 +673,17 @@ impl World {
         depth
     }
 
-    /// Has an instance, whose root is alive, take what its prefab gives as `new` has it, in place
-    /// of what it gave as `old` had it, as [`refit_prefab`](Self::refit_prefab) says.
+    /// Refits one instance with a live root from `old` to `new`; see
+    /// [`refit_prefab`](Self::refit_prefab).
     #[cfg(feature = "dev")]
     fn refit(&mut self, old: &Instance, new: &Instance) {
         let old_parts: HashMap<EntityId, usize> = (old.ids.iter().enumerate())
             .map(|(part, &id)| (id, part))
             .collect();
         let new_parts: HashSet<EntityId> = new.ids.iter().copied().collect();
-        // Each part after its parent, so that a part's parent is placed before it's asked of.
+        // Each part after its parent, so a parent is placed before it's asked of.
         let downward = new.template.downward();
-        // Those the prefab gives now, which no living entity has, under a parent that's alive or
+        // Parts the prefab gives now that no living entity has, under a parent that's alive or
         // comes with them.
         let mut fresh = vec![false; new.ids.len()];
         for &part in &downward[1..] {
@@ -707,8 +697,8 @@ impl World {
         if fresh.contains(&true) {
             self.spawn_fresh(new, &fresh);
         }
-        // Moved before those the prefab gives no more go, so that none goes with them, under
-        // parents that are alive or have just come.
+        // Moved, under parents alive or just come, before those the prefab gives no more go, so
+        // none goes with them.
         for &part in &downward[1..] {
             let id = new.ids[part];
             let (Some(&was), Some(entity)) = (old_parts.get(&id), self.entity(id)) else {
@@ -719,7 +709,7 @@ impl World {
                 && let Some(to) = to
                 && self.parent(entity).expect("alive") == from
             {
-                // A parent under it, as an entity code moved there, keeps it where it is.
+                // A parent code moved it under keeps it where it is.
                 let _ = self.set_parent(entity, Some(to));
             }
         }
@@ -754,9 +744,8 @@ impl World {
         }
     }
 
-    /// Has `entity`'s `component` take what its prefab gives now, `new`, where it has what the
-    /// prefab gave, `old`, as [`refit_prefab`](Self::refit_prefab) says: field by field, for a
-    /// struct of named fields.
+    /// Refits `entity`'s `component` from `old` to `new`, field by field for a struct of named
+    /// fields; see [`refit_prefab`](Self::refit_prefab).
     #[cfg(feature = "dev")]
     fn refit_component(
         &mut self,
@@ -787,8 +776,8 @@ impl World {
                     _ => Vec::new(),
                 };
                 for (path, value) in changed {
-                    // A nested instance's link too, whose entities the outer instance's refit
-                    // spawns and despawns itself.
+                    // A nested instance's link too; the outer instance's refit spawns and
+                    // despawns its entities itself.
                     let set = self.write_field(entity, &name, &path, &value, true);
                     set.expect("a prefab's value, which loaded, sets");
                 }
@@ -807,8 +796,8 @@ impl World {
         }
     }
 
-    /// Spawns the parts of `new` that `fresh` says, under their parents, as
-    /// [`spawn_instance`](Self::spawn_instance) spawns an instance's.
+    /// Spawns `new`'s parts marked in `fresh` under their parents, like
+    /// [`spawn_instance`](Self::spawn_instance).
     #[cfg(feature = "dev")]
     fn spawn_fresh(&mut self, new: &Instance, fresh: &[bool]) {
         let mut handles: Vec<Option<Entity>> = new.ids.iter().map(|&id| self.entity(id)).collect();
@@ -869,7 +858,6 @@ mod tests {
     use crate::reflect::Reflect;
     use crate::{Context, Log, Name, Operation};
 
-    /// A lamp: its light's color and brightness, and the entity it aims at.
     #[derive(Clone, Debug, PartialEq, crate::Component)]
     struct Lamp {
         color: Vec4,
@@ -877,7 +865,7 @@ mod tests {
         aim: Option<Entity>,
     }
 
-    /// A lamp, its root turned away by a transform its instances don't take, aiming at its bulb.
+    /// A lamp aiming at its bulb, its root turned by a transform instances don't take.
     const LAMP: &str = r#"(
     entities: {
         "00000000000000a1": (
@@ -942,8 +930,7 @@ mod tests {
         )
     }
 
-    /// A context whose world has registered `Lamp`, with prefabs of `texts`, each its path and its
-    /// text, named by their paths.
+    /// A context with `Lamp` registered and a prefab per (path, text) of `texts`.
     fn with<const N: usize>(texts: [(&str, &str); N]) -> (Context, [Prefab; N]) {
         let mut cx = Context::seeded(1);
         let world = cx.world_mut();
@@ -954,18 +941,16 @@ mod tests {
         (cx, prefabs)
     }
 
-    /// The entity whose ID mixes from `root`'s and `local`, in `world`.
     fn of(world: &World, root: Entity, local: u64) -> Entity {
         let root = world.id(root).expect("alive");
         let mixed = linked(root, id(local)).expect("an ID");
         world.entity(mixed).expect("spawned")
     }
 
-    /// An instance's root takes its prefab's root's components but its transform, its own; the
-    /// prefab's other entities spawn under it, their IDs mixed from its, its references to them
-    /// its own. A scene saves each instance as its root, its link, its transform and what else
-    /// differs, field by field, and each entity the prefab gives where something does; the scene
-    /// loads to the same world, and saves to the same bytes.
+    /// An instance's root takes its prefab root's components but its own transform; the prefab's
+    /// other entities spawn under it with IDs mixed from its. A scene saves each instance as its
+    /// root, link, transform and other differences, field by field, plus any given entity that
+    /// differs. It loads to the same world and saves to the same bytes.
     #[test]
     fn a_scene_saves_what_an_instance_has_otherwise_than_its_prefab() {
         let (mut cx, [lamp]) = with([("lamp.prefab", LAMP)]);
@@ -1003,7 +988,7 @@ mod tests {
         world.insert(other, held).expect("code may");
         let text = world.save_scene(&[first, second]).expect("saved");
         let [first_id, second_id, other_id] = [first, second, other].map(|e| world.id(e).unwrap());
-        // An instance's root, with what else it changes, `lamp`, at `at`.
+        // An instance's root at `at`, with `lamp`, what else it changes.
         let root = |id: EntityId, lamp: &str, at: &str| {
             format!(
                 r#"        "{id}": (
@@ -1059,8 +1044,8 @@ mod tests {
         );
     }
 
-    /// A field an instance's entity leaves out takes its prefab's, not its type's default; and an
-    /// entity of the prefab code took away, or a component of one, is refused as it's saved.
+    /// A field an instance's entity leaves out takes its prefab's, not its type's default. Saving
+    /// is refused after code took away a prefab's entity or a component of one.
     #[test]
     fn what_an_instance_leaves_out_is_its_prefabs() {
         let (mut cx, [lamp]) = with([("lamp.prefab", LAMP)]);
@@ -1092,7 +1077,7 @@ mod tests {
         );
         assert_eq!(world.get::<PrefabRoot>(roots[0]), Some(&PrefabRoot(lamp)));
         assert_eq!(world.save_scene(&roots).expect("saved"), text);
-        // Nor does a root's own transform take what it leaves out from the prefab's root's.
+        // Nor does a root's own transform take what it leaves out from the prefab root's.
         let placed = text.replace("0000000000000100", "0000000000000200").replace(
             "            PrefabRoot: (\"lamp.prefab\"),\n",
             "            PrefabRoot: (\"lamp.prefab\"),\n            Transform: (\n                \
@@ -1111,9 +1096,9 @@ mod tests {
         assert_eq!(error.code(), "scene.prefab_missing", "{error:#}");
     }
 
-    /// An instance inside a prefab spawns under the instance of that prefab, its IDs mixed again
-    /// from its own root's, with what the outer prefab gives it otherwise; a scene saves the outer
-    /// instance's root alone, and an entity the inner gives that differs under its mixed ID.
+    /// An instance inside a prefab spawns under the outer instance, its IDs mixed again from its
+    /// own root's, with what the outer prefab gives it. A scene saves the outer root alone, plus
+    /// any differing inner entity under its mixed ID.
     #[test]
     fn a_prefabs_instances_nest() {
         let post = post();
@@ -1163,10 +1148,10 @@ mod tests {
         );
     }
 
-    /// What of an instance's entity differs from its prefab is found as a scene's save finds it: by
-    /// the outermost instance whose prefab gives it, a struct of named fields field by field and
-    /// another type whole, with the components it adds; a root's transform is its own, and neither
-    /// a child of its own under an instance's entity nor an entity of no instance's has any.
+    /// Overrides are found as a scene save finds them, by the outermost instance giving the
+    /// entity: named-field structs field by field, other types whole, plus added components. A
+    /// root's transform is its own; a child of its own under an instance's entity, or an entity
+    /// of no instance, has none.
     #[cfg(feature = "dev")]
     #[test]
     fn overrides_say_what_an_instances_entities_change() {
@@ -1242,8 +1227,8 @@ mod tests {
 
     /// A link gives a root whose subtree holds what its prefab gives, under the IDs its instance
     /// mixes, its `PrefabRoot` back, spawning nothing, as an unlink's undo does: the world as it
-    /// was, each entity under its handle. It's refused for a root linked already, an entity an
-    /// instance gives, and a subtree that holds otherwise than its prefab gives.
+    /// was, each entity under its handle. Refused for a root already linked, an entity an
+    /// instance gives, and a subtree that differs from what its prefab gives.
     #[test]
     fn an_unlinked_instance_links_again_as_it_was() {
         let (mut cx, [lamp]) = with([("lamp.prefab", LAMP)]);
@@ -1295,14 +1280,14 @@ mod tests {
         assert_eq!(world.get::<PrefabRoot>(root), None, "nothing changed");
     }
 
-    /// A link redone, or an unlink undone, is checked as a link is, as another author may have
-    /// changed the subtree since, and refused as a link would be, changing nothing, so that a scene
-    /// still saves; and a link is refused for an entity its prefab gives that links a prefab the
-    /// prefab doesn't link it to, as a scene's load would refuse it.
+    /// A link redone or an unlink undone is checked like a link, as another author may have
+    /// changed the subtree: refused the same way, changing nothing, so a scene still saves. A
+    /// link is also refused for a given entity that links a prefab its prefab doesn't link it to,
+    /// as a scene load would refuse.
     #[test]
     fn a_link_undone_or_redone_is_checked_as_a_link_is() {
-        // A stand and its bulb, which nothing refers to, as a lamp's aim does, so that a scene
-        // saves without it.
+        // A stand and its bulb, which nothing refers to (a lamp's aim does), so a scene saves
+        // without it.
         let stand = "(entities: {\"00000000000000a1\": (Name: (\"stand\")), \"00000000000000b2\": \
                      (Name: (\"bulb\"), Parent: (\"00000000000000a1\"))})\n";
         let dot = "(entities: {\"00000000000000e1\": (Name: (\"dot\"))})\n";
@@ -1350,12 +1335,12 @@ mod tests {
         assert_eq!(world.get::<PrefabRoot>(root), None, "nothing changed");
     }
 
-    /// A subtree saved as a prefab gives each of its own entities the local ID that the instance
-    /// whose root is the subtree's mixes to its ID, and a nested instance's its ID mixed from its
-    /// root's, its root at its origin; linked, it's an instance of it that holds every entity under
-    /// its ID, model's nodes too, differing from its prefab in nothing, which a scene saves as the
-    /// link and the transform alone; undone, it's as it was. An instance's entity or root, a
-    /// model's node, and a subtree that refers outside itself are refused.
+    /// A subtree saved as a prefab gives each entity the local ID that the instance rooted at the
+    /// subtree mixes to its ID, and a nested instance's entities IDs mixed from its root's, the
+    /// root at its origin. Linked, it's an instance holding every entity under its ID, model
+    /// nodes too, with no differences, which a scene saves as the link and transform alone;
+    /// undone, it's as it was. Refused: an instance's entity or root, a model's node, and a
+    /// subtree that refers outside itself.
     #[cfg(feature = "dev")]
     #[test]
     fn a_subtree_saved_as_a_prefab_links_under_its_ids() {
@@ -1462,8 +1447,8 @@ mod tests {
         assert_eq!(refused(world, aimed), "scene.outside");
     }
 
-    /// A model's root in a prefab spawns its model's nodes in each instance, their IDs mixed from
-    /// the instance's entity's, as anywhere; a scene saves the instance without them.
+    /// A model root in a prefab spawns its nodes in each instance, IDs mixed from the instance
+    /// entity's; a scene saves the instance without them.
     #[test]
     fn a_model_in_a_prefab_spawns_its_nodes_in_each_instance() {
         let text = "(\n    entities: {\n        \"00000000000000e1\": (),\n        \
@@ -1495,7 +1480,7 @@ mod tests {
     /// another.
     #[test]
     fn a_prefab_that_links_itself_or_whose_root_links_one_is_refused() {
-        // A prefab of a root, and a child of it that links prefab `of`.
+        // A prefab of a root and a child of it linking prefab `of`.
         let link = |root: u64, child: u64, of: &str| {
             format!(
                 r#"(
@@ -1554,10 +1539,10 @@ mod tests {
         assert_eq!(count(world), before, "nothing spawned");
     }
 
-    /// Tools create an instance, one edit with its entities; change its entities' fields and
-    /// revert them; change its prefab and take it away, its entities and their fields coming back
-    /// with an undo; unlink it into entities of its own; and copy it, the copies' IDs mixed from
-    /// the copy's; but take none of its prefab's entities or components away.
+    /// Tools create an instance (one edit with its entities), change and revert its entities'
+    /// fields, change its prefab or remove it (undo restores entities and fields), unlink it into
+    /// entities of its own, and copy it with IDs mixed from the copy's. They can't remove its
+    /// prefab's entities or components.
     #[test]
     fn tools_change_an_instance_and_take_none_of_its_prefab_away() {
         let post = post();
@@ -1627,7 +1612,7 @@ mod tests {
         );
         assert_eq!(error.expect_err("its own").code(), "ecs.no_prefab");
 
-        // An entity of its own under the prefab's, and a component of its own, which go freely.
+        // A component of its own on the prefab's entity goes freely.
         let held = Operation::Add {
             entity: bulb_id,
             component: "Lamp".into(),
@@ -1666,7 +1651,7 @@ mod tests {
         log.undo(world).expect("undone");
         assert_eq!(place(world), DVec3::new(0.0, 5.0, 0.0));
 
-        // Another prefab, and back, its own entity and its field as they were.
+        // Another prefab, and back, its entities and fields as they were.
         let content = world.hash().content;
         let relink = Operation::Set {
             entity: root_id,
@@ -1704,7 +1689,7 @@ mod tests {
         log.undo(world).expect("given back");
         assert_eq!(world.hash().content, content);
 
-        // Unlinked, its entities its own, which go freely; linked again by the undo.
+        // Unlinked, its entities are its own and go freely; the undo links again.
         log.apply(world, Operation::Unlink { entity: root_id })
             .expect("unlinked");
         assert_eq!(world.get::<PrefabRoot>(root), None);
@@ -1717,7 +1702,7 @@ mod tests {
         let error = log.apply(world, Operation::Delete { entity: bulb_id });
         assert_eq!(error.expect_err("the prefab's").code(), "ecs.prefab_entity");
 
-        // A copy, its bulb its own copy's, mixed from the copy's ID, its field kept.
+        // A copy; its bulb's ID mixes from the copy's, its field kept.
         let duplicate = Operation::Duplicate {
             entity: root_id,
             copies: Vec::new(),
@@ -1769,9 +1754,9 @@ mod tests {
         assert_eq!(saved.ok(), world.save_scene(&[root]).ok());
     }
 
-    /// As its prefab's file changes, an instance takes each field it had as the prefab did, and
-    /// keeps the rest; the entities the prefab gives now spawn, under their IDs, and those it
-    /// gives no more go; and a text that doesn't load changes nothing.
+    /// As its prefab's file changes, an instance takes each field still as the prefab had it and
+    /// keeps the rest; newly given entities spawn under their IDs, dropped ones go; a text that
+    /// doesn't load changes nothing.
     #[cfg(feature = "dev")]
     #[test]
     fn instances_take_what_their_prefab_changes_and_keep_the_rest() {
@@ -1805,7 +1790,7 @@ mod tests {
         assert_eq!(world.parent(shade).expect("alive"), Some(root));
         check_ids(world);
 
-        // Its bulb gone, and its lamp's aim with it, as the prefab's.
+        // Its bulb gone, and the lamp's aim with it, as the prefab's.
         let bulbless: Arc<str> = r#"(
     entities: {
         "00000000000000a1": (
@@ -1847,9 +1832,8 @@ mod tests {
         assert_eq!(world.hash(), hash, "nothing changed");
     }
 
-    /// A scene file saved with an instance's entity changed sets that entity's field; saved with
-    /// another instance, it makes the instance's root with its link first, its prefab's entities
-    /// with it, and then the rest.
+    /// A scene edit changing an instance's entity sets its field; adding an instance makes the
+    /// root with its link first, its prefab's entities with it, then the rest.
     #[cfg(feature = "dev")]
     #[test]
     fn a_scene_edit_links_an_instance_before_the_rest() {
@@ -1889,9 +1873,8 @@ mod tests {
         assert_eq!(world.hash().content, edited.hash().content);
     }
 
-    /// A scene file saved with an instance unlinked unlinks it, its entities staying, its own, as
-    /// the file holds them; saved linked again, it links it again, the entities of its own that
-    /// hold the IDs its prefab gives going first.
+    /// A scene edit unlinking an instance keeps its entities as its own, as the file holds them;
+    /// relinking deletes the own entities holding the prefab's IDs first.
     #[cfg(feature = "dev")]
     #[test]
     fn a_scene_edit_unlinks_an_instance_and_links_it_again() {
@@ -1908,7 +1891,7 @@ mod tests {
             .expect("unlinked");
         let own = unlinked.entity(root_id).expect("alive");
         let unlinked_text = unlinked.save_scene(&[own]).expect("saved");
-        // The edit from `old` to `new`, its creates first, then the rest.
+        // The edit from `old` to `new`: creates first, then the rest.
         let edit = |world: &mut World, log: &mut Log, old: &str, new: &str| {
             let crate::ecs::SceneEdit::Creates(creates) =
                 world.scene_edit(Some(old), new).expect("an edit")
@@ -1939,11 +1922,10 @@ mod tests {
         check_ids(world);
     }
 
-    /// A scene file's relink of an instance, whose delete of the entities of the world's own that
-    /// hold the IDs the prefab gives would clear what names them from outside, as a joint's bodies
-    /// (`Component::cleared`), has what it cleared name the entities the link makes again under
-    /// those IDs: the world is the one the file holds, as it was before the unlink; and an undo
-    /// takes it back to the unlinked world, naming its own entity again.
+    /// Relinking by scene edit deletes the world's own entities holding the prefab's IDs, which
+    /// clears what names them from outside, like a joint's bodies (`Component::cleared`). That
+    /// then names the entities the link remakes under those IDs: the world is the file's, as
+    /// before the unlink. Undo returns to the unlinked world, naming its own entity again.
     #[cfg(feature = "dev")]
     #[test]
     fn a_relink_keeps_what_names_its_entities_from_outside() {
@@ -2003,8 +1985,8 @@ mod tests {
         check_ids(world);
     }
 
-    /// Sets of an instance's link that a gesture amends are each an edit of its own: each undo
-    /// puts back the prefab before, its entities under their handles.
+    /// Amended sets of an instance's link are each an edit: each undo restores the prior prefab,
+    /// its entities under their handles.
     #[test]
     fn sets_of_an_instances_link_are_each_an_edit_of_its_own() {
         let post = post();
@@ -2029,7 +2011,7 @@ mod tests {
         let mut log = Log::default();
         log.amend(world, relink(post)).expect("relinked");
         let posted = world.hash().content;
-        // A prefab whose bulb's ID is the lamp's, which the post's set's undo would find taken.
+        // A prefab whose bulb's ID is the lamp's, which the post's undo would find taken.
         log.amend(world, relink(globe)).expect("relinked");
         log.undo(world).expect("the post again");
         assert_eq!(world.hash().content, posted);
@@ -2039,7 +2021,7 @@ mod tests {
         check_ids(world);
     }
 
-    /// A prefab's text of bare entities, each its ID and its parent's, the root's none.
+    /// A prefab's text of bare entities, each an ID and its parent's (none for the root).
     #[cfg(feature = "dev")]
     fn bare(entities: &[(u64, Option<u64>)]) -> Arc<str> {
         let mut text = String::from("(\n    entities: {\n");
@@ -2055,8 +2037,8 @@ mod tests {
         text.into()
     }
 
-    /// As its prefab's file takes an entity away and puts the one under it in its place, an
-    /// instance's entity of that one moves out from under it before it goes, not going with it.
+    /// When the prefab's file drops an entity and puts its child in its place, the child moves
+    /// out first and doesn't go with it.
     #[cfg(feature = "dev")]
     #[test]
     fn an_entity_whose_prefab_parent_goes_moves_out_first() {
@@ -2075,8 +2057,8 @@ mod tests {
         check_ids(world);
     }
 
-    /// As its prefab's file gives an entity under a new one whose ID comes after its own, an
-    /// instance spawns both, each under its parent.
+    /// As its prefab's file gives an entity under a new one with a later ID, the instance spawns
+    /// both, each under its parent.
     #[cfg(feature = "dev")]
     #[test]
     fn an_instance_spawns_what_its_prefab_gives_now_parents_first() {
@@ -2094,9 +2076,8 @@ mod tests {
         check_ids(world);
     }
 
-    /// A duplicate refuses an ID it's given that an instance's copy gives one of its entities, or
-    /// that a copy's entity would take from another; and the ID it draws for an instance's copy
-    /// leaves free those its entities take.
+    /// A duplicate refuses a given ID that an instance copy's entity would take, or take from
+    /// another. The ID drawn for an instance copy leaves free those its entities take.
     #[test]
     fn a_duplicates_instances_copies_take_the_ids_mixed_from_theirs() {
         let (mut cx, [lamp]) = with([("lamp.prefab", LAMP)]);
@@ -2153,9 +2134,8 @@ mod tests {
         check_ids(world);
     }
 
-    /// An instance that an undo puts back takes what its prefab's file changed while it was out,
-    /// as a deleted one's undo puts it back, and as a relinked one's does; and a redo takes out
-    /// what it took.
+    /// An instance an undo restores (after a delete or relink) takes the prefab file's changes
+    /// made meanwhile; a redo removes what it took.
     #[cfg(feature = "dev")]
     #[test]
     fn an_instance_an_undo_puts_back_takes_what_its_prefab_changed_meanwhile() {
@@ -2164,7 +2144,7 @@ mod tests {
         let world = cx.world_mut();
         let root = lamp.spawn(world, Transform::IDENTITY).expect("spawned");
         let root_id = world.id(root).expect("alive");
-        // The lamp's file with an entity more under its root, of local ID `local`.
+        // The lamp's file with one more entity under its root, of local ID `local`.
         let with_child = |text: &str, local: &str, name: &str| -> Arc<str> {
             text.replace(
                 "    },\n)\n",
@@ -2209,8 +2189,8 @@ mod tests {
         check_ids(world);
     }
 
-    /// Code reads an instance's link, but changes it no way, since the entities under it would
-    /// then be another prefab's.
+    /// Code reads an instance's link but can't change it: the entities under it would be another
+    /// prefab's.
     #[test]
     fn code_reads_an_instances_link_but_cant_change_it() {
         let post = post();
@@ -2231,9 +2211,8 @@ mod tests {
         assert_eq!(world.hash().content, content, "nothing changed");
     }
 
-    /// An entity an instance gives that code made a root, or put under an entity a scene doesn't
-    /// save, is refused as it's saved, as a load would put it back under its prefab's parent;
-    /// under one the scene saves, it's saved there.
+    /// Saving is refused for an instance entity code made a root or put under an unsaved entity,
+    /// as a load would return it to its prefab parent. Under a saved one, it's saved there.
     #[test]
     fn an_instances_entity_is_saved_under_a_parent_the_scene_saves() {
         let (mut cx, [lamp]) = with([("lamp.prefab", LAMP)]);
