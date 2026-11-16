@@ -5,7 +5,7 @@ use gg_engine::math::Vec4;
 
 use super::*;
 
-/// A world that knows the sandbox's types, and the engine's, as the app's does.
+/// A world registered as the app's is.
 fn world() -> World {
     let mut world = World::default();
     world.register::<Transform>().expect("registered");
@@ -19,8 +19,8 @@ fn grid_text() -> String {
     gg_engine::read_scene(&scene("grid.ron")).unwrap_or_else(|error| panic!("{error:#}"))
 }
 
-/// The grid's scene loads and saves to its own bytes, so that a type of the sandbox's that changes
-/// under it fails here.
+/// The grid's scene loads and saves to its own bytes, so a sandbox type changing under it fails
+/// here.
 #[test]
 fn the_grid_saves_as_it_is() {
     let text = grid_text();
@@ -32,9 +32,9 @@ fn the_grid_saves_as_it_is() {
     assert_eq!(grid(&world).len(), 100);
 }
 
-/// Each texture and model under the sandbox's root has its ID file beside it, committed with it,
-/// each holding an ID of its own, and no ID file is left without its asset, so that every checkout
-/// gives each asset the ID the repository holds, rather than its runs writing others.
+/// Each texture and model under the sandbox's root has a committed ID file beside it, each ID its
+/// own, and no ID file lacks its asset. So every checkout gives each asset the repository's ID,
+/// rather than its runs writing others.
 #[test]
 fn every_asset_has_its_id_file_beside_it() {
     let found = gg_api::asset::scan(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -58,9 +58,8 @@ fn every_asset_has_its_id_file_beside_it() {
     assert!(found.unread.is_empty(), "{:?}", found.unread);
 }
 
-/// Drift finds, to reset, exactly the drifters that wrap across the field at each tick, as their
-/// laps across it count, worked out apart from their transforms, so that the swarm doesn't streak
-/// across the view as it wraps.
+/// Drift finds exactly the drifters that wrap at each tick, as laps worked out apart from their
+/// transforms count them.
 #[test]
 fn drift_finds_the_drifters_that_wrap_alone() {
     let mut world = world();
@@ -98,8 +97,7 @@ fn drift_finds_the_drifters_that_wrap_alone() {
     assert!(seen > 0, "no drifter wrapped");
 }
 
-/// A reload replaces the grid whole, a square that's another's descendant too, or, if it's
-/// refused, leaves the grid there was.
+/// A reload replaces the whole grid, nested squares too, or, refused, leaves it as it was.
 #[test]
 fn a_reload_replaces_the_grid_whole_or_not_at_all() {
     let mut world = world();
@@ -116,8 +114,8 @@ fn a_reload_replaces_the_grid_whole_or_not_at_all() {
     assert_eq!(world.save_scene(&grid(&world)).expect("saved"), nested);
 }
 
-/// The panels' commands change nothing until the next tick, which applies them in the order they
-/// came; and what the Inspector sets stays until a panel changes it again.
+/// The panels' commands wait for the next tick, which applies them in order. What the Inspector
+/// sets stays until a panel changes it again.
 #[test]
 fn commands_change_the_world_at_the_next_tick_in_order() {
     let mut world = world();
@@ -144,7 +142,7 @@ fn commands_change_the_world_at_the_next_tick_in_order() {
     assert_eq!((drifters(&world), colored(&world)), (0, 0));
     sandbox.tick(&mut world, Tick { number: 0 });
     assert_eq!((drifters(&world), colored(&world)), (3, 100));
-    // A square colored otherwise, as the Inspector colors it, stays so at the next tick.
+    // A square the Inspector recolors stays so at the next tick.
     let square = world
         .query::<(Entity, &GridCell)>()
         .next()
@@ -153,12 +151,12 @@ fn commands_change_the_world_at_the_next_tick_in_order() {
     sprite.expect("a sprite").color = Vec4::ONE;
     sandbox.tick(&mut world, Tick { number: 1 });
     assert_eq!(colored(&world), 99);
-    // And stays so through a reload that's refused, which leaves the grid as it was.
+    // And through a refused reload, which leaves the grid as it was.
     let text = "(entities: {".to_owned();
     sandbox.commands.push(Command::ReloadGrid { text, colors });
     sandbox.tick(&mut world, Tick { number: 2 });
     assert_eq!(colored(&world), 99);
-    // The swarm's size dragged away and back between two ticks leaves its drifters be.
+    // A size dragged away and back between two ticks leaves the drifters be.
     let swarm = |world: &World| {
         let drifters = world.query::<(Entity, &Drifter)>();
         let mut drifters: Vec<(u32, Entity)> = drifters.map(|(e, d)| (d.index, e)).collect();
@@ -181,8 +179,8 @@ fn commands_change_the_world_at_the_next_tick_in_order() {
     assert_eq!(swarm(&world), before[..2]);
 }
 
-/// A world restored from a snapshot simulates as it did from there, through resizes of the swarm
-/// and a recolored grid: the sandbox keeps none of the swarm, which the world holds.
+/// A world restored from a snapshot simulates as before, through resizes and a recolor: the world,
+/// not the sandbox, holds the swarm.
 #[test]
 fn a_restored_world_simulates_as_before() {
     let mut cx = Context::seeded(0x5eed).root(env!("CARGO_MANIFEST_DIR"));
@@ -218,11 +216,9 @@ fn a_restored_world_simulates_as_before() {
     assert_eq!(parted.map(|tick| 64 + tick), None, "the first tick to part");
 }
 
-/// The sandbox's simulation, run without a GPU from a seed through the commands of a script,
-/// hashes at its attach and at each tick as its reference says: the same in one run as in the
-/// next, on four threads as on one, in a debug build as in a release one, and on every platform,
-/// as determinism needs. `GG_UPDATE_REFERENCES=1` writes the reference again, after a change meant
-/// to change the simulation or what the hash reads.
+/// The sandbox's simulation, run without a GPU from a seed through a script's commands, hashes at
+/// attach and each tick as its reference says. Determinism needs it the same run to run, on four
+/// threads as on one, in debug and release builds, and on every platform.
 #[test]
 fn the_simulation_gives_its_reference_hashes() {
     let run = simulate();
@@ -255,12 +251,12 @@ fn the_simulation_gives_its_reference_hashes() {
     first_difference(&run, &reference, &path.display().to_string(), after);
 }
 
-/// The sandbox's simulation from a seed, as lines of the world's hash, its content then its
-/// layout: one after it attaches, and one at each of 256 ticks, between which the script queues
-/// what the panels would, and sets what the Inspector would.
+/// The sandbox's simulation from a seed, as lines of the world's hash, content then layout: one
+/// after attach, and one at each of 256 ticks. Between ticks, the script queues what the panels
+/// would and sets what the Inspector would.
 fn simulate() -> Vec<String> {
-    // Rooted as the app is, so that its textures' names, which the hash reads, are the same
-    // wherever the repository is.
+    // Rooted as the app is, so the textures' names, which the hash reads, are the same wherever
+    // the repository is.
     let mut cx = Context::seeded(0x5eed).root(env!("CARGO_MANIFEST_DIR"));
     // One swarm for debug and release builds, whose own differ.
     let mut sandbox = Sandbox {
@@ -280,8 +276,8 @@ fn simulate() -> Vec<String> {
                 sandbox.commands.push(Command::GridColors(colors));
             }
             96 => sandbox.commands.push(Command::Swarm(250)),
-            // An infinite spin, which turns the drifter by a NaN that an invalid operation
-            // makes, whose sign each CPU gives it, and the hash takes as one.
+            // An infinite spin turns the drifter by a NaN from an invalid operation. Its sign
+            // varies by CPU, and the hash takes either as one.
             112 => {
                 let mut drifters = world.query_mut::<&mut Drifter>();
                 let first = drifters.find(|drifter| drifter.index == 0);
@@ -307,9 +303,9 @@ fn simulate() -> Vec<String> {
     lines
 }
 
-/// Panics at the first of `run`'s lines that isn't `expected`'s, which `what` holds, saying
-/// which part of the hash differs there and how many lines differ, then `after`; or, if one
-/// of them ends first, at the first line the other has past its end.
+/// Panics at `run`'s first line that differs from `expected`, which `what` names, saying which part
+/// of the hash differs and how many lines do, then `after`. If one ends first, it panics at the
+/// other's first line past that end.
 fn first_difference(run: &[String], expected: &[String], what: &str, after: &str) {
     let differ = |(line, other): &(&String, &String)| line != other;
     let lines = || run.iter().zip(expected);

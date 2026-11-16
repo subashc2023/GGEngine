@@ -1,7 +1,6 @@
-//! The engine's development app: a swarm of up to 100,000 sprites drifting on the job system's
-//! threads, which measures how fast the engine simulates and draws, and a grid loaded from its scene
-//! file, which development builds apply as it's saved, with the engine's Performance, Entities and
-//! Inspector panels.
+//! The engine's development app. A swarm of up to 100,000 sprites drifts on the job system's
+//! threads, measuring how fast the engine simulates and draws. Over it, a grid loads from its scene
+//! file, which development builds apply as it's saved.
 
 use std::f32::consts::TAU;
 use std::mem;
@@ -24,8 +23,7 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The sandbox, with the engine's Performance, Entities and Inspector panels: what `main` runs,
-/// and what its recordings replay.
+/// The sandbox, as `main` runs it and its recordings replay it.
 fn app() -> App {
     let app = App::new("Sandbox").root(env!("CARGO_MANIFEST_DIR"));
     let app = app.custom_title_bar();
@@ -33,26 +31,24 @@ fn app() -> App {
     app.overlay(gg_engine::Inspector::default())
 }
 
-/// How far forward the swarm is, behind the grid, at 0.2 in its scene. The orthographic camera sees
-/// from 1 behind it to 1 in front.
+/// The swarm's depth, behind the grid's 0.2 in its scene. The camera sees from 1 behind it to 1 in
+/// front.
 const SWARM_Z: f32 = 0.1;
 
-/// The most sprites the swarm has.
 const SWARM_MAX: u32 = 100_000;
 
-/// How many sprites the swarm starts with: all of them in a release build, and a tenth in a debug
-/// build, whose unoptimized code would draw them all slowly.
+/// A tenth of the swarm in debug builds, whose unoptimized code would draw it all slowly.
 const SWARM_START: u32 = if cfg!(debug_assertions) {
     SWARM_MAX / 10
 } else {
     SWARM_MAX
 };
 
-/// The swarm's field, centered on the origin: a little wider and taller than the view at first,
-/// so that its sprites wrap around out of sight.
+/// The swarm's field, centered on the origin. It's a little larger than the first view, so sprites
+/// wrap out of sight.
 const FIELD: Vec2 = Vec2::new(8.0, 4.5);
 
-/// A camera, unturned, over `center`, seeing `height` units from the view's bottom to its top.
+/// An unturned camera over `center`, seeing `height` units top to bottom.
 fn overlooking(center: Vec2, height: f32) -> Viewpoint {
     Viewpoint {
         position: center.extend(0.0).as_dvec3(),
@@ -65,28 +61,27 @@ fn overlooking(center: Vec2, height: f32) -> Viewpoint {
     }
 }
 
-/// What the sandbox set up as it loaded, which its ticks go by: the swarm's sprites, one for each
-/// cell of a sheet of 4 by 4 shapes with transparent margins, row by row.
+/// The swarm's sprites: a 4 by 4 sheet's cells, row by row.
 struct SwarmShapes {
     shapes: [Sprite; 16],
 }
 
-/// One of the swarm's sprites: how it moves, picked once from its index.
+/// One of the swarm's sprites. Its motion is picked once from its index.
 #[derive(Clone, Copy, Component)]
 struct Drifter {
-    /// Which of the swarm it is, from 0: the swarm shrinks from its last.
+    /// Its place in the swarm, from 0. The swarm shrinks from its last.
     index: u32,
-    /// Where it is when the swarm starts, from the field's bottom left.
+    /// Where it starts, from the field's bottom left.
     start: Vec2,
     /// In units a second.
     velocity: Vec2,
-    /// How far it's turned when the swarm starts.
+    /// Its turn at the start.
     #[reflect(degrees)]
     turn: f32,
-    /// How far it turns a second.
+    /// Its turn a second.
     #[reflect(degrees)]
     spin: f32,
-    /// How far across it is, in units.
+    /// Its width, in units.
     size: f32,
 }
 
@@ -106,9 +101,8 @@ impl Drifter {
         (drifter, (pick(1) * 16.0) as usize % 16)
     }
 
-    /// Where it is `t` seconds after the swarm starts. Its place and its turn are worked out in
-    /// `f64` and wrapped before they're narrowed, so that the swarm moves as smoothly however long
-    /// it has run.
+    /// Where it is `t` seconds after the swarm starts. Place and turn wrap in `f64` before they're
+    /// narrowed, so the swarm moves as smoothly however long it has run.
     fn transform(&self, t: f64) -> Transform {
         let wrap = |start: f32, speed: f32, every: f32| {
             (f64::from(start) + f64::from(speed) * t).rem_euclid(f64::from(every)) as f32
@@ -125,7 +119,7 @@ impl Drifter {
     }
 }
 
-/// One of the grid's squares, which its sprite's color follows.
+/// One of the grid's squares. Its sprite takes the color.
 #[derive(Clone, Copy, Component)]
 struct GridCell {
     /// The grid's first color or its second, alternating as a checkerboard's.
@@ -133,15 +127,13 @@ struct GridCell {
     color: u32,
 }
 
-/// Registers the sandbox's component types, as a game does before it loads a scene of them.
 fn register(world: &mut World) {
     for registered in [world.register::<Drifter>(), world.register::<GridCell>()] {
         registered.expect("the sandbox's types describe themselves");
     }
 }
 
-/// The sandbox's scene `name`, in `scenes/` beside its assets: `grid.ron`, the grid, 10 by 10
-/// squares 2 units across.
+/// The sandbox's scene `name`: `grid.ron` is the grid, 10 by 10 squares 2 units across.
 fn scene(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("scenes")
@@ -154,14 +146,14 @@ fn grid(world: &World) -> Vec<Entity> {
     cells.map(|(cell, _)| cell).collect()
 }
 
-/// Saves the grid to `scenes/grid.ron`, as [`gg_engine::write_scene`] writes a scene, so that a
-/// save cut short leaves the last grid whole.
+/// Saves the grid to `scenes/grid.ron` through [`gg_engine::write_scene`], so a save cut short
+/// leaves the last grid whole.
 fn save_grid(world: &World) -> Result<(), Error> {
     let text = world.save_scene(&grid(world))?;
     gg_engine::write_scene(&scene("grid.ron"), &text)
 }
 
-/// The grid scene's text, from `scenes/grid.ron`; or, if it can't be read, logs why.
+/// The text of `scenes/grid.ron`, or `None` after logging why it can't be read.
 fn read_grid() -> Option<String> {
     let path = scene("grid.ron");
     match gg_engine::read_scene(&path) {
@@ -173,8 +165,8 @@ fn read_grid() -> Option<String> {
     }
 }
 
-/// Loads the grid from `text`, read from `scenes/grid.ron`, in place of the one there is, and
-/// colors it in `colors`. If it's refused, logs where and why, and the grid stays as it was.
+/// Replaces the grid with `text`, read from `scenes/grid.ron`, colored in `colors`. A refused grid
+/// is logged, and the old one stays.
 fn reload_grid(world: &mut World, text: &str, colors: [[f32; 3]; 2]) {
     match replace_grid(world, text) {
         Ok(()) => color_grid(world, colors),
@@ -186,9 +178,8 @@ fn reload_grid(world: &mut World, text: &str, colors: [[f32; 3]; 2]) {
     }
 }
 
-/// Loads the grid scene `text` in place of the grid there is; or, if it's refused, loads the grid
-/// there was back, so that it stays as it was, its IDs and the Inspector's pick of one of its
-/// squares too.
+/// Replaces the grid with the scene `text`. If that's refused, the old grid loads back, keeping its
+/// IDs and so the Inspector's pick.
 fn replace_grid(world: &mut World, text: &str) -> Result<(), Error> {
     let cells = grid(world);
     let kept = world
@@ -209,13 +200,12 @@ fn replace_grid(world: &mut World, text: &str) -> Result<(), Error> {
     loaded.map(drop)
 }
 
-/// Moves each drifter to where it is `t` seconds after the swarm starts, on the job system's
-/// threads; and resets the interpolation of each that wraps from one side of the field to the
-/// other, which it puts in `wrapped`, so that it doesn't draw on its way across.
+/// Moves each drifter to where it is at `t`, on the job system's threads. Those that wrap go in
+/// `wrapped`, their interpolation reset so they don't draw on their way across.
 fn drift(world: &mut World, t: f64, wrapped: &mut Mutex<Vec<Entity>>) {
     let _zone = gg_engine::zone!();
-    // Kept for its memory, and the lock with it, which macOS's std makes as it's first taken. The
-    // jobs find them in any order, which drawing alone reads.
+    // Kept for its memory, and its lock, which macOS's std makes as it's first taken. The jobs find
+    // them in any order, which only drawing reads.
     let found = &*wrapped;
     world
         .query_mut::<(Entity, &Drifter, &mut Transform)>()
@@ -234,8 +224,8 @@ fn drift(world: &mut World, t: f64, wrapped: &mut Mutex<Vec<Entity>>) {
     }
 }
 
-/// Whether a drifter moved from `from` to `to` at a tick has wrapped across the field, or been
-/// moved across it otherwise: a tick moves it far less than half the field's width or height.
+/// Whether a drifter moving from `from` to `to` in a tick wrapped, or was moved, across the field.
+/// A tick moves it far less than half the field.
 fn wraps(from: &Transform, to: &Transform) -> bool {
     let moved = (to.translation - from.translation)
         .truncate()
@@ -251,8 +241,8 @@ fn color_grid(world: &mut World, colors: [[f32; 3]; 2]) {
     }
 }
 
-/// A number from 0 up to 1 that `index` and `salt` pick, the same every time: Chris Wellons's
-/// lowbias32 hash, its top 24 bits as a fraction.
+/// A number in [0, 1) that `index` and `salt` pick, the same every time: Chris Wellons's lowbias32
+/// hash, its top 24 bits as a fraction.
 fn pick(index: u32, salt: u32) -> f32 {
     let mut x = index ^ salt.wrapping_mul(0x9e37_79b9);
     x ^= x >> 16;
@@ -263,43 +253,34 @@ fn pick(index: u32, salt: u32) -> f32 {
     (x >> 8) as f32 / (1 << 24) as f32
 }
 
-/// Draws in the game's view a swarm of sprites from a sheet's cells, drifting and turning on the job
-/// system's threads, which tests how many sprites the engine simulates and draws, and over it a grid
-/// of sprites in two colors that alternate, from its scene file, which a development build applies
-/// as it's saved. Both are entities: the world holds all of the simulation, so that a snapshot of it
-/// restores it, and a recording of the commands replays it. The engine's orthographic camera
-/// controller steers the camera, turning it too, by the keys [`OrthographicCameraController`]
-/// gives. Shows three panels to dock, beside the engine's Performance panel, which counts the draws,
-/// and its Entities and Inspector panels, which list the entities and edit the picked one's
-/// components: the camera and the cursor; how many sprites the swarm has; and the grid's colors,
-/// which can be picked. Logs the key, mouse and gamepad presses that reach it, which those on the
-/// panels don't. The title bar's File menu saves the grid to its scene, loads it again from the
-/// scene, which a refusal of leaves it as it was, and quits.
+/// The sandbox's layer. The swarm and the grid are entities, so the world holds the whole
+/// simulation: a snapshot restores it, and a recording of the commands replays it. The camera
+/// turns too, by the keys [`OrthographicCameraController`] gives. It logs the key, mouse and pad
+/// presses that reach it, which those on panels don't.
 struct Sandbox {
     /// The grid's two colors, in linear RGB.
     grid_colors: [[f32; 3]; 2],
     camera: OrthographicCameraController,
-    /// How many sprites the swarm has, as its panel says.
+    /// The swarm's size, as its panel says.
     swarm: u32,
-    /// The swarm's shapes, set up as the sandbox loads.
+    /// Once loaded.
     scene: Option<SwarmShapes>,
     /// What the panels and the File menu changed since the last tick.
     commands: Vec<Command>,
-    /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
-    /// ticks.
+    /// A tick's wrapped drifters, kept for its memory and lock. Empty between ticks.
     wrapped: Mutex<Vec<Entity>>,
 }
 
-/// What the sandbox's panels and File menu change of its world, queued as they change it and
-/// applied at its next tick, before its systems: its commands, which a recording keeps.
+/// What the panels and File menu change of the world, applied at the next tick, before its
+/// systems. Recordings keep them.
 #[derive(Reflect)]
 enum Command {
     /// Spawns or despawns drifters until the swarm has this many.
     Swarm(u32),
     /// Colors the grid's squares in these, in linear RGB.
     GridColors([[f32; 3]; 2]),
-    /// Loads the grid in place of the one there is from `text`, read from its scene as the menu
-    /// was clicked, and colors it in `colors`, as the panel had them then.
+    /// Replaces the grid with `text`, read from its scene at the menu's click, colored in the
+    /// panel's `colors` then.
     ReloadGrid { text: String, colors: [[f32; 3]; 2] },
 }
 
@@ -318,10 +299,8 @@ impl Sandbox {
         }
     }
 
-    /// Spawns drifters until the swarm has `swarm`, or despawns them until it has, from its end,
-    /// so that those left are the first `swarm`, each moving as its index has it, from where it is
-    /// `t` seconds after the swarm starts. It finds them in the world, which holds the swarm
-    /// whole, as a snapshot of it restores it.
+    /// Spawns or despawns drifters, from the end, until the swarm is its first `swarm`, new ones
+    /// placed as at `t`.
     fn resize_swarm(&self, world: &mut World, swarm: u32, t: f64) {
         let _zone = gg_engine::zone!();
         let Some(scene) = &self.scene else {
@@ -365,28 +344,25 @@ impl Layer for Sandbox {
     }
 
     fn attach(&mut self, cx: &mut Context) {
-        // A run that ends as it loads loads no grid, so that it ends with the load's error alone.
+        // A run ending as it loads loads no grid, so it ends with the load's error alone.
         if cx.exiting() {
             return;
         }
-        // Watched as the sandbox runs, in development builds, which apply its saves; one that's
-        // refused ends the run with its error.
+        // Development builds watch the grid and apply its saves.
         if let Err(error) = cx.load_scene_file(scene("grid.ron")) {
             cx.fail(error);
             return;
         }
         color_grid(cx.world_mut(), self.grid_colors);
-        // At the first tick, so that a recording holds the swarm's size, which a build's own
-        // differs from another's.
+        // At the first tick, so recordings hold the swarm's size, which differs by build.
         self.commands.push(Command::Swarm(self.swarm));
     }
 
-    /// Takes the panels' values from the world, which a snapshot brought back as they had left it.
+    /// Takes the panels' values from the world a snapshot brought back.
     fn restored(&mut self, cx: &mut Context) {
         let world = cx.world();
         self.swarm = world.query::<&Drifter>().count() as u32;
-        // Each the color most of its squares have, which a square set apart in the Inspector
-        // doesn't change.
+        // Each color is its squares' most common, so one recolored in the Inspector doesn't count.
         let mut counts: [Vec<([f32; 3], u32)>; 2] = Default::default();
         for (cell, sprite) in world.query::<(&GridCell, &Sprite)>() {
             let seen = sprite.color.truncate().to_array();
@@ -407,7 +383,7 @@ impl Layer for Sandbox {
         let _zone = gg_engine::zone!();
         let t = tick.time().as_secs_f64();
         let mut commands = mem::take(&mut self.commands);
-        // The swarm's last size, once: its slider dragged between two ticks queues several.
+        // The last size alone: a slider dragged between two ticks queues several.
         let mut swarm = None;
         for command in commands.drain(..) {
             match command {
@@ -470,8 +446,7 @@ impl Layer for Sandbox {
         if save && let Err(error) = save_grid(cx.world()) {
             error!(code = error.code(), "{error:#}");
         }
-        // Read now, so that the tick goes by its commands alone; and colored as the panel says,
-        // rather than as it was saved.
+        // Read now, so the tick goes by its commands alone. Colored as the panel says.
         if reload && let Some(text) = read_grid() {
             let colors = self.grid_colors;
             self.commands.push(Command::ReloadGrid { text, colors });
@@ -499,9 +474,8 @@ impl Layer for Sandbox {
                 self.commands.push(Command::Swarm(self.swarm));
             }
         });
-        // By the colors rather than the buttons' changes: egui gives back the colors its picker
-        // makes of them, as it first draws them too, which the world takes, as the grid's scene
-        // saves them.
+        // By the colors, not the buttons' changes: egui's picker alters them, even at its first
+        // draw, and the world takes what it makes, as the grid's scene saves them.
         let colors = self.grid_colors;
         ui.panel("Grid", |ui| {
             ui.horizontal(|ui| {
