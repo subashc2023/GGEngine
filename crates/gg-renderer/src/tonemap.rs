@@ -1,6 +1,5 @@
-//! Tonemapping: the pass that maps the game's view, drawn in colors of high dynamic range, into the
-//! range the view's image shows, 0 to 1, by a tonemapper, and dithers it against banding in the
-//! image's 8 bits.
+//! Tonemapping: the view's HDR colors into its image's 0 to 1, dithered against banding in its 8
+//! bits.
 
 use std::sync::Arc;
 
@@ -10,28 +9,27 @@ use gg_gpu::{Blend, ColorImage, Device, GraphicsDesc, Pass, Pipeline};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.spv"));
 
-/// How the game's view, drawn in colors of high dynamic range, maps into the range its image shows,
-/// 0 to 1, from linear RGB, as [`RenderData::tonemapper`](crate::RenderData::tonemapper) names it.
+/// How the view's HDR linear RGB maps into 0 to 1, as
+/// [`RenderData::tonemapper`](crate::RenderData::tonemapper) picks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Tonemapper {
-    /// Khronos PBR Neutral, which shows base colors up to about 0.76 as they are, less the 0.04
-    /// of light that a dielectric reflects whatever its color, so that glTF materials keep their
-    /// colors, and rolls brighter light off toward white, desaturating it a little.
+    /// Khronos PBR Neutral: base colors up to about 0.76 show as they are, less a dielectric's 0.04
+    /// reflection, so glTF materials keep their colors. Brighter light rolls off toward white,
+    /// slightly desaturated.
     #[default]
     PbrNeutral,
-    /// ACES, as Stephen Hill fitted its reference rendering and output transforms: the film look,
-    /// of higher contrast, darkening mid-tones, shifting hues and saturating what's bright.
+    /// ACES, as Stephen Hill fitted its reference rendering and output transforms. The film look:
+    /// more contrast, darker mid-tones, shifted hues, saturated highlights.
     Aces,
-    /// AgX, Blender's default since 4.0, as three.js has it: a filmic curve that keeps very bright,
-    /// saturated light from clipping to its primaries, but shifts every color a little.
+    /// AgX, Blender's default since 4.0, as three.js has it. Very bright saturated light doesn't
+    /// clip to its primaries, but every color shifts a little.
     Agx,
-    /// None: each channel clamped to 0 to 1, and not dithered, so that what's in that range shows
-    /// as it was drawn, as the view of a world without an environment does.
+    /// Each channel clamped to 0 to 1, undithered, as a world without an environment shows.
     None,
 }
 
 impl Tonemapper {
-    /// Each tonemapper, in the order of their indices.
+    /// In index order.
     pub const ALL: [Self; 4] = [Self::PbrNeutral, Self::Aces, Self::Agx, Self::None];
 
     /// Its index in [`ALL`](Self::ALL), which the tonemap shader switches on.
@@ -45,8 +43,7 @@ impl Tonemapper {
     }
 }
 
-/// Maps the view's colors of high dynamic range into the view's image, of [`ColorImage::FORMAT`],
-/// each pixel onto the one of the image.
+/// Maps the view's HDR colors into its image, of [`ColorImage::FORMAT`], pixel for pixel.
 pub(crate) struct TonemapPass {
     pipeline: Pipeline,
 }
@@ -72,13 +69,12 @@ impl TonemapPass {
         Ok(Self { pipeline })
     }
 
-    /// Draws over the whole of the pass's target, the view's image, the view's colors, whose index
-    /// [`Pass::sampled`] gave this pass as `colors`, mapped by `tonemapper`, and, but by
-    /// [`Tonemapper::None`], dithered.
+    /// Draws the view's colors, at bindless index `colors` from [`Pass::sampled`], over the whole
+    /// target, mapped by `tonemapper` and dithered unless it's [`Tonemapper::None`].
     ///
     /// # Panics
     ///
-    /// If the pass's target isn't of [`ColorImage::FORMAT`], without IDs or a depth image.
+    /// - If the pass's target isn't of [`ColorImage::FORMAT`], without IDs or a depth image.
     pub(crate) fn draw(&self, pass: &mut Pass<'_, '_>, colors: u32, tonemapper: Tonemapper) {
         pass.set_pipeline(&self.pipeline);
         let push = TonemapPush {
@@ -90,11 +86,10 @@ impl TonemapPass {
     }
 }
 
-/// What the tonemap pass pushes: `Push` in `shaders/tonemap.slang`, field for field.
+/// `Push` in `shaders/tonemap.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct TonemapPush {
-    /// The index of the view's colors in the bindless set.
     image: u32,
     /// The tonemapper's [`index`](Tonemapper::index).
     tonemapper: u32,

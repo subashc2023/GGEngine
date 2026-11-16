@@ -1,7 +1,6 @@
-//! Bloom: light spreading round what's bright in the game's view, as it does through a camera's
-//! lens, from a chain of downsamples of the view's colors and upsamples back, blended into them
-//! before its canvas, as `shaders/bloom.slang` says; and the pass that blends them, which grades
-//! them too, as [`Grade`] says, and runs to grade them alone where they don't bloom.
+//! Bloom: light spreading round what's bright, as through a lens. A chain downsamples the view's
+//! colors and upsamples back (`shaders/bloom.slang`). The last pass blends it in before the canvas
+//! and grades as [`Grade`] says, alone where nothing blooms.
 
 use std::sync::Arc;
 
@@ -13,21 +12,19 @@ use crate::grade::{Grade, GradeData};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bloom.spv"));
 
-/// How many texels across and down a workgroup takes: `GROUP` in `shaders/bloom.slang`.
+/// Texels across and down per workgroup: `GROUP` in `shaders/bloom.slang`.
 const GROUP: u32 = 8;
 
-/// The most levels the chain has, as a view 4,096 pixels or more on its shorter side has.
+/// The most levels: a view's of 4,096 pixels or more on its shorter side.
 const MOST: usize = 8;
 
-/// How far each upsample lerps a level toward the one below it: so that what the first level ends
-/// up holding is 1 less this of the first level as downsampled, this times 1 less this of the
-/// second, and so on, the last level the rest, about a sixth at six levels, which spreads light
-/// widely but faintly, as a lens does, in the showcase's scenes.
+/// How far each upsample lerps a level toward the one below. The first level ends up 1 − s of
+/// itself, s(1 − s) of the second, and so on, the last taking the rest: about a sixth at six
+/// levels. Wide, faint light, as a lens spreads it.
 const SHARE: f32 = 0.7;
 
-/// How many levels the chain of a view `size` pixels has: as many as halve its shorter side to
-/// between 16 and 32 texels, so that its last level spans as much of the view at any size, up to
-/// [`MOST`]; none for a view under 32 pixels on a side, which doesn't bloom.
+/// Enough levels to halve the shorter side to 16 to 32 texels, up to [`MOST`], so the last spans
+/// the same share of any view. None under 32 pixels.
 fn levels(size: [u32; 2]) -> usize {
     let shorter = size[0].min(size[1]);
     (shorter.max(1).ilog2() as usize)
@@ -35,20 +32,18 @@ fn levels(size: [u32; 2]) -> usize {
         .min(MOST)
 }
 
-/// Whether a view `size` pixels blooms by `intensity`: by more than none, and large enough to, as
-/// [`levels`] says.
+/// Whether a view `size` pixels blooms by `intensity`: above 0, and with [`levels`].
 pub(crate) fn blooms(intensity: f32, size: [u32; 2]) -> bool {
     intensity > 0.0 && levels(size) > 0
 }
 
-/// The size of each level of the chain of a view `size` pixels, the first half its size each way,
-/// each after half the one before, rounded up.
+/// Each level's size: half the one before, rounded up.
 fn sizes(size: [u32; 2]) -> impl Iterator<Item = [u32; 2]> {
     let half = |size: &[u32; 2]| Some(size.map(|side| side.div_ceil(2)));
     std::iter::successors(half(&size), half).take(levels(size))
 }
 
-/// What the passes push: `Push` in `shaders/bloom.slang`, field for field.
+/// `Push` in `shaders/bloom.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct BloomPush {
@@ -67,8 +62,6 @@ impl BloomPush {
     const GRADES: u32 = 2;
 }
 
-/// What blooms and grades the game's view: a pipeline for each of the chain's passes and for the
-/// last.
 pub(crate) struct BloomPass {
     first: ComputePipeline,
     down: ComputePipeline,
@@ -76,9 +69,8 @@ pub(crate) struct BloomPass {
     composite: ComputePipeline,
 }
 
-/// A frame's bloom and grade in its graph: the view's colors, which it reads and then writes, and
-/// their size; the chain's levels, the first [`levels`] of them, or none if the view doesn't bloom;
-/// and the last pass, which blends the first into the view's colors and grades them.
+/// A frame's bloom and grade in its graph. The chain has [`levels`] levels, or none if the view
+/// doesn't bloom.
 pub(crate) struct Plan {
     colors: ImageId,
     size: [u32; 2],
@@ -86,8 +78,7 @@ pub(crate) struct Plan {
     composite: PassId,
 }
 
-/// A level of a frame's bloom: its image, of the graph's own, its size, the pass that downsamples
-/// into it, and, but for the last, the one that upsamples into it.
+/// A level: its image and the passes into it. The last has no upsample.
 #[derive(Clone, Copy)]
 struct Level {
     image: ImageId,
@@ -108,14 +99,11 @@ impl BloomPass {
     }
 
     /// Declares in `graph` the bloom, if it `blooms`, and the grade, if it `grades`, of the view's
-    /// `colors`, of `size` pixels, an image of colors of high dynamic range of the graph's own that
-    /// an earlier pass wrote, into themselves: the chain's levels, images of the graph's own,
-    /// downsampled from the view's colors one after another and upsampled back from the last; and
-    /// the last pass, which blends the view's colors toward the first and grades them.
+    /// HDR `colors`, `size` pixels, in place.
     ///
     /// # Panics
     ///
-    /// If it blooms a view too small to, as [`blooms`] says.
+    /// - If it blooms a view too small to, as [`blooms`] says.
     pub(crate) fn plan(
         graph: &mut Graph,
         colors: ImageId,
@@ -188,12 +176,10 @@ impl BloomPass {
         }
     }
 
-    /// Records `plan`'s bloom and grade of the view's colors: blending the first level into them
-    /// by `intensity`, from 0 for none to 1 for the first level alone, if it blooms, and grading
-    /// them by `grade`, unless that's the identity.
+    /// Records `plan`: blends the first level in by `intensity` (0 none, 1 the first level alone),
+    /// if it blooms, and grades by `grade` unless that's the identity.
     pub(crate) fn record(&self, frame: &mut Frame<'_>, plan: &Plan, intensity: f32, grade: &Grade) {
-        // A pass of the chain's, of `pipeline`, that reads `source` and writes `target`, each an
-        // image and its size.
+        // A chain pass: `pipeline` from `source` to `target`, each an image and its size.
         let dispatch = |frame: &mut Frame<'_>, pass, pipeline, source, target, share| {
             let (source, source_size): (ImageId, [u32; 2]) = source;
             let (target, size): (ImageId, [u32; 2]) = target;
@@ -220,7 +206,7 @@ impl BloomPass {
             dispatch(frame, level.down, pipeline, before, target, 0.0);
             before = target;
         }
-        // `before` is the last level, which the one above it reads first.
+        // `before` starts as the last level, which the one above it reads first.
         for level in levels.rev().skip(1) {
             let target = (level.image, level.size);
             let up = level.up.expect("each level but the last upsamples");
@@ -256,9 +242,8 @@ impl BloomPass {
 mod tests {
     use super::*;
 
-    /// A view's chain halves its shorter side to between 16 and 32 texels: 5 levels at 1,280 by
-    /// 720, 6 at 1,920 by 1,080; none under 32 pixels, and at most 8; each level half the one
-    /// before, rounded up.
+    /// 5 levels at 1,280 by 720, 6 at 1,920 by 1,080, none under 32 pixels, at most 8. Each is half
+    /// the one before, rounded up.
     #[test]
     fn the_chain_halves_the_view_to_between_16_and_32_texels() {
         assert_eq!(levels([1280, 720]), 5);

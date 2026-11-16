@@ -1,11 +1,12 @@
-//! Temporal antialiasing: the game's view drawn a fraction of a pixel off each frame, by a cycle of
-//! offsets, and resolved, before it's tonemapped, against what the frames before it resolved,
-//! taken back to where each pixel's point was by its motion and clipped to its neighborhood, as
-//! `shaders/taa.slang` says; into one of two images of the view's size, which the next frame
-//! resolves against in turn, beside two more of what each pixel's offsets drew, which keep a still
-//! pixel's history unclipped where only the offsets change it, and two of what its flicker test
-//! keeps, resolved into and against in turn as the colors are, which keep the luminance of a
-//! pixel that flickers as the view moves.
+//! Temporal antialiasing (`shaders/taa.slang`): the view drawn off by a cycle of subpixel offsets,
+//! then, before tonemapping, resolved against the frames before, reprojected by motion and clipped
+//! to each pixel's neighborhood. A [`History`] holds three pairs of images, each frame writing one
+//! of a pair and reading the other:
+//!
+//! - the resolved colors;
+//! - what each pixel's offsets drew, keeping a still pixel's history unclipped where only the
+//!   offsets change it;
+//! - the flicker test's, keeping the luminance of a pixel that flickers as the view moves.
 
 use std::sync::Arc;
 
@@ -18,52 +19,47 @@ use crate::exposure::rescale;
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/taa.spv"));
 
-/// How many pixels across and down a workgroup takes: `GROUP` in `shaders/taa.slang`.
+/// Pixels across and down per workgroup: `GROUP` in `shaders/taa.slang`.
 const GROUP: u32 = 8;
 
-/// How the game's view is antialiased, as
-/// [`RenderData::antialiasing`](crate::RenderData::antialiasing) names it.
+/// How the view is antialiased, as [`RenderData::antialiasing`](crate::RenderData::antialiasing)
+/// names it. The canvas, drawn after, isn't.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Antialiasing {
-    /// Temporal antialiasing: the view drawn a fraction of a pixel off each frame, by a cycle of
-    /// 8 offsets, and each pixel blended with what the frames before resolved where its point was,
-    /// as its motion says, clipped to what's round it this frame, so that its edges average what's
-    /// drawn across their pixels; and, where it stands still and each offset draws it as it did a
-    /// cycle before, unclipped, so that what's thinner than a pixel averages too, rather than
-    /// flicker, as it does where the clip keeps throwing out what the frames draw of a pixel as
-    /// the view moves, which keeps its luminance and takes less of each frame. What's drawn and
-    /// gone again faster than every 20 frames, as it or the view moves, shows its mean there
-    /// too. What's drawn on the canvas, after it, isn't antialiased. Each frame draws
-    /// what's opaque in the view with how far it moved in the world since the frame before: a
-    /// model's by its instance's transform the frame before, of the world's opaque meshes, and a
-    /// game's shader's as it returns it, and the rest with the camera alone.
+    /// The view drawn off by a cycle of 8 subpixel offsets, each pixel blended with its reprojected
+    /// history, clipped to its neighborhood. Edges average what's drawn across their pixels.
+    ///
+    /// - A still pixel, each offset drawing it as a cycle before, goes unclipped, so what's thinner
+    ///   than a pixel averages rather than flickers.
+    /// - A pixel whose history the clip keeps rejecting as the view moves keeps its luminance,
+    ///   taking less of each frame.
+    /// - What comes and goes faster than every 20 frames shows its mean.
+    ///
+    /// What's opaque draws its motion since the frame before: a world model's by its instance's
+    /// last transform, a game's shader's as it returns it, the rest the camera's alone.
     #[default]
     Taa,
-    /// None: each pixel shows what's drawn at its center.
+    /// Each pixel shows what's drawn at its center.
     None,
-    /// SMAA 1x, morphological antialiasing from the view's colors alone, without a history: the
-    /// lines its pixels' edges make measured, and each pixel blended with its neighbor across an
-    /// edge by how much of it lies on the neighbor's side of the edge the line stands for, as
-    /// `shaders/smaa.slang` says. Sharper than temporal antialiasing, and without its ghosts, but
-    /// what's thinner than a pixel still flickers as it moves; what's drawn on the canvas, after
-    /// it, isn't antialiased.
+    /// SMAA 1x (`shaders/smaa.slang`): from this frame's colors alone, each pixel blended with its
+    /// neighbor across an edge by how much of it lies past the edge its line stands for. Sharper
+    /// than TAA, without ghosts, but what's thinner than a pixel still flickers.
     Smaa,
 }
 
 impl Antialiasing {
-    /// Each way, in the order of their indices.
+    /// Each, in the order of their indices.
     pub const ALL: [Self; 3] = [Self::Taa, Self::None, Self::Smaa];
 }
 
-/// How many offsets the view cycles through, of the Halton sequence's first: `OFFSETS` in
-/// `shaders/taa.slang`, whose store of what each drew holds four in each of two images.
+/// How many Halton offsets the view cycles through: `OFFSETS` in `shaders/taa.slang`, whose two
+/// images of the offsets' draws hold four each.
 const OFFSETS: u64 = 8;
 
-/// How many of the frame's targets a [`History`] takes, from [`TaaPass::plan`]'s `first`.
+/// Frame targets a [`History`] takes, from [`TaaPass::plan`]'s `first`.
 pub(crate) const TARGETS: usize = 6;
 
-/// The `index`th number of the Halton sequence of base `base`: its digits in that base, mirrored
-/// about the point, from 0 to 1.
+/// The `index`th base-`base` Halton number: its digits mirrored about the point.
 fn halton(mut index: u64, base: u64) -> f32 {
     let (mut fraction, mut result) = (1.0, 0.0);
     while index > 0 {
@@ -74,16 +70,15 @@ fn halton(mut index: u64, base: u64) -> f32 {
     result
 }
 
-/// How far the `resolved`th frame to resolve the view draws it off, from 0, in pixels across and
-/// down, each from -0.5 to 0.5: the Halton sequence of bases 2 and 3, from its first number, of
-/// which the frames cycle through [`OFFSETS`], spread evenly across a pixel.
+/// The `resolved`th resolving frame's offset in pixels, -0.5 to 0.5 each way: Halton bases 2 and 3
+/// from index 1, cycling through [`OFFSETS`].
 fn offset(resolved: u64) -> Vec2 {
     let index = resolved % OFFSETS + 1;
     Vec2::new(halton(index, 2), halton(index, 3)) - 0.5
 }
 
-/// The matrix that moves what clip space holds `offset` across and down in the view's normalized
-/// coordinates, whatever its depth: each point's X and Y by the offset times its W.
+/// Moves clip space by `offset` in normalized coordinates at any depth: X and Y by the offset times
+/// W.
 pub(crate) fn jitter(offset: Vec2) -> Mat4 {
     Mat4::from_cols(
         Vec4::X,
@@ -93,14 +88,13 @@ pub(crate) fn jitter(offset: Vec2) -> Mat4 {
     )
 }
 
-/// `offset`, in pixels of a view `size` pixels, in the view's normalized coordinates, two units
-/// across each way.
+/// `offset`, in pixels of a view `size` pixels, in normalized coordinates, two units each way.
 pub(crate) fn normalized(offset: Vec2, size: [u32; 2]) -> Vec2 {
     let [width, height] = size.map(|side| side as f32);
     offset * 2.0 / Vec2::new(width, height)
 }
 
-/// What the resolve reads: `Resolve` in `shaders/taa.slang`, field for field.
+/// `Resolve` in `shaders/taa.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Resolve {
@@ -125,16 +119,15 @@ struct Resolve {
     unused: [u32; 2],
 }
 
-/// What the resolve pushes: `Push` in `shaders/taa.slang`.
+/// `Push` in `shaders/taa.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct ResolvePush {
     resolve: u64,
 }
 
-/// The last frame that resolved the view: its number, the view's size, the matrix from the world to
-/// the view's clip space it drew by, without its offset, what lit shading multiplied light by, and
-/// how many frames in a row what it resolved holds, its own among them.
+/// The last resolving frame: its unjittered world-to-clip matrix, its exposure, and how many frames
+/// in a row its resolve holds, its own included.
 #[derive(Clone, Copy)]
 struct Resolved {
     frame: u64,
@@ -144,28 +137,25 @@ struct Resolved {
     held: u32,
 }
 
-/// What resolves the game's view, how many frames have, which the next one's offset follows, and
-/// how the last that did drew it.
+/// The resolve, the count of resolving frames (which the offsets follow), and the last one.
 pub(crate) struct TaaPass {
     resolve: ComputePipeline,
     resolved: u64,
     last: Option<Resolved>,
 }
 
-/// What the game's view resolves into and against: two images of its size, made again as it
-/// changes, each frame resolving into the one the frame before didn't, against the other; two
-/// more, of what each pixel's offsets drew, which each frame reads and writes in place; and two of
-/// what the flicker test keeps of each pixel, written and read in turn as the first two are, as
-/// `shaders/taa.slang` says; all six of which frames that resolve take as their targets, apart
-/// from [`TaaPass`], as a frame holds them while it records the resolve.
+/// The images the view resolves into and against, made again as its size changes, as the
+/// [module](self) says. Each frame writes the colors and flicker test's the frame before didn't,
+/// and the offsets' draws in place. Frames take all six as targets, apart from [`TaaPass`], while
+/// they record the resolve.
 #[derive(Default)]
 pub(crate) struct History {
     images: Option<[StorageImage; TARGETS]>,
 }
 
 impl History {
-    /// Makes its images again at `size`, if they're another size, or there are none yet; the
-    /// frame resolves against none then, as the last that resolved did so at another size.
+    /// Makes its images again at `size`, if they're another size or none yet. The frame then
+    /// resolves against none.
     pub(crate) fn prepare(&mut self, device: &Arc<Device>, size: [u32; 2]) -> Result<()> {
         if (self.images.as_ref()).is_some_and(|images| images[0].size() == size) {
             return Ok(());
@@ -184,19 +174,16 @@ impl History {
         Ok(())
     }
 
-    /// Its images, as a frame that resolves takes them as targets, at the indices
-    /// [`TaaPass::plan`] gives them: none before [`prepare`](Self::prepare) has made them.
+    /// Its images as a frame's targets, at the indices [`TaaPass::plan`] gives them: none before
+    /// [`prepare`](Self::prepare).
     pub(crate) fn targets(&mut self) -> impl Iterator<Item = Target<'_>> {
         (self.images.iter_mut()).flat_map(|images| images.iter_mut().map(Target::Storage))
     }
 }
 
-/// A frame's resolve in its graph: its pass; the view's size, and its colors, depth and motion, as
-/// its passes drew them; the image it resolves into, and the one it resolves against, if the frame
-/// before resolved one it can take; the two of what each pixel's offsets drew; the image the
-/// flicker test writes, and the one it reads, as the frame before wrote it, if its history is
-/// taken; and the view's resolved colors, if it writes them apart, for its canvas to be drawn
-/// over.
+/// A frame's resolve in its graph. `history` and `flicker`, the frame before's, are there if its
+/// resolve can be taken. `resolved` holds the view's resolved colors when written apart, for the
+/// canvas to draw over.
 pub(crate) struct Plan {
     pass: PassId,
     size: [u32; 2],
@@ -210,15 +197,14 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// What the view shows, resolved: its resolved colors, if they're written apart, and otherwise
-    /// what the frame resolved into.
+    /// What the view shows: `resolved` if written, else `target`.
     pub(crate) fn shown(&self) -> ImageId {
         self.resolved.unwrap_or(self.target)
     }
 }
 
-/// How a frame drew its view: from the world to its clip space, without its offset and with it,
-/// the offset, in its normalized coordinates, and what lit shading multiplied light by.
+/// How a frame drew its view: world to clip without and with its offset, the offset in normalized
+/// coordinates, and the exposure lit shading multiplied light by.
 #[derive(Clone, Copy)]
 pub(crate) struct Drawn {
     pub(crate) unjittered: Mat4,
@@ -228,8 +214,8 @@ pub(crate) struct Drawn {
 }
 
 impl TaaPass {
-    /// Takes what it keeps of the frame before into the space of a frame whose origin is `by`
-    /// further along than the frame before's: what was at `p` is at `p - by`, as
+    /// Moves what it keeps of the frame before into the space of a frame whose origin is `by`
+    /// further on: what was at `p` is at `p - by`, as
     /// [`RenderData::origin`](crate::RenderData::origin) says.
     pub(crate) fn moved(&mut self, by: Vec3) {
         if let Some(last) = &mut self.last {
@@ -246,26 +232,25 @@ impl TaaPass {
         })
     }
 
-    /// How far the next frame to resolve the view draws it off, in pixels across and down, as
-    /// [`offset`] says: by the frames that have resolved it, rather than by the frames' numbers, so
-    /// that a run's offsets follow from what it antialiased alone.
+    /// The next resolving frame's offset in pixels, by [`offset`]. It counts resolving frames, not
+    /// frame numbers, so a run's offsets follow from what it antialiased alone.
     pub(crate) fn offset(&self) -> Vec2 {
         offset(self.resolved)
     }
 
-    /// Which of the [`OFFSETS`] offsets the next frame to resolve the view draws it at, from 0:
-    /// the one [`offset`](Self::offset) gives.
+    /// Which of the [`OFFSETS`] the next resolving frame draws at: [`offset`](Self::offset)'s.
     pub(crate) fn phase(&self) -> u32 {
         (self.resolved % OFFSETS) as u32
     }
 
-    /// Declares in `graph` the resolve of frame `frame`'s view, of `size` pixels, from its colors,
-    /// depth and motion, `drawn`, into the image of a [`History`]'s two of colors, at targets
-    /// `first` and 1 past it, that the frame before didn't resolve into, against the other, if that
-    /// one resolved the view at its size; reading and writing its two of what the offsets drew, at
-    /// the two targets past those; writing the flicker test's, at the two past those, as it does
-    /// the colors, into one and against the other; and into the view's resolved colors too, made
-    /// in `graph`, if `apart`.
+    /// Declares in `graph` the resolve of frame `frame`'s `drawn` colors, depth and motion, `size`
+    /// pixels. A [`History`]'s targets start at `first`, in pairs: colors, offsets' draws, flicker
+    /// test's.
+    ///
+    /// - Colors and flicker test: into the one the frame before didn't write, against the other if
+    ///   that frame resolved at this size.
+    /// - Offsets' draws: in place.
+    /// - If `apart`, into the view's resolved colors too, made in `graph`.
     pub(crate) fn plan(
         &self,
         graph: &mut Graph,
@@ -308,8 +293,8 @@ impl TaaPass {
         }
     }
 
-    /// Records `plan`'s resolve of its view, as `drawn` says the frame drew it, against what the
-    /// frame before resolved, as it noted how it drew it, and notes how this one did, for the next.
+    /// Records `plan`'s resolve against the frame before's, and keeps this frame's view for the
+    /// next.
     pub(crate) fn resolve(
         &mut self,
         frame: &mut Frame<'_>,
@@ -320,7 +305,7 @@ impl TaaPass {
         let mut pass = frame.compute(plan.pass);
         let last = self.last.filter(|_| plan.history.is_some());
         let previous = last.map_or(drawn.unjittered, |last| last.clip_from_world);
-        // The history at this frame's exposure, as it changes, as an adapting one does.
+        // The history at this frame's exposure, as an adapting one changes it.
         let history_scale = last.map_or(1.0, |last| rescale(drawn.exposure, last.exposure));
         let held = last.map_or(0, |last| last.held);
         let [colors, depth, motion] = plan.drawn.map(|image| pass.sampled(image));
@@ -342,7 +327,6 @@ impl TaaPass {
             history_scale,
             seen_first: pass.storage(plan.seen[0], 0),
             seen_second: pass.storage(plan.seen[1], 0),
-            // The offset `offset` gave this frame, which `self.resolved` counts to.
             phase: self.phase(),
             flicker: plan.flicker.map_or(0, |flicker| pass.sampled(flicker)),
             flickers: pass.storage(plan.flickers, 0),
@@ -371,8 +355,8 @@ impl TaaPass {
 mod tests {
     use super::*;
 
-    /// The offsets cycle through the Halton sequence's first eight of bases 2 and 3, within half a
-    /// pixel each way, their mean the pixel's center.
+    /// The offsets are the first eight Halton numbers of bases 2 and 3, within half a pixel each
+    /// way, averaging to the pixel's center.
     #[test]
     fn offsets_cycle_through_eight_across_a_pixel() {
         let offsets: Vec<Vec2> = (0..8).map(offset).collect();
@@ -388,8 +372,8 @@ mod tests {
         assert!((0..8).all(distinct));
     }
 
-    /// A point moves across and down by the offset, in normalized coordinates, whatever its
-    /// depth, under perspective and without it.
+    /// A point moves by the offset in normalized coordinates at any depth, with perspective or
+    /// without.
     #[test]
     fn jitter_moves_every_depth_alike() {
         let offset = normalized(Vec2::new(0.25, -0.5), [400, 200]);

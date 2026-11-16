@@ -1,7 +1,5 @@
-//! Depth of field: what's nearer or farther than the focus blurred, as a camera's lens blurs it, each
-//! point spread over its circle of confusion, a thin lens's, of the view's focus, aperture and field
-//! of view, gathered at half the view's size into a near field and a far one and composited into the
-//! view's colors by their circles, as `shaders/depth_of_field.slang` says.
+//! Depth of field: a thin lens's blur, gathered at half size into near and far fields and
+//! composited by their circles of confusion (`shaders/depth_of_field.slang`).
 
 use std::sync::Arc;
 
@@ -14,35 +12,30 @@ use crate::{Projection, Viewpoint};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/depth_of_field.spv"));
 
-/// How many texels across and down a workgroup takes: `GROUP` in `shaders/depth_of_field.slang`.
+/// Texels across and down per workgroup: `GROUP` in `shaders/depth_of_field.slang`.
 const GROUP: u32 = 8;
 
-/// How many texels at half the view's size a tile spans each way: `TILE` in
-/// `shaders/depth_of_field.slang`.
+/// Texels at half size per tile, each way: `TILE` in `shaders/depth_of_field.slang`.
 const TILE: u32 = 8;
 
-/// The height of the sensor the view's height stands for, in meters: a full-frame camera's, 24 mm,
-/// which a lens's focal length and f-number are most often quoted for.
+/// The sensor height in meters: full frame's 24 mm, which focal lengths and f-numbers are quoted
+/// for.
 const SENSOR: f32 = 0.024;
 
-/// The largest radius a circle of confusion is drawn at, as a share of the view's height: past
-/// it, the gather's rings would stand too far apart for what they gather to blend.
+/// The largest circle's radius, as a share of the view's height. Past it the gather's rings can't
+/// blend.
 const LARGEST: f32 = 0.02;
 
-/// Depth of field, as [`RenderData::depth_of_field`](crate::RenderData::depth_of_field) gives it:
-/// what's in focus at `focus_distance` from the view, through an aperture of `f_number`, a thin
-/// lens's, of the focal length that the view's field of view takes on a full-frame camera's sensor,
-/// 24 mm high, so that a wider aperture, a nearer focus or a narrower field of view blurs more, as a
-/// camera's do. The world's units are taken as meters.
+/// Depth of field, as [`RenderData::depth_of_field`](crate::RenderData::depth_of_field) gives it: a
+/// thin lens of the focal length the field of view takes on a 24 mm sensor. World units are meters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DepthOfField {
-    /// How far ahead of the view what's in focus is, in the world's units: 3 by default. A focus
-    /// nearer than twice the focal length, a lens's closest, is taken as that.
+    /// The focus's distance ahead, in world units: 3 by default. At least twice the focal length, a
+    /// lens's closest.
     pub focus_distance: f32,
-    /// The lens's focal length over its aperture's diameter: 1.4 by default, a fast lens's widest,
-    /// through which, of a field of view of 50° focused at 3, what's far off blurs over a radius of
-    /// a third of a percent of the view's height; each stop up, by √2, narrows the aperture and
-    /// halves its area, and the blur's radius by √2.
+    /// Focal length over aperture: 1.4 by default, a fast lens's widest. At 50° focused at 3, the
+    /// far blur's radius is a third of a percent of the view's height; each stop (×√2) divides it
+    /// by √2.
     pub f_number: f32,
 }
 
@@ -56,15 +49,14 @@ impl Default for DepthOfField {
 }
 
 impl DepthOfField {
-    /// Whether it blurs anything: its focus distance and f-number are positive and finite.
     fn blurs(&self) -> bool {
         let positive = |value: f32| value.is_finite() && value > 0.0;
         positive(self.focus_distance) && positive(self.f_number)
     }
 }
 
-/// The radius of a view's circles of confusion, in its pixels, from its reversed depth `z`: `add +
-/// mul × z`, signed, more than 0 past the focus and less before it, within `largest`.
+/// The circle's radius in pixels at reversed depth `z`: `add + mul × z`, positive past the focus,
+/// within `largest`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Circle {
     add: f32,
@@ -73,13 +65,13 @@ pub(crate) struct Circle {
 }
 
 impl Circle {
-    /// The circles of a view of `size` pixels seen from `viewpoint`, in focus as `focus` says: none
-    /// without perspective, which has no lens, or for a focus that doesn't blur.
+    /// The circles of a view `size` pixels from `viewpoint`: none without perspective (no lens) or
+    /// a focus that doesn't blur.
     ///
     /// A thin lens of focal length `f` and aperture `A = f / N` focused at `S` spreads a point at
-    /// distance `d` over a circle `A f (d - S) / (d (S - f))` across on its sensor. Under the view's
-    /// perspective, reversed depth is `near / d`, so the radius is linear in it: `K (1 - S z /
-    /// near)`, `K` the radius of what's infinitely far, `A f / (S - f) / 2`, in the view's pixels.
+    /// distance `d` over a circle `A f (d - S) / (d (S - f))` across on its sensor. Reversed depth
+    /// is `near / d`, so the radius is linear in it: `K (1 - S z / near)`, `K` the radius at
+    /// infinity, `A f / (S - f) / 2`, in the view's pixels.
     pub(crate) fn new(focus: DepthOfField, viewpoint: &Viewpoint, size: [u32; 2]) -> Option<Self> {
         let Projection::Perspective { fov, near } = viewpoint.projection else {
             return None;
@@ -99,14 +91,13 @@ impl Circle {
         })
     }
 
-    /// How many tiles a dilation reaches each way: as far as the largest circle at half the view's
-    /// size spans.
+    /// Tiles a dilation reaches each way: the largest circle's span at half size.
     fn reach(&self) -> u32 {
         (self.largest * 0.5 / TILE as f32).ceil() as u32
     }
 }
 
-/// What every pass pushes: `Push` in `shaders/depth_of_field.slang`, field for field.
+/// `Push` in `shaders/depth_of_field.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct DepthOfFieldPush {
@@ -126,7 +117,6 @@ struct DepthOfFieldPush {
     reach: u32,
 }
 
-/// What blurs the game's view by its depth of field: a pipeline for each of its passes.
 pub(crate) struct DepthOfFieldPass {
     downsample: ComputePipeline,
     tiles: ComputePipeline,
@@ -135,9 +125,8 @@ pub(crate) struct DepthOfFieldPass {
     composite: ComputePipeline,
 }
 
-/// A frame's depth of field in its graph: the view's circles; its size, half that, rounded up, and
-/// its tiles' count; its colors, which it reads and then writes, and its depth; the images of the
-/// graph's own its passes write, as `shaders/depth_of_field.slang` says; and its passes, in order.
+/// A frame's depth of field in its graph. It reads `depth`, reads then writes `colors`, and owns
+/// the other images (`shaders/depth_of_field.slang`). The passes are in order.
 pub(crate) struct Plan {
     circle: Circle,
     size: [u32; 2],
@@ -165,9 +154,8 @@ impl DepthOfFieldPass {
         })
     }
 
-    /// Declares in `graph` the depth of field of the view's `colors`, of `size` pixels, an image of
-    /// colors of high dynamic range of the graph's own that an earlier pass wrote, by `circle`, from
-    /// its `depth`, into themselves.
+    /// Declares in `graph` the depth of field of the view's HDR `colors`, `size` pixels, from its
+    /// `depth`, in place.
     pub(crate) fn plan(
         graph: &mut Graph,
         circle: Circle,
@@ -210,7 +198,6 @@ impl DepthOfFieldPass {
         }
     }
 
-    /// Records `plan`'s passes.
     pub(crate) fn record(&self, frame: &mut Frame<'_>, plan: &Plan) {
         let Circle { add, mul, largest } = plan.circle;
         let base = DepthOfFieldPush {
@@ -251,7 +238,7 @@ impl DepthOfFieldPass {
         };
         pass.set_pipeline(&self.tiles);
         pass.push_constants(bytemuck::bytes_of(&push));
-        // A workgroup a tile.
+        // A workgroup per tile.
         pass.dispatch([plan.tiles[0], plan.tiles[1], 1]);
         drop(pass);
         let mut pass = frame.compute(dilate);
@@ -304,10 +291,9 @@ mod tests {
         }
     }
 
-    /// A thin lens's circle: none at the focus, half the farthest's at twice its distance, growing
-    /// before it without bound but the largest, the farthest's `A f / (S - f)` across on a sensor
-    /// 24 mm high; twice as wide at half the f-number; none without perspective or a focus that
-    /// blurs.
+    /// A thin lens's circle: none at the focus, half the farthest's at twice its distance,
+    /// unbounded nearer but for the largest. The farthest's is `A f / (S - f)` on a 24 mm sensor,
+    /// doubling at half the f-number. None without perspective or a blurring focus.
     #[test]
     fn circles_are_a_thin_lenss() {
         let focus = DepthOfField {

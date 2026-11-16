@@ -1,12 +1,10 @@
-//! SMAA 1x: antialiasing from the game's view's colors alone, without a history, as
-//! `shaders/smaa.slang` says: the edges between its pixels found, the lines they make measured
-//! through the lookup textures `lookup` makes, and each pixel blended with its neighbor across its
-//! edge by the share the line cuts off, into an image of the view's size, in temporal
-//! antialiasing's place, before bloom, the grade and the canvas.
+//! SMAA 1x (`shaders/smaa.slang`), in TAA's place before bloom, the grade and the canvas. It finds
+//! edges, measures their lines through `lookup`'s textures, and blends each pixel with its neighbor
+//! across the edge by the share the line cuts off.
 //!
-//! It blends colors as the tonemapper will show them, not weighed by 1 over 1 plus their luminance
-//! as TAA's resolve weighs them: that would darken every edge's blend, and compress bright edges'
-//! contrast under the threshold.
+//! It blends colors as the tonemapper will show them, not weighed by 1 / (1 + luminance) as TAA's
+//! resolve does. That would darken every edge's blend and squash bright edges' contrast under the
+//! threshold.
 
 mod lookup;
 
@@ -20,11 +18,10 @@ use crate::{Grade, Tonemapper};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/smaa.spv"));
 
-/// How many pixels across and down a workgroup takes: `GROUP` in `shaders/smaa.slang`.
+/// Pixels across and down per workgroup: `GROUP` in `shaders/smaa.slang`.
 const GROUP: u32 = 8;
 
-/// What the passes push: `Push` in `shaders/smaa.slang`, field for field, each pass setting those
-/// it reads and writes.
+/// `Push` in `shaders/smaa.slang`, field for field. Each pass sets those it reads and writes.
 #[repr(C)]
 #[derive(Clone, Copy, Default, NoUninit)]
 struct SmaaPush {
@@ -38,10 +35,9 @@ struct SmaaPush {
     curve: [f32; 4],
 }
 
-/// Where the shoulder SMAA sees the view's light by starts rolling it off toward 1, under
-/// `tonemapper`, as `shaders/smaa.slang`'s `seen` says: PBR Neutral's, at 0.76, which ACES and AgX,
-/// rolling light off sooner and more gently, are taken as too; and under none, which clamps each
-/// channel at 1, the last 256th below 1, so that it's all but the clamp and still takes light back.
+/// Where SMAA's view of light starts rolling off toward 1 under `tonemapper` (`seen` in
+/// `shaders/smaa.slang`). PBR Neutral's 0.76 serves ACES and AgX too, which roll off sooner and
+/// more gently. Under none, which clamps at 1, it's 1 − 1/256: all but the clamp, yet invertible.
 fn shoulder(tonemapper: Tonemapper) -> f32 {
     match tonemapper {
         Tonemapper::None => 255.0 / 256.0,
@@ -49,21 +45,18 @@ fn shoulder(tonemapper: Tonemapper) -> f32 {
     }
 }
 
-/// What antialiases the game's view by SMAA: a pipeline for each of its passes, and its lookup
-/// textures, which the first frame to record it writes.
+/// A pipeline per pass, and the lookup textures, which the first frame to record SMAA writes.
 pub(crate) struct SmaaPass {
     edges: ComputePipeline,
     weights: ComputePipeline,
     blend: ComputePipeline,
     area: Texture,
     search: Texture,
-    /// Whether a frame has written the lookup textures.
     written: bool,
 }
 
-/// A frame's SMAA in its graph: the view's size and colors, as its passes drew them; its edges and
-/// blending weights, images of the graph's own; the view's antialiased colors, another; and the
-/// passes that find the edges, weigh them and blend.
+/// A frame's SMAA in its graph: its edges, weights and antialiased `target`, images of the graph's
+/// own.
 pub(crate) struct Plan {
     size: [u32; 2],
     colors: ImageId,
@@ -74,7 +67,6 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// What the view shows, antialiased.
     pub(crate) fn shown(&self) -> ImageId {
         self.target
     }
@@ -103,8 +95,8 @@ impl SmaaPass {
         })
     }
 
-    /// Writes the lookup textures in `frame`, before its passes, unless a frame has: made then, as
-    /// they take a millisecond or so.
+    /// Writes the lookup textures in `frame`, before its passes, unless a frame has. They take a
+    /// millisecond or so to make.
     pub(crate) fn write_textures(&mut self, frame: &mut Frame<'_>) -> Result<()> {
         if self.written {
             return Ok(());
@@ -117,10 +109,8 @@ impl SmaaPass {
         Ok(())
     }
 
-    /// Declares in `graph` the SMAA of the view's `colors`, of `size` pixels, an image of colors of
-    /// high dynamic range that an earlier pass wrote: its edges, found from them, its blending
-    /// weights, from the edges, and the blend of the colors by the weights into the view's
-    /// antialiased colors, each an image of the graph's own.
+    /// Declares in `graph` the SMAA of the view's HDR `colors`, `size` pixels, that an earlier pass
+    /// wrote.
     pub(crate) fn plan(graph: &mut Graph, colors: ImageId, size: [u32; 2]) -> Plan {
         let edges = graph.hdr("smaa edges", size);
         let weights = graph.hdr("smaa weights", size);
@@ -141,12 +131,12 @@ impl SmaaPass {
         }
     }
 
-    /// Records `plan`'s passes, once a frame has written the lookup textures, seeing the view's
-    /// light as `grade`'s slope and `tonemapper` will show it, about, as `shaders/smaa.slang` says.
+    /// Records `plan`'s passes, seeing the view's light roughly as `grade`'s slope and `tonemapper`
+    /// will show it, as `shaders/smaa.slang` says.
     ///
     /// # Panics
     ///
-    /// If no frame has written them.
+    /// - If no frame has written the lookup textures.
     pub(crate) fn record(
         &self,
         frame: &mut Frame<'_>,

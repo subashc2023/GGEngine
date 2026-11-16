@@ -1,45 +1,44 @@
-//! SMAA's lookup textures, made from the algorithm the reference's generator scripts describe
-//! (`Scripts/AreaTex.py` and `Scripts/SearchTex.py` of <https://github.com/iryoku/smaa>, under
-//! the MIT license), for SMAA 1x alone, whose subsample offset is 0: the area texture, which takes the
-//! shape of a line of edges, its distances to its ends and how the edges crossing it there go, to
-//! the share of a pixel on it and of its neighbor across it that the line, revectorized as the edge
-//! it stands for, cuts off; and the search texture, which takes the edges a search's last bilinear
-//! fetch found to how many of the two pixels it spans the line goes on through.
+//! SMAA 1x's lookup textures (subsample offset 0), by the algorithm of `Scripts/AreaTex.py` and
+//! `Scripts/SearchTex.py` in <https://github.com/iryoku/smaa>, under the MIT license.
+//!
+//! - Area: from a line of edges' shape, distances to its ends and crossings there, to the shares of
+//!   a pixel and its neighbor across the edge that the revectorized line cuts off.
+//! - Search: from the edges a search's last bilinear fetch found, to how many of its two pixels the
+//!   line goes on through.
 
-/// The area texture's size: the reference's first 80 rows, those of subsample offset 0, of which
-/// the left 80 columns hold the orthogonal patterns and the right 80 the diagonal ones.
+/// The reference's first 80 rows (subsample offset 0): orthogonal patterns in the left 80 columns,
+/// diagonal in the right 80.
 pub(super) const AREA_SIZE: [u32; 2] = [160, 80];
 
-/// The search texture's size: the reference's packed size, cropped from 66 by 33.
+/// The reference's packed size, cropped from 66 by 33.
 pub(super) const SEARCH_SIZE: [u32; 2] = [64, 16];
 
-/// How many texels each way an orthogonal pattern's square of distances takes, the distances the
-/// texels' squares: `SMAA_AREATEX_MAX_DISTANCE`.
+/// An orthogonal pattern's square, in texels each way, its distances the texels' squares:
+/// `SMAA_AREATEX_MAX_DISTANCE`.
 const ORTHO: usize = 16;
 
-/// How many texels each way a diagonal pattern's square of distances takes, a texel a distance:
+/// A diagonal pattern's square, in texels each way, a texel a distance:
 /// `SMAA_AREATEX_MAX_DISTANCE_DIAG`.
 const DIAG: usize = 20;
 
-/// The length of a U pattern from which its areas are its lines' alone, which shorter ones are
-/// smoothed toward the square root of: the reference's `SMOOTH_MAX_DISTANCE`.
+/// The U length from which areas are the lines' alone, shorter ones smoothed: the reference's
+/// `SMOOTH_MAX_DISTANCE`.
 const SMOOTH_MAX_DISTANCE: f64 = 32.0;
 
-/// The area texture's texels, as RGBA8 rows, top first: each pixel's share of its neighbor across
-/// its edge in red, and its neighbor's share of it in green, out of 255.
+/// The area texture's RGBA8 rows, top first: red, a pixel's share of its neighbor across its edge;
+/// green, the neighbor's share of it.
 pub(super) fn area() -> Vec<u8> {
     let _zone = gg_core::zone!();
     let [width, height] = AREA_SIZE.map(|side| side as usize);
     let mut texels = vec![0; width * height * 4];
     let mut put = |x: usize, y: usize, [r, g]: [f64; 2]| {
         let at = (y * width + x) * 4;
-        // Within 0 to 1 by construction; rounded as 8 bits hold them.
+        // Within 0 to 1 by construction.
         texels[at] = (r * 255.0).round() as u8;
         texels[at + 1] = (g * 255.0).round() as u8;
     };
-    // Orthogonal patterns, by the crossing edges at the line's start and at its end, each of its
-    // own square: an edge crossing toward the pixel's side counts 3, toward its neighbor's 1, as
-    // the bilinear fetch the shader rounds weighs them, three to one.
+    // Orthogonal patterns, a square per start and end crossing. A crossing toward the pixel counts
+    // 3, toward its neighbor 1, as the shader's rounded bilinear fetch weighs them.
     for start in 0..4 {
         for end in 0..4 {
             let tile = |down: usize, up: usize| 3 * down + up;
@@ -58,8 +57,8 @@ pub(super) fn area() -> Vec<u8> {
             }
         }
     }
-    // Diagonal patterns, right of those, past their five squares, by their crossing edges at each
-    // end, as the shader merges them, a square each.
+    // Diagonal patterns, past the orthogonal ones' five squares, a square per merged start and end
+    // crossing.
     for start in 0..4 {
         for end in 0..4 {
             for x in 0..DIAG {
@@ -73,24 +72,25 @@ pub(super) fn area() -> Vec<u8> {
     texels
 }
 
-/// The areas of an orthogonal pattern, `pattern`, for a pixel `left` pixels from the line's start
-/// and `right` from its end: the edge along y = 0, from x = 0 to the length, the pixel's side
-/// below and its neighbor's above, the pixel from `left` to `left + 1`. Its bits are the edges
-/// crossing it at its start toward the pixel's side, at its end so, at its start toward its
-/// neighbor's and at its end so. A line from the middle of an edge that crosses at one end to the
-/// middle of the line is an L, the corner of a shape; a line from the middle of one crossing on one
-/// side to the middle of one on the other at the other end is a Z, a step of a slanted edge; and an
-/// L at each end on one side is a U, a bump, which [`smooth`] makes rounder where it's short. A line
-/// that nothing crosses, or that's crossed through at an end, where it's ambiguous, isn't changed.
+/// The areas of orthogonal `pattern` for a pixel `left` pixels from the line's start and `right`
+/// from its end. The edge runs along y = 0 from 0 to the length, the pixel (`left` to `left + 1`)
+/// below and its neighbor above. The bits are crossings: at the start toward the pixel, at the end
+/// so, at the start toward the neighbor, at the end so.
+///
+/// - L, a corner: from one end's crossing's middle to the line's middle.
+/// - Z, a slanted edge's step: from a crossing's middle on one side to the other side's at the
+///   other end.
+/// - U, a bump: an L at each end on one side, which [`smooth`] rounds where short.
+/// - No crossing, or crossed through at an end (ambiguous): unchanged.
 fn ortho(pattern: usize, left: f64, right: f64) -> [f64; 2] {
     let length = left + right + 1.0;
     let middle = length / 2.0;
-    // The middle of an edge crossing toward the neighbor's side and toward the pixel's.
+    // A crossing's middle, toward the neighbor and toward the pixel.
     let (up, down) = (0.5, -0.5);
     let line = |from: [f64; 2], to: [f64; 2]| ortho_area(from, to, left);
     match pattern {
-        // The L patterns, whose lines span the line's half at their crossing's end, as the
-        // reference takes the pixel at the middle of one of odd length on either side.
+        // L patterns span the line's half at their crossing's end. The reference takes an odd
+        // line's middle pixel on either side.
         1 if left <= right => line([0.0, down], [middle, 0.0]),
         2 if left >= right => line([middle, 0.0], [length, down]),
         4 if left <= right => line([0.0, up], [middle, 0.0]),
@@ -112,9 +112,9 @@ fn ortho(pattern: usize, left: f64, right: f64) -> [f64; 2] {
     }
 }
 
-/// The areas between the line from `from` to `to` and the edge, y = 0, over the pixel from `x` to
-/// `x + 1`, within the line's own span: below the edge, which the pixel takes of its neighbor, and
-/// above, which its neighbor takes of it.
+/// The areas between the line `from`–`to` and the edge, y = 0, over the pixel `x` to `x + 1`,
+/// within the line's span: below (the pixel's take of its neighbor) and above (the neighbor's of
+/// it).
 fn ortho_area(from: [f64; 2], to: [f64; 2], x: f64) -> [f64; 2] {
     let (x1, x2) = (x.max(from[0]), (x + 1.0).min(to[0]));
     if x1 >= x2 {
@@ -122,8 +122,7 @@ fn ortho_area(from: [f64; 2], to: [f64; 2], x: f64) -> [f64; 2] {
     }
     let y = |at: f64| from[1] + (to[1] - from[1]) * (at - from[0]) / (to[0] - from[0]);
     let (y1, y2) = (y(x1), y(x2));
-    // Each part's area, below the edge as negative, either side of where the line crosses it, if
-    // it does within the pixel.
+    // Each part's area, negative below the edge, either side of a crossing within the pixel.
     let parts = if y1 * y2 < 0.0 {
         let crossing = x1 + (x2 - x1) * y1 / (y1 - y2);
         [y1 * (crossing - x1) / 2.0, y2 * (x2 - crossing) / 2.0]
@@ -135,9 +134,8 @@ fn ortho_area(from: [f64; 2], to: [f64; 2], x: f64) -> [f64; 2] {
     [below, above]
 }
 
-/// A U pattern's areas, the sum of its two lines', `start` and `end`, each smoothed toward the
-/// square root of twice itself, halved, the shorter the U: so that a bump a few pixels long blends
-/// more than its lines' small triangles would.
+/// A U's areas: its lines', each smoothed toward half the square root of twice itself, the more the
+/// shorter the U. A short bump then blends more than its lines' small triangles would.
 fn smooth(length: f64, start: [f64; 2], end: [f64; 2]) -> [f64; 2] {
     let p = (length / SMOOTH_MAX_DISTANCE).clamp(0.0, 1.0);
     let smoothed = |a: f64| {
@@ -147,21 +145,17 @@ fn smooth(length: f64, start: [f64; 2], end: [f64; 2]) -> [f64; 2] {
     [0, 1].map(|i| smoothed(start[i]) + smoothed(end[i]))
 }
 
-/// The areas of a diagonal pattern, of a line of pixels each with an edge on its left and on its
-/// top, rising to the right, `left` pixels from its lower end and `right` from its upper, in a space
-/// where each pixel is a unit square, Y up, the line's pixels from (1, 0) up and to the right, a
-/// pixel a step: how much of the pixel, at (1 + left, left), lies above the revectorized line, which
-/// it takes of its neighbor above, at (1 + left, 1 + left), and how much of that neighbor lies below
-/// it, which the neighbor takes of the pixel. `start` and `end` are the edges crossing the line at
-/// its lower end and its upper end, as the shader merges them: at its start, 1 for its last edge
-/// going on down, an edge on its left, and 2 for one going on left, an edge on the top of the pixel
-/// left of it; at its end, 2 for one going on right and 1 for one going on up. Such a crossing is a
-/// step two pixels long, where a line slanted off 45° meets the staircase it draws: one going on
-/// down or right puts that end of the revectorized line on the line through the staircase's outer
-/// corners, y = x - 1, and one going on left or up on the line through its inner corners, y = x, as
-/// a line steeper or shallower than 45° runs. Where an end's crossing is unknown, as where the
-/// search ran out or both go on, the areas are the mean of the lines either way, as the reference
-/// takes them; unknown at both ends, the mean of the lines through the inner and the outer corners.
+/// The areas of a diagonal pattern, a line of pixels rising to the right, each with edges on its
+/// left and top; the pixel is `left` from the lower end and `right` from the upper. In unit
+/// squares, Y up, from (1, 0): the share of the pixel at (1 + left, left) above the revectorized
+/// line, and of its upper neighbor, (1 + left, 1 + left), below it.
+///
+/// `start` and `end` are the shader's merged crossings. At the start, 1 is going on down (an edge
+/// on its left) and 2 going on left (atop the pixel left of it); at the end, 2 is right and 1 up.
+/// Each is a two-pixel step where a line off 45° meets its staircase. Down or right puts that end
+/// on the outer corners' line, y = x - 1; left or up on the inner corners', y = x. An unknown end
+/// (the search ran out, or both go on) averages both lines, as the reference does; two unknown ends
+/// average the inner and outer corners' lines.
 fn diag(start: usize, end: usize, left: f64, right: f64) -> [f64; 2] {
     let length = left + right + 1.0;
     let starts: &[[f64; 2]] = match start {
@@ -189,14 +183,14 @@ fn diag(start: usize, end: usize, left: f64, right: f64) -> [f64; 2] {
     areas
 }
 
-/// How much of the unit square whose lower left corner is `corner` lies right of the line through
-/// `from` and `to`, looking along it: below it, for a line that rises to the right.
+/// How much of the unit square at lower left `corner` lies right of the line `from`–`to`, looking
+/// along it: below a line rising to the right.
 fn covered(from: [f64; 2], to: [f64; 2], corner: [f64; 2]) -> f64 {
     let side =
         |[x, y]: [f64; 2]| (to[1] - from[1]) * (x - from[0]) - (to[0] - from[0]) * (y - from[1]);
     let [x, y] = corner;
     let square = [[x, y], [x + 1.0, y], [x + 1.0, y + 1.0], [x, y + 1.0]];
-    // The square clipped to the line's right, at most one corner more than it has.
+    // The square clipped to the line's right: one corner more at most.
     let mut clipped = [[0.0; 2]; 5];
     let mut count = 0;
     for (i, &a) in square.iter().enumerate() {
@@ -221,18 +215,17 @@ fn covered(from: [f64; 2], to: [f64; 2], corner: [f64; 2]) -> f64 {
     twice.abs() / 2.0
 }
 
-/// The search texture's texels, as RGBA8 rows, top first, in red: for each bilinear fetch of the
-/// edges a search left or right makes, a quarter of a pixel and an eighth off a pixel's middle,
-/// toward the pixel before it along the search and the row above, how many of the two pixels it
-/// spans the line goes on through, times 127. Its column is the edges crossing the line, the left
-/// edges' fetch, and its row the line's, the top edges', each in 32nds, the texture's left half for
-/// searches to the left and its right half for those to the right, flipped and cropped to the
-/// rows where the line goes on through the nearer pixel, as the reference packs it.
+/// The search texture's RGBA8 rows, top first, in red: per bilinear fetch of a search, how many of
+/// its two pixels the line goes on through, × 127. A fetch sits a quarter pixel and an eighth off a
+/// pixel's middle, toward the pixel before along the search and the row above.
+///
+/// Columns are the crossing (left) edges' fetch, rows the line's (top) edges', in 32nds. The left
+/// half serves left searches, the right half right ones. Rows are flipped and cropped to where the
+/// line goes on through the nearer pixel, as the reference packs them.
 pub(super) fn search() -> Vec<u8> {
     let _zone = gg_core::zone!();
-    // A fetch's value, in 32nds, of the edges of the row above, the farther pixel's and the
-    // nearer's, and of the line's row, likewise: weighed by a quarter and three quarters across,
-    // and an eighth and seven eighths down.
+    // A fetch in 32nds, of the row above's farther and nearer pixels, then the line's row's:
+    // weighed ¼ and ¾ across, ⅛ and ⅞ down.
     let fetched = |e: [bool; 4]| {
         usize::from(e[0]) + 3 * usize::from(e[1]) + 7 * usize::from(e[2]) + 21 * usize::from(e[3])
     };
@@ -256,19 +249,18 @@ pub(super) fn search() -> Vec<u8> {
     texels
 }
 
-/// How many of the two pixels a search to the left's last fetch spans the line goes on through:
-/// the nearer, if it has the line's edge, and then the farther, if it has it too, and no edge
-/// crosses between them. Each array holds the edges of the row above, the farther pixel's and the
-/// nearer's, then the line's row's likewise; a pixel's crossing edge is on its left.
+/// How many of a left search's last two pixels the line goes on through: the nearer if it has the
+/// line's edge, then the farther if it does too and no edge crosses between. Arrays are the row
+/// above's farther and nearer pixels, then the line's row's; a crossing edge is on a pixel's left.
 fn search_left(crossing: [bool; 4], line: [bool; 4]) -> u8 {
     let nearer = line[3];
     let farther = nearer && line[2] && !crossing[1] && !crossing[3];
     u8::from(nearer) + u8::from(farther)
 }
 
-/// As [`search_left`], to the right, where the nearer pixel is the one weighed by three quarters
-/// still, and a crossing edge on a pixel's left is between it and the pixel before it: the nearer,
-/// if it has the line's edge and none crosses before it, and then the farther likewise.
+/// [`search_left`] to the right: the nearer pixel is still the one weighed ¾, and a crossing on a
+/// pixel's left lies before it. The nearer counts if it has the line's edge and none crosses before
+/// it, then the farther likewise.
 fn search_right(crossing: [bool; 4], line: [bool; 4]) -> u8 {
     let nearer = line[3] && !crossing[1] && !crossing[3];
     let farther = nearer && line[2] && !crossing[0] && !crossing[2];
@@ -279,8 +271,8 @@ fn search_right(crossing: [bool; 4], line: [bool; 4]) -> u8 {
 mod tests {
     use super::*;
 
-    /// A row of pixels' edges, as the shader's searches read them: each pixel's top edge, the
-    /// line's, and its left edge, a crossing one, in its row and the row above.
+    /// A row's edges as the shader's searches read them: each pixel's top (the line's) and left (a
+    /// crossing), in its row and the row above.
     struct Row {
         line: Vec<bool>,
         crossing: Vec<bool>,
@@ -288,9 +280,8 @@ mod tests {
     }
 
     impl Row {
-        /// The bilinear fetch at `x` pixels across, a pixel's middle at a half past its index, an
-        /// eighth of a pixel into the row above: the crossing edges' and the line's, the row above
-        /// holding no line, as the searches find them, clamped to the row's ends.
+        /// The bilinear fetch `x` pixels across (a middle at half past its index), ⅛ pixel into the
+        /// row above, clamped to the row: the crossing edges' and the line's (none above).
         fn fetch(&self, x: f64) -> [f64; 2] {
             let last = self.line.len() as i64 - 1;
             let left = (x - 0.5).floor();
@@ -303,8 +294,7 @@ mod tests {
             [crossing, lerp(&self.line) * 0.875]
         }
 
-        /// The search texture's value at a fetch `e`, as the shader's `search_length` looks it up,
-        /// for a search to the left, or to the right.
+        /// The search texture's value at fetch `e`, as the shader's `search_length` reads it.
         fn length(texels: &[u8], e: [f64; 2], right: bool) -> f64 {
             let offset = if right { 0.5 } else { 0.0 };
             let column = 32.0 * e[0] + 66.0 * offset;
@@ -316,10 +306,9 @@ mod tests {
             f64::from(texels[(row * 64 + column) * 4]) / 255.0
         }
 
-        /// How far the line runs from pixel `x`, to the left or to the right, as the shader's
-        /// searches find it: by fetches two pixels apart while both have the line and none crosses
-        /// it, from a quarter of a pixel off its middle, and the last fetch's pixels by the search
-        /// texture, within 16 fetches.
+        /// How far the line runs left or right from pixel `x`, as the shader finds it: fetches two
+        /// pixels apart, from ¼ pixel off its middle, while both have the line and none crosses, at
+        /// most 16. The search texture resolves the last fetch.
         fn search(&self, texels: &[u8], x: usize, right: bool) -> f64 {
             let center = x as f64 + 0.5;
             let step = if right { 2.0 } else { -2.0 };
@@ -336,9 +325,8 @@ mod tests {
         }
     }
 
-    /// The search texture takes each search's last fetch to the pixels the line goes on through:
-    /// along lines of every length to 30 from each of their pixels, ended or crossed at any pixel's
-    /// left, in the line's row or the row above, the searches find the line's ends.
+    /// The searches find the ends of lines of every length to 30, from each pixel, ended or crossed
+    /// at any pixel's left, in the line's row or the row above.
     #[test]
     fn searches_find_the_ends_of_lines() {
         let texels = search();
@@ -381,9 +369,9 @@ mod tests {
         }
     }
 
-    /// An L's and a Z's areas are the triangles between their lines and the edge: an L's, across
-    /// its half at its corner, the pixel's own, half a pixel high; a Z's, either side of its middle,
-    /// the pixel's below its first half's and its neighbor's above its second's.
+    /// An L's and a Z's areas are the triangles between their lines and the edge: an L's across its
+    /// half at its corner, half a pixel high there; a Z's either side of its middle, the pixel's
+    /// below the first half, its neighbor's above the second.
     #[test]
     fn orthogonal_areas_are_the_triangles_their_lines_cut() {
         for length in [4.0f64, 9.0, 16.0] {
@@ -409,12 +397,13 @@ mod tests {
         }
     }
 
-    /// A diagonal line whose ends aren't known blends a quarter of each pixel on it with its
-    /// neighbor above, the mean of the lines through its steps' inner and outer corners; one that
-    /// goes on down at its start and right at its end is the line through the outer corners, which
-    /// halves each pixel, and one that goes on left and up the line through the inner corners,
-    /// which halves each neighbor; and one that goes on left at its start and right at its end
-    /// rises from the inner corner at its start, (1, 1), to the outer at its end, shallower.
+    /// Diagonal lines' blends with the neighbor above:
+    ///
+    /// - Ends unknown: a quarter of each pixel, the mean of the inner and outer corners' lines.
+    /// - Down at the start, right at the end: the outer corners' line, halving each pixel.
+    /// - Left and up: the inner corners' line, halving each neighbor.
+    /// - Left at the start, right at the end: shallower, from the inner corner at its start, (1,
+    ///   1), to the outer at its end.
     #[test]
     fn diagonal_areas_are_those_of_their_lines() {
         let close = |[r, g]: [f64; 2], [x, y]: [f64; 2]| {
@@ -425,14 +414,13 @@ mod tests {
             close(diag(1, 2, left, right), [0.5, 0.0]);
             close(diag(2, 1, left, right), [0.0, 0.5]);
         }
-        // From (1, 1) to (12, 11): over the first pixel, from 1 to 2 across, it rises from 1 to
-        // 1 + 10/11, above the pixel and through the lower part of its neighbor.
+        // From (1, 1) to (12, 11): over the first pixel, 1 to 2 across, it rises from 1 to 1 +
+        // 10/11, above the pixel and through its neighbor's lower part.
         close(diag(2, 2, 0.0, 10.0), [0.0, 0.5 * 10.0 / 11.0]);
     }
 
-    /// Both textures are of their sizes, as RGBA8; and every area, of every pattern at every
-    /// distance the area texture holds, is within 0 to 1 before it's rounded to 8 bits, which would
-    /// take one past either end to that end unseen.
+    /// Both textures are of their sizes, in RGBA8. Every area is within 0 to 1 before rounding to 8
+    /// bits, which would hide one out of range.
     #[test]
     fn the_textures_are_their_sizes_and_their_areas_within_0_to_1() {
         let pixels = |[width, height]: [u32; 2]| (width * height * 4) as usize;

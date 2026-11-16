@@ -1,6 +1,5 @@
-//! Motion blur: the game's view blurred along how what it shows moved across it while the shutter
-//! was open, from its colors, depth and motion, by McGuire et al.'s reconstruction filter, into an
-//! image of its own, as `shaders/motion_blur.slang` says.
+//! Motion blur: the view blurred along its motion while the shutter was open, by McGuire et al.'s
+//! reconstruction filter (`shaders/motion_blur.slang`).
 
 use std::sync::Arc;
 
@@ -13,24 +12,22 @@ use crate::taa::Drawn;
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/motion_blur.spv"));
 
-/// How many pixels across and down a workgroup takes, and how many threads a tile's: `GROUP` in
+/// Pixels across and down per workgroup, and threads per tile: `GROUP` in
 /// `shaders/motion_blur.slang`.
 const GROUP: u32 = 8;
 
-/// How many of the view's heights in pixels a tile's side is, the farthest a pixel is blurred
-/// either way: 20 pixels at 720, McGuire et al.'s.
+/// Tiles down the view's height. A tile's side is the farthest a pixel blurs either way: 20 pixels
+/// at 720, as McGuire et al. have it.
 const TILES_DOWN: u32 = 36;
 
-/// Motion blur, as [`RenderData::motion_blur`](crate::RenderData::motion_blur) gives it: what the
-/// view shows blurred along how far it moved across the view while the shutter was open, `shutter`
-/// of the frame, as a film camera's shutter is open for its angle's share of a turn, round where it
-/// shows. What draws its own motion blurs by it, and what draws none, by the camera's alone, as
-/// [`Antialiasing::Taa`](crate::Antialiasing::Taa) says. A headless frame draws a tick, so its
-/// motion is a tick's.
+/// Motion blur, as [`RenderData::motion_blur`](crate::RenderData::motion_blur) gives it: the view
+/// blurred along how far things moved while the shutter was open, centered on where they show.
+/// Motion is as [`Antialiasing::Taa`](crate::Antialiasing::Taa) says. A headless frame draws a
+/// tick, so its motion is a tick's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionBlur {
-    /// The share of the frame the shutter is open, from 0, for none, to 1, a frame's motion: a
-    /// half by default, a 180° shutter's, film's.
+    /// The share of the frame the shutter is open, as a film shutter's angle is of a turn: 0 none,
+    /// 1 a frame's motion, ½ (film's 180°) by default.
     pub shutter: f32,
 }
 
@@ -41,18 +38,17 @@ impl Default for MotionBlur {
 }
 
 impl MotionBlur {
-    /// Whether it blurs anything: its shutter is open some of the frame.
     pub(crate) fn blurs(&self) -> bool {
         self.shutter.is_finite() && self.shutter > 0.0
     }
 }
 
-/// The side of a tile of a view `size` pixels, in pixels, as [`TILES_DOWN`] says: 1 or more.
+/// A tile's side in pixels for a view `size` pixels, by [`TILES_DOWN`]: 1 or more.
 fn tile(size: [u32; 2]) -> u32 {
     size[1].div_ceil(TILES_DOWN).max(1)
 }
 
-/// What the velocities' pass reads: `Seen` in `shaders/motion_blur.slang`, field for field.
+/// What the velocity pass reads: `Seen` in `shaders/motion_blur.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Seen {
@@ -63,7 +59,7 @@ struct Seen {
     unused: u32,
 }
 
-/// What every pass pushes: `Push` in `shaders/motion_blur.slang`, field for field.
+/// `Push` in `shaders/motion_blur.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct BlurPush {
@@ -80,8 +76,7 @@ struct BlurPush {
     unused: u32,
 }
 
-/// The last frame that blurred the view: its number, the view's size, and the matrix from the world
-/// to the view's clip space it drew by, without its offset.
+/// The last frame that blurred the view, and its unjittered world-to-clip matrix.
 #[derive(Clone, Copy)]
 struct Blurred {
     frame: u64,
@@ -89,8 +84,6 @@ struct Blurred {
     clip_from_world: Mat4,
 }
 
-/// What blurs the game's view by its motion: a pipeline for each of its passes, and how the last
-/// frame that blurred it drew it.
 pub(crate) struct MotionBlurPass {
     velocity: ComputePipeline,
     tiles: ComputePipeline,
@@ -99,9 +92,8 @@ pub(crate) struct MotionBlurPass {
     last: Option<Blurred>,
 }
 
-/// A frame's motion blur in its graph: the share of the frame its shutter is open; the view's size,
-/// a tile's side and the tiles' count; its colors, depth and motion, which it reads; the images of
-/// the graph's own its passes write, the last the view's blurred colors; and its passes, in order.
+/// A frame's motion blur in its graph: it reads `drawn` (colors, depth, motion) and writes
+/// `blurred`, which the view shows after it. The passes are in order.
 pub(crate) struct Plan {
     shutter: f32,
     size: [u32; 2],
@@ -116,15 +108,14 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// What the view shows, blurred.
     pub(crate) fn blurred(&self) -> ImageId {
         self.blurred
     }
 }
 
 impl MotionBlurPass {
-    /// Takes what it keeps of the frame before into the space of a frame whose origin is `by`
-    /// further along than the frame before's: what was at `p` is at `p - by`, as
+    /// Moves what it keeps of the frame before into the space of a frame whose origin is `by`
+    /// further on: what was at `p` is at `p - by`, as
     /// [`RenderData::origin`](crate::RenderData::origin) says.
     pub(crate) fn moved(&mut self, by: Vec3) {
         if let Some(last) = &mut self.last {
@@ -144,9 +135,8 @@ impl MotionBlurPass {
         })
     }
 
-    /// Declares in `graph` the motion blur, by `blur`, of the view of `size` pixels from its colors,
-    /// depth and motion, `drawn`, as earlier passes left them, into the view's blurred colors, made
-    /// in `graph`.
+    /// Declares in `graph` the motion blur, by `blur`, of the view's `drawn` colors, depth and
+    /// motion, `size` pixels, into blurred colors of the graph's own.
     pub(crate) fn plan(
         graph: &mut Graph,
         blur: MotionBlur,
@@ -183,10 +173,9 @@ impl MotionBlurPass {
         }
     }
 
-    /// Records `plan`'s passes, of the view as `drawn` says the frame drew it, against how the frame
-    /// before drew it, if it blurred the view at its size and the view isn't `cut` to its viewpoint
-    /// from elsewhere, and as though the camera stood still otherwise; and notes how this one did,
-    /// for the next.
+    /// Records `plan`'s passes against the frame before's view, if it blurred at this size and the
+    /// view isn't `cut` to its viewpoint; else as though the camera stood still. Keeps this frame's
+    /// view for the next.
     pub(crate) fn record(
         &mut self,
         frame: &mut Frame<'_>,
@@ -241,7 +230,7 @@ impl MotionBlurPass {
         };
         pass.set_pipeline(&self.tiles);
         pass.push_constants(bytemuck::bytes_of(&push));
-        // A workgroup a tile.
+        // A workgroup per tile.
         pass.dispatch([plan.tiles[0], plan.tiles[1], 1]);
         drop(pass);
         let mut pass = frame.compute(neighboring);
@@ -278,8 +267,7 @@ impl MotionBlurPass {
 mod tests {
     use super::*;
 
-    /// A tile's side is a 36th of the view's height, rounded up, 20 pixels at 720, and a pixel at
-    /// least.
+    /// A tile's side is a 36th of the view's height, rounded up: 20 pixels at 720, at least 1.
     #[test]
     fn tiles_are_a_36th_of_the_views_height() {
         assert_eq!(tile([1280, 720]), 20);
