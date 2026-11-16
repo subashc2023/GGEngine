@@ -1,15 +1,14 @@
-//! Shadows: the cascades a directional light's shadows are drawn into, each a shadow map, fitted to
-//! the view and steadied against its moves, and what shaders read of them through the frame's data.
+//! Shadows: a directional light's cascades of shadow maps, fitted to the view and steadied against
+//! its moves, and their GPU form.
 //!
-//! The view's depth, from its near plane to how far the shadows reach, splits into [`CASCADES`]
-//! slices, the nearest the shortest, as the practical split scheme has it (Zhang, Sun, Xu and Lo,
-//! "Parallel-Split Shadow Maps on Programmable GPUs", GPU Gems 3, ch. 10). Each slice's cascade is
-//! the box round the smallest sphere that holds the slice, seen from the light, as Valient's stable
-//! cascades are ("Stable Rendering of Cascaded Shadow Maps", ShaderX6): the sphere's size depends
-//! on the view's projection alone, not on which way it looks, and its center moves in whole texels
-//! of its map, in the light's space, so that as the view turns and moves, each map's texels stay
-//! where they are in the world, and shadows' edges don't shimmer. Casters between the light and a
-//! box's near plane cast from it, their depth clamped there.
+//! The view's depth, from its near plane to the shadows' reach, splits into [`CASCADES`] slices,
+//! the nearest the shortest, by the practical split scheme (Zhang, Sun, Xu and Lo, "Parallel-Split
+//! Shadow Maps on Programmable GPUs", GPU Gems 3, ch. 10). Each cascade is the light-space box
+//! round the smallest sphere holding its slice, as in Valient's stable cascades ("Stable Rendering
+//! of Cascaded Shadow Maps", ShaderX6). The sphere's size depends on the projection alone, not the
+//! view's heading, and its center moves in whole texels in the light's space. So texels stay put in
+//! the world as the view moves, and edges don't shimmer. Casters between the light and a box's near
+//! plane still cast, their depth clamped there.
 
 use bytemuck::NoUninit;
 use gg_core::math::camera::rh::view;
@@ -17,57 +16,54 @@ use gg_core::math::{Mat4, Vec3, Vec4, libm};
 
 use crate::{Light, LightKind, Projection, Viewpoint};
 
-/// How many cascades a light's shadows are in, each a shadow map of its own.
+/// Cascades per light, each its own shadow map.
 pub(crate) const CASCADES: usize = 4;
 
-/// The texels across and down each cascade's shadow map: 16 MiB of 32-bit depth each.
+/// Each map's texels across and down: 16 MiB of 32-bit depth.
 pub(crate) const MAP_SIZE: u32 = 2048;
 
-/// How far a shadow map's depths go back from the casters they're of, in multiples of the most a
-/// caster's depth changes across a texel, as [`GraphicsDesc::depth_bias`] says: a texel's worth of
-/// the caster's own slope, past what the receivers' normal offset covers, for surfaces that curve
-/// between the normals shading interpolates.
+/// How far a map's depths sit behind their casters, in multiples of the caster's depth slope per
+/// texel, as [`GraphicsDesc::depth_bias`] says. A texel of slope beyond the receivers' normal
+/// offset covers surfaces that curve between interpolated normals.
 ///
 /// [`GraphicsDesc::depth_bias`]: gg_gpu::GraphicsDesc::depth_bias
 pub(crate) const DEPTH_BIAS: f32 = 1.0;
 
-/// How much of each split is logarithmic, where the rest is uniform: the practical split scheme's
-/// lambda. A logarithmic split gives each slice the same texels per pixel, but its nearest slices
-/// are so short that the farther ones run out of texels; this keeps most of its share.
+/// The practical split scheme's lambda: the logarithmic share of each split, the rest uniform. A
+/// fully logarithmic split gives each slice the same texels per pixel, but its nearest slices are
+/// so short that the far ones run out of texels.
 const LOGARITHMIC: f32 = 0.75;
 
-/// The texels inside its map's edges that each cascade keeps the points it shadows to, which its
-/// sphere grows by: the filter's reach round a point, 3, and how far the normal offset moves it,
-/// at most 3, with 2 to spare. `MARGIN` in `shaders/model.slang` is the same.
+/// The texels inside its map's edges where each cascade keeps the points it shadows, which grow its
+/// sphere: the filter's reach, 3, the normal offset, at most 3, and 2 to spare. Equals `MARGIN` in
+/// `shaders/model.slang`.
 const MARGIN: f32 = 8.0;
 
-/// How far through their reach the shadows start to fade, so that they end without an edge.
+/// The share of their reach after which the shadows fade, so they end without an edge.
 const FADE_FROM: f32 = 0.9;
 
-/// The cascades of a light's shadows, fitted to the view: where each is in the light's space, and
-/// how far ahead of the view they reach.
+/// A light's shadow cascades, fitted to the view.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Cascades {
-    /// The light's index among the frame's, as shaders read them.
+    /// The light's index as shaders read the lights.
     light: u32,
-    /// From the world to the light's space, which turns with the light alone: its -Z the way the
-    /// light shines.
+    /// Turns with the light alone; its -Z is the way the light shines.
     light_from_world: Mat4,
-    /// Each cascade's sphere: its center in the light's space, its X and Y in whole texels of its
-    /// map, and its radius, from the nearest the view out.
+    /// Each cascade's sphere, nearest first: its center in the light's space, X and Y in whole
+    /// texels, and its radius.
     spheres: [Vec4; CASCADES],
-    /// How far a point is ahead of the view: its dot product with XYZ, plus W.
+    /// A point's distance ahead of the view: its dot product with XYZ, plus W.
     view_depth: Vec4,
-    /// How far ahead of the view the shadows start to fade, and how far they reach.
+    /// Distances ahead of the view where the shadows start to fade, and end.
     fade_from: f32,
     reach: f32,
 }
 
 impl Cascades {
-    /// The cascades of the brightest of `lights` that casts shadows, a directional light of some
-    /// light that shines some way, with a shadow distance, the first of those as bright, fitted to
-    /// what `viewpoint` sees of a view `aspect` times as wide as it's tall; `None` if none casts
-    /// them, or the view sees nothing within its shadow distance.
+    /// The cascades of the brightest shadow caster among `lights` (the first among equals), fitted
+    /// to `viewpoint` at `aspect` (width over height). A caster is directional, has some light,
+    /// shines some way, and has a finite, positive shadow distance. `None` if none casts, or the
+    /// view sees nothing within the distance.
     pub(crate) fn fit(lights: &[Light], viewpoint: &Viewpoint, aspect: f32) -> Option<Self> {
         let luminance = |light: &Light| light.color.dot(Vec3::new(0.2126, 0.7152, 0.0722));
         let (light, direction, distance) = (lights.iter().enumerate())
@@ -94,8 +90,8 @@ impl Cascades {
             Vec3::Y
         };
         let light_from_world = view::look_to_mat4(Vec3::ZERO, direction, up);
-        // How far the view sees, ahead of it, and how far its view reaches off its axis at a
-        // distance ahead: in proportion under perspective, the same everywhere without.
+        // How far the view sees, and how far it reaches off its axis at a distance: in proportion
+        // under perspective, the same everywhere without.
         let diagonal = (1.0 + aspect * aspect).sqrt();
         let (near, far, across, logarithmic) = match viewpoint.projection {
             Projection::Perspective { fov, near } => {
@@ -105,7 +101,7 @@ impl Cascades {
             Projection::Orthographic { height, near, far } => {
                 let (near, far) = (near.min(far), near.max(far));
                 let half = height / 2.0 * diagonal;
-                // Without perspective, every slice gets as many texels a pixel at any split.
+                // Without perspective, every split gives each slice the same texels per pixel.
                 (
                     near,
                     far.min(near + distance),
@@ -122,7 +118,7 @@ impl Cascades {
         let spheres = std::array::from_fn(|i| {
             let (from, to) = (splits[i], splits[i + 1]);
             let (center, radius) = across.sphere(from, to);
-            // Grown so that the slice keeps MARGIN texels inside its map's edges.
+            // Grown so the slice keeps MARGIN texels inside its map's edges.
             let radius = radius / (1.0 - 2.0 * MARGIN / MAP_SIZE as f32);
             let center =
                 light_from_world.transform_point3(viewpoint.position.as_vec3() + forward * center);
@@ -140,15 +136,14 @@ impl Cascades {
         })
     }
 
-    /// The matrix from the world to Vulkan's clip space that cascade `i` is drawn with: its box,
-    /// as seen from the light, mapped onto clip space, and its depth onto 1 at the near side, the
-    /// light's, to 0 at the far, as the renderer's cameras project it.
+    /// The world to Vulkan clip space matrix cascade `i` is drawn with: its box, seen from the
+    /// light, onto clip space, depth 1 at the light's side to 0 at the far, as the renderer's
+    /// cameras project.
     pub(crate) fn clip_from_world(&self, i: usize) -> Mat4 {
         let sphere = self.spheres[i];
         let (center, scale) = (sphere.truncate(), 1.0 / sphere.w);
-        // A point `p` in the light's space is at `n = (p - center) * scale` in the box, -1 to 1
-        // each way: clip space's X is n's X, its Y, which points down, n's -Y, and its depth
-        // half n's Z, plus a half.
+        // A light-space point `p` is at `n = (p - center) * scale` in the box, -1 to 1 each way.
+        // Clip space's X is n's X, its Y (pointing down) n's -Y, and its depth n's Z / 2 + 1/2.
         let into_box = Mat4::from_cols(
             Vec4::new(scale, 0.0, 0.0, 0.0),
             Vec4::new(0.0, -scale, 0.0, 0.0),
@@ -163,7 +158,7 @@ impl Cascades {
         into_box * self.light_from_world
     }
 
-    /// What shaders read of the shadows, their maps' slots in the bindless set `maps`.
+    /// The shadows' GPU form, the maps at slots `maps` of the bindless set.
     pub(crate) fn data(&self, maps: [u32; CASCADES]) -> ShadowData {
         ShadowData {
             light_from_world: self.light_from_world,
@@ -180,9 +175,8 @@ impl Cascades {
     }
 }
 
-/// Where the view's depth from `near` to `far` ahead of it splits into the cascades' slices, from
-/// `near` to `far`: as much of each split as `logarithmic` says at the same ratio from the one
-/// before, and the rest the same distance on from it.
+/// The cascades' split distances from `near` to `far`: each a `logarithmic` blend of the same ratio
+/// from the one before and the same distance from it.
 fn splits(near: f32, far: f32, logarithmic: f32) -> [f32; CASCADES + 1] {
     std::array::from_fn(|i| {
         let t = i as f32 / CASCADES as f32;
@@ -195,24 +189,24 @@ fn splits(near: f32, far: f32, logarithmic: f32) -> [f32; CASCADES + 1] {
     })
 }
 
-/// How far the view reaches off its axis at a distance ahead of it, to its corners.
+/// How far the view reaches off its axis, to its corners, at a distance ahead.
 #[derive(Clone, Copy)]
 enum Across {
-    /// This much of the distance.
+    /// This share of the distance.
     Perspective(f32),
-    /// This much, however far.
+    /// This much at any distance.
     Orthographic(f32),
 }
 
 impl Across {
-    /// The smallest sphere that holds the slice of the view from `from` to `to` ahead of it: how
-    /// far ahead its center is, on the view's axis, and its radius.
+    /// The smallest sphere holding the view's slice from `from` to `to` ahead: its center's
+    /// distance ahead on the axis, and its radius.
     ///
-    /// The slice's corners are each `from` or `to` ahead, and `a` or `b` off the axis, as far as
-    /// the view reaches there. A sphere centered `c` ahead holds the near ones within
-    /// `(c - from)² + a²` and the far ones within `(to - c)² + b²`, which are the same where
-    /// `c = (from + to) / 2 + (b² - a²) / (2 (to - from))`: the sphere is smallest there, or, past
-    /// the slice's end, at its end, where the corners there alone reach it.
+    /// The slice's corners are `from` or `to` ahead, and `a` or `b` off the axis. A sphere centered
+    /// `c` ahead holds the near ones within `(c - from)² + a²` and the far ones within `(to - c)² +
+    /// b²`. These are equal at `c = (from + to) / 2 + (b² - a²) / (2 (to - from))`, where the
+    /// sphere is smallest. If that's past the slice's end, the center is the end, where the far
+    /// corners alone reach it.
     fn sphere(self, from: f32, to: f32) -> (f32, f32) {
         let (a, b) = match self {
             Self::Perspective(tan) => (from * tan, to * tan),
@@ -226,24 +220,20 @@ impl Across {
     }
 }
 
-/// What shaders read of a frame's shadows, through its data: `Shadows` in `shaders/mesh.slang`,
-/// field for field.
+/// `Shadows` in `shaders/mesh.slang`, field for field. Fields shared with [`Cascades`] mean the
+/// same.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
 pub(crate) struct ShadowData {
-    /// From the world to the light's space, its -Z the way the light shines.
     light_from_world: Mat4,
-    /// Each cascade's center in the light's space, and 1 over its radius: a point `p` there is at
-    /// `(p - center) / radius` in its box, -1 to 1 each way, from the nearest the view out.
+    /// Each cascade's light-space center and 1 over its radius, nearest first. A point `p` is at
+    /// `(p - center) / radius` in its box, -1 to 1 each way.
     cascades: [Vec4; CASCADES],
-    /// Each cascade's shadow map's slot in the bindless set.
+    /// Each map's slot in the bindless set.
     maps: [u32; CASCADES],
-    /// How far a point is ahead of the view: its dot product with XYZ, plus W.
     view_depth: Vec4,
-    /// The light that casts them, by its index among the frame's, as shaders read them; `u32::MAX`
-    /// for none.
+    /// As [`Cascades::light`]; `u32::MAX` for none.
     light: u32,
-    /// How far ahead of the view they start to fade, and how far they reach.
     fade_from: f32,
     reach: f32,
     /// [`MAP_SIZE`], as a float.
@@ -274,8 +264,8 @@ mod tests {
 
     use super::*;
 
-    /// A directional light along `direction`, `brightness` times white, casting shadows as far as
-    /// `distance`, if given.
+    /// A directional light along `direction`, `brightness` times white, casting shadows to
+    /// `distance`.
     fn sun(direction: Vec3, distance: Option<f32>, brightness: f32) -> Light {
         Light {
             kind: LightKind::Directional,
@@ -299,9 +289,8 @@ mod tests {
         }
     }
 
-    /// The brightest directional light with a shadow distance casts, the first of those as bright;
-    /// point lights don't, nor directional ones without a distance, or with one of none or past
-    /// any, or shining no way, or of no light.
+    /// The first among equals. Not point lights, nor directional ones without a distance, with one
+    /// of 0 or infinity, shining no way, or of no light.
     #[test]
     fn the_brightest_directional_light_with_a_distance_casts() {
         let view = looking(Vec3::ZERO, Quat::IDENTITY);
@@ -329,11 +318,9 @@ mod tests {
         assert_eq!(fit(&[sun(down, Some(50.0), 0.0)]), None, "one of no light");
     }
 
-    /// Each cascade holds its slice of the view's depth, every corner of it inside its box, as
-    /// many texels in from its map's edges as `MARGIN` says, but for the half a texel that its
-    /// center moves to a texel's corner; each is the same size wherever the view is and however it
-    /// turns, its center in whole texels of its map; and the matrix it's drawn with takes its
-    /// center to the middle of clip space.
+    /// Every corner inside the box by `MARGIN` texels, less the half texel the center snaps by; the
+    /// size the same wherever the view is and however it turns; and the matrix taking the center to
+    /// the middle of clip space.
     #[test]
     fn cascades_hold_their_slices_keep_their_size_and_stay_on_their_texels() {
         let lights = [sun(Vec3::new(0.3, -1.0, 0.2).normalize(), Some(80.0), 1.0)];
@@ -388,9 +375,8 @@ mod tests {
         }
     }
 
-    /// With perspective, the shadows reach their distance, the slices growing ever longer; without,
-    /// as far as the view sees, if that's nearer, in slices as long as each other; and they fade out
-    /// over the last tenth of their reach.
+    /// With perspective, in ever longer slices. Without, as far as the view sees, if nearer, in
+    /// even slices. They fade out over the last tenth.
     #[test]
     fn shadows_reach_their_distance_or_the_end_of_the_view() {
         let near = splits(0.1, 80.0, LOGARITHMIC);

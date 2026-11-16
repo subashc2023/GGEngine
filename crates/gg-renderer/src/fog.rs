@@ -1,12 +1,12 @@
-//! Height fog: a medium filling the world, densest low down and thinning exponentially with height,
-//! which dims the light from what the view shows by its optical depth along the way to the eye,
-//! integrated in closed form, and scatters the sky's light from all around and the sun's toward
-//! it, as `shaders/fog.slang` says; and the pass that fogs what's opaque in the view, the sky among
-//! it, from the view's depth, before what blends, which fogs itself as it draws.
+//! Height fog, and the pass that applies it. The fog thins exponentially with height. It dims the
+//! light from what the view shows by its optical depth to the eye, integrated in closed form, and
+//! scatters the sky's light and the sun's toward the eye (`shaders/fog.slang`). The pass fogs
+//! what's opaque, the sky included, from the view's depth, before what blends, which fogs itself as
+//! it draws.
 //!
-//! Under an atmosphere the fog is taken as nearer the eye than the air's haze: what's lit is hazed
-//! as it shades and fogged after, as is the sky drawn from the atmosphere's table. The fog is lit
-//! by the atmosphere's light from all around and by its sun as the air dims it.
+//! Under an atmosphere, the fog is nearer the eye than the air's haze: what's lit is hazed as it
+//! shades and fogged after, as is the sky from the atmosphere's table. The atmosphere's ambient
+//! light and its sun, dimmed by the air, light the fog.
 
 use std::sync::Arc;
 
@@ -19,53 +19,46 @@ use crate::{Light, LightKind};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fogging.spv"));
 
-/// How many pixels across and down a workgroup takes: `GROUP` in `shaders/fogging.slang`.
+/// Pixels across and down per workgroup: `GROUP` in `shaders/fogging.slang`.
 const GROUP: u32 = 8;
 
-/// The most of Henyey-Greenstein's g the sun's lobe takes, short of 1, where its lobe would narrow
-/// to a point of infinite brightness.
+/// The largest Henyey-Greenstein g of the sun's lobe. At 1 the lobe narrows to an infinitely bright
+/// point.
 const SHARPEST: f32 = 0.99;
 
-/// Height fog, as [`RenderData::fog`](crate::RenderData::fog) gives it: its density, an
-/// extinction, the share of light it takes out over a unit of the world, at `height`, thinning
-/// exponentially above it by `falloff`, and thickening as far below it, from `start` along the way
-/// from the eye. Of the light it takes out, it scatters `color` toward the eye, of the light that
-/// reaches it: from all around, the sky's, or without a sky `luminance`, and the sun's, the
-/// brightest directional light's, round the way toward it, in a lobe as sharp as `sharpness`. It
-/// casts and takes no shadows, so the sun lights all of it, `sun` times as much as it would out in
-/// the open.
+/// Height fog, as [`RenderData::fog`](crate::RenderData::fog) gives it. Its density is `density` at
+/// `height`, thinning exponentially above by `falloff` and thickening below, from `start` along the
+/// way from the eye. It scatters `color` of the light reaching it: the sky's from all around
+/// (`luminance` without a sky), and the sun's (the brightest directional light) in a lobe as sharp
+/// as `sharpness`. It casts and takes no shadows, so `sun` scales the sun's light.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fog {
-    /// The share of the light it takes out over a unit of the world at `height`, the fog's
-    /// extinction there: 0.02 by default, which lets through a third of the light from 50 units
-    /// away at that height, and none at all for 0, which leaves the view as it is without fog.
+    /// The extinction at `height`: the share of light taken out per world unit. 0.02 by default,
+    /// letting a third of the light through from 50 units away. 0 shows no fog.
     pub density: f32,
-    /// How fast it thins with height, per unit: its density at `height + h` is `density × e^(-falloff
-    /// × h)`, halving every 0.69 / `falloff` units up, and doubling as far down. 0.2 by default; 0
-    /// fills the world alike at every height.
+    /// How fast it thins with height, per unit: the density at `height + h` is `density ×
+    /// e^(-falloff × h)`, halving every 0.69 / `falloff` units up. 0.2 by default; 0 is alike at
+    /// every height.
     pub falloff: f32,
-    /// The height, along +Y, at which its density is `density`.
+    /// Along +Y.
     pub height: f32,
-    /// How far from the eye it starts, in units of the world: what's nearer shows unfogged. 0 by
-    /// default.
+    /// Its distance from the eye, in world units: what's nearer shows unfogged. 0 by default.
     pub start: f32,
-    /// The most of the light from what's behind it it takes out, from 0 to 1: 1, the default,
-    /// hides what's far enough away, the sky among it, behind the fog; less lets that much of it
-    /// show through, however far.
+    /// The most of the light from behind it that it takes out, 0 to 1. 1 (the default) hides what's
+    /// far enough away, the sky included; less lets that much show through at any distance.
     pub opacity: f32,
-    /// The share of the light reaching it that it scatters toward the eye, rather than absorbing,
-    /// in linear RGB: white by default, as water's droplets scatter every color alike.
+    /// The share of the light reaching it that it scatters toward the eye rather than absorbs, in
+    /// linear RGB. White by default, as water droplets scatter every color alike.
     pub color: Vec3,
-    /// The luminance, in candela per square meter, of the light that reaches it from all around in
-    /// a world without a sky, in its place, before the exposure, as light is: 10,000 by default,
-    /// about a bright day's sky, which shows its color at a quarter on a sunny day's exposure.
+    /// The luminance of the light from all around in a world without a sky, in cd/m², before
+    /// exposure. 10,000 by default, about a bright day's sky.
     pub luminance: f32,
-    /// How much of the sun's light reaches it: 1, the default, as out in the open; less where
-    /// shadows the fog doesn't take, as a courtyard's walls, would keep much of it out.
+    /// How much of the sun's light reaches it. 1 (the default) is the open; less stands in for
+    /// shadows the fog doesn't take, as of a courtyard's walls.
     pub sun: f32,
-    /// How much more of the sun's light it scatters on toward the way the light goes than any other
-    /// way: Henyey-Greenstein's g, from 0, alike every way, toward 1, a glow round the sun that
-    /// narrows and brightens as it nears 1, kept within 0.99. 0.6 by default.
+    /// How much more of the sun's light it scatters forward than other ways: Henyey-Greenstein's g.
+    /// 0 is alike every way; toward 1, a glow round the sun narrows and brightens. Clamped to 0.99.
+    /// 0.6 by default.
     pub sharpness: f32,
 }
 
@@ -86,8 +79,8 @@ impl Default for Fog {
 }
 
 impl Fog {
-    /// The name of the first of its fields that isn't finite, a NaN or an infinity, which would
-    /// turn the whole view black, if any is: such fog shows as none does.
+    /// The name of its first field that's a NaN or an infinity, if any. Such fog would turn the
+    /// view black, so it shows as none.
     pub fn non_finite(&self) -> Option<&'static str> {
         let numbers = [
             ("density", self.density),
@@ -105,15 +98,13 @@ impl Fog {
         (numbers.into_iter()).find_map(|(name, number)| (!number.is_finite()).then_some(name))
     }
 
-    /// Whether it fogs anything, as fog of a density of 0 or less, or of none, or whose numbers
-    /// aren't finite, doesn't.
+    /// Whether it fogs anything: not with a density of 0 or less, or a non-finite field.
     pub(crate) fn shows(&self) -> bool {
         self.density > 0.0 && self.non_finite().is_none()
     }
 }
 
-/// What shaders read of the fog, through the frame's data: `Fog` in `shaders/mesh.slang`, field for
-/// field, which says what each is. Its default has none, which fogs nothing.
+/// `Fog` in `shaders/mesh.slang`, field for field, which documents them. The default fogs nothing.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, NoUninit)]
 pub(crate) struct FogData {
@@ -130,10 +121,8 @@ pub(crate) struct FogData {
 }
 
 impl FogData {
-    /// The data of `fog`, if it shows, as a frame of `exposure` lit by `lights` takes it: lit from
-    /// all around by its sky's light, of luminance `sky`, in a frame with a sky, or by its own
-    /// luminance otherwise; and from the brightest directional light that shines, the first of
-    /// those as bright, as the sun. None for fog that doesn't show.
+    /// `fog`'s data at `exposure`, or the default if it doesn't show. It's lit from all around by
+    /// the sky's luminance `sky`, or its own without a sky, and by [`sun`].
     pub(crate) fn new(fog: Option<Fog>, sky: Option<f32>, lights: &[Light], exposure: f32) -> Self {
         let Some(fog) = fog.filter(Fog::shows) else {
             return Self::default();
@@ -158,8 +147,8 @@ impl FogData {
     }
 }
 
-/// The way toward the sun, a unit vector, and its light, in lux: of the brightest of `lights` that's
-/// directional and shines some way, the first of those as bright, as the shadows take theirs.
+/// The way toward the sun, a unit vector, and its light in lux: the brightest directional light
+/// that shines some way, the first among equals, as for shadows.
 fn sun(lights: &[Light]) -> Option<(Vec3, Vec3)> {
     let luminance = |color: Vec3| color.dot(Vec3::new(0.2126, 0.7152, 0.0722));
     (lights.iter())
@@ -174,7 +163,7 @@ fn sun(lights: &[Light]) -> Option<(Vec3, Vec3)> {
         })
 }
 
-/// What the fog's pass pushes: `FogPush` in `shaders/fogging.slang`, field for field.
+/// `FogPush` in `shaders/fogging.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct FogPush {
@@ -185,13 +174,11 @@ struct FogPush {
     target: u32,
 }
 
-/// What fogs the view's colors, from its depth.
+/// Fogs the view's colors from its depth.
 pub(crate) struct FogPass {
     pipeline: ComputePipeline,
 }
 
-/// The fog's pass in a frame's graph: the pass, and the view's size, its depth, which it samples,
-/// and its colors, which it fogs.
 pub(crate) struct Plan {
     pass: PassId,
     size: [u32; 2],
@@ -206,9 +193,8 @@ impl FogPass {
         })
     }
 
-    /// Declares in `graph` the pass that fogs the view's `colors`, of `size` pixels, from its
-    /// `depth`, sampling `lit` too, the images the sky's light is in, in the frame that prefilters
-    /// them.
+    /// Declares the pass that fogs `colors` from `depth` in `graph`. It also samples `lit`, the
+    /// sky's light images, in the frame that prefilters them.
     pub(crate) fn plan(
         graph: &mut Graph,
         size: [u32; 2],
@@ -228,9 +214,8 @@ impl FogPass {
         }
     }
 
-    /// Records `plan`'s pass, the next of `frame`'s, of the view drawn by `clip_from_world`, from
-    /// the world to its clip space, offset as antialiasing offsets it, whose fog and sky shaders
-    /// read from the frame's data at the address `data`.
+    /// Records `plan`'s pass, the frame's next. `clip_from_world` includes antialiasing's offset.
+    /// `data` is the frame's data, which the fog and sky shaders read.
     pub(crate) fn record(
         &self,
         frame: &mut Frame<'_>,
@@ -268,10 +253,8 @@ mod tests {
         }
     }
 
-    /// Fog that doesn't show, as of no density, or none at all, fogs nothing; fog that does scatters
-    /// its color of the sky's light, in a frame with a sky, or else of its own luminance, and of the
-    /// brightest directional light's, from the way toward it, each times the exposure, and lets
-    /// through at least what its opacity leaves.
+    /// Fog that doesn't show fogs nothing. Each light is times the exposure, and at least what the
+    /// opacity leaves comes through.
     #[test]
     fn fog_takes_its_light_from_the_sky_or_its_own_and_the_brightest_sun() {
         let lights = [
@@ -302,7 +285,7 @@ mod tests {
         );
         let unlit = FogData::new(Some(fog), None, &lights, 0.5);
         assert_eq!(unlit.ambient, Vec3::new(50.0, 25.0, 12.5));
-        // The first of the two as bright, of a way, the point light and the one of no way aside.
+        // The first of the two equally bright. The point light and the one of no way are skipped.
         assert_eq!(unlit.to_sun, Vec3::Z);
         assert_eq!(unlit.sun, Vec3::new(0.25, 0.5, 0.0625));
         assert_eq!(unlit.least, 0.25);
@@ -316,8 +299,7 @@ mod tests {
         assert_eq!(FogData::new(Some(sharp), None, &[], 1.0).lobe, SHARPEST);
     }
 
-    /// Fog with a NaN or an infinity in any of its numbers names it, doesn't show and fogs nothing,
-    /// as its light would turn the whole view black.
+    /// Its light would turn the view black.
     #[test]
     fn fog_with_a_number_that_isnt_finite_names_it_and_fogs_nothing() {
         let finite = Fog::default();

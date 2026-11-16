@@ -1,9 +1,8 @@
-//! Ambient occlusion: how much of the light from all around reaches each point the game's view
-//! shows, past what's near it, from the view's depth, as `shaders/ao.slang` computes it, XeGTAO's
-//! ground-truth ambient occlusion, in compute passes once what's opaque in the view has drawn its
-//! depth and before it's shaded, which darkens the sky's light by it, into an image of the view's
-//! size; averaged over the frames before by a [`History`] of its own, so that its noise, which is on
-//! the screen, doesn't stay there as the view moves.
+//! Ambient occlusion: how much of the light from all around reaches each point the view shows, past
+//! what's near it, from the view's depth. `shaders/ao.slang` computes XeGTAO's ground-truth ambient
+//! occlusion in compute passes, after the opaque depth and before shading, into an image of the
+//! view's size. A [`History`] averages it over frames, so its screen-space noise doesn't stay put
+//! as the view moves.
 
 use std::sync::Arc;
 
@@ -16,51 +15,46 @@ use gg_gpu::{
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ao.spv"));
 
-/// How many pixels across and down a workgroup of the occlusion or a denoise takes: `GROUP` in
-/// `shaders/ao.slang`. The prefilter's threads take 2 by 2 pixels each.
+/// Pixels across and down per occlusion or denoise workgroup: `GROUP` in `shaders/ao.slang`. Each
+/// prefilter thread takes 2 by 2 pixels.
 const GROUP: u32 = 8;
 
-/// How many levels the view-space depth has: `LEVELS` in `shaders/ao.slang`, XeGTAO's
+/// The view-space depth's levels: `LEVELS` in `shaders/ao.slang`, XeGTAO's
 /// `XE_GTAO_DEPTH_MIP_LEVELS`.
 const LEVELS: u32 = 5;
 
-/// The power a strength of 1 raises the visibility to: XeGTAO's `XE_GTAO_DEFAULT_FINAL_VALUE_POWER`.
+/// The power a strength of 1 raises visibility to: XeGTAO's `XE_GTAO_DEFAULT_FINAL_VALUE_POWER`.
 const FINAL_VALUE_POWER: f32 = 2.2;
 
-/// How much a denoise keeps of each pixel's own term, against its neighbors' weights: the last's,
-/// XeGTAO's `DenoiseBlurBeta`, and those before it a fifth of that, which blur more.
+/// How much a denoise keeps of each pixel's own term against its neighbors': XeGTAO's
+/// `DenoiseBlurBeta` for the last, a fifth of it for those before, which blur more.
 const BLUR: f32 = 1.2;
 
-/// How many times the occlusion is denoised: three times, XeGTAO's soft preset, however the view is
-/// antialiased. XeGTAO denoises once, its sharp preset, where temporal antialiasing averages its
-/// noise over the frames; here the history averages 8 frames' noise in a still view, as
-/// [`History::noise`] says, and 8 frames' denoised once averaged to a grainier occlusion than
-/// denoised three times, by about a sixth, in the measure of the GPU test
-/// `ambient_occlusion_averages_its_noise_away`, as temporal antialiasing averaged them; and what
-/// bounds the history, what the last denoise's terms range over round each pixel, is the wider the
-/// fewer denoises come before it, which leaves more of a trail behind what moves.
+/// Denoises per frame: XeGTAO's soft preset, whatever the antialiasing. XeGTAO's sharp preset (one)
+/// relies on temporal antialiasing; here the history averages 8 frames, as [`History::noise`] says.
+/// One denoise averaged that way is grainier than three by about a sixth, per the GPU test
+/// `ambient_occlusion_averages_its_noise_away`. Fewer denoises also widen the range that bounds the
+/// history, leaving more trail behind what moves.
 const DENOISES: usize = 3;
 
-/// How many frames' noise in turn a still view's occlusion takes, which its history averages, as
-/// many as temporal antialiasing has offsets, so that each offset draws a still pixel as it did a
-/// cycle before, as the resolve asks of what it keeps unclipped; and how many such cycles of
-/// XeGTAO's 64 frames' noise there are, which a view that moves goes on through.
+/// Frames of noise a still view cycles through, which its history averages: as many as temporal
+/// antialiasing's offsets, so each offset draws a still pixel as it did a cycle before, as the
+/// resolve asks of what it keeps unclipped. Also the number of such cycles in XeGTAO's 64 frames of
+/// noise, which a moving view goes on through.
 const PHASES: u64 = 8;
 const CYCLES: u64 = 8;
 
-/// How the game's view's ambient occlusion darkens the light from all around, as
-/// [`RenderData::ambient_occlusion`](crate::RenderData::ambient_occlusion) has it: the sky's diffuse
-/// and specular light at each point the view shows, by how much of it what's near the point hides,
-/// as its depth shows it, and never the frame's lights.
+/// How the view's ambient occlusion darkens the light from all around, as
+/// [`RenderData::ambient_occlusion`](crate::RenderData::ambient_occlusion) has it. It darkens the
+/// sky's diffuse and specular light by how much of it nearby depth hides, never the frame's lights.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AmbientOcclusion {
-    /// How far from a point what hides its light reaches, in the world's units, fading over the
-    /// farther part: 0.5 by default, XeGTAO's. A radius that isn't positive and finite occludes
-    /// nothing, and none of it runs.
+    /// How far what hides a point's light reaches, in world units, fading over the farther part.
+    /// 0.5 by default, XeGTAO's. Not positive and finite: nothing occludes, and none of it runs.
     pub radius: f32,
-    /// How much it darkens: the power the light it lets through is raised to, as a fraction, times
-    /// XeGTAO's 2.2, so that 1, the default, darkens as XeGTAO does, and more darkens more. A
-    /// strength that isn't positive and finite darkens nothing, and none of it runs.
+    /// How much it darkens: the light let through is raised to this times XeGTAO's 2.2. 1 (the
+    /// default) darkens as XeGTAO does; more darkens more. Not positive and finite: nothing
+    /// darkens, and none of it runs.
     pub strength: f32,
 }
 
@@ -74,18 +68,17 @@ impl Default for AmbientOcclusion {
 }
 
 impl AmbientOcclusion {
-    /// Whether it darkens anything: its radius and its strength are positive and finite.
+    /// Whether radius and strength are both positive and finite.
     pub(crate) fn darkens(&self) -> bool {
         let positive = |value: f32| value.is_finite() && value > 0.0;
         positive(self.radius) && positive(self.strength)
     }
 }
 
-/// What takes the view's pixels back into its space, as `Push` in `shaders/ao.slang` has it: a
-/// point's X and Y there over its depth, from its texture coordinates in the view, from its top
-/// left, `(view_mul * uv + view_add) * depth`; and its view-space depth, its distance ahead of the
-/// view, from the view's depth, `z`, `depth_mul / (depth_add + z)`; as the reflections' trace takes
-/// it too.
+/// Unprojects the view's pixels, as `Push` in `shaders/ao.slang` has it, and as the reflections'
+/// trace does too. From texture coordinates (top left origin), a point's view-space X and Y are
+/// `(view_mul * uv + view_add) * depth`; from the view's depth `z`, its view-space depth (distance
+/// ahead) is `depth_mul / (depth_add + z)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Unprojection {
     pub(crate) view_mul: Vec2,
@@ -95,12 +88,11 @@ pub(crate) struct Unprojection {
 }
 
 impl Unprojection {
-    /// From a perspective's `clip_from_view`, as [`Viewpoint`](crate::Viewpoint)'s projection
-    /// makes it and antialiasing moves it: its fourth row (0, 0, -1, 0), each point's clip W its
-    /// distance ahead of the view, `d`, its view space's -Z, so that its normalized X is
-    /// `(row0.x * x - row0.z * d) / d`, and Y alike, and its depth `(row2.w - row2.z * d) / d`,
-    /// which this solves for X, Y and `d`. A view's normalized coordinates are `uv * 2 - 1`, Y down
-    /// as Vulkan's clip space has it, so that the Y found is the view space's, up.
+    /// From a perspective's `clip_from_view`, as [`Viewpoint`](crate::Viewpoint)'s projection makes
+    /// it and antialiasing moves it. Its fourth row is (0, 0, -1, 0), so clip W is the distance
+    /// ahead, `d`, the view space's -Z. Normalized X is `(row0.x * x - row0.z * d) / d`, Y alike,
+    /// and depth `(row2.w - row2.z * d) / d`, which this solves for X, Y and `d`. Normalized
+    /// coordinates are `uv * 2 - 1`, Y down as in Vulkan's clip space, so the Y found points up.
     pub(crate) fn new(clip_from_view: Mat4) -> Self {
         let [row0, row1, row2] = [0, 1, 2].map(|row| clip_from_view.row(row));
         Self {
@@ -112,7 +104,7 @@ impl Unprojection {
     }
 }
 
-/// What every pass pushes: `Push` in `shaders/ao.slang`, field for field.
+/// `Push` in `shaders/ao.slang`, field for field, for every pass.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Push {
@@ -135,7 +127,7 @@ struct Push {
     accumulation: u64,
 }
 
-/// What the last denoise accumulates by: `Accumulation` in `shaders/ao.slang`, field for field.
+/// `Accumulation` in `shaders/ao.slang`, field for field, for the last denoise.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Accumulation {
@@ -146,37 +138,33 @@ struct Accumulation {
     unused: u32,
 }
 
-/// From the occlusion's view space, X right, Y up and Z ahead, as `shaders/ao.slang` has it, to the
-/// clip space `previous_clip_from_world` takes the world to, through `world_from_view`, the view's,
-/// whose space looks down -Z: where a frame before saw each point this frame's occlusion is of.
+/// From the occlusion's view space (X right, Y up, Z ahead) to `previous_clip_from_world`'s clip
+/// space, through `world_from_view` (looking down -Z): where an earlier frame saw each point.
 fn reprojection(previous_clip_from_world: Mat4, world_from_view: Mat4) -> Mat4 {
     previous_clip_from_world * world_from_view * Mat4::from_scale(Vec3::new(1.0, 1.0, -1.0))
 }
 
-/// The ambient occlusion's history, which lasts from frame to frame: two images of the view's size,
-/// made again as it changes, and dropped by a frame that renders the view without ambient
-/// occlusion, each frame accumulating into the one the frame before didn't, against the other; how
-/// the last frame that accumulated drew the view, which their remaking or dropping forgets; and which
-/// frames' noise the frames take. Apart from [`AoPass`], as a frame takes its images as targets
-/// while it records the passes.
+/// The ambient occlusion's history, kept from frame to frame. Two images of the view's size, remade
+/// when it changes and dropped by a frame without ambient occlusion; each frame accumulates into
+/// the one the last didn't, against the other. It also keeps how the last accumulating frame drew
+/// the view (forgotten with the images), and which frames' noise frames take. It's apart from
+/// [`AoPass`] because a frame takes its images as targets while recording.
 #[derive(Default)]
 pub(crate) struct History {
     images: Option<[StorageImage; 2]>,
     last: Option<Accumulated>,
-    /// How many frames have accumulated, by which each takes the next of [`PHASES`] frames' noise;
-    /// and how many of them saw from elsewhere than the frame before, by which the cycle of those
-    /// that the frames take moves on: so that what's left of the noise as the view moves, which
-    /// the history carries with the world, isn't the same few frames' over and over, which would
-    /// stay on the screen as the view moved slowly. A view that moves every frame takes XeGTAO's 64
-    /// in turn, as it orders them: the noise of each pixel, by a frame's place, is a step of a
-    /// lattice on, which steps of 9 would take under a quarter as far along one of its two ways.
+    /// Frames accumulated, which pick each frame's noise among [`PHASES`]. `moving` counts those
+    /// that saw from elsewhere than the frame before, which moves the cycle on. So the noise left
+    /// in a moving view, which the history carries with the world, isn't the same few frames' over
+    /// and over, which would stay on screen in a slow move. A view moving every frame takes
+    /// XeGTAO's 64 in its order: each pixel's noise steps a lattice by a frame's place, which steps
+    /// of 9 would cover under a quarter as far along one of its two ways.
     accumulated: u64,
     moving: u64,
 }
 
-/// The last frame that accumulated: its number, the view's size, and the matrices from the world to
-/// the view's clip space it drew by, with antialiasing's offset, which its history is of, and
-/// without.
+/// The last frame that accumulated: its number, the view's size, and its world-to-clip matrices
+/// with antialiasing's offset (the history's) and without.
 #[derive(Clone, Copy)]
 struct Accumulated {
     frame: u64,
@@ -186,9 +174,8 @@ struct Accumulated {
 }
 
 impl History {
-    /// Takes what it keeps of the frame before into the space of a frame whose origin is `by`
-    /// further along than the frame before's: what was at `p` is at `p - by`, as
-    /// [`RenderData::origin`](crate::RenderData::origin) says.
+    /// Moves what it keeps into the space of a frame whose origin is `by` further along: what was
+    /// at `p` is at `p - by`, as [`RenderData::origin`](crate::RenderData::origin) says.
     pub(crate) fn moved(&mut self, by: Vec3) {
         if let Some(last) = &mut self.last {
             let along = Mat4::from_translation(by);
@@ -197,8 +184,8 @@ impl History {
         }
     }
 
-    /// Makes its images at `size`, if they're another size, or there are none, forgetting what
-    /// those there accumulated.
+    /// Makes its images at `size` if there are none or they're another size, forgetting what was
+    /// accumulated.
     pub(crate) fn prepare(&mut self, device: &Arc<Device>, size: [u32; 2]) -> Result<()> {
         if (self.images.as_ref()).is_some_and(|images| images[0].size() == size) {
             return Ok(());
@@ -212,42 +199,39 @@ impl History {
         Ok(())
     }
 
-    /// Lets its images go, as a frame that renders the view without ambient occlusion does, and what
-    /// they accumulated: those made again hold nothing until a frame accumulates.
+    /// Drops its images and what they accumulated, as a frame without ambient occlusion does.
+    /// Images made again hold nothing until a frame accumulates.
     pub(crate) fn forget(&mut self) {
-        // They retire until the GPU is done with them.
+        // They retire once the GPU is done with them.
         self.images = None;
         self.last = None;
     }
 
-    /// The matrix from the world to the view's clip space, with antialiasing's offset, that what
-    /// frame `frame` accumulates against was drawn by: the last frame's to accumulate, if it was the
-    /// frame before, of a view of `size` pixels, and the view isn't `cut` to where it sees from.
+    /// The world-to-clip matrix, with antialiasing's offset, that frame `frame` accumulates
+    /// against: the last accumulating frame's, if it was the frame before, at `size`, and the view
+    /// isn't `cut`.
     pub(crate) fn against(&self, frame: u64, size: [u32; 2], cut: bool) -> Option<Mat4> {
         (self.last)
             .filter(|last| !cut && last.frame + 1 == frame && last.size == size)
             .map(|last| last.clip_from_world)
     }
 
-    /// Whether a frame that sees from `unjittered`, from the world to the view's clip space without
-    /// antialiasing's offset, sees from elsewhere than the last frame to accumulate.
+    /// Whether `unjittered` (world to clip, without antialiasing's offset) sees from elsewhere than
+    /// the last accumulating frame.
     fn sees_elsewhere(&self, unjittered: Mat4) -> bool {
         self.last.is_none_or(|last| last.unjittered != unjittered)
     }
 
-    /// Which of XeGTAO's 64 frames' noise the next frame to accumulate takes, as it sees from
-    /// `unjittered`: in a still view, each of [`PHASES`] in turn, as many as temporal antialiasing
-    /// has offsets, whose cycle repeats; in one that moves, the cycle moves on every [`PHASES`]
-    /// frames.
+    /// Which of XeGTAO's 64 frames of noise the next accumulating frame takes. A still view cycles
+    /// through [`PHASES`] of them; a moving one moves the cycle on every [`PHASES`] frames.
     pub(crate) fn noise(&self, unjittered: Mat4) -> u32 {
         let moving = self.moving + u64::from(self.sees_elsewhere(unjittered));
         let cycle = moving / PHASES % CYCLES;
         (self.accumulated % PHASES + PHASES * cycle) as u32
     }
 
-    /// Notes that frame `frame`, submitted, accumulated the occlusion of a view of `size` pixels,
-    /// drawn by `clip_from_world`, with antialiasing's offset, and `unjittered`, without it, for the
-    /// next frame to accumulate against.
+    /// Notes that submitted frame `frame` accumulated at `size`, drawn by `clip_from_world` (with
+    /// antialiasing's offset) and `unjittered` (without), for the next frame to accumulate against.
     pub(crate) fn accumulated(
         &mut self,
         frame: u64,
@@ -265,16 +249,16 @@ impl History {
         });
     }
 
-    /// Its images, as a frame that accumulates takes them as targets, at the indices
-    /// [`AoPass::plan`] gives them: none before [`prepare`](Self::prepare) has made them.
+    /// Its images as targets, at the indices [`AoPass::plan`] gives them. None before
+    /// [`prepare`](Self::prepare).
     pub(crate) fn targets(&mut self) -> impl Iterator<Item = Target<'_>> {
         (self.images.iter_mut()).flat_map(|images| images.iter_mut().map(Target::Storage))
     }
 }
 
-/// The view-space depth's levels of a view of `size` pixels, one after another, each half the size
-/// of the one before, rounded down, at least a texel, as the shader reads them: where each level
-/// after the first starts, in texels, and their bytes together.
+/// The view-space depth's levels at `size`, back to back, each half the last, rounded down, at
+/// least a texel, as the shader reads them. Returns where each level after the first starts, in
+/// texels, and their total bytes.
 fn levels(size: [u32; 2]) -> ([u32; LEVELS as usize - 1], u64) {
     let [width, height] = size.map(u64::from);
     let texels = |level: u32| (width >> level).max(1) * (height >> level).max(1);
@@ -288,8 +272,8 @@ fn levels(size: [u32; 2]) -> ([u32; LEVELS as usize - 1], u64) {
     (starts, start * 4)
 }
 
-/// What computes the view's ambient occlusion: the prefilter of its depth, the occlusion, the
-/// denoises before the last and the last.
+/// Computes the view's ambient occlusion: depth prefilter, occlusion, the denoises before the last,
+/// and the last.
 pub(crate) struct AoPass {
     prefilter: ComputePipeline,
     occlusion: ComputePipeline,
@@ -297,16 +281,13 @@ pub(crate) struct AoPass {
     denoise_last: ComputePipeline,
 }
 
-/// A frame's ambient occlusion in its graph: its passes, the view's size, the depths it takes the
-/// nearer of, the buffers between its passes, the image it ends in, which the passes that shade the
-/// view sample, the [`History`]'s image it accumulates into, and the one it accumulates against, if
-/// the frame before accumulated one it can take, with the matrix from the world to the view's clip
-/// space that drew it.
+/// A frame's ambient occlusion in its graph. It takes the nearer of `depths`, and `history` is the
+/// image it accumulates against, with the matrix that drew it.
 pub(crate) struct Plan {
     size: [u32; 2],
     depths: [ImageId; 2],
     levels: BufferId,
-    /// What the occlusion writes, and the denoises read and write by turns.
+    /// The occlusion writes them, and the denoises read and write them by turns.
     terms: [BufferId; 2],
     image: ImageId,
     accumulated: ImageId,
@@ -317,16 +298,15 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// The view's ambient occlusion: a scalar a pixel, the fraction of the light from all around
-    /// that reaches it.
+    /// The view's ambient occlusion: per pixel, the fraction of the light from all around that
+    /// reaches it.
     pub(crate) fn image(&self) -> ImageId {
         self.image
     }
 }
 
-/// What a frame's ambient occlusion takes of how it draws the view: from the view's space to its
-/// clip space, with antialiasing's offset, under perspective; from the view's space to the world;
-/// the settings; and which of XeGTAO's 64 frames' noise it takes, as [`History::noise`] says.
+/// How a frame draws the view, for its ambient occlusion: `clip_from_view` is a perspective, with
+/// antialiasing's offset, and `noise` is [`History::noise`]'s.
 pub(crate) struct Seen {
     pub(crate) clip_from_view: Mat4,
     pub(crate) world_from_view: Mat4,
@@ -345,12 +325,11 @@ impl AoPass {
         })
     }
 
-    /// Declares in `graph` the ambient occlusion of frame `frame`'s view, of `size` pixels, from
-    /// `depths`, as the passes before drew them, whose nearer at each pixel is what's opaque there,
-    /// into an image its shading passes then sample, denoised [`DENOISES`] times, the last of which
-    /// accumulates it into the image of a [`History`]'s two, at targets `first` and 1 past it, that
-    /// the frame before didn't accumulate into, against the other, if `against`, the matrix from the
-    /// world to the view's clip space that drew it, is given, as [`History::against`] gives it.
+    /// Declares in `graph` frame `frame`'s ambient occlusion at `size`, from `depths` (the nearest
+    /// is what's opaque), into an image shading then samples. It's denoised [`DENOISES`] times. The
+    /// last denoise accumulates into whichever of a [`History`]'s two images (targets `first` and
+    /// `first + 1`) the frame before didn't, against the other, if `against` gives that frame's
+    /// matrix ([`History::against`]).
     pub(crate) fn plan(
         graph: &mut Graph,
         depths: [ImageId; 2],
@@ -412,7 +391,7 @@ impl AoPass {
         }
     }
 
-    /// Records `plan`'s passes, the next of the frame's, as `seen` says the frame draws the view.
+    /// Records `plan`'s passes, the frame's next, as `seen` says the frame draws the view.
     pub(crate) fn record(&self, frame: &mut Frame<'_>, plan: &Plan, seen: &Seen) -> Result<()> {
         let Unprojection {
             view_mul,
@@ -515,9 +494,6 @@ mod tests {
     use crate::taa::jitter;
     use crate::{Projection, Viewpoint};
 
-    /// The history, moved with the origin by `by`, projects a point from where it is from the new
-    /// origin, `p - by`, where it projected it from the old, `p`, with antialiasing's offset and
-    /// without.
     #[test]
     fn the_history_moves_with_the_origin() {
         let viewpoint = Viewpoint {
@@ -543,9 +519,8 @@ mod tests {
         assert!(is.abs_diff_eq(was, 1e-4), "{is}, not {was}");
     }
 
-    /// A point in the view's space, projected by a perspective that antialiasing moves a fraction
-    /// of a pixel, comes back from its texture coordinates and depth where it was: X right, Y up
-    /// and its distance ahead, which the view space's -Z is.
+    /// View-space X is right, Y up, and depth the distance ahead (-Z), through a perspective
+    /// antialiasing moves part of a pixel.
     #[test]
     fn pixels_unproject_to_where_their_points_are() {
         let viewpoint = Viewpoint {
@@ -582,7 +557,7 @@ mod tests {
                 "{found} {expected}"
             );
         }
-        // The view's top row, where V is 0, is up its space; and its depth of 0 is infinitely far.
+        // The view's top row (V of 0) is up its space; a depth of 0 is infinitely far.
         assert!(unprojected.view_add.y > 0.0, "{}", unprojected.view_add.y);
         assert_eq!(
             unprojected.depth_mul / (unprojected.depth_add + 0.0),
@@ -590,8 +565,6 @@ mod tests {
         );
     }
 
-    /// The levels each halve the view, rounded down, to a texel at least, one after another, as
-    /// the shader reads them.
     #[test]
     fn the_depths_levels_halve_the_view() {
         let sizes = [1920 * 1080, 960 * 540, 480 * 270, 240 * 135, 120 * 67];
@@ -606,7 +579,6 @@ mod tests {
         assert_eq!(levels([3, 1]), ([3, 4, 5, 6], (3 + 1 + 1 + 1 + 1) * 4));
     }
 
-    /// Settings that would occlude nothing, or occlude as no number, run none of it.
     #[test]
     fn only_a_positive_finite_radius_and_strength_darken() {
         assert!(AmbientOcclusion::default().darkens());
@@ -622,10 +594,8 @@ mod tests {
         }
     }
 
-    /// A point in the occlusion's view space, as a jittered projection's pixels unproject to it,
-    /// reprojects to where a view that moved and turned since saw it, offset as it was: in the clip
-    /// space that view's own matrix takes the point's place in the world to, its W the point's
-    /// distance ahead of that view.
+    /// From a jittered projection's pixels, offset as it was, to a view that moved and turned
+    /// since: clip W is the distance ahead of that view.
     #[test]
     fn points_reproject_to_where_the_frame_before_saw_them() {
         let view_from_world = |viewpoint: &Viewpoint| {
@@ -671,9 +641,7 @@ mod tests {
         }
     }
 
-    /// A still view takes 8 frames' noise in turn, over and over; one that moves goes on through
-    /// all 64, a frame's on from the one before's but at the end of each 8; and one that stops
-    /// again takes the 8 it stopped among.
+    /// One that stops again cycles through the 8 it stopped among.
     #[test]
     fn a_still_view_cycles_through_8_frames_noise_and_a_moving_one_through_64() {
         let mut history = History::default();
@@ -712,8 +680,7 @@ mod tests {
         assert!(taken.iter().all(|&noise| noise < 64));
     }
 
-    /// What a frame accumulates against is the frame before's, of the view at its size, and none
-    /// once a frame was skipped, the view is another size, or it's cut to where it sees from.
+    /// Not after a skipped frame, a resize, or a cut.
     #[test]
     fn a_history_is_taken_only_from_the_frame_before() {
         let mut history = History::default();

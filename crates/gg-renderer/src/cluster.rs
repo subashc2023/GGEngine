@@ -1,10 +1,10 @@
-//! Clustered lighting: the game's view cut into clusters, tiles across and down it by slices along
-//! its depth, and the frame's lights binned into them on the GPU, each cluster's the lights whose
-//! reach meets it, so that each lit fragment shades by its cluster's lights rather than by every
-//! light, as `shaders/clusters.slang` bins them and `shaders/model.slang` reads them (Olsson,
-//! Billeter and Assarsson, "Clustered Deferred and Forward Shading", HPG 2012, whose slices grow
-//! exponentially along the depth, as these do with perspective); and the frame's lights in the
-//! order shaders read them.
+//! Clustered lighting: the view cut into tiles across and down by slices along its depth, and the
+//! frame's lights binned into those clusters on the GPU. Each lit fragment then shades by its
+//! cluster's lights, not every light. `shaders/clusters.slang` bins them and `shaders/model.slang`
+//! reads them.
+//!
+//! After Olsson, Billeter and Assarsson, "Clustered Deferred and Forward Shading", HPG 2012: slices
+//! grow exponentially with depth under perspective.
 
 use std::sync::Arc;
 
@@ -25,34 +25,31 @@ const DOWN: u32 = 9;
 const SLICES: u32 = 24;
 const CLUSTERS: u32 = ACROSS * DOWN * SLICES;
 
-/// The frame's lights as shaders read them, and the pipeline that bins them into the clusters.
+/// The frame's lights as shaders read them, and the binning pipeline.
 pub(crate) struct Lighting {
     binning: ComputePipeline,
-    /// Those that light everywhere first, as [`Light::everywhere`] says, then the rest, each in the
-    /// order the frame gives them, kept between frames, so that one with no more than the last
-    /// allocates nothing.
+    /// Those [`Light::everywhere`] first, then the rest, each in the frame's order. Kept between
+    /// frames, so a frame with no more lights than the last allocates nothing.
     lights: Vec<GpuLight>,
-    /// How many of them light everywhere.
     everywhere: u32,
-    /// How far ahead of the view the farthest of the rest reaches, which a perspective's slices
-    /// end at.
+    /// How far ahead of the view the farthest binned light reaches, where a perspective's slices
+    /// end.
     reach: f32,
 }
 
-/// The clusters' buffer and the pass that copies the lights to its front and bins them into it, in
-/// a frame's graph.
+/// The clusters' buffer in a frame's graph, and the pass that copies the lights to its front and
+/// bins them.
 pub(crate) struct ClusterPlan {
     pub(crate) buffer: BufferId,
     pass: PassId,
-    /// Each cluster's words, a light binned a bit.
+    /// Each cluster's words, a bit per binned light.
     words: u32,
-    /// The lights' copies' words, after which the clusters' start.
+    /// The light copies' words, after which the clusters start.
     bits: u32,
 }
 
-/// What shaders read of the clusters, through the frame's data: `Clusters` in `shaders/mesh.slang`,
-/// field for field, which says what each is. Its default has none, so that every fragment shades
-/// by every light.
+/// `Clusters` in `shaders/mesh.slang`, field for field, which documents them. The default has no
+/// clusters, so every fragment shades by every light.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, NoUninit)]
 pub(crate) struct ClusterData {
@@ -72,7 +69,7 @@ pub(crate) struct ClusterData {
     unused: u32,
 }
 
-/// What the binning pushes, as `BinPush` in `shaders/clusters.slang` has it.
+/// `BinPush` in `shaders/clusters.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct BinPush {
@@ -106,12 +103,12 @@ impl Lighting {
         })
     }
 
-    /// Puts `lights` in the order shaders read them, and finds how far ahead of `viewpoint` those
-    /// that are binned reach.
+    /// Orders `lights` as shaders read them, and finds how far ahead of `viewpoint` the binned ones
+    /// reach.
     ///
     /// # Panics
     ///
-    /// If there are 2^32 lights or more.
+    /// - There are 2^32 lights or more.
     pub(crate) fn order(&mut self, lights: &[Light], viewpoint: &Viewpoint) {
         let _zone = gg_core::zone!();
         self.lights.clear();
@@ -132,18 +129,16 @@ impl Lighting {
         );
     }
 
-    /// The lights, as shaders read them.
     pub(crate) fn lights(&self) -> &[GpuLight] {
         &self.lights
     }
 
-    /// Declares in `graph` the clusters' buffer and the pass that copies the lights to its front
-    /// and bins them into it, if a light is binned: on the compute queue, beside the graphics
-    /// passes declared between it and the first that reads the clusters.
+    /// Declares the clusters' buffer and their pass in `graph`, if a light is binned. The pass runs
+    /// on the compute queue, beside the graphics passes declared between it and the first reader.
     ///
     /// # Panics
     ///
-    /// If the lights' copies take 2^32 words or more.
+    /// - The light copies take 2^32 words or more.
     pub(crate) fn plan(&self, graph: &mut Graph) -> Option<ClusterPlan> {
         let binned = self.lights.len() as u32 - self.everywhere;
         if binned == 0 {
@@ -165,11 +160,10 @@ impl Lighting {
         })
     }
 
-    /// Records `plan`'s pass, the next of the frame's, which copies the lights, where the frame
-    /// uploaded them, at `lights`, to the front of the clusters' buffer, and bins them into the
-    /// clusters of what `viewpoint` sees of a view `aspect` times as wide as it's tall; and returns
-    /// where the view's shaders read the lights, the copies, and what they read of the clusters:
-    /// `lights` and no clusters if there's no plan, as no light is binned.
+    /// Records `plan`'s pass, the frame's next: copies the lights from `lights`, where the frame
+    /// uploaded them, to the buffer's front, and bins them for `viewpoint` at `aspect` (width over
+    /// height). Returns the lights' address for the view's shaders (the copies) and the clusters'
+    /// data. Without a plan, `lights` and no clusters.
     pub(crate) fn bin(
         &self,
         frame: &mut Frame<'_>,
@@ -209,8 +203,8 @@ impl Lighting {
             across: ACROSS,
             down: DOWN,
             slices: SLICES,
-            // Both projections are symmetric, so that the view's space's X and Y are clip space's
-            // over these, times the depth with perspective.
+            // Both projections are symmetric, so view-space X and Y are clip space's over these,
+            // times the depth with perspective.
             x_scale: 1.0 / projection.x_axis.x,
             y_scale: 1.0 / projection.y_axis.y,
             slice_scale: data.slice_scale,
@@ -225,11 +219,9 @@ impl Lighting {
     }
 }
 
-/// The clusters of what `viewpoint` sees of a view `aspect` times as wide as it's tall, the first
-/// `everywhere` of the frame's lights lighting everywhere, without their words: where a point is
-/// among the tiles, by the view's projection, and its slice, exponentially with perspective, from
-/// the near plane to `reach` ahead, as far as the lights binned reach, or twice the near plane's
-/// distance if that's farther, and evenly without, from the near plane to the far.
+/// The clusters for `viewpoint` at `aspect`, without their words. Tiles follow the projection. With
+/// perspective, slices grow exponentially from the near plane to `reach` (or twice the near
+/// distance, if farther); without, they're even from near to far.
 fn clusters(everywhere: u32, reach: f32, viewpoint: &Viewpoint, aspect: f32) -> ClusterData {
     let clip = viewpoint.view_projection(aspect);
     let [x, y, _, w] = [0, 1, 2, 3].map(|row| clip.row(row));
@@ -251,7 +243,7 @@ fn clusters(everywhere: u32, reach: f32, viewpoint: &Viewpoint, aspect: f32) -> 
         everywhere,
         words: 0,
         bits: 0,
-        // From clip space's -1 to 1 onto 0 to the tiles across, and down, as its Y points down.
+        // Clip space's -1..1 onto 0..tiles across, and down, as its Y points down.
         x: (x + w) * (0.5 * ACROSS as f32),
         y: (y + w) * (0.5 * DOWN as f32),
         w,
@@ -274,8 +266,8 @@ mod tests {
 
     use super::*;
 
-    /// Where `data` puts `p`, as `cluster` in `shaders/model.slang` finds it: across and down the
-    /// tiles, and its slice.
+    /// Where `data` puts `p`, as `cluster` in `shaders/model.slang` finds it: tile across, down,
+    /// and slice.
     fn placed(data: &ClusterData, p: Vec3) -> [f32; 3] {
         let q = p.extend(1.0);
         let w = data.w.dot(q);
@@ -292,16 +284,14 @@ mod tests {
         ]
     }
 
-    /// Whether `a` and `b` are within a thousandth of each other.
     fn near_to(a: [f32; 3], b: [f32; 3]) -> bool {
         a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3)
     }
 
-    /// The clusters span the view: its top left corner at the first tile, its bottom right past the
-    /// last; with perspective, its near plane at the first slice and as far as the lights reach
-    /// past the last, or twice the near plane's distance if they reach no farther, its slices the
-    /// same number to each doubling of the distance; and without, from its near plane to its far,
-    /// the same depth each.
+    /// The clusters span the view: its top left at the first tile, its bottom right past the last.
+    /// With perspective, the near plane is at the first slice, and the lights' reach (at least
+    /// twice the near distance) past the last, each doubling of distance getting the same slices.
+    /// Without, near to far in even slices.
     #[test]
     fn clusters_span_the_view() {
         let aspect = 16.0 / 9.0;

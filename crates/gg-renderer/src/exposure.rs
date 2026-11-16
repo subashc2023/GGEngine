@@ -1,9 +1,9 @@
-//! Exposure that adapts to what the game's view sees, as eyes adapt between sunlight and shade: the
-//! view's light metered each frame, from a histogram of its luminance, in compute passes after it's
-//! antialiased and before it blooms, as `shaders/exposure.slang` says; what the meter found read
-//! back by the frame two later, as it begins, so that no frame waits for it; and the exposure that
-//! frame shades at moved from the frame before's toward what the meter calls for, as [`Adaptation`]
-//! says, on the CPU, where every reader of the exposure takes it as it would a fixed one.
+//! Exposure that adapts to what the game's view sees, as eyes adapt between sunlight and shade.
+//! Compute passes meter the view's light each frame from a histogram of its luminance, after
+//! antialiasing and before bloom (`shaders/exposure.slang`). The frame two later reads the result
+//! back as it begins, so no frame waits. On the CPU, that frame's exposure moves from the last
+//! one's toward what the meter calls for, as [`Adaptation`] says, and every reader takes it as a
+//! fixed one.
 
 use std::sync::Arc;
 
@@ -14,83 +14,77 @@ use gg_gpu::{BufferId, ComputePipeline, Device, Frame, Graph, ImageId, PassId};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/exposure.spv"));
 
-/// How many bins the histogram has, and how many a stop of luminance takes, from 2^-12 candela per
-/// square meter, the log2 the first starts at: `BINS`, `PER_STOP` and `LOWEST` in
-/// `shaders/exposure.slang`; the tests take the last two.
+/// The histogram's bins, the bins per stop, and the first bin's log2 luminance (2^-12 cd/m²):
+/// `BINS`, `PER_STOP` and `LOWEST` in `shaders/exposure.slang`. Only the tests read the last two.
 const BINS: u64 = 256;
 #[cfg(test)]
 const PER_STOP: f32 = 8.0;
 #[cfg(test)]
 const LOWEST: f32 = -12.0;
 
-/// How many pixels across and down a workgroup of the histogram's takes: `GROUP` in
-/// `shaders/exposure.slang`.
+/// Pixels across and down per histogram workgroup: `GROUP` in `shaders/exposure.slang`.
 const GROUP: u32 = 16;
 
-/// The names of the buffers the meter writes what it found into, which frames read back: of the
-/// game's own view, and of a tool's look, whose exposures adapt apart, as
-/// [`RenderData::looked`](crate::RenderData::looked) says.
+/// The names of the buffers frames read the meter back from: the game's view's, and a tool's
+/// look's, which adapt apart, as [`RenderData::looked`](crate::RenderData::looked) says.
 pub(crate) const METERED: [&str; 2] = ["exposure metered", "exposure metered by a look"];
 
-/// The stops between the exposure value, EV100, a reflected-light meter calls for and the log2 of
-/// the luminance it meters, in candela per square meter: log2(100 / 12.5), of ISO 100 and a meter
-/// calibrated to K = 12.5, as Lagarde and de Rousiers's (2014).
+/// The stops between the EV100 a reflected-light meter calls for and the log2 of the luminance it
+/// meters, in cd/m²: log2(100 / 12.5), for ISO 100 and K = 12.5, after Lagarde and de Rousiers
+/// (2014).
 const METER: f32 = 3.0;
 
-/// What lit shading multiplies light by at exposure value `ev100`: 1 over the largest luminance that
-/// doesn't saturate a camera of that exposure value, 1.2 × 2^EV100, as Frostbite's and Filament's do
-/// (Lagarde and de Rousiers, "Moving Frostbite to Physically Based Rendering", 2014).
+/// What lit shading multiplies light by at exposure value `ev100`: 1 over the largest luminance
+/// that doesn't saturate a camera there, 1.2 × 2^EV100, as Frostbite and Filament do (Lagarde and
+/// de Rousiers, "Moving Frostbite to Physically Based Rendering", 2014).
 pub fn light_scale(ev100: f32) -> f32 {
     1.0 / (1.2 * exp2f(ev100))
 }
 
-/// The exposure value at which lit shading multiplies light by `scale`, as [`light_scale`] has it.
+/// The inverse of [`light_scale`].
 fn exposure_value(scale: f32) -> f32 {
     -log2f(1.2 * scale)
 }
 
-/// What colors kept from a frame exposed at `then`, as antialiasing's history and the colors
-/// reflections trace against are, are multiplied by to be of the light of a frame exposed at
-/// `now`, as an adapting exposure changes: `now` over `then`, or 1 where that isn't positive and
-/// finite, which takes no colors to any light.
+/// What colors kept from a frame exposed at `then` (antialiasing's history, reflections' colors)
+/// are multiplied by to match a frame exposed at `now`: `now` over `then`, or 1 where that isn't
+/// positive and finite.
 pub(crate) fn rescale(now: f32, then: f32) -> f32 {
     Some(now / then)
         .filter(|scale| scale.is_finite() && *scale > 0.0)
         .unwrap_or(1.0)
 }
 
-/// How the game's view's exposure adapts to what it sees, as eyes adapt between sunlight and shade,
-/// as [`RenderData::adaptation`](crate::RenderData::adaptation) takes it. Each frame meters the
-/// view's light as Unreal's histogram does, from luminances of 2^-12 candela per square meter,
-/// darker than starlight, to 2^20, in eighths of a stop, leaving out what's darker, black among it:
-/// the mean log2 of the luminance of its pixels between two percentiles of it. A reflected-light
-/// meter of ISO 100 calibrated to K = 12.5 calls for an exposure value of log2(luminance × 100 /
-/// 12.5) for that mean, which less the compensation, kept between `min` and `max`, is what the
-/// exposure moves toward, at speeds of its own up and down. What isn't lit, as sprites, text and
-/// unlit materials, shows its colors at any exposure, as ever, and is metered as though it were lit,
-/// brighter the darker the exposure.
+/// How the game's view's exposure adapts to what it sees, as
+/// [`RenderData::adaptation`](crate::RenderData::adaptation) takes it.
+///
+/// Each frame meters the view's light as Unreal's histogram does: 2^-12 cd/m² (darker than
+/// starlight) to 2^20, in eighths of a stop, leaving out what's darker, black included. The meter
+/// takes the mean log2 luminance of the pixels between two percentiles. A reflected-light meter of
+/// ISO 100 and K = 12.5 calls for an exposure value of log2(luminance × 100 / 12.5). The exposure
+/// moves toward that, less the compensation and kept between `min` and `max`, at its own speeds up
+/// and down. Unlit things (sprites, text, unlit materials) show their colors at any exposure, and
+/// are metered as though lit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Adaptation {
-    /// The lowest exposure value, EV100, it adapts to, at which what calls for a lower one shows
-    /// darker: 0 by default, about a street at night, so that a moonlit world shows as dark as it
-    /// is.
+    /// The lowest EV100 it adapts to; what calls for lower shows darker. 0 by default, about a
+    /// street at night, so a moonlit world shows as dark as it is.
     pub min: f32,
-    /// The highest, at which what calls for a higher one shows brighter: 18 by default, past snow in
-    /// sunlight.
+    /// The highest; what calls for higher shows brighter. 18 by default, past snow in sunlight.
     pub max: f32,
-    /// How many stops brighter than the meter calls for the view is exposed, as a camera's exposure
-    /// compensation: 1 brightens it twice over, -1 darkens it by half; 0 by default.
+    /// Stops brighter than the meter calls for, as a camera's exposure compensation: 1 is twice as
+    /// bright, -1 half. 0 by default.
     pub compensation: f32,
-    /// How fast the exposure value rises toward a brighter view's, in stops a second: 3 by default,
-    /// as Unreal's, eyes adapting to light within seconds.
+    /// How fast the exposure value rises toward a brighter view's, in stops a second. 3 by default,
+    /// as Unreal's: eyes adapt to light within seconds.
     pub speed_up: f32,
-    /// How fast it falls toward a darker view's: 1 by default, as Unreal's, slower, as eyes adapt
-    /// to the dark.
+    /// How fast it falls toward a darker view's. 1 by default, as Unreal's: eyes adapt to dark
+    /// slower.
     pub speed_down: f32,
-    /// The percentile of the view's pixels by their luminance, as a fraction, below which they
-    /// aren't metered: 0.1 by default, leaving out the darkest tenth, as Unreal does.
+    /// The luminance percentile, as a fraction, below which pixels aren't metered. 0.1 by default,
+    /// leaving out the darkest tenth, as Unreal does.
     pub low_percentile: f32,
-    /// The percentile above which they aren't: 0.9 by default, leaving out the brightest tenth.
+    /// The percentile above which they aren't. 0.9 by default.
     pub high_percentile: f32,
 }
 
@@ -109,9 +103,9 @@ impl Default for Adaptation {
 }
 
 impl Adaptation {
-    /// It as the renderer adapts by it: each field but the speeds finite, or the default's, `max`
-    /// no lower than `min`, the speeds no lower than 0, an infinite one moving at once, and the
-    /// percentiles from 0 to 1, the high no lower than the low.
+    /// It as the renderer adapts by it: fields but the speeds finite (else the default's), `max` at
+    /// least `min`, the speeds at least 0 (an infinite one moves at once), the percentiles within
+    /// 0..1, the high at least the low.
     fn bounded(self) -> Self {
         let base = Self::default();
         let finite = |value: f32, or: f32| if value.is_finite() { value } else { or };
@@ -130,7 +124,7 @@ impl Adaptation {
         }
     }
 
-    /// `ev100` kept between `min` and `max`, or `min` for no number.
+    /// `ev100` kept between `min` and `max`, or `min` for NaN.
     fn clamped(&self, ev100: f32) -> f32 {
         if ev100.is_nan() {
             return self.min;
@@ -138,22 +132,21 @@ impl Adaptation {
         ev100.clamp(self.min, self.max)
     }
 
-    /// The exposure value the meter calls for, before the compensation, of a view whose metered
-    /// pixels' mean log2 luminance is `metered`, within the bounds plus the compensation, so that
-    /// less the compensation it's within them.
+    /// The exposure value the meter calls for, before the compensation, for a metered mean log2
+    /// luminance `metered`. Kept within the bounds plus the compensation, so less it, it's within
+    /// them.
     fn called(&self, metered: f32) -> f32 {
         let compensation = self.compensation;
         (metered + METER).clamp(self.min + compensation, self.max + compensation)
     }
 
-    /// What's shown of `called`, the exposure value the meter calls for before the compensation:
-    /// less the compensation, within the bounds.
+    /// What's shown of `called`: less the compensation, within the bounds.
     fn shown(&self, called: f32) -> f32 {
         self.clamped(called - self.compensation)
     }
 }
 
-/// What every pass pushes: `Push` in `shaders/exposure.slang`, field for field.
+/// `Push` in `shaders/exposure.slang`, field for field, for every pass.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct ExposurePush {
@@ -166,16 +159,15 @@ struct ExposurePush {
     high: f32,
 }
 
-/// What meters the view: a pipeline for each of its passes.
+/// Meters the view: a pipeline per pass.
 pub(crate) struct ExposurePass {
     clear: ComputePipeline,
     histogram: ComputePipeline,
     average: ComputePipeline,
 }
 
-/// A frame's metering of the view in its graph: the view's colors and their size; the histogram
-/// and what the meter found, buffers of the graph's own; and the passes that empty the histogram,
-/// count the view's pixels into it, average it and read that back.
+/// A frame's metering in its graph: the view's colors and size, the histogram and result buffers,
+/// and the passes that clear the histogram, count pixels into it, average it and read that back.
 pub(crate) struct Plan {
     colors: ImageId,
     size: [u32; 2],
@@ -197,10 +189,9 @@ impl ExposurePass {
         })
     }
 
-    /// Declares in `graph` the metering of the view's `colors`, of `size` pixels, an image of
-    /// colors of high dynamic range that an earlier pass wrote, and what reads back what the meter
-    /// found, as [`Frame::buffer_read`] gives it by [`METERED`]'s name for the game's own view, or
-    /// a tool's look, if `looked`.
+    /// Declares in `graph` the metering of `colors`, an HDR image an earlier pass wrote, and the
+    /// readback, which [`Frame::buffer_read`] gives by [`METERED`]'s name for the game's view, or a
+    /// tool's look if `looked`.
     pub(crate) fn plan(graph: &mut Graph, colors: ImageId, size: [u32; 2], looked: bool) -> Plan {
         let bins = graph.buffer("exposure histogram", BINS * 4);
         let metered = graph.buffer(METERED[usize::from(looked)], 8);
@@ -226,8 +217,8 @@ impl ExposurePass {
         }
     }
 
-    /// Records `plan`'s metering of a frame that lit shading multiplied light by `scale` in,
-    /// between the percentiles `adaptation` gives.
+    /// Records `plan`'s metering of a frame whose lit shading multiplied light by `scale`, between
+    /// `adaptation`'s percentiles.
     pub(crate) fn record(
         &self,
         frame: &mut Frame<'_>,
@@ -270,8 +261,8 @@ impl ExposurePass {
     }
 }
 
-/// What the meter found, as a frame reads back what one before it did, by [`METERED`]: that
-/// frame's number, and the mean log2 luminance of what it metered, if it metered any of the view.
+/// A readback by [`METERED`]: the metering frame's number, and its mean log2 luminance, if it
+/// metered any of the view.
 pub(crate) fn metered((frame, read): (u64, &[u8])) -> Option<(u64, f32)> {
     let (words, _) = read.as_chunks::<4>();
     let [mean, counted] = *words.first_chunk::<2>()?;
@@ -279,13 +270,8 @@ pub(crate) fn metered((frame, read): (u64, &[u8])) -> Option<(u64, f32)> {
     (counted > 0.0).then_some((frame, mean))
 }
 
-/// What adapts an exposure from frame to frame: the percentiles its frames meter by, bounded, while
-/// it adapts, and the number of the first frame that metered by them; the mean log2 luminance a
-/// frame metered last, which may be of the percentiles before; whether one metered by these has
-/// come back, and whether the exposure has taken one at once since they changed; the exposure value
-/// the meter calls for, before the compensation, as it moves at the speeds; and the time of the
-/// last frame. The fields the CPU alone reads, the bounds, the compensation and the speeds, aren't
-/// kept, but read in each frame, so that a change to them leaves out no metering.
+/// Adapts an exposure from frame to frame. The bounds, compensation and speeds, read by the CPU
+/// alone, aren't kept but read each frame, so changing them leaves out no metering.
 #[derive(Debug, Default)]
 pub(crate) struct Adapting {
     percentiles: Option<[f32; 2]>,
@@ -298,8 +284,7 @@ pub(crate) struct Adapting {
 }
 
 impl Adapting {
-    /// Takes the mean log2 luminance that frame `frame` metered, `mean`, if it adapts and the frame
-    /// metered by its percentiles.
+    /// Takes frame `frame`'s mean, if adapting and the frame metered by the current percentiles.
     pub(crate) fn meter(&mut self, frame: u64, mean: f32) {
         if self.percentiles.is_some() && frame >= self.since {
             self.mean = Some(mean);
@@ -307,14 +292,13 @@ impl Adapting {
         }
     }
 
-    /// What lit shading multiplies light by in frame `number`, which shows `time`, in seconds:
-    /// `scale`, unless `adaptation` adapts it. Then it's the exposure value the meter calls for,
-    /// before the compensation, moved toward what the mean last metered calls for, within the
-    /// bounds, by at most a speed's stops a second over the time since the frame before, never
-    /// back; less the compensation, within the bounds. It starts at `scale`'s exposure value, and
-    /// takes the first mean metered by its percentiles at once, as it does again the first after
-    /// they change, the means metered by those before left out but the last, which it moves on
-    /// toward meanwhile.
+    /// What lit shading multiplies light by in frame `number`, at `time` seconds: `scale`, unless
+    /// `adaptation` adapts it.
+    ///
+    /// Then the exposure value called for, before the compensation, moves toward the last mean's,
+    /// by at most a speed's stops a second, never past it, and shows less the compensation, within
+    /// the bounds. It starts at `scale`'s value. It takes the first mean metered by its percentiles
+    /// at once, also after they change; until then it moves toward the last mean of those before.
     pub(crate) fn step(
         &mut self,
         adaptation: Option<Adaptation>,
@@ -358,7 +342,7 @@ impl Adapting {
                 self.taken = true;
                 target
             } else {
-                // None over no time, rather than an infinite speed times it, which is no number.
+                // No time moves nothing, where an infinite speed times 0 would be NaN.
                 let reach = |speed: f32| if dt > 0.0 { speed * dt } else { 0.0 };
                 let (down, up) = (reach(adaptation.speed_down), reach(adaptation.speed_up));
                 self.called + (target - self.called).clamp(-down, up)
@@ -388,9 +372,9 @@ mod tests {
         high_percentile: 0.9,
     };
 
-    /// The exposure values `adapting` shades frames at under `adaptation`, frame `number` on, a
-    /// tenth of a second apart from `time`, each with what the frame two before metered, if
-    /// anything: `metered[i]` for frame `number + i - 2`.
+    /// The exposure values `adapting` shades frames at under `adaptation`, from frame `number`, a
+    /// tenth of a second apart from `time`. `metered[i]` is what frame `number + i - 2` metered, if
+    /// anything.
     fn shown(
         adapting: &mut Adapting,
         adaptation: Option<Adaptation>,
@@ -402,8 +386,8 @@ mod tests {
         shown_each(adapting, number, time, &frames)
     }
 
-    /// As [`shown`], each frame under an adaptation of its own: `frames[i]` its adaptation and
-    /// what frame `number + i - 2` metered, if anything.
+    /// As [`shown`], each frame under its own adaptation: `frames[i]` is its adaptation and what
+    /// frame `number + i - 2` metered, if anything.
     fn shown_each(
         adapting: &mut Adapting,
         number: u64,
@@ -428,8 +412,7 @@ mod tests {
         assert!(near, "{got:?} against {want:?}");
     }
 
-    /// An exposure value comes back from its scale, as gg-engine's environments' tests check the
-    /// scale's steps.
+    /// gg-engine's environment tests check the scale's steps.
     #[test]
     fn an_exposure_value_comes_back_from_its_scale() {
         for ev100 in [-6.0, 0.0, 7.5, 15.0, 22.0] {
@@ -437,8 +420,7 @@ mod tests {
         }
     }
 
-    /// The meter calls for log2(L × 100 / 12.5): a mean luminance of 4,096, a sunny day's, for
-    /// 15, less the compensation, within the bounds.
+    /// log2(L × 100 / 12.5): 15 for a mean luminance of 4,096, a sunny day's.
     #[test]
     fn the_meter_calls_for_its_luminance_less_the_compensation_within_bounds() {
         let settled = |adaptation: Adaptation, mean| adaptation.shown(adaptation.called(mean));
@@ -456,10 +438,8 @@ mod tests {
         assert_eq!(brighter.called(-20.0), -2.5);
     }
 
-    /// The frames before the first metering comes back shade at the given exposure within the
-    /// bounds; that metering's exposure is taken at once; and after it each frame moves toward
-    /// what the meter last called for at the speeds, by the time since the frame before, down
-    /// slower than up, never past it.
+    /// Until then, frames shade at the given exposure within the bounds. After it, down is slower
+    /// than up, and never past the target.
     #[test]
     fn exposure_jumps_to_its_first_metering_then_moves_at_its_speeds() {
         let mut adapting = Adapting::default();
@@ -496,11 +476,10 @@ mod tests {
         assert_near(&got, &[10.7]);
     }
 
-    /// The fields the CPU alone reads, the compensation, the bounds and the speeds, take effect in
-    /// the frame they change, and the exposure goes on adapting through changes in every frame, as
-    /// a script easing the compensation each tick makes: the compensation shifts what's shown at
-    /// once, while the exposure the meter calls for moves at its speed; a `min` raised past what's
-    /// shown holds it there at once.
+    /// The bounds, compensation and speeds take effect the frame they change, even when they change
+    /// every frame, as a script easing the compensation does. The compensation shifts what's shown
+    /// at once; the called-for exposure moves at its speed. A `min` raised past what's shown holds
+    /// it there at once.
     #[test]
     fn fields_the_cpu_alone_reads_apply_at_once_and_keep_it_adapting() {
         let mut adapting = Adapting::default();
@@ -530,10 +509,8 @@ mod tests {
         assert_near(&got, &[9.5, 9.5]);
     }
 
-    /// A change of the percentiles, which the meter's passes read, leaves out what frames before
-    /// it metered, the exposure moving on toward what the meter last called for, until a frame
-    /// metered by them comes back, which it takes at once. Turned off, the exposure is the given
-    /// one; turned on again, it starts afresh.
+    /// Earlier frames' meterings are left out; meanwhile the exposure moves on toward the last.
+    /// Turned off, the exposure is the given one; turned on again, it starts afresh.
     #[test]
     fn changed_percentiles_wait_for_a_metering_by_them() {
         let mut adapting = Adapting::default();
@@ -557,9 +534,9 @@ mod tests {
         assert_near(&got, &[15.0, 15.0, 8.0]);
     }
 
-    /// Bounds keep an adaptation adapting: NaN and infinite fields their defaults', a `max` below
-    /// `min` at `min`, negative speeds at 0, and percentiles within 0 and 1, the high no lower than
-    /// the low; and an infinite speed jumps at once.
+    /// NaN and infinite fields take the default's, a `max` below `min` is `min`, negative speeds 0,
+    /// and percentiles stay within 0..1, the high at least the low. An infinite speed jumps at
+    /// once.
     #[test]
     fn bounds_keep_an_adaptation_adapting() {
         let wild = Adaptation {
@@ -600,8 +577,7 @@ mod tests {
         assert_near(&got, &[15.0, 15.0, 10.0, 10.0, 10.0]);
     }
 
-    /// What's read back: nothing for a frame that metered no pixels or read none, and the mean of
-    /// one that did, with its number.
+    /// Nothing for a frame that metered no pixels or read none.
     #[test]
     fn a_metering_reads_back_as_its_mean_if_it_counted_any() {
         let bytes = |mean: f32, counted: f32| [mean, counted].map(f32::to_ne_bytes).concat();

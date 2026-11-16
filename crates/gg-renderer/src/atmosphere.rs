@@ -1,14 +1,13 @@
-//! The atmosphere: a sky made from its sun, as Sébastien Hillaire's "A Scalable and Production
-//! Ready Sky and Atmosphere Rendering Technique" (EGSR 2020) makes it, after his reference
-//! implementation (github.com/sebh/UnrealEngineSkyAtmosphere, MIT licensed, Copyright (c) 2020 Epic
-//! Games, Inc.), as `shaders/atmosphere.slang` says: its tables made on the GPU in each frame that
-//! shows it, the sky drawn from them behind the world with the sun's disk, the haze it puts between
-//! the viewer and what's lit, and the cube the sky's light is prefiltered from, as an image sky's
-//! is, again only as the sun turns or the viewer rises past what the light holds.
+//! The atmosphere: a sky made from its sun, after Sébastien Hillaire's "A Scalable and Production
+//! Ready Sky and Atmosphere Rendering Technique" (EGSR 2020) and his reference implementation
+//! (github.com/sebh/UnrealEngineSkyAtmosphere, MIT licensed, Copyright (c) 2020 Epic Games, Inc.),
+//! as `shaders/atmosphere.slang` says. Each frame that shows it makes its tables on the GPU. From
+//! them come the sky behind the world with the sun's disk, the haze between the viewer and what's
+//! lit, and the cube the sky's light is prefiltered from, as an image sky's is.
 //!
-//! Its sun is the frame's brightest directional light that shines, its illuminance taken outside
-//! the atmosphere: the light that reaches the world is dimmed by the transmittance toward the sun
-//! from the viewer, once a frame, on the CPU, by the sums the GPU's table makes.
+//! Its sun is the frame's brightest shining directional light, its illuminance taken outside the
+//! atmosphere. Once a frame, the CPU dims the light that reaches the world by the transmittance
+//! from the viewer toward the sun, summing as the GPU's table does.
 
 use std::sync::Arc;
 
@@ -26,41 +25,38 @@ static COMPUTE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/atmosphere.spv
 static SKY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/atmosphere_sky.spv"));
 
 /// Hillaire's atmosphere, as [`RenderData::atmosphere`](crate::RenderData::atmosphere) gives it:
-/// Rayleigh's and Mie's scattering and ozone's absorption over a planet of Earth's radius, 6,360
-/// km, up to the atmosphere's top, 100 km above it, as the paper's. The world's units are meters,
-/// and its +Y up.
+/// Rayleigh's and Mie's scattering and ozone's absorption, over a planet of Earth's radius (6,360
+/// km) up to 100 km, as the paper's. World units are meters, +Y up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Atmosphere {
-    /// Rayleigh's scattering at the ground, of each channel, in millionths per meter, thinning
-    /// exponentially with height, by a scale height of 8 km: what makes the sky blue and sunsets
-    /// red.
+    /// Rayleigh's scattering at the ground, per channel, in millionths per meter, thinning
+    /// exponentially by a scale height of 8 km: what makes the sky blue and sunsets red.
     pub rayleigh: Vec3,
-    /// Mie's scattering at the ground, of every channel alike, in millionths per meter, thinning
-    /// by a scale height of 1.2 km: the haze's, which whitens the sky round the sun and toward the
+    /// Mie's scattering at the ground, alike in every channel, in millionths per meter, thinning by
+    /// a scale height of 1.2 km: the haze that whitens the sky round the sun and toward the
     /// horizon.
     pub mie: f32,
     /// What Mie's haze absorbs, likewise.
     pub mie_absorption: f32,
-    /// How much of its light Mie's haze scatters forward, onward from the way it came, by
-    /// Henyey-Greenstein's phase function: from -1 all back to 1 all onward, 0 alike every way.
+    /// How much Mie's haze scatters forward, by Henyey-Greenstein's phase function: -1 all back, 1
+    /// all forward, 0 alike every way.
     pub mie_anisotropy: f32,
-    /// Ozone's absorption, of each channel, in millionths per meter, where it's densest, 25 km up,
-    /// thinning to none 15 km above and below.
+    /// Ozone's absorption per channel, in millionths per meter, densest 25 km up, thinning to none
+    /// 15 km above and below.
     pub ozone: Vec3,
-    /// The planet's ground's albedo, which lights the atmosphere from below and shows below the
-    /// horizon.
+    /// The ground's albedo, which lights the atmosphere from below and shows below the horizon.
     pub ground_albedo: Vec3,
-    /// How far above the planet's ground the world's origin is, in meters: the viewer is as high
-    /// as that and its own Y, kept between 10 m and 10 m below the atmosphere's top.
+    /// The world origin's height above the ground, in meters. The viewer is that plus its own Y,
+    /// kept 10 m above the ground and 10 m below the atmosphere's top.
     pub altitude: f32,
-    /// The angle the sun's disk spans across, in radians.
+    /// The angle across the sun's disk, in radians.
     pub sun_size: f32,
 }
 
 impl Atmosphere {
-    /// Earth's, as the paper's: Rayleigh's scattering of (5.802, 13.558, 33.1), Mie's of 3.996,
-    /// absorbing 0.444, anisotropy 0.8, ozone's absorption of (0.650, 1.881, 0.085), all millionths
-    /// per meter; ground of albedo 0.3, the world's origin on it, and a sun 0.5357° across.
+    /// Earth's, as the paper's, in millionths per meter: Rayleigh (5.802, 13.558, 33.1), Mie 3.996
+    /// absorbing 0.444 with anisotropy 0.8, ozone (0.650, 1.881, 0.085). Ground albedo 0.3, the
+    /// origin on the ground, and a sun 0.5357° across.
     pub const EARTH: Self = Self {
         rayleigh: Vec3::new(5.802, 13.558, 33.1),
         mie: 3.996,
@@ -80,9 +76,9 @@ impl Default for Atmosphere {
     }
 }
 
-/// The planet's radius and the atmosphere's top's, in kilometers, the scale heights its Rayleigh
-/// and Mie scattering thin by, and where ozone is densest and how far above and below it thins to
-/// none: `atmosphere.slang`'s.
+/// In kilometers: the planet's radius and the atmosphere's top, the Rayleigh and Mie scale heights,
+/// and ozone's densest height and how far above and below it thins to none. Equal to
+/// `atmosphere.slang`'s.
 const GROUND: f32 = 6360.0;
 const TOP: f32 = 6460.0;
 const RAYLEIGH_HEIGHT: f32 = 8.0;
@@ -90,74 +86,71 @@ const MIE_HEIGHT: f32 = 1.2;
 const OZONE_HEIGHT: f32 = 25.0;
 const OZONE_WIDTH: f32 = 15.0;
 
-/// How far above the ground and below the atmosphere's top the viewer is kept, in kilometers:
-/// below that, the sky's table's map of the horizon breaks down, and above, the sky is a planet
-/// seen from space, which it doesn't draw.
+/// How far above the ground and below the atmosphere's top the viewer is kept, in kilometers.
+/// Lower, the sky table's horizon map breaks down; higher, the sky is a planet seen from space,
+/// which it doesn't draw.
 const OFFSET: f32 = 0.01;
 
-/// What the settings' millionths per meter are per kilometer, as the shaders take them.
+/// Millionths per meter in per-kilometer units, as the shaders take them.
 const PER_KM: f32 = 1.0e-3;
 
-/// How many steps the transmittance takes, as `TRANSMITTANCE_STEPS` in `atmosphere.slang`.
+/// `TRANSMITTANCE_STEPS` in `atmosphere.slang`.
 const TRANSMITTANCE_STEPS: u32 = 40;
 
-/// The tables' sizes, as `atmosphere.slang` has them: the transmittance's, the light scattered
-/// many times over's, the sky's, and the aerial perspective's, its `SLICES` slices of `SLICES` by
-/// `SLICES` froxels side by side.
+/// The tables' sizes, as `atmosphere.slang` has them: transmittance, multiple scattering, sky view,
+/// and aerial perspective (`SLICES` slices of `SLICES` by `SLICES` froxels, side by side).
 const TRANSMITTANCE: [u32; 2] = [256, 64];
 const MULTIPLE: [u32; 2] = [32, 32];
 const SKY_VIEW: [u32; 2] = [192, 108];
 const SLICES: u32 = 32;
 const AERIAL: [u32; 2] = [SLICES * SLICES, SLICES];
 
-/// The side of the cube the sky's light is prefiltered from: the sky is smooth but at the
-/// horizon, and its prefiltered light more so.
+/// The side of the cube the sky's light is prefiltered from. The sky is smooth but at the horizon,
+/// its prefiltered light more so.
 pub(crate) const CUBE: u32 = 128;
 
-/// How far the sun may turn, in radians, before the sky's light is prefiltered again, by how high
-/// it is: [`LEAST_TURN`] at the horizon and below, where the sky's light falls by half to three
-/// quarters each degree, growing by a factor of e every [`TURN_GROWTH`] up, as the light changes
-/// more slowly, to [`MOST_TURN`], so that the light changes by no more than about 2% a step
-/// anywhere; and [`MOST_TURN`] again past [`NIGHT`], once the sky is dark. And the most the viewer
-/// rises or falls, in meters. A sun that turns 3° a second, a day of two minutes, has the light
-/// prefiltered every frame at 60 a second while it's low, and about three times a second high.
+/// How far the sun may turn, in radians, before the sky's light is prefiltered again, by its
+/// height. [`LEAST_TURN`] at the horizon and below, where the light falls by half to three quarters
+/// a degree. Growing by e every [`TURN_GROWTH`] up, as the light changes slower, to [`MOST_TURN`],
+/// so the light changes by at most about 2% a step. [`MOST_TURN`] again past [`NIGHT`], once the
+/// sky is dark. [`RISE`] is the most the viewer rises or falls, in meters. A two-minute day (3° a
+/// second) prefilters every frame at 60 fps while the sun is low, about three times a second high.
 const LEAST_TURN: f32 = 0.01 * std::f32::consts::PI / 180.0;
 const TURN_GROWTH: f32 = 5.0 * std::f32::consts::PI / 180.0;
 const MOST_TURN: f32 = std::f32::consts::PI / 180.0;
 const NIGHT: f32 = -18.0 * std::f32::consts::PI / 180.0;
 const RISE: f32 = 100.0;
 
-/// How many samples each texel of the sky's prefiltered light takes from the atmosphere's cube,
-/// fewer than an image sky's, as the sky is smooth and its light is prefiltered again often.
+/// Samples per texel of the sky's prefiltered light from the atmosphere's cube: fewer than an image
+/// sky's, as the sky is smooth and prefiltered often.
 pub(crate) const SAMPLES: u32 = 64;
 
-/// The threads across and down of the tables' workgroups, as `atmosphere.slang` has them.
+/// Threads across and down per table workgroup, as `atmosphere.slang` has them.
 const GROUP: u32 = 8;
 
 /// Rec. 709's luminance of linear RGB, which picks the brightest light.
 const LUMINANCE: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
 
-/// The atmosphere as a frame lights it and sees it: its sun, the frame's brightest directional
-/// light that shines, the first of those as bright, and how high the viewer is.
+/// The atmosphere as a frame lights and sees it: its sun (the frame's brightest shining directional
+/// light, the first among equals) and the viewer's height.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Seen {
     atmosphere: Atmosphere,
-    /// The light that stands for the sun, by its index among the frame's, if one shines.
+    /// The sun's light, by its index among the frame's, if one shines.
     sun: Option<usize>,
-    /// The unit way toward the sun: straight up without one.
+    /// The unit way toward the sun; straight up without one.
     to_sun: Vec3,
-    /// The sun's illuminance outside the atmosphere, its brightest channel's, in lux: 0 without
-    /// one.
+    /// As [`Seen::illuminance`] returns it.
     illuminance: f32,
-    /// The sun's color, as a share of its illuminance.
+    /// The sun's color as a share of its illuminance.
     tint: Vec3,
-    /// How high the viewer is above the ground, in meters, kept within the atmosphere.
+    /// The viewer's height above the ground, in meters, kept within the atmosphere.
     height: f32,
-    /// What of the sun's light reaches the viewer, by each channel, as [`sunlight`] says.
+    /// What of the sun's light reaches the viewer, per channel, as [`sunlight`] says.
     sunlight: Vec3,
 }
 
-/// Whether `light` shines from a sun: a directional light of some light, shining some way.
+/// Whether `light` is a sun: directional, of some light, shining some way.
 fn shines(light: &Light) -> bool {
     light.kind == LightKind::Directional
         && light.color.cmpgt(Vec3::ZERO).any()
@@ -165,7 +158,6 @@ fn shines(light: &Light) -> bool {
 }
 
 impl Seen {
-    /// `atmosphere` under the sun of `lights`, a frame's, seen from `viewpoint`.
     pub(crate) fn new(atmosphere: Atmosphere, lights: &[Light], viewpoint: &Viewpoint) -> Self {
         let luminance = |light: &Light| light.color.dot(LUMINANCE);
         let sun = (lights.iter().enumerate())
@@ -201,24 +193,23 @@ impl Seen {
         }
     }
 
-    /// The sun's illuminance outside the atmosphere, its brightest channel's, in lux, which the
-    /// tables' light, of an illuminance of 1, is multiplied by: 0 without a sun.
+    /// The sun's illuminance outside the atmosphere, in its brightest channel, in lux: what the
+    /// tables' light (of illuminance 1) is multiplied by. 0 without a sun.
     pub(crate) fn illuminance(&self) -> f32 {
         self.illuminance
     }
 
-    /// Whether it dims a light of the frame's, the one that stands for its sun.
+    /// Whether it dims one of the frame's lights, the sun's.
     pub(crate) fn dims(&self) -> bool {
         self.sun.is_some()
     }
 
-    /// Whether its sun has set: a light stands for it, and none of the light reaches the viewer.
+    /// Whether its sun has set: a light stands for it, and none of its light reaches the viewer.
     pub(crate) fn set(&self) -> bool {
         self.sun.is_some() && self.sunlight == Vec3::ZERO
     }
 
-    /// Dims the light that stands for the sun among `lights`, the frame's it was seen under, by
-    /// what of the sun's light reaches the viewer, as [`sunlight`] says.
+    /// Dims the sun's light among `lights`, the frame's it was seen under, by [`sunlight`].
     pub(crate) fn dim(&self, lights: &mut [Light]) {
         if let Some(sun) = self.sun {
             lights[sun].color *= self.sunlight;
@@ -230,7 +221,7 @@ impl Seen {
         libm::cosf(self.atmosphere.sun_size.max(1.0e-5) / 2.0)
     }
 
-    /// The luminance of the sun's disk for an illuminance of 1: 1 over the solid angle it spans.
+    /// The sun disk's luminance for an illuminance of 1: 1 over its solid angle.
     pub(crate) fn disk(&self) -> f32 {
         1.0 / (2.0 * std::f32::consts::PI * (1.0 - self.sun_cosine())).max(1.0e-12)
     }
@@ -245,8 +236,8 @@ impl Seen {
         }
     }
 
-    /// The atmosphere's data, as its shaders read it, its froxels seeing along the ways
-    /// `ways_from_clip` gives, as [`Viewpoint::ways_from_clip`] gives them unjittered.
+    /// The atmosphere's shader data, its froxels seeing along `ways_from_clip`, the unjittered
+    /// [`Viewpoint::ways_from_clip`].
     pub(crate) fn data(&self, ways_from_clip: Mat4) -> AtmosphereData {
         let atmosphere = &self.atmosphere;
         let mie = atmosphere.mie.max(0.0) * PER_KM;
@@ -266,8 +257,7 @@ impl Seen {
     }
 }
 
-/// What the sky's light was prefiltered from: the atmosphere, its sun's way and color, and how
-/// high the viewer was.
+/// What the sky's light was prefiltered from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Lit {
     atmosphere: Atmosphere,
@@ -277,10 +267,10 @@ pub(crate) struct Lit {
 }
 
 impl Lit {
-    /// Whether light prefiltered from `held` stands for this: of the same atmosphere and sun's
-    /// color, the sun turned no further than [`turn`] lets it at the lower of its two heights,
-    /// and the viewer risen or fallen no more than 100 m since. The sun's illuminance isn't among
-    /// it, as the light is of an illuminance of 1.
+    /// Whether light prefiltered from `held` stands for this: the same atmosphere and sun color,
+    /// the sun turned no further than [`turn`] allows at the lower of its two heights, and the
+    /// viewer moved at most [`RISE`] meters. The illuminance doesn't count, as the light is for an
+    /// illuminance of 1.
     pub(crate) fn near(&self, held: &Lit) -> bool {
         let lower = libm::asinf(self.to_sun.y.min(held.to_sun.y).clamp(-1.0, 1.0));
         // By the chord between the two ways, which keeps a hundredth of a degree in an f32, as a
@@ -293,8 +283,8 @@ impl Lit {
     }
 }
 
-/// How far the sun may turn, in radians, before the sky's light is prefiltered again, at
-/// `elevation` radians above the horizon, as [`LEAST_TURN`] says.
+/// How far the sun may turn, in radians, at `elevation` radians above the horizon, as
+/// [`LEAST_TURN`] says.
 fn turn(elevation: f32) -> f32 {
     if elevation < NIGHT {
         MOST_TURN
@@ -303,8 +293,8 @@ fn turn(elevation: f32) -> f32 {
     }
 }
 
-/// How far along `way`, a unit vector, from `from` a ray first meets the sphere of `radius` round
-/// the planet's center, 0 from inside it; -1 if it doesn't, as `nearest` in `atmosphere.slang`.
+/// How far along unit `way` from `from` a ray first meets the sphere of `radius` round the planet's
+/// center: 0 from inside it, -1 if it doesn't. As `nearest` in `atmosphere.slang`.
 fn nearest(from: Vec3, way: Vec3, radius: f32) -> f32 {
     let b = from.dot(way);
     let c = from.dot(from) - radius * radius;
@@ -325,7 +315,7 @@ fn nearest(from: Vec3, way: Vec3, radius: f32) -> f32 {
     }
 }
 
-/// What takes light away, per kilometer, at a point `radius` kilometers from the planet's center.
+/// Extinction per kilometer at `radius` kilometers from the planet's center.
 fn extinction(atmosphere: &Atmosphere, radius: f32) -> Vec3 {
     let height = radius - GROUND;
     let rayleigh = atmosphere.rayleigh.max(Vec3::ZERO) * libm::expf(-height / RAYLEIGH_HEIGHT);
@@ -335,13 +325,13 @@ fn extinction(atmosphere: &Atmosphere, radius: f32) -> Vec3 {
     (rayleigh + Vec3::splat(mie) + atmosphere.ozone.max(Vec3::ZERO) * ozone) * PER_KM
 }
 
-/// The share of light that comes from outside the atmosphere to a point `radius` kilometers from
-/// the planet's center along a way of zenith cosine `mu`, or from the ground, if that's in the way:
-/// `optical_depth` in `atmosphere.slang`, which the GPU's table of it sums alike.
+/// The share of light reaching a point `radius` kilometers from the planet's center, along a way of
+/// zenith cosine `mu`, from outside the atmosphere, or from the ground if that's in the way.
+/// `optical_depth` in `atmosphere.slang`, which the GPU's table sums alike.
 pub(crate) fn transmittance(atmosphere: &Atmosphere, radius: f32, mu: f32) -> Vec3 {
     let from = Vec3::new(0.0, radius, 0.0);
     let way = Vec3::new((1.0 - mu * mu).max(0.0).sqrt(), mu, 0.0);
-    // To the ground, if the way goes into it, and otherwise out of the atmosphere.
+    // To the ground, if the way goes into it, otherwise out of the atmosphere.
     let bottom = nearest(from, way, GROUND);
     let top = nearest(from, way, TOP).max(0.0);
     let end = if bottom > 0.0 { top.min(bottom) } else { top };
@@ -362,10 +352,10 @@ pub(crate) fn transmittance(atmosphere: &Atmosphere, radius: f32, mu: f32) -> Ve
     )
 }
 
-/// What of a sun's light reaches a point `radius` kilometers from the planet's center, its center
-/// at zenith cosine `mu`: the transmittance toward it, times the share of its disk above the
-/// horizon, from all of it with its disk's lowest point at the horizon, to none with its highest,
-/// so that the light fades as the sun sets rather than going out at once; none once it's set.
+/// What of a sun's light reaches a point `radius` kilometers from the planet's center, the sun's
+/// center at zenith cosine `mu`. The transmittance toward it, times the share of its disk above the
+/// horizon: all of it with the disk's lowest point at the horizon, none with its highest. So the
+/// light fades as the sun sets, rather than going out at once.
 fn sunlight(atmosphere: &Atmosphere, radius: f32, mu: f32) -> Vec3 {
     let share = GROUND / radius;
     let horizon = -(1.0 - share * share).max(0.0).sqrt();
@@ -380,8 +370,7 @@ fn sunlight(atmosphere: &Atmosphere, radius: f32, mu: f32) -> Vec3 {
     transmittance(atmosphere, radius, mu.max(horizon + 1.0e-4)) * shown
 }
 
-/// The atmosphere as its shaders read it: `Atmosphere` in `shaders/atmosphere.slang`, field for
-/// field, in kilometers.
+/// `Atmosphere` in `shaders/atmosphere.slang`, field for field, in kilometers.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit)]
 pub(crate) struct AtmosphereData {
@@ -393,32 +382,29 @@ pub(crate) struct AtmosphereData {
     mie_extinction: f32,
     ground_albedo: Vec3,
     mie_anisotropy: f32,
-    /// The unit way toward the sun, and how far the viewer is above the ground, in kilometers: a
-    /// height rather than a radius, as an f32 keeps its meters, which it loses at the planet's
-    /// radius.
+    /// The unit way toward the sun, and the viewer's height above the ground in kilometers. A
+    /// height, not a radius: an f32 loses meters at the planet's radius.
     sun: Vec3,
     height: f32,
-    /// The sun's color, as a share of its illuminance, and the cosine of its disk's radius.
+    /// The sun's color as a share of its illuminance, and the cosine of its disk's radius.
     tint: Vec3,
     sun_cosine: f32,
 }
 
 /// The aerial perspective's part of the frame's data: `Aerial` in `shaders/mesh.slang`, field for
-/// field, its `luminance` 0 in a frame without an atmosphere.
+/// field. `luminance` is 0 without an atmosphere.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, NoUninit)]
 pub(crate) struct AerialData {
-    /// From the world to clip space, unjittered, where a point falls among the froxels.
+    /// World to clip space, unjittered: where a point falls among the froxels.
     clip_from_world: Mat4,
-    /// The froxels' slot in the bindless set.
+    /// The froxels' bindless slot.
     texture: u32,
-    /// What their light is multiplied by, before the exposure: the sun's illuminance.
+    /// What their light is multiplied by before exposure: the sun's illuminance.
     luminance: f32,
 }
 
 impl AerialData {
-    /// The froxels in the slot `texture`, as a view of `clip_from_world`, unjittered, finds
-    /// points among them, of a sun of `illuminance`.
     pub(crate) fn new(clip_from_world: Mat4, texture: u32, illuminance: f32) -> Self {
         Self {
             clip_from_world,
@@ -428,7 +414,7 @@ impl AerialData {
     }
 }
 
-/// What the atmosphere's passes push: `Push` in `shaders/atmosphere.slang`, field for field.
+/// `Push` in `shaders/atmosphere.slang`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Push {
@@ -445,8 +431,8 @@ struct Push {
 }
 
 impl Push {
-    /// What a table's pass pushes, of the atmosphere's data at `atmosphere`, writing the storage
-    /// slot `target`, before it says what else it reads.
+    /// A table pass's push of the atmosphere data at `atmosphere`, writing storage slot `target`,
+    /// before the rest of what it reads.
     fn of(atmosphere: u64, target: u32) -> Self {
         Self {
             world_from_clip: Mat4::ZERO,
@@ -463,9 +449,8 @@ impl Push {
     }
 }
 
-/// What the sky's draw takes: the atmosphere's data's address, the slots of the transmittance's
-/// table and the sky's in its pass, what its light is multiplied by, the sun's illuminance times
-/// the exposure, and its disk's luminance for an illuminance of 1.
+/// What the sky's draw takes. `scale` is the sun's illuminance times the exposure, and `disk` the
+/// disk's luminance for an illuminance of 1.
 pub(crate) struct Drawn {
     pub(crate) atmosphere: u64,
     pub(crate) transmittance: u32,
@@ -474,17 +459,15 @@ pub(crate) struct Drawn {
     pub(crate) disk: f32,
 }
 
-/// The atmosphere's tables and their passes in a frame's graph, the tables the graph's own.
+/// The atmosphere's tables, the graph's own, and their passes in a frame's graph.
 pub(crate) struct Plan {
-    /// The transmittance's, the light scattered many times over's, the sky's and the aerial
-    /// perspective's.
+    /// Transmittance, multiple scattering, sky view and aerial perspective.
     images: [ImageId; 4],
     passes: [PassId; 4],
 }
 
 impl Plan {
-    /// Those the view's passes sample: the transmittance's table, the sky's and the aerial
-    /// perspective's.
+    /// Those the view's passes sample: transmittance, sky view and aerial perspective.
     pub(crate) fn sampled(&self) -> [ImageId; 3] {
         let [transmittance, _, sky_view, aerial] = self.images;
         [transmittance, sky_view, aerial]
@@ -503,8 +486,7 @@ impl Plan {
     }
 }
 
-/// The atmosphere's pipelines: those that make its tables and its sky's cube, and the one that
-/// draws its sky behind the world.
+/// The pipelines that make the tables and the sky's cube, and draw the sky behind the world.
 pub(crate) struct AtmospherePass {
     transmittance: ComputePipeline,
     multiple: ComputePipeline,
@@ -532,8 +514,8 @@ impl AtmospherePass {
                     mesh: None,
                     fragment: Some(c"fragment_main"),
                     format: Format::HDR.with_ids().with_motion().with_depth(),
-                    // Drawn first, at depth 0, which the cleared depth passes, writing none, nor
-                    // any motion, as an image sky is.
+                    // Drawn first, at depth 0, which the cleared depth passes, writing no depth or
+                    // motion, as an image sky is.
                     blend: Blend::Opaque,
                     depth_write: false,
                     ids_write: true,
@@ -544,10 +526,9 @@ impl AtmospherePass {
         })
     }
 
-    /// Adds to `graph` the passes that make the atmosphere's tables, each the graph's own, each in
-    /// a pass that computes, on the graphics queue, as they're images: the transmittance first,
-    /// which the rest read, then the light scattered many times over, then the sky's and the
-    /// aerial perspective's.
+    /// Adds the tables' passes to `graph`: compute passes on the graphics queue, as they write
+    /// images. Transmittance first, which the rest read, then multiple scattering, then sky view
+    /// and aerial perspective.
     pub(crate) fn plan(graph: &mut Graph) -> Plan {
         let transmittance = graph.hdr("atmosphere transmittance", TRANSMITTANCE);
         let multiple = graph.hdr("atmosphere multiple scattering", MULTIPLE);
@@ -576,9 +557,8 @@ impl AtmospherePass {
         }
     }
 
-    /// Records `plan`'s passes, the next of `frame`'s graph to record, which make the tables of
-    /// the atmosphere `data` gives; returns the address its data is uploaded at, for the frame's
-    /// other uses of it.
+    /// Records `plan`'s passes, the next of `frame`'s graph, making the tables of the atmosphere
+    /// `data` gives. Returns the address `data` is uploaded at, for the frame's other uses.
     pub(crate) fn record(
         &self,
         frame: &mut Frame<'_>,
@@ -603,7 +583,7 @@ impl AtmospherePass {
             ..Push::of(address, pass.storage(multiple, 0))
         };
         pass.push_constants(bytemuck::bytes_of(&push));
-        // A workgroup a texel, of a thread a way round it.
+        // A workgroup per texel, a thread per way round it.
         let [width, height] = MULTIPLE;
         pass.dispatch([width, height, 1]);
         drop(pass);
@@ -624,9 +604,9 @@ impl AtmospherePass {
         Ok(address)
     }
 
-    /// Records the pass that makes the first level of the cube `prefiltering`, a plan of the sky's
-    /// light, prefilters, the next of `frame`'s graph to record, from the sky's table that `plan`
-    /// made, without the sun's disk, of the atmosphere's data at `atmosphere`.
+    /// Records the pass that makes the first level of `prefiltering`'s cube, the next of `frame`'s
+    /// graph: from `plan`'s sky table, without the sun's disk, for the atmosphere data at
+    /// `atmosphere`.
     pub(crate) fn cube(
         &self,
         frame: &mut Frame<'_>,
@@ -646,13 +626,13 @@ impl AtmospherePass {
         pass.dispatch([face.div_ceil(GROUP), face.div_ceil(GROUP), 6]);
     }
 
-    /// Draws the atmosphere's sky behind everything the pass draws after it, over the whole of its
-    /// target, as `viewpoint` sees it in a view `aspect` times as wide as it's tall, drawn `jitter`
-    /// off, in its normalized coordinates, as antialiasing draws it, as `drawn` says.
+    /// Draws the atmosphere's sky, as `drawn` says, behind everything the pass draws after it, over
+    /// the whole target. It's seen from `viewpoint` at `aspect` (width over height), offset by
+    /// antialiasing's `jitter` in normalized coordinates.
     ///
     /// # Panics
     ///
-    /// If the pass isn't into an image of [`Format::HDR`] with IDs, motion and a depth image.
+    /// - The pass isn't into an image of [`Format::HDR`] with IDs, motion and a depth image.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
@@ -707,10 +687,9 @@ mod tests {
         }
     }
 
-    /// Straight up from the ground, the transmittance is what the paper's model gives in closed
-    /// form: each scattering's density integrated is its scale height, less what lies past the
-    /// atmosphere's top, and ozone's tent 15 km across; and toward the horizon far less light comes
-    /// through, the blue least, as a low sun reddens.
+    /// Straight up, in closed form: each scattering's integrated density is its scale height, less
+    /// what lies past the top, and ozone's tent is 15 km across. Toward the horizon far less comes
+    /// through, blue least, as a low sun reddens.
     #[test]
     fn the_transmittance_is_the_papers_model() {
         let earth = Atmosphere::EARTH;
@@ -743,7 +722,7 @@ mod tests {
     }
 
     /// The transmittance from `height` km up along a way of zenith cosine `mu` out of the
-    /// atmosphere, as the paper models it, summed in doubles by the midpoints of 200,000 steps.
+    /// atmosphere, as the paper models it, summed in doubles at the midpoints of 200,000 steps.
     fn modelled(earth: &Atmosphere, height: f64, mu: f64) -> [f64; 3] {
         let (ground, top) = (f64::from(GROUND), f64::from(TOP));
         let from = ground + height;
@@ -769,10 +748,8 @@ mod tests {
         depth.map(|depth| libm::exp(-depth))
     }
 
-    /// Toward a low sun, 85°, 89° and 89.9° from the zenith, 10 m up, as the viewer is kept, the
-    /// transmittance the light that reaches the world is dimmed by is the paper's model's, each
-    /// channel within 2%, though the blue that comes through near the horizon is a thousandth of
-    /// the red's.
+    /// At 85°, 89° and 89.9° from the zenith, 10 m up (as low as the viewer goes), each channel
+    /// within 2%, though near the horizon blue comes through at a thousandth of red.
     #[test]
     fn toward_a_low_sun_the_transmittance_is_the_papers_model() {
         let earth = Atmosphere::EARTH;
@@ -787,9 +764,8 @@ mod tests {
         }
     }
 
-    /// The sun is the brightest directional light that shines, the first of those as bright, and
-    /// the light that reaches the world from it is its own dimmed by the transmittance toward it,
-    /// less as it's high than low, and none once it's set; the others aren't dimmed.
+    /// The first among equals. It's dimmed less high than low, and out once set; other lights
+    /// aren't dimmed.
     #[test]
     fn the_brightest_directional_light_is_the_sun_dimmed_by_the_air() {
         let down = Vec3::new(0.0, -1.0, 0.0);
@@ -832,7 +808,7 @@ mod tests {
         assert_eq!((dark.sun, dark.illuminance()), (None, 0.0));
     }
 
-    /// The sun's light fades over its disk's height as it sets, rather than going out at once.
+    /// Over its disk's height, rather than going out at once.
     #[test]
     fn a_setting_sun_fades() {
         let earth = Atmosphere::EARTH;
@@ -848,9 +824,8 @@ mod tests {
         assert!(middle > 0.2 * above, "{middle} of {above}");
     }
 
-    /// The sky's light is prefiltered again once the sun turns past 1° high in the sky, and past
-    /// less the lower it is, the viewer rises past 100 m, the sun's color or the atmosphere
-    /// changes, but not as the sun brightens.
+    /// Past 1° high in the sky, less the lower it is; also once the viewer moves 100 m, or the
+    /// sun's color or the atmosphere changes, but not as the sun brightens.
     #[test]
     fn the_skys_light_is_prefiltered_again_as_the_sun_turns() {
         let sun = |angle: f32, color: Vec3| {
@@ -871,12 +846,12 @@ mod tests {
         assert!(!lit(sun(0.5, Vec3::new(1.0, 0.5, 0.5)), 10.0, earth).near(&held));
         let hazier = Atmosphere { mie: 8.0, ..earth };
         assert!(!lit(sun(0.5, Vec3::ONE), 10.0, hazier).near(&held));
-        // Lower, as the sky's light changes faster, sooner: a hundredth of a degree at the horizon
-        // and below, and about 0.074° 10° up; but past twilight, at night, a degree again.
+        // Lower, sooner, as the light changes faster: a hundredth of a degree at the horizon and
+        // below, about 0.074° at 10°, and a degree again past twilight.
         for (elevation, most) in [(0.0, 0.01), (-5.0, 0.01), (10.0, 0.0739), (-30.0, 1.0)] {
             let from = to_radians(elevation);
             let held = lit(sun(from, Vec3::ONE), 10.0, earth);
-            // Turning down, so that the lower of the two is where it started.
+            // Turning down, so the lower of the two is where it started.
             let turned = |by: f32| lit(sun(from - to_radians(by), Vec3::ONE), 10.0, earth);
             assert!(turned(0.97 * most).near(&held), "{elevation}°");
             assert!(!turned(1.03 * most).near(&held), "{elevation}°");
