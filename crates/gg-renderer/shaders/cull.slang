@@ -1,8 +1,8 @@
 // GPU culling of a frame's opaque runs, per view: the game's view's two passes and the shadow
 // cascades. An instance is kept if its bounding sphere reaches inside every plane of the view, at
-// the level of detail `LodView` in src/mesh.rs picks. Kept instances go into the view's arrays, by
-// level in order, for the run's indirect draws, one per level. `Push` matches `CullPush` in
-// src/mesh/cull.rs field for field; culling.slang holds what meshlets.slang shares.
+// the level of detail `LodView` in src/mesh/draw.rs picks. Kept instances go into the view's
+// arrays, by level in order, for the run's indirect draws, one per level. `Push` matches
+// `CullPush` in src/mesh/cull.rs field for field; culling.slang holds what meshlets.slang shares.
 //
 // The game's view's first pass keeps what its second found unhidden last frame. The second keeps
 // what the first didn't and the depth pyramid doesn't hide, and records what's unhidden for the

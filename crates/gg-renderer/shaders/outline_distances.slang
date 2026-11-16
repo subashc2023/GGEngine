@@ -11,7 +11,7 @@
 [[vk::binding(0, 0)]] Texture2D<uint2> ids[];
 [[vk::binding(2, 0)]] [format("r32f")] RWTexture2DArray<float> scalars[];
 
-// Pixels across and down a workgroup: `GROUP` in src/view.rs for both.
+// Pixels across and down a workgroup: `GROUP_X` and `GROUP_Y` in src/view.rs.
 static const uint GROUP_X = 64;
 static const uint GROUP_Y = 4;
 // The largest reach: `MAX_REACH` in src/view.rs.

@@ -8,13 +8,13 @@
 static const uint BLOCK = 64;
 // The most workgroups a dispatch takes across: `MOST_GROUPS` in src/mesh/cull.rs.
 static const uint MOST_GROUPS = 65535;
-// A mesh's most levels of detail: `MAX_LEVELS` in src/mesh.rs.
+// A mesh's most levels of detail: `MAX_LEVELS` in src/mesh/registry.rs.
 static const uint MAX_LEVELS = 8;
 // An instance a view doesn't draw.
 static const uint CULLED = 0xFFFFFFFF;
 // `Run::meshlets` without meshlets: `NO_MESHLETS` in src/mesh/cull.rs.
 static const uint NO_MESHLETS = 0xFFFFFFFF;
-// The pixels a level's error may span on screen: `LOD_ERROR_PIXELS` in src/mesh.rs.
+// The pixels a level's error may span on screen: `LOD_ERROR_PIXELS` in src/mesh/draw.rs.
 static const float LOD_ERROR_PIXELS = 1.0;
 // The game's view's first pass's slot among the views: `FIRST` in src/mesh/cull.rs.
 static const uint FIRST = 0;

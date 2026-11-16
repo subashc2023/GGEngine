@@ -7,7 +7,7 @@
 
 // A run's instances per copy, a workgroup's: `BLOCK` in src/mesh/cull.rs.
 static const uint BLOCK = 64;
-// A record's parameters: `MeshDraw::MAX_PARAMS` in src/mesh.rs, in words.
+// A record's parameters: `MeshDraw::MAX_PARAMS` in src/mesh/registry.rs, in words.
 static const uint RECORD_WORDS = 16;
 // A copy's `source_params` for one from the scene.
 static const uint SCENE = 0xFFFFFFFF;

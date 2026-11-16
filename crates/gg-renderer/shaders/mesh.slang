@@ -9,7 +9,7 @@
 // - `Fog`: `FogData` in src/fog.rs.
 // - `Aerial`: `AerialData` in src/atmosphere.rs.
 // - `Reflected`: `ReflectionData` in src/reflections.rs.
-// - `Push` and `Frame`: `Push` and `FrameData` in src/mesh.rs.
+// - `Push` and `Frame`: `Push` and `FrameData` in src/mesh/draw.rs.
 
 // The bindless set: cube textures, as the sky's prefiltered light is, through `cubes`; the sampler
 // that compares depth, `COMPARISON_SAMPLER`, through `comparisons`.
@@ -235,7 +235,7 @@ struct Push<V, P> {
     // instance and index in the mesh.
     uint2* meshlets;
     // For their draw into the visibility buffer: its culling run and view pass, as `Push::draw` in
-    // src/mesh.rs says; 0 for any other draw.
+    // src/mesh/draw.rs says; 0 for any other draw.
     uint draw;
     // How many transforms past each instance's is its transform the frame before: 0 where the
     // engine has none, reading the instance's own.
