@@ -8,7 +8,7 @@ mod texture;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use gg_api::asset::{self, Found};
 use gg_api::{Fetch, Project};
@@ -114,9 +114,10 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     // The icon is the executable's and the window's, which the game's build compiles in.
     let icon = project.icon_path(dir);
     let unpacked = |file: &Path| file == manifest || file == fetch || icon.as_deref() == Some(file);
-    let taken = (found.iter())
+    let taken: Vec<_> = (found.iter())
         .filter(|found| !in_mod(&found.path) && !unpacked(&found.file))
-        .filter_map(|found| Some((found, Take::of(&found.path)?)));
+        .filter_map(|found| Some((found, Take::of(&found.path)?)))
+        .collect();
     let mut package = Package {
         writer: Writer::new(
             &project.assets,
@@ -125,28 +126,18 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
         ),
         cooked: BTreeMap::new(),
     };
+    // Made on the job system's threads, then added as a cook one file at a time would: shaders
+    // last, each kind in the scan's order, so it fails as that cook would first.
+    let made = cook::in_order(taken, &|(found, take)| (found, make(found, take)));
     let mut shaders = Vec::new();
     let mut uis = Vec::new();
-    for (found, take) in taken {
-        let Found { path, file } = found;
+    for (Found { path, file }, made) in made {
         let id = ids.get(path).copied();
-        match take {
-            Take::File => package.add(path, id, Kind::File, read(file)?)?,
-            Take::Texture => {
-                let image = cook::read_image(path, file)?;
-                // A Radiance HDR's as BC6H; others' as BC7.
-                let colors = match image.format {
-                    cook::Format::Rgba16f => Compressed::Bc6h,
-                    _ => Compressed::Bc7Srgb,
-                };
-                let ktx2 = texture::compress(path, image.size, &image.pixels, false, colors)?;
-                package.add(path, id, Kind::Texture, ktx2)?;
-            }
-            Take::Model => package.add(path, id, Kind::Model, model(path, file)?)?,
-            Take::Font => package.add(path, id, Kind::Font, cook::bake_font(path, file)?)?,
-            Take::Shader => shaders.push((path, file)),
-            Take::Ui => {
-                let cook::ReadUi { bytes, named } = cook::read_ui(path, file)?;
+        match made {
+            Made::Entry(kind, data) => package.add(path, id, kind, data?)?,
+            Made::Shader(compiled) => shaders.push((path, file, compiled)),
+            Made::Ui(read) => {
+                let cook::ReadUi { bytes, named } = read?;
                 package.add(path, id, Kind::File, bytes)?;
                 uis.push((path, named));
             }
@@ -156,8 +147,8 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     // with the files it read.
     let mut included = BTreeSet::new();
     let mut failed = Vec::new();
-    for (path, file) in shaders {
-        match cook::compile_shader(path, file) {
+    for (path, file, compiled) in shaders {
+        match compiled {
             Ok((spirv, read)) => {
                 let read = read.iter().skip(1);
                 included.extend(read.filter_map(|file| fs::canonicalize(file).ok()));
@@ -188,6 +179,37 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     }
     package.writer.write(out)?;
     Ok(package.cooked.into_values().collect())
+}
+
+/// What [`cook()`] makes of a file, or why it can't, to add to the package.
+enum Made {
+    Entry(Kind, Result<Vec<u8>>),
+    Ui(Result<cook::ReadUi>),
+    /// Its SPIR-V and the files slangc read, its own first.
+    Shader(Result<(Vec<u8>, Vec<PathBuf>)>),
+}
+
+/// What [`cook()`] makes of `found`, taken as `take`.
+fn make(found: &Found, take: Take) -> Made {
+    let Found { path, file } = found;
+    match take {
+        Take::File => Made::Entry(Kind::File, read(file)),
+        Take::Texture => {
+            let ktx2 = cook::read_image(path, file).and_then(|image| {
+                // A Radiance HDR's as BC6H; others' as BC7.
+                let colors = match image.format {
+                    cook::Format::Rgba16f => Compressed::Bc6h,
+                    _ => Compressed::Bc7Srgb,
+                };
+                texture::compress(path, image.size, &image.pixels, false, colors)
+            });
+            Made::Entry(Kind::Texture, ktx2)
+        }
+        Take::Model => Made::Entry(Kind::Model, model(path, file)),
+        Take::Font => Made::Entry(Kind::Font, cook::bake_font(path, file)),
+        Take::Shader => Made::Shader(cook::compile_shader(path, file)),
+        Take::Ui => Made::Ui(cook::read_ui(path, file)),
+    }
 }
 
 /// Finds the font or texture, as `kind` says, that UI `ui` names `name`, in `package` as a run from
@@ -256,24 +278,24 @@ fn find(
 /// compress.
 fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
     let mut model = cook::read_model(path, file)?;
-    let images = (model.images.iter().enumerate())
-        .map(|(i, image)| {
-            let texels = cook::texels(&model, i);
-            let name = format!("{path}#{i}");
-            // A DDS image, which reading the model gives as blocks. BC7's blocks are the same for
-            // colors or values: the texture's use picks the format.
-            if let cook::Format::Bc { mipmapped, .. } = image.format {
-                let compressed = match texels {
-                    Texels::Map(_) => Compressed::Bc7Unorm,
-                    _ => Compressed::Bc7Srgb,
-                };
-                return texture::keep(&name, image.size, &image.pixels, mipmapped, compressed);
-            }
-            let levels = cook::levels(image, texels);
-            // Other images have their full chain of levels, which `levels` made.
-            texture::compress(&name, image.size, &levels, true, Compressed::of(texels))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let compress = |(i, image): (usize, &cook::Image)| {
+        let texels = cook::texels(&model, i);
+        let name = format!("{path}#{i}");
+        // A DDS image, which reading the model gives as blocks. BC7's blocks are the same for
+        // colors or values: the texture's use picks the format.
+        if let cook::Format::Bc { mipmapped, .. } = image.format {
+            let compressed = match texels {
+                Texels::Map(_) => Compressed::Bc7Unorm,
+                _ => Compressed::Bc7Srgb,
+            };
+            return texture::keep(&name, image.size, &image.pixels, mipmapped, compressed);
+        }
+        let levels = cook::levels(image, texels);
+        // Other images have their full chain of levels, which `levels` made.
+        texture::compress(&name, image.size, &levels, true, Compressed::of(texels))
+    };
+    let images = cook::in_order(model.images.iter().enumerate().collect(), &compress);
+    let images = images.into_iter().collect::<Result<Vec<_>>>()?;
     for primitive in &mut model.primitives {
         let blends = primitive.blends();
         let lods = mesh::optimize(

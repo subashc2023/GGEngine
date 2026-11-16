@@ -170,7 +170,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | A warning of a path whose case differs from its file's, and a check that a package holds every file code loads | A file fails from its package alone |
 | Loading assets that scene text names in a tick, for a lockstep joiner's API, and at a server's scene change (`net.no_scene_change`) | A game loads so |
 | Levels of detail: in dev runs, hysteresis, simplified by attributes, small parts pruned, shared borders locked | A pop, color shift or gap shows |
-| Packages: meshes compressed, compression chosen per texture, compressed on threads, bytes alike on every OS | Size, cook time, art or build caches need it |
+| Packages: meshes compressed, compression chosen per texture, one image compressed on several threads, bytes alike on every OS | Size, cook time, art or build caches need it |
 | Import settings in assets' ID files: a part a `.meta` file may add, which older files take the default of | An asset needs settings of its own |
 
 ### ECS, scenes and simulation

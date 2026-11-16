@@ -1,6 +1,7 @@
 //! What `tools/cook` takes from the engine to write a game's package, so its output is what a run
 //! makes of each file: the package's [`Writer`], and fonts, shaders, textures, models and mip
-//! levels made, and cooked models read, as a run does. Not for games.
+//! levels made, and cooked models read, as a run does; and [`in_order`], to make them on the job
+//! system's threads. Not for games.
 
 use std::path::Path;
 
@@ -12,6 +13,7 @@ pub use gg_renderer::{
 
 pub use crate::gltf::{Imported, Primitive};
 pub use crate::image::{Compressed, Format, Image, decode_ktx2};
+pub use crate::jobs::in_order;
 use crate::package::Files;
 pub use crate::package::{Kind, Writer};
 

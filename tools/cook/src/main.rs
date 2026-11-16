@@ -36,7 +36,7 @@ fn main() -> ExitCode {
     });
     let (project, package) = (PathBuf::from(project), PathBuf::from(package));
     let start = Instant::now();
-    // Fonts bake on the job system's threads, as a run's do.
+    // Files cook on the job system's threads, and fonts bake there as a run's do.
     let threads = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
     let cooked = gg_engine::start_jobs(threads).and_then(|()| cook::cook(&project, &package));
     let cooked = match cooked {

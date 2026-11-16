@@ -52,6 +52,18 @@ where
     }
 }
 
+/// `f` of each of `items`, in their order: halves offered to the pool's other threads, down to an
+/// item a job. Outside a pool, in turn on the calling thread.
+pub fn in_order<T: Send, R: Send>(mut items: Vec<T>, f: &(impl Fn(T) -> R + Sync)) -> Vec<R> {
+    if items.len() < 2 {
+        return items.into_iter().map(f).collect();
+    }
+    let rest = items.split_off(items.len() / 2);
+    let (mut done, rest) = join(|| in_order(items, f), || in_order(rest, f));
+    done.extend(rest);
+    done
+}
+
 /// Offers `f` to the pool's other threads and returns at once. Outside a pool, as [`join`] says,
 /// does nothing.
 pub(crate) fn spawn(f: impl FnOnce() + Send + 'static) {
