@@ -4240,6 +4240,7 @@ mod tests {
     /// both peers, which hash alike.
     #[test]
     fn a_lockstep_session_s_delay_follows_its_link() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let mut joiner = Peer::joiner(&mut host);
@@ -4323,6 +4324,7 @@ mod tests {
     /// runs more than a few ticks ahead of the other, and every command applies once on both.
     #[test]
     fn rollback_peers_predict_as_far_as_their_link_needs_and_keep_alike_in_time() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         // 75 ms each way and up to 30 more, a fiftieth lost.
         let link = Conditions {
@@ -4381,6 +4383,7 @@ mod tests {
     /// joiner starts with. Every command applies once on both peers, which hash alike.
     #[test]
     fn a_joiner_s_inputs_go_out_from_the_tick_its_host_s_world_names() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         host.net().delay = 10;
@@ -4402,6 +4405,7 @@ mod tests {
     /// clock, is taken off; so neither peer's delay goes to the most.
     #[test]
     fn a_peer_whose_frames_stop_awhile_leaves_the_delay_as_it_was() {
+        let _real_time = crate::testing::real_time();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let mut joiner = Peer::joiner(&mut host);
         join(&mut host, &mut joiner);
@@ -4433,6 +4437,7 @@ mod tests {
     /// 300 ms, less the few ticks whose inputs it had, and the joiner's first tick's time after.
     #[test]
     fn a_peer_counts_its_stalls_and_their_time() {
+        let _real_time = crate::testing::real_time();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let mut joiner = Peer::joiner(&mut host);
         join(&mut host, &mut joiner);
@@ -4472,6 +4477,7 @@ mod tests {
     /// [`MARGIN`] deviations past the way.
     #[test]
     fn a_delay_falls_to_the_most_the_link_needed_in_the_last_two_seconds() {
+        let _real_time = crate::testing::real_time();
         for rollback in [false, true] {
             let game = Game {
                 rollback,
@@ -4535,6 +4541,7 @@ mod tests {
     /// of order, and their worlds hash alike at each tick run on both peers' inputs.
     #[test]
     fn rollback_peers_over_a_slow_link_apply_each_command_once_and_hash_alike() {
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -4646,6 +4653,7 @@ mod tests {
     /// layer that keeps what it did, as the Inspector's log, counts it.
     #[test]
     fn rollback_peers_apply_each_edit_once() {
+        let _real_time = crate::testing::real_time();
         let peer = |net: &Net, cx: Context| {
             let applied = Rc::new(Cell::new(0));
             let mut stack = Stack::default();
@@ -4878,6 +4886,7 @@ mod tests {
 
         use crate::dirs::tests::Scratch;
 
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -4961,12 +4970,14 @@ mod tests {
     /// As [`peers_change_scenes_in_step`] says, in lockstep.
     #[test]
     fn lockstep_peers_change_scenes_in_step() {
+        let _real_time = crate::testing::real_time();
         peers_change_scenes_in_step(false);
     }
 
     /// As [`peers_change_scenes_in_step`] says, rolling back over a slow link.
     #[test]
     fn rollback_peers_change_scenes_in_step() {
+        let _real_time = crate::testing::real_time();
         peers_change_scenes_in_step(true);
     }
 
@@ -5059,12 +5070,14 @@ mod tests {
     /// As [`peers_stream_cells_in_step`] says, in lockstep.
     #[test]
     fn lockstep_peers_stream_cells_in_step() {
+        let _real_time = crate::testing::real_time();
         peers_stream_cells_in_step(false);
     }
 
     /// As [`peers_stream_cells_in_step`] says, rolling back over a slow link.
     #[test]
     fn rollback_peers_stream_cells_in_step() {
+        let _real_time = crate::testing::real_time();
         peers_stream_cells_in_step(true);
     }
 
@@ -5076,6 +5089,7 @@ mod tests {
         use crate::cells::tests::{Walk, project};
         use crate::dirs::tests::Scratch;
 
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -5121,6 +5135,7 @@ mod tests {
         use crate::cells::tests::{Walk, id_of, project, xs};
         use crate::dirs::tests::Scratch;
 
+        let _real_time = crate::testing::real_time();
         let dir = Scratch::new("net-cells-joiner");
         let root = project(&dir.0);
         let mut host = walker(
@@ -5228,6 +5243,7 @@ mod tests {
     /// both values, and made the same again once.
     #[test]
     fn two_peers_run_each_tick_on_both_players_inputs() {
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let (partings, parted) = mpsc::channel();
         let subscriber = tracing_subscriber::registry()
@@ -5311,6 +5327,7 @@ mod tests {
     /// session's worlds.
     #[test]
     fn peers_are_networked_as_their_layers_attach_and_pick_up() {
+        let _real_time = crate::testing::real_time();
         let seen = |game: &Game| Rc::clone(&game.networked);
         let game = Game::default();
         let host_saw = seen(&game);
@@ -5359,6 +5376,7 @@ mod tests {
     /// after [`REFUSED`], so that the host refuses it once.
     #[test]
     fn a_refused_joiner_waits_before_trying_again() {
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -5386,6 +5404,7 @@ mod tests {
     /// given the host's then joins.
     #[test]
     fn a_joiner_given_another_code_is_refused() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let address = host.net().listening.expect("listening").to_string();
@@ -5531,16 +5550,19 @@ mod tests {
 
     #[test]
     fn lockstep_peers_meet_through_a_relay() {
+        let _real_time = crate::testing::real_time();
         peers_meet_through_a_relay(false, false);
     }
 
     #[test]
     fn rollback_peers_meet_through_a_relay() {
+        let _real_time = crate::testing::real_time();
         peers_meet_through_a_relay(true, false);
     }
 
     #[test]
     fn peers_whose_routers_let_no_packet_through_play_through_the_relay() {
+        let _real_time = crate::testing::real_time();
         peers_meet_through_a_relay(false, true);
     }
 
@@ -5550,6 +5572,7 @@ mod tests {
     /// joins.
     #[test]
     fn a_stranger_who_has_the_room_but_not_the_code_is_refused_at_the_handshake() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let (relay, at) = relay();
         let (mut host, mut joiner) = relayed(&at, Game::default);
@@ -5683,11 +5706,13 @@ mod tests {
 
     #[test]
     fn runs_alone_host_and_join_by_the_code_in_lockstep() {
+        let _real_time = crate::testing::real_time();
         runs_alone_host_and_join_by_the_code(false);
     }
 
     #[test]
     fn runs_alone_host_and_join_by_the_code_predicting() {
+        let _real_time = crate::testing::real_time();
         runs_alone_host_and_join_by_the_code(true);
     }
 
@@ -5696,6 +5721,7 @@ mod tests {
     /// closes.
     #[test]
     fn a_thread_that_connects_ends_with_its_session() {
+        let _real_time = crate::testing::real_time();
         let (relay, at) = relay();
         let looking = Looking::default();
         let host = "the lockstep host";
@@ -5716,6 +5742,7 @@ mod tests {
     /// whose relay can't be reached says so as it tries.
     #[test]
     fn a_run_starts_a_session_of_its_own_only_where_it_can() {
+        let _real_time = crate::testing::real_time();
         let mut nowhere = Peer::alone(1, Game::default(), "127.0.0.1:1");
         nowhere.cx.own.relay = None;
         let no_relay = nowhere.cx.host().expect_err("no relay");
@@ -5757,6 +5784,7 @@ mod tests {
     /// lose their link, the host registers again within [`REGISTER`], and the joiner joins again.
     #[test]
     fn peers_meet_again_through_a_relay_replaced() {
+        let _real_time = crate::testing::real_time();
         let (relay, at) = relay();
         let (mut host, mut joiner) = relayed(&at, Game::default);
         join(&mut host, &mut joiner);
@@ -5778,6 +5806,7 @@ mod tests {
     /// other end's socket, are dropped, and warned of once (`net.forged`).
     #[test]
     fn a_link_takes_the_other_end_s_packets_alone_each_once() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let [(made, made_keys), (taken, taken_keys)] = secure::linked();
         let mut ours = Link::new(taken, taken_keys, true, None).expect("a link");
@@ -5817,6 +5846,7 @@ mod tests {
     /// took: the stream's bytes as sealed, more than its lines', and the packets and their bytes.
     #[test]
     fn each_end_of_a_link_counts_what_the_other_sent() {
+        let _real_time = crate::testing::real_time();
         let [(made, made_keys), (taken, taken_keys)] = secure::linked();
         let mut ends = [
             Link::new(taken, taken_keys, true, None).expect("a link"),
@@ -5872,6 +5902,7 @@ mod tests {
     /// other end's keys open.
     #[test]
     fn a_link_s_stream_holds_none_of_its_lines() {
+        let _real_time = crate::testing::real_time();
         let [(mut made, made_keys), (taken, taken_keys)] = secure::linked();
         let mut link = Link::new(taken, taken_keys, true, None).expect("a link");
         let text = "world 1234 1238 2 50124\ngg-snapshot 2\nend\n";
@@ -5910,6 +5941,7 @@ mod tests {
     /// its line sends, drops its connection before its hello, freeing the joiner's place.
     #[test]
     fn a_line_past_the_most_drops_its_connection() {
+        let _real_time = crate::testing::real_time();
         let mut most = vec![b'x'; MAX_LINE];
         most.push(b'\n');
         let read = read_line(&mut &most[..]).expect("a line");
@@ -5943,6 +5975,7 @@ mod tests {
     /// joiner's place, which a joiner then takes.
     #[test]
     fn a_connection_that_says_no_hello_is_lost() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let _stranger = stranger(&mut host);
@@ -5971,6 +6004,7 @@ mod tests {
     /// on alone; until then it's kept.
     #[test]
     fn a_peer_nothing_comes_from_is_lost() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let (mut stranger, mut sealer) = stranger(&mut host);
@@ -6008,6 +6042,7 @@ mod tests {
     /// there; and the peers go on in step once its frames go on.
     #[test]
     fn a_peer_whose_frames_stop_is_kept_by_its_link_s_thread() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let mut joiner = Peer::joiner(&mut host);
@@ -6035,6 +6070,7 @@ mod tests {
     /// both builds: one of the same source and another package too.
     #[test]
     fn a_joiner_of_another_build_is_refused() {
+        let _real_time = crate::testing::real_time();
         let ours = [
             LOCKSTEP,
             "Tested",
@@ -6128,6 +6164,7 @@ mod tests {
     /// step, its command for its own player applying: neither player steers the other's.
     #[test]
     fn a_peer_s_command_for_the_other_s_player_is_refused_by_both() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
         let mut joiner = Peer::joiner(&mut host);
@@ -6161,6 +6198,7 @@ mod tests {
         use crate::Transform;
         use crate::dirs::tests::Scratch;
 
+        let _real_time = crate::testing::real_time();
         let dir = Scratch::new("net-scene");
         fs::create_dir_all(dir.0.join("scenes")).expect("a directory");
         let path = dir.0.join("scenes").join("level.ron");
@@ -6228,6 +6266,7 @@ mod tests {
 
         use crate::dirs::tests::Scratch;
 
+        let _real_time = crate::testing::real_time();
         let spin = |fields: &str, step: u32| {
             format!(
                 "local Spin = gg.declare(\"Spin\", {{ count = 0{fields} }})\n\
@@ -6298,6 +6337,7 @@ mod tests {
 
         use crate::dirs::tests::Scratch;
 
+        let _real_time = crate::testing::real_time();
         let installed = Scratch::new("net-mods-host");
         let folder = installed.0.join("tally");
         fs::create_dir_all(&folder).expect("a directory");
@@ -6352,6 +6392,7 @@ mod tests {
     #[cfg(feature = "dev")]
     #[test]
     fn patches_apply_on_both_peers_before_the_ticks_the_host_chooses() {
+        let _real_time = crate::testing::real_time();
         for rollback in [false, true] {
             patches_apply_before_the_ticks_the_host_chooses(rollback);
         }
@@ -6505,6 +6546,7 @@ mod tests {
 
         use crate::dirs::tests::Scratch;
 
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -6611,6 +6653,7 @@ mod tests {
         use crate::dirs::tests::Scratch;
         use crate::scene_files::tests::{look_now, save};
 
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -6727,6 +6770,7 @@ mod tests {
     /// one, which loses the other, those before taken.
     #[test]
     fn a_peer_keeps_the_other_s_inputs_to_a_second() {
+        let _real_time = crate::testing::real_time();
         let net = Net::Join(crate::args::Toward::Address("127.0.0.1:1".to_owned()));
         let mut peer = Lockstep::start(&net, TESTED, "Tested", BUILD, &[]).expect("started");
         let now = Instant::now();
@@ -6801,6 +6845,7 @@ mod tests {
     /// load frees them; and no undo reaches past the world the joiner started from.
     #[test]
     fn a_joiner_and_its_host_spawn_into_the_same_slots() {
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);

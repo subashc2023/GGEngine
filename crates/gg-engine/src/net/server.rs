@@ -780,6 +780,7 @@ mod tests {
     /// at a tick no run reaches.
     #[test]
     fn a_client_s_inputs_are_kept_to_a_second_and_a_line() {
+        let _real_time = crate::testing::real_time();
         let [_other, (stream, keys)] = secure::linked();
         let mut link = Link::new(stream, keys, true, None).expect("a link");
         link.joined = true;
@@ -827,6 +828,7 @@ mod tests {
     /// most ticks after; those that apply at their tick aren't late.
     #[test]
     fn a_server_counts_the_inputs_that_came_late() {
+        let _real_time = crate::testing::real_time();
         let listen = crate::args::Listen::at("127.0.0.1:0");
         let mut server = Server::start(&listen, TESTED, "Tested", BUILD, &[]).expect("started");
         let [_other, (stream, keys)] = secure::linked();
@@ -867,6 +869,7 @@ mod tests {
     /// client lost.
     #[test]
     fn clients_predict_their_own_player_and_correct_toward_the_server_s_world() {
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -997,6 +1000,7 @@ mod tests {
     /// client catching up at its pace none would for some 3.5 s.
     #[test]
     fn a_client_that_starts_behind_catches_up_at_once() {
+        let _real_time = crate::testing::real_time();
         let serve = Net::Serve(crate::args::Listen::at("127.0.0.1:0"));
         let mut server = Node::new(&serve, Context::seeded(1));
         let address = match server.stack.session_mut() {
@@ -1059,6 +1063,7 @@ mod tests {
     /// link's go direct.
     #[test]
     fn a_server_and_its_clients_meet_through_a_relay() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let relay = gg_relay::serve("127.0.0.1:0", gg_relay::Limits::default()).expect("a relay");
         let at = relay.address().to_string();
@@ -1114,6 +1119,7 @@ mod tests {
     /// another's player.
     #[test]
     fn a_client_s_command_for_another_s_player_is_refused() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut server = Node::new(
             &Net::Serve(crate::args::Listen::at("127.0.0.1:0")),
@@ -1165,6 +1171,7 @@ mod tests {
     /// joining; a client given the server's joins.
     #[test]
     fn a_client_given_another_code_is_refused() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let mut server = Node::new(
             &Net::Serve(crate::args::Listen::at("127.0.0.1:0")),
@@ -1261,6 +1268,7 @@ mod tests {
         use crate::cells::tests::{id_of, project, xs};
         use crate::dirs::tests::Scratch;
 
+        let _real_time = crate::testing::real_time();
         let (codes, logged) = mpsc::channel();
         let subscriber = tracing_subscriber::registry().with(Codes(codes));
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -1426,6 +1434,7 @@ mod tests {
     /// state.
     #[test]
     fn states_are_written_on_a_thread_of_the_server_s_own() {
+        let _real_time = crate::testing::real_time();
         let logged = crate::testing::logged();
         let gate = Gate::default();
         let serve = Net::Serve(crate::args::Listen::at("127.0.0.1:0"));
@@ -1708,6 +1717,7 @@ mod tests {
     /// push the ball and stand again, one steered over the navmesh, and its emitter bursts.
     #[test]
     fn a_3d_world_s_ticks_run_again_alike_as_a_sync_test() {
+        let _alone = crate::testing::alone();
         let scratch = fox_files("sync-test-3d");
         let mut cx = Context::seeded(1).root(scratch.0.clone());
         let mut stack = Stack::default();
@@ -1758,6 +1768,7 @@ mod tests {
     /// though it catches up past some, as a debug build's client may, reading each state whole.
     #[test]
     fn a_server_s_clients_come_to_its_3d_world() {
+        let _alone = crate::testing::alone();
         let logged = crate::testing::logged();
         let scratch = fox_files("server-3d");
         // The server's ticks' hashes, then each client's, by its seed.

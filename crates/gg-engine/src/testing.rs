@@ -1,9 +1,11 @@
 //! What tests share: the shapes a pass of egui paints, among which the UI's tests find what they
-//! drew, in development builds, which have the UI; and the codes of the events logged, which tests
-//! of what warns, or logs what it did, read.
+//! drew, in development builds, which have the UI; the codes of the events logged, which tests of
+//! what warns, or logs what it did, read; and the lock that keeps tests that load cores for seconds
+//! from running beside those that pace themselves by the clock.
 
 use std::fmt;
 use std::sync::mpsc::Sender;
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[cfg(feature = "dev")]
 use egui::Shape;
@@ -32,6 +34,26 @@ pub(crate) fn painted(shapes: &[ClippedShape]) -> Vec<&Shape> {
         add(&clipped.shape, &mut painted);
     }
     painted
+}
+
+/// What keeps a test that loads cores for seconds from running beside those that run peers, a
+/// server and its clients, or a link, which pace themselves by the clock and allow a busy machine
+/// only so much: [`real_time`] keeps it shared, [`alone`] alone. It guards no data, so a test that
+/// panicked keeping it leaves it as usable as before.
+static REAL_TIME: RwLock<()> = RwLock::new(());
+
+/// Kept for its whole run by a test that runs peers, a server and its clients, or a link: such
+/// tests run beside each other and the rest, but never beside one keeping [`alone`]. Taken once, as
+/// the test starts: a second, while another test waits for [`alone`], may wait for good.
+pub(crate) fn real_time() -> RwLockReadGuard<'static, ()> {
+    REAL_TIME.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Kept for its whole run by a test that loads cores for seconds, as a 3D world's physics and
+/// animation do in a debug build: it runs beside no test keeping [`real_time`], whose threads it
+/// would starve, on a hosted runner of few cores, past what they allow.
+pub(crate) fn alone() -> RwLockWriteGuard<'static, ()> {
+    REAL_TIME.write().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Sends the code of each event that reaches it.
