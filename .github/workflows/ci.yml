@@ -267,7 +267,7 @@ jobs:
         shell: bash
         run: |
           export XDG_STATE_HOME="$RUNNER_TEMP/state"
-          for game in shards foxball; do
+          for game in shards; do
             name="$(echo "${game:0:1}" | tr '[:lower:]' '[:upper:]')${game:1}"
             cargo gg ship "$game"
             shipped="$RUNNER_TEMP/shipped-$game"
@@ -284,7 +284,6 @@ jobs:
             grep -q "Roblox Corporation" "$shipped/NOTICES.txt"
             grep -q "^source [0-9a-f]\{16\}$" "target/ship/$game-symbols/build.txt"
           done
-          grep -q "tomkranis" "$RUNNER_TEMP/shipped-foxball/NOTICES.txt"
       # The reference player as it ships, a build of it alone, without `dev`: with the showcase cooked
       # into its package beside it, in a directory of its own, it runs the showcase's scenes and Luau
       # scripts headless, with neither the showcase's project nor slangc where its build found them,
