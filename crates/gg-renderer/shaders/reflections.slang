@@ -1,41 +1,29 @@
-// Screen-space reflections: what the game's view shows of the world, seen in the mirror of each
-// pixel's point of what's opaque, traced through the view's depth once it's drawn and before the view
-// shades, which then takes the reflection in place of the sky's specular light where a ray found
-// something, blurred as its surface's roughness spreads it, and the sky's where it found nothing.
-// The colors a ray finds are those the frame before showed, antialiased, before its bloom, its grade
-// and its canvas, where what it found showed then, as the camera moved since.
+// Screen-space reflections: what each opaque pixel's mirror shows, traced through the view's depth
+// before the view shades. Shading takes a found reflection in place of the sky's specular light,
+// blurred by roughness. Rays find the colors the frame before showed, antialiased, before its
+// bloom, grade and canvas.
 //
-// In passes, a pixel a thread: `depth_main` takes the nearer of the view's two depths into the first
-// level of a pyramid of the nearest depth, and `reduce_main` each level after from the one before,
-// each texel the nearest, the most, of the 2 by 2 under it, as many of them as there are past the
-// edge, so that each level's sides are half the one's before, rounded up, and texel `c` of level `n`
-// covers the pixels from `c * 2^n` to `(c + 1) * 2^n`; `trace_main` follows each pixel's mirror ray
-// through the pyramid, about its surface's normal, and writes, into the first
-// level of the view's reflections, the colors it found, times how much it trusts them, and that
-// trust, and how far, in pixels, a reflection of it spreads for each unit of the tangent of a lobe's
-// angle, into an image of its own; `blur_main` averages each level of the reflections after the
-// first from the one before, so that shading blurs a reflection by sampling a coarser level; and
-// `keep_main`, once the view is drawn and resolved, copies its colors for the next frame's rays.
+// Passes, a pixel a thread:
+// - `depth_main` and `reduce_main`: a pyramid of the nearest depth, each level's sides half the
+//   last's, rounded up, so texel `c` of level `n` covers pixels `c * 2^n` to `(c + 1) * 2^n`.
+// - `trace_main`: each pixel's mirror ray through the pyramid.
+// - `blur_main`: the reflections' coarser levels, which shading samples to blur them.
+// - `keep_main`: the drawn, resolved view's colors, for the next frame's rays.
 //
-// The trace is AMD's FidelityFX SSSR's, under the MIT license, whose functions these follow:
-// `FFX_SSSR_HierarchicalRaymarch`, which climbs a level each time a ray crosses a texel above what
-// it holds, and steps down one where it doesn't, until it's below what the first level holds; and
-// `FFX_SSSR_ValidateHit`, which trusts what it found less toward the view's edges and the farther
-// behind what's there the ray is:
+// The trace is AMD's FidelityFX SSSR's, under the MIT license; functions follow its
+// `FFX_SSSR_HierarchicalRaymarch` and `FFX_SSSR_ValidateHit`:
 // https://github.com/GPUOpen-Effects/FidelityFX-SSSR/blob/master/ffx-sssr/ffx_sssr.h
-// Positions here are in pixels across and down, and the view's depth; the view's space is
-// ao.slang's, X right, Y up and Z ahead, so that depth is positive.
+// Positions are in pixels across and down, and the view's depth. View space is ao.slang's: X right,
+// Y up and Z ahead, so depth is positive.
 //
-// A surface's normal is its shading's, where a pass before the trace found it: the smooth normal
-// its triangle's corners interpolate, its normal map's bumps among it. visibility.slang's
-// `normal_main` finds it where the view's visibility buffer drew, and model.slang's draws it where
-// the opaque and masked model shaders drew the depth alone of what's drawn otherwise. Elsewhere, as
-// where a game's shader drew what's nearest, it's found from the depth round the point, which is a
-// curved mesh's facets', each a flat mirror, whose rays step at its edges.
+// Normals are the shading's, bumps included, where a pass found them: visibility.slang's
+// `normal_main` for the visibility buffer, and model.slang where the opaque and masked model
+// shaders drew depth alone. Elsewhere, as under a game's shader, they come from the depth: a
+// curved mesh's flat facets, whose rays step at their edges.
 //
-// The pyramid is reached as a pointer the push constants hold, indexed, and each entry point reads
-// what it reads through functions of its own, as pyramid.slang says why. `Push` and `Trace` match
-// `Push` and `Trace` in src/reflections.rs field for field.
+// The pyramid is a pointer the push constants hold, indexed, and each entry point reads through
+// functions of its own, as pyramid.slang says why. `Push` and `Trace` match `Push` and `Trace` in
+// src/reflections.rs field for field.
 
 #include "common.slang"
 
@@ -50,68 +38,62 @@ static const uint MOST_LEVELS = 12;
 
 // What the trace reads.
 struct Trace {
-    // From the view's space, as this frame sees it, to the clip space of the frame before, without
-    // its offset, as the colors it kept were drawn.
+    // To the frame before's clip space, without its offset, as the kept colors were drawn.
     float4x4 previous_clip_from_view;
-    // From the world to the view's space, which turns the shading's normals.
+    // Turns the shading's normals.
     float4x4 view_from_world;
-    // What takes a point's texture coordinates in the view, from its top left, to its X and Y in
-    // the view's space, over its depth, `(view_mul * uv + view_add) * depth`; and the view's depth,
-    // `z`, to its depth there, `depth_mul / (depth_add + z)`, as ao.slang's `Push` has them.
+    // As ao.slang's `Push` has them: from a point's texture coordinates, from the view's top left,
+    // to its view-space X and Y over its depth, `(view_mul * uv + view_add) * depth`; and from the
+    // view's depth `z` to view-space depth, `depth_mul / (depth_add + z)`.
     float2 view_mul;
     float2 view_add;
     float depth_mul;
     float depth_add;
-    // The view's size in pixels.
+    // In pixels.
     uint2 size;
-    // The colors the frame before kept, a texture of the bindless set's; the storage slots of the
-    // reflections' first level and of how far each spreads.
+    // The colors the frame before kept, a bindless texture; the storage slots of the reflections'
+    // first level and of their spread.
     uint colors;
     uint target;
     uint spread;
-    // How many levels the pyramid has.
+    // The pyramid's levels.
     uint levels;
-    // How far a ray reaches, in the world's units, and how far behind what the view's depth shows
-    // it may pass and still find it.
+    // A ray's reach, in world units, and how far behind what the depth shows it may pass and still
+    // find it.
     float distance;
     float thickness;
-    // Where each level starts among the pyramid's, in texels.
+    // Where each level starts in the pyramid, in texels.
     uint starts[MOST_LEVELS];
-    // What the colors the frame before kept are multiplied by to be of this frame's light: this
-    // frame's exposure over theirs, which an adapting exposure changes.
+    // Takes the kept colors to this frame's light: this frame's exposure over theirs.
     float scale;
-    // The normals in the world, as the shading turns them, of what drew each of the view's two
-    // depths, `Push`'s, and 1 in alpha, where they have one, and 0 elsewhere: as visibility.slang's
-    // `normal_main` found them from the visibility buffer, and model.slang's drew them; textures of
-    // the bindless set's, or 0 for none.
+    // Bindless textures, or 0 for none: world-space normals of what drew each of `Push`'s two
+    // depths, alpha 1 where there's one.
     uint normals[2];
     uint unused[3];
 };
 
 struct Push {
-    // Every level of the pyramid, one after another, each a row after another.
+    // Every level of the pyramid, end to end, each row by row.
     float* pyramid;
     // What `trace_main` reads.
     Trace* trace;
-    // The view's two depths whose nearer is what's opaque at each pixel, textures of the bindless
-    // set's, that `depth_main` reads, and `trace_main` beside its normals.
+    // Bindless textures, the view's two depths; the nearer is what's opaque.
     uint2 depths;
-    // The size of what's written, in texels.
+    // What's written, in texels.
     uint2 size;
-    // The size of what's read: of the pyramid's level that `reduce_main` reads, or of the
-    // reflections' level that `blur_main` does.
+    // What's read, in texels.
     uint2 source_size;
-    // What's read: where the pyramid's level read starts; the storage slot of the reflections'
-    // level read; or the view's colors, a texture of the bindless set's.
+    // What's read: the pyramid level's start; the reflections' level's storage slot; or the view's
+    // colors, a bindless texture.
     uint source;
-    // What's written: where the pyramid's level written starts; or the storage slot written.
+    // What's written: the pyramid level's start, or a storage slot.
     uint target;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// How many pixels across and down a workgroup takes: `GROUP` in src/reflections.rs.
+// Pixels across and down a workgroup: `GROUP` in src/reflections.rs.
 static const uint GROUP = 8;
-// The most steps a ray takes, from texel to texel at one level or another.
+// The most steps a ray takes, texel to texel at any level.
 static const uint MOST_STEPS = 64;
 // The view-space depth that what's infinitely far, as the sky, stands at, as ao.slang's.
 static const float FARTHEST = 1.0e30;
@@ -119,8 +101,8 @@ static const float FARTHEST = 1.0e30;
 static const float FLOAT_MAX = 3.402823466e38;
 // How far past a texel's edge a ray steps into the next, in pixels, as FidelityFX's `uv_offset`.
 static const float NUDGE = 0.005;
-// The share of the view's height over which what a ray found fades toward the view's edges, as
-// FidelityFX's; and the share of its reach over which it fades toward its end.
+// The share of the view's height over which hits fade toward its edges, as FidelityFX's; and of a
+// ray's reach over which they fade toward its end.
 static const float EDGE_FADE = 0.05;
 static const float DISTANCE_FADE = 0.25;
 // `Sampler::LinearClamp`'s index in the bindless set.
@@ -140,7 +122,7 @@ void depth_main(uint3 thread: SV_DispatchThreadID) {
     push.pyramid[push.target + at.y * push.size.x + at.x] = max(a, b);
 }
 
-// The level read's texel at `at`, but within its edges.
+// The level read's texel at `at`, clamped.
 float below_at(uint2 at) {
     at = min(at, push.source_size - 1);
     return push.pyramid[push.source + at.y * push.source_size.x + at.x];
@@ -160,43 +142,41 @@ void reduce_main(uint3 thread: SV_DispatchThreadID) {
     push.pyramid[push.target + at.y * push.size.x + at.x] = nearest;
 }
 
-// The size of the pyramid's level `level`: the view's halved that many times, rounded up.
+// Level `level`'s size: the view's halved that many times, rounded up.
 uint2 level_size(Trace trace, uint level) {
     return (trace.size + (1u << level) - 1) >> level;
 }
 
-// The nearest depth over level `level`'s texel `texel`, but within the level's edges.
+// The nearest depth over level `level`'s texel `texel`, clamped.
 float nearest_at(Trace trace, uint level, int2 texel) {
     uint2 size = level_size(trace, level);
     uint2 at = uint2(clamp(texel, int2(0), int2(size) - 1));
     return push.pyramid[trace.starts[level] + at.y * size.x + at.x];
 }
 
-// The view-space depth of the view's depth `z`.
 float view_depth(Trace trace, float z) {
     return min(trace.depth_mul / (trace.depth_add + z), FARTHEST);
 }
 
-// The point at `uv` in the view, `depth` ahead of it.
 float3 position(Trace trace, float2 uv, float depth) {
     return float3((trace.view_mul * uv + trace.view_add) * depth, depth);
 }
 
-// Where `p`, a point in the view's space ahead of it, shows: its pixel across and down, and its depth.
+// Where `p`, in view space ahead of the view, shows: its pixel across and down, and its depth.
 float3 screen(Trace trace, float3 p) {
     float2 uv = (p.xy / p.z - trace.view_add) / trace.view_mul;
     return float3(uv * float2(trace.size), trace.depth_mul / p.z - trace.depth_add);
 }
 
-// The point the view shows at `pixel`, its nearest, but within the view's edges.
+// The nearest point the view shows at `pixel`, clamped.
 float3 point_at(Trace trace, int2 pixel) {
     int2 at = clamp(pixel, int2(0), int2(trace.size) - 1);
     float z = nearest_at(trace, 0, at);
     return position(trace, (float2(at) + 0.5) / float2(trace.size), view_depth(trace, z));
 }
 
-// The way along the surface from `center` toward the pixel after it, from the pixel before it, or
-// toward the one after, whichever the depth runs on to more smoothly, of those inside the view.
+// The way along the surface from `center`: toward the pixel after or from the one before,
+// whichever the depth runs to more smoothly, of those in the view.
 float3 along(float3 center, float3 before, float3 after, bool has_before, bool has_after) {
     float3 forward = after - center;
     float3 backward = center - before;
@@ -209,8 +189,8 @@ float3 along(float3 center, float3 before, float3 after, bool has_before, bool h
     return abs(forward.z) < abs(backward.z) ? forward : backward;
 }
 
-// The surface's normal at `pixel`, whose point is `center`, from the points round it: toward the
-// view, as the pixel below is down the view's space.
+// The normal at `pixel`, whose point is `center`, from the points round it: toward the view, as
+// the pixel below is down view space.
 float3 normal_at(Trace trace, int2 pixel, float3 center) {
     int2 last = int2(trace.size) - 1;
     float3 across = along(center, point_at(trace, pixel + int2(-1, 0)),
@@ -222,9 +202,8 @@ float3 normal_at(Trace trace, int2 pixel, float3 center) {
     return length2 > 1.0e-30 ? normal * rsqrt(length2) : -normalize(center);
 }
 
-// The normal of the surface at `pixel`, inside the view, whose point is `center` and whose depth,
-// the nearer of the view's two, is `z`: the shading's, where what drew the nearer depth has normals
-// and drew one there, and otherwise as `normal_at` finds it from the depth round it.
+// The normal at `pixel`, in the view, whose point is `center` and nearer depth `z`: the shading's,
+// where what drew that depth has normals and drew one there; else `normal_at`'s.
 float3 surface_normal(Trace trace, int2 pixel, float3 center, float z) {
     int3 at = int3(pixel, 0);
     [unroll]
@@ -239,12 +218,9 @@ float3 surface_normal(Trace trace, int2 pixel, float3 center, float z) {
     return normal_at(trace, pixel, center);
 }
 
-// FFX_SSSR_HierarchicalRaymarch: follows the ray from `origin` along `way`, both in pixels and depth,
-// `t` along it from 0 at its origin to 1 at its end, through the pyramid, from its first level,
-// climbing a level each time it crosses a texel wholly above what that holds, and stepping down one
-// each time it meets a texel's nearest depth, until it's below what the first level holds there:
-// what it found, where `t` stops, or nothing, as when it leaves the view, passes its end or takes
-// its last step first.
+// FFX_SSSR_HierarchicalRaymarch, from the pyramid's first level: whether the ray from `origin`
+// along `way`, in pixels and depth, finds something before it leaves the view, passes its end or
+// takes its last step. `t`, where it stops, runs from 0 at the origin to 1 at the end.
 bool march(Trace trace, float3 origin, float3 way, out float t) {
     float3 inverse = float3(way.x != 0.0 ? 1.0 / way.x : FLOAT_MAX,
                             way.y != 0.0 ? 1.0 / way.y : FLOAT_MAX,
@@ -286,12 +262,11 @@ bool all_finite(float3 v) {
     return all((asuint(v) & 0x7F800000) != 0x7F800000);
 }
 
-// Each pixel's mirror ray, traced through the pyramid: the colors it found, times how much it trusts
-// them, and that trust, into the reflections' first level, 0 where it found nothing or nothing
-// opaque is; and how far a reflection there spreads, in pixels, for each unit of the tangent of a
-// lobe's angle: `t / (d + t)` of the pixels a unit spans a unit ahead of the view, for a point `d`
-// from the eye and what it found `t` from the point, or, where it found nothing, where it stopped,
-// as a mirror shows what it reflects `d + t` away.
+// Each pixel's mirror ray, into the reflections' first level: the colors found times their trust,
+// and that trust; 0 where nothing was found or nothing opaque is. And its spread, in pixels per
+// unit of a lobe's angle's tangent: `t / (d + t)` of the pixels a unit spans a unit ahead, for a
+// point `d` from the eye and its hit, or where it stopped, `t` from the point, as a mirror shows
+// what it reflects `d + t` away.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void trace_main(uint3 thread: SV_DispatchThreadID) {
@@ -310,8 +285,8 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     if (opaque) {
         normal = surface_normal(trace, int2(pixel), center, z);
     }
-    // Nothing where nothing opaque is, nor where its normal is no number, as where the sky is on
-    // both sides of it, whose points are as far as any.
+    // Nothing where nothing opaque is, nor where its normal is no number, as with sky on both
+    // sides.
     if (!opaque || !all_finite(normal)) {
         storage[trace.target][to] = float4(0.0);
         scalars[trace.spread][to] = 0.0;
@@ -319,8 +294,8 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     }
     float3 view = normalize(center);
     float3 ray = reflect(view, normal);
-    // Rays back toward the view find what's behind it, which it doesn't show: faded out as they
-    // turn from across the view to half way toward it.
+    // Rays back toward the view find what's behind it, which it doesn't show: faded out from
+    // across the view to halfway toward it.
     float away = saturate(1.0 - 2.0 * dot(ray, -view));
     // As far as its reach, but short of the near plane, toward which the depth stops.
     float near = trace.depth_mul / (trace.depth_add + 1.0);
@@ -357,8 +332,8 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
             float far = saturate((trace.distance - traveled) / (trace.distance * DISTANCE_FADE));
             trust = behind * behind * border.x * border.y * far * away;
             reached = seen;
-            // Where what it found showed in the frame before, as the camera saw it then: what it
-            // kept there, at this frame's exposure, but nothing where it was out of that view.
+            // What the frame before kept where the hit showed then, at this frame's exposure;
+            // nothing where it was out of that view.
             float4 then = mul(trace.previous_clip_from_view, float4(seen, 1.0));
             float2 kept = then.xy / then.w * 0.5 + 0.5;
             if (then.w > 0.0 && all(kept >= 0.0) && all(kept <= 1.0)) {
@@ -379,14 +354,14 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     scalars[trace.spread][to] = kept ? spread : 0.0;
 }
 
-// The level read's texel at `at`, but within its edges.
+// The level read's texel at `at`, clamped.
 float4 finer_at(uint2 at) {
     at = min(at, push.source_size - 1);
     return storage[push.source][uint3(at, 0)];
 }
 
-// A level of the reflections after the first, each texel the mean of the 2 by 2 under it: of their
-// colors times their trust, and of their trust, which shading divides the first by again.
+// A later level of the reflections, each texel the mean of the 2 by 2 under it: of their colors
+// times their trust, and of their trust, which shading divides the first by again.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void blur_main(uint3 thread: SV_DispatchThreadID) {

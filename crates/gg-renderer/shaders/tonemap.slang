@@ -1,6 +1,6 @@
-// The game's view, drawn in colors of high dynamic range, mapped into the range its image shows, 0
-// to 1, by a tonemapper: each pixel of the view's colors onto the image's, which the target encodes
-// as sRGB; and, tonemapped by any but none, dithered against banding in the image's 8 bits.
+// The view's high dynamic range colors, mapped to 0 to 1 by a tonemapper, a pixel each, onto an
+// image the target encodes as sRGB. Any tonemapper but none also dithers against banding in its 8
+// bits.
 
 #include "common.slang"
 
@@ -19,15 +19,15 @@ static const uint ACES = 1;
 static const uint AGX = 2;
 static const uint NONE = 3;
 
-// A triangle over the whole viewport, from three vertices and no buffer: (-1, -1), (3, -1) and
-// (-1, 3) in clip space.
+// A triangle over the viewport, from three vertices and no buffer: (-1, -1), (3, -1) and (-1, 3) in
+// clip space.
 [shader("vertex")]
 float4 vertex_main(uint index: SV_VulkanVertexID) : SV_Position {
     float2 corner = float2((index << 1) & 2, index & 2);
     return float4(corner * 2.0 - 1.0, 0.0, 1.0);
 }
 
-// Khronos PBR Neutral, as Khronos's reference gives it, for colors that aren't negative:
+// Khronos PBR Neutral, as Khronos's reference gives it, for colors not negative:
 // https://github.com/KhronosGroup/ToneMapping/blob/main/PBR_Neutral/pbrNeutral.glsl
 float3 pbr_neutral(float3 color) {
     const float START_COMPRESSION = 0.8 - 0.04;
@@ -70,7 +70,7 @@ float3 aces(float3 color) {
 // AgX, as three.js has it, under the MIT license, after Filament's, which follows Blender's, in
 // Rec. 2020's primaries:
 // https://github.com/mrdoob/three.js/blob/dev/src/renderers/shaders/ShaderChunk/tonemapping_pars_fragment.glsl.js
-// GLSL builds its matrices from their columns, which `mul(color, m)` takes these rows as.
+// GLSL builds matrices from columns, which `mul(color, m)` takes these rows as.
 static const float3x3 SRGB_TO_REC2020 = float3x3(
     0.6274, 0.0691, 0.0164,
     0.3293, 0.9195, 0.0880,
@@ -94,7 +94,7 @@ static const float AGX_MAX_EV = 4.026069;
 float3 agx(float3 color) {
     color = mul(color, SRGB_TO_REC2020);
     color = mul(color, AGX_INSET);
-    // In log2, from 1e-10, short of 0, which has none.
+    // In log2, from 1e-10, as 0 has none.
     color = log2(max(color, 1e-10));
     float3 x = saturate((color - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV));
     // The sigmoid, as Benjamin Wrensch approximated it:
@@ -108,7 +108,7 @@ float3 agx(float3 color) {
     return saturate(mul(color, REC2020_TO_SRGB));
 }
 
-// sRGB's encoding, of linear values from 0 to 1, as the target writes them, and its decoding.
+// sRGB's encoding of linear values from 0 to 1, as the target writes them, and its decoding.
 float3 srgb_encoded(float3 value) {
     return select(value <= 0.0031308, value * 12.92, 1.055 * pow(value, 1.0 / 2.4) - 0.055);
 }
@@ -129,12 +129,11 @@ uint2 pcg2d(uint2 v) {
     return v ^ (v >> 16u);
 }
 
-// `color`, from 0 to 1, dithered against banding in the target's 8 bits, where the target encodes
-// it: triangular noise, of two uniform noises of up to half a step either way, from a hash of the
-// pixel, the same each frame, so that frames of the same colors write the same; added to the color
-// encoded, which is then decoded, for the target to encode again. Within a step of 0 or 1, the
-// noise shrinks to reach no further than they, so that black and white stay as they are and no
-// noise is clamped off, which would shift the mean.
+// `color`, 0 to 1, dithered against banding in the target's 8 bits, in its encoding. Triangular
+// noise, two uniform noises of up to half a step either way, hashed from the pixel alone, so the
+// same colors write the same each frame. It's added to the encoded color, which is decoded for the
+// target to encode again. Within a step of 0 or 1, the noise shrinks to reach no further, so black
+// and white stay and no noise is clamped off, which would shift the mean.
 float3 dithered(float3 color, uint2 pixel) {
     float2 halves = float2(pcg2d(pixel) >> 8u) / 16777216.0;
     float noise = (halves.x + halves.y - 1.0) / 255.0;
@@ -148,7 +147,7 @@ float4 fragment_main(float4 position: SV_Position) : SV_Target {
     // A pixel's position is its center, so its whole part is the pixel's.
     int2 pixel = int2(position.xy);
     float4 drawn = textures[push.image].Load(int3(pixel, 0));
-    // As what blends can leave below 0, and as the tonemappers would make infinity no number.
+    // What blends can leave below 0, and the tonemappers would make infinity NaN.
     float3 color = finite(drawn.rgb);
     switch (push.tonemapper) {
     case PBR_NEUTRAL:

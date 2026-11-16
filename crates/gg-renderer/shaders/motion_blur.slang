@@ -1,20 +1,19 @@
-// Motion blur: each of the view's pixels blurred along how what it shows moved across the view while
-// the shutter was open, by McGuire, Hennessy, Bukowski and Osman's reconstruction filter ("A
-// Reconstruction Filter for Plausible Motion Blur", I3D 2012), which blurs what moves over what's
-// still behind it and lets what's behind show through what moves, from the view's colors, depth and
-// motion.
+// Motion blur along how each pixel's point moved while the shutter was open, from the view's
+// colors, depth and motion: McGuire, Hennessy, Bukowski and Osman's reconstruction filter ("A
+// Reconstruction Filter for Plausible Motion Blur", I3D 2012). What moves blurs over what's still
+// behind it, which shows through.
 //
-// In four passes. `velocity_main` finds how far each pixel's point moved across the view, in pixels,
-// as taa.slang finds it: where it is, from the view's depth, and where it was, less how far it moved
-// in the world since the frame before, as the frame before's camera saw it; half of that times the
-// shutter, how far it moves either way of where it shows while the shutter is open, kept within a
-// tile's side, and its depth. `tiles_main` finds each tile's largest of those, and `neighbors_main`
-// each tile's largest of the 3 by 3 round it, which is as far as any pixel that can blur into the
-// tile's moves. Then `gather_main` takes each pixel and a fixed count of others along its tile's
-// largest, either way, jittered by noise of the pixel's, each weighed by whether it's in front of the
-// pixel or behind it and how far each of the two moves: what's in front by how far its own blur
-// reaches the pixel, what's behind by how far the pixel's blur lets it show, and what moves alike at
-// a depth alike by both. Where nothing round a tile moves half a pixel, its pixels are as they were.
+// Four passes:
+// - `velocity_main`: each pixel's motion in pixels, found as taa.slang finds it, times half the
+//   shutter, within a tile's side; and its depth.
+// - `tiles_main`: each tile's largest.
+// - `neighbors_main`: each tile's largest of the 3 by 3 round it, as far as any pixel blurring into
+//   it moves.
+// - `gather_main`: each pixel and a fixed count of others along its tile's largest, either way,
+//   jittered per pixel. What's in front weighs by how far its blur reaches the pixel, what's behind
+//   by how far the pixel's blur lets it show, and what moves alike at a like depth by both.
+//
+// Tiles with nothing round them moving half a pixel are left as they were.
 //
 // `Push` and `Seen` match `BlurPush` and `Seen` in src/motion_blur.rs field for field.
 
@@ -23,21 +22,20 @@
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
 
-// How many pixels across and down a workgroup takes, and how many threads a tile's: `GROUP` in
-// src/motion_blur.rs.
+// Pixels across and down a workgroup, and a tile's threads each way: `GROUP` in src/motion_blur.rs.
 static const uint GROUP = 8;
 
-// How many pixels the gather takes, each pixel's own among them: McGuire et al.'s 15.
+// Pixels the gather takes, the pixel's own among them: McGuire et al.'s 15.
 static const uint SAMPLES = 15;
 
-// How much nearer than another, as a share of its depth, a pixel must be to stand wholly in front of
-// it: what's nearer by less is in front and behind at once, in part.
+// The share of its depth by which a pixel must be nearer to stand wholly in front; nearer by less,
+// it's partly behind too.
 static const float SOFT_DEPTH = 0.01;
 
 struct Seen {
-    // From the view's clip space, as this frame draws it, offset, to the world, homogeneous.
+    // This frame's clip space, offset, to the world, homogeneous.
     float4x4 world_from_clip;
-    // From the world to the view's clip space as the frame before drew it, without its offset.
+    // The world to the frame before's clip space, without its offset.
     float4x4 previous_clip_from_world;
     // This frame's offset, in the view's normalized coordinates.
     float2 jitter;
@@ -47,27 +45,26 @@ struct Seen {
 };
 
 struct Push {
-    // How this frame and the one before saw the view, for the velocities.
+    // For the velocities.
     Seen* seen;
-    // The view's size, the side of a tile, and the tiles' count each way.
+    // The view's size, a tile's side, and the tiles each way.
     uint2 size;
     uint2 tiles;
     uint tile;
-    // The view's colors, depth and motion, its velocities, its tiles' largest and those of their
-    // neighbors, textures of the bindless set's.
+    // Bindless textures: the view's colors, depth and motion, its velocities, and its tiles'
+    // largest and their neighbors'.
     uint colors;
     uint depth;
     uint motion;
     uint velocity;
     uint tiled;
-    // What the pass writes, a storage image of the set's.
+    // What the pass writes: a bindless storage image.
     uint target;
     uint unused;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// Each pixel's velocity: how far its point moves either way of where it shows while the shutter is
-// open, in pixels, within a tile's side, and its reversed depth.
+// Each pixel's velocity, either way while the shutter is open, and its reversed depth.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void velocity_main(uint3 pixel: SV_DispatchThreadID) {
@@ -91,19 +88,17 @@ void velocity_main(uint3 pixel: SV_DispatchThreadID) {
     }
     float most = float(push.tile);
     float speed = length(velocity);
-    // A velocity no number, as a point at infinity under no perspective's makes, moves nothing.
+    // A velocity that's no number, as a point at infinity makes without perspective, moves nothing.
     if (!(speed <= most)) {
         velocity = speed > most ? velocity * (most / speed) : float2(0.0);
     }
     storage[push.target][uint3(pixel.xy, 0)] = float4(velocity, depth, 0.0);
 }
 
-// The largest velocity among each thread's pixels of a tile, and its length squared, as the threads
-// reduce them.
+// Each thread's largest velocity in the tile, and its length squared, as the threads reduce them.
 groupshared float3 largest[GROUP * GROUP];
 
-// Each tile's largest velocity, of its pixels, a workgroup a tile, each thread taking every eighth
-// pixel each way.
+// A workgroup a tile, each thread taking every eighth pixel each way.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void tiles_main(uint3 thread: SV_GroupThreadID, uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
@@ -132,7 +127,6 @@ void tiles_main(uint3 thread: SV_GroupThreadID, uint3 group: SV_GroupID, uint in
     }
 }
 
-// Each tile's largest velocity of the 3 by 3 tiles round it.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void neighbors_main(uint3 tile: SV_DispatchThreadID) {
@@ -154,24 +148,23 @@ void neighbors_main(uint3 tile: SV_DispatchThreadID) {
     storage[push.target][uint3(tile.xy, 0)] = float4(most.xy, 0.0, 0.0);
 }
 
-// How far, as a share, a point blurred `velocity` pixels either way covers one `distance` from it.
+// How much a point blurred `velocity` pixels either way covers one `distance` from it.
 float cone(float distance, float velocity) {
     return saturate(1.0 - distance / velocity);
 }
 
-// Whether a point blurred `velocity` pixels either way covers one `distance` from it, softened at the
-// end of its blur.
+// Whether it covers it, softened at the blur's end.
 float cylinder(float distance, float velocity) {
     return 1.0 - smoothstep(0.95 * velocity, 1.05 * velocity, distance);
 }
 
-// How much the point of reversed depth `a` is in front of that of `b`: wholly if it's nearer, and
-// not at all if it's farther by `SOFT_DEPTH` of the nearer's depth or more.
+// How much the point at reversed depth `a` is in front of `b`'s: wholly if nearer, not at all if
+// farther by `SOFT_DEPTH` of the nearer's depth or more.
 float in_front(float a, float b) {
     return saturate(1.0 - (b - a) / max(SOFT_DEPTH * max(a, b), 1.0e-7));
 }
 
-// PCG2D, a hash of two numbers into two (Jarzynski and Olano, "Hash Functions for GPU Rendering",
+// PCG2D, two numbers hashed into two (Jarzynski and Olano, "Hash Functions for GPU Rendering",
 // 2020), as tonemap.slang's.
 uint2 pcg2d(uint2 v) {
     v = v * 1664525u + 1013904223u;
@@ -183,7 +176,7 @@ uint2 pcg2d(uint2 v) {
     return v ^ (v >> 16u);
 }
 
-// Each pixel of the view, blurred: the reconstruction filter's, a pixel a thread.
+// A pixel a thread.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void gather_main(uint3 pixel: SV_DispatchThreadID) {
@@ -201,11 +194,11 @@ void gather_main(uint3 pixel: SV_DispatchThreadID) {
     }
     Texture2D velocities = textures[push.velocity];
     float3 own = velocities.Load(int3(at, 0)).xyz;
-    // Within half a pixel, as what's still is drawn across its pixel.
+    // At least half a pixel: what's still is drawn across its pixel.
     float own_velocity = max(length(own.xy), 0.5);
     float weight = 1.0 / own_velocity;
     float3 sum = finite(color.rgb) * weight;
-    // Noise from -0.5 to 0.5, the same each frame, that shifts all the pixel's samples alike.
+    // -0.5 to 0.5, the same each frame, shifting all the pixel's samples alike.
     float jitter = float(pcg2d(pixel.xy).x >> 8u) / 16777216.0 - 0.5;
     int2 last = int2(push.size) - 1;
     for (uint i = 0; i < SAMPLES; i++) {

@@ -1,30 +1,20 @@
-// The game's view's ambient occlusion, from its depth: how much of the light from all around reaches
-// each pixel's point past what's near it, which the sky's light is darkened by. Ground-truth ambient
+// The view's ambient occlusion from its depth, which darkens the sky's light: ground-truth ambient
 // occlusion (Jimenez, Wu, Pesce and Jarabo, "Practical Real-Time Strategies for Accurate Indirect
-// Occlusion", 2016), as Intel's XeGTAO computes it, under the MIT license, whose functions these
-// follow, with its default settings and its high quality, of 3 slices of 3 steps each way:
+// Occlusion", 2016) as Intel's XeGTAO computes it, under the MIT license. Functions follow
+// XeGTAO's, with its defaults and high quality, 3 slices of 3 steps each way:
 // https://github.com/GameTechDev/XeGTAO/blob/master/Source/Rendering/Shaders/XeGTAO.hlsli
 //
-// In three passes, a pixel a thread: `prefilter_main` takes the view's depth to view-space depth, the
-// distance ahead of the view, in levels of half the size each, each texel a mean of the 2 by 2 under
-// it weighted toward the farthest; `occlusion_main` searches each pixel's horizons along slices of
-// the hemisphere round its normal, found from the depth around it, turned by noise that changes from
-// pixel to pixel along a Hilbert curve, and with `Push::noise`, which changes from frame to frame,
-// and writes how much of it they leave open and where the depth breaks round it; and the denoise,
-// once or more, blurs each pixel with the 8 round it but across those breaks, `denoise_main` from one
-// buffer into another and `denoise_last_main` into the view's ambient occlusion. The view's space
-// here is XeGTAO's: X right, Y up and Z ahead, so that depth is positive.
+// Passes, a pixel a thread: `prefilter_main`, view-space depth's levels; `occlusion_main`, horizons
+// along slices of the hemisphere round each normal, turned by noise; then one or more denoises,
+// the last `denoise_last_main`. View space is XeGTAO's: X right, Y up and Z ahead, so depth is
+// positive.
 //
-// The noise is on the screen, where the view moves under it, and blurring leaves blotches of it a few
-// pixels across, which neither the blur nor temporal antialiasing, which clips each pixel's history to
-// what this frame drew round it, takes away. So `denoise_last_main` also averages each pixel's
-// occlusion over the frames before, each with noise of its own, by a history of its own (reverse
-// reprojection caching: Nehab, Sander, Lawrence, Tatarchuk and Isidoro, "Accelerating Real-Time
-// Shading with Reverse Reprojection Caching", 2007): from where the pixel's point showed in the frame
-// before, as the camera moved, unless the depth there is of another point, as what's uncovered or
-// moved is; bounded by what the last denoise's own terms round the pixel range over, and a little
-// more, so that the occlusion of something that moves leaves little trail; and accumulated for the
-// next. What's left of the noise then moves with the world.
+// The blur leaves blotches of the screen's noise a few pixels across, which TAA, clipping to this
+// frame, doesn't take away. So the last denoise also averages each pixel over frames by a history
+// of its own (reverse reprojection caching: Nehab, Sander, Lawrence, Tatarchuk and Isidoro,
+// "Accelerating Real-Time Shading with Reverse Reprojection Caching", 2007). It's rejected where
+// the depth is another point's, as what's uncovered or moved, and bounded near this frame's terms,
+// so moving occlusion leaves little trail. What's left of the noise then moves with the world.
 //
 // `Push` and `Accumulation` match `Push` and `Accumulation` in src/ao.rs field for field.
 
@@ -35,12 +25,11 @@
 
 // What the last denoise accumulates by.
 struct Accumulation {
-    // From the view's space, as `position` has it, to the clip space of the view as the frame before
-    // drew it, offset as it was.
+    // From view space to the frame before's clip space, offset as it was.
     float4x4 previous_clip_from_view;
-    // What the frame before accumulated, a texture of the bindless set's, if `taken` isn't 0; and
-    // what this frame accumulates, a storage image. Each pixel's occlusion; the depth of its point,
-    // as far as a half float holds; and how many frames' occlusion it holds.
+    // What the frame before accumulated, a bindless texture, if `taken` isn't 0; what this frame
+    // accumulates, a storage image. Per pixel: the occlusion; its point's depth, up to a half
+    // float's largest; and how many frames it holds.
     uint history;
     uint accumulated;
     uint taken;
@@ -48,35 +37,34 @@ struct Accumulation {
 };
 
 struct Push {
-    // The view-space depth's levels, one after another, each a row after another.
+    // The view-space depth's levels, end to end, each row by row.
     float* levels;
-    // Each pixel's occlusion and its edges, packed as `packed` packs them: what the occlusion
-    // writes and a denoise reads, and what a denoise before the last writes.
+    // Each pixel's occlusion and edges, as `packed` packs them: the occlusion's, which a denoise
+    // reads, and a denoise's before the last.
     uint* terms;
     uint* denoised;
-    // What takes a point's texture coordinates in the view, from its top left, to its X and Y in
-    // the view's space, over its depth: `(view_mul * uv + view_add) * depth`.
+    // From a point's texture coordinates in the view, from its top left, to its X and Y in view
+    // space, over its depth: `(view_mul * uv + view_add) * depth`.
     float2 view_mul;
     float2 view_add;
-    // What takes the view's depth, `z`, to view-space depth: `depth_mul / (depth_add + z)`.
+    // From the view's depth, `z`, to view-space depth: `depth_mul / (depth_add + z)`.
     float depth_mul;
     float depth_add;
-    // The view's size in pixels.
+    // In pixels.
     uint2 size;
-    // The two depths whose nearer is what the view shows of what's opaque at each pixel, textures
-    // of the bindless set's: the view's, drawn into its visibility buffer, and what's drawn
-    // otherwise; or that alone, twice.
+    // Bindless textures, two depths whose nearer is what's opaque: the visibility buffer's and
+    // what's drawn otherwise, or one twice.
     uint2 depths;
-    // The view's ambient occlusion, a storage image of the bindless set's.
+    // The view's ambient occlusion, a bindless storage image.
     uint target;
-    // How far occluders reach, in the world's units, and the power the visibility is raised to.
+    // How far occluders reach, in world units, and the power the visibility is raised to.
     float radius;
     float power;
     // Which of 64 frames' noise to take.
     uint noise;
     // How much a denoise keeps of each pixel's own term, against its neighbors' weights.
     float blur;
-    // Where each level after the first starts among the levels, in texels.
+    // Where each level after the first starts, in texels.
     uint start1;
     uint start2;
     uint start3;
@@ -86,14 +74,13 @@ struct Push {
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// How many pixels across and down a workgroup of the occlusion or a denoise takes: `GROUP` in
-// src/ao.rs. The prefilter's threads take 2 by 2 pixels each.
+// Pixels across and down a workgroup of the occlusion or a denoise: `GROUP` in src/ao.rs. The
+// prefilter's threads take 2 by 2 pixels each.
 static const uint GROUP = 8;
-// How many levels the view-space depth has: `LEVELS` in src/ao.rs.
+// The view-space depth's levels: `LEVELS` in src/ao.rs.
 static const uint LEVELS = 5;
-// The view-space depth that what's infinitely far, as the sky, stands at: past what any sample
-// reaches, and far enough short of a float's largest that a point there and the differences
-// between points stay finite.
+// The view-space depth of what's infinitely far, as the sky: past any sample's reach, and far
+// enough short of a float's largest that its points and their differences stay finite.
 static const float FARTHEST = 1.0e30;
 
 static const float PI = 3.14159265358979;
@@ -112,36 +99,32 @@ static const uint STEPS = 3;
 // How near a sample may be, in pixels, before it's pushed out to that: the pixel itself tells
 // nothing.
 static const float PIXEL_TOO_CLOSE = 1.3;
-// How many frames' occlusion a history holds at most, so that each frame's makes at least a
-// sixteenth of a pixel's: in a view that moves, about the last 31 frames' noise together, a sixth of
-// one frame's; and what changes the occlusion settles in some 16 frames.
+// The most frames a history holds: each frame makes at least a sixteenth, so changes settle in
+// some 16 frames, and a moving view averages about 31 frames' noise, a sixth of one frame's.
 static const float HELD_MOST = 15.0;
-// How far the depth a history keeps may be from that of the point it's taken for, as a share of the
-// point's: past what the depth changes to the next pixel along its surface, a fiftieth.
+// How far, relative, a history's depth may be from its point's: past what the depth changes to the
+// next pixel along its surface.
 static const float DEPTH_SLACK = 0.02;
-// How far a history may lie outside what the last denoise's terms round the pixel range over: some
-// 5 of a byte's levels, past the noise two denoises leave, so that a still view's history, which
-// averages the frames' noise, isn't clipped back to this frame's; but a change the terms show, as
-// occlusion that moved, takes it along. With none, a floor's grain as a 768 by 512 view panned over
-// it, without antialiasing, doubled; with 0.05, a sphere rolling across the floor left 5 to 7 times
-// the trail, in the GPU test `ambient_occlusion_leaves_no_trail_behind_what_moves`.
+// How far a history may stray past the range of the last denoise's terms round the pixel: about 5
+// byte levels, past two denoises' noise, so a still view's averaged history isn't clipped back to
+// this frame's. With 0, a floor's grain doubled in a 768 by 512 pan without antialiasing; with
+// 0.05, a rolling sphere's trail grew 5 to 7 times
+// (`ambient_occlusion_leaves_no_trail_behind_what_moves`).
 static const float HISTORY_MARGIN = 0.02;
-// The largest a half float holds, short of infinity: the depth a history keeps of what's farther.
+// The largest half float short of infinity: the depth a history keeps of what's farther.
 static const float HALF_MOST = 65504.0;
 
-// Level `level`'s size: the view's halved that many times, rounded down, at least a texel.
 uint2 level_size(uint level) {
     return max(push.size >> level, uint2(1));
 }
 
-// Where level `level` starts among the levels.
 uint level_start(uint level) {
     uint4 starts = uint4(push.start1, push.start2, push.start3, push.start4);
     // Indexed within the four, as both sides of the choice may be evaluated.
     return level == 0 ? 0 : starts[max(level, 1) - 1];
 }
 
-// The view-space depth at `pixel`: the nearer of the two depths there, but within the view's edges.
+// The view-space depth at `pixel`, clamped to the view: the nearer of the two depths.
 float view_depth(int2 pixel) {
     int2 at = clamp(pixel, int2(0), int2(push.size) - 1);
     float a = depths[push.depths.x].Load(int3(at, 0));
@@ -151,7 +134,6 @@ float view_depth(int2 pixel) {
     return min(push.depth_mul / (push.depth_add + z), FARTHEST);
 }
 
-// Writes `depth` at `at` of level `level`, if the level has a texel there.
 void write_level(uint level, uint2 at, float depth) {
     uint2 size = level_size(level);
     if (at.x < size.x && at.y < size.y) {
@@ -159,8 +141,8 @@ void write_level(uint level, uint2 at, float depth) {
     }
 }
 
-// XeGTAO_DepthMIPFilter: the mean of four depths, each weighted by how near it is to the farthest
-// of them, so that a coarser level keeps to what's behind a thin occluder rather than average it in.
+// XeGTAO_DepthMIPFilter: the mean of four depths weighted toward the farthest, so a coarser level
+// keeps to what's behind a thin occluder.
 float filtered(float d0, float d1, float d2, float d3) {
     float farthest = max(max(d0, d1), max(d2, d3));
     float effect = 0.75 * push.radius * RADIUS_MULTIPLIER;
@@ -176,7 +158,7 @@ float filtered(float d0, float d1, float d2, float d3) {
 groupshared float scratch[GROUP][GROUP];
 
 // XeGTAO_PrefilterDepths16x16: each thread's 2 by 2 pixels of the first level, their mean in the
-// second, and the means of 2 by 2 of those, by threads in turn, in the three after.
+// second, and, by threads in turn, the means of 2 by 2 of those in the three after.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void prefilter_main(uint3 thread: SV_DispatchThreadID, uint3 local: SV_GroupThreadID) {
@@ -208,14 +190,13 @@ void prefilter_main(uint3 thread: SV_DispatchThreadID, uint3 local: SV_GroupThre
     }
 }
 
-// The first level's depth at `pixel`, but within its edges.
+// The first level's depth at `pixel`, clamped to its edges.
 float depth_at(int2 pixel) {
     int2 at = clamp(pixel, int2(0), int2(push.size) - 1);
     return push.levels[at.y * push.size.x + at.x];
 }
 
-// Level `level`'s depth at `uv`, its nearest texel, but within its edges, as a sampler that takes
-// the nearest of each and clamps samples.
+// Level `level`'s nearest texel at `uv`, clamped, as a nearest, clamping sampler would take.
 float level_at(uint level, float2 uv) {
     uint2 size = level_size(level);
     uint2 texel = min(uint2(max(uv * float2(size), 0.0)), size - 1);
@@ -227,9 +208,8 @@ float3 position(float2 uv, float depth) {
     return float3((push.view_mul * uv + push.view_add) * depth, depth);
 }
 
-// XeGTAO_CalculateEdges: how far the depth runs on smoothly from the center to each of the pixels
-// left, right, above and below it, from 1 to 0 where it breaks, as a plane sloping through the
-// center would carry it, by the depth's own scale.
+// XeGTAO_CalculateEdges: how smoothly the depth runs from the center to each side's pixel, 1 to 0
+// where it breaks, against a plane sloping through the center, by the depth's own scale.
 float4 edges_of(float center, float left, float right, float top, float bottom) {
     float4 edges = float4(left, right, top, bottom) - center;
     float slope_lr = (edges.y - edges.x) * 0.5;
@@ -251,15 +231,14 @@ float4 unpacked_edges(uint edges) {
     return float4(steps) / 3.0;
 }
 
-// A term, from 0 to `TERM_SCALE`, which a raw term can pass 1 by and denoised ones average back
-// to, over that scale in its low 16 bits; and its edges' byte above them.
+// A term from 0 to `TERM_SCALE`, which raw terms can pass 1 by and denoised ones average back to,
+// over that scale, in the low 16 bits; its edges' byte above.
 uint packed(float term, uint edges) {
     return uint(saturate(term) * 65535.0 + 0.5) | (edges << 16);
 }
 
-// XeGTAO_CalculateNormal: the surface's normal at the center, `c`, from the points round it, each
-// pair's cross product weighted by how smoothly the depth runs on to both; toward the view where
-// none does.
+// XeGTAO_CalculateNormal: the normal at `c` from the points round it, each pair's cross product
+// weighted by how smoothly the depth runs to both; toward the view where none does.
 float3 normal_of(float4 edges, float3 c, float3 l, float3 r, float3 t, float3 b) {
     float4 accepted = saturate(float4(edges.x * edges.z, edges.z * edges.y, edges.y * edges.w,
                                       edges.w * edges.x) + 0.01);
@@ -273,7 +252,7 @@ float3 normal_of(float4 edges, float3 c, float3 l, float3 r, float3 t, float3 b)
     return length2 > 1.0e-20 ? normal * rsqrt(length2) : -normalize(c);
 }
 
-// XeGTAO_FastSqrt and XeGTAO_FastACos, which takes -1 to 1 to 0 to π (Drobot, "Low Level
+// XeGTAO_FastSqrt and XeGTAO_FastACos, -1 to 1 onto 0 to π (Drobot, "Low Level
 // Optimizations for GCN", 2014; Lagarde, "Inverse trigonometric functions GPU optimization for
 // AMD GCN architecture", 2014).
 float fast_sqrt(float x) {
@@ -286,8 +265,7 @@ float fast_acos(float x) {
     return x >= 0.0 ? result : PI - result;
 }
 
-// Which of a 64 by 64 tile's pixels `x` and `y` is along a Hilbert curve through it, as XeGTAO's
-// `HilbertIndex` has it.
+// XeGTAO's `HilbertIndex`: pixel `x`, `y`'s place along a Hilbert curve through a 64 by 64 tile.
 uint hilbert_index(uint x, uint y) {
     uint index = 0;
     for (uint level = 32; level > 0; level /= 2) {
@@ -308,8 +286,8 @@ uint hilbert_index(uint x, uint y) {
 }
 
 // XeGTAO's `SpatioTemporalNoise`: the R2 sequence (Roberts, "The Unreasonable Effectiveness of
-// Quasirandom Sequences", 2018) at `pixel`'s place along the Hilbert curve, and 288 on for each of
-// the 64 frames' noise, `frame`.
+// Quasirandom Sequences", 2018) at `pixel`'s place along the Hilbert curve, 288 on for each of the
+// 64 frames' noise, `frame`.
 float2 noise_at(uint2 pixel, uint frame) {
     uint index = hilbert_index(pixel.x % 64, pixel.y % 64) + 288 * (frame % 64);
     return frac(0.5 + float(index) * float2(0.75487766624669276005, 0.5698402909980532659114));
@@ -335,8 +313,7 @@ void occlusion_main(uint3 thread: SV_DispatchThreadID) {
     float bottom = depth_at(at + int2(0, 1));
     float4 edges = edges_of(z, left, right, top, bottom);
     uint edge_bits = packed_edges(edges);
-    // Where nothing opaque drew, as the sky, nothing occludes; its edges still part it from what's
-    // round it.
+    // Nothing occludes the sky; its edges still part it from what's round it.
     if (z >= FARTHEST) {
         push.terms[index] = packed(1.0 / TERM_SCALE, edge_bits);
         return;
@@ -356,7 +333,7 @@ void occlusion_main(uint3 thread: SV_DispatchThreadID) {
     float falloff_mul = -1.0 / falloff_range;
     float falloff_add = falloff_from / falloff_range + 1.0;
     float2 noise = noise_at(pixel, push.noise);
-    // How wide a pixel is in the view's space at the center's depth, and the radius in pixels.
+    // A pixel's width in view space at the center's depth, and the radius in pixels.
     float2 pixel_extent = z * push.view_mul * pixel_size;
     float screen_radius = effect / pixel_extent.x;
     // Fading out where the radius spans few pixels.
@@ -421,7 +398,7 @@ void occlusion_main(uint3 thread: SV_DispatchThreadID) {
     push.terms[index] = packed(visibility / TERM_SCALE, edge_bits);
 }
 
-// The term and edges at `pixel` that a denoise reads, but within the view's edges.
+// The packed term a denoise reads at `pixel`, clamped to the view.
 uint term_at(int2 pixel) {
     int2 at = clamp(pixel, int2(0), int2(push.size) - 1);
     return push.terms[at.y * push.size.x + at.x];
@@ -435,9 +412,9 @@ float4 edges_at(uint packed) {
     return unpacked_edges(packed >> 16);
 }
 
-// XeGTAO_Denoise, a pixel at a time: the term at `pixel` blurred with the 8 round it, each
-// weighted by how smoothly the depth runs on to it, both ways, but for some of the term leaking
-// back where three edges or four break; and the pixel's own packed word, whose edges it keeps.
+// XeGTAO_Denoise, a pixel at a time: the term at `pixel` blurred with the 8 round it, each weighted
+// by how smoothly the depth runs to it both ways, but leaking back some where three or four edges
+// break. `center`: the pixel's own word, whose edges it keeps.
 float denoised_at(int2 pixel, out uint center) {
     center = term_at(pixel);
     uint l = term_at(pixel + int2(-1, 0));
@@ -486,8 +463,8 @@ void denoise_main(uint3 thread: SV_DispatchThreadID) {
     push.denoised[pixel.y * push.size.x + pixel.x] = packed(term, center >> 16);
 }
 
-// Adds to `sum` and `held` what the frame before accumulated at `texel`, in `history`, by `weight`,
-// and that to `weights`, if it's inside the view and its depth is within `slack` of `depth`.
+// Adds what the frame before accumulated at `texel` of `history`, by `weight`, to `sum`, `held` and
+// `weights`, if it's in the view and its depth is within `slack` of `depth`.
 void take(uint history, int2 texel, float weight, float depth, float slack,
           inout float sum, inout float held, inout float weights) {
     if (any(texel < 0) || any(texel >= int2(push.size))) {
@@ -501,9 +478,9 @@ void take(uint history, int2 texel, float weight, float depth, float slack,
     }
 }
 
-// The last denoise, from `terms` into the view's ambient occlusion: the fraction of the light from
-// all around that reaches each pixel, from 0 to 1, averaged with what the frame before accumulated
-// where the pixel's point showed, and accumulated for the next.
+// The last denoise, into the view's ambient occlusion: the fraction of light from all around that
+// reaches each pixel, 0 to 1, averaged with the frame before's where the point showed, and
+// accumulated for the next.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void denoise_last_main(uint3 thread: SV_DispatchThreadID) {
@@ -517,18 +494,16 @@ void denoise_last_main(uint3 thread: SV_DispatchThreadID) {
     float occlusion = min(denoised_at(int2(pixel), center) * TERM_SCALE, 1.0);
     int2 at = int2(pixel);
     float z = depth_at(at);
-    // How many frames' occlusion the history held where the point showed: none where it's taken
-    // from nowhere.
+    // Frames the history held where the point showed; none where it's taken from nowhere.
     float held = 0.0;
     if (accumulation.taken != 0 && z < FARTHEST) {
         float2 size = float2(push.size);
         float2 uv = (float2(pixel) + 0.5) / size;
         float4 clip = mul(accumulation.previous_clip_from_view, float4(position(uv, z), 1.0));
         if (clip.w > 0.0) {
-            // How far the frame before's view saw the point, and how far each of the 4 pixels round
-            // where it showed may then have seen theirs: as far, give or take a fiftieth, and what
-            // the depth changes to the next pixel each way along the surface, the smaller of the
-            // two sides', as across an edge is another surface.
+            // The frame before's depth of the point, and the slack for each of the 4 pixels round
+            // where it showed: `DEPTH_SLACK`, plus the depth's change to the next pixel each way
+            // along the surface, the smaller side's, as across an edge is another surface.
             float across = min(abs(depth_at(at + int2(1, 0)) - z), abs(z - depth_at(at + int2(-1, 0))));
             float down = min(abs(depth_at(at + int2(0, 1)) - z), abs(z - depth_at(at + int2(0, -1))));
             float slack = DEPTH_SLACK * clip.w + across + down;
@@ -545,8 +520,8 @@ void denoise_last_main(uint3 thread: SV_DispatchThreadID) {
             take(accumulation.history, corner + int2(0, 1), g.x * f.y, clip.w, slack, sum, held_sum, weights);
             take(accumulation.history, corner + int2(1, 1), f.x * f.y, clip.w, slack, sum, held_sum, weights);
             if (weights > 0.0) {
-                // Within what the terms round the pixel range over, as this frame's denoised
-                // occlusion, their weighted mean, is, widened by `HISTORY_MARGIN`.
+                // Within the range of the terms round the pixel, which this frame's denoised
+                // occlusion averages, widened by `HISTORY_MARGIN`.
                 float least = 1.0;
                 float most = 0.0;
                 for (int y = -1; y <= 1; y++) {
