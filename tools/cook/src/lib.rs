@@ -1,10 +1,7 @@
-//! The offline asset cooker, as ARCHITECTURE.md's Project state says: a game's project into the
-//! package its builds without `dev` run from, of the files under its asset root that its runs load,
-//! each as the engine makes it as it loads it where that takes more than reading it, a font baked
-//! into its field and a shader compiled to SPIR-V; a texture compressed to BC7, or a sky's to
-//! BC6H, and a model's meshes optimized, with levels of detail, their vertices packed and their
-//! levels cut into meshlets, and its images compressed with their mip levels, so that they load and
-//! draw faster; and the rest as they are.
+//! The offline asset cooker, as ARCHITECTURE.md's Project state says. It turns a game's project
+//! into the package its builds without `dev` run from. Files that take more than reading to load
+//! are made ahead, as a run would make them; textures and models are compressed and optimized to
+//! load and draw faster. [`cook()`] says what the package holds.
 
 mod mesh;
 mod texture;
@@ -26,14 +23,14 @@ pub struct Cooked {
     pub kind: Kind,
     /// Its asset ID, if it has one.
     pub id: Option<u64>,
-    /// How many bytes the package holds of it.
+    /// Its size in the package.
     pub bytes: usize,
 }
 
 /// What [`cook()`] makes of a file under the asset root, by its extension.
 #[derive(Clone, Copy, PartialEq)]
 enum Take {
-    /// As it is: a sound or music, a scene, a prefab or other RON, or a script.
+    /// As it is.
     File,
     Texture,
     /// With the files it names.
@@ -45,9 +42,8 @@ enum Take {
 }
 
 impl Take {
-    /// What a file at `path` is taken as, by its extension, whatever its case; `None` for one that
-    /// no run loads, which the package leaves out, as a game's code or docs, or a model's buffers,
-    /// which its model holds.
+    /// What a file at `path` is taken as, by its extension in any case. `None` for what no run
+    /// loads, such as code, docs, or a model's buffers, which its model holds.
     fn of(path: &str) -> Option<Self> {
         let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
         Some(match extension.as_str() {
@@ -62,31 +58,29 @@ impl Take {
     }
 }
 
-/// Cooks the project whose manifest, `project.ron`, is in `dir` into the package at `out`, written
-/// whole, and returns what it holds, in the order of their paths.
+/// Cooks the project whose `project.ron` is in `dir` into the package at `out`, written whole.
+/// Returns what it holds, in path order. Cooking the same project again gives the same bytes.
 ///
-/// The package holds the files under the asset root, through the folders gg-api's scan goes
-/// through, but those in a mod's folder, which holds a `mod.ron`, as mods are the player's, the
-/// manifest, the icon it names, which the game's build compiles in, and the fetch list: sounds and
-/// music, scenes and other RON, UIs, and scripts, as they are;
-/// textures compressed
-/// to BC7, or a Radiance HDR's colors of high dynamic range to BC6H, of one level, as a layer's
-/// texture has; models read as a run reads them, with the
-/// buffers and images they name, their primitives' triangles optimized and given levels of detail,
-/// and their images compressed to BC7 with their full chains of mip levels, made as a run makes
-/// them; fonts baked into their fields; and shaders compiled, but for a file that doesn't compile
-/// alone that another includes. Each texture, model, font, prefab and UI whose ID file holds its ID
-/// has it there. Cooking the same project again gives the same bytes.
+/// The package holds the files runs load under the asset root, in the folders gg-api's scan goes
+/// through. It leaves out a mod's folder, holding a `mod.ron`, as mods are the player's; the
+/// manifest; the icon it names, which the game's build compiles in; and the fetch list.
 ///
-/// Fails, writing nothing, as the manifest's reading does; with `cook.unread` for a folder or a
-/// file it can't read; with `asset.bad_meta` or `asset.meta_case` for an asset whose ID file doesn't
-/// read, as gg-api's scan finds it, and `asset.duplicate_id` for an ID two assets' ID files hold;
-/// as adding a texture, a model, a font, a UI or a shader fails; with `asset.no_font` or
-/// `asset.no_texture` for a font or a texture a UI names that a run from the package wouldn't
-/// find there, as `find` says; with `cook.uncompressed` for a texture that doesn't compress;
-/// with `cook.no_start` if the start scene isn't among what it holds, as in
-/// a folder the scan doesn't go through; and with `package.unwritten` if the package can't be
-/// written.
+/// Textures go to BC7, or a Radiance HDR's to BC6H, of one level, as a layer's texture has. Models
+/// are optimized and their images compressed, as `model` says. Fonts are baked into their fields,
+/// and shaders compiled, but for a file that doesn't compile alone and another includes. The rest
+/// go as they are. Each texture, model, font, prefab and UI keeps the ID its ID file holds.
+///
+/// Fails, writing nothing, as reading the manifest or adding a texture, model, font, UI or shader
+/// fails, or with:
+///
+/// - `cook.unread` for a folder or file it can't read;
+/// - `asset.bad_meta` or `asset.meta_case` for an ID file that doesn't read, as gg-api's scan finds
+///   it, and `asset.duplicate_id` for an ID two assets' ID files hold;
+/// - `asset.no_font` or `asset.no_texture` for a font or texture a UI names that a run from the
+///   package wouldn't find there;
+/// - `cook.uncompressed` for a texture that doesn't compress;
+/// - `cook.no_start` if the start scene isn't among what it holds, as in a folder the scan skips;
+/// - `package.unwritten` if the package can't be written.
 pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     let project = Project::read(dir).map_err(|failure| {
         let code = match failure.code.as_str() {
@@ -140,7 +134,7 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
             Take::File => package.add(path, id, Kind::File, read(file)?)?,
             Take::Texture => {
                 let image = cook::read_image(path, file)?;
-                // A Radiance HDR's colors, of high dynamic range, as BC6H; others' as BC7.
+                // A Radiance HDR's as BC6H; others' as BC7.
                 let colors = match image.format {
                     cook::Format::Rgba16f => Compressed::Bc6h,
                     _ => Compressed::Bc7Srgb,
@@ -182,7 +176,7 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
             find(ui, *kind, name, &root, &ids, &package)?;
         }
     }
-    // What every run loads first: its other files, which its code names, the cook can't know.
+    // What every run loads first. Other files, which code names, the cook can't know.
     let start = project.start_path(dir);
     if !within(&root, &start).is_some_and(|start| package.cooked.contains_key(&start)) {
         let message = format!(
@@ -196,14 +190,13 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     Ok(package.cooked.into_values().collect())
 }
 
-/// Finds what UI `ui` names `name`, a font or a texture as `kind` says, in `package`, as a run from
-/// it would, from the asset root `root`: by its ID, as `ids` gives each asset's by its path from
-/// the root, or else by its path from the root; a model's image by its model, which has an image of
-/// its place.
+/// Finds the font or texture, as `kind` says, that UI `ui` names `name`, in `package` as a run from
+/// it would. A name is an ID, which `ids` maps paths to, or a path from `root`. A model's image is
+/// named by its model and index.
 ///
 /// Fails with `asset.no_font` or `asset.no_texture`, as the run's add of the UI would, for an ID no
-/// asset has, an absolute path, one outside the root, one the package doesn't hold, one that isn't
-/// a font's or a texture's, or a model's, for its image, or an image the model hasn't.
+/// asset has, an absolute path or one outside the root, a file the package doesn't hold or of
+/// another kind, or an image the model hasn't.
 fn find(
     ui: &str,
     kind: UiAsset,
@@ -250,13 +243,14 @@ fn find(
     Ok(())
 }
 
-/// Model `path`'s file at `file`, cooked as a run from the package reads it: read as a run reads
-/// it, each primitive's triangles optimized and given levels of detail, keeping their order where
-/// its material blends, its vertices packed as a run packs them, and each level cut into meshlets
-/// but where its material blends; and each image compressed as what it holds says, BC7 of colors or values
-/// or BC5 of a normal map, with the full chain of mip levels a run gives it, made as a run makes
-/// them; but a DDS image, as MSFT_texture_dds names one, keeps its BC7 blocks and its levels, as
-/// colors or values as what it holds says.
+/// Model `path`'s file at `file`, cooked as a run from the package reads it.
+///
+/// - Each primitive's triangles are optimized and given levels of detail, keeping their order
+///   where its material blends. Its vertices are packed as a run packs them, and its levels cut
+///   into meshlets but where it blends or is skinned.
+/// - Each image is compressed as what it holds says, BC7 of colors or values or BC5 of a normal
+///   map, with the full mip chain a run makes. A DDS image, as MSFT_texture_dds names one, keeps
+///   its BC7 blocks and levels.
 ///
 /// Fails as adding the model fails, and with `cook.uncompressed` for an image that doesn't
 /// compress.
@@ -266,8 +260,8 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
         .map(|(i, image)| {
             let texels = cook::texels(&model, i);
             let name = format!("{path}#{i}");
-            // A DDS image's, which reading the model alone gives as blocks: BC7 is the same blocks
-            // of colors or of values, which the texture's format says.
+            // A DDS image, which reading the model gives as blocks. BC7's blocks are the same for
+            // colors or values: the texture's use picks the format.
             if let cook::Format::Bc { mipmapped, .. } = image.format {
                 let compressed = match texels {
                     Texels::Map(_) => Compressed::Bc7Unorm,
@@ -276,7 +270,7 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
                 return texture::keep(&name, image.size, &image.pixels, mipmapped, compressed);
             }
             let levels = cook::levels(image, texels);
-            // Every other image of a model has its full chain of levels, which `levels` made.
+            // Other images have their full chain of levels, which `levels` made.
             texture::compress(&name, image.size, &levels, true, Compressed::of(texels))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -303,8 +297,8 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
             })
             .collect();
         let mut packed = cook::pack(path, primitive, levels)?;
-        // What blends draws its triangles in their order, through its indices; and what's skinned,
-        // whose meshlets' bounds its joints would leave behind, through its indices too.
+        // What blends draws its triangles in order, through its indices. What's skinned does too:
+        // its joints would move it out of its meshlets' bounds.
         if !blends && packed.skin.is_empty() {
             mesh::cut(&mut packed);
         }
@@ -321,9 +315,7 @@ struct Package {
 }
 
 impl Package {
-    /// Adds the file at `path` from the asset root, of `kind`, as `data`, with the ID `id` names.
-    ///
-    /// Fails as [`Writer::add`] does.
+    /// Adds `data` as the file at `path` from the asset root. Fails as [`Writer::add`] does.
     fn add(&mut self, path: &str, id: Option<u64>, kind: Kind, data: Vec<u8>) -> Result<()> {
         let bytes = data.len();
         self.writer.add(path, id, kind, data)?;
@@ -339,10 +331,10 @@ impl Package {
     }
 }
 
-/// The ID each asset under `root` has, by its path from the root, as its ID file holds it.
+/// Each asset's ID under `root`, by its path from the root, as its ID file holds it.
 ///
-/// Fails with `asset.bad_meta` or `asset.meta_case` for an ID file that doesn't read, as gg-api's
-/// scan finds it, and with `asset.duplicate_id` for an ID two hold.
+/// Fails with `asset.bad_meta` or `asset.meta_case` for an ID file that doesn't read, and
+/// `asset.duplicate_id` for an ID two hold.
 fn ids(root: &Path) -> Result<HashMap<String, u64>> {
     let mut ids = HashMap::new();
     let mut holders: HashMap<u64, String> = HashMap::new();
@@ -374,9 +366,7 @@ fn ids(root: &Path) -> Result<HashMap<String, u64>> {
     Ok(ids)
 }
 
-/// The file at `file`, whole.
-///
-/// Fails with `cook.unread` if it can't be read.
+/// Fails with `cook.unread` if `file` can't be read.
 fn read(file: &Path) -> Result<Vec<u8>> {
     fs::read(file).map_err(|error| {
         let message = format!("can't read {}", file.display());
@@ -384,8 +374,8 @@ fn read(file: &Path) -> Result<Vec<u8>> {
     })
 }
 
-/// The path from `root` of `file`, as written, `/` between its parts, as the package names it and
-/// a run asks for it; `None` for a file outside it, or a path through `..`.
+/// `file`'s path from `root`, as written, `/` between parts, as the package names it and a run
+/// asks for it. `None` outside the root or through `..`.
 fn within(root: &Path, file: &Path) -> Option<String> {
     let mut parts = Vec::new();
     for part in file.strip_prefix(root).ok()?.components() {
@@ -448,8 +438,8 @@ Targets fragment_main(Varyings input) {
 }
 "#;
 
-    /// A project of a test's own, in the OS's temporary directory, holding `files`, each a path
-    /// from its directory and what it holds; removed as it drops.
+    /// A test's project in the OS's temporary directory, holding `files`, paths from it and their
+    /// text. Removed as it drops.
     struct Fixture(PathBuf);
 
     impl Fixture {
@@ -493,7 +483,7 @@ Targets fragment_main(Varyings input) {
         file
     }
 
-    /// The file of one of the cooker's test models, `name`.
+    /// The cooker's test model `name`.
     fn test_model(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/models")
@@ -507,12 +497,10 @@ Targets fragment_main(Varyings input) {
         .text()
     }
 
-    /// A package holds what a game's runs load, by their paths from the asset root: a texture
-    /// compressed, with the ID its ID file holds; a model cooked; a scene, a prefab and a UI, with
-    /// their IDs too, and a script as they are; and a shader compiled, but the module it includes,
-    /// which doesn't compile alone; and leaves out the manifest, the icon it names, with its ID
-    /// file, the fetch list, a mod's folder, and what no run loads, as code and notes, but the
-    /// relay the manifest names. Cooked again, it's the same bytes.
+    /// A package holds what runs load, with their IDs: a compressed texture, a cooked model, a
+    /// scene, prefab, UI and script as they are, and a compiled shader but not the module it
+    /// includes. It leaves out the manifest, though not its relay; the icon and its ID file; the
+    /// fetch list; a mod's folder; and code and notes. Cooked again, it's the same bytes.
     #[test]
     fn a_package_holds_what_runs_load() {
         let stone = id_file("5f3c9a1e07b2d846");
@@ -584,9 +572,8 @@ Targets fragment_main(Varyings input) {
         assert_eq!(fs::read(&out).unwrap(), first, "the same bytes");
     }
 
-    /// A model cooks to what a run from the package reads: as many primitives and images as it
-    /// read, each primitive with levels of detail among its indices, the first its own triangles,
-    /// and each image compressed as what it holds, with its full chain of levels.
+    /// A model cooks to what a run reads: its primitives, each with levels of detail, the first its
+    /// own triangles, and its images, compressed as what they hold, with full mip chains.
     #[test]
     fn a_model_cooks_to_what_a_run_reads() {
         for name in ["crate.gltf", "torus.gltf", "tiles.gltf", "fox/Fox.gltf"] {
@@ -602,7 +589,8 @@ Targets fragment_main(Varyings input) {
                 assert_eq!(finest.start, 0, "{name}");
                 assert_eq!(finest.count as usize, read.indices.len(), "{name}");
                 assert_eq!(finest.error, 0.0, "{name}");
-                // Cut into meshlets but where it blends or is skinned, which keeps a weight a vertex.
+                // Cut into meshlets but where it blends or is skinned, which keeps a weight a
+                // vertex.
                 let levels = mesh.meshlets.levels.len();
                 let skinned = !read.joints.is_empty();
                 let cut = if read.blends() || skinned {
@@ -637,8 +625,8 @@ Targets fragment_main(Varyings input) {
         assert!(lods.len() > 1, "{lods:?}");
     }
 
-    /// A DDS file of BC7 of `size` texels and the DXGI format `format`, 98 of values or 99 of sRGB,
-    /// holding `levels`, each one's blocks, as Microsoft's guide lays one out.
+    /// A BC7 DDS file of `size` texels and DXGI format `format`, 98 of values or 99 of sRGB,
+    /// holding `levels`' blocks, laid out as Microsoft's guide says.
     fn dds(format: u32, size: [u32; 2], levels: &[Vec<u8>]) -> Vec<u8> {
         let mut words = [0u32; 31];
         // Its header's size; DDSD_CAPS, HEIGHT, WIDTH, PIXELFORMAT and MIPMAPCOUNT; its size and
@@ -659,10 +647,9 @@ Targets fragment_main(Varyings input) {
         [b"DDS ".to_vec(), words.collect(), levels.concat()].concat()
     }
 
-    /// A model of a material of KHR_materials_pbrSpecularGlossiness's, whose textures are DDS
-    /// images, as MSFT_texture_dds names them, cooks to its images' blocks and levels as they are,
-    /// its diffuse texture's and its specular-glossiness map's as BC7 of colors, sRGB-encoded, and
-    /// its normal map's as BC7 of values, whatever each file's own format says.
+    /// A KHR_materials_pbrSpecularGlossiness model whose textures are MSFT_texture_dds images keeps
+    /// their blocks and levels. Its diffuse and specular-glossiness maps become sRGB BC7, its
+    /// normal map BC7 of values, whatever each file's own format says.
     #[test]
     fn a_models_dds_images_keep_their_blocks() {
         let floats = |floats: &[f32]| floats.iter().flat_map(|f| f.to_le_bytes()).collect();
@@ -741,8 +728,8 @@ Targets fragment_main(Varyings input) {
         assert_eq!(held, expected);
     }
 
-    /// A project whose package couldn't name its assets alike, whose shader doesn't compile, or
-    /// whose UI a run would refuse, is refused, and no package is written.
+    /// A project with clashing or unreadable IDs, an asset that doesn't load, a UI a run would
+    /// refuse, or a start scene outside the scan, is refused, and no package is written.
     #[test]
     fn a_project_that_wouldnt_run_alike_is_refused() {
         let twice = id_file("5f3c9a1e07b2d846");
@@ -797,9 +784,8 @@ Targets fragment_main(Varyings input) {
         refused("nostart", &files, "cook.no_start");
     }
 
-    /// A model that a run refuses, a triangle whose vertices span more than packed vertices reach
-    /// with what an f32 holds, -f32::MAX beside 0, is refused as a run refuses it, naming its
-    /// mesh, and no package is written.
+    /// A model a run refuses, a triangle spanning -f32::MAX to 0, past packed vertices' reach, is
+    /// refused as a run refuses it, naming its mesh, and no package is written.
     #[test]
     fn a_model_a_run_refuses_is_refused() {
         let floats =
@@ -831,8 +817,8 @@ Targets fragment_main(Varyings input) {
         assert!(!out.exists());
     }
 
-    /// Checks that a project of `files`, beside its manifest and start scene unless they're among
-    /// them, a fixture named `name`, is refused with `code`, and no package written.
+    /// Checks that fixture `name` of `files`, with a manifest and start scene unless given, is
+    /// refused with `code`, and no package written.
     fn refused(name: &str, files: &[(&str, &str)], code: &str) {
         let mut files = files.to_vec();
         for (path, text) in [("project.ron", PROJECT), ("scenes/main.ron", SCENE)] {

@@ -1,5 +1,5 @@
-//! `gg-cook`, the offline asset cooker: writes a game's package from its project, as the `cook`
-//! library says, printing what it holds as JSON, a line at a time, as `gg` prints what it finds.
+//! `gg-cook`: writes a game's package from its project, as the `cook` library says, printing what
+//! it holds as lines of JSON, as `gg` prints.
 
 use std::io::Write as _;
 use std::num::NonZeroUsize;

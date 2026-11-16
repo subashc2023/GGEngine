@@ -1,7 +1,7 @@
-//! A model primitive's triangles, optimized with meshoptimizer for drawing: identical vertices
-//! merged, the triangles and the vertices ordered for the GPU's caches, and a chain of coarser
-//! levels of detail over the same vertices, which a draw picks from by its size on screen; and,
-//! once its vertices are packed, each level cut into meshlets, which views cull and draw apart.
+//! A model primitive's triangles, optimized for drawing with meshoptimizer: identical vertices
+//! merged, triangles and vertices ordered for the GPU's caches, and coarser levels of detail over
+//! the same vertices, which a draw picks by its size on screen. Once packed, each level is cut
+//! into meshlets, which views cull and draw apart.
 
 use std::ops::Range;
 
@@ -14,46 +14,44 @@ use meshopt::{
     remap_vertex_buffer, simplify_decoder, typed_to_bytes,
 };
 
-/// How many levels a chain holds at most, level 0 among them. Each level has about half the
-/// triangles of the one before, so eight take the coarsest to a 128th of level 0's, a million
-/// triangles to some eight thousand: past that, what an instance costs is its fixed cost, not its
-/// triangles, and each level more is one more for the renderer to sort instances into.
+/// The most levels a chain holds, level 0 among them. Each halves the triangles, so the coarsest
+/// has a 128th of level 0's: a million triangles to some eight thousand. Past that, an instance's
+/// fixed cost outweighs its triangles, and each further level is one more for the renderer to sort
+/// instances into.
 const MAX_LEVELS: usize = 8;
 
-/// The fewest triangles a level is simplified toward, and the most that one can have and not be
-/// simplified further. A GPU shades vertices in warps or waves of 32 or 64, so a level whose
-/// vertices don't fill one draws no faster than a level of 32 triangles, which has some 16 to 32.
+/// The fewest triangles a level is simplified toward, and the most the last level can have. GPUs
+/// shade vertices in warps or waves of 32 or 64. A level of 32 triangles has some 16 to 32
+/// vertices, and one with fewer draws no faster.
 const MIN_TRIANGLES: usize = 32;
 
-/// The share of the level before it that a coarser level must shed, or the chain ends before it:
-/// the simplifier stops short of its target at what its topology rules allow, as at a mesh whose
-/// every vertex is a seam, and a level that keeps nine tenths of the triangles draws almost as
-/// slowly as the one before it, for the index memory of another level.
+/// The share of the level before that a coarser level must shed, or the chain ends before it. The
+/// simplifier stops short where topology forbids, as when every vertex is a seam. A level keeping
+/// nine tenths draws almost as slowly, for another level's index memory.
 const MIN_SHED: f32 = 0.1;
 
-/// How much of the vertex cache's hits the overdraw optimizer may cost level 0, to cut its overdraw:
-/// 1.05 is up to 5%, the example meshoptimizer.h gives.
+/// How much of the vertex cache's hits the overdraw optimizer may cost level 0: 1.05 is up to 5%,
+/// meshoptimizer.h's example.
 const OVERDRAW_THRESHOLD: f32 = 1.05;
 
-/// A level of detail: some of a primitive's indices, whole triangles over its vertices, and how far
-/// the surface they make may stray from level 0's.
+/// A level of detail: a range of a primitive's indices, whole triangles, and how far their surface
+/// may stray from level 0's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Lod {
     /// Where its indices begin in the primitive's.
     pub(crate) start: u32,
-    /// How many indices it has, three for each triangle.
+    /// Three indices a triangle.
     pub(crate) count: u32,
-    /// How far its surface may stray from level 0's, absolute, in the mesh's own units, as the
-    /// simplifier measures it: 0 for level 0, and no less than the level before's. It adds up the
-    /// simplifier's error for each step from level 0, as a level's surface may stray that far from
-    /// the one before it, which may stray from level 0's.
+    /// How far its surface may stray from level 0's, in the mesh's own units, as the simplifier
+    /// measures it. 0 for level 0, and no less than the level before's: it sums each step's error
+    /// from level 0, as each level strays from the one before.
     pub(crate) error: f32,
 }
 
 impl Lod {
-    /// The level whose indices are the `count` from `start`, `error` away from level 0.
+    /// The level of the `count` indices from `start`.
     ///
-    /// Panics if its indices pass what 32 bits count, which no primitive the engine reads has.
+    /// Panics if they pass what 32 bits count, which no primitive the engine reads does.
     fn new(start: usize, count: usize, error: f32) -> Self {
         let bits =
             |n: usize| u32::try_from(n).expect("a primitive's indices are counted in 32 bits");
@@ -64,14 +62,13 @@ impl Lod {
         }
     }
 
-    /// Where its indices are in the primitive's.
     fn range(&self) -> Range<usize> {
         let start = self.start as usize;
         start..start + self.count as usize
     }
 }
 
-/// A primitive's vertices, an array for each of their attributes, as `optimize` takes them.
+/// A primitive's vertices, an array per attribute.
 pub(crate) struct Vertices<'a> {
     pub(crate) positions: &'a mut Vec<[f32; 3]>,
     pub(crate) uvs: &'a mut Vec<[f32; 2]>,
@@ -100,30 +97,27 @@ impl Vertices<'_> {
 
 /// Optimizes a primitive's triangles in place, and returns its levels of detail, finest first.
 ///
-/// Vertices identical in every attribute merge into one, and those no triangle uses go. Level 0 has
-/// the input's triangles, with the winding they had, in the order and from the corners that the
-/// vertex cache and overdraw optimizers choose. Each coarser level is the one before it simplified
-/// toward half its triangles, by a simplifier that moves no vertex and keeps attribute seams, the
-/// edges where vertices of one position differ in another attribute, as hard edges' normals do,
-/// then ordered for the vertex cache. The chain ends at [`MAX_LEVELS`] levels, or before a level
-/// that would shed less than [`MIN_SHED`] of the one before it, and no level is simplified toward
-/// fewer than [`MIN_TRIANGLES`] triangles, though the simplifier may land a few short of its target.
+/// - Vertices identical in every attribute, joints and weights too, merge; those no triangle uses
+///   go.
+/// - Level 0 has the input's triangles and windings, in the order and from the corners the vertex
+///   cache and overdraw optimizers choose.
+/// - Each coarser level is the one before simplified toward half its triangles, then ordered for
+///   the vertex cache. The simplifier moves no vertex and keeps attribute seams: edges where
+///   vertices of one position differ in another attribute, as hard edges' normals do.
+/// - The chain ends at [`MAX_LEVELS`], or before a level that would shed less than [`MIN_SHED`].
+///   No level is simplified toward fewer than [`MIN_TRIANGLES`], though the simplifier may land a
+///   few short.
 ///
 /// Afterwards `indices` holds level 0's triangles, then each coarser level's, over the same
-/// vertices, which are in the order that one pass through the levels, from the coarsest to the
-/// finest, first uses them, so that a coarser level reads a shorter range of them. Every vertex is
-/// used by level 0, and a coarser level uses only some of them.
+/// vertices. Those are in order of first use from the coarsest level to the finest, so a coarser
+/// level reads a shorter range of them. Level 0 uses every vertex.
 ///
-/// If `keep_order`, as a primitive whose material blends needs, whose triangles cover each other in
-/// the order they draw in, no level's triangles are ordered for the vertex cache or overdraw: level
-/// 0's are the input's in its order, and a coarser level's in the order the simplifier gives them.
+/// `keep_order` is for a primitive whose material blends, whose triangles cover each other in draw
+/// order. No level is then ordered for the vertex cache or overdraw: level 0 keeps the input's
+/// order, and coarser levels the simplifier's.
 ///
-/// A skinned primitive's joints and weights move with its vertices, and merge vertices identical
-/// in them too.
-///
-/// Panics if the vertex arrays differ in length, if `indices` aren't whole triangles, or if one is
-/// past the vertices, as the glTF reader leaves none; and if the levels' indices together pass
-/// what 32 bits count.
+/// Panics if the vertex arrays differ in length, or `indices` aren't whole triangles within them,
+/// which the glTF reader rules out; and if all levels' indices pass what 32 bits count.
 pub(crate) fn optimize(
     mut vertices: Vertices<'_>,
     indices: &mut Vec<u32>,
@@ -131,8 +125,8 @@ pub(crate) fn optimize(
 ) -> Vec<Lod> {
     let len = vertices.positions.len();
     let skinned = !vertices.joints.is_empty();
-    // meshoptimizer builds with its assertions off in release, and reads past the vertices of an
-    // index that is.
+    // meshoptimizer's release build has no assertions, and reads past the vertices for an index
+    // that is.
     assert!(
         [
             vertices.uvs.len(),
@@ -147,9 +141,9 @@ pub(crate) fn optimize(
         "a primitive's vertex arrays are of one length, and its indices whole triangles within them"
     );
 
-    // Its simplifier follows the mesh's topology, so identical vertices left apart would be seams
-    // it can't collapse across (the README's basic simplification). Every attribute is compared,
-    // bit for bit, as the shader reads them.
+    // The simplifier follows topology, so identical vertices left apart would be seams it can't
+    // collapse across (the README's basic simplification). Attributes compare bit for bit, as the
+    // shader reads them.
     let mut streams = vec![
         VertexStream::new(vertices.positions.as_ptr()),
         VertexStream::new(vertices.uvs.as_ptr()),
@@ -167,7 +161,7 @@ pub(crate) fn optimize(
 
     if !keep_order {
         optimize_vertex_cache_in_place(indices, count);
-        // After the vertex cache, which it takes the output of.
+        // After the vertex cache, whose output it takes.
         optimize_overdraw_in_place_decoder(indices, vertices.positions, OVERDRAW_THRESHOLD);
     }
 
@@ -179,13 +173,12 @@ pub(crate) fn optimize(
             break;
         }
         // From the level before, which the README says is faster than from level 0 and keeps
-        // attributes better, with the errors added up to choose among levels by. Sparse, which it
-        // suggests for deep chains, makes relative errors relative to the level's own extents,
-        // hence the absolute ones it advises with it. With no limit on the error, the simplifier
-        // is likelier to reach the target, and the error it returns is what a draw chooses the
-        // level by, as the README has it. Not Prune, which it recommends for a mesh simplified
-        // whole: with no limit on the error, its cleanup removes whole parts that topology holds,
-        // all of a mesh stuck above the target, where without it one stuck in part sheds the rest.
+        // attributes better; the errors add up. Sparse, which it suggests for deep chains, makes
+        // relative errors relative to the level's extents, hence the absolute ones it advises. With
+        // no error limit, the target is likelier, and the returned error is what a draw picks the
+        // level by, as the README has it. Not Prune, which it recommends for a whole mesh: with no
+        // error limit, it removes parts that topology holds, all of a mesh stuck above the target.
+        // Without it, a mesh stuck in part sheds the rest.
         let mut step = 0.0;
         let mut level = simplify_decoder(
             &indices[finer.range()],
@@ -197,8 +190,8 @@ pub(crate) fn optimize(
         );
         let error = finer.error + step;
         let shed = triangles.saturating_sub(level.len() / 3) as f32;
-        // An error that isn't finite, as of opposite infinities, is one no draw's size on screen
-        // is within; and a level of no triangles is none that a run takes.
+        // No draw's size on screen is within an error that isn't finite, as of opposite
+        // infinities. A run takes no level of no triangles.
         if shed < MIN_SHED * triangles as f32 || !error.is_finite() || level.is_empty() {
             break;
         }
@@ -210,10 +203,10 @@ pub(crate) fn optimize(
         indices.extend(level);
     }
 
-    // Levels that share vertices: the README has each ordered for the vertex cache alone, then
-    // one vertex fetch pass over all their indices from the coarsest level on, so that a coarser
-    // level's vertices are a short range at the start. GPUs that can only transform a sequential
-    // range of vertices need that, and on any a distant instance's draw reads less memory.
+    // Levels sharing vertices: the README orders each for the vertex cache alone, then runs one
+    // vertex fetch pass over all their indices from the coarsest on, so a coarser level's vertices
+    // are a short range at the start. GPUs that transform only a sequential range of vertices need
+    // that, and on any, a distant instance's draw reads less memory.
     let mut by_use = Vec::with_capacity(indices.len());
     for lod in lods.iter().rev() {
         by_use.extend_from_slice(&indices[lod.range()]);
@@ -226,16 +219,14 @@ pub(crate) fn optimize(
     lods
 }
 
-/// How much meshoptimizer's meshlet builder weighs keeping each meshlet's triangles facing one way,
-/// which narrows the cones views cull them by, against keeping meshlets full: the README's
-/// suggestion for meshlets culled by their cones.
+/// How much the meshlet builder weighs facing a meshlet's triangles one way, narrowing the cones
+/// views cull by, against filling meshlets: the README's suggestion for cone culling.
 const CONE_WEIGHT: f32 = 0.25;
 
-/// Cuts each of `mesh`'s levels into meshlets, as [`ModelMesh`]'s holds them: each level's
-/// triangles, by meshoptimizer's builder, into meshlets of at most [`MAX_MESHLET_VERTICES`] vertices
-/// and [`MAX_MESHLET_TRIANGLES`] triangles, each with the sphere round its vertices as they unpack,
-/// which is where they draw, and the cone its triangles face within; one level's after another's,
-/// in the levels' order, each triangle in one meshlet of its level.
+/// Cuts each of `mesh`'s levels into meshlets, as [`ModelMesh`]'s holds them, in the levels'
+/// order. A meshlet has at most [`MAX_MESHLET_VERTICES`] vertices and [`MAX_MESHLET_TRIANGLES`]
+/// triangles, the sphere round its vertices as they unpack (where they draw), and the cone its
+/// triangles face within. Each triangle is in one meshlet of its level.
 pub(crate) fn cut(mesh: &mut ModelMesh) {
     let positions: Vec<[f32; 3]> = (mesh.positions().iter())
         .map(|position| position.to_array())
@@ -292,15 +283,14 @@ mod tests {
         indices: Vec<u32>,
     }
 
-    /// A vertex as the bits of its fields, so that vertices compare and sort whatever order a mesh
-    /// holds them in.
+    /// A vertex as its fields' bits, so vertices compare and sort in any order.
     type Key = [u32; 16];
 
-    /// A normal and a tangent facing +Z, as a vertex of a flat mesh has them.
+    /// A flat mesh's normal and tangent, facing +Z.
     const FACING: ([f32; 3], [f32; 4]) = ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
 
     impl Mesh {
-        /// A mesh of `positions`, `uvs` and `colors`, facing +Z, and `indices`.
+        /// A mesh facing +Z.
         fn facing(
             positions: Vec<[f32; 3]>,
             uvs: Vec<[f32; 2]>,
@@ -322,7 +312,6 @@ mod tests {
             self.optimize_keeping(false)
         }
 
-        /// Optimizes it as `optimize` does, keeping its triangles' order if `keep_order`.
         fn optimize_keeping(&mut self, keep_order: bool) -> Vec<Lod> {
             let vertices = Vertices {
                 positions: &mut self.positions,
@@ -352,9 +341,8 @@ mod tests {
             key
         }
 
-        /// The triangles of `indices`, each as its vertices' keys from its least on, in the order
-        /// they wind in, and sorted: what a set of triangles is whatever order they and their
-        /// corners come in.
+        /// The triangles of `indices`, each as its vertices' keys from the least, keeping winding,
+        /// sorted: a set of triangles, whatever order they and their corners come in.
         fn triangles(&self, indices: &[u32]) -> Vec<[Key; 3]> {
             let mut triangles: Vec<[Key; 3]> = (indices.as_chunks::<3>().0.iter())
                 .map(|corners| {
@@ -392,8 +380,8 @@ mod tests {
         Mesh::facing(positions, uvs, colors, indices)
     }
 
-    /// A cube whose six faces are each `n` by `n` quads with UVs of their own, `f` to `f + 0.5`
-    /// across face `f`, so that its edges are seams: vertices of one position, in other faces.
+    /// A cube of six faces of `n` by `n` quads, face `f`'s UVs `f` to `f + 0.5` across, so its
+    /// edges are seams.
     fn cube(n: u32) -> Mesh {
         let (mut positions, mut uvs, mut colors, mut indices) = (vec![], vec![], vec![], vec![]);
         for face in 0..6u32 {
@@ -425,8 +413,8 @@ mod tests {
         Mesh::facing(positions, uvs, colors, indices)
     }
 
-    /// `grid` but for its triangles whose first corner `weld` doesn't hold, which have vertices of
-    /// their own and a UV of their own, so that each of their vertices is a seam.
+    /// `grid`, but its triangles whose first corner fails `weld` get vertices and a UV of their
+    /// own, so each of their vertices is a seam.
     fn unwelded(grid: &Mesh, weld: impl Fn([f32; 3]) -> bool) -> Mesh {
         let mut mesh = Mesh {
             indices: vec![],
@@ -450,9 +438,8 @@ mod tests {
         mesh
     }
 
-    /// A grid whose quads each tilt their normals their own way, as a faceted mesh's hard edges
-    /// do: every vertex of one position stays apart from those of another normal, as a seam, which
-    /// no level collapses across.
+    /// A grid whose quads each tilt their normals their own way, as hard edges do: vertices of one
+    /// position and different normals stay apart, a seam no level collapses across.
     #[test]
     fn hard_edges_keep_their_normals_apart() {
         let input = grid(16);
@@ -496,11 +483,10 @@ mod tests {
         }
     }
 
-    /// Checks what holds of any output: the arrays of one length; the levels' indices one after
-    /// another to the end of `indices`, whole triangles within the vertices; level 0 using every
-    /// vertex and each coarser level a range of them from 0, which is the order of first use from
-    /// the coarsest level on, as each level's vertices are some of the level before's; and the
-    /// errors finite, 0 for level 0 and not falling.
+    /// Checks what holds of any output: arrays of one length; levels' indices one after another to
+    /// the end, whole triangles within the vertices; level 0 using every vertex, and each level a
+    /// range of them from 0, the order of first use from the coarsest; and errors finite, 0 for
+    /// level 0, and not falling.
     fn check(name: &str, mesh: &Mesh, lods: &[Lod]) {
         let vertices = mesh.positions.len();
         let others = [
@@ -542,8 +528,8 @@ mod tests {
         assert!(lods.iter().all(|lod| lod.error.is_finite()), "{name}");
     }
 
-    /// A grid of 64 by 64 quads gets a chain of levels at the cap, each with fewer triangles than
-    /// the one before it, more error than it, and some; its level 0 has the input's triangles.
+    /// A 64 by 64 grid gets a full chain, each level with fewer triangles and more error than the
+    /// one before. Level 0 has the input's triangles.
     #[test]
     fn a_grid_gets_a_chain_of_levels() {
         let mut mesh = grid(64);
@@ -559,9 +545,8 @@ mod tests {
         assert_eq!(mesh.triangles(&mesh.indices[lods[0].range()]), input);
     }
 
-    /// A grid small enough that its chain ends before the cap ends at the floor: its last level is
-    /// the first to have no more than the floor's triangles, and is simplified toward the floor
-    /// rather than past it, which the simplifier lands within a tenth of.
+    /// A small grid's chain ends at the floor, before the cap: its last level is the first at or
+    /// under the floor, simplified toward it rather than past it, and lands within a tenth.
     #[test]
     fn a_small_mesh_stops_at_the_floor() {
         for n in [8, 5] {
@@ -596,8 +581,7 @@ mod tests {
         }
     }
 
-    /// Identical vertices merge into one, those no triangle uses go, and the triangles stay what
-    /// they were, as vertices' attributes.
+    /// Identical vertices merge, unused ones go, and the triangles keep their vertices' attributes.
     #[test]
     fn identical_vertices_merge_and_unused_ones_go() {
         // A square of two triangles, whose corners 0 and 2 are held twice, and a vertex that no
@@ -632,10 +616,8 @@ mod tests {
         assert_eq!(mesh.triangles(&mesh.indices), input);
     }
 
-    /// A triangle has one level, all of it, with no error.
-    /// A primitive whose material blends keeps level 0's triangles in the order it had them, each
-    /// from the corner it started at, as they cover each other in that order; and still gets
-    /// coarser levels.
+    /// A primitive that blends keeps level 0's triangles in order, each from its first corner, as
+    /// they cover each other in that order. It still gets coarser levels.
     #[test]
     fn a_primitive_that_blends_keeps_its_triangles_order() {
         let input = grid(16);
@@ -655,6 +637,7 @@ mod tests {
         assert_ne!(keys(&ordered, finest), keys(&input, &input.indices));
     }
 
+    /// A triangle has one level, all of it, with no error.
     #[test]
     fn a_triangle_has_one_level() {
         let mut mesh = Mesh::facing(
@@ -677,9 +660,8 @@ mod tests {
         assert_eq!(mesh.triangles(&mesh.indices), input);
     }
 
-    /// A cube's edges are seams: its faces' vertices at one position stay apart, as their UVs
-    /// differ, and no level of a finer cube has a triangle across one, which would be a collapse
-    /// across a seam.
+    /// A cube's edges are seams: faces' vertices at one position stay apart, their UVs differing,
+    /// and no level of a finer cube has a triangle across faces.
     #[test]
     fn a_cube_keeps_its_seams() {
         let mut mesh = cube(1);
@@ -706,8 +688,7 @@ mod tests {
         }
     }
 
-    /// A mesh every vertex of which is a seam, as a faceted one's, can't be simplified, and has
-    /// one level.
+    /// A mesh of seams alone, as a faceted one, can't be simplified: it has one level.
     #[test]
     fn a_mesh_that_cant_be_simplified_has_one_level() {
         let mut mesh = unwelded(&grid(16), |_| false);
@@ -716,8 +697,7 @@ mod tests {
         assert_eq!(lods.len(), 1, "{lods:?}");
     }
 
-    /// A mesh stuck in part, as a grid with half of it faceted is, still has the levels that the
-    /// simplifier can make of the rest.
+    /// A mesh stuck in part, as a half-faceted grid, still gets levels of the rest.
     #[test]
     fn a_mesh_stuck_in_part_still_gets_levels() {
         let mut mesh = unwelded(&grid(32), |corner| corner[0] < 0.5);
@@ -780,9 +760,8 @@ mod tests {
         [0, 1, 2].map(|i| corners[(least + i) % 3])
     }
 
-    /// Each level's meshlets hold its triangles, each once, winding as they did, within a
-    /// meshlet's limits, each in a sphere round its vertices as they unpack; and the mesh holds
-    /// together.
+    /// Each level's meshlets hold its triangles once each, winding as they did, within a meshlet's
+    /// limits and its sphere; and the mesh holds together.
     #[test]
     fn each_levels_meshlets_hold_its_triangles() {
         for (name, input) in [("grid", grid(48)), ("cube", cube(12))] {
@@ -824,9 +803,8 @@ mod tests {
         }
     }
 
-    /// Wherever a meshlet's cone says a camera sees only its triangles' backs, as the culling tests
-    /// it, it does: no triangle faces a camera on the cone's axis, behind its sphere, at any
-    /// distance.
+    /// Where a meshlet's cone, as culling tests it, says a camera sees only backs, it does: no
+    /// triangle faces a camera on the cone's axis, behind its sphere, at any distance.
     #[test]
     fn a_meshlets_cone_hides_only_triangles_facing_away() {
         let mesh = cut_mesh(cube(12));

@@ -1,8 +1,9 @@
-//! Textures compressed in KTX2, as a game's package holds them, by what they hold: colors as BC7,
-//! a layer's texture of one level and a model's base colors and emission with their full chain of
-//! mip levels; a model's maps, values as BC7 and normal maps' X and Y as BC5, with theirs, which
-//! the engine makes for the cooker as a frame makes a texture's; and colors of high dynamic range,
-//! as a sky's, as BC6H, of one level. A model's DDS images of BC7 keep their blocks and levels.
+//! Textures compressed in KTX2, as a game's package holds them. Colors and values go to BC7,
+//! normal maps' X and Y to BC5, and colors of high dynamic range, as a sky's, to BC6H.
+//!
+//! A layer's texture and a sky have one level. A model's images have full mip chains, which the
+//! engine makes for the cooker as a frame makes a texture's. A model's BC7 DDS images keep their
+//! blocks and levels.
 
 use ctt::encoders::Encoder;
 use ctt::encoders::bc7enc::Bc7encSettings;
@@ -14,25 +15,29 @@ use ctt::{
 use gg_engine::cook::{Compressed, mip_sizes};
 use gg_engine::{Error, Result};
 
-/// The zstd level each of a texture's levels is supercompressed at: zstd's highest short of its
-/// ultra levels, which take far more memory to compress. Blocks shrink little whatever the level,
-/// but reading them back takes no longer for a higher one.
+/// The zstd level of each mip level's supercompression: zstd's highest short of its ultra levels,
+/// which take far more memory. Blocks shrink little at any level, but a higher one reads back no
+/// slower.
 const ZSTD_LEVEL: i32 = 19;
 
-/// Texture `name`'s `pixels`, rows of RGBA8, alpha not multiplied in, or for BC6H of RGBA of 16-bit
-/// floats, `size` texels across and down, followed, if `mipmapped`, by the rest of their full chain
-/// of levels, smallest last: compressed as `compressed` says, each level supercompressed by zstd,
-/// in KTX2, as [`decode_ktx2`](gg_engine::cook::decode_ktx2) reads it. Colors, sRGB-encoded, go to
-/// BC7 by bc7enc_rdo's perceptual encoder, and values, as stored, to BC7 by the same encoder
-/// weighing each channel alike; a normal map's X and Y, in red and green, go to BC5 by Intel's ISPC
-/// Texture Compressor, which drops blue and alpha; and colors of high dynamic range to BC6H by the
-/// same, which drops alpha. The same pixels compress to the same bytes every time on one machine.
+/// Texture `name`'s `pixels`, compressed as `compressed` says into KTX2, as
+/// [`decode_ktx2`](gg_engine::cook::decode_ktx2) reads it, each level supercompressed by zstd.
+///
+/// `pixels` are rows of `size` texels, RGBA8 with alpha not multiplied in, or for BC6H RGBA of
+/// 16-bit floats. If `mipmapped`, the rest of their full chain of levels follows, smallest last.
+///
+/// - sRGB colors go to BC7 by bc7enc_rdo's perceptual encoder, and values, as stored, by the same
+///   encoder weighing each channel alike.
+/// - A normal map's X and Y, in red and green, go to BC5 by Intel's ISPC Texture Compressor, which
+///   drops blue and alpha. Colors of high dynamic range go to BC6H by the same, which drops alpha.
+///
+/// The same pixels compress to the same bytes every time on one machine.
 ///
 /// Fails with `cook.uncompressed` if ctt can't compress them.
 ///
 /// # Panics
 ///
-/// If `pixels` don't fill the levels exactly.
+/// - `pixels` don't fill the levels exactly.
 pub(crate) fn compress(
     name: &str,
     size: [u32; 2],
@@ -100,11 +105,10 @@ pub(crate) fn compress(
         desc: FormatDesc {
             format: input,
             color_space,
-            // Though alpha isn't multiplied in: ctt multiplies a straight one into the colors as
-            // it reads them and divides it out as it hands them to the encoder, which blackens a
-            // transparent texel's color, which a run's filtering mixes into those beside it as
-            // its levels show, where a development run's texture keeps it. Taken as opaque, the
-            // texels go to the encoder as they are, which compresses alpha as it does the colors.
+            // Though alpha isn't multiplied in: ctt multiplies it in as it reads and divides it out
+            // for the encoder, blackening a transparent texel's color. A run's filtering mixes that
+            // into its neighbors, where a development run's texture keeps the color. Taken as
+            // opaque, texels reach the encoder as they are, alpha compressed as the colors are.
             alpha: AlphaMode::Opaque,
         },
     };
@@ -130,16 +134,16 @@ pub(crate) fn compress(
     }
 }
 
-/// Texture `name`'s BC7 `blocks`, `size` texels across and down, of its first level alone or, if
-/// `mipmapped`, of its full chain, as a model's DDS image holds them: kept as they are, in KTX2 as
-/// [`compress`] writes it, of sRGB or of values as `compressed` says, each level supercompressed by
-/// zstd.
+/// Texture `name`'s BC7 `blocks`, as a model's DDS image holds them, kept as they are in KTX2 as
+/// [`compress`] writes it. They're `size` texels' first level, or if `mipmapped` its full chain, of
+/// sRGB or values as `compressed` says.
 ///
 /// Fails with `cook.uncompressed` if ctt can't write them.
 ///
 /// # Panics
 ///
-/// If `compressed` isn't BC7, or `blocks` don't fill the levels exactly.
+/// - `compressed` isn't BC7.
+/// - `blocks` don't fill the levels exactly.
 pub(crate) fn keep(
     name: &str,
     size: [u32; 2],
@@ -183,7 +187,7 @@ pub(crate) fn keep(
             alpha: AlphaMode::Opaque,
         },
     };
-    // No format to convert to: ctt passes blocks of the format they're in through as they are.
+    // No format to convert to: ctt passes the blocks through as they are.
     let settings = ConvertSettings {
         container: Container::ktx2_zstd(ZSTD_LEVEL),
         mipmap: false,
@@ -206,9 +210,8 @@ mod tests {
 
     use super::*;
 
-    /// The texels of a level's `blocks`, BC7 or BC5 as `compressed` says, `size` texels across and
-    /// down, each block decoded as a GPU decodes it: RGBA8, row after row, top row first, BC5's
-    /// red and green alone, blue 0 and alpha 255.
+    /// A level's `blocks`, BC7 or BC5 as `compressed` says, decoded as a GPU does: rows of `size`
+    /// RGBA8 texels, top first, BC5's with blue 0 and alpha 255.
     fn decoded(blocks: &[u8], [width, height]: [u32; 2], compressed: Compressed) -> Vec<[u8; 4]> {
         let (width, height) = (width as usize, height as usize);
         let across = width.div_ceil(4);
@@ -241,9 +244,8 @@ mod tests {
         (texel.iter().zip(expected)).all(|(&got, want)| got.abs_diff(want) <= 3)
     }
 
-    /// A texture compresses to the KTX2 a run reads back, of what it holds: BC7 that decodes to its
-    /// colors, the color of a transparent texel among them, as a development run's texture keeps
-    /// it, or to its values; or BC5 that decodes to a normal map's X and Y.
+    /// A texture compresses to KTX2 a run reads back: BC7 decoding to its colors, a transparent
+    /// texel's too, or its values; or BC5 decoding to a normal map's X and Y.
     #[test]
     fn a_texture_compresses_to_what_it_holds() {
         // 8x4 texels: opaque on the left, transparent but colored on the right.
@@ -277,8 +279,8 @@ mod tests {
         }
     }
 
-    /// Colors of high dynamic range compress to the BC6H a run reads back, a block of each color
-    /// decoding to it within compression's loss, past 1 and far past it, and below.
+    /// Colors of high dynamic range compress to BC6H a run reads back, each block decoding to its
+    /// color within compression's loss, far past 1 and below it.
     #[test]
     fn colors_of_high_dynamic_range_compress_to_bc6h() {
         // 8x4 texels, a block of each color.
@@ -312,9 +314,8 @@ mod tests {
         }
     }
 
-    /// A texture's full chain of levels compresses to the KTX2 a run reads back, each level's
-    /// blocks where a run looks for them, largest first, of that level's colors, every time to the
-    /// same bytes.
+    /// A full chain compresses to KTX2 a run reads back, each level's blocks where a run looks,
+    /// largest first, and to the same bytes every time.
     #[test]
     fn a_textures_levels_compress_in_their_order() {
         // 13x5 texels, whose levels are 6x2, 3x1 and 1x1, each a color of its own.
