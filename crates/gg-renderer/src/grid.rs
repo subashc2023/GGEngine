@@ -1,15 +1,15 @@
 //! Grids: lines a power of ten apart on one of the world's axis planes, and the plane's two axes in
-//! their colors, which the engine draws with a mesh and a shader of its own.
+//! their colors, drawn by the engine's own mesh and shader.
 
 use std::mem::offset_of;
 
 use bytemuck::NoUninit;
 use gg_core::math::{Vec2, Vec3};
 
-/// The grid shader, which the build compiled from `shaders/grid.slang`.
+/// `shaders/grid.slang`, compiled by the build.
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/grid.spv"));
 
-/// The unit square, about its center: its center, then its corners counterclockwise.
+/// The unit square: its center, then its corners counterclockwise.
 pub(crate) const SQUARE: [Vec2; 5] = [
     Vec2::ZERO,
     Vec2::new(-0.5, -0.5),
@@ -19,57 +19,54 @@ pub(crate) const SQUARE: [Vec2; 5] = [
 ];
 
 /// The square as four triangles from its center, where perspective puts the camera's foot: the
-/// lines are finest there, and the plane's coordinates are interpolated most precisely near a
-/// vertex.
+/// lines are finest there, and the plane's coordinates interpolate most precisely near a vertex.
 pub(crate) const FAN: [u32; 12] = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1];
 
-/// A grid on one of the world's axis planes, XY, XZ or YZ, seen through either projection: lines a
-/// power of ten apart, and the plane's two axes in their colors, on a unit square about its center
-/// in its XY plane, which a draw's transform lays in the plane: around the camera's foot in
-/// perspective, and over the view orthographically, as the engine's grid places it. Lines a power
-/// of ten apart show once they're 8 pixels apart, fading in until they're 80 apart, and brighten
-/// from there to the major lines' gray by 800. Crisp lines are a pixel each; anti-aliased ones are
-/// drawn each family of lines by its own footprint, and fade toward grazing angles. It's drawn by
-/// straight alpha over what's drawn before it, but where an opaque mesh is nearer, testing depth
-/// without writing it, and where it draws nothing, picks find what's behind it.
+/// A grid on the XY, XZ or YZ plane, in either projection: a unit square about its center in its XY
+/// plane, which the draw's transform lays in the plane. The engine's grid places it around the
+/// camera's foot in perspective, and over the view orthographically.
+///
+/// Lines of each power of ten show once 8 pixels apart, fade in until 80 apart, and brighten to the
+/// major lines' gray by 800. Crisp lines are a pixel each. Anti-aliased ones are filtered per
+/// family by its footprint, and fade toward grazing angles. It blends by straight alpha over what's
+/// drawn before it, testing depth without writing it. Where it draws nothing, picks find what's
+/// behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grid {
-    /// The color of the plane's first axis, linear: X in XY and XZ, Y in YZ.
+    /// The first axis's color, linear: X in XY and XZ, Y in YZ.
     pub first: Vec3,
-    /// Where the square's center is along the first axis, modulo the coarsest spacing drawn, and
-    /// within half of it of 0: the lines are where they'd be from the plane's origin, and as
-    /// precise however far from it they are.
+    /// The square's center along the first axis, modulo the coarsest spacing drawn, within half of
+    /// it of 0. So lines sit where they would from the plane's origin, as precise however far from
+    /// it.
     pub first_center: f32,
-    /// The color of its second axis: Y in XY, Z in XZ and YZ.
+    /// The second axis's color, linear: Y in XY, Z in XZ and YZ.
     pub second: Vec3,
-    /// Where the square's center is along the second axis, as `first_center` is along the first.
+    /// As `first_center`, along the second axis.
     pub second_center: f32,
-    /// In perspective, where the camera is from the square's center; orthographically, the way it
-    /// faces.
+    /// In perspective, the camera's position from the square's center; orthographically, its
+    /// forward direction.
     pub eye: Vec3,
-    /// The power of ten that the coarsest spacing drawn is, which the center is taken modulo.
+    /// The coarsest spacing drawn, as a power of ten. The centers are taken modulo it.
     pub coarsest: f32,
-    /// The plane's normal: Z for XY, Y for XZ, X for YZ.
+    /// Z for XY, Y for XZ, X for YZ.
     pub normal: Vec3,
-    /// How the lines draw.
     pub lines: GridLines,
 }
 
-/// How a [`Grid`]'s lines draw, as the camera sees its plane.
+/// How a [`Grid`]'s lines draw.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GridLines {
-    /// Anti-aliased, through perspective from a point.
+    /// Anti-aliased, in perspective.
     Perspective,
-    /// Anti-aliased, orthographically along a direction.
+    /// Anti-aliased, orthographic.
     Orthographic,
-    /// Crisp, a pixel each, orthographically, for a camera that faces the plane squarely, its
-    /// right along one of the plane's axes.
+    /// Crisp, a pixel each, orthographic, for a camera facing the plane squarely with its right
+    /// along one of the plane's axes.
     Crisp,
 }
 
 impl Grid {
-    /// What the grid shader takes for the grid, an instance of its draw.
     pub(crate) fn params(&self) -> Params {
         Params {
             first: self.first,
@@ -84,9 +81,8 @@ impl Grid {
     }
 }
 
-/// What `shaders/grid.slang` takes for each grid, an instance of its draw, which `Grid` there
-/// matches byte for byte: `lines` is its `PERSPECTIVE`, `ORTHOGRAPHIC` or `CRISP`, as
-/// [`GridLines`] numbers them.
+/// What `shaders/grid.slang` takes per grid, an instance of its draw. Its `Grid` matches this byte
+/// for byte; `lines` is its `PERSPECTIVE`, `ORTHOGRAPHIC` or `CRISP`, numbered as [`GridLines`].
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Params {
@@ -100,9 +96,8 @@ pub(crate) struct Params {
     lines: u32,
 }
 
-// Each `Vec3` begins a row of 16 bytes, which a 4-byte field ends, so that `Params` is laid out
-// alike in C, as Slang lays out what an address points at, and in std430, which aligns a float3 to
-// 16 bytes.
+// Each `Vec3` starts a 16-byte row that a 4-byte field ends, so `Params` lays out alike in C (as
+// Slang lays out what an address points at) and in std430 (which aligns a float3 to 16 bytes).
 const _: () = {
     assert!(offset_of!(Params, second) == 16);
     assert!(offset_of!(Params, eye) == 32);

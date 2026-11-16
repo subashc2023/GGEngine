@@ -1,38 +1,37 @@
-//! Sprites: rectangles of textures, tinted, which the engine draws on a quad of its own with a
-//! shader of its own; and the sprite sheets whose cells they show.
+//! Sprites: tinted rectangles of textures, drawn on the engine's quad by their own shader; and the
+//! sprite sheets whose cells they show.
 
 use bytemuck::NoUninit;
 use gg_core::math::{Vec2, Vec3, Vec4};
 
 use crate::{Mesh, Sampler, Shader, Texture};
 
-/// The sprite shader, which the build compiled from `shaders/sprite.slang`.
+/// `shaders/sprite.slang`, compiled by the build.
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprite.spv"));
 
-/// What a sprite shows: a rectangle of a texture, tinted. A sprite is a square a unit across,
-/// centered on its origin in its XY plane and facing +Z, with `rect`'s top left at its top left,
-/// +Y being up; the draw's transform places, sizes and turns it in the world, and it's drawn by
-/// straight alpha over what's drawn before it, but where an opaque mesh is nearer, testing depth
-/// without writing it. `Sprite::default()` shows the whole of the engine's white texture,
-/// untinted, so that a sprite of only a color is `Sprite { color, ..Sprite::default() }`.
+/// A tinted rectangle of a texture, on a unit square centered on its origin in its XY plane, facing
+/// +Z, `rect`'s top left at its top left (+Y up). The draw's transform places, sizes and turns it.
+/// It blends by straight alpha over what's drawn before it, testing depth without writing it.
+/// `Sprite::default()` shows the engine's white texture untinted, so a plain color is `Sprite {
+/// color, ..Sprite::default() }`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sprite {
-    /// In linear RGBA, alpha not multiplied in, which multiplies the texture's colors and alpha:
-    /// over the white texture, the sprite's own color. White by default.
+    /// Linear RGBA, alpha not premultiplied, multiplying the texture's colors and alpha. White by
+    /// default.
     pub color: Vec4,
-    /// The texture it shows: `None`, the default, for the engine's white texture, a pixel across.
+    /// `None` (the default) is the engine's white texture, a pixel across.
     pub texture: Option<Texture>,
-    /// The part of `texture` to show, its top left then its bottom right, in texture coordinates,
-    /// from (0, 0) at the texture's top left to (1, 1) at its bottom right: the whole texture by
-    /// default, and a sheet's cells from [`SpriteSheet::sprite`]. Past 0 or 1, a repeating sampler
-    /// tiles the texture; a left past its right, or a top below its bottom, flips it. The sprite
-    /// samples only the texels the rectangle covers, wholly or in part, never nearer its edges
-    /// than their centers, so that under a linear or a nearest sampler the cells of a sheet packed
-    /// edge to edge show nothing of one another. So a tiled sprite's outermost texels don't blend
-    /// with those they'd wrap to either, nor, under a linear sampler, sprites side by side with
-    /// each other.
+    /// The part of `texture` shown, top left then bottom right, in texture coordinates: (0, 0) at
+    /// its top left, (1, 1) at its bottom right. The whole texture by default; a sheet's cells from
+    /// [`SpriteSheet::sprite`]. Past 0 or 1, a repeating sampler tiles it; a left past its right,
+    /// or a top below its bottom, flips it.
+    ///
+    /// The sprite samples only texels the rectangle covers, never nearer its edges than their
+    /// centers. So under either sampler, cells packed edge to edge show nothing of each other, a
+    /// tiled sprite's edges don't blend with what they'd wrap to, and linear sprites side by side
+    /// don't blend.
     pub rect: [Vec2; 2],
-    /// How `texture` is sampled: [`Sampler::LinearClamp`] by default.
+    /// [`Sampler::LinearClamp`] by default.
     pub sampler: Sampler,
 }
 
@@ -47,9 +46,9 @@ impl Default for Sprite {
     }
 }
 
-/// A texture cut into cells `cell` pixels across and down, packed edge to edge from its top left,
-/// as tile sets and the frames of animations come; with cells a pixel across, into any rectangle
-/// of its pixels, as an atlas holds images of different sizes. `size` is the texture's, in pixels.
+/// A texture cut into `cell`-pixel cells packed edge to edge from its top left, as tile sets and
+/// animation frames come. Cells a pixel across allow any rectangle of pixels, as an atlas of images
+/// of different sizes. `size` is the texture's, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpriteSheet {
     pub texture: Texture,
@@ -60,17 +59,17 @@ pub struct SpriteSheet {
 }
 
 impl SpriteSheet {
-    /// A sprite of the cells from `at`, its column then its row counted from the sheet's top left,
-    /// `span` cells across and down: `[1, 1]` for one cell. Its other fields are
-    /// `Sprite::default()`'s, so it's untinted and filtered linearly; pixel art wants
-    /// [`Sampler::NearestClamp`].
+    /// A sprite of `span` cells across and down from `at` (column, row from the top left): `[1, 1]`
+    /// for one cell. The rest is `Sprite::default()`'s: untinted and filtered linearly. Pixel art
+    /// wants [`Sampler::NearestClamp`].
     ///
     /// # Panics
     ///
-    /// If the cells reach past the sheet's edges, or `span` or `cell` has a side of 0.
+    /// - The cells reach past the sheet's edges.
+    /// - `span` or `cell` has a side of 0.
     pub fn sprite(&self, at: [u32; 2], span: [u32; 2]) -> Sprite {
-        // Where the cells start and end on an axis, as a fraction of the sheet; pixels are counted
-        // in u64, where only the end can overflow, and a product that does fails the check.
+        // The cells' start and end on an axis, as fractions of the sheet. Pixels count in u64,
+        // where only the end can overflow, and an overflow fails the check.
         let fractions = |axis: usize| {
             let (cell, size) = (u64::from(self.cell[axis]), u64::from(self.size[axis]));
             let start = u64::from(at[axis]) * cell;
@@ -95,7 +94,6 @@ impl SpriteSheet {
 }
 
 impl Sprite {
-    /// What the sprite shader takes for the sprite, an instance of its draw.
     pub(crate) fn params(&self) -> Params {
         Params {
             color: self.color.to_array(),
@@ -106,9 +104,9 @@ impl Sprite {
     }
 }
 
-/// A corner of the quad, which the sprite, circle and line shaders read as `Corner` in
-/// `shaders/mesh.slang`: its position in the quad's own space, and where it is in the sprite's
-/// rectangle, from (0, 0) at its top left to (1, 1) at its bottom right.
+/// A corner of the quad: `Corner` in `shaders/mesh.slang`, read by the sprite, circle and line
+/// shaders. Its position in the quad's space, and its place in the sprite's rectangle, (0, 0) top
+/// left to (1, 1) bottom right.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Corner {
@@ -116,7 +114,7 @@ pub(crate) struct Corner {
     uv: Vec2,
 }
 
-/// The quad: a unit square centered on the origin, facing +Z, its rectangle upright on it.
+/// A unit square centered on the origin, facing +Z, its rectangle upright.
 pub(crate) const CORNERS: [Corner; 4] = [
     Corner {
         position: Vec3::new(-0.5, -0.5, 0.0),
@@ -137,7 +135,7 @@ pub(crate) const CORNERS: [Corner; 4] = [
 ];
 pub(crate) const INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
 
-/// What `shaders/sprite.slang` takes for each sprite, an instance of its draw.
+/// What `shaders/sprite.slang` takes per sprite, an instance of its draw.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Params {
@@ -147,17 +145,17 @@ pub(crate) struct Params {
     sampler: u32,
 }
 
-/// The quad, the first mesh of every `Meshes`.
+/// The quad, every `Meshes`' first mesh.
 pub(crate) const QUAD: Mesh<Corner> = Mesh::new(0);
 
-/// The sprite shader, the first shader of every `Shaders`.
+/// The sprite shader, every `Shaders`' first shader.
 pub(crate) const SHADER: Shader<Corner, Params> = Shader::new(0, false);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The Cherno's example: cells of 128 pixels, on a sheet 2,560 pixels across.
+    /// The Cherno's example: 128-pixel cells on a sheet 2,560 pixels across.
     const SHEET: SpriteSheet = SpriteSheet {
         texture: Texture::WHITE,
         size: [2560, 1664],

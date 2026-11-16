@@ -1,42 +1,40 @@
-//! Glyphs: a font's letters, which the engine draws from its distance field on its quad with a
-//! shader of its own, crisp at any size.
+//! Glyphs: a font's letters, drawn from its distance field on the engine's quad by their own
+//! shader, crisp at any size.
 
 use bytemuck::NoUninit;
 use gg_core::math::{Vec2, Vec4};
 
 use crate::Texture;
 
-/// The text shader, which the build compiled from `shaders/text.slang`.
+/// `shaders/text.slang`, compiled by the build.
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.spv"));
 
-/// A glyph of text, drawn from its font's field: a texture of [data](crate::Texels::Data) whose red,
-/// green and blue hold distances to the glyph's edges, a multi-channel signed distance field, whose
-/// median is the distance to the nearest edge but keeps the glyph's corners sharp, from 0.5 at its
-/// edge up inside it and down outside it. A glyph is a square a unit across, as a sprite is,
-/// centered on its origin in its XY plane and facing +Z, showing `rect` of the field, its top left
-/// at its top left, +Y being up, filled with `color` where the field says it's inside the glyph.
-/// The draw's transform places, sizes and turns it in the world. Its edge is smoothed over a pixel
-/// however big it shows, sharp at any size the field's texels are no larger than pixels, and
-/// blurred where they are, rather than aliased, as a glyph drawn smaller than its field is; and
-/// it's drawn by straight alpha over what's drawn before it, but where an opaque mesh is nearer,
-/// testing depth without writing it, and where it's fully transparent, between its strokes, it
-/// draws nothing, so that picks there find what's behind it.
+/// A glyph of text, drawn from its font's multi-channel signed distance field: a
+/// [data](crate::Texels::Data) texture whose red, green and blue hold distances to the glyph's
+/// edges. Their median is the distance to the nearest edge, keeping corners sharp: 0.5 at the edge,
+/// rising inside and falling outside.
+///
+/// A glyph is a unit square centered on its origin in its XY plane, facing +Z, as a sprite is. It
+/// shows `rect` of the field (top left at its top left, +Y up), filled with `color` inside the
+/// glyph. The draw's transform places, sizes and turns it. Its edge is smoothed over a pixel at any
+/// size: sharp while the field's texels are no larger than pixels, and blurred where they're
+/// larger, rather than aliased as a glyph drawn smaller than its field is. It blends by straight
+/// alpha over what's drawn before it, testing depth without writing it. Where it's fully
+/// transparent it draws nothing, so picks there find what's behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {
-    /// In linear RGBA, alpha not multiplied in.
+    /// Linear RGBA, alpha not premultiplied.
     pub color: Vec4,
-    /// The field it's drawn from, sampled linearly and clamped to its edges.
+    /// Sampled linearly, clamped to its edges.
     pub field: Texture,
-    /// The part of `field` it shows, its top left then its bottom right, in texture coordinates,
-    /// from (0, 0) at the field's top left to (1, 1) at its bottom right.
+    /// The part of `field` shown, top left then bottom right, in texture coordinates: (0, 0) at the
+    /// field's top left, (1, 1) at its bottom right.
     pub rect: [Vec2; 2],
-    /// How far the field's distances reach, in its texels: from `-range / 2` at 0 to `range / 2`
-    /// at 1.
+    /// How far the field's distances reach, in its texels: `-range / 2` at 0 to `range / 2` at 1.
     pub range: f32,
 }
 
 impl Glyph {
-    /// What the text shader takes for the glyph, an instance of its draw.
     pub(crate) fn params(&self) -> Params {
         Params {
             color: self.color.to_array(),
@@ -47,7 +45,7 @@ impl Glyph {
     }
 }
 
-/// What `shaders/text.slang` takes for each glyph, an instance of its draw.
+/// What `shaders/text.slang` takes per glyph, an instance of its draw.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Params {

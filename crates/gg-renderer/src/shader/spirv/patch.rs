@@ -8,21 +8,20 @@ use super::{
     instructions, string, words,
 };
 
-/// `spirv`, a shader slangc compiled, with each sampled image that it makes of an image or a
-/// sampler decorated `NonUniform` decorated so too. Vulkan requires the decoration on the operand
-/// an instruction reaches a resource through, which for a sample is the sampled image
-/// (VUID-RuntimeSpirv-subgroupSize-10149), but slangc before Slang 2026.11, the Vulkan SDK
-/// 1.4.335's among them, decorates only the loads of the image and the sampler
-/// (shader-slang/slang#10525): a driver that reads the decoration where Vulkan puts it may sample
-/// one instance's texture for every instance of a subgroup. This can go once the engine requires
-/// a slangc that decorates it, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's. SPIR-V
-/// it can't read stays as it is, for Vulkan to refuse.
+/// `spirv` with each sampled image made of a `NonUniform` image or sampler decorated `NonUniform`
+/// too. Vulkan requires the decoration on the operand reaching the resource, for a sample the
+/// sampled image (VUID-RuntimeSpirv-subgroupSize-10149). slangc before Slang 2026.11, the Vulkan
+/// SDK 1.4.335's among them, decorates only the image's and sampler's loads
+/// (shader-slang/slang#10525). A driver reading the decoration where Vulkan puts it may then sample
+/// one instance's texture for a whole subgroup. This can go once the engine requires Slang 2026.11
+/// or later, such as the Vulkan SDK 1.4.363's. SPIR-V it can't read stays as it is, for Vulkan to
+/// refuse.
 pub(in crate::shader) fn decorate_non_uniform(spirv: Vec<u8>) -> Vec<u8> {
     let Some(mut words) = words(&spirv) else {
         return spirv;
     };
-    // The IDs decorated NonUniform; where the first of those decorations ends, which is where
-    // more go; and each sampled image, with the image and the sampler it's made of.
+    // The IDs decorated NonUniform; where the first such decoration ends, where more go; and each
+    // sampled image, with its image and sampler.
     let mut non_uniform = HashSet::new();
     let mut end = None;
     let mut sampled = Vec::new();
@@ -54,23 +53,25 @@ pub(in crate::shader) fn decorate_non_uniform(spirv: Vec<u8>) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }
 
-/// `spirv`, a shader slangc compiled, its fragment shader, `fragment_main`, returning zeros at
-/// location 2, as the motion of what it draws, if it returns nothing there. The pipelines of
-/// shaders that write depth write the view's motion, the motion of what owns the depth: one whose
-/// fragment shader returned none would leave there what drew behind it, whose motion its pixels
-/// would then be taken back by, where zeros move them with the camera alone. Those of shaders that
-/// blend don't write it, but lavapipe may, as `GraphicsDesc::format` in gg-gpu says, blending the
-/// zeros as the color blends, which leaves it as it was. The motion is a float4, the type of the
-/// color at location 0, which the contract has a float4, whose output's pointer type the motion's
-/// takes too. SPIR-V it can't read, or whose fragment shader returns something at location 2
-/// already, or nothing at location 0, stays as it is.
+/// `spirv` with `fragment_main` returning zeros at location 2, the motion, if it returns nothing
+/// there.
+///
+/// Pipelines of depth-writing shaders write the view's motion, that of what owns the depth. A
+/// fragment shader returning none would leave what drew behind it, and its pixels would take their
+/// history by that; zeros move them with the camera alone. Blending shaders' pipelines don't write
+/// it, but lavapipe may (`GraphicsDesc::format` in gg-gpu), blending the zeros as the color blends,
+/// which leaves it unchanged.
+///
+/// The motion is a float4, as the contract has the color at location 0, and takes that output's
+/// pointer type. SPIR-V it can't read, or whose fragment shader already returns something at
+/// location 2, or nothing at location 0, stays as it is.
 pub(in crate::shader) fn return_no_motion(spirv: Vec<u8>) -> Vec<u8> {
     let Some(words) = words(&spirv) else {
         return spirv;
     };
-    // The fragment shader's entry point, where it is, its function and its interface; each
-    // location decorated, with where its decoration ends; each output's pointer type, and each
-    // pointer's pointee; where the first function starts, and the entry point's function returns.
+    // The fragment shader's entry point: where it is, its function and interface; each decorated
+    // location, with where its decoration ends; each output's pointer type and each pointer's
+    // pointee; where the first function starts, and where the entry point's function returns.
     let mut entry = None;
     let mut locations = HashMap::new();
     let (mut outputs, mut pointees) = (HashMap::new(), HashMap::new());

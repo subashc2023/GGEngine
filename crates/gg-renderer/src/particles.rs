@@ -1,11 +1,10 @@
-//! Particles: the particles of the frame's emitters, which belong to the frames rather than the
-//! world. Each particle is its birth record, in a pool on the GPU that lasts from frame to frame,
-//! each emitter's in a ring of its own there, from which its age alone gives where it is and how it
-//! looks, as `shaders/particles.slang` draws it. So a frame writes only its emitters' births, in a
-//! compute pass before the view's passes, as `shaders/emit.slang` writes them, and draws every slot
-//! of each emitter's ring, among the frame's draws that blend, in the emitter's place. They draw
-//! before TAA's resolve and write no motion, so the resolve takes what's behind them; their soft
-//! edges shimmer little under its jitter.
+//! Particles of the frame's emitters, owned by the frames, not the world.
+//!
+//! Each particle is a birth record in a GPU pool kept across frames, in its emitter's ring. Its age
+//! alone gives where it is and how it looks. So a frame writes only births, in a compute pass
+//! before the view's (`shaders/emit.slang`), and draws every ring slot among the blended draws
+//! (`shaders/particles.slang`). They draw before TAA's resolve and write no motion, so the resolve
+//! takes what's behind them; their soft edges shimmer little under its jitter.
 
 use std::sync::Arc;
 
@@ -23,92 +22,81 @@ use crate::{DrawCounts, Draws, Texture};
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/particles.spv"));
 static EMIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/emit.spv"));
 
-/// The most particles the pool holds, all its emitters' together: 2^20, 32 MiB of birth records.
+/// The pool's capacity, all emitters together: 2^20, 32 MiB of birth records.
 pub const MAX_PARTICLES: u32 = 1 << 20;
 
-/// The fewest slots a ring has, so that emitters of a few particles don't cut the pool fine.
+/// So small emitters don't cut the pool fine.
 const LEAST_RING: u32 = 64;
 
-/// The fewest slots the pool has, once it has any.
+/// Once the pool has any slots.
 const LEAST_POOL: u32 = 1 << 12;
 
-/// The orders of the pool's blocks, the powers of two of their slots, from a slot to the whole
-/// pool at its largest.
+/// Block orders (log2 of slots), from a slot to the largest pool.
 const ORDERS: usize = MAX_PARTICLES.trailing_zeros() as usize + 1;
 
-/// The bytes of a birth record, `Particle` in `shaders/particle.slang`.
+/// Bytes of `Particle` in `shaders/particle.slang`.
 const RECORD: u64 = 32;
 
-/// The threads of a workgroup of `shaders/emit.slang`, a slot or a word each.
+/// Threads of a `shaders/emit.slang` workgroup, a slot or a word each.
 const GROUP: u32 = 64;
 
-/// The most workgroups a dispatch takes across, as every device takes: a pool of more words grows
-/// in several dispatches.
+/// The most workgroups across a dispatch that every device takes. Growing a larger pool takes
+/// several dispatches.
 const MOST_GROUPS: u32 = 65_535;
 
 /// `DISC` in `shaders/particle.slang`: a soft disc in place of a texture.
 const DISC: u32 = u32::MAX;
 
-/// The pool's two names, which it takes by turns as it grows, so that the frame that grows it
-/// declares both, and copies the one into the other.
+/// The pool's names, alternating as it grows, so the frame that grows it declares both and copies
+/// one into the other.
 const POOLS: [&str; 2] = ["particle pool a", "particle pool b"];
 
-/// Where an emitter's particles are born, in its own space, and which way they go: an emitter
-/// without a rotation sends them up, along its +Y, as a fountain and a fire do.
+/// Where particles are born in the emitter's space, and which way they go. Unrotated, they go up
+/// +Y.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ParticleShape {
     /// At its origin, any way.
     Point,
-    /// Anywhere within `radius` of its origin, away from it.
+    /// Within `radius`, outward.
     Sphere { radius: f32 },
-    /// Anywhere in the box of `half_extents` round its origin, along its +Y.
+    /// In the box, along +Y.
     Box { half_extents: Vec3 },
-    /// On the disc of `radius` round its origin, in its XZ plane, any way within `angle` of its +Y,
-    /// in radians: the cone's half angle.
+    /// On the disc of `radius` in the XZ plane, within `angle` of +Y (the cone's half angle, in
+    /// radians).
     Cone { angle: f32, radius: f32 },
 }
 
-/// How an emitter's particles are born, move and look: the parts of a [`Particles`] that are the
-/// emitter's own, rather than its frame's.
+/// The emitter's own part of [`Particles`]: how they're born, move and look.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Emission {
     pub shape: ParticleShape,
-    /// The least and the most speed a particle is born with, along the way its shape gives it, in
-    /// the world's units a second, whatever the emitter's scale: each takes a share between them at
-    /// random, as it does of its lifetime and its spin.
+    /// Least and most speed at birth, in world units a second, whatever the emitter's scale. Each
+    /// particle picks at random between them, as for lifetime and spin.
     pub speed: [f32; 2],
-    /// The least and the most seconds a particle lives; one of no more than 0 is never drawn.
+    /// Least and most seconds alive. 0 or less is never drawn.
     pub lifetime: [f32; 2],
-    /// The least and the most a particle turns a second, in radians, counterclockwise as seen.
+    /// Least and most radians a second, counterclockwise as seen.
     pub spin: [f32; 2],
-    /// What every particle accelerates by, in the world's units a second squared: gravity, or a
-    /// fire's rising.
+    /// In world units a second squared.
     pub acceleration: Vec3,
-    /// The share of its velocity a particle loses a second, by linear drag, of dv/dt = acceleration
-    /// - drag * v: 0 for none. Less than 0 is 0.
+    /// Linear drag, per second: dv/dt = acceleration - drag * v. 0 or less for none.
     pub drag: f32,
-    /// A particle's size across, in the world, at its birth and at its death, as it goes from one
-    /// to the other over its life.
+    /// Size across in the world at birth and at death.
     pub size: [f32; 2],
-    /// A particle's color at its birth and at its death, linear RGBA, alpha not multiplied in, as it
-    /// goes from one to the other over its life: past 1 for light, as fire's.
+    /// Color at birth and at death: linear RGBA, alpha not premultiplied, past 1 for light.
     pub color: [Vec4; 2],
-    /// What a particle shows, tinted by its color: the texture, sampled as stored by
-    /// [`Sampler::LinearClamp`], or `None` for a soft disc, brightest at its middle.
+    /// Tinted by `color`, sampled as stored by [`Sampler::LinearClamp`]. `None` is a soft disc.
     pub texture: Option<Texture>,
-    /// The cells across and down the texture is cut into, evenly, which a particle plays through,
-    /// row by row from the top left, over its life: `[1, 1]` for the whole texture. A side of 0 is
-    /// 1.
+    /// Even cells across and down, played row by row from the top left over a life. `[1, 1]` is the
+    /// whole texture; a side of 0 is 1.
     pub cells: [u32; 2],
-    /// Whether particles add their light to what's behind them, as fire and sparks do, rather than
-    /// going over it by their alpha.
+    /// Adds light to what's behind, rather than blending by alpha.
     pub additive: bool,
 }
 
-/// An emitter's births in a frame: `count` particles, numbered on from `first` among the emitter's,
-/// the first born at `time`, of the world's time, in ticks, each next `every` ticks after, and each
-/// where the emitter was at its birth: the first `along` of the way from `from`, the emitter's
-/// transform the frame before, to `to`, its transform this frame, each next `step` further.
+/// An emitter's births in a frame: `count` particles numbered from `first`. The first is born at
+/// `time` (world ticks), each next `every` ticks later, at `along` of the way from `from` (last
+/// frame's transform) to `to` (this frame's), each next `step` further.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Births {
     pub first: u64,
@@ -122,7 +110,7 @@ pub struct Births {
 }
 
 impl Births {
-    /// None, of an emitter that's at `at`.
+    /// None, of an emitter at `at`.
     pub fn none(at: Mat4) -> Self {
         Self {
             first: 0,
@@ -137,9 +125,8 @@ impl Births {
     }
 }
 
-/// An emitter's bursts in a frame: `count` bursts of `size` particles each, numbered on from `first`,
-/// but for the first `skip` particles of the first, all born at `time`, of the world's time, in
-/// ticks, where `at` places the emitter.
+/// An emitter's bursts in a frame: `count` bursts of `size`, numbered from `first`, less the first
+/// `skip` particles. All are born at `time` (world ticks), where `at` places the emitter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bursts {
     pub first: u32,
@@ -151,7 +138,7 @@ pub struct Bursts {
 }
 
 impl Bursts {
-    /// None, of an emitter that's at `at`.
+    /// None, of an emitter at `at`.
     pub fn none(at: Mat4) -> Self {
         Self {
             first: 0,
@@ -163,38 +150,34 @@ impl Bursts {
         }
     }
 
-    /// How many particles they are.
     pub fn particles(&self) -> u64 {
         (u64::from(self.count) * u64::from(self.size)).saturating_sub(u64::from(self.skip))
     }
 }
 
-/// An emitter's particles in a frame, which the frame draws where [`Draws::push_particles`] puts
-/// them: plain data, which the engine gives for each emitter each frame, of the world's time as the
-/// frame draws it. The renderer keeps the emitter's particles from frame to frame by its `id`, in a
-/// ring of slots of its own, as long as each frame draws it; each particle's randomness is a hash
-/// of `id` and its number, or its burst's and its own within the burst. Its particles write `id`
-/// where they show, which picks read back.
+/// An emitter's particles in a frame, drawn where [`Draws::push_particles`] puts them. The renderer
+/// keeps them across frames by `id`, in a ring of their own, while each frame draws them. A
+/// particle's randomness hashes `id` with its number (or its burst's and its own). They write `id`
+/// for picks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Particles {
     pub id: u64,
-    /// Whether its ring starts again empty this frame, as the engine starts an emitter again.
+    /// Whether its ring starts empty this frame, as when the engine restarts an emitter.
     pub fresh: bool,
-    /// The most particles it has alive at once, which its ring holds: its births a second times
-    /// their most lifetime, and a burst. A frame's births past what its ring holds, the oldest,
-    /// aren't drawn. One of more than [`MAX_PARTICLES`] draws the newest of them alone, warning
-    /// (`renderer.particles_full`).
+    /// The most alive at once, its ring's size: births a second times the most lifetime, plus a
+    /// burst. A frame's oldest births past that aren't drawn. Past [`MAX_PARTICLES`], the newest
+    /// draw alone, with a warning (`renderer.particles_full`).
     pub most: u32,
-    /// The world's time the frame draws, in ticks, from which each particle's age is taken.
+    /// World ticks the frame draws; ages are taken from it.
     pub now: f64,
-    /// The seconds a tick takes.
+    /// Seconds per tick.
     pub tick: f32,
     pub births: Births,
     pub bursts: Bursts,
     pub emission: Emission,
 }
 
-/// A block of the pool's slots: the first, and its order, the power of two of the slots it has.
+/// A block of pool slots: its first, and its order (log2 of its slots).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Block {
     offset: u32,
@@ -207,8 +190,8 @@ impl Block {
     }
 }
 
-/// An emitter's ring: its emitter's ID, its block of slots, the slot its next birth goes to, which
-/// holds its oldest particle, and whether a draw of the frame being planned names it.
+/// An emitter's ring. `next` takes the next birth and holds the oldest particle; `seen` means a
+/// draw of the frame being planned names it.
 #[derive(Clone, Copy, Debug)]
 struct Ring {
     id: u64,
@@ -217,11 +200,14 @@ struct Ring {
     seen: bool,
 }
 
-/// What a frame writes and draws of an emitter: its draw's index among the frame's particles, and
-/// its ring's block; where its births go, after the particles it keeps of the ring it had, as a ring
-/// made or grown starts, which writes every slot; how many births it writes, after the oldest it
-/// drops, and burst particles, and how many more of those it skips, the first; and the slot that
-/// holds its oldest particle once they're written, which draws first.
+/// A frame's work for an emitter:
+///
+/// - `index`: its draw's index among the frame's particles.
+/// - `write_at`: where births go, after what a ring made or grown (`rebuilt`) keeps; such a ring
+///   writes every slot.
+/// - `dropped`: the oldest births not written.
+/// - `burst_skip`: how many more of the first burst it skips.
+/// - `drawn_from`: the oldest slot once written, drawn first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Planned {
     index: usize,
@@ -236,7 +222,7 @@ struct Planned {
 }
 
 impl Planned {
-    /// The slots it writes: every slot of a ring made or grown, or its births.
+    /// Every slot of a ring made or grown, else its births and bursts.
     fn writes(&self) -> u32 {
         match self.rebuilt {
             Some(_) => self.block.slots(),
@@ -245,8 +231,8 @@ impl Planned {
     }
 }
 
-/// The particles a ring made or grown keeps of the ring it had: that ring's block, its slot, from
-/// its first, that holds the first kept, and how many it keeps, in their order.
+/// What a ring made or grown keeps of its old one: the old block, the first kept slot (from its
+/// start), and how many.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Kept {
     block: Block,
@@ -255,7 +241,6 @@ struct Kept {
 }
 
 impl Kept {
-    /// None.
     const NONE: Self = Self {
         block: Block {
             offset: 0,
@@ -266,8 +251,8 @@ impl Kept {
     };
 }
 
-/// The pool a frame writes and draws: its slots, which of [`POOLS`] names it, and, if it grew in the
-/// frame, the slots it had before, 0 for a pool made in the frame, which holds nothing to copy.
+/// The pool a frame writes and draws. `name` indexes [`POOLS`]. `grown_from` is the slots before it
+/// grew in the frame; 0 for a new pool, with nothing to copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Pool {
     slots: u32,
@@ -275,39 +260,36 @@ struct Pool {
     grown_from: Option<u32>,
 }
 
-/// The pool's slots and the emitters' rings in it, planned on the CPU, kept from frame to frame:
-/// the pool, of a power of two slots, cut into blocks of powers of two, a buddy allocator's, each
-/// ring a block, the pool doubling as rings need more room, to [`MAX_PARTICLES`]. A block freed in a
-/// frame is free from the next, so that what a frame copies out of a ring it lets go of isn't
-/// written in the same pass by a ring that takes its place.
+/// The rings, planned on the CPU and kept across frames. A buddy allocator: the pool is a power of
+/// two slots, cut into power-of-two blocks, one per ring, doubling up to [`MAX_PARTICLES`]. A freed
+/// block is free from the next frame, so a ring taking its place can't overwrite what the frame
+/// copies out of it.
 #[derive(Default)]
 struct Rings {
-    /// By their emitters' IDs.
+    /// By emitter ID.
     rings: Vec<Ring>,
-    /// The offsets of the free blocks of each order.
+    /// Offsets of free blocks, per order.
     free: [Vec<u32>; ORDERS],
-    /// The blocks let go of in the frame being planned, free from the next.
+    /// Freed this frame; free from the next.
     freed: Vec<Block>,
-    /// The pool's slots, 0 for none.
+    /// 0 for none.
     slots: u32,
-    /// Which of [`POOLS`] names it.
+    /// Indexes [`POOLS`].
     name: usize,
-    /// The slots it had before the frame being planned grew it, if it did.
+    /// The slots before this frame grew it.
     grown_from: Option<u32>,
-    /// What the frame being planned writes and draws, in the order of its draws.
+    /// This frame's work, in draw order.
     planned: Vec<Planned>,
-    /// The emitters warned of having no room, which aren't again while they're drawn without it.
+    /// Emitters warned of having no room, not warned again while drawn without it.
     warned: Vec<u64>,
 }
 
 impl Rings {
-    /// Plans a frame of `particles`, the frame's draws': each emitter's ring, the one it had, if
-    /// it's in the frame before's draws and still has room, made, as a new emitter's is, or grown,
-    /// keeping its particles, as one of more particles needs, the pool growing as they need; the
-    /// rings of emitters it doesn't draw let go of. Returns the pool, if it has any particles.
+    /// Plans a frame's `particles`. An emitter drawn last frame keeps its ring if it fits;
+    /// otherwise its ring is made or grown, keeping its particles, and the pool grows as needed.
+    /// Undrawn emitters' rings go. Returns the pool, if any.
     fn plan(&mut self, particles: &[Particles]) -> Option<Pool> {
         let _zone = gg_core::zone!("plan particles");
-        // By index, keeping the list's memory.
         for i in 0..self.freed.len() {
             let block = self.freed[i];
             self.release(block);
@@ -343,8 +325,8 @@ impl Rings {
         })
     }
 
-    /// Plans `drawn`, the frame's draw of `index`: `None` where it has no ring, as one that doesn't
-    /// fit, or an emitter drawn twice in the frame, whose second draw draws nothing.
+    /// `None` where `drawn` has no ring: it doesn't fit, or it's its emitter's second draw this
+    /// frame.
     fn ring(&mut self, index: usize, drawn: &Particles) -> Option<Planned> {
         let order = ring_slots(drawn.most).trailing_zeros();
         let fits = drawn.most <= MAX_PARTICLES;
@@ -408,8 +390,7 @@ impl Rings {
             }
         };
         let slots = block.slots();
-        // The bursts, born after the births, are the newest, so the births are dropped first, the
-        // oldest; and of bursts the ring can't hold, the first.
+        // Bursts are newest, so the oldest births drop first, then the first bursts.
         let all_bursts = drawn.bursts.particles();
         let bursts = all_bursts.min(u64::from(slots));
         let burst_skip = u64::from(drawn.bursts.skip) + (all_bursts - bursts);
@@ -444,7 +425,7 @@ impl Rings {
         })
     }
 
-    /// Warns once that `drawn` doesn't fit, as `why` says.
+    /// Warns once that `drawn` doesn't fit.
     fn full(&mut self, drawn: &Particles, why: &str) {
         if self.warned.contains(&drawn.id) {
             return;
@@ -463,8 +444,7 @@ impl Rings {
         );
     }
 
-    /// A block of `order`, the pool doubled as it must be to have one, up to [`MAX_PARTICLES`];
-    /// `None` past that.
+    /// Doubles the pool as needed, up to [`MAX_PARTICLES`]; `None` past that.
     fn allocate(&mut self, order: u32) -> Option<Block> {
         loop {
             if let Some(block) = self.take(order) {
@@ -477,15 +457,15 @@ impl Rings {
             if grown > MAX_PARTICLES {
                 return None;
             }
-            // A frame that grows a pool it had takes the other name for it, once, however many
-            // times it doubles it, and copies the pool it had into it.
+            // Growing a pool switches its name once, however often it doubles, and copies the old
+            // pool.
             if self.grown_from.is_none() {
                 self.grown_from = Some(self.slots);
                 if self.slots > 0 {
                     self.name ^= 1;
                 }
             }
-            // The pool's new half, or the whole of a pool made now, a block free.
+            // The new half, or a new pool, is free.
             let (offset, free) = match self.slots {
                 0 => (0, grown),
                 slots => (slots, slots),
@@ -495,8 +475,7 @@ impl Rings {
         }
     }
 
-    /// A free block of `order`, the smallest free that's large enough cut down to it, its other
-    /// halves free.
+    /// The smallest free block large enough, halved down to `order`, the other halves freed.
     fn take(&mut self, order: u32) -> Option<Block> {
         let found = (order as usize..ORDERS).find(|&k| !self.free[k].is_empty())?;
         let offset = self.free[found].pop()?;
@@ -506,7 +485,7 @@ impl Rings {
         Some(Block { offset, order })
     }
 
-    /// Frees `block`, joining it with its buddy, and theirs with its own, while they're free.
+    /// Frees `block`, merging it with its buddy while both are free.
     fn release(&mut self, mut block: Block) {
         let whole = self.slots.trailing_zeros();
         while block.order < whole {
@@ -524,8 +503,8 @@ impl Rings {
         self.free[block.order as usize].push(block.offset);
     }
 
-    /// Forgets every ring, and the pool, as a frame that doesn't write it leaves it: the graph lets
-    /// go of a buffer a frame doesn't declare.
+    /// Forgets every ring and the pool, for a frame that doesn't declare it: the graph lets go of
+    /// such a buffer.
     fn forget(&mut self) {
         self.rings.clear();
         self.free.iter_mut().for_each(Vec::clear);
@@ -536,13 +515,12 @@ impl Rings {
     }
 }
 
-/// The slots of a ring for `most` particles: the power of two at or past it, from [`LEAST_RING`] to
-/// [`MAX_PARTICLES`].
+/// The power of two at or past `most`, from [`LEAST_RING`] to [`MAX_PARTICLES`].
 fn ring_slots(most: u32) -> u32 {
     most.clamp(LEAST_RING, MAX_PARTICLES).next_power_of_two()
 }
 
-/// What `shaders/emit.slang` pushes: `EmitPush` there.
+/// `EmitPush` in `shaders/emit.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct EmitPush {
@@ -555,7 +533,7 @@ struct EmitPush {
     unused: u32,
 }
 
-/// What `shaders/particles.slang` pushes: `DrawPush` there.
+/// `DrawPush` in `shaders/particles.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct DrawPush {
@@ -566,8 +544,7 @@ struct DrawPush {
     unused_right: f32,
     up: Vec3,
     unused_up: f32,
-    /// The address of the frame's data, a [`FrameData`](crate::mesh::FrameData), whose fog the
-    /// particles are fogged by.
+    /// The frame's [`FrameData`](crate::mesh::FrameData), whose fog the particles take.
     frame: u64,
 }
 
@@ -628,7 +605,7 @@ struct GpuEmission {
     unused: u32,
 }
 
-/// `Emitter` in `shaders/particle.slang`: an emitter's part of a frame, its look first.
+/// `Emitter` in `shaders/particle.slang`: an emitter's part of a frame, look first.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct GpuEmitter {
@@ -636,15 +613,14 @@ struct GpuEmitter {
     emission: GpuEmission,
 }
 
-/// `ticks`, of the world's time, as the shaders take a time: the low 32 bits of its whole ticks,
-/// which wrap alike as the shaders subtract them, and how far it is into the next.
+/// World ticks as the shaders take them: the low 32 bits of the whole ticks (they wrap alike when
+/// subtracted), and the fraction.
 fn split(ticks: f64) -> (u32, f32) {
     let whole = ticks.floor();
     // A saturating cast, then the low bits.
     ((whole as u64) as u32, (ticks - whole) as f32)
 }
 
-/// What the shaders read of `drawn`'s frame, as `planned` writes and draws it.
 fn gpu_emitter(drawn: &Particles, planned: &Planned) -> GpuEmitter {
     let Particles {
         id,
@@ -662,7 +638,6 @@ fn gpu_emitter(drawn: &Particles, planned: &Planned) -> GpuEmitter {
         ParticleShape::Box { half_extents } => (2, half_extents.extend(0.0)),
         ParticleShape::Cone { angle, radius } => (3, Vec4::new(angle, radius, 0.0, 0.0)),
     };
-    // The births it writes, after the oldest it drops.
     let dropped = planned.dropped;
     let first = births.first.wrapping_add(u64::from(dropped));
     let (birth_tick, birth_fraction) = split(births.time + f64::from(dropped) * births.every);
@@ -674,7 +649,7 @@ fn gpu_emitter(drawn: &Particles, planned: &Planned) -> GpuEmitter {
             color_birth: emission.color[0],
             color_death: emission.color[1],
             acceleration: emission.acceleration,
-            // What isn't a number, or is less than 0, is none.
+            // NaN or less than 0 is none.
             drag: if emission.drag > 0.0 {
                 emission.drag
             } else {
@@ -727,43 +702,41 @@ fn gpu_emitter(drawn: &Particles, planned: &Planned) -> GpuEmitter {
     }
 }
 
-/// What a frame's particles take in its graph: the pool, the pass that writes their births, and, in
-/// a frame that grows the pool, the pool before and the pass that copies it.
+/// What a frame's particles declare in its graph: the pool and the births' pass, plus the old pool
+/// and the copy's pass when it grows.
 pub(crate) struct ParticlePlan {
     pub(crate) pool: BufferId,
     emit: PassId,
     grow: Option<(BufferId, PassId, u32)>,
-    /// The pass that moves the pool's particles as the origin moved, by how far, and its slots.
+    /// The pass moving particles with the origin, by how far, and the pool's slots.
     moved: Option<(PassId, Vec3, u32)>,
 }
 
 impl ParticlePlan {
-    /// `pass`, reading the pool, as a pass that draws the frame's particles does.
+    /// Has `pass` read the pool.
     pub(crate) fn drawn<'g>(&self, pass: RenderPass<'g>) -> RenderPass<'g> {
         pass.read_buffer(self.pool)
     }
 }
 
-/// Where a frame's particles are: the pool's address, and that of its emitters' parts of the frame,
-/// one after another, in the order they're planned.
+/// The pool's address, and that of its emitters' frame parts, in planned order.
 #[derive(Clone, Copy)]
 pub(crate) struct Emitted {
     pool: u64,
     emitters: u64,
 }
 
-/// The particle passes' pipelines, the pool's rings, and what a frame planned, kept from frame to
-/// frame so that a frame allocates nothing once they've grown.
+/// The particle pipelines, rings and plan, kept across frames so a frame allocates nothing once
+/// they've grown.
 pub(crate) struct ParticlePass {
     emit: ComputePipeline,
     grow: ComputePipeline,
     moved: ComputePipeline,
     draw: Pipeline,
     rings: Rings,
-    /// Each planned emitter's part of the frame, as the shaders read it.
     emitters: Vec<GpuEmitter>,
-    /// How far the origin moved since the frame that last drew particles, which the next frame
-    /// that draws them moves them by.
+    /// How far the origin moved since particles were last drawn. The next frame drawing them moves
+    /// them by it.
     shift: Vec3,
 }
 
@@ -778,8 +751,8 @@ impl ParticlePass {
                 mesh: None,
                 fragment: Some(c"fragment_main"),
                 format: Format::HDR.with_ids().with_motion().with_depth(),
-                // Over what's behind them by their alpha, premultiplied, which writing no alpha
-                // makes adding their light; testing depth without writing it or motion.
+                // Premultiplied alpha; writing alpha 0 adds light. They test depth, but write
+                // neither it nor motion.
                 blend: Blend::PremultipliedAlpha,
                 depth_write: false,
                 ids_write: true,
@@ -798,27 +771,23 @@ impl ParticlePass {
         })
     }
 
-    /// Takes the particles alive into the space of a frame whose origin is `by` further along than
-    /// the frame before's, as the next frame that draws them moves them, before their births:
-    /// what was at `p` is at `p - by`, as [`RenderData::origin`](crate::RenderData::origin) says.
+    /// Moves live particles into a frame whose origin is `by` further on, before the next births:
+    /// `p` becomes `p - by`, as [`RenderData::origin`](crate::RenderData::origin) says.
     pub(crate) fn moved(&mut self, by: Vec3) {
         self.shift += by;
     }
 
-    /// Declares in `graph` what `draws`' particles take, if it has any, as [`Rings::plan`] plans
-    /// their rings: the pool, the pass that copies it into the larger one that takes its place, in
-    /// a frame that grows it, and the pass that writes the births, on the graphics queue, before
-    /// the passes that draw.
+    /// Declares in `graph` what `draws`' particles take, if any: the pool, the copy into a grown
+    /// pool, and the births' pass, on the graphics queue, before the drawing passes.
     pub(crate) fn plan(&mut self, graph: &mut Graph, draws: &Draws) -> Option<ParticlePlan> {
-        // What the origin moved by since the pool's particles were born, which a frame without
-        // them, which lets them go, forgets.
+        // A frame without particles lets them go, and forgets the shift.
         let shift = std::mem::replace(&mut self.shift, Vec3::ZERO);
         let pool = self.rings.plan(&draws.particles)?;
         let bytes = |slots: u32| u64::from(slots) * RECORD;
         let from = (pool.grown_from.filter(|&slots| slots > 0))
             .map(|slots| (graph.buffer(POOLS[pool.name ^ 1], bytes(slots)), slots));
         let buffer = graph.buffer(POOLS[pool.name], bytes(pool.slots));
-        // What no pass of the frame wrote is read as a pass that writes it, as the graph has it.
+        // The graph has a pass read what no earlier pass wrote by declaring a write.
         let grow = from.map(|(from, slots)| {
             let grow = graph.compute(label!("particle pool growth"));
             let pass = grow.write_buffer(from).write_buffer(buffer).add();
@@ -839,15 +808,13 @@ impl ParticlePass {
         })
     }
 
-    /// Forgets every ring, as a frame that doesn't render the view, or renders nothing, leaves
-    /// them: the next frame's particles start in new rings, without the particles before.
+    /// Forgets every ring, for a frame that doesn't render the view, or renders nothing. The next
+    /// particles start in new rings.
     pub(crate) fn forget(&mut self) {
         self.rings.forget();
     }
 
-    /// Records `plan`'s passes, the next of the frame's: the pool copied into the one that takes
-    /// its place, in a frame that grows it, and the births written into each ring, of `draws`'
-    /// particles.
+    /// Records `plan`'s passes: the grown pool's copy, then each ring's births.
     pub(crate) fn record(
         &mut self,
         frame: &mut Frame<'_>,
@@ -925,14 +892,14 @@ impl ParticlePass {
                 unused: 0,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
-            // At most `MAX_PARTICLES` slots, of 16,384 workgroups.
+            // At most `MAX_PARTICLES` slots: 16,384 workgroups.
             pass.dispatch([count.div_ceil(GROUP), 1, 1]);
         }
         Ok(Emitted { pool, emitters })
     }
 
-    /// What the view's passes draw the frame's particles by, once [`record`](Self::record) has
-    /// written them where `emitted` says, each facing the view along `right` and `up`.
+    /// For the view's passes, once [`record`](Self::record) has written the particles where
+    /// `emitted` says. They face the view along `right` and `up`.
     pub(crate) fn draws(&self, emitted: Emitted, right: Vec3, up: Vec3) -> ParticleDraws<'_> {
         ParticleDraws {
             pipeline: &self.draw,
@@ -944,8 +911,7 @@ impl ParticlePass {
     }
 }
 
-/// What the view's passes draw a frame's particles by, as `MeshPass::draw` draws each emitter's in
-/// its place among the frame's draws.
+/// What `MeshPass::draw` draws each emitter's particles by, in its place among the frame's draws.
 #[derive(Clone, Copy)]
 pub(crate) struct ParticleDraws<'a> {
     pipeline: &'a Pipeline,
@@ -956,10 +922,8 @@ pub(crate) struct ParticleDraws<'a> {
 }
 
 impl ParticleDraws<'_> {
-    /// Draws the frame's particles of `index` among its draws', every slot of their ring an
-    /// instance of the quad, whose indices are `quad`, as `clip_from_world` takes the world to clip
-    /// space, if they have a ring, fogged by the fog of the frame's data at the address `frame`.
-    /// Returns what it drew.
+    /// Draws the particles of the frame's draw `index`, if they have a ring: an instance of the
+    /// quad (indices `quad`) per slot, fogged by the frame data at `frame`. Returns what it drew.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
@@ -998,8 +962,6 @@ impl ParticleDraws<'_> {
 mod tests {
     use super::*;
 
-    /// An emitter's particles of up to `most` alive at once, with `births` births and `bursts`
-    /// burst particles this frame.
     fn particles(id: u64, most: u32, births: u32, bursts: u32) -> Particles {
         Particles {
             id,
@@ -1032,7 +994,7 @@ mod tests {
         }
     }
 
-    /// Each planned emitter's ID's draw index, block, kept particles and oldest slot.
+    /// Each planned emitter's draw index, block, kept particles and oldest slot.
     fn planned(rings: &Rings) -> Vec<(usize, Block, Option<Kept>, u32)> {
         let planned = |planned: &Planned| {
             let Planned {
@@ -1047,12 +1009,11 @@ mod tests {
         rings.planned.iter().map(planned).collect()
     }
 
-    /// A new emitter's ring is made, every slot written, of the least slots or the power of two at
-    /// or past its most particles; the next frame writes its births after the last's, round its
-    /// ring, its oldest drawing first; a frame's births past its ring's room drop the oldest, before
-    /// any burst; and an emitter that needs more grows its ring, keeping its particles, oldest
-    /// first, the newest of them where the births leave too little room, while the pool grows from
-    /// its least by doubling.
+    /// A new ring is made whole: the least slots, or the power of two at or past its most. Next
+    /// frame's births follow the last's round the ring, oldest drawn first. Births past its room
+    /// drop the oldest, before any burst. An emitter needing more grows its ring, keeping its
+    /// particles oldest first (the newest, where births leave too little room). The pool doubles
+    /// from its least.
     #[test]
     fn rings_hold_their_emitters_particles_from_frame_to_frame() {
         let mut rings = Rings::default();
@@ -1083,8 +1044,8 @@ mod tests {
         rings.plan(&[particles(7, 10, 5, 62)]);
         let both = rings.planned[0];
         assert_eq!((both.births, both.bursts, both.dropped), (2, 62, 3));
-        // Grown to 256 slots for 200, of 150 births: its 64 kept, oldest first, from its slot 3,
-        // before them, in a block past the first's, which is free again only from the next frame.
+        // Grown to 256 slots for 200 with 150 births: the 64 kept go first, oldest first from slot
+        // 3, in a block past the first's, which is free again only from the next frame.
         rings.plan(&[particles(7, 200, 150, 0)]);
         let grown = Block {
             offset: 256,
@@ -1097,22 +1058,21 @@ mod tests {
         };
         assert_eq!(planned(&rings), [(0, grown, Some(kept), 214)]);
         assert_eq!(rings.freed, [first]);
-        // One started afresh keeps nothing, in its ring as it was.
+        // A fresh one keeps nothing, in the same ring.
         let fresh = Particles {
             fresh: true,
             ..particles(7, 200, 1, 0)
         };
         rings.plan(&[fresh]);
         assert_eq!(planned(&rings), [(0, grown, made, 1)]);
-        // More births than the ring had kept, of the newest of them alone.
+        // More births than the ring had kept: only the newest of them kept.
         rings.plan(&[particles(7, 200, 0, 0)]);
         rings.plan(&[particles(7, 400, 400, 0)]);
         let regrown = rings.planned[0];
         assert_eq!(regrown.block.slots(), 512);
         let kept = regrown.rebuilt.expect("grown");
         assert_eq!((kept.count, kept.first, regrown.drawn_from), (112, 145, 0));
-        // A ring past what the pool has doubles it, and doubles it again, the pool taking the other
-        // name once, and copying the pool it had into it.
+        // Past the pool's room: it doubles twice, switching its name once and copying the old pool.
         let pool = rings.plan(&[particles(7, 400, 0, 0), particles(8, 5000, 0, 0)]);
         let doubled = Pool {
             slots: 4 * LEAST_POOL,
@@ -1128,10 +1088,9 @@ mod tests {
         assert_eq!(pool, Some(kept));
     }
 
-    /// The pool holds `MAX_PARTICLES` across its rings: an emitter that doesn't fit beside the
-    /// rest draws nothing, warned of once while it's drawn without room, and has a ring once the
-    /// rings of emitters no longer drawn are free, the frame after; one of more than the pool holds
-    /// is warned of too, and draws what fits.
+    /// An emitter that doesn't fit beside the rest draws nothing, warned once while drawn without
+    /// room. It gets a ring the frame after unused rings are freed. One larger than the pool warns
+    /// too, and draws what fits.
     #[test]
     fn the_pool_holds_its_most_and_no_more() {
         let mut rings = Rings::default();
@@ -1153,7 +1112,7 @@ mod tests {
         let indices: Vec<_> = rings.planned.iter().map(|planned| planned.index).collect();
         assert_eq!(indices, [0, 1]);
         assert!(rings.warned.is_empty(), "it fits");
-        // More than the pool holds: warned of, drawing what fits once the rest are gone.
+        // Larger than the pool: warned of, drawing what fits once the rest are gone.
         let huge = [particles(4, MAX_PARTICLES + 1, 0, 0)];
         rings.plan(&huge);
         assert_eq!(rings.warned, [4]);
@@ -1165,10 +1124,9 @@ mod tests {
         assert_eq!((rings.slots, rings.rings.len()), (0, 0));
     }
 
-    /// The buddies of blocks freed join again, so that a pool cut fine by many small rings has its
-    /// whole room for a large one once they're gone: a large ring in the frame they go doubles the
-    /// pool, as what they free is free only from the next frame, and another in the frame after
-    /// takes their room, joined whole.
+    /// A pool cut fine by small rings has its whole room for a large one once they're gone. In the
+    /// frame they go, a large ring doubles the pool, as their blocks are free only from the next
+    /// frame; one in the frame after takes their merged room.
     #[test]
     fn freed_blocks_join_their_buddies() {
         let mut rings = Rings::default();

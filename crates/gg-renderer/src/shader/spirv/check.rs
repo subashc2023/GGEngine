@@ -1,4 +1,4 @@
-//! Checking a shader against the contract games' shaders keep, which Vulkan checks none of.
+//! Checking a shader against the contract games' shaders keep, which Vulkan doesn't check.
 
 use std::collections::HashMap;
 use std::mem::offset_of;
@@ -14,18 +14,16 @@ use super::{
 use crate::mesh::{FrameData, Push};
 use crate::shader::Types;
 
-/// How deep the check follows types nested in types, as structs in structs or arrays of arrays:
-/// far past any type laid out as a Rust type is, and short of the stack a type that holds itself,
-/// which SPIR-V that isn't valid can declare, would take.
+/// How deep the check follows nested types: far past any type laid out as a Rust type, and short of
+/// the stack a self-holding type (invalid SPIR-V can declare one) would take.
 const MOST_NESTED: u32 = 64;
 
-/// The most steps the check takes through a type, a step for each type it meets, each element of
-/// an array among them: past any vertex's, parameters' or frame's data's, and short of the time
-/// and memory an array of billions of fields would take.
+/// The most steps the check takes through a type, one per type met, each array element among them:
+/// past any vertex, parameters or frame data, and short of the time and memory billions of fields
+/// would take.
 const MOST_STEPS: u32 = 1 << 20;
 
-/// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order, but
-/// for the word of padding that ends it.
+/// Each member of a [`Push`] at its offset, in order, less the final padding word.
 const PUSHED: [(u32, &str, Pushed); 10] = [
     (
         offset_of!(Push, clip_from_world) as u32,
@@ -79,7 +77,6 @@ const PUSHED: [(u32, &str, Pushed); 10] = [
     ),
 ];
 
-/// The bytes the engine pushes.
 const PUSHED_BYTES: usize = size_of::<Push>();
 
 /// What a member of a [`Push`] is.
@@ -87,30 +84,29 @@ const PUSHED_BYTES: usize = size_of::<Push>();
 enum Pushed {
     /// A float4x4.
     Matrix,
-    /// The address of the vertices, a `V` each.
+    /// The vertices' address, a `V` each.
     Vertices,
-    /// The address of the instances' transforms, a float4x4 each.
+    /// The transforms' address, a float4x4 per instance.
     Transforms,
-    /// The address of the instances' IDs, a uint2 each.
+    /// The IDs' address, a uint2 per instance.
     Ids,
-    /// The address of the instances' parameters, a `P` each.
+    /// The parameters' address, a `P` per instance.
     Params,
     /// A float2.
     View,
-    /// The address of the frame's data, a [`FrameData`].
+    /// The address of the frame's [`FrameData`].
     Frame,
-    /// The address of a draw of meshlets, uint2s, which the model shaders' meshlet geometry reads:
-    /// 0 for any other draw.
+    /// The address of a meshlet draw's uint2s, read by the model shaders' meshlet geometry; 0 for
+    /// any other draw.
     Meshlets,
-    /// A uint, which the model shaders' meshlets write into the visibility buffer: 0 for any other
-    /// draw.
+    /// A uint the model shaders' meshlets write into the visibility buffer; 0 for any other draw.
     Draw,
-    /// A uint, how many transforms past each instance's its transform the frame before is.
+    /// A uint: how many transforms past each instance's its last frame's is.
     Previous,
 }
 
-/// The capabilities that games' shaders may reach for that need what the engine doesn't enable,
-/// named with what in Slang asks for them; others are named by number.
+/// Capabilities games' shaders may reach for that need what the engine doesn't enable, named by
+/// what in Slang asks for them. Others are named by number.
 const REFUSED_CAPABILITIES: [(u32, &str); 31] = [
     (9, "Float16, for `half`"),
     (10, "Float64, for `double`"),
@@ -145,8 +141,8 @@ const REFUSED_CAPABILITIES: [(u32, &str); 31] = [
     (5379, "DemoteToHelperInvocation, for demoting fragments"),
 ];
 
-/// Each way `spirv`, a shader slangc compiled, breaks the contract for a shader of `types`, a
-/// line each: none if it keeps to it.
+/// Each way `spirv`, as slangc compiled it, breaks the contract for `types`, a line each. Empty if
+/// it keeps to it.
 pub(in crate::shader) fn breaches(spirv: &[u8], types: &Types) -> Vec<String> {
     let Some(module) = Module::read(spirv) else {
         return vec!["it isn't SPIR-V the engine can read".to_owned()];
@@ -158,8 +154,8 @@ pub(in crate::shader) fn breaches(spirv: &[u8], types: &Types) -> Vec<String> {
     module.check_interfaces(&mut breaches);
     module.check_capabilities(&mut breaches);
     module.check_writes(&mut breaches);
-    // Whether or not it reads them: each draw's parameters follow the last's, so a size of part
-    // of a word would leave every later draw's off the words shaders read them by.
+    // Read or not: each draw's parameters follow the last's, so part of a word would put every
+    // later draw's off the words shaders read them by.
     let (size, rust) = types.params();
     if size % 4 != 0 {
         breaches.push(format!(
@@ -176,11 +172,10 @@ struct Scalar {
     float: bool,
 }
 
-/// What [`Module::scalars`] gathers of a type: its 32-bit scalars, and the steps taken, which it
-/// counts against [`MOST_STEPS`].
+/// What [`Module::scalars`] gathers of a type: its 32-bit scalars, and the steps taken, counted
+/// against [`MOST_STEPS`].
 struct Laid {
-    /// Whether an address of what's in a buffer is two of its scalars, of 64 bits together, as the
-    /// frame's data has them.
+    /// Whether an address in a buffer counts as two 32-bit scalars, as the frame's data has them.
     addresses: bool,
     scalars: Vec<Scalar>,
     steps: u32,
@@ -197,10 +192,9 @@ impl Laid {
 }
 
 impl Module {
-    /// The 32-bit scalars `ty` is made of, from byte `at`, where a matrix's columns are
-    /// `matrix_stride` bytes apart, as a struct says of its members, `depth` types deep, gathered
-    /// into `laid`; or what in it isn't one, or takes the check past [`MOST_NESTED`] or
-    /// [`MOST_STEPS`], or lays out a field past what 32-bit offsets reach.
+    /// Gathers into `laid` the 32-bit scalars `ty` is made of, from byte `at`, `depth` types deep,
+    /// a matrix's columns `matrix_stride` bytes apart as a struct says. Errs with what in it isn't
+    /// one, or takes the check past [`MOST_NESTED`] or [`MOST_STEPS`], or lies past 32-bit offsets.
     fn scalars(
         &self,
         ty: u32,
@@ -286,9 +280,8 @@ impl Module {
         Ok(())
     }
 
-    /// The size of what `ty` lays out from byte 0, if it's 32-bit scalars back to back, addresses
-    /// among them if `addresses`, as [`scalars`](Self::scalars) says; or why it isn't, as what it
-    /// holds.
+    /// The size `ty` lays out from byte 0, if it's 32-bit scalars back to back, addresses among
+    /// them if `addresses` ([`scalars`](Self::scalars)); or why not, naming what it holds.
     fn packed_size(&self, ty: u32, addresses: bool) -> Result<u32, String> {
         let mut laid = Laid::new(addresses);
         self.scalars(ty, 0, None, 0, &mut laid)
@@ -296,8 +289,8 @@ impl Module {
         packed(&laid.scalars)
     }
 
-    /// Whether `ty`, where a struct lays out its columns `matrix_stride` bytes apart, is 16
-    /// floats back to back: a float4x4, as slangc lays one out.
+    /// Whether `ty`, its columns `matrix_stride` bytes apart, is 16 floats back to back: a float4x4
+    /// as slangc lays one out.
     fn is_float4x4(&self, ty: u32, matrix_stride: Option<u32>) -> bool {
         let mut laid = Laid::new(false);
         let laid_out = self.scalars(ty, 0, matrix_stride, 0, &mut laid).is_ok();
@@ -392,8 +385,8 @@ impl Module {
                         ));
                     }
                 }
-                // Not a struct: a P* params of 8 bytes declared where the IDs go would read as
-                // their address otherwise.
+                // Not a struct: otherwise 8-byte `P* params` declared where the IDs go would read
+                // as their address.
                 Pushed::Ids | Pushed::Meshlets => {
                     let pointee = self.pointee(ty, PHYSICAL_STORAGE_BUFFER);
                     let stride = self.decoration(ty, ARRAY_STRIDE);
@@ -445,10 +438,9 @@ impl Module {
         }
     }
 
-    /// Checks that `pointer`, the type of the push constant with the address of the frame's data,
-    /// points at the start of what [`FrameData`] lays out: no more bytes, of 32-bit fields and
-    /// addresses without padding, so that a shader that reads the fields before those the engine
-    /// adds to its end keeps to the contract.
+    /// Checks that `pointer`, the frame data push constant's type, points at a prefix of what
+    /// [`FrameData`] lays out: no more bytes, of 32-bit fields and addresses without padding. So a
+    /// shader reading the fields before those the engine adds at its end keeps to the contract.
     fn check_frame(&self, pointer: u32, breaches: &mut Vec<String>) {
         let size = size_of::<FrameData>();
         let Some(pointee) = self.pointee(pointer, PHYSICAL_STORAGE_BUFFER) else {
@@ -471,9 +463,9 @@ impl Module {
         }
     }
 
-    /// Checks that `pointer`, the type of a push constant with the address of the shader's
-    /// `what`, points at what `rust`, its Rust type named `role`, lays out: as many bytes, of
-    /// 32-bit fields without padding.
+    /// Checks that `pointer`, the type of a push constant addressing the shader's `what`, points at
+    /// what `rust` (its Rust type, named `role`) lays out: as many bytes, of 32-bit fields without
+    /// padding.
     fn check_pointee(
         &self,
         pointer: u32,
@@ -547,7 +539,7 @@ impl Module {
         }
     }
 
-    /// What a resource the shader binds is, for a breach to name.
+    /// What a bound resource is, for a breach to name.
     fn resource(&self, variable: &Variable) -> &'static str {
         let pointee = self.pointee(variable.ty, variable.storage);
         if variable.storage == STORAGE_BUFFER
@@ -558,8 +550,8 @@ impl Module {
         if variable.storage == UNIFORM {
             return "a constant buffer";
         }
-        // An array's elements, as deep as the check follows them: of one that holds itself, they
-        // would go on for good.
+        // An array's elements, as deep as the check follows them: a self-holding one's would go on
+        // for good.
         let mut ty = pointee;
         for _ in 0..MOST_NESTED {
             match ty.and_then(|ty| self.types.get(&ty)) {
@@ -645,7 +637,7 @@ impl Module {
         };
         for output in outputs {
             let name = self.interface_name(output.id);
-            // ", color," of a field it returns, or nothing of what it returns whole.
+            // ", color," for a returned field, nothing for what it returns whole.
             let named = (name.as_ref()).map_or_else(String::new, |name| format!(", {name},"));
             let location = self.decoration(output.id, LOCATION);
             let ty = self.pointee(output.ty, OUTPUT);
@@ -747,8 +739,8 @@ impl Module {
     }
 }
 
-/// The size of `scalars` if they're back to back from byte 0, as a struct without padding lays
-/// them out; or where the first gap is.
+/// The size of `scalars` if they're back to back from byte 0, as in an unpadded struct; or where
+/// the first gap is.
 fn packed(scalars: &[Scalar]) -> Result<u32, String> {
     for (i, scalar) in (0..).zip(scalars) {
         if scalar.at != 4 * i {
@@ -758,8 +750,8 @@ fn packed(scalars: &[Scalar]) -> Result<u32, String> {
     Ok(4 * scalars.len() as u32)
 }
 
-/// Byte `at` and `count` more of `size` bytes past it, if 32-bit offsets reach that far; or what
-/// a field laid out there is, for a breach to name.
+/// Byte `at` plus `count` times `size`, if 32-bit offsets reach it; or what a field there is, for a
+/// breach to name.
 fn past(at: u32, count: u32, size: u32) -> Result<u32, String> {
     (count.checked_mul(size))
         .and_then(|bytes| at.checked_add(bytes))

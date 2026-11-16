@@ -1,5 +1,5 @@
-//! Shaders: Slang files compiled to SPIR-V with slangc, games' as they're added and the engine's
-//! own as it builds, which draw meshes of one vertex type in the game's view.
+//! Shaders: Slang compiled to SPIR-V by slangc, games' as they're added and the engine's as it
+//! builds. Each draws meshes of one vertex type in the game's view.
 
 mod spirv;
 
@@ -26,19 +26,18 @@ use crate::packed::PackedVertex;
 use crate::sprite::{self, Corner, Params};
 use crate::{circle, grid, line, text};
 
-/// The slangc that compiled the renderer's own shaders, as the build found it.
+/// The slangc the build found and compiled the renderer's shaders with.
 const SLANGC: &str = env!("GG_SLANGC");
 
-/// A shader that [`Shaders::add`] handed out, which draws meshes of vertex type `V` and takes
-/// parameters of type `P` with each draw.
+/// A shader from [`Shaders::add`], drawing meshes of vertex type `V` with per-draw parameters `P`.
 pub struct Shader<V, P = ()> {
     pub(crate) index: u32,
-    /// Whether it writes depth, as [`writes_depth`] says.
+    /// Whether it writes depth ([`writes_depth`]).
     pub(crate) opaque: bool,
     types: PhantomData<fn() -> (V, P)>,
 }
 
-// By hand, so that they don't need `V` and `P` to be `Clone` or `Debug` too.
+// By hand, so `V` and `P` needn't be `Clone` or `Debug`.
 impl<V, P> Clone for Shader<V, P> {
     fn clone(&self) -> Self {
         *self
@@ -57,16 +56,15 @@ impl<V, P> Shader<V, P> {
     }
 }
 
-/// `spirv`, one of the engine's shaders the build compiled, its sampled images decorated as
-/// [`spirv::decorate_non_uniform`] says, for a pipeline made apart from [`Shaders`].
+/// `spirv`, an engine shader the build compiled, its sampled images decorated per
+/// [`spirv::decorate_non_uniform`], for a pipeline made apart from [`Shaders`].
 pub(crate) fn non_uniform(spirv: &[u8]) -> Vec<u8> {
     spirv::decorate_non_uniform(spirv.to_vec())
 }
 
-/// Whether a shader that blends as `blend` says writes its depth where it draws, as well as
-/// testing it: an opaque one does, so that what's behind it, drawn after it, doesn't show; one
-/// that blends doesn't, so that what's behind it still shows through it, as through its
-/// transparent margins.
+/// Whether a shader blending as `blend` writes depth as well as testing it. An opaque one does, so
+/// what's behind it, drawn later, doesn't show. One that blends doesn't, so what's behind shows
+/// through it, as through its transparent margins.
 pub(crate) fn writes_depth(blend: Blend) -> bool {
     blend == Blend::Opaque
 }
@@ -77,70 +75,70 @@ impl<V, P> fmt::Debug for Shader<V, P> {
     }
 }
 
-/// The shaders a renderer draws meshes with, the first of them the engine's sprite shader, which
-/// the build compiled. It compiles each one added as it's added and hands out its handle, and
-/// keeps its SPIR-V until [`Uploads::take`](crate::Uploads::take) takes it, for a renderer to make
-/// its pipeline the next time it renders; a game's shader compiled again replaces it the same way,
-/// and a shader removed goes with them, in order. A renderer draws with the shaders of one
-/// `Shaders` only.
+/// The shaders a renderer draws meshes with, the engine's sprite shader first. Each is compiled as
+/// it's added, and its SPIR-V kept until [`Uploads::take`](crate::Uploads::take) takes it, for a
+/// renderer to make its pipeline when it next renders. A game's shader compiled again replaces it
+/// the same way; removals go in order with them. A renderer draws with one `Shaders`' shaders only.
 pub struct Shaders {
-    /// Those added, replaced or removed since they were last taken, in order.
+    /// Added, replaced or removed since last taken, in order.
     pub(crate) changes: Vec<Change>,
-    /// How many have been added.
+    /// How many were ever added.
     count: u32,
-    /// Those removed, whose handles are never given out again.
+    /// Never handed out again.
     removed: HashSet<u32>,
-    /// The handles of the engine's shaders that are added the first time they're asked for, once
-    /// each has been: its model shaders, for opaque, masked and blended materials, then its circle
-    /// shader, its line shader, its grid shader and its text shader.
+    /// Handles of the engine's shaders added when first asked for: the model shaders (opaque,
+    /// masked, blended), then circle, line, grid and text.
     lazy: [Option<u32>; 7],
-    /// The games' shaders, in the order they were added, less those removed.
+    /// Games' shaders in order added, less those removed.
     sources: Vec<ShaderSource>,
 }
 
-/// A change to a renderer's shaders, which [`Uploads::take`](crate::Uploads::take) carries to it.
+/// A change to a renderer's shaders, carried by [`Uploads::take`](crate::Uploads::take).
 pub(crate) enum Change {
-    /// A shader added, or one compiled again in place of one.
+    /// Added, or compiled again in place of one.
     Added(Added),
-    /// A shader removed, by its index.
+    /// By index.
     Removed(u32),
 }
 
 pub(crate) struct Added {
     pub(crate) index: u32,
-    /// Whether it's a shader compiled again, in place of one a renderer has, rather than one
-    /// added, which comes after those a renderer has.
+    /// Compiled again in place of one a renderer has, rather than added after them.
     pub(crate) replacement: bool,
     pub(crate) name: String,
     pub(crate) spirv: Vec<u8>,
-    /// The size of the vertices it reads.
+    /// In bytes.
     pub(crate) vertex_size: usize,
-    /// The size of the parameters it takes.
+    /// In bytes.
     pub(crate) params_size: usize,
     pub(crate) blend: Blend,
-    /// Whether it writes the IDs of what it draws, as all do but the engine's grid, which is for
-    /// seeing by and leaves those of what's under it.
+    /// Whether it writes IDs, as all but the engine's grid do: that's for seeing by, and leaves the
+    /// IDs under it.
     pub(crate) ids: bool,
-    /// What draws the shadows of what it draws, if it writes depth and they're cut out as it is:
-    /// a module of its vertex shader and `shadow_main`, a fragment shader that discards where it
-    /// does, as the engine's masked model shader has. Those of the others that write depth are of
-    /// whole triangles, drawn by their vertex shaders alone.
+    /// What draws its shadows when it writes depth and they're cut out as it is: a module of its
+    /// vertex shader and `shadow_main`, a fragment shader discarding where it does, as the engine's
+    /// masked model shader has. Other depth-writing shaders' shadows are whole triangles, drawn by
+    /// their vertex shaders alone.
     pub(crate) shadow: Option<Vec<u8>>,
-    /// What draws the meshlets a view keeps of a mesh, for the engine's opaque and masked model
-    /// shaders, which views draw meshes with meshlets by.
+    /// What draws the meshlets a view keeps of a mesh: for the engine's opaque and masked model
+    /// shaders, which views draw meshlet meshes with.
     pub(crate) meshlets: Option<Box<Meshlets>>,
 }
 
-/// What draws a model shader's meshlets: through vertex shaders, a module of `meshlet_vertex_main`
-/// and `fragment_main`, and one of it and `shadow_main` for shadows cut out, as [`Added::shadow`]
-/// says; and through a mesh shader, a module of `mesh_main` alone, whose pipelines take the shader's
-/// own modules' fragment shaders, as [`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh) says. And
-/// what draws them into the visibility buffer: through vertex shaders, a module of
-/// `meshlet_visibility_main` and `visibility_main`; and through a mesh shader, a module of
-/// `mesh_visibility_main` alone, and one of `visibility_primitive_main` alone. And what draws its
-/// normals, for the view's reflections where it draws otherwise than into the visibility buffer: by
-/// indices, a module of `vertex_main` and `normal_main`, whose fragment shader a mesh shader's
-/// pipeline takes too; and through vertex shaders, one of `meshlet_vertex_main` and `normal_main`.
+/// A model shader's meshlet modules, each of the entry points named:
+///
+/// - `vertices`: `meshlet_vertex_main` and `fragment_main`, through vertex shaders.
+/// - `vertices_shadow`: those and `shadow_main`, for shadows cut out ([`Added::shadow`]).
+/// - `mesh`: `mesh_main` alone. Its pipelines take the shader's own fragment shaders, as
+///   [`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh) says.
+/// - `visibility`: `meshlet_visibility_main` and `visibility_main`, into the visibility buffer
+///   through vertex shaders.
+/// - `visibility_mesh`, `visibility_primitive`: `mesh_visibility_main` alone and
+///   `visibility_primitive_main` alone, into it through a mesh shader.
+/// - `normals`: `vertex_main` and `normal_main`, by indices, for the view's reflections where it
+///   draws other than into the visibility buffer. Mesh shader pipelines take its fragment shader
+///   too.
+/// - `vertices_normals`: `meshlet_vertex_main` and `normal_main`, the same through vertex shaders.
 pub(crate) struct Meshlets {
     pub(crate) vertices: Vec<u8>,
     pub(crate) vertices_shadow: Option<Vec<u8>>,
@@ -152,8 +150,8 @@ pub(crate) struct Meshlets {
     pub(crate) vertices_normals: Vec<u8>,
 }
 
-/// What a shader draws with: the sizes and names of its vertex type and its type of parameters,
-/// which the contract's check compares its structs for them with.
+/// The sizes and names of a shader's vertex and parameter types, which the contract's check
+/// compares its structs with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Types {
     vertex_size: usize,
@@ -182,143 +180,126 @@ impl Types {
 }
 
 impl Shaders {
-    /// How many it has handed out, the engine's sprite shader among them, and those of its own it
-    /// added as they were first asked for: the index of the next.
+    /// How many it has handed out, the sprite shader and the engine's added ones among them: the
+    /// next one's index.
     pub fn count(&self) -> u32 {
         self.count
     }
 
-    /// Compiles the Slang shader at `path`, which draws meshes of vertex type `V` and takes
-    /// parameters of type `P` with each draw, such as a color: `()` for none. `blend` says how its
-    /// color goes over what's drawn before it: [`Blend::Alpha`] blends by the alpha it returns, not
-    /// multiplied into the color, and [`Blend::PremultipliedAlpha`] by the alpha it returns,
-    /// multiplied into the color already. Every shader tests the view's depth, drawing only where
-    /// it's as near as what's drawn there or nearer; one that's [`Blend::Opaque`] writes its depth
-    /// too, so that what's behind it doesn't show over it, while one that blends doesn't, so that
-    /// what's behind it still shows through it. What one that's opaque draws casts shadows, from
-    /// the light that casts them, of whole triangles, as its vertex shader places them, pushed a
-    /// shadow map's matrix from the world to its clip space and the map's size in place of the
-    /// view's, and the frame's data without the sky, the shadows, the clusters, the ambient
-    /// occlusion or the fog. `name` names it in errors and GPU captures.
+    /// Compiles the Slang shader at `path`, drawing meshes of vertex type `V` with per-draw
+    /// parameters `P`, such as a color (`()` for none). `name` names it in errors and GPU captures.
+    /// `blend` ([`Blend`]) says how its color goes over what's drawn before it.
     ///
-    /// Vulkan checks nothing about a shader, so the engine checks, in the SPIR-V slangc writes,
-    /// that it keeps to this contract:
+    /// Every shader tests the view's depth, drawing where it's as near as what's there or nearer. A
+    /// [`Blend::Opaque`] one writes depth too; one that blends doesn't, so what's behind shows
+    /// through. What an opaque one draws casts the shadow-casting light's shadows, of whole
+    /// triangles as its vertex shader places them. For those it's pushed the shadow map's
+    /// world-to-clip matrix and size in place of the view's, and frame data without the sky,
+    /// shadows, clusters, ambient occlusion or fog.
     ///
-    /// - Its entry points are `vertex_main`, a vertex shader, and `fragment_main`, a fragment
-    ///   shader that returns a struct of two outputs, or three, and nothing else: the color, a
-    ///   `float4 : SV_Target0`, in linear RGBA, which may be brighter than 1, as the view's colors
-    ///   are of high dynamic range; the draw's ID, a `uint2 : SV_Target1`, which the view keeps
-    ///   where the draw shows, for [picks](crate::Pick) to read back: its instance's, which the
-    ///   vertex shader reads from `ids[instance]` and hands on `nointerpolation`, or 0 where it
-    ///   draws no entity; and, if it likes, the motion, a `float4 : SV_Target2`, how far the point
-    ///   it draws moved in the world since the frame before, in its XYZ, and 0 in its W: where it
-    ///   is, `mul(transforms[instance], float4(position, 1.0))`, less where it was,
-    ///   `mul(transforms[instance + previous], float4(position, 1.0))`, as `previous` below says,
-    ///   which the vertex shader hands on, interpolated, as the difference of two points placed by
-    ///   one mesh's transforms is. The view keeps the motion of what's opaque where it shows, which
-    ///   its antialiasing ([`Antialiasing::Taa`](crate::Antialiasing::Taa)) takes each pixel's
-    ///   history from where its point was by: a shader that writes depth and returns none moves
-    ///   what it draws with the camera alone, as though it stood still, as the engine has its
-    ///   fragment shader return zeros there; that of one that blends goes unused, as what's behind
-    ///   it keeps its own. A shader that blends should discard what's fully transparent, after it
-    ///   samples, as the engine's do: blending it changes no pixel, but its ID would hide what's
-    ///   behind it from picks.
-    /// - Each run of consecutive draws of one mesh with it is one instanced draw, whose instances
-    ///   are the draws. Its push constants are `struct { float4x4 clip_from_world; V* vertices;
-    ///   float4x4* transforms; uint2* ids; P* params; float2 view; Frame* frame; uint2* meshlets;
-    ///   uint draw; uint previous; }`, 128 bytes. The first is the camera's view and projection,
-    ///   from the world to Vulkan's clip space, which antialiasing moves a fraction of a pixel
-    ///   each frame; the second, the address of the mesh's vertices; the third, of the instances'
-    ///   transforms, each from the mesh's own space to the world's, for `mul(clip_from_world,
-    ///   mul(transforms[instance], float4(position, 1.0)))`; the fourth, of the instances' IDs,
-    ///   each the low and high halves of a 64-bit number; the fifth, of the instances' parameters,
-    ///   one `P` each, back to back; the sixth, the view's size in pixels, across then down, for
-    ///   what's sized on screen, as the engine's lines are; the seventh, of the frame's data,
-    ///   `struct Frame { float3 camera; float time; float exposure; uint light_count; Light*
-    ///   lights; Material* materials; float4 eye; uint sky; uint irradiance; uint specular; uint
-    ///   specular_levels; uint brdf; float sky_luminance; Shadows shadows; Clusters clusters; uint
-    ///   ambient_occlusion; uint unused; Fog fog; Aerial aerial; Reflected reflections; }`,
-    ///   where the view sees from in the world, the time it shows, what lit shading multiplies
-    ///   light by, and the frame's lights, those [`RenderData`](crate::RenderData) gives, those
-    ///   that light everywhere first, directional lights and those without a range, then the rest,
-    ///   each in the order it gives them, `Light` as `shaders/mesh.slang` declares it; the address
-    ///   of the table of models' materials; where shading sees from, the camera's position and 1,
-    ///   or for an orthographic projection the way back toward it and 0, so that the way to the eye
-    ///   from `p` is `eye.xyz - p * eye.w`; the sky, as `shaders/mesh.slang` says, its texture,
-    ///   0 under an atmosphere, its prefiltered light, cubes, the split sum's table and its
-    ///   luminance, `specular_levels` 0 in a frame without one; the shadows of the light that
-    ///   casts them, their cascades' shadow maps among them, `Shadows` as `shaders/mesh.slang`
-    ///   declares it, its `light` 0xFFFFFFFF in a frame without them; and which of the lights
-    ///   reach each cluster of the view, the view cut into tiles and those along its depth,
-    ///   `Clusters` as `shaders/mesh.slang` declares it, its `words` 0 in a frame without them,
-    ///   where each fragment shades by every light; the view's ambient occlusion, as
-    ///   [`AmbientOcclusion`](crate::AmbientOcclusion) says, a texture of the bindless set's of
-    ///   the view's size, whose red is the fraction of the light from all around that reaches
-    ///   what's opaque at each pixel, which a fragment of what's opaque loads at its pixel,
-    ///   `SV_Position`'s XY, and darkens the sky's light by, 0 for none, in a frame without it and
-    ///   in every pass but the view's own, the canvas's among them; the fog the view is in, `Fog`
-    ///   as `shaders/mesh.slang` declares it, its `density` 0 in a frame without fog, which the
-    ///   view fogs what an opaque shader draws by, in a pass of its own once what's opaque has
-    ///   drawn, and which a shader that blends fogs itself by, if it likes, as `shaders/fog.slang`
-    ///   does, drawing unfogged otherwise; the haze an atmosphere puts between the viewer and
-    ///   what's lit, the froxels of the view that hold it and where a point falls among them,
-    ///   `Aerial` as `shaders/mesh.slang` declares it, its `luminance` 0 in a frame without one
-    ///   and in the canvas's pass; and the view's reflections, as
-    ///   [`Reflections`](crate::Reflections) says, `Reflected` as `shaders/mesh.slang` declares
-    ///   it, textures of the bindless set's of the view's size, which a fragment of what's opaque
-    ///   loads and samples at its pixel and takes in place of the sky's specular light, 0 in a frame
-    ///   without them and in every pass but the view's own; or a struct of as many of its first
-    ///   fields: the engine adds
-    ///   fields at its end. The eighth and the ninth are the engine's own model shaders', 0 for any
-    ///   other; the tenth, how many transforms past each instance's its transform the frame before
-    ///   is, which the motion is from: those of the world's opaque meshes, in the game's view, and
-    ///   0 for the rest, which the engine knows none of, as a layer's draws, made each frame, so
-    ///   that they read their own and stand still. A shader that takes no parameters leaves out the fifth, and so those
-    ///   after it. A shader may end the struct after the last of them it reads, and one that reads
-    ///   none has none.
-    /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
-    ///   `SV_VulkanInstanceID`, not `SV_VertexID` or `SV_InstanceID`, which need a feature the
-    ///   engine doesn't enable, nor vertex attributes. A fragment shader that reads its instance's
-    ///   parameters gets the instance from the vertex shader, `nointerpolation`. It writes nothing
-    ///   through the addresses, which needs features the engine doesn't enable too.
-    /// - It may sample the bindless set's `[[vk::binding(0, 0)]] Texture2D textures[]`, by a
-    ///   [`Texture`](crate::Texture) in its parameters, a `uint`, with its
-    ///   `[[vk::binding(1, 0)]] SamplerState samplers[]`, by a [`Sampler`](crate::Sampler)'s
-    ///   index, a `uint` too, each through `NonUniformResourceIndex`, since the instances of one
-    ///   draw can carry different ones; the cubes the frame's data names, through
-    ///   `[[vk::binding(0, 0)]] TextureCube cubes[]`, the same binding; and the shadow maps the
-    ///   frame's data names, by comparison alone, as `SampleCmp` samples, through
-    ///   `[[vk::binding(1, 0)]] SamplerComparisonState comparisons[]`, the samplers' binding, at
-    ///   [`COMPARISON_SAMPLER`](gg_gpu::COMPARISON_SAMPLER), which samples nothing else, as the
-    ///   other textures hold no depth. It uses no other resources, and nothing else that needs a
-    ///   feature the engine doesn't enable, such as `double`, `half`, 64-bit integers or wave
-    ///   operations.
-    /// - Its structs for `V` and `P` have their fields, in order, of 32-bit scalars, vectors and
+    /// Vulkan checks nothing about a shader, so the engine checks the SPIR-V slangc writes against
+    /// this contract:
+    ///
+    /// - Entry points: `vertex_main`, a vertex shader, and `fragment_main`, a fragment shader
+    ///   returning a struct of two or three outputs and nothing else:
+    ///   - the color, `float4 : SV_Target0`, linear RGBA, which may pass 1 (the view is HDR);
+    ///   - the ID, `uint2 : SV_Target1`, kept where the draw shows for [picks](crate::Pick):
+    ///     `ids[instance]`, read by the vertex shader and passed on `nointerpolation`, or 0 for no
+    ///     entity;
+    ///   - optionally the motion, `float4 : SV_Target2`: how far the point moved in the world since
+    ///     the last frame, in XYZ, 0 in W. That's `mul(transforms[instance], float4(position,
+    ///     1.0))` less `mul(transforms[instance + previous], float4(position, 1.0))`, passed on
+    ///     interpolated by the vertex shader.
+    ///
+    ///   TAA ([`Antialiasing::Taa`](crate::Antialiasing::Taa)) takes each pixel's history by the
+    ///   motion of what's opaque there. A depth-writing shader returning none gets zeros returned
+    ///   for it, so what it draws moves with the camera alone. A blending shader's motion goes
+    ///   unused, as what's behind keeps its own. A blending shader should discard what's fully
+    ///   transparent, after sampling, as the engine's do: it changes no pixel, but its ID would
+    ///   hide what's behind from picks.
+    /// - Each run of consecutive draws of one mesh with it is one instanced draw, an instance per
+    ///   draw. Its push constants are `struct { float4x4 clip_from_world; V* vertices; float4x4*
+    ///   transforms; uint2* ids; P* params; float2 view; Frame* frame; uint2* meshlets; uint draw;
+    ///   uint previous; }`, 128 bytes:
+    ///   - `clip_from_world`: the camera's view and projection, from the world to Vulkan's clip
+    ///     space, jittered a fraction of a pixel each frame by antialiasing.
+    ///   - `vertices`: the mesh's vertices.
+    ///   - `transforms`: each instance's, from the mesh's space to the world's, for
+    ///     `mul(clip_from_world, mul(transforms[instance], float4(position, 1.0)))`.
+    ///   - `ids`: each instance's, the low and high halves of a 64-bit number.
+    ///   - `params`: one `P` per instance, back to back.
+    ///   - `view`: the view's size in pixels, across then down, for what's sized on screen.
+    ///   - `frame`: the frame's data, below.
+    ///   - `meshlets`, `draw`: the engine's model shaders' own, 0 for any other.
+    ///   - `previous`: how many transforms past each instance's its last frame's is, for the
+    ///     motion. Set for the world's opaque meshes in the game's view; 0 for the rest, which the
+    ///     engine knows none of (a layer's draws, made each frame), so they read their own and
+    ///     stand still.
+    ///
+    ///   A shader without parameters leaves out `params`, and so the fields after it. A shader may
+    ///   end the struct after the last field it reads; one reading none has none.
+    ///
+    ///   The frame's data is `struct Frame { float3 camera; float time; float exposure; uint
+    ///   light_count; Light* lights; Material* materials; float4 eye; uint sky; uint irradiance;
+    ///   uint specular; uint specular_levels; uint brdf; float sky_luminance; Shadows shadows;
+    ///   Clusters clusters; uint ambient_occlusion; uint unused; Fog fog; Aerial aerial; Reflected
+    ///   reflections; }`, or a struct of as many of its first fields: the engine adds fields at its
+    ///   end. `shaders/mesh.slang` declares it and its structs, and says what each field holds and
+    ///   when it's 0. Beyond that:
+    ///   - `lights` are [`RenderData`](crate::RenderData)'s: those lighting everywhere (directional
+    ///     lights and those without a range) first, then the rest, each in given order.
+    ///   - `ambient_occlusion` is the view's [`AmbientOcclusion`](crate::AmbientOcclusion). Opaque
+    ///     fragments load it at `SV_Position`'s XY and darken the sky's light by it. It's 0 in
+    ///     every pass but the view's own, the canvas's among them.
+    ///   - `fog`: the view fogs what opaque shaders draw, in its own pass after them. A blending
+    ///     shader fogs itself if it likes, as `shaders/fog.slang` does, or draws unfogged.
+    ///   - `aerial`'s `luminance` is 0 in the canvas's pass too.
+    ///   - `reflections` are the view's [`Reflections`](crate::Reflections), which opaque fragments
+    ///     sample at their pixel in place of the sky's specular light.
+    /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at `SV_VulkanInstanceID`:
+    ///   no vertex attributes, and not `SV_VertexID` or `SV_InstanceID`, which need a feature the
+    ///   engine doesn't enable. A fragment shader reading its instance's parameters gets the
+    ///   instance from the vertex shader, `nointerpolation`. It writes nothing through the
+    ///   addresses, which needs features not enabled either.
+    /// - It may sample:
+    ///   - the bindless set's `[[vk::binding(0, 0)]] Texture2D textures[]` by a
+    ///     [`Texture`](crate::Texture) in its parameters, a `uint`, with `[[vk::binding(1, 0)]]
+    ///     SamplerState samplers[]` by a [`Sampler`](crate::Sampler)'s index, a `uint` too, each
+    ///     through `NonUniformResourceIndex`, as one draw's instances can differ;
+    ///   - the cubes the frame's data names, through `[[vk::binding(0, 0)]] TextureCube cubes[]`,
+    ///     the same binding;
+    ///   - the shadow maps the frame's data names, by comparison alone (`SampleCmp`), through
+    ///     `[[vk::binding(1, 0)]] SamplerComparisonState comparisons[]`, the samplers' binding, at
+    ///     [`COMPARISON_SAMPLER`](gg_gpu::COMPARISON_SAMPLER). That samples nothing else, as other
+    ///     textures hold no depth.
+    ///
+    ///   It uses no other resources, and nothing else needing a feature the engine doesn't enable,
+    ///   such as `double`, `half`, 64-bit integers or wave operations.
+    /// - Its `V` and `P` structs have their fields in order, of 32-bit scalars, vectors and
     ///   matrices: Slang lays out what a pointer points at as `#[repr(C)]` does, without padding.
-    ///   `P` is a whole number of 4-byte words even for a shader that reads no parameters, as
-    ///   each draw's parameters go after the last draw's, which other shaders read by words.
-    ///   glam's `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3` and `Mat4` are `float2`, `float3`,
-    ///   `float4`, `float4`, `float3x3` and `float4x4`; not `Vec3A` or `Mat3A`, whose columns
-    ///   take 16 bytes to `float3`'s 12. The engine builds glam without SIMD, so each of them is
-    ///   4-byte aligned, as Slang's are.
+    ///   `P` is whole 4-byte words even for a shader reading no parameters, as each draw's
+    ///   parameters follow the last's, which other shaders read by words. glam's `Vec2`, `Vec3`,
+    ///   `Vec4`, `Quat`, `Mat3` and `Mat4` are `float2`, `float3`, `float4`, `float4`, `float3x3`
+    ///   and `float4x4`; not `Vec3A` or `Mat3A`, whose columns take 16 bytes to `float3`'s 12. The
+    ///   engine builds glam without SIMD, so each is 4-byte aligned, as Slang's are.
     ///
-    /// The check sees each struct's size and that its fields are 32 bits each, but not what the
-    /// fields are: fields of the same total size as its type's, in another order or of another
-    /// kind, such as a `uint` read as a float, draw garbage without a message. It tells the push
-    /// constants apart by their places and types alone, so parameters that are one `uint2`,
-    /// declared where `ids` goes or swapped with it, read the IDs as their own. Nor does it see
-    /// which way a matrix is laid out, or whether an index that can differ across a draw goes
+    /// The check sees each struct's size and that its fields are 32 bits, not what they are: fields
+    /// of the right total size in another order or kind, such as a `uint` read as a float, draw
+    /// garbage silently. It tells push constants apart by place and type alone, so parameters of
+    /// one `uint2`, declared where `ids` goes or swapped with it, read the IDs as their own. Nor
+    /// does it see a matrix's layout, or whether an index that can differ across a draw goes
     /// through `NonUniformResourceIndex`.
     ///
-    /// slangc writes the SPIR-V in a directory of the compile's own in the OS's temporary
-    /// directory, with the list of the files the shader read, its own and those it includes, which
-    /// its [`ShaderSource`] keeps, with when the compile began, for hot reload to compile it again
-    /// as they change.
+    /// slangc writes the SPIR-V, and the list of files the shader read (its own and its includes),
+    /// to a directory of its own in the OS's temporary directory. [`ShaderSource`] keeps the list
+    /// and the compile's start time, for hot reload.
     ///
-    /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, with
-    /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, with
-    /// `renderer.shader_files` if slangc's directory can't be made or what it wrote there can't
-    /// be read, and with `renderer.no_slangc` if slangc can't be run.
+    /// # Errors
+    ///
+    /// - `renderer.bad_shader`, with slangc's diagnostics: it doesn't compile.
+    /// - `renderer.shader_mismatch`, with each breach: it breaks the contract.
+    /// - `renderer.shader_files`: slangc's directory can't be made, or what it wrote can't be read.
+    /// - `renderer.no_slangc`: slangc can't be run.
     pub fn add<V: NoUninit, P: NoUninit>(
         &mut self,
         name: &str,
@@ -342,13 +323,14 @@ impl Shaders {
         Ok(Shader::new(index, writes_depth(blend)))
     }
 
-    /// Adds a game's shader, `name`, as [`compile_shader`] compiled it from the file at `path`,
-    /// `spirv`, as `tools/cook` puts it in a game's package: as [`add`](Self::add) adds one it
-    /// compiles itself, checked against the contract for its types alike, but listing no files,
-    /// so that it doesn't compile again as they change.
+    /// Adds a game's shader `name` from `spirv`, which [`compile_shader`] compiled from `path` into
+    /// a package (`tools/cook`). It's checked against the contract as [`add`](Self::add) checks,
+    /// but lists no files, so it isn't compiled again as they change.
     ///
-    /// Fails with `renderer.shader_mismatch` and each way it breaks the contract if it breaks it,
-    /// as SPIR-V that can't be read does.
+    /// # Errors
+    ///
+    /// - `renderer.shader_mismatch`, with each breach: it breaks the contract, or its SPIR-V can't
+    ///   be read.
     pub fn add_compiled<V: NoUninit, P: NoUninit>(
         &mut self,
         name: &str,
@@ -371,9 +353,9 @@ impl Shaders {
         Ok(Shader::new(index, writes_depth(blend)))
     }
 
-    /// The shader [`add`](Self::add) gave for a file whose path `same` takes, drawing meshes of `V`
-    /// with parameters `P` and blending as `blend` says, if one was added: its types by their names
-    /// and sizes, as a snapshot's asset lines name a draw's.
+    /// The shader [`add`](Self::add) gave for a file whose path `same` accepts, drawing `V` with
+    /// `P` and blending as `blend` says, if any. Types match by name and size, as a snapshot's
+    /// asset lines name a draw's.
     pub fn find<V: NoUninit, P: NoUninit>(
         &self,
         blend: Blend,
@@ -385,23 +367,21 @@ impl Shaders {
         Some(Shader::new(source.index, writes_depth(blend)))
     }
 
-    /// The games' shaders added so far, in the order they were added, for hot reload to compile
-    /// again as their files change; the engine's own shaders aren't among them.
+    /// Games' shaders in order added, for hot reload to compile again as their files change. The
+    /// engine's aren't among them.
     pub fn sources(&self) -> &[ShaderSource] {
         &self.sources
     }
 
-    /// Puts `compiled` in place of the shader it was compiled from, which keeps its handle: a
-    /// renderer makes its pipeline anew the next time it renders, and draws with the old one
-    /// until then. It takes the place of any of that shader's SPIR-V still waiting for a
-    /// renderer, as it was added or replaced. A renderer that can't make its pipeline warns, and
-    /// goes on drawing with the old one. A shader removed stays removed: one compiled again from
-    /// its source is dropped.
+    /// Puts `compiled` in place of its source shader, keeping its handle. A renderer makes the
+    /// pipeline anew when it next renders, drawing with the old one until then, or warns and keeps
+    /// the old one if it can't. It replaces any of that shader's SPIR-V still waiting for a
+    /// renderer. A removed shader stays removed: one compiled again from its source is dropped.
     ///
     /// # Panics
     ///
-    /// If `compiled` wasn't compiled from one of these shaders, as another `Shaders`' handles can
-    /// stand for shaders of other types, which would draw meshes as though laid out as they are.
+    /// - `compiled` wasn't compiled from one of these shaders. Another `Shaders`' handles can stand
+    ///   for shaders of other types, which would read meshes as laid out as theirs.
     pub fn replace(&mut self, compiled: Compiled) {
         let Compiled { source, spirv, .. } = compiled;
         if self.removed.contains(&source.index) {
@@ -434,15 +414,15 @@ impl Shaders {
         }));
     }
 
-    /// Removes `shader`: its pipeline goes once the GPU is done with the frames that draw with it,
-    /// every draw with it draws nothing from the frame that takes the removal on, and a game's
-    /// shader leaves [`sources`](Self::sources), so that it isn't compiled again. Its handle is
-    /// never given out again, so a stale one, in a world or a snapshot, never draws with another
-    /// shader. Removing one removed already does nothing.
+    /// Removes `shader`. Its pipeline goes once the GPU is done with the frames using it, and its
+    /// draws draw nothing from the frame that takes the removal on. A game's shader leaves
+    /// [`sources`](Self::sources), so it isn't compiled again. Its handle is never given out again,
+    /// so a stale one, in a world or a snapshot, never draws with another shader. Removing it again
+    /// does nothing.
     ///
     /// # Panics
     ///
-    /// If `shader` isn't one of these shaders, as another `Shaders`' handles can be past them.
+    /// - `shader` isn't one of these: another `Shaders`' handles can be past them.
     pub fn remove<V, P>(&mut self, shader: Shader<V, P>) {
         assert!(
             shader.index < self.count,
@@ -455,11 +435,10 @@ impl Shaders {
         }
     }
 
-    /// Takes `spirv`, shader `name` compiled, which draws meshes of `types`, as [`prepared`] has
-    /// it, and `shadow`, what draws its shadows if they're cut out, as [`Added::shadow`] says,
-    /// with its sampled images decorated as [`spirv::decorate_non_uniform`] says, blending as
-    /// `blend` says and writing IDs if `ids` says so, as [`Added::ids`] says, and gives the index of
-    /// its handle.
+    /// Takes shader `name`'s `spirv`, drawing meshes of `types`, made [`prepared`]; `shadow`
+    /// ([`Added::shadow`]) and `meshlets`, their sampled images decorated per
+    /// [`spirv::decorate_non_uniform`]; `blend`; and `ids` ([`Added::ids`]). Gives its handle's
+    /// index.
     #[expect(
         clippy::too_many_arguments,
         reason = "each says what one of the shaders is"
@@ -491,7 +470,7 @@ impl Shaders {
                 let shadow = meshlets.vertices_shadow;
                 Box::new(Meshlets {
                     vertices: module(meshlets.vertices),
-                    // An empty module for a shadow that isn't cut out.
+                    // Empty for a shadow that isn't cut out.
                     vertices_shadow: (!shadow.is_empty()).then(|| module(shadow)),
                     mesh: module(meshlets.mesh),
                     visibility: module(meshlets.visibility),
@@ -505,10 +484,9 @@ impl Shaders {
         index
     }
 
-    /// The engine's model shader for materials that cover what's behind them as `alpha` says,
-    /// which the build compiled, added as a game's are the first time it's asked for: a renderer
-    /// draws models with it, but makes no pipeline for it without them, and games' handles come
-    /// where they would have.
+    /// The engine's model shader for materials covering what's behind as `alpha` says. It's added
+    /// like a game's when first asked for: a renderer without models makes no pipeline for it, and
+    /// games' handles come where they would have.
     pub(crate) fn model(&mut self, alpha: AlphaMode) -> Shader<PackedVertex, model::Params> {
         let (slot, name, spirv, blend) = match alpha {
             AlphaMode::Opaque => (0, "model", model::OPAQUE_SPIRV, Blend::Opaque),
@@ -516,7 +494,7 @@ impl Shaders {
             AlphaMode::Blend => (2, "model blended", model::BLENDED_SPIRV, Blend::Alpha),
         };
         let shadow = matches!(alpha, AlphaMode::Mask { .. }).then_some(model::MASKED_SHADOW_SPIRV);
-        // What blends draws in its order, by its indices.
+        // Blended draws go in order, by indices.
         let meshlets = match alpha {
             AlphaMode::Opaque => Some(model::MeshletSpirv {
                 vertices: model::OPAQUE_MESHLETS_SPIRV,
@@ -543,10 +521,10 @@ impl Shaders {
         self.lazy(slot, name, spirv, shadow, meshlets.as_ref(), blend, true)
     }
 
-    /// Adds the engine's model shader for each alpha mode that none has asked for yet, as
-    /// [`MeshDraw::with_material`](crate::MeshDraw::with_material) adds one the first time a
-    /// material asks for it: so that a material made later, as a model's read again, adds none,
-    /// whose index what's added after it would then follow.
+    /// Adds the engine's model shader for each alpha mode not yet asked for, as
+    /// [`MeshDraw::with_material`](crate::MeshDraw::with_material) does on first use. Then a
+    /// material made later, as by a model read again, adds none, which would shift the indices of
+    /// what's added after it.
     pub fn add_model_shaders(&mut self) {
         let modes = [
             AlphaMode::Opaque,
@@ -558,35 +536,29 @@ impl Shaders {
         }
     }
 
-    /// The engine's circle shader, which the build compiled, added as the model shaders are the
-    /// first time it's asked for.
+    /// Added when first asked for, as the model shaders are.
     pub(crate) fn circle(&mut self) -> Shader<Corner, circle::Params> {
         self.lazy(3, "circle", circle::SPIRV, None, None, Blend::Alpha, true)
     }
 
-    /// The engine's line shader, which the build compiled, added as the model shaders are the
-    /// first time it's asked for.
+    /// Added when first asked for, as the model shaders are.
     pub(crate) fn line(&mut self) -> Shader<Corner, line::Params> {
         self.lazy(4, "line", line::SPIRV, None, None, Blend::Alpha, true)
     }
 
-    /// The engine's grid shader, which the build compiled, added as the model shaders are the
-    /// first time it's asked for.
+    /// Added when first asked for, as the model shaders are.
     pub(crate) fn grid(&mut self) -> Shader<Vec2, grid::Params> {
         self.lazy(5, "grid", grid::SPIRV, None, None, Blend::Alpha, false)
     }
 
-    /// The engine's text shader, which the build compiled, added as the model shaders are the
-    /// first time it's asked for.
+    /// Added when first asked for, as the model shaders are.
     pub(crate) fn text(&mut self) -> Shader<Corner, text::Params> {
         self.lazy(6, "text", text::SPIRV, None, None, Blend::Alpha, true)
     }
 
-    /// The engine's shader in slot `slot` of `lazy`, `name`, compiled to `spirv`, with `shadow`
-    /// to draw its shadows cut out, if they are, and `meshlets` to draw meshes' meshlets, if it
-    /// does, which draws meshes of `V` with parameters `P`, blends as `blend` says and writes the
-    /// IDs of what it draws if `ids` says so, as [`Added::ids`] says: added the first time it's
-    /// asked for, and then the same.
+    /// The engine's shader in `lazy`'s `slot`, added when first asked for, then the same. `shadow`
+    /// draws its shadows cut out and `meshlets` its meshlets, if it has them; `ids` is as
+    /// [`Added::ids`] says.
     #[expect(
         clippy::too_many_arguments,
         reason = "each says what one of the shaders is"
@@ -638,8 +610,8 @@ impl Default for Shaders {
     }
 }
 
-/// A game's shader as [`Shaders::add`] added it, which [`ShaderSource::compile`] compiles again
-/// from its file, as hot reload does when the files it reads change.
+/// A game's shader as [`Shaders::add`] added it. [`ShaderSource::compile`] compiles it again, as
+/// hot reload does when its files change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderSource {
     index: u32,
@@ -662,20 +634,19 @@ impl ShaderSource {
         &self.path
     }
 
-    /// The files it read as it was added: its own first, then those it includes, as slangc found
-    /// them.
+    /// The files it read as added: its own first, then its includes, as slangc found them.
     pub fn files(&self) -> &[PathBuf] {
         &self.files
     }
 
-    /// When the compile that added it began: what its files hold from then on may not be in it.
+    /// When the compile adding it began: its files may have changed since.
     pub fn compiled_at(&self) -> SystemTime {
         self.compiled_at
     }
 
-    /// Compiles the shader again from its file, and checks it against the contract for the types
-    /// it was added for, as [`Shaders::add`] did, on the calling thread: slangc takes about a
-    /// tenth of a second. Its [`Compiled`] lists the files the shader read this time.
+    /// Compiles it again and checks it against the contract for its types, as [`Shaders::add`] did,
+    /// on the calling thread: slangc takes about a tenth of a second. Its [`Compiled`] lists the
+    /// files read this time.
     ///
     /// Fails as `Shaders::add` does.
     pub fn compile(&self) -> Result<Compiled> {
@@ -689,37 +660,34 @@ impl ShaderSource {
     }
 }
 
-/// `spirv`, a shader, as a renderer makes its pipelines: its sampled images decorated as
-/// [`spirv::decorate_non_uniform`] says, and its fragment shader returning no motion where it
-/// returns none, as [`spirv::return_no_motion`] says.
+/// `spirv` as a renderer makes pipelines from it: its sampled images decorated per
+/// [`spirv::decorate_non_uniform`], and a fragment shader returning no motion made to return zeros,
+/// per [`spirv::return_no_motion`].
 fn prepared(spirv: Vec<u8>) -> Vec<u8> {
     spirv::return_no_motion(spirv::decorate_non_uniform(spirv))
 }
 
-/// A game's shader compiled again, which [`Shaders::replace`] puts in place of the one it was
-/// compiled from.
+/// A game's shader compiled again, for [`Shaders::replace`].
 #[derive(Debug)]
 pub struct Compiled {
     source: ShaderSource,
-    /// As [`prepared`] has it.
+    /// As [`prepared`] makes it.
     spirv: Vec<u8>,
     files: Vec<PathBuf>,
 }
 
 impl Compiled {
-    /// What it was compiled from.
     pub fn source(&self) -> &ShaderSource {
         &self.source
     }
 
-    /// The files the shader read, its own first, then those it includes, as slangc found them.
+    /// The files read this time, ordered as in [`ShaderSource::files`].
     pub fn files(&self) -> &[PathBuf] {
         &self.files
     }
 }
 
-/// Checks `spirv`, shader `name` at `path` as slangc compiled it, against the contract that
-/// [`Shaders::add`] describes for a shader that draws with `types`.
+/// Checks `spirv`, shader `name` at `path`, against [`Shaders::add`]'s contract for `types`.
 fn check(name: &str, path: &Path, spirv: &[u8], types: &Types) -> Result<()> {
     let _zone = gg_core::zone!();
     let breaches = spirv::breaches(spirv, types);
@@ -734,19 +702,17 @@ fn check(name: &str, path: &Path, spirv: &[u8], types: &Types) -> Result<()> {
     Err(Error::new("renderer.shader_mismatch", message))
 }
 
-/// Compiles a game's shader, `name`, from the file at `path` to SPIR-V with the slangc the build
-/// found, as [`Shaders::add`] does, but unchecked, as checking it against the contract needs the
-/// types it draws with: for `tools/cook`, from whose package a run adds it through
-/// [`Shaders::add_compiled`], which checks it. Gives it with the files the shader read, its own
-/// first, then those it includes.
+/// Compiles a game's shader `name` at `path` to SPIR-V with the build's slangc, as [`Shaders::add`]
+/// does, but unchecked: the check needs its types. For `tools/cook`: a run adds the package's
+/// SPIR-V through [`Shaders::add_compiled`], which checks it. Gives the files read too, its own
+/// first, then its includes.
 ///
-/// Fails as `Shaders::add` does but for the contract.
+/// Fails as `Shaders::add` does, but for the contract.
 pub fn compile_shader(name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathBuf>)> {
     compile(Path::new(SLANGC), name, path)
 }
 
-/// Compiles the shader `name` at `path` to SPIR-V with `slangc`, and gives it with the files the
-/// shader read, its own first, then those it includes.
+/// Compiles shader `name` at `path` with `slangc`, giving the files read too, its own first.
 fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathBuf>)> {
     let zone = gg_core::zone!();
     zone.text(path.display());
@@ -768,20 +734,19 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathB
     command
         .arg(path)
         .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
-        // Unoptimized: slangc's optimizer turns a struct's read through an address, as
-        // `*push.frame` reads the frame's data, into reads of the fields used (2026.20's always,
-        // the Vulkan SDK's 2025.23.2 where few are), which AMD's driver (25.10.30.02) compiles as
-        // reads through the wrong address, losing the device. Unoptimized, slangc reads the struct
-        // whole, and AMD's code reads what the shader does. Drop it once AMD's driver compiles
-        // those reads right.
+        // Unoptimized: slangc's optimizer turns a struct read through an address, as `*push.frame`
+        // is, into reads of the fields used (2026.20 always, the Vulkan SDK's 2025.23.2 where few
+        // are). AMD's driver (25.10.30.02) compiles those as reads through the wrong address,
+        // losing the device. Unoptimized, slangc reads the struct whole, which AMD compiles right.
+        // Drop it once AMD's driver does.
         .arg("-O0")
-        // As glam lays matrices out. It's slangc's default too, but only for legacy reasons, as
-        // Slang's docs have it: elsewhere the default is row-major.
+        // As glam lays matrices out. slangc's default too, but only for legacy reasons, per Slang's
+        // docs: elsewhere the default is row-major.
         .arg("-matrix-layout-column-major")
         // A function marked for one stage but compiled as the other.
         .args(["-warnings-as-errors", "38006"])
-        // Parameters at one binding, as the bindless set's textures are, 2D and cubes, which
-        // Vulkan lets a shader declare as both, each slot read as what it holds.
+        // Parameters sharing a binding, as the bindless set's 2D textures and cubes do. Vulkan
+        // allows it, each slot read as what it holds.
         .args(["-warnings-disable", "39001"])
         .args(["-entry", "vertex_main", "-stage", "vertex"])
         .args(["-entry", "fragment_main", "-stage", "fragment"])
@@ -800,7 +765,7 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathB
         )
         .with_source(error)
     })?;
-    // In lines of their own, without the carriage returns slangc ends them with on Windows.
+    // One per line, without the carriage returns slangc adds on Windows.
     let diagnostics = String::from_utf8_lossy(&output.stderr);
     let diagnostics = diagnostics.lines().collect::<Vec<_>>().join("\n");
     let diagnostics = diagnostics.trim_end();
@@ -853,10 +818,10 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathB
     Ok((spirv, files))
 }
 
-/// Where slangc writes a shader it compiles, and the list of the files it read: a directory of
-/// the compile's own in the OS's temporary directory, removed with them as it drops. That
-/// directory is shared on Unix, so its name is random and only the user can write in it: no one
-/// else can have made it, or put in it anything slangc would write through or this would read.
+/// Where slangc writes a compile's SPIR-V and file list: a directory of its own in the OS's
+/// temporary directory, removed on drop. That's shared on Unix, so the name is random and only the
+/// user can write in it: no one else can have made it, or planted anything slangc would write
+/// through or this would read.
 struct Written {
     dir: PathBuf,
     spirv: PathBuf,
@@ -864,7 +829,7 @@ struct Written {
 }
 
 impl Written {
-    /// Makes the directory, which fails if anything is at its name.
+    /// Fails if anything is at its name.
     fn new() -> io::Result<Self> {
         static COMPILES: AtomicU64 = AtomicU64::new(0);
         let compile = COMPILES.fetch_add(1, Ordering::Relaxed);
@@ -889,11 +854,11 @@ impl Drop for Written {
     }
 }
 
-/// The files that `depfile`, which slangc wrote, lists as what its output was made from, each
-/// once, in order; `None` if one's name isn't a path here, as one that isn't UTF-8 isn't outside
-/// Unix. It's a Makefile's rule, `target: prerequisites`, in which a backslash escapes a colon, a
-/// space, a `#` or another backslash, `$$` is a `$`, and a backslash ending a line carries the
-/// rule on to the next. Names are bytes, as Unix's are, which slangc writes as it was given them.
+/// The files `depfile` (slangc's) lists as its output's sources, each once, in order. `None` if a
+/// name isn't a path here, as non-UTF-8 isn't outside Unix. It's a Makefile rule, `target:
+/// prerequisites`: a backslash escapes a colon, a space, a `#` or a backslash, `$$` is `$`, and a
+/// backslash ending a line continues the rule. Names are bytes, as on Unix, which slangc writes as
+/// given.
 fn depfile_files(depfile: &[u8]) -> Option<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut word = Vec::new();
@@ -907,7 +872,7 @@ fn depfile_files(depfile: &[u8]) -> Option<Vec<PathBuf>> {
                     bytes.next();
                 }
                 Some(b'\r' | b'\n') => {
-                    // A line carried on: a space between words.
+                    // A continued line: a space between words.
                     if bytes.next() == Some(b'\r') && bytes.peek() == Some(&b'\n') {
                         bytes.next();
                     }
@@ -936,7 +901,7 @@ fn depfile_files(depfile: &[u8]) -> Option<Vec<PathBuf>> {
     Some(files)
 }
 
-/// Ends `word`, which `files` takes once the rule's targets are done, unless it has it already.
+/// Ends `word`, adding it to `files` once the targets are done, unless already there.
 fn end_word(word: &mut Vec<u8>, targets_done: bool, files: &mut Vec<PathBuf>) -> Option<()> {
     let word = std::mem::take(word);
     if targets_done && !word.is_empty() {
@@ -948,8 +913,7 @@ fn end_word(word: &mut Vec<u8>, targets_done: bool, files: &mut Vec<PathBuf>) ->
     Some(())
 }
 
-/// The path named by `bytes`: any bytes on Unix, and UTF-8 elsewhere, as slangc writes names on
-/// Windows.
+/// `bytes` as a path: any bytes on Unix, UTF-8 elsewhere, as slangc writes names on Windows.
 #[cfg(unix)]
 fn path(bytes: Vec<u8>) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
@@ -971,14 +935,14 @@ mod tests {
             .join(file)
     }
 
-    /// The names of `files`, without their directories.
+    /// File names, without directories.
     fn names(files: &[PathBuf]) -> Vec<Option<&str>> {
         (files.iter())
             .map(|file| file.file_name().and_then(|name| name.to_str()))
             .collect()
     }
 
-    /// The shaders added or replaced, waiting to be taken, in order.
+    /// Added or replaced, waiting to be taken, in order.
     fn adds(shaders: &Shaders) -> Vec<&Added> {
         (shaders.changes.iter())
             .filter_map(|change| match change {
@@ -988,7 +952,7 @@ mod tests {
             .collect()
     }
 
-    /// A directory of the test's own, emptied, and removed as the test ends, failed or not.
+    /// The test's own directory, emptied, and removed as the test ends, failed or not.
     struct Scratch(PathBuf);
 
     impl Scratch {
@@ -1029,14 +993,14 @@ mod tests {
         assert_eq!(flat().map(|shader| shader.index).ok(), Some(2));
     }
 
-    /// Adds the shader `file`, which draws vertices `V` with parameters `P`, to `shaders`.
+    /// Adds shader `file`, drawing `V` with `P`, to `shaders`.
     fn keeps_to_it<V: NoUninit, P: NoUninit>(shaders: &mut Shaders, file: &str) {
         let added = shaders.add::<V, P>(file, &fixture(file), Blend::Opaque);
         added.unwrap_or_else(|error| panic!("{file}: {error:#}"));
     }
 
-    /// Why the shader `file`, added to draw vertices `V` with parameters `P`, is refused, which it
-    /// must be for breaking the contract, without taking a handle.
+    /// Why shader `file`, drawing `V` with `P`, is refused for breaking the contract, taking no
+    /// handle.
     fn refusal<V: NoUninit, P: NoUninit>(file: &str) -> String {
         let mut shaders = Shaders::default();
         let path = fixture(file);
@@ -1077,8 +1041,8 @@ mod tests {
         assert_eq!(shaders.sources().len(), 7);
     }
 
-    /// A shader that returns no motion returns zeros there, whether it writes depth or blends, as
-    /// one that does keeps its own, and each still keeps to the contract.
+    /// A shader returning no motion returns zeros there, whether it writes depth or blends; one
+    /// returning its own keeps it. Each keeps to the contract.
     #[test]
     fn shaders_return_motion() {
         let mut shaders = Shaders::default();
@@ -1122,9 +1086,9 @@ mod tests {
         assert_eq!(spirv::return_no_motion(moving_spirv.clone()), moving_spirv);
     }
 
-    /// The engine's own shaders that draw into the game's view without writing its depth return
-    /// something at the motion's location all the same, which their pipelines don't write but
-    /// lavapipe may, as `GraphicsDesc::format` in gg-gpu says.
+    /// The engine's shaders drawing into the game's view without writing depth still return
+    /// something at the motion's location: their pipelines don't write it, but lavapipe may, as
+    /// `GraphicsDesc::format` in gg-gpu says.
     #[test]
     fn the_engines_shaders_that_draw_into_the_view_return_motion() {
         let shaders: [(&str, &[u8]); 3] = [
@@ -1164,8 +1128,7 @@ mod tests {
             refusal::<Vertex, ()>("flat_color.slang"),
             &["it reads parameters through params, but it's added without them"],
         );
-        // Parameters it doesn't read, of part of a word, which would put every later draw's off
-        // their words.
+        // Unread parameters of part of a word, which would put every later draw's off their words.
         says(
             refusal::<[f32; 7], [u16; 3]>("vertex_color.slang"),
             &["its type of parameters, [u16; 3], takes 6 bytes, not a whole number of 4-byte"],
@@ -1189,8 +1152,8 @@ mod tests {
             refusal::<Vertex, Color>("float_ids.slang"),
             &["its push constants' ids isn't the address of uint2s"],
         );
-        // Parameters of 8 bytes, where the IDs go, and the IDs where the parameters go, which
-        // would pass for them.
+        // 8-byte parameters where the IDs go, and IDs where the parameters go, which would pass for
+        // each other.
         says(
             refusal::<Vertex, [u32; 2]>("ids_after_params.slang"),
             &["its push constants' params isn't the address of uint2s"],
@@ -1257,9 +1220,9 @@ mod tests {
         (shaders.add::<[f32; 5], [u32; 2]>("textured", &textured, Blend::Alpha)).expect("a shader");
         let level = fixture("level.slang");
         (shaders.add::<[f32; 5], [u32; 3]>("level", &level, Blend::Alpha)).expect("a shader");
-        // The sprite shader, the three model shaders and the two games'. Each samples a texture
-        // by an index an instance carries; the model shaders sample the sky's light too, by the
-        // frame's indices, the same across a draw.
+        // The sprite shader, three model shaders and two games'. Each samples a texture by an
+        // instance's index; the model shaders sample the sky's light too, by the frame's indices,
+        // uniform across a draw.
         assert_eq!(shaders.changes.len(), 6);
         let non_uniform = |name: &str, spirv: &[u8]| {
             let sampled = spirv::sampled_images(spirv);
@@ -1272,15 +1235,13 @@ mod tests {
         for added in adds(&shaders) {
             non_uniform(&added.name, &added.spirv);
         }
-        // The shading of the view from its visibility buffer, whose pixels each take their own
-        // material.
+        // Shading the view from its visibility buffer, each pixel taking its own material.
         let shading = super::non_uniform(crate::mesh::VISIBILITY_SPIRV);
         non_uniform("visibility shading", &shading);
     }
 
-    /// The model shaders load the frame's data whole, unoptimized as `compile` says why: reaching
-    /// into it for its lights' or materials' address alone makes a pointer to a pointer in buffer
-    /// memory.
+    /// The model shaders load the frame's data whole, unoptimized (`compile` says why): reaching in
+    /// for its lights' or materials' address alone makes a pointer to a pointer in buffer memory.
     #[test]
     fn the_model_shaders_load_the_frame_whole() {
         let shaders = [
@@ -1302,9 +1263,9 @@ mod tests {
         }
     }
 
-    /// The cull, gather and depth pyramid shaders take every address from their push constants, as
-    /// they say why, and none from buffer memory; the model shaders' frame holds some, which the
-    /// check would find.
+    /// The cull, gather and depth pyramid shaders take every address from push constants (they say
+    /// why), none from buffer memory. The model shaders' frame holds some, which the check would
+    /// find.
     #[test]
     fn the_cull_shader_holds_no_addresses_in_buffers() {
         let culling = [
@@ -1356,7 +1317,7 @@ mod tests {
         assert!(exist, "{compiled:?}");
         assert_eq!(compiled.source(), source);
 
-        // Before a renderer takes the first, it takes the first's place; after, it's queued, and
+        // Before a renderer takes the first, the second takes its place; after, it's queued, and
         // the next takes its place in turn.
         let first_spirv = adds(&shaders)[1].spirv.clone();
         let source = source.clone();
@@ -1379,8 +1340,8 @@ mod tests {
             "in place of the one a renderer has"
         );
 
-        // Removed, it leaves the sources, so that it isn't compiled again, and one compiled from
-        // its source already is dropped; removing it again does nothing.
+        // Removed, it leaves the sources, so it isn't compiled again, and one already compiled from
+        // its source is dropped. Removing it again does nothing.
         shaders.changes.clear();
         let compiled = source.compile().expect("the shader compiles again");
         shaders.remove(shader);
@@ -1438,8 +1399,8 @@ mod tests {
         let rules = b"a.spv: one.slang\nb.spv: two.slang\nstray\n";
         assert_eq!(files(rules), ["one.slang", "two.slang"].map(PathBuf::from));
         assert!(files(b"").is_empty());
-        // Names in UTF-8, as slangc writes them on Windows; and one that isn't, which on Unix is
-        // a name like any other.
+        // Names in UTF-8, as slangc writes them on Windows, and one that isn't: on Unix, a name
+        // like any other.
         let japanese = files("out.spv: 日本.slang".as_bytes());
         assert_eq!(japanese, [PathBuf::from("日本.slang")]);
         let latin1 = b"out.spv: caf\xe9.slang\n";

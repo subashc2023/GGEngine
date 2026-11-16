@@ -1,7 +1,7 @@
-//! The SPIR-V slangc writes: checking a shader against the contract that
-//! [`Shaders::add`](super::Shaders::add) describes, which Vulkan checks none of, and decorating its
-//! sampled images `NonUniform` as Vulkan requires. Both read the module's instructions as the
-//! SPIR-V specification lays them out, each a word of its length and opcode, then its operands.
+//! The SPIR-V slangc writes: checking a shader against [`Shaders::add`](super::Shaders::add)'s
+//! contract, which Vulkan doesn't check, and decorating its sampled images `NonUniform` as Vulkan
+//! requires. Both read instructions as the SPIR-V specification lays them out: a word of length and
+//! opcode, then operands.
 
 use std::collections::HashMap;
 #[cfg(test)]
@@ -13,11 +13,11 @@ mod patch;
 pub(super) use check::breaches;
 pub(super) use patch::{decorate_non_uniform, return_no_motion};
 
-/// SPIR-V's magic number, which opens a module.
+/// SPIR-V's magic number, opening a module.
 const MAGIC: u32 = 0x0723_0203;
 
-/// The most a module's bound, one past its every ID, may be: SPIR-V's universal limit, which
-/// spirv-val holds modules to, and which keeps the IDs [`return_no_motion`] adds within a word.
+/// The most a module's bound (one past its every ID) may be: SPIR-V's universal limit, which
+/// spirv-val holds modules to. It keeps the IDs [`return_no_motion`] adds within a word.
 const MOST_BOUND: u32 = 4_194_303;
 
 // The opcodes read.
@@ -52,14 +52,14 @@ const OP_RETURN: u32 = 253;
 const OP_ATOMIC_STORE: u32 = 228;
 const OP_ATOMIC_FLAG_CLEAR: u32 = 319;
 
-/// The instructions that make a value of a type, a pointer among them, which the check follows to
-/// see what a store writes through: `OpUndef`, `OpFunctionParameter`, `OpFunctionCall`, `OpLoad`,
-/// the access chains, `OpCompositeExtract`, `OpCopyObject`, `OpConvertUToPtr`, `OpBitcast`,
-/// `OpSelect` and `OpPhi`.
+/// The instructions making a value of a type, a pointer among them, which the check follows to see
+/// what a store writes through: `OpUndef`, `OpFunctionParameter`, `OpFunctionCall`, `OpLoad`, the
+/// access chains, `OpCompositeExtract`, `OpCopyObject`, `OpConvertUToPtr`, `OpBitcast`, `OpSelect`
+/// and `OpPhi`.
 const MAKES_VALUES: [u32; 14] = [1, 55, 57, 61, 65, 66, 67, 70, 81, 83, 120, 124, 169, 245];
 
-/// Whether `opcode` is an atomic operation's other than `OpAtomicStore` and `OpAtomicFlagClear`,
-/// whose pointer comes after their result's type and ID.
+/// Whether `opcode` is an atomic operation other than `OpAtomicStore` and `OpAtomicFlagClear`,
+/// whose pointer follows their result's type and ID.
 fn is_atomic(opcode: u32) -> bool {
     matches!(opcode, 227 | 229..=242 | 318 | 5614 | 5615 | 6035)
 }
@@ -97,7 +97,6 @@ const BASE_VERTEX: u32 = 4424;
 const BASE_INSTANCE: u32 = 4425;
 const DRAW_INDEX: u32 = 4426;
 
-/// An image's dimensionality, for 2D images.
 const DIM_2D: u32 = 1;
 const DIM_CUBE: u32 = 3;
 
@@ -124,7 +123,7 @@ enum Type {
     SampledImage,
     Array {
         element: u32,
-        /// The ID of the constant that's its length.
+        /// The constant's ID.
         length: u32,
     },
     RuntimeArray {
@@ -140,17 +139,17 @@ enum Type {
 }
 
 struct Image {
-    /// The type of what's sampled from it.
+    /// The sampled type's ID.
     sampled: u32,
     dim: u32,
     arrayed: bool,
     multisampled: bool,
-    /// 1 for an image that's sampled, 2 for one that's read and written.
+    /// 1 if sampled, 2 if read and written.
     usage: u32,
 }
 
 impl Image {
-    /// Whether it's a 2D image or a cube that's sampled, as the bindless set's textures are.
+    /// A sampled 2D image or cube, as the bindless set's textures are.
     fn is_texture(&self) -> bool {
         matches!(self.dim, DIM_2D | DIM_CUBE)
             && (self.arrayed, self.multisampled, self.usage) == (false, false, 1)
@@ -160,11 +159,11 @@ impl Image {
 struct EntryPoint {
     model: u32,
     name: String,
-    /// The global variables it uses: its inputs and outputs among them.
+    /// The global variables it uses, inputs and outputs among them.
     interface: Vec<u32>,
 }
 
-/// A variable: its type, a pointer, and its storage class.
+/// A variable. `ty` is its pointer type.
 struct Variable {
     id: u32,
     ty: u32,
@@ -178,9 +177,9 @@ struct Module {
     entry_points: Vec<EntryPoint>,
     names: HashMap<u32, String>,
     member_names: HashMap<(u32, u32), String>,
-    /// Each ID's decorations, with their first operand, if they have one.
+    /// Each ID's decorations, with their first operand, if any.
     decorations: HashMap<(u32, u32), u32>,
-    /// Each struct member's, by struct and member.
+    /// By struct and member.
     member_decorations: HashMap<(u32, u32, u32), u32>,
     types: HashMap<u32, Type>,
     /// The first word of each constant's value.
@@ -193,7 +192,7 @@ struct Module {
 }
 
 impl Module {
-    /// Reads `spirv`: `None` if it isn't SPIR-V that can be read.
+    /// `None` if it isn't readable SPIR-V.
     fn read(spirv: &[u8]) -> Option<Self> {
         let words = words(spirv)?;
         let mut module = Self::default();
@@ -304,8 +303,8 @@ impl Module {
             .copied()
     }
 
-    /// What `id` is called in the shader's source: a struct by the name slangc gave it, without
-    /// the layout slangc adds to it.
+    /// `id`'s name in the shader's source: a struct's as slangc named it, without the layout slangc
+    /// adds.
     fn name(&self, id: u32) -> String {
         let Some(name) = self.names.get(&id) else {
             return format!("%{id}");
@@ -317,9 +316,9 @@ impl Module {
         name.to_owned()
     }
 
-    /// What an entry point's input or output is called in the shader's source: a parameter, or a
-    /// field of the struct it returns, as slangc names its variables, such as
-    /// `entryPointParam_fragment_main.color`; `None` for what an entry point returns whole.
+    /// An entry point input's or output's name in the source: a parameter, or a field of the struct
+    /// it returns, as slangc names its variables (`entryPointParam_fragment_main.color`). `None`
+    /// for what an entry point returns whole.
     fn interface_name(&self, id: u32) -> Option<String> {
         let name = self.names.get(&id)?;
         match name.rsplit_once('.') {
@@ -335,13 +334,12 @@ impl Module {
             .unwrap_or_else(|| format!("member {member}"))
     }
 
-    /// Whether `ty` is a 32-bit float.
     fn is_float(&self, ty: u32) -> bool {
         matches!(self.types.get(&ty), Some(Type::Float { width: 32 }))
     }
 
-    /// Whether `ty` is a vector of two 32-bit integers, and if so whether they're signed: a uint2
-    /// is `Some(false)`, and an int2 `Some(true)`.
+    /// Whether `ty` is a vector of two 32-bit integers, and if so whether signed: `Some(false)` for
+    /// a uint2, `Some(true)` for an int2.
     fn signed_int2(&self, ty: u32) -> Option<bool> {
         let Some(&Type::Vector {
             component,
@@ -356,7 +354,7 @@ impl Module {
         }
     }
 
-    /// What `pointer` points at, if it's a pointer of storage class `storage`.
+    /// What `pointer` points at, if it's of storage class `storage`.
     fn pointee(&self, pointer: u32, storage: u32) -> Option<u32> {
         match self.types.get(&pointer) {
             Some(&Type::Pointer {
@@ -368,8 +366,8 @@ impl Module {
     }
 }
 
-/// `spirv` as words, if it's a whole number of them that opens as a SPIR-V module does, with a
-/// bound within [`MOST_BOUND`].
+/// `spirv` as words, if it's whole words opening as a SPIR-V module does, its bound within
+/// [`MOST_BOUND`].
 fn words(spirv: &[u8]) -> Option<Vec<u32>> {
     let (words, []) = spirv.as_chunks::<4>() else {
         return None;
@@ -378,9 +376,9 @@ fn words(spirv: &[u8]) -> Option<Vec<u32>> {
     (words.len() >= 5 && words[0] == MAGIC && words[3] <= MOST_BOUND).then_some(words)
 }
 
-/// The instructions of `words`, a module's, after its header, each a word of its length and its
-/// opcode, then its operands: each one's position, opcode and operands, then `None` and no more
-/// where one can't be read, as one of no words, or one that runs past the end.
+/// The instructions of a module's `words` after its header: each one's position, opcode and
+/// operands. Then `None` and no more where one can't be read, as one of no words or one running
+/// past the end.
 fn instructions(words: &[u32]) -> impl Iterator<Item = Option<(usize, u32, &[u32])>> {
     let mut next = Some(5);
     std::iter::from_fn(move || {
@@ -393,8 +391,8 @@ fn instructions(words: &[u32]) -> impl Iterator<Item = Option<(usize, u32, &[u32
     })
 }
 
-/// The string that `words` open with, and how many words it takes: UTF-8, ending in a zero byte,
-/// padded to a whole word.
+/// The string `words` open with, and how many words it takes: UTF-8, ending in a zero byte, padded
+/// to a whole word.
 fn string(words: &[u32]) -> Option<(String, usize)> {
     let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     let end = bytes.iter().position(|&byte| byte == 0)?;
@@ -402,7 +400,7 @@ fn string(words: &[u32]) -> Option<(String, usize)> {
     Some((text, end / 4 + 1))
 }
 
-/// The locations of what `spirv`'s fragment shaders return, in order.
+/// The locations `spirv`'s fragment shaders return, in order.
 #[cfg(test)]
 pub(super) fn fragment_locations(spirv: &[u8]) -> Vec<u32> {
     let module = Module::read(spirv).expect("SPIR-V");
@@ -420,8 +418,8 @@ pub(super) fn fragment_locations(spirv: &[u8]) -> Vec<u32> {
     locations
 }
 
-/// The IDs of the sampled images `spirv` makes, each with whether it's decorated NonUniform, and
-/// whether the image or the sampler it's made of is.
+/// The IDs of `spirv`'s sampled images, each with whether it's decorated NonUniform, and whether
+/// its image or sampler is.
 #[cfg(test)]
 pub(super) fn sampled_images(spirv: &[u8]) -> Vec<(u32, bool, bool)> {
     let words = words(spirv).expect("SPIR-V");
@@ -442,9 +440,8 @@ pub(super) fn sampled_images(spirv: &[u8]) -> Vec<(u32, bool, bool)> {
     sampled.into_iter().map(decorated).collect()
 }
 
-/// How many of the pointer types `spirv` declares point into buffer memory, by device address, at
-/// a pointer: what a shader makes as it reaches into a buffer for a pointer the buffer holds,
-/// rather than loading what holds it whole.
+/// How many of `spirv`'s pointer types point into buffer memory at a pointer: what a shader makes
+/// reaching into a buffer for a pointer it holds, rather than loading the whole.
 #[cfg(test)]
 pub(super) fn buffer_pointers_to_pointers(spirv: &[u8]) -> usize {
     let words = words(spirv).expect("SPIR-V");
@@ -464,8 +461,8 @@ pub(super) fn buffer_pointers_to_pointers(spirv: &[u8]) -> usize {
         .count()
 }
 
-/// How many of the struct types `spirv` reaches in buffer memory, by device address, hold a
-/// pointer, as a member or in a struct or array they hold.
+/// How many struct types `spirv` reaches in buffer memory hold a pointer, as a member or in a
+/// struct or array they hold.
 #[cfg(test)]
 pub(super) fn buffer_structs_holding_pointers(spirv: &[u8]) -> usize {
     let words = words(spirv).expect("SPIR-V");
@@ -547,8 +544,8 @@ mod tests {
             decorate(33),
         ];
         assert_eq!(decorated, module(&expected, &samples));
-        // What it can't read stays as it is: an instruction cut short, an instruction of no words,
-        // bytes that aren't whole words, and what isn't SPIR-V.
+        // What it can't read stays as it is: an instruction cut short, one of no words, bytes that
+        // aren't whole words, and what isn't SPIR-V.
         let mut empty = spirv.clone();
         empty.splice(20..20, [0; 4]);
         let unreadable = [
@@ -565,7 +562,7 @@ mod tests {
     #[test]
     fn what_isnt_spirv_breaks_the_contract_rather_than_passing() {
         let types = Types::of::<[f32; 3], ()>();
-        // A header whose bound is past SPIR-V's limit, as no module's is.
+        // A bound past SPIR-V's limit.
         let unbounded = [MAGIC, 0x0001_0500, 0, MOST_BOUND + 1, 0];
         let unbounded: Vec<u8> = unbounded
             .iter()
@@ -584,10 +581,10 @@ mod tests {
         }
     }
 
-    /// Types that hold themselves, or that lay out more fields than the check reads, or fields
-    /// past what 32-bit offsets reach, as SPIR-V that isn't valid can declare them, break the
-    /// contract rather than taking the check's stack, time or memory: as a shader's parameters,
-    /// and as the arrays of a resource it binds.
+    /// Types holding themselves, laying out more fields than the check reads, or with fields past
+    /// 32-bit offsets, as invalid SPIR-V can declare, break the contract rather than exhausting the
+    /// check's stack, time or memory. As a shader's parameters, and as the arrays of a resource it
+    /// binds.
     #[test]
     fn types_without_end_break_the_contract_rather_than_hanging() {
         let types = Types::of::<[f32; 3], [f32; 4]>();
@@ -603,9 +600,8 @@ mod tests {
                 .flat_map(|word| word.to_le_bytes())
                 .collect::<Vec<u8>>()
         };
-        // Push constants, struct 12, whose fifth member, at the parameters' place, is the address
-        // of type 10, which `types` declare; besides a float, 1, and a uint constant, 3, of
-        // `length`.
+        // Push constants, struct 12, whose fifth member (the parameters' place) is the address of
+        // type 10, which `types` declare; besides a float, 1, and a uint constant, 3, of `length`.
         let params = offset_of!(Push, params) as u32;
         let breaches_of = |length: u32, types_: &[Vec<u32>]| {
             let mut instructions = vec![
