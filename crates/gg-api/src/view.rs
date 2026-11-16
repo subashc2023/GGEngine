@@ -178,6 +178,10 @@ impl Reader {
     /// it published doesn't hold together, as a game that wrote over the header wouldn't: a frame
     /// that doesn't fit in the memory, or whose viewpoint has a kind of projection there's none of
     /// or a number that isn't finite, as a game's camera at no finite place would give too.
+    ///
+    /// An embedded game may start its next frame as soon as this takes the last, so a client sends
+    /// what that frame draws with, its `look` and `input`, before it takes; else the frame draws
+    /// without them.
     pub fn take(&mut self) -> Option<Frame> {
         let header = self.memory.header();
         if header.latest.load(Ordering::Acquire) & NEW == 0 {

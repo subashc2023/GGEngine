@@ -173,8 +173,8 @@ impl Project {
     }
 
     /// The manifest's canonical text, a part to a line, with four spaces to each level and a
-    /// comma after each part, as ARCHITECTURE.md's Project state describes, its lines ending in
-    /// `\n`, and no line for a relay or an icon it hasn't: for a project that
+    /// comma after each part, its lines ending in `\n`, and no line for a relay or an icon it
+    /// hasn't: for a project that
     /// [`check`](Self::check) passes, which reads back as it is.
     pub fn text(&self) -> String {
         let (game, assets, start) = (&self.game, &self.assets, &self.start);

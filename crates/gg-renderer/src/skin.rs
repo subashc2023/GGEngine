@@ -4,6 +4,10 @@
 //! `shaders/skin.slang` moves them. A mesh moves into a part of that buffer of its own, its header
 //! copied first, so that a draw reads it as it reads any mesh's buffer; so each instance of a
 //! skinned model, posed apart, is a mesh of its own.
+//!
+//! A skinned mesh isn't cut into meshlets, whose bounds its joints would leave behind, so it draws
+//! by its indices, outside the visibility buffer. Its motion is its instance's alone, not its
+//! joints'.
 
 use std::sync::Arc;
 

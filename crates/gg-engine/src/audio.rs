@@ -5,6 +5,9 @@
 //! time, looping. What plays follows how the run plays, as the tool API pauses and stops it.
 //! Both mix through volume buses in kira, whose mixer runs on cpal's audio thread, as
 //! ARCHITECTURE.md's Audio says.
+//!
+//! The engine pans and fades each play itself, each frame, rather than giving each place a spatial
+//! track of kira's: so a sound starts and follows its entity without a track made or dropped.
 
 use std::io::{self, Cursor};
 use std::mem;
@@ -129,7 +132,8 @@ pub enum Place {
     At(DVec3),
     /// On an entity: where the latest tick left it as each frame is handed off, following it as it
     /// moves, and once it's despawned, where it was last, until the sound ends. One that's gone as
-    /// the sound is queued or played plays from nowhere.
+    /// the sound is queued or played plays from nowhere. That's up to a tick ahead of where the
+    /// entity draws, too little to hear.
     On(Entity),
 }
 

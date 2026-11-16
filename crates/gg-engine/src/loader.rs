@@ -91,7 +91,8 @@ impl Loader {
 
     /// A loader that decodes images on threads of its own, which the first image starts: half as
     /// many as the hardware runs at once, leaving the rest to the main and render threads and the
-    /// game's own, but at least one, and [`MOST_THREADS`] at most.
+    /// game's own, but at least one, and [`MOST_THREADS`] at most. Threads that can't start leave
+    /// decoding to the main thread, warning `engine.loader`.
     pub(crate) fn threaded() -> Self {
         let count = thread::available_parallelism().map_or(1, |count| count.get() / 2);
         Self::on_threads(count.clamp(1, MOST_THREADS))

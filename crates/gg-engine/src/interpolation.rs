@@ -3,6 +3,8 @@
 //! row of the world's tables draws from, found from the copy once a frame that ticked. Both follow
 //! what changed: a table's copy takes again only the rows whose transforms or parents changed
 //! since, while no row joined or left it, and its rows draw from it as they are while none did.
+//! So an entity despawned in a tick vanishes up to a tick before it reaches where it stopped, and
+//! an Inspector set glides there over a tick, as a drag does.
 
 use std::iter;
 

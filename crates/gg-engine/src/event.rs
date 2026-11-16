@@ -33,7 +33,8 @@ pub enum Event<'a> {
         repeat: bool,
     },
     /// Text that a key press typed, which follows its [`Event::Key`]. Keys such as Backspace,
-    /// Enter and Tab type none.
+    /// Enter and Tab type none. An IME's composition doesn't come as text: the engine's events
+    /// carry none of it.
     Text(&'a str),
     /// The text on the OS's clipboard, which Ctrl+V, or Cmd+V on macOS, pasted: it follows the
     /// key's [`Event::Key`], in a windowed run, where the clipboard holds text. A game's text field

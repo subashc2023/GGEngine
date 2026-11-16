@@ -13,7 +13,8 @@
 //! sends direct alone, to where the latest that came direct came from, while it has, and the
 //! other's latest packet says it has too, so that a way that works one way alone is never taken,
 //! and the two ends settle on the same way. A way direct that stops falls back to the relay
-//! within [`QUIET`], and probes again for [`PUNCH`].
+//! within [`QUIET`], and probes again for [`PUNCH`]. Routers that map each destination their own
+//! way leave a session's packets on the relay.
 //!
 //! It's a state machine alone, without a clock or I/O of its own: a link gives it each instant.
 

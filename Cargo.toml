@@ -91,7 +91,8 @@ kira = { version = "0.12.6", default-features = false, features = [
 # Reads the KTX2 files a game's package holds its textures in, which ctt writes as the cooker cooks
 # them.
 ktx2 = "0.5.0"
-# macOS's C functions that say how much memory the process holds, which gg-engine logs.
+# macOS's C functions that say how much memory the process holds, which gg-engine logs, and Unix's
+# handler of Ctrl+C's signal.
 libc = "0.2.191"
 # Finds RenderDoc's library in the process, for captures. ash's version, so that the two build
 # once.
@@ -100,8 +101,8 @@ libloading = "0.8.9"
 # ported. Its default `arch` feature puts only what IEEE makes exact, such as sqrt, on hardware.
 # Pinned, as ARCHITECTURE.md's Determinism says.
 libm = "=0.2.16"
-# The cooker's meshes: their triangles ordered for the GPU's caches, and their levels of detail.
-# meshoptimizer 1.3's C++, which needs a C++ compiler, as VMA and Luau do.
+# The cooker's meshes: their triangles ordered for the GPU's caches, their levels of detail, and
+# their meshlets. meshoptimizer 1.3's C++, which needs a C++ compiler, as VMA and Luau do.
 meshopt = "0.7.0"
 # Luau, for games' scripts: its VM and compiler, built from luau0-src's C++, which needs a C++
 # compiler, as VMA does. luau-vector4, so that a quaternion crosses into a script as a vector, by
@@ -116,6 +117,7 @@ mlua = { version = "=0.12.2", features = ["luau", "luau-vector4"] }
 mlua-sys = { version = "=0.13.0", default-features = false }
 luau0-src = { version = "=0.22.0", default-features = false }
 nu-ansi-term = "0.50.3"
+# PNGs, as textures and models' images may be, decoded as development runs add them.
 png = "0.18.1"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
@@ -208,7 +210,9 @@ tracing = { version = "0.1.44", default-features = false, features = [
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
 # Tracy's client, for gg-core's zones. Its defaults open a profiler to the network and add
 # sampling, system tracing and a crash handler; these keep its listener on loopback, where the
-# broadcast lets a viewer on this machine list it.
+# broadcast lets a viewer on this machine list it. It builds Tracy's C++ client, which keeps what it
+# records in memory until a viewer connects: so gg-core's `tracy` is off by default, and no shipping
+# build turns it on.
 tracy-client = { version = "0.19.0", default-features = false, features = [
     "enable",
     "only-localhost",
@@ -224,8 +228,8 @@ tracy-client-sys = { version = "=0.30.1", default-features = false }
 windows-sys = "0.52.0"
 winit = "0.30.13"
 # Decompresses the levels of a game's package's textures, which the cooker supercompresses through
-# ctt, whose version this is. Without its defaults, zstd's legacy formats and dictionary building,
-# which runs need neither of.
+# ctt, whose version this is; and compresses a server's states for its clients. Without its
+# defaults, zstd's legacy formats and dictionary building, which runs need neither of.
 zstd = { version = "0.14.3", default-features = false }
 # JPEGs, as textures and models' images may be: a decoder in Rust alone, the image crate's.
 zune-jpeg = "0.5.15"

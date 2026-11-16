@@ -732,8 +732,8 @@ pub(crate) struct Cataloged {
     pub(crate) problem: Option<Problem>,
 }
 
-/// A problem with an asset's ID file: its code, as ARCHITECTURE.md's Project state names them, and
-/// its warning's message.
+/// A problem with an asset's ID file: its code, as [`scanned`] lists them, and its warning's
+/// message.
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Problem {
@@ -816,8 +816,13 @@ pub(crate) fn scan(
 }
 
 /// What `catalog` becomes of `found`, what a scan found under the asset root, or `None` if nothing
-/// changed, warning of each problem once a run and writing the ID files missing if `writes`, as
-/// ARCHITECTURE.md's Project state says.
+/// changed, warning of each problem once a run and writing the ID files missing if `writes`.
+///
+/// The problems: `asset.no_id`, none where the run writes none; `asset.bad_meta`, one that doesn't
+/// read, its asset going without an ID; `asset.meta_case`, one named so in case alone;
+/// `asset.duplicate_id`; `asset.orphaned`, one without its asset; `asset.id_changed`;
+/// `asset.unwritten`; and `asset.unlisted`, what the scan couldn't take. The run rewrites no ID
+/// file there, as one that doesn't read may be a merge's conflict or someone's edit.
 ///
 /// An asset found gets the ID its ID file holds, unless another asset has it this run, and keeps
 /// it for the run, whatever its ID file holds later: at a run's first scan, the asset first by

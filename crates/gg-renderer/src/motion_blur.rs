@@ -25,7 +25,8 @@ const TILES_DOWN: u32 = 36;
 /// view shows blurred along how far it moved across the view while the shutter was open, `shutter`
 /// of the frame, as a film camera's shutter is open for its angle's share of a turn, round where it
 /// shows. What draws its own motion blurs by it, and what draws none, by the camera's alone, as
-/// [`Antialiasing::Taa`](crate::Antialiasing::Taa) says.
+/// [`Antialiasing::Taa`](crate::Antialiasing::Taa) says. A headless frame draws a tick, so its
+/// motion is a tick's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionBlur {
     /// The share of the frame the shutter is open, from 0, for none, to 1, a frame's motion: a

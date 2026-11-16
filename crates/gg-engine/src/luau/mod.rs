@@ -101,7 +101,9 @@ const REMOVED: [&str; 7] = [
 /// A reload may change the component's fields, but not its name: each component of it keeps the
 /// fields of a name and a kind it had, the rest taking their defaults; and a world from before,
 /// as the tool API's `stop` brings back, does so as it comes back, as do the components an undo
-/// puts back. A changed default reaches the components added after.
+/// puts back. A changed default reaches the components added after. An undo doesn't take a reload
+/// back: saving the file as it was does, the fields the reload dropped coming back at their
+/// defaults.
 ///
 /// A script is a component: its file declares one with `gg.declare`, its fields' names and their
 /// defaults, numbers, bools, vectors, or `gg.entity` for an entity, none by default; and a `tick`

@@ -9,9 +9,10 @@ use crate::{Component, Sprite, Tick, World};
 /// [`step_animation`](super::step_animation) runs in: `frames` cells from `first`, `rate` of them a
 /// second, as `playback` says, its sprite's `rect` set to the cell it's on. The sheet is the
 /// sprite's texture cut evenly into `columns` by `rows` cells, edge to edge, as
-/// [`SpriteSheet`](crate::SpriteSheet) cuts one whose cells fill it. A sprite flipped, its rect's
-/// left past its right or its top below its bottom, stays flipped, as a character turned to face
-/// the other way does. An entity without a `Sprite` doesn't play it.
+/// [`SpriteSheet`](crate::SpriteSheet) cuts one whose cells fill it. Its cells are fractions of the
+/// texture, as the world doesn't know a texture's size, which is the renderer's. A sprite flipped,
+/// its rect's left past its right or its top below its bottom, stays flipped, as a character
+/// turned to face the other way does. An entity without a `Sprite` doesn't play it.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Flipbook {
     /// The sheet's cells across.

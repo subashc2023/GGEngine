@@ -10,11 +10,11 @@
 //! solid, a span from its lowest point in a column to its highest, so that a wall standing in a floor
 //! leaves no floor inside it, and that spans merge with the flag of the higher top, or of either
 //! where their tops are within a step. Recast's regions, contours and polygon mesh give way to
-//! rectangles of cells, grown greedily, each as far along X as its cells join and then along Z, row
-//! by row: they stay correct across slopes, steps and floors over floors, since each cell keeps its
-//! own floor and a rectangle holds only cells joined to their neighbors, at the cost of more polygons
-//! than Recast makes where walls cross the grid's axes, whose staircase of cells splits into
-//! slivers, and of paths that bend at a rectangle's corner where a larger polygon would let them run
+//! rectangles of cells, each the best anchored at the first cell left, as [`partition`] says: they
+//! stay correct across slopes, steps and floors over floors, since each cell keeps its own floor
+//! and a rectangle holds only cells joined to their neighbors, at the cost of more polygons than
+//! Recast makes where walls cross the grid's axes, whose staircase of cells splits into slivers,
+//! and of paths that bend at a rectangle's corner where a larger polygon would let them run
 //! straight.
 
 use gg_core::math::{Vec2, Vec3, libm};

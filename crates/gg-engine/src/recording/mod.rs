@@ -853,6 +853,7 @@ pub(crate) fn replay(app: App, path: &Path, dump: Option<Dump>) -> ExitCode {
         error!(code = error.code(), path = %shown, "{shown}: {error:#}{hint}");
         ExitCode::FAILURE
     };
+    // `fs::read`, not `dirs::read_file`: a recording may come through a pipe.
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) => {

@@ -1,7 +1,7 @@
 //! Reflection: what the engine knows of its types' fields while it runs, so that the inspector,
-//! scenes and operations, and the tool API to come, reach components by name, without their Rust
-//! types. A type describes itself once to [`Types`], by name; its values go in and out as
-//! [`Value`]s, checked against that description. Types derive [`Reflect`], with
+//! scenes, operations, snapshots, replication, Luau's bindings and the tool API reach components by
+//! name, without their Rust types. A type describes itself once to [`Types`], by name; its values
+//! go in and out as [`Value`]s, checked against that description. Types derive [`Reflect`], with
 //! `#[derive(Reflect)]`, or `#[derive(Clone, Component)]` for components.
 
 mod impls;
@@ -51,12 +51,13 @@ pub enum Value {
     DVec3(DVec3),
     /// A unit quaternion.
     Quat(Quat),
-    /// The entity's handle in this process: scenes and recordings map it to its persistent ID
-    /// where values cross into them, as the tool API and replication will.
+    /// The entity's handle in this process: scenes, recordings, the tool API and replication map
+    /// it to its persistent ID where values cross into them.
     Entity(Entity),
-    /// A texture's handle, which the renderer alone hands out, so that no value makes one it
-    /// didn't: scenes, recordings, snapshots and the tool API name it by its path, which the
-    /// world's [assets](crate::App::root) map it to where values cross into them.
+    /// A texture's handle, which the renderer alone hands out, so that no value makes an index
+    /// that shaders sample unchecked: scenes, recordings, snapshots and the tool API name it by its
+    /// asset ID, or else its path, which the world's [assets](crate::App::root) map it to where
+    /// values cross into them.
     Texture(Texture),
     /// A model's handle, which only a model added hands out, named where values cross out of the
     /// process as a texture is.

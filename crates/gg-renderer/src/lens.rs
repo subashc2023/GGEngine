@@ -1,6 +1,7 @@
 //! A camera's lens and film over the game's view: chromatic aberration, a vignette and film grain,
 //! in a pass of their own before its canvas, so that a game's UI shows none of them, from the view's
-//! colors into an image of its own, as `shaders/lens.slang` says.
+//! colors into an image of its own, as `shaders/lens.slang` says. It isn't part of the tonemap
+//! pass, which samples the view with its canvas drawn over it.
 
 use std::sync::Arc;
 

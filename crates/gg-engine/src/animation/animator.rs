@@ -129,7 +129,8 @@ fn moving(clip: &Clip, part: u32, path: Path) -> Option<&Channel> {
 /// one of a clip its model hasn't leaving with a warning (`animation.no_clip`), and one eased to
 /// 0 leaving; then each part a play moves takes the plays' poses blended by their weights, a
 /// translation or scale as their mean, a rotation as their normalized sum, each the same way
-/// round as the first, written only where it changed.
+/// round as the first, written only where it changed. Each part's node is found by the ID
+/// [`node_id`] mixes from the root's, without a map, so a tick allocates nothing.
 pub(super) fn step(world: &mut World) {
     let dt = Tick::DT.as_secs_f32();
     let mut roots = world.take_list();

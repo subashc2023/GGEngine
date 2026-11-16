@@ -3,6 +3,10 @@
 //! into an app run through `renderdoccmd capture` or qrenderdoc, or loaded as RenderDoc's Vulkan
 //! layer as an instance is made, with `ENABLE_VULKAN_RENDERDOC_CAPTURE=1`. The engine only finds
 //! the library loaded, never loads it, and finds none where RenderDoc doesn't run, as on macOS.
+//!
+//! A capture shows every Vulkan object by its debug name, but for the images of a torn-off
+//! window's swapchain that the frame doesn't render into: RenderDoc records only the captured
+//! window's images and those the frame uses, so these keep RenderDoc's own names.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem::{offset_of, size_of};

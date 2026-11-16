@@ -99,8 +99,8 @@ impl Fetch {
     /// named, neither `.` nor `..`, with `/` between them, without `\`, `:` or a control character,
     /// so that they stay inside the project's directory on every OS; each file's SHA-256 64
     /// lowercase hex digits; no file's path into the project twice; and each of `ids` an asset ID,
-    /// as gg-api's [`AssetId`] reads one, of a texture, a model, a font or a prefab of `files`, no
-    /// two the same.
+    /// as gg-api's [`AssetId`] reads one, of a texture, a model, a font, a prefab or a UI of
+    /// `files`, no two the same.
     ///
     /// Fails with `fetch.bad`, naming what's wrong.
     pub fn check(&self) -> Result<(), Failure> {

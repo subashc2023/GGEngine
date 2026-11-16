@@ -119,7 +119,7 @@ impl AssetKind {
 }
 
 /// An asset's ID file, `<file>.meta` beside it, as it reads: canonical RON, a part to a line, which
-/// [`text`](Self::text) writes, as ARCHITECTURE.md's Project state describes. `id` is required; a
+/// [`text`](Self::text) writes, as `(`, `    id: "5f3c9a1e07b2d846",`, `)`. `id` is required; a
 /// part added later, as import settings will be, takes its default where a file leaves it out; a
 /// part it hasn't is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -234,10 +234,10 @@ pub struct Unread {
     pub error: String,
 }
 
-/// Scans the asset root `root` for textures, models, fonts, prefabs and UIs and their ID files, as
-/// ARCHITECTURE.md's Project state describes: every folder under it but those whose names start
-/// with `.`, those named `target`, and at its top level [`UNBUILT`]'s, which a package's root holds;
-/// never through a link, to a folder or to a file; each asset's ID file by its exact name.
+/// Scans the asset root `root` for textures, models, fonts, prefabs and UIs and their ID files:
+/// every folder under it but those whose names start with `.`, those named `target`, and at its top
+/// level [`UNBUILT`]'s, which a package's root holds; never through a link, to a folder or to a
+/// file; each asset's ID file by its exact name.
 ///
 /// Matching by exact name, rather than asking the file system for the file, gives the same answer
 /// on Windows' and macOS's file systems, which ignore case, as on Linux's.

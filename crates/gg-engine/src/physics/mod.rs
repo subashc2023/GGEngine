@@ -4,6 +4,10 @@
 //! colliders touch and overlap ([`contacts`]); the world's resources that hold rapier's bodies,
 //! joints and contacts, which snapshots copy and snapshot files hold; and the colliders' outlines
 //! and the joints' lines, drawn where their entities draw.
+//!
+//! rapier's builds are its `f64` ones, `rapier2d-f64` and `rapier3d-f64`, which the manifests name
+//! `rapier2d` and `rapier3d`. Bodies' positions go into rapier and come back as `f64`s, whole;
+//! velocities, sizes, offsets and gravity stay their components' `f32`s.
 
 use std::f32::consts::TAU;
 
@@ -404,6 +408,11 @@ enum Outline {
 /// the 2D colliders' first; then each joint's lines, as [`lines_between`] has them, with its own
 /// entity's ID, the 2D joints' first. Lines draw with the engine's line shader, which `shaders`
 /// adds the first time any do.
+///
+/// They draw over the rest of the view but where an opaque mesh is nearer, as lines do, rather
+/// than nudged toward the camera. Sprites test depth without writing it, so an outline shows from
+/// behind a sprite as from in front; a joint inside its bodies' meshes shows only where they don't
+/// hide it.
 pub(crate) fn draw_colliders(
     world: &World,
     poses: &Poses<'_>,

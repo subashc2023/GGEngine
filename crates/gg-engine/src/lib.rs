@@ -403,10 +403,10 @@ impl App {
     ///
     /// A build without `dev` reads no manifest, as shipping builds start from cooked data: it runs
     /// from the game's package, which `tools/cook` writes, the files under the asset root as the
-    /// package holds them, and its start scene the one the package names, as ARCHITECTURE.md's
-    /// Project state says; the package is `<executable>.ggpk` beside the executable, in a macOS
-    /// app's bundle in its `Contents/Resources`, or the one `--package` names, which a development
-    /// build runs from too, in place of the files themselves.
+    /// package holds them, and its start scene the one the package names, as `tools/cook` says;
+    /// the package is `<executable>.ggpk` beside the executable, in a macOS app's bundle in its
+    /// `Contents/Resources`, or the one `--package` names, which a development build runs from too,
+    /// in place of the files themselves.
     #[must_use]
     pub fn project(mut self, dir: impl AsRef<Path>) -> Self {
         let dir = dir.as_ref();
@@ -931,12 +931,12 @@ pub(crate) fn beside_exe(name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
-/// Where a run of app `name`, as [`App::new`] names it, writes its JSON log, as ARCHITECTURE.md's
-/// Diagnostics says: in a development build, `logs` beside the executable, `target/debug/logs` for
-/// `cargo run`'s, where agents find it; in a build without `dev`, which ships where its
-/// executable's directory may not be written, as Program Files or a signed .app, `logs` in the
-/// app's directory of what it keeps for the user, or beside the executable without the variables
-/// that directory needs. Public for tests, which read the log.
+/// Where a run of app `name`, as [`App::new`] names it, writes its JSON log: in a development
+/// build, `logs` beside the executable, `target/debug/logs` for `cargo run`'s, where agents find
+/// it; in a build without `dev`, which ships where its executable's directory may not be written,
+/// as Program Files or a signed .app, `logs` in the app's directory of what it keeps for the user,
+/// or beside the executable without the variables that directory needs. Public for tests, which
+/// read the log.
 #[doc(hidden)]
 pub fn log_dir(name: &str) -> PathBuf {
     if !cfg!(feature = "dev")

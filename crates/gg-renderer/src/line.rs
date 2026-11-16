@@ -1,5 +1,9 @@
 //! Lines: straight lines a width in the view's pixels, which the engine draws on its quad with a
 //! shader of its own.
+//!
+//! Quads rather than Vulkan's lines: a draw's lines are all one width, and wide lines and smooth
+//! ones are optional features. As quads, a run of lines of any widths is one instanced draw, as
+//! sprites are, and draws the same on every device.
 
 use bytemuck::NoUninit;
 use gg_core::math::{Vec3, Vec4};

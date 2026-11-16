@@ -3,6 +3,10 @@
 //! through the lookup textures `lookup` makes, and each pixel blended with its neighbor across its
 //! edge by the share the line cuts off, into an image of the view's size, in temporal
 //! antialiasing's place, before bloom, the grade and the canvas.
+//!
+//! It blends colors as the tonemapper will show them, not weighed by 1 over 1 plus their luminance
+//! as TAA's resolve weighs them: that would darken every edge's blend, and compress bright edges'
+//! contrast under the threshold.
 
 mod lookup;
 

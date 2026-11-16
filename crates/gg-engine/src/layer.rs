@@ -917,14 +917,14 @@ impl Context {
         self.sync_tested
     }
 
-    /// The player this run plays, in a lockstep session, which the run hosts (`--host`, or
-    /// [`host`](Self::host)), as player 0, or joins (`--join`, or [`join`](Self::join)), as player
-    /// 1; `None` outside one, as once a session the game started ends. Each peer runs every
-    /// player's world, and its layers queue commands for their own player alone, naming it in
-    /// them, as the other
-    /// peer's queue for theirs: a command whose variant or struct has a field `player`, an
-    /// integer, that names another player than the one whose inputs it came in, is refused there
-    /// (`net.bad_command`), by every run of the session alike.
+    /// The player this run plays: 0 for a lockstep host (`--host`, or [`host`](Self::host)), 1 for
+    /// its joiner (`--join`, or [`join`](Self::join)), the one its server gives a client
+    /// (`--connect`); `None` for a server and outside a session, as once a session the game
+    /// started ends. Each peer runs every player's world, and its layers queue commands for their
+    /// own player alone, naming it in them, as the other peer's queue for theirs: a command whose
+    /// variant or struct has a field `player`, an integer, that names another player than the one
+    /// whose inputs it came in, is refused there (`net.bad_command`), by every run of the session
+    /// alike.
     pub fn player(&self) -> Option<u8> {
         self.player
     }
@@ -1379,14 +1379,14 @@ impl Context {
     /// decodes, and samples as white. A run from a game's package reads it as the cooker
     /// compressed it, to BC7. In a development run that serves the tool API, the texture takes its
     /// file's image again as the file changes, at whatever size, once frames have streamed it,
-    /// drawing as it did until then, as ARCHITECTURE.md's Rendering says; one that doesn't decode
+    /// drawing as it did until then, as hot_reload.rs says; one that doesn't decode
     /// warns, and the texture keeps drawing as it did. A test's context, [`Context::seeded`],
     /// decodes it on the calling thread as it's added instead, warning at once. A file's add logs
     /// `asset.texture_loaded`, and its pixels' decode `asset.texture_decoded`, each with how long
     /// it took, at the debug level.
     ///
     /// A file added again, by whatever form of its path, gives the texture it gave first, without
-    /// loading it again, as ARCHITECTURE.md's Rendering says, and so does an asset's file renamed
+    /// loading it again, as `assets::file_of` resolves it, and so does an asset's file renamed
     /// or moved since, by the ID that names it; `name` is then unused, and the texture keeps the
     /// path it was first added by, which another path names too; but once the texture's removed,
     /// as [`remove_texture`](Self::remove_texture) says, the file loads anew. Scenes,
@@ -1537,8 +1537,7 @@ impl Context {
     /// package reads the model as the cooker cooked it instead, its meshes optimized, with levels
     /// of detail that each draw picks by its size on screen, and its images compressed with their
     /// levels, BC7 of colors or values and BC5 of normal maps, but DDS images' blocks as they are,
-    /// as ARCHITECTURE.md's Project state says. A file
-    /// added again gives the model it gave first, until it's removed, as
+    /// as cooked.rs says. A file added again gives the model it gave first, until it's removed, as
     /// [`remove_model`](Self::remove_model) says.
     ///
     /// Of each node it takes the transform, a matrix or a translation, rotation and scale, and its
@@ -1565,7 +1564,7 @@ impl Context {
     /// named by its asset ID, where its file has one, or else by its path, as a texture is, and its
     /// images by its name and their places in it, such as `5f3c9a1e07b2d846#0` or
     /// `assets/truck.glb#0`. In a development run that serves the tool API, it takes what its files
-    /// hold again as they change, as ARCHITECTURE.md's Rendering says: its meshes and images, and,
+    /// hold again as they change, as hot_reload.rs says: its meshes and images, and,
     /// unless the run is recorded, in a lockstep session or follows another, its nodes and
     /// materials, which its roots' nodes take.
     ///
@@ -1847,9 +1846,9 @@ impl Context {
     /// [`draw_text`](Self::draw_text) to draw text in from then on, through the handle, baking its
     /// field as it loads: a texture of data, a multi-channel signed distance field of each glyph of
     /// the characters Windows-1252 prints that the font has, and of its `.notdef`, which draws in
-    /// place of the characters the font or the field lacks but whitespace and control characters,
-    /// as ARCHITECTURE.md's Rendering says. The outlines are its default instance's, a variable
-    /// font's at its axes' defaults, unhinted, since the field draws them at any size. `name` names
+    /// place of the characters the font or the field lacks but whitespace and control characters.
+    /// The outlines are its default instance's, a variable font's at its axes' defaults, unhinted,
+    /// since the field draws them at any size. `name` names
     /// the font in errors and its field in GPU captures, as `<name> field`; frames stream the field
     /// to the GPU, and its text draws nothing until it's there, as its glyphs bake and the field
     /// grows. Its add logs `asset.font_loaded`, with how long it took. A file added again, by
@@ -1986,8 +1985,7 @@ impl Context {
     /// Fails with `engine.bad_ui` if the file can't be read, isn't a regular file, is more than
     /// 16 MiB or isn't UTF-8; with `ui.syntax`, `ui.bad_name`, `ui.duplicate_name`,
     /// `ui.bad_field`, `ui.unnamed_button`, `ui.bad_value` or `ui.no_node` for a file that isn't a
-    /// UI's, as ARCHITECTURE.md's Project state says, saying the line and column where it's
-    /// refused;
+    /// UI's, as `game_ui::file::parse` says, saying the line and column where it's refused;
     /// as finding an ID's file fails, as with `asset.unknown_id`; with `asset.no_font` or
     /// `asset.no_texture` for a font or a texture it names that doesn't load, saying why; and with
     /// `renderer.too_many_textures` if the renderer hasn't room for the texture rounded corners

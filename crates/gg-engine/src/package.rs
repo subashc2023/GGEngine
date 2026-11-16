@@ -1,9 +1,8 @@
 //! A game's package: the files under its project's asset root that its runs read, in one file,
 //! cooked where the engine would otherwise make something of them as they load, as a font's field
 //! or a shader's SPIR-V, or where they draw faster cooked, as a texture compressed or a model's
-//! meshes optimized, which `tools/cook` writes and a build without `dev` runs from, as
-//! ARCHITECTURE.md's Project state says; and [`Files`], where a run reads them, its package or the
-//! disk.
+//! meshes optimized, which `tools/cook` writes, as its root says, and a build without `dev` runs
+//! from; and [`Files`], where a run reads them, its package or the disk.
 //!
 //! The format, every number little-endian:
 //!
@@ -34,7 +33,8 @@ use gg_core::{Error, Result};
 use crate::dirs;
 
 const MAGIC: &[u8; 4] = b"GGPK";
-/// 6 since its header names the project's relay.
+/// Changes whenever the format, or what an entry of some kind holds, changes, as a baked font's
+/// layout or a cooked model's: 6 since its header names the project's relay.
 const VERSION: u32 = 6;
 const HEADER: usize = 40;
 const ENTRY: usize = 32;
@@ -338,7 +338,8 @@ impl Package {
 }
 
 /// Where a run reads the files under its asset root: the disk, or its game's package, in which
-/// each is found by its path from the root, `root`.
+/// each is found by its path from the root, `root`, exactly as written, case and all, so that a
+/// package runs alike wherever it's copied and on every OS.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Files {
     package: Option<(Arc<Package>, PathBuf)>,

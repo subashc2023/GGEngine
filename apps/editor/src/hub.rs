@@ -7,7 +7,8 @@
 //! for a folder in the engine's workspace, and elsewhere a game of its own, which builds against
 //! the engine typed, the one the editor is built from as it starts; and whether the editor opens
 //! the latest project as it starts, skipping the hub. The editor keeps the projects opened, and
-//! that choice, for the user from run to run.
+//! that choice, for the user from run to run. It does what Unity Hub does, but as a screen over
+//! the editor's panels rather than a launcher of its own.
 
 use std::fs;
 use std::path::{Path, PathBuf};

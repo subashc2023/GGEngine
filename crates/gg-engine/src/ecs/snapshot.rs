@@ -1,7 +1,8 @@
 //! Snapshots: the world copied whole, which restores it: the tool API's `play` runs a copy, and
-//! its `stop` goes back to the world it copied, as rollback, client-side prediction and hot reload
-//! will restore one. Taken again into a copy kept from before, a snapshot is copied in that
-//! copy's memory, which allocates as little as [`World`] says.
+//! its `stop` goes back to the world it copied; rollback takes the world back to one
+//! ([`rewind`](World::rewind)), and a SyncTest runs each tick again on one. Taken again into a copy
+//! kept from before, a snapshot is copied in that copy's memory, which allocates as little as
+//! [`World`] says.
 
 use super::{World, next_serial};
 

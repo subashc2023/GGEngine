@@ -401,7 +401,8 @@ pub struct RenderData<'a> {
     pub origin: DVec3,
     /// Whether the view is cut to `viewpoint` from elsewhere since the frame before, rather than
     /// moved there, as a tool's look set or a camera switched: what takes the camera's motion from
-    /// the frame before, motion blur, takes it as standing still.
+    /// the frame before, motion blur, takes it as standing still. A game's camera teleported isn't
+    /// cut to: nothing tells the engine it jumped.
     pub cut: bool,
     /// The meshes, shaders and textures added, replaced or removed since a frame last took them,
     /// which it takes first: the shaders get their pipelines, the removals apply, and the meshes

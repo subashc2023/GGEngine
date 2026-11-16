@@ -27,7 +27,8 @@ use crate::{
 /// [`Transform`] too, while it's [`primary`](Self::primary), in frames no layer sets a viewpoint
 /// of its own, through [`Context::set_viewpoint`]. It sees from where its entity draws, between
 /// ticks too, carried by its ancestors: from its place in the world, facing as its rotation and
-/// theirs turn it, their scales aside.
+/// theirs turn it, their scales aside. Where it sees from is drawing's alone: no hash, scene or
+/// recording holds it, only the component.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Camera {
     /// How it projects what's in front of it onto the view, fitted to the view's aspect ratio.
@@ -35,8 +36,8 @@ pub struct Camera {
     /// Whether the view sees through it. Making a camera primary, as the Inspector's checkbox
     /// or another operation does, makes every other not, and undoing it makes them primary again;
     /// of several made primary otherwise, by code or a scene, the view sees through the one of
-    /// the lowest ID, with a warning (`engine.camera_tie`); and without one, from the default
-    /// viewpoint.
+    /// the lowest ID, with a warning (`engine.camera_tie`), since scenes keep no order cameras came
+    /// in; and without one, from the default viewpoint.
     pub primary: bool,
 }
 

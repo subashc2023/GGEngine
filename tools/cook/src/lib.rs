@@ -76,7 +76,7 @@ impl Take {
 /// and their images compressed to BC7 with their full chains of mip levels, made as a run makes
 /// them; fonts baked into their fields; and shaders compiled, but for a file that doesn't compile
 /// alone that another includes. Each texture, model, font, prefab and UI whose ID file holds its ID
-/// has it there.
+/// has it there. Cooking the same project again gives the same bytes.
 ///
 /// Fails, writing nothing, as the manifest's reading does; with `cook.unread` for a folder or a
 /// file it can't read; with `asset.bad_meta` or `asset.meta_case` for an asset whose ID file doesn't

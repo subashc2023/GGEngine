@@ -3,7 +3,9 @@
 //! each emitter's in a ring of its own there, from which its age alone gives where it is and how it
 //! looks, as `shaders/particles.slang` draws it. So a frame writes only its emitters' births, in a
 //! compute pass before the view's passes, as `shaders/emit.slang` writes them, and draws every slot
-//! of each emitter's ring, among the frame's draws that blend, in the emitter's place.
+//! of each emitter's ring, among the frame's draws that blend, in the emitter's place. They draw
+//! before TAA's resolve and write no motion, so the resolve takes what's behind them; their soft
+//! edges shimmer little under its jitter.
 
 use std::sync::Arc;
 

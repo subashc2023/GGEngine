@@ -1,8 +1,8 @@
 //! `gg fetch`: the files a project's fetch list names, `fetch.ron` beside its manifest, as gg-api's
 //! `Fetch` reads it, fetched with curl, each checked against its SHA-256 before it takes its place,
-//! with the ID file of each texture, model and font under the asset root: holding the ID the list
-//! gives it, so that every checkout gives it the ID its scenes name, or else written, as a
-//! development run would write it, if it has none.
+//! with the ID file of each asset (texture, model, font, prefab or UI) under the asset root:
+//! holding the ID the list gives it, so that every checkout gives it the ID its scenes name, or
+//! else written, as a development run would write it, if it has none.
 
 use std::fs;
 use std::path::Path;
@@ -33,9 +33,10 @@ pub(crate) fn fetch(scope: &Scope) -> Result<(), Failure> {
 /// Fetches each file `list` names into directory `dir`, by `download`, which writes what's at a URL
 /// to a file, but those there already whose SHA-256 is the list's, each written first beside where
 /// it goes, with `.part` after its name, and put in its place once its SHA-256 is the list's; then
-/// writes the ID file of each that's a texture, a model or a font under the asset root, `root`:
-/// with the ID the list gives it, unless it holds that, or else a fresh one, if it has none. Hands
-/// `print` a line of JSON for each, and returns how many were fetched and how many kept.
+/// writes the ID file of each that's an asset (a texture, model, font, prefab or UI) under the
+/// asset root, `root`: with the ID the list gives it, unless it holds that, or else a fresh one, if
+/// it has none. Hands `print` a line of JSON for each, and returns how many were fetched and how
+/// many kept.
 ///
 /// Fails with `gg.fetch` for a file that can't be read or written, a download that fails, or one
 /// whose SHA-256 isn't the list's, which it removes, keeping the files fetched before it.

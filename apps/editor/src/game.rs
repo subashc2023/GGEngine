@@ -38,7 +38,8 @@
 //! editor's camera, as it does at any client's `stop` that no Play clicked since follows. Stopped,
 //! the camera switch has the view show what the game's camera sees, as it does at first and as a
 //! New or an Open opens a scene, the input staying the editor's, until the editor's camera takes
-//! some, which turns the view to it.
+//! some, which turns the view to it. Play and Simulate are Unreal's Play and Simulate In Editor,
+//! and a switch between them its Possess and Eject.
 //!
 //! A game that asks for the cursor grabbed, for looking about with the mouse, as the view's memory
 //! says it does, has the editor grab its own window's in Play while the view has the keys, the

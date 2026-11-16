@@ -3,7 +3,8 @@
 //! the world, as rollback needs, which runs ticks again from a snapshot: a tick that goes by
 //! anything but the world, its commands and what its layer set up, as a layer's state kept from one
 //! tick to the next, or that a copy of the world doesn't hold all of, is named where the two part.
-//! The stack runs it, at each tick and each tick a replay runs.
+//! The stack runs it, at each tick and each tick a replay runs. What a tick logs, it logs again
+//! as the SyncTest runs it again.
 
 use gg_core::{Error, Result};
 

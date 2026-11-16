@@ -119,7 +119,8 @@ pub(crate) const CUBE: u32 = 128;
 /// quarters each degree, growing by a factor of e every [`TURN_GROWTH`] up, as the light changes
 /// more slowly, to [`MOST_TURN`], so that the light changes by no more than about 2% a step
 /// anywhere; and [`MOST_TURN`] again past [`NIGHT`], once the sky is dark. And the most the viewer
-/// rises or falls, in meters.
+/// rises or falls, in meters. A sun that turns 3° a second, a day of two minutes, has the light
+/// prefiltered every frame at 60 a second while it's low, and about three times a second high.
 const LEAST_TURN: f32 = 0.01 * std::f32::consts::PI / 180.0;
 const TURN_GROWTH: f32 = 5.0 * std::f32::consts::PI / 180.0;
 const MOST_TURN: f32 = std::f32::consts::PI / 180.0;

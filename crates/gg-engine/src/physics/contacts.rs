@@ -1,6 +1,9 @@
 //! Contacts: which entities' colliders touch, or overlap where either is a sensor, as each step of
 //! physics leaves them, and which started and stopped at that step, ordered by their entities' IDs
 //! so that every platform, peer and replay has them alike.
+//!
+//! They come from rapier's contact and intersection pairs, not its events: an event names
+//! colliders, some of them gone by the time it's read.
 
 use std::mem;
 

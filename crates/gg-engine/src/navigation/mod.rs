@@ -4,6 +4,10 @@
 //! ticks a layer runs it in, its state the agents' components and the world's [`Navigation`], which
 //! snapshots copy and a run restored from a snapshot file bakes again; and its lines, the navmesh's
 //! polygons and the agents' paths, drawn where they are.
+//!
+//! It gives the same bits on every platform, which the reference hash in `tests.rs` checks: plain
+//! `f32` arithmetic and square roots, libm's cosine and sine, comparisons rather than `min` and
+//! `max`, whose zeros' signs are the platform's, and everything ordered by entities' IDs.
 
 mod agents;
 mod avoid;

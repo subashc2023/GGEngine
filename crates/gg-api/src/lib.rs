@@ -143,18 +143,18 @@
 //!   again as the revision `entities` answers moves on.
 //! - `hash`: answers [`struct@Hash`], the world's.
 //! - `cells`: answers [`CellList`], the world's cells, in a world whose `Cells` cut it into scene
-//!   files that come in around its viewers, as ARCHITECTURE.md's worlds of cells describes: which
+//!   files that come in around its viewers, as gg-engine's `cells` module describes: which
 //!   are in, coming, kept, refused or filed, the viewers they come in around, the look's viewpoint
 //!   among them while the game is stopped, and which a `scene` `save` would write.
 //! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models, fonts, prefabs
 //!   and UIs under the game's asset root, in the order of their paths, each with its ID, which its
-//!   ID file beside it, [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and
-//!   the ID files whose assets aren't there. It answers once the game has looked at the root since it
-//!   asked, or at once from its last look while its frames pause, as while its window is minimized,
-//!   so that an asset added or renamed since is listed, a run that writes ID files, a game alone or
-//!   a lockstep session's host that serves the API, having written each one missing and moved
-//!   beside its file each that a rename of the file alone left behind, as it does as it starts and
-//!   as it watches the root. A listed asset's `problem` says what's wrong with its ID file:
+//!   ID file beside it, [`asset::Meta`], holds, and the ID files whose assets aren't there. It
+//!   answers once the game has looked at the root since it asked, or at once from its last look
+//!   while its frames pause, as while its window is minimized, so that an asset added or renamed
+//!   since is listed, a run that writes ID files, a game alone or a lockstep session's host that
+//!   serves the API, having written each one missing and moved beside its file each that a rename
+//!   of the file alone left behind, as it does as it starts and as it watches the root. A listed
+//!   asset's `problem` says what's wrong with its ID file:
 //!   - `asset.no_id`, none, in a run that writes none, a lockstep session's joiner: its host writes
 //!     it, as a game alone does;
 //!   - `asset.bad_meta`, one that doesn't read: fix it, or remove it for a fresh one;
@@ -534,7 +534,7 @@ pub struct Hello {
     /// own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
-    /// The capabilities the connection is kept to, as ARCHITECTURE.md's Agents and tools says:
+    /// The capabilities the connection is kept to, as the crate's docs say each method needs:
     /// `read` and `write` of the world, whole, or of one component type's, as `read:Shard`, and
     /// `play`, `input`, `view`, `scene`, `snapshot`, `debug`, `patch`, `files`, `note` and `quit`;
     /// every one without it. A capability there's none of fails the `hello` with `grant.unknown`,
@@ -1959,6 +1959,7 @@ pub struct Debugging {
 
 /// A breakpoint: its script, the line asked, and the line Luau placed it at, the next with code
 /// from the line asked, or `None` while its script hasn't loaded, or has no code there or after.
+/// It's placed once its script's chunk has run, so none stops the chunk as it loads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Breakpoint {
     pub script: String,

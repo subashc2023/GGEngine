@@ -1,10 +1,26 @@
-//! Scenes: entities and their components as text, in the canonical form ARCHITECTURE.md
-//! describes, so that saving the same entities always gives the same bytes, and changing a field
-//! changes only its lines. The engine writes the text itself, and `ron` only reads it, through
-//! seeds that reflection's descriptions drive. A prefab is a scene of one subtree: an entity with a
-//! [`PrefabRoot`](crate::PrefabRoot) is an instance of one, linked, which a scene saves as what
-//! differs from it, its prefab's [template](Template) giving the rest as it loads; or it's placed
-//! as a copy whose IDs are mixed from its own. Scene files are written whole or not at all.
+//! Scenes: entities and their components as text, in a canonical form, so that saving the same
+//! entities always gives the same bytes, and changing a field changes only its lines. The engine
+//! writes the text itself, and `ron` only reads it, through seeds that reflection's descriptions
+//! drive. A prefab is a scene of one subtree: an entity with a [`PrefabRoot`](crate::PrefabRoot)
+//! is an instance of one, linked, which a scene saves as what differs from it, its prefab's
+//! [template](Template) giving the rest as it loads; or it's placed as a copy whose IDs are mixed
+//! from its own. Scene files are written whole or not at all.
+//!
+//! The canonical form:
+//!
+//! - A scene is `(entities: {...})`: each entity under its ID, as a string, in the order of IDs.
+//! - An entity's components go by their types' names, in the order of the names; a component's
+//!   fields in its description's order, every field written. No type's name is written, so a
+//!   rename touches only its keys.
+//! - A struct or a variant with fields, and a list with elements, is a block, a part to a line. A
+//!   value of one part, `Some(v)` or a one-field tuple's `(v)`, wraps it, keeping its form. Leaves
+//!   are inline: floats as `float` writes them, strings as `quote` escapes them.
+//! - A child's `Parent` is its parent's ID; a root's isn't saved, nor an instance's entity's where
+//!   it's the one its prefab gives.
+//! - A texture, a model, a font or a prefab is saved by its name: its asset ID, or else its path.
+//! - What's opaque isn't saved: a load builds each component on
+//!   [`Component::base`](crate::Component::base).
+//! - Values nest at most [`MAX_DEPTH`] levels.
 
 mod read;
 mod template;

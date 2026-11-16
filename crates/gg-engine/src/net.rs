@@ -1,32 +1,34 @@
 //! Lockstep between two peers, as [Networking](../../../ARCHITECTURE.md#networking) describes: a
 //! host, player 0, that listens, and a joiner, player 1, that connects and starts from the host's
-//! world, and runs its host's scripts, which come with it; each tick's inputs, every layer's
-//! commands and the edits that apply before it, a script's reload among them, sent as many ticks
-//! ahead as the link needs, from [`DELAY`] until it's timed, and run once both peers' are in, or, in
-//! a rollback session (`--rollback`), sent [`ROLLBACK_DELAY`] ahead and run before the other's have
-//! come, as far as the link needs, from [`PREDICTED`] ticks on, on the prediction that they hold
-//! nothing, the world taken back and the ticks run again from the first whose inputs held
-//! something, as [`Lockstep::follow_link`] says; each peer's ticks paced so that neither runs far
-//! ahead of the other, as [`Lockstep::pace`] says; the world's hash after each tick that's run on
-//! both peers' inputs, compared, each peer keeping a copy of its world after the tick until it is,
-//! so that where the hashes part, the host sends its joiner its world there, and the joiner names
-//! the field where its own differs; and, in development builds, the patches of the game's code,
-//! which the host has apply at a tick of its choosing.
+//! world and scripts. A tick's inputs are every layer's commands and the edits that apply before
+//! it, a script's reload among them.
 //!
-//! A session is kept to the runs given its code (`--code`): each connection opens with a handshake
-//! keyed by it, which the end that took it refuses a run of another code at, as [`secure`] says,
-//! and which makes the keys the stream's frames and the packets are sealed under, so that what
-//! goes between the session's runs can't be read, forged or played again on the way.
+//! - Lockstep: a peer sends its inputs [`DELAY`] ticks ahead until the link is timed, then as far
+//!   ahead as the link needs, and runs a tick once both peers' inputs are in.
+//! - Rollback (`--rollback`): a peer sends its inputs [`ROLLBACK_DELAY`] ahead and runs up to its
+//!   window, from [`PREDICTED`] ticks, on the other's predicted to hold nothing. From the first
+//!   tick whose inputs held something, it takes the world back and runs the ticks again.
+//!   [`Lockstep::follow_link`] says how the delay and the window follow the link.
+//! - [`Lockstep::pace`] keeps either peer from running far ahead of the other.
+//! - The peers compare the world's hash after each tick run on both peers' inputs, each keeping a
+//!   copy of its world until then. Where they part, the host sends its world after that tick, and
+//!   the joiner names the field where its own differs.
+//! - In development builds, the patches of the game's code apply at a tick the host chooses.
+//!
+//! The session's code (`--code`) keys each connection's handshake, as [`secure`] says. The end
+//! that took the connection refuses a run of another code there. The keys the handshake makes seal
+//! the stream's frames and the packets, so nothing between the runs can be read, forged or played
+//! again on the way.
 //!
 //! Runs that can't connect to each other, as two behind their own routers can't, meet through a
-//! relay (`--relay`), which `gg-relay` runs: the host registers its session's room there, which
-//! the code gives, and its joiner comes for it, as [`listen`] and [`connect`] say; the relay copies
-//! their stream each way and forwards their packets, which it can't read or forge, and the packets
-//! go direct where the routers between them let them, as [`path`] says.
+//! relay (`--relay`), which `gg-relay` runs. The host registers the room the code gives, and its
+//! joiner comes for it, as [`listen`] and [`connect`] say. The relay copies the stream each way and
+//! forwards the packets, which it can't read or forge; packets go direct where the routers let
+//! them, as [`path`] says.
 //!
-//! The session's stream is lines of text over TCP, sealed in frames, which a thread of the
-//! connection's reads, and another writes, as the main thread sends them, so that a slow link
-//! never holds the main thread:
+//! The session's stream is lines of text over TCP, without Nagle's delay, sealed in frames. A
+//! thread of the connection's reads them, and another writes what the main thread sends, so a slow
+//! link never holds the main thread:
 //!
 //! ```text
 //! hello\tgg-lockstep 9\tShards\t0.1.0 debug dev\t3f8a6c2e9b1d4057\tShards Inspector\t50123

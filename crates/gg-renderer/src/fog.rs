@@ -3,6 +3,10 @@
 //! integrated in closed form, and scatters the sky's light from all around and the sun's toward
 //! it, as `shaders/fog.slang` says; and the pass that fogs what's opaque in the view, the sky among
 //! it, from the view's depth, before what blends, which fogs itself as it draws.
+//!
+//! Under an atmosphere the fog is taken as nearer the eye than the air's haze: what's lit is hazed
+//! as it shades and fogged after, as is the sky drawn from the atmosphere's table. The fog is lit
+//! by the atmosphere's light from all around and by its sun as the air dims it.
 
 use std::sync::Arc;
 

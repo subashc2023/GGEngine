@@ -391,7 +391,9 @@ impl Draws {
     /// drawn, as a list that scrolls hides what's scrolled out of it. `None` clips nothing. Each
     /// call starts a run for the draws after it, so that [`place`](Self::place) can place their
     /// clip with them. The view's culling doesn't know a clip, and culls a clipped draw as if it
-    /// weren't.
+    /// weren't. A scissor on the run, rather than a rectangle in each instance, which every shader
+    /// that draws on the canvas would have to test: so a UI's list or text field of clipped draws
+    /// is one scissored instanced draw of each mesh and shader.
     pub fn clip(&mut self, clip: Option<[Vec2; 2]>) {
         (self.clip, self.split) = (clip, true);
     }
