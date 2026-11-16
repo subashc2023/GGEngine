@@ -1,35 +1,33 @@
-// Gathers the instances of a frame's opaque runs into the arrays `cull.slang` culls them from, each
-// run's after the run's before: those of the frame's draws from where the frame copied them, and
-// those of the scene, which the GPU keeps from frame to frame, from its table of records, in the
-// order the scene keeps them in; and each one's transform the frame before, past the transforms,
-// which the frame's draws, made each frame, give as their own. `Copy`, `Record` and `Push` match
-// `GpuCopy`, `Record` in src/mesh/scene.rs and `GatherPush` in src/mesh/cull.rs field for field.
-//
-// Each array is reached as a pointer the push constants hold, indexed, as `cull.slang` says why.
+// Gathers a frame's opaque runs' instances, run after run, into the arrays `cull.slang` culls. The
+// frame's draws come from where the frame copied them; the scene's, kept on the GPU from frame to
+// frame, from its table of records, in the scene's order. Last frame's transforms go past the
+// transforms; the frame's draws, made anew each frame, repeat their own. `Copy`, `Record` and
+// `Push` match `GpuCopy`, `Record` in src/mesh/scene.rs and `GatherPush` in src/mesh/cull.rs field
+// for field. Arrays are indexed pointers from the push constants, as `cull.slang` says why.
 
-// How many of a run's instances a copy takes, a workgroup's: `BLOCK` in src/mesh/cull.rs.
+// A run's instances per copy, a workgroup's: `BLOCK` in src/mesh/cull.rs.
 static const uint BLOCK = 64;
-// The words of a record's parameters: `MeshDraw::MAX_PARAMS` in src/mesh.rs, in words.
+// A record's parameters: `MeshDraw::MAX_PARAMS` in src/mesh.rs, in words.
 static const uint RECORD_WORDS = 16;
 // A copy's `source_params` for one from the scene.
 static const uint SCENE = 0xFFFFFFFF;
 
 // Up to `BLOCK` instances of a run, a workgroup's to copy.
 struct Copy {
-    // Where the first goes in the arrays, and the first word of its parameters there.
+    // Where the first goes in the arrays, and its parameters' first word there.
     uint dest;
     uint dest_params;
-    // How many there are, and the words of each one's parameters.
+    // How many, and each one's parameter words.
     uint count;
     uint params_words;
-    // Where the first is: in the frame's arrays, its parameters' first word at `source_params`;
-    // or, where that's `SCENE`, in the scene's order, which holds each one's slot in its table.
+    // Where the first is: in the frame's arrays, its parameters from `source_params`; or, where
+    // that's `SCENE`, in the scene's order, which holds each one's slot in its table.
     uint source;
     uint source_params;
 };
 
-// An instance of the scene, in its slot of the table: its transform, and the one the frame its
-// transform last changed in found it at, which that frame's number, its low and high words, says.
+// A scene instance in its table slot: its transform, and `previous`, the one it had as frame
+// `changed` (low word first) began, the frame its transform last changed in.
 struct Record {
     float4x4 transform;
     float4x4 previous;
@@ -47,15 +45,14 @@ struct Push {
     // The scene's table of records, by slot, and its order.
     Record* scene;
     uint* order;
-    // Where they go: what `cull.slang` reads, each instance's transform the frame before
-    // `instances` past its own.
+    // Where they go, for `cull.slang`: last frame's transforms `instances` past.
     float4x4* transforms;
     uint2* ids;
     uint* params;
     uint copy_count;
-    // How many workgroups were dispatched across, each taking every that many copies in turn.
+    // Workgroups dispatched across; each takes every `groups`th copy.
     uint groups;
-    // The frame's number, its low and high words.
+    // The frame's number, low word first.
     uint2 frame;
     uint instances;
     uint unused;
@@ -74,12 +71,12 @@ void gather_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
         uint to = copy.dest + i;
         uint to_params = copy.dest_params + i * copy.params_words;
         if (copy.source_params == SCENE) {
-            // Read whole, as the model shaders read the frame's data, so that every address is
-            // a pushed one indexed, none kept across the loop.
+            // Read whole, as the model shaders read the frame's data: every address is a pushed
+            // one indexed, none kept across the loop.
             Record record = push.scene[push.order[copy.source + i]];
             push.transforms[to] = record.transform;
-            // Where the frame before drew it: the transform the frame its transform last changed
-            // in found it at, if that's this one, and otherwise where it is.
+            // Where the frame before drew it: `previous` if its transform changed this frame,
+            // else where it is.
             bool changed = all(record.changed == push.frame);
             push.transforms[push.instances + to] = changed ? record.previous : record.transform;
             push.ids[to] = record.id;

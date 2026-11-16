@@ -1,63 +1,59 @@
-// Bins the frame's lights into the game's view's clusters, as src/cluster.rs plans them: the view
-// cut into `across` tiles across and `down` down, each cut into `slices` along the view's depth,
-// exponentially with perspective, from its near plane to as far as the farthest light reaches, and
-// evenly without, from its near plane to its far. Each light with a range, past those that light
-// everywhere, is binned into each cluster whose box in the view's space its sphere reaches into, as
-// a bit of the cluster's words, the lights' bits in their order; and each cluster keeps its first
-// word that holds a bit and the word past its last, so that a fragment reads those alone. The
-// lights are copied to the front of the clusters' buffer, where the view's shaders read them and,
-// through their address, the clusters, as `Clusters` in mesh.slang says why. `BinPush` matches its
-// namesake in src/cluster.rs field for field.
+// Bins the frame's lights into the view's clusters, as src/cluster.rs plans them: `across` by
+// `down` tiles, each cut into `slices` by depth. With perspective, slices grow exponentially from
+// the near plane to the farthest light's reach; without, evenly from near to far. Each light with a
+// range, past those lighting everywhere, sets its bit, in light order, in each cluster whose
+// view-space box its sphere reaches. Each cluster keeps its first and past-last words holding a
+// bit, so fragments read those alone. The lights are copied to the front of the clusters' buffer,
+// as `Clusters` in mesh.slang says why. `BinPush` matches its namesake in src/cluster.rs field for
+// field.
 //
-// A workgroup bins a cluster, each thread every `GROUP`th word of it; and the dispatch's threads
-// copy the lights' words, each thread the word at its index among them and every word as many
-// threads on. The lights, their copies and the clusters are reached as pointers the push constants
-// hold, indexed, as `cull.slang` says why.
+// A workgroup bins a cluster, each thread every `GROUP`th word; the dispatch's threads also copy
+// the lights' words, strided. Every array is a push-constant pointer, indexed, as `cull.slang`
+// says why.
 
 #include "mesh.slang"
 
-// The threads of a workgroup.
+// Threads per workgroup.
 static const uint GROUP = 64;
 
 struct BinPush {
-    // From the world to the view's space, a point `p` at `dot(right, p)` across, `dot(up, p)` up
-    // and `dot(ahead, p)` ahead, each of `float4(p, 1.0)`.
+    // From the world to the view's space: `p` is `dot(right, q)` across, `dot(up, q)` up and
+    // `dot(ahead, q)` ahead, `q = float4(p, 1.0)`.
     float4 right;
     float4 up;
     float4 ahead;
-    // The frame's lights, as shaders read them, where the frame uploaded them, and where their
-    // words are copied to, the front of the clusters' buffer: word by word, as slangc writes a
-    // whole struct through an address without the alignment Vulkan requires.
+    // The frame's lights as uploaded, and their copy at the front of the clusters' buffer: word by
+    // word, as slangc writes a whole struct through an address without the alignment Vulkan
+    // requires.
     Light* lights;
     uint* copies;
-    // Past the copies: each cluster's first word that holds a bit and the word past its last, then
-    // each cluster's words, `words` each, in the order of `cluster`'s index in model.slang.
+    // Past the copies: each cluster's first and past-last words holding a bit, then each cluster's
+    // `words` words, in the order of shading.slang's `cluster` index.
     uint* clusters;
-    // The first light binned, past those that light everywhere, and how many are.
+    // The first light binned, past those lighting everywhere, and how many are.
     uint first;
     uint count;
-    // A cluster's words, a light a bit.
+    // Per cluster, a bit per light.
     uint words;
     uint across;
     uint down;
     uint slices;
-    // How far across and up the view's space a point is at 1 across and up its tiles' normalized
-    // device coordinates, whose Y may point down: at a unit ahead with perspective, and anywhere
+    // How far across and up the view's space a point at 1 across and up the tiles' normalized
+    // device coordinates is, whose Y may point down: a unit ahead with perspective, anywhere
     // without.
     float x_scale;
     float y_scale;
-    // How a point's slice is found from how far ahead of the view it is:
-    // `log2(depth) * scale + bias` with perspective, and `depth * scale + bias` without.
+    // A point's slice from its depth: `log2(depth) * scale + bias` with perspective,
+    // `depth * scale + bias` without.
     float slice_scale;
     float slice_bias;
     uint perspective;
-    // The words of every light, each `Light`'s in turn, which are copied.
+    // Every light's words, copied.
     uint light_words;
 };
 [[vk::push_constant]] ConstantBuffer<BinPush> push;
 
-// The first word of a cluster that holds a bit, and the word past its last, as its threads find
-// them.
+// The cluster's first and past-last words holding a bit, as its threads find them.
 groupshared uint first_word;
 groupshared uint end_word;
 
@@ -88,7 +84,7 @@ void bin_main(uint3 group: SV_GroupID, uint thread: SV_GroupIndex) {
     uint slice = cluster / tiles;
     float near = slice_start(slice);
     float far = slice_start(slice + 1);
-    // The tile's sides, as the view's space has them at a unit ahead, or anywhere.
+    // The tile's sides in the view's space, a unit ahead or anywhere.
     float2 count = float2(push.across, push.down);
     float2 at = float2(tile % push.across, tile / push.across);
     float2 scale = float2(push.x_scale, push.y_scale);

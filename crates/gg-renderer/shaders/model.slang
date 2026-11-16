@@ -1,26 +1,20 @@
-// Models' meshes, shaded as shading.slang says: each instance a mesh with its own transform, ID and
-// material, writing its ID where it shows, and how far each point moved in the world since the
-// frame before, by its instance's transform then, which the view's antialiasing follows it by.
-// `Params` matches `Params` in src/model.rs byte for byte.
+// Models' meshes, shaded as shading.slang says, each instance with its own transform, ID and
+// material. It writes its ID, and its motion in the world since the frame before, for
+// antialiasing. `Params` matches `Params` in src/model.rs byte for byte.
 //
-// As it is, it's for materials that blend by their alpha, and discards what's fully transparent,
-// which blending would leave as it was, so that a pick there finds what's behind it; it writes no
-// depth, so it keeps early depth testing. model_opaque.slang and model_masked.slang include it
-// with OPAQUE or MASKED defined, for materials whose alpha glTF ignores, or uses only to cut out
-// what's less opaque than their cutoff: both are drawn fully opaque, so they return an alpha of 1.
-// Of those, only the masked one discards, since a shader that can discard while it writes depth
-// loses early depth testing on some GPUs; its shadows are cut out as it is, by `shadow_main`,
-// where those of an opaque material, drawn without a fragment shader, are whole. Both draw their
-// normals by `normal_main` too, for the view's reflections, where the view draws them otherwise than
-// into its visibility buffer.
+// As is, it's for blended materials: it discards what's fully transparent, for picks, and writes
+// no depth, keeping early depth testing. model_opaque.slang and model_masked.slang include it with
+// OPAQUE or MASKED defined, for materials drawn fully opaque, alpha 1:
+// - Only MASKED discards, below the cutoff: discarding while writing depth loses early depth
+//   testing on some GPUs. Its shadows are cut out by `shadow_main`; opaque ones draw whole,
+//   without a fragment shader.
+// - Both draw normals by `normal_main` for the view's reflections, where they aren't drawn into
+//   the visibility buffer.
 //
-// What blends fogs itself by the frame's fog, as fog.slang says, as it draws over what the fog's
-// pass fogged, which fogs what's opaque.
+// What blends fogs itself (fog.slang); the fog's pass fogs what's opaque.
 //
-// The meshlets a view keeps of their meshes draw into the visibility buffer too, which the view's
-// shading then shades a pixel at a time (visibility.slang): each fragment the draw and the meshlet
-// and triangle it shows, for the shading to find again, and its instance's ID, cut out as
-// `fragment_main` cuts it out.
+// Kept meshlets also draw into the visibility buffer, which visibility.slang shades: each fragment
+// writes its draw, meshlet, triangle and ID, cut out as `fragment_main` cuts it.
 
 #include "shading.slang"
 #include "fog.slang"
@@ -32,7 +26,6 @@ struct Params {
 
 [[vk::push_constant]] ConstantBuffer<Push<PackedVertex, Params>> push;
 
-// The mesh's vertex `index`, unpacked as its header says.
 Vertex unpacked(uint index) {
     Header header = *(Header*)push.vertices;
     return unpack(header, push.vertices[HEADER + index]);
@@ -47,9 +40,9 @@ struct Varyings {
     float4 color;
     float3 normal;
     float4 tangent;
-    // In x, -1 where the instance's transform mirrors it, 1 elsewhere. A vector, as Debian 13's
-    // validation layer (1.4.309) warns of an output the next stage doesn't read, as the masked
-    // shadows' `shadow_main` doesn't read this, unless it's a vector.
+    // In x, -1 where the instance's transform mirrors it, else 1. A vector: Debian 13's validation
+    // layer (1.4.309) warns of a scalar output the next stage doesn't read, as `shadow_main`
+    // doesn't.
     nointerpolation float2 side;
     nointerpolation uint instance;
     nointerpolation uint2 id;
@@ -66,19 +59,17 @@ static const uint MAX_VERTICES = 64;
 static const uint MAX_TRIANGLES = 124;
 // Where a draw's meshlets start in `push.meshlets`, past the draw's eight words.
 static const uint KEPT = 4;
-// How many workgroups across a draw of meshlets through a mesh shader takes: `ACROSS` in
-// meshlets.slang.
+// Workgroups across a mesh shader's draw of meshlets: `ACROSS` in meshlets.slang.
 static const uint ACROSS = 32768;
 
-// Byte `byte` of the mesh's meshlets' triangles, as its header places them.
+// Byte `byte` of the mesh's meshlets' triangles.
 uint triangle_byte(Header header, uint byte) {
     uint word = ((uint*)push.vertices)[header.triangles + byte / 4];
     return (word >> ((byte & 3) * 8)) & 0xFF;
 }
 
-// The vertex at corner `corner` of the meshlet a view kept that the draw's `kept`th entry holds,
-// drawn through vertex shaders, as `meshlet_vertex_main` draws it, by its index in the mesh; and
-// its instance's place among the draw's instances.
+// The mesh's index of the vertex at `corner` of the draw's `kept`th meshlet, drawn through vertex
+// shaders, and its instance's place among the draw's.
 uint2 meshlet_corner(uint corner, uint kept) {
     uint2 entry = push.meshlets[KEPT + kept];
     Header header = *(Header*)push.vertices;
@@ -95,18 +86,17 @@ uint2 meshlet_corner(uint corner, uint kept) {
     return uint2(index, entry.x);
 }
 
-// A corner of a meshlet a view kept, drawn through vertex shaders: each meshlet kept an instance of
-// the draw, of `MAX_TRIANGLES` triangles, whose `corner`th this is. The corners of a triangle past
-// the meshlet's own are all its first vertex, which draws nothing.
+// A kept meshlet's corner through vertex shaders, each meshlet an instance of `MAX_TRIANGLES`
+// triangles. Those past its own are degenerate, every corner its first vertex.
 [shader("vertex")]
 Varyings meshlet_vertex_main(uint corner: SV_VulkanVertexID, uint kept: SV_VulkanInstanceID) {
     uint2 vertex = meshlet_corner(corner, kept);
     return placed(unpacked(vertex.x), vertex.y);
 }
 
-// A meshlet a view kept, drawn through a mesh shader: a workgroup each, `ACROSS` across, as many
-// rows down as they take, those past the draw's meshlets drawing nothing; a thread for each of its
-// vertices, and for each of its triangles and the one `MAX_VERTICES` after it.
+// A kept meshlet, through a mesh shader: a workgroup each, `ACROSS` across and as many rows as they
+// take, those past the draw's meshlets drawing nothing. A thread per vertex, and per triangle and
+// the one `MAX_VERTICES` after it.
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(MAX_VERTICES, 1, 1)]
@@ -138,8 +128,7 @@ void mesh_main(uint3 group: SV_GroupID, uint thread: SV_GroupIndex,
     }
 }
 
-// `vertex` as instance `instance` places it in the world and the view sees it, and as its transform
-// the frame before placed it.
+// `vertex` placed by `instance` in the world and the view, and by its transform the frame before.
 Varyings placed(Vertex vertex, uint instance) {
     float4x4 transform = push.transforms[instance];
     float4 world = mul(transform, float4(vertex.position, 1.0));
@@ -159,8 +148,8 @@ Varyings placed(Vertex vertex, uint instance) {
     return out;
 }
 
-// The color, the instance's ID, and how far its point moved in the world since the frame before,
-// which the view keeps where what's opaque shows, as games' shaders may return it.
+// The color, the instance's ID, and its motion in the world since the frame before, which the view
+// keeps where what's opaque shows, as games' shaders may return it.
 struct Shaded {
     float4 color : SV_Target0;
     uint2 id : SV_Target1;
@@ -172,9 +161,8 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     Frame frame = *push.frame;
     Material material = frame.materials[push.params[input.instance].material];
     // Every texture sampled before any branch or discard, which would leave the derivatives that
-    // pick their levels undefined. Base colors decode from sRGB as they're sampled, as the
-    // emission's and a specular-glossiness map's specular colors do; the other maps, and that
-    // map's glossiness in alpha, are read as stored.
+    // pick their levels undefined. Base, emission and specular-glossiness specular colors decode
+    // from sRGB as sampled; other maps, and glossiness in alpha, read as stored.
     float4 color = sampled(material, 0, input.uv) * material.color * input.color;
     float4 surface = sampled(material, 1, input.uv);
     float2 mapped = sampled(material, 2, input.uv).xy * 2.0 - 1.0;
@@ -194,13 +182,13 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
 #endif
     Shaded out;
     out.id = input.id;
-    // Vulkan's front winds counterclockwise as seen, whichever faces the run draws, which a
-    // transform that mirrors shows of its mesh's backs.
+    // Vulkan's front winds counterclockwise as seen, whichever faces the run draws; a mirroring
+    // transform shows its mesh's backs so.
     bool shows_front = front != (input.side.x < 0.0);
     float4 reflected = float4(0.0);
 #if defined(OPAQUE) || defined(MASKED)
-    // The view's ambient occlusion and reflections are of what's opaque, as its depth has it: what
-    // blends shows over that, and takes neither.
+    // The view's ambient occlusion and reflections are of the opaque depth; what blends over it
+    // takes neither.
     uint2 pixel = uint2(input.position.xy);
     occlusion = ambient(frame, pixel, occlusion);
     reflected = reflection(frame, pixel, roughness_of(material, surface));
@@ -209,21 +197,18 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
                     surface, mapped, occlusion, emission, reflected);
     out.motion = float4(input.moved, 0.0);
 #if !defined(OPAQUE) && !defined(MASKED)
-    // What blends fogs itself, over what the fog's pass fogged behind it; what's opaque, the fog's
-    // pass fogs.
     out.color = fogged(fog_at(frame, input.world), out.color);
 #endif
     return out;
 }
 
 #if defined(MASKED)
-// A masked material's shadow, drawn into a shadow map: none where it's less opaque than its
-// cutoff, as it draws nothing there.
+// A masked material's shadow: none below its cutoff, where it draws nothing.
 [shader("fragment")]
 void shadow_main(Varyings input) {
     // Loaded whole, as fragment_main's is. Read for its material table alone, slangc reaches the
     // table's address through a pointer into the frame, even unoptimized, which AMD's driver
-    // (25.10.30) miscompiles beside a texture's sample, reading the frame at address 0 and losing
+    // (25.10.30) miscompiles beside a texture sample: it reads the frame at address 0 and loses
     // the device.
     Frame frame = loadAligned<8>(push.frame);
     Material material = frame.materials[push.params[input.instance].material];
@@ -235,10 +220,9 @@ void shadow_main(Varyings input) {
 #endif
 
 #if defined(OPAQUE) || defined(MASKED)
-// Which way what's opaque faces in the world, as `fragment_main` shades it, and 1 in alpha, for the
-// view's reflections to trace their rays about: drawn against the view's depth once it's drawn,
-// where it's nearest, before anything shades; and none of a masked material where it's less opaque
-// than its cutoff, as `fragment_main` draws none.
+// The world normal of what's opaque, as `fragment_main` shades it, and 1 in alpha, for the view's
+// reflections' rays. Drawn against the finished depth, where nearest, before anything shades; none
+// below a masked material's cutoff.
 [shader("fragment")]
 float4 normal_main(Varyings input, bool front: SV_IsFrontFace) : SV_Target0 {
     // Loaded whole, as `shadow_main` says why.
@@ -259,9 +243,8 @@ float4 normal_main(Varyings input, bool front: SV_IsFrontFace) : SV_Target0 {
 }
 #endif
 
-// What a fragment drawn into the visibility buffer takes: where its triangle shows, and for a
-// masked material, what cuts it out; its instance's ID; and, drawn through vertex shaders, the
-// meshlet and triangle it shows, as the visibility buffer holds them.
+// What a fragment drawn into the visibility buffer takes; `triangle`, through vertex shaders, its
+// meshlet and triangle.
 struct Visible {
     float4 position : SV_Position;
 #if defined(MASKED)
@@ -273,8 +256,7 @@ struct Visible {
     nointerpolation uint triangle;
 };
 
-// `vertex` as instance `instance` places it in the view, as `placed` does, of the meshlet and
-// triangle `triangle` says.
+// `vertex` placed as `placed` does, of the meshlet and triangle `triangle` says.
 Visible visible(Vertex vertex, uint instance, uint triangle) {
     float4x4 transform = push.transforms[instance];
     float4 world = mul(transform, float4(vertex.position, 1.0));
@@ -290,24 +272,21 @@ Visible visible(Vertex vertex, uint instance, uint triangle) {
     return out;
 }
 
-// A corner of a meshlet a view kept, drawn into the visibility buffer through vertex shaders, as
-// `meshlet_vertex_main` draws it, with its meshlet's place among those the draw kept, and its
-// triangle's among the meshlet's: each triangle's corners are its own, so they all carry it.
+// `meshlet_vertex_main` into the visibility buffer, carrying its meshlet's place in the draw and
+// its triangle's in the meshlet: no corner is shared, so all carry it.
 [shader("vertex")]
 Visible meshlet_visibility_main(uint corner: SV_VulkanVertexID, uint kept: SV_VulkanInstanceID) {
     uint2 vertex = meshlet_corner(corner, kept);
     return visible(unpacked(vertex.x), vertex.y, kept << 7 | corner / 3);
 }
 
-// What a mesh shader writes of each triangle into the visibility buffer: its meshlet's place
-// among those the draw kept, and its own among the meshlet's, as its primitive's ID, which the
-// fragments behind it read.
+// Each triangle's meshlet's place in the draw and its own in the meshlet, as its primitive ID,
+// which its fragments read.
 struct Primitive {
     uint triangle : SV_PrimitiveID;
 };
 
-// A meshlet a view kept, drawn into the visibility buffer through a mesh shader, as `mesh_main`
-// draws it.
+// `mesh_main` into the visibility buffer.
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(MAX_VERTICES, 1, 1)]
@@ -349,8 +328,7 @@ struct Seen {
     uint2 id : SV_Target1;
 };
 
-// What a fragment of the triangle `triangle` says writes into the visibility buffer: none for a
-// masked material where it's less opaque than its cutoff, as `fragment_main` draws none.
+// What a fragment of `triangle` writes: none below a masked material's cutoff.
 Seen seen(Visible input, uint triangle) {
 #if defined(MASKED)
     // Loaded whole, as `shadow_main` says why.
@@ -367,16 +345,14 @@ Seen seen(Visible input, uint triangle) {
     return out;
 }
 
-// A fragment drawn into the visibility buffer through vertex shaders, whose corners carry their
-// triangle.
+// Through vertex shaders, whose corners carry their triangle.
 [shader("fragment")]
 Seen visibility_main(Visible input) {
     return seen(input, input.triangle);
 }
 
-// A fragment drawn into the visibility buffer behind a mesh shader, which writes its triangle as
-// its primitive's ID. A module of its own, as reading that takes the Geometry capability, which
-// only devices that draw through mesh shaders enable.
+// Behind a mesh shader, which writes the triangle as the primitive ID. A module of its own:
+// reading it takes the Geometry capability, which only devices drawing through mesh shaders enable.
 [shader("fragment")]
 Seen visibility_primitive_main(Visible input, uint triangle: SV_PrimitiveID) {
     return seen(input, triangle);

@@ -1,15 +1,13 @@
-// Skinned meshes' vertices, moved by their joints before the frame draws them: a thread for each
-// vertex of a skinned model's mesh, which reads it from the mesh's buffer, as it was bound, with
-// its `SkinVertex`, and writes it where its joints carry it, as the matrices of its joints blended
-// by its weights place it, into where the frame's draws of the mesh read it, packed on the mesh's
-// grid, which holds wherever its clips take it. The first threads of a mesh's first dispatch copy
-// its header there too, so that a draw reads it as it reads any mesh's buffer. `SkinPush` in
-// src/skin.rs matches `Push` byte for byte.
+// Skins meshes' vertices before the frame draws them, a thread a vertex. Each reads its vertex, as
+// bound, and its `SkinVertex` from the mesh's buffer, blends its joints' matrices by its weights,
+// and writes it where the frame's draws read it, packed on the mesh's grid, which holds wherever
+// its clips take it. A mesh's first dispatch also copies its header there, so draws read it as any
+// mesh's buffer. `SkinPush` matches its namesake in src/skin.rs byte for byte.
 
 #include "shading.slang"
 
-// What moves a vertex, `SkinVertex` in src/packed.rs, read as words: its four joints, as 16-bit
-// indices of its skin's joints, then their weights, as unsigned 16-bit fractions of 1.
+// `SkinVertex` in src/packed.rs, as words: four joints, 16-bit indices into its skin's, then their
+// weights, unsigned 16-bit fractions of 1.
 struct SkinVertex {
     uint joints_01;
     uint joints_23;
@@ -22,22 +20,21 @@ struct SkinPush {
     PackedVertex* source;
     // Where its draws read it, its header first.
     PackedVertex* target;
-    // Each of its skin's joints' matrices, from the mesh's space as the joint was bound to the
-    // mesh's space as the joint is drawn now.
+    // Each joint's matrix, from the mesh's space as bound to its space as drawn now.
     float4x4* joints;
     uint vertices;
     uint joint_count;
-    // The first vertex of this dispatch's.
+    // This dispatch's first vertex.
     uint first;
     uint unused;
 };
 [[vk::push_constant]] ConstantBuffer<SkinPush> push;
 
-// The words of a `PackedVertex`.
+// A `PackedVertex`'s words.
 static const uint WORDS = 6;
 
-// `v`, a unit vector, folded onto an octahedron and unfolded onto a square, as `octahedral` in
-// src/packed.rs folds it, as two signed 16-bit fractions of 1 in a word, its first in the low half.
+// Unit vector `v` folded onto an octahedron, as `octahedral` in src/packed.rs folds it: two signed
+// 16-bit fractions of 1, the first in the low half.
 uint folded(float3 v) {
     float3 p = v / (abs(v.x) + abs(v.y) + abs(v.z));
     float2 e = p.xy;
@@ -52,8 +49,8 @@ uint folded(float3 v) {
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void skin_main(uint3 thread: SV_DispatchThreadID) {
-    // The header a word a thread, as slangc leaves the alignment off a store of a whole struct
-    // copied from an address, which SPIR-V requires.
+    // The header a word a thread: slangc leaves the alignment SPIR-V requires off a store of a
+    // whole struct copied from an address.
     if (push.first == 0 && thread.x < HEADER * WORDS) {
         ((uint*)push.target)[thread.x] = ((uint*)push.source)[thread.x];
     }
@@ -81,10 +78,9 @@ void skin_main(uint3 thread: SV_DispatchThreadID) {
     push.target[HEADER + index].color = out.color;
 }
 
-// `packed`, a vertex of a mesh whose buffer starts with `header`, where `joints` carry it, each as
-// much as `weights` says, which add up to more than 0.
+// `packed`, carried by `joints` as `weights` say; the weights sum to more than 0.
 PackedVertex skinned(Header header, PackedVertex packed, uint4 joints, float4 weights) {
-    // A joint past those given counts as the last, so that no vertex reads past them.
+    // A joint past those given counts as the last, so no vertex reads past them.
     float4x4 moved = float4x4(0.0);
     for (uint k = 0; k < 4; k++) {
         moved += weights[k] * push.joints[min(joints[k], push.joint_count - 1)];
@@ -102,7 +98,7 @@ PackedVertex skinned(Header header, PackedVertex packed, uint4 joints, float4 we
         tangent = vertex.tangent.xyz;
     }
     float3 steps = clamp(round((position - header.offset) / header.step), 0.0, 65535.0);
-    // Where it isn't a number, as a joint's matrix that isn't can leave it, at the grid's corner.
+    // NaN, as a joint matrix of NaNs leaves it, goes to the grid's corner.
     uint3 at = select(isnan(steps), uint3(0), uint3(steps));
     uint sign = turned.tangent.w < 0.0 ? 0xFFFF0000u : 0x00010000u;
     PackedVertex out = packed;

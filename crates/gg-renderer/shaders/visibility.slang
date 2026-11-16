@@ -1,27 +1,22 @@
 // Shades the game's view from its visibility buffer, a pixel a thread: where a meshlet's triangle
-// drew into it, as model.slang's `seen` writes, the pixel's color is what model.slang's
-// `fragment_main` would have shaded there, as shading.slang shades it; elsewhere, the color the
-// view clears to. The triangle's corners are found again through the run's draw of its meshlets,
-// and unpacked and placed as the draw placed them. The pixel's weights for them, and how those
-// change a pixel across and down, come from the corners as the view sees them, in clip space,
-// homogeneous in X, Y and W: a point at (x, y), in the view's normalized coordinates, weighs each
-// corner by the determinant of the other two and the point, `dot(cross(b, c), (x, y, 1))`, over
-// their sum (Olano and Greer, "Triangle Scan Conversion using 2D Homogeneous Coordinates", 1997),
-// which divides by no corner's W, so that a corner behind the camera, which the draw clipped, weighs
-// right too. They interpolate what the draw's fragments took, and the change of the texture
-// coordinates a pixel across and down picks the levels of the material's textures, as the change
-// between a quad's fragments does for theirs. They weigh the corners as the instance's transform
-// the frame before placed them too, for how far the pixel's point moved in the world since, which
-// the view's motion takes, as model.slang's fragments write it; 0 where nothing drew.
+// drew (model.slang's `seen`), what model.slang's `fragment_main` would have shaded; elsewhere,
+// the view's clear color. The triangle's corners are found through the run's meshlet draw, and
+// unpacked and placed as the draw placed them.
 //
-// Where the view reflects, `normal_main` finds each pixel's normal first, the same way, as its
-// shading turns it, for the reflections' rays (reflections.slang), which are traced before the view
-// shades: the smooth normal its corners' interpolate, which the depth's facets of a curved mesh
-// aren't, its normal map's bumps among it.
+// The pixel weighs the corners in clip space, homogeneous in X, Y and W: a point at (x, y) in
+// normalized coordinates weighs each by the determinant of the other two and the point,
+// `dot(cross(b, c), (x, y, 1))`, over their sum (Olano and Greer, "Triangle Scan Conversion using
+// 2D Homogeneous Coordinates", 1997). Dividing by no W, it weighs a clipped corner behind the
+// camera right too. The weights a pixel across and down give the UVs' change, which picks texture
+// levels as a quad's derivatives would. Applied to the corners as placed the frame before, they
+// give the view's motion; 0 where nothing drew.
 //
-// `ShadePush` and `Shading` match `ShadePush` and `Shading` in src/mesh/visibility.rs, field for
-// field. A change here needs AMD's ISA of it checked again, under both slangc releases the build
-// may use, as model.slang's lighting does.
+// Where the view reflects, `normal_main` first finds each pixel's smooth shading normal the same
+// way, for reflections.slang's rays: a curved mesh's depth facets aren't smooth.
+//
+// `ShadePush` and `Shading` match their namesakes in src/mesh/visibility.rs field for field. A
+// change here needs AMD's ISA checked again, under both slangc releases the build may use, as
+// shading.slang's light loop does.
 
 #include "runs.slang"
 #include "shading.slang"
@@ -31,19 +26,18 @@
 
 // What the shading reads of the view and its culling.
 struct Shading {
-    // From the world to the view's clip space, which the draws placed the corners by.
+    // From the world to the view's clip space, as the draws placed the corners.
     float4x4 clip_from_world;
     // What the view clears to, linear RGBA, where nothing drew.
     float4 clear;
     // The view's size in pixels.
     uint2 size;
-    // How many instances each of the culling's views keeps room for, and words of their
-    // parameters.
+    // Room per culling view, in instances and in their parameters' words.
     uint instances;
     uint params_words;
-    // For each of the game's view's two passes, its slot among the culling's views, where its
-    // meshlets start among the culling's commands, in words, and where the transforms the frame
-    // before of the instances it keeps are among the kept transforms' arrays.
+    // For each of the view's two passes: its slot among the culling's views, where its meshlets
+    // start in the culling's commands, in words, and where its kept instances' transforms the frame
+    // before are among the kept transforms' arrays.
     uint2 slots;
     uint2 meshlets;
     uint2 previous;
@@ -57,13 +51,13 @@ struct ShadePush {
     // The culling's commands, as words: each view's meshlets where `Shading::meshlets` says, each
     // run's draw of them, eight words, then the meshlets it kept, as meshlets.slang keeps them.
     uint* commands;
-    // What each of the culling's views keeps of the instances, as cull.slang writes it: their
-    // transforms, those the frame before of the game's view's passes', and the words of their
-    // parameters, the first of which is the material's index.
+    // What each of the culling's views keeps of the instances (cull.slang): their transforms, the
+    // view passes' ones the frame before, and their parameters' words, the first the material's
+    // index.
     float4x4* transforms;
     uint* params;
-    // The visibility buffer, a texture of the bindless set's, and the view's colors and motion,
-    // storage images of it; or for `normal_main`, its normals, and no motion.
+    // The visibility buffer, bindless, and the view's colors and motion, storage images; for
+    // `normal_main`, its normals, and no motion.
     uint visibility;
     uint target;
     uint motion;
@@ -82,8 +76,7 @@ struct Placed {
     Turned turned;
 };
 
-// `packed`, of a mesh whose buffer starts with `header`, as `transform` places it in the world and
-// `clip_from_world` sees it, as model.slang's `placed` does.
+// `packed`, placed as model.slang's `placed` does.
 Placed placed(Header header, PackedVertex packed, float4x4 transform, float4x4 clip_from_world) {
     Placed out;
     out.vertex = unpack(header, packed);
@@ -99,10 +92,8 @@ uint byte_of(uint word, uint byte) {
     return (word >> ((byte & 3) * 8)) & 0xFF;
 }
 
-// What a pixel shows of the triangle that drew into the visibility buffer there: its material; where
-// it is in the world, and where the instance's transform the frame before placed it; its texture
-// coordinates, and their change a pixel across and down; its vertices' color; its normal and
-// tangent, as interpolated; and whether its triangle shows its front.
+// What a pixel shows of its triangle. `was`: where the transform the frame before placed it.
+// `uv_across` and `uv_down`: the UVs' change a pixel across and down.
 struct Shown {
     Material material;
     float3 world;
@@ -116,20 +107,18 @@ struct Shown {
     bool front;
 };
 
-// What `pixel` shows, of the frame's `materials` and as `shading` says, where the visibility buffer
-// holds `seen`: which run of the culling's drew it, and in which of the view's passes, 1 past twice
-// the run's index, and that pass's 1 past it; and the meshlet and triangle it shows. It takes the
-// material table's address, not the frame: reading the table from a frame passed in, slangc 2026
-// reaches it through a pointer into the frame, as model.slang's `shadow_main` says AMD's driver
-// miscompiles.
+// What `pixel` shows, where the visibility buffer holds `seen`: in x, 1 + 2 * the culling run's
+// index + its view pass; in y, its meshlet and triangle. It takes the material table's address, not
+// the frame: given a frame, slangc 2026 reads the table through a pointer into it, which AMD's
+// driver miscompiles, as model.slang's `shadow_main` says.
 Shown shown_at(Shading shading, Material* materials, uint2 pixel, uint2 seen) {
     uint drawn = seen.x - 1;
     Run run = push.runs[drawn >> 1];
     bool second = (drawn & 1) != 0;
     uint slot = second ? shading.slots.y : shading.slots.x;
     uint meshlets = second ? shading.meshlets.y : shading.meshlets.x;
-    // The meshlet among those the run's draw kept: its instance's place among the run's in the
-    // view, and its index among the mesh's.
+    // The kept meshlet's entry: its instance's place among the run's in the view, and its index in
+    // the mesh.
     uint entry = meshlets + run.meshlet_draw + 8 + 2 * (seen.y >> 7);
     uint place = push.commands[entry];
     uint meshlet = push.commands[entry + 1];
@@ -139,8 +128,8 @@ Shown shown_at(Shading shading, Material* materials, uint2 pixel, uint2 seen) {
     uint params = slot * shading.params_words + run.params_output + place * run.params_words;
     Shown out;
     out.material = materials[push.params[params]];
-    // The mesh's buffer, as model.slang's draws read it through `push.vertices`: its address's
-    // two words cast to a pointer, as a 64-bit integer would take the shaderInt64 feature.
+    // The mesh's buffer, as model.slang reads `push.vertices`: its address's two words cast to a
+    // pointer, as a 64-bit integer would need the shaderInt64 feature.
     uint* words = bit_cast<uint*>(run.vertices);
     Header header = *(Header*)words;
     // What draws the meshlet: `GpuMeshlet` in src/packed.rs.
@@ -170,10 +159,9 @@ Shown shown_at(Shading shading, Material* materials, uint2 pixel, uint2 seen) {
     float3 weight = here / (here.x + here.y + here.z);
     float3 weight_across = across / (across.x + across.y + across.z) - weight;
     float3 weight_down = down / (down.x + down.y + down.z) - weight;
-    // A triangle winds counterclockwise as seen, Vulkan's front, where its corners' determinant is
-    // negative, as the view's Y points down; whatever their W, as clipping keeps how they wind. It
-    // shows its mesh's front so, or, of an instance whose transform mirrors it, its back. A run
-    // that draws its fronts alone shows nothing else.
+    // Counterclockwise as seen, Vulkan's front, is a negative determinant, as the view's Y points
+    // down, whatever the W: clipping keeps winding. That's the mesh's front, or its back where the
+    // transform mirrors. A run drawing fronts alone shows nothing else.
     out.front = run.cones != 0 || ((dot(ha, ea) < 0.0) != (a.turned.side < 0.0));
     out.world = weight.x * a.world + weight.y * b.world + weight.z * c.world;
     out.was = weight.x * mul(previous, float4(a.vertex.position, 1.0)).xyz
@@ -231,9 +219,8 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
             mapped, occlusion, emission, reflected);
 }
 
-// Each pixel's normal in the world, of unit length, as its shading turns it, its normal map's bumps
-// among it, in RGB, and 1 in alpha, where a meshlet's triangle drew into the visibility buffer; 0
-// elsewhere.
+// Each pixel's unit normal in the world, as shading turns it, with its normal map's bumps, in RGB,
+// and 1 in alpha, where a meshlet's triangle drew; 0 elsewhere.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void normal_main(uint3 pixel: SV_DispatchThreadID) {

@@ -1,34 +1,34 @@
-// What cull.slang and meshlets.slang share: the runs, levels and views a frame culls for, as
-// runs.slang, and `GpuLevel` and `GpuView` in src/mesh/cull.rs, have them field for field, and the
-// tests a sphere is culled by. Each module that includes it declares its own push constants,
-// `push`, with the fields these read: `instances`, `block_count`, `counts` and `pyramid`.
+// Shared by cull.slang and meshlets.slang: runs, levels and views as runs.slang and `GpuLevel` and
+// `GpuView` in src/mesh/cull.rs have them, field for field, and the sphere tests. Each includer
+// declares `push`, with `instances`, `block_count`, `counts` and `pyramid`.
 
 #include "runs.slang"
 
-// How many of a run's instances a workgroup takes: `BLOCK` in src/mesh/cull.rs.
+// A run's instances per workgroup: `BLOCK` in src/mesh/cull.rs.
 static const uint BLOCK = 64;
 // The most workgroups a dispatch takes across: `MOST_GROUPS` in src/mesh/cull.rs.
 static const uint MOST_GROUPS = 65535;
-// The most levels of detail a mesh has: `MAX_LEVELS` in src/mesh.rs.
+// A mesh's most levels of detail: `MAX_LEVELS` in src/mesh.rs.
 static const uint MAX_LEVELS = 8;
-// Where an instance a view doesn't draw goes: nowhere.
+// An instance a view doesn't draw.
 static const uint CULLED = 0xFFFFFFFF;
-// What a run without meshlets has for its first meshlet: `NO_MESHLETS` in src/mesh/cull.rs.
+// `Run::meshlets` without meshlets: `NO_MESHLETS` in src/mesh/cull.rs.
 static const uint NO_MESHLETS = 0xFFFFFFFF;
-// How many pixels a level's error may span on screen: `LOD_ERROR_PIXELS` in src/mesh.rs.
+// The pixels a level's error may span on screen: `LOD_ERROR_PIXELS` in src/mesh.rs.
 static const float LOD_ERROR_PIXELS = 1.0;
-// The slot of the game's view's first pass among the views: `FIRST` in src/mesh/cull.rs.
+// The game's view's first pass's slot among the views: `FIRST` in src/mesh/cull.rs.
 static const uint FIRST = 0;
 
-// What a view keeps of what reaches inside its planes, as `Keep` in src/mesh/cull.rs has it: all of
-// it, as a cascade does; what the last frame found unhidden, as the game's view's first pass does;
-// or what its first pass didn't keep and the depth pyramid doesn't hide, as its second does.
+// What a view keeps of what's inside its planes: `Keep` in src/mesh/cull.rs.
+// - `KEEP_ALL`: all, for a cascade.
+// - `KEEP_SHOWN`: what last frame found unhidden, for the game's view's first pass.
+// - `KEEP_UNHIDDEN`: what the first pass didn't keep and the pyramid doesn't hide, for its second.
 static const uint KEEP_ALL = 0;
 static const uint KEEP_SHOWN = 1;
 static const uint KEEP_UNHIDDEN = 2;
 
-// A level of detail: its indices, how far its surface strays from the mesh's own, and its
-// meshlets among its mesh's, the first and how many, for a run drawn by them.
+// A level of detail: its indices, its surface's `error` from the mesh's, and its meshlets among
+// the mesh's.
 struct Level {
     uint start;
     uint count;
@@ -46,66 +46,59 @@ struct Command {
     uint first_instance;
 };
 
-// A view that draws the runs.
 struct View {
-    // A point `p` is inside a plane where `dot(xyz, p) + w` is at least 0, and a sphere reaches
-    // inside it where that's at least minus its radius times the length of `xyz`.
+    // `p` is inside a plane where `dot(xyz, p) + w` is at least 0; a sphere reaches inside where
+    // that's at least `-radius * length(xyz)`.
     float4 planes[6];
-    // As `LodView`: what a point's clip W is the dot product of, how much W changes with a world
-    // unit's distance, and the pixels a world unit spans where W is 1.
+    // As `LodView`: `dot(w, p)` is clip W; `w_slope`, its change per world unit; `pixels_per_unit`,
+    // pixels per world unit at W 1.
     float4 w;
-    // What a point's clip X, Y and Z are the dot products of, which the pyramid's test projects
-    // spheres by.
+    // Likewise clip X, Y and Z, for the pyramid's test.
     float4 x;
     float4 y;
     float4 z;
     float w_slope;
     float pixels_per_unit;
-    // Its place among the views, which its parts of the arrays, the scratch and the commands are
-    // at, and what it keeps, one of `KEEP_ALL`, `KEEP_SHOWN` and `KEEP_UNHIDDEN`.
+    // `slot` places its parts of the arrays, scratch and commands; `keep` is a `KEEP_` constant.
     uint slot;
     uint keep;
-    // For `KEEP_UNHIDDEN`, its size in pixels, and how many levels its pyramid has.
+    // For `KEEP_UNHIDDEN`: its size in pixels and pyramid levels.
     uint width;
     uint height;
     uint pyramid_levels;
-    // Where its meshlets' draws start among the culling's commands, in words.
+    // Its meshlets' draws among the culling's commands, in words.
     uint meshlets;
     // Where it sees from, and 1, under perspective; or the way it looks, and 0, without.
     float4 eye;
-    // For the game's view's passes, where the transforms the frame before of the instances it
-    // keeps go among the kept transforms' arrays, past every view's, by index; `NO_PREVIOUS` for a
-    // cascade's, which keeps none.
+    // For the game's view's passes: the index, past every view's, of its kept instances'
+    // last-frame transforms in the kept transforms. `NO_PREVIOUS` for a cascade.
     uint previous;
     uint unused[3];
 };
 
-// What a view that keeps no transforms of the frame before has for `View::previous`.
+// `View::previous` of a view keeping no last-frame transforms.
 static const uint NO_PREVIOUS = 0xFFFFFFFF;
 
-// Where the codes of the view in slot `slot` start in the scratch: each instance's level, and its
-// place among those of its level in its block, as `level | place << 8`, or `CULLED`, at its run's
-// `output`.
+// View `slot`'s codes in the scratch, at each run's `output`: `level | place << 8`, the place
+// among its level's in its block, or `CULLED`.
 uint codes_at(uint slot) {
     return push.instances + slot * (push.instances + push.block_count * MAX_LEVELS);
 }
 
-// Where the blocks' levels of the view in slot `slot` start in the scratch: for each block, by its
-// index times `MAX_LEVELS`, how many of each level the view keeps of it, as `choose_main` counts
-// them, and then where the first of them goes in its run's room, as `offsets_main` places them.
+// View `slot`'s blocks' levels in the scratch, `MAX_LEVELS` per block: the view's count per level
+// (`choose_main`), then the first's place in the run's room (`offsets_main`).
 uint block_levels_at(uint slot) {
     return codes_at(slot) + push.instances;
 }
 
-// How many workgroups were dispatched across, each taking every that many blocks in turn.
+// Workgroups dispatched across, each taking blocks that many apart.
 uint groups() {
     return min(push.block_count, MOST_GROUPS);
 }
 
-// The most `columns`, a transform's linear part's columns, stretch any way: the square root of the
-// largest eigenvalue of their dot products, which Gershgorin's circles bound by the largest sum of
-// a row's magnitudes, exactly where the columns are at right angles, as a rotation and scale's
-// are, and above it for a shear.
+// The most a transform's columns stretch any way: the square root of their dot products' largest
+// eigenvalue, which Gershgorin's circles bound by the largest row sum of magnitudes. Exact for
+// columns at right angles (rotation and scale), above for a shear.
 float stretch(float3 x, float3 y, float3 z) {
     float xy = abs(dot(x, y));
     float xz = abs(dot(x, z));
@@ -113,8 +106,7 @@ float stretch(float3 x, float3 y, float3 z) {
     return sqrt(max(dot(x, x) + xy + xz, max(dot(y, y) + xy + yz, dot(z, z) + xz + yz)));
 }
 
-// Whether the sphere round `center` of `radius`, in the world, reaches inside every plane of
-// `view`.
+// Whether the world sphere reaches inside every plane of `view`.
 bool reaches(View view, float3 center, float radius) {
     bool inside = true;
     for (uint i = 0; i < 6; i++) {
@@ -126,13 +118,11 @@ bool reaches(View view, float3 center, float radius) {
     return inside;
 }
 
-// The least and the most of a clip coordinate over W across a sphere of `radius` round a center
-// whose coordinate is `c`, of a row whose XYZ is `length` long, and whose W is `w`, `w_slope` as
-// the view has it. Without perspective, W is 1. With it, W is the distance ahead of the camera, and
-// the row a scale times the axis it's along, at right angles to the way ahead: the sphere is a disc
-// in the plane of the two, `c / length` along the axis and `w` ahead, whose tangents through the
-// camera bound it (Mara and McGuire, "2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D
-// Sphere", 2013), for a sphere wholly ahead of the camera.
+// The least and most clip coordinate over W across a sphere of `radius`, its center at `c` and W
+// `w`, the row's XYZ `length` long. Without perspective W is 1. With it, W is the distance ahead,
+// and the sphere a disc in the plane of ahead and the row's axis, bound by its tangents through
+// the camera (Mara and McGuire, "2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D
+// Sphere", 2013). For a sphere wholly ahead of the camera.
 float2 across(float c, float length, float w, float radius, float w_slope) {
     if (w_slope == 0.0) {
         return float2(c - radius * length, c + radius * length);
@@ -144,10 +134,9 @@ float2 across(float c, float length, float w, float radius, float w_slope) {
     return float2(least, most) * length;
 }
 
-// Whether `view`'s depth pyramid hides the sphere round `center` of `radius`, in the world: whether
-// what's drawn in every pixel the sphere may cover is nearer than its nearest point. Its rectangle
-// on screen, a pixel wider each way against rounding, falls within 2 by 2 texels of the level whose
-// texels are at least as wide; the farthest of those is as far as anything there is drawn.
+// Whether `view`'s depth pyramid hides the world sphere: every pixel it may cover drew nearer than
+// its nearest point. Its screen rectangle, a pixel wider each way against rounding, falls within
+// 2 by 2 texels of the level whose texels are as wide; their farthest bounds what's drawn there.
 bool hides(View view, float3 center, float radius) {
     float4 p = float4(center, 1.0);
     float w = dot(view.w, p);
@@ -169,8 +158,8 @@ bool hides(View view, float3 center, float radius) {
     }
     uint2 first = uint2(clamp(least, float2(0.0), size - 1.0));
     uint2 last = uint2(clamp(most, float2(0.0), size - 1.0));
-    // The least level whose texels, 2 to the level plus 1 pixels a side, are as wide as the
-    // rectangle, which then reaches 2 at most each way.
+    // The least level whose texels, 2^(level + 1) pixels a side, are as wide as the rectangle,
+    // which then spans at most 2 each way.
     uint span = max(last.x - first.x, last.y - first.y) + 1;
     uint level = span <= 1 ? 0 : firstbithigh(span - 1);
     level = min(level, view.pyramid_levels - 1);
@@ -188,8 +177,7 @@ bool hides(View view, float3 center, float radius) {
     return depth < farthest;
 }
 
-// Adds `value` to the 64-bit count whose low word is at `low` in `push.counts` and high word after
-// it.
+// Adds `value` to the 64-bit count at `low` in `push.counts`, low word first.
 void add_wide(uint low, uint value) {
     uint was;
     InterlockedAdd(push.counts[low], value, was);

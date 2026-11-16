@@ -1,23 +1,24 @@
-// What the engine's mesh shaders share, which sprite.slang, circle.slang, line.slang, shading.slang
-// and clusters.slang include: the bindless set's arrays, the quad's corners, the frame's data, with
-// its lights, the table of models' materials, the sky's prefiltered light, the shadows' cascades,
-// the clusters its lights are binned into, its ambient occlusion, its fog, its atmosphere's haze
-// and its reflections, and the push constants, for a shader's types of vertices and parameters,
-// and what the fragment stage returns. `Corner` in src/sprite.rs, `GpuLight` in src/light.rs,
-// `Entry` in src/model.rs, `ShadowData` in src/shadow.rs, `ClusterData` in src/cluster.rs,
-// `FogData` in src/fog.rs, `AerialData` in src/atmosphere.rs, `ReflectionData` in
-// src/reflections.rs and `Push` and `FrameData` in src/mesh.rs, which `Corner`, `Light`,
-// `Material`, `Shadows`, `Clusters`, `Fog`, `Aerial`, `Reflected`, `Push` and `Frame` here match
-// field for field.
+// What the engine's mesh shaders share, included by sprite.slang, circle.slang, line.slang,
+// shading.slang and clusters.slang: the bindless set, the quad's corners, the frame's data, the
+// push constants and what fragments return. Each struct matches its Rust one field for field:
+// - `Corner`: `Corner` in src/sprite.rs.
+// - `Light`: `GpuLight` in src/light.rs.
+// - `Material`: `Entry` in src/model.rs.
+// - `Shadows`: `ShadowData` in src/shadow.rs.
+// - `Clusters`: `ClusterData` in src/cluster.rs.
+// - `Fog`: `FogData` in src/fog.rs.
+// - `Aerial`: `AerialData` in src/atmosphere.rs.
+// - `Reflected`: `ReflectionData` in src/reflections.rs.
+// - `Push` and `Frame`: `Push` and `FrameData` in src/mesh.rs.
 
-// The bindless set's textures, those of cubes, as the sky's prefiltered light is, through the
-// second; and its samplers, the one that compares depth, `COMPARISON_SAMPLER`, through the second.
+// The bindless set: cube textures, as the sky's prefiltered light is, through `cubes`; the sampler
+// that compares depth, `COMPARISON_SAMPLER`, through `comparisons`.
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(0, 0)]] TextureCube cubes[];
 [[vk::binding(1, 0)]] SamplerState samplers[];
 [[vk::binding(1, 0)]] SamplerComparisonState comparisons[];
 
-// `COMPARISON_SAMPLER`'s index in the bindless set.
+// Its index in the bindless set.
 static const uint COMPARISON_SAMPLER = 9;
 
 struct Corner {
@@ -27,18 +28,18 @@ struct Corner {
 
 // A light, as KHR_lights_punctual describes them.
 struct Light {
-    // Where it shines from, in the world: a point's or a spot's.
+    // In the world: a point's or a spot's.
     float3 position;
     // 0 for directional, 1 for point, 2 for spot.
     uint kind;
-    // The way it shines, a unit vector in the world: a directional's or a spot's.
+    // The way it shines, a unit vector in the world: a directional's or spot's.
     float3 direction;
     // 1 over the distance past which it lights nothing, or 0 for as far as its falloff takes it.
     float inverse_range;
     // Its linear RGB times its intensity, in lux for a directional light and candela for the rest.
     float3 color;
-    // What a spot's cosine from its direction is scaled by, then offset by, before it's clamped to
-    // 0 to 1 and squared: 0 and 1 for the rest.
+    // A spot's cosine from its direction is scaled, then offset, by these, then clamped to 0 to 1
+    // and squared; 0 and 1 for the rest.
     float angle_scale;
     float angle_offset;
 };
@@ -59,29 +60,26 @@ struct Material {
     float cutoff;
     // 1 if it's unlit, 2 if it has a normal map, and 4 if it's a specular-glossiness material.
     uint flags;
-    // Each texture's index and its sampler's: the base color's, the surface's (the
-    // metallic-roughness map, or the specular-glossiness map), the normal map's, the occlusion
-    // map's and the emissive's.
+    // Each texture's index and its sampler's: base color, surface (metallic-roughness or
+    // specular-glossiness), normal, occlusion and emissive maps.
     uint2 textures[5];
     // A specular-glossiness material's specular color, linear RGB, and glossiness, 0 for the other.
     float3 specular;
     float glossiness;
 };
 
-// How many cascades a light's shadows are in.
 static const uint CASCADES = 4;
 
-// The shadows a directional light casts, in cascades, each a shadow map, from the nearest the view
-// out: the boxes in the light's space round spheres that hold slices of the view's depth.
+// A directional light's shadows, in cascades, each a shadow map, nearest the view first: boxes in
+// the light's space round spheres holding slices of the view's depth.
 struct Shadows {
     // From the world to the light's space, its -Z the way the light shines.
     float4x4 light_from_world;
-    // Each cascade's center in the light's space, and 1 over its radius: a point `p` there is at
-    // `(p - center) / radius` in its box, -1 to 1 each way, whose X and Y map onto its map's U, and
-    // V, which points down, and whose Z onto its depth, from 0 at the far side to 1 at the light's.
+    // Each cascade's center in the light's space and 1 over its radius: `p` there is at
+    // `(p - center) / radius` in its box, -1 to 1. X and Y map to its map's U and V, V pointing
+    // down; Z to depth, 0 at the far side to 1 at the light's.
     float4 cascades[CASCADES];
-    // Each cascade's shadow map, a texture of the bindless set's, which `COMPARISON_SAMPLER`
-    // samples.
+    // Each cascade's shadow map, in the bindless set, sampled by `COMPARISON_SAMPLER`.
     uint maps[CASCADES];
     // How far a point `p` is ahead of the view: `dot(view_depth.xyz, p) + view_depth.w`.
     float4 view_depth;
@@ -94,25 +92,23 @@ struct Shadows {
     float map_size;
 };
 
-// The clusters of the game's view that the frame's lights are binned into, as clusters.slang bins
-// them, and model.slang's `cluster` finds a point's: the view cut into `across` tiles across and
-// `down` down, each cut into `slices` along its depth.
+// The view's clusters for the frame's lights, binned by clusters.slang and found by shading.slang's
+// `cluster`: `across` by `down` tiles, each cut into `slices` by depth.
 struct Clusters {
-    // How many of the frame's lights, the first, light everywhere, which no cluster bins:
-    // directional lights, and those without a range. The rest are binned.
+    // How many of the frame's lights, the first, light everywhere, unbinned: directional lights and
+    // those without a range. The rest are binned.
     uint everywhere;
-    // Each cluster's words, a light binned a bit, its first light's the first word's lowest; 0 in a
-    // frame without clusters, whose fragments each shade by every light.
+    // Words per cluster, a bit per binned light, its first the first word's lowest. 0 without
+    // clusters, where fragments shade by every light.
     uint words;
-    // Where, in words from the lights' address, `(uint*)lights`, each cluster's first word that
-    // holds a bit and the word past its last start, followed by each cluster's words, by its index,
-    // `(slice * down + y) * across + x`. They follow the lights in one buffer, reached through one
-    // address: AMD's driver (25.10.30) drops the address of a second pointer read from memory, as
-    // a fragment's loops over a cluster's lights read them, and reads through the index alone.
+    // Where, in words from the lights' address, `(uint*)lights`, each cluster's first word holding
+    // a bit and the word past its last start, then each cluster's words, by index
+    // `(slice * down + y) * across + x`. They follow the lights in one buffer, through one address:
+    // AMD's driver (25.10.30) drops the address of a second pointer read from memory, as a
+    // fragment's loops over a cluster's lights read them, and reads through the index alone.
     uint bits;
-    // Where a point `p` is across and down the tiles, from the view's top left, and how far ahead
-    // of the view it is: `dot(x, q) / dot(w, q)`, `dot(y, q) / dot(w, q)` and `dot(depth, q)`, of
-    // `q = float4(p, 1.0)`.
+    // A point `p`'s tile across and down from the view's top left, and its depth ahead of the view:
+    // `dot(x, q) / dot(w, q)`, `dot(y, q) / dot(w, q)` and `dot(depth, q)`, `q = float4(p, 1.0)`.
     float4 x;
     float4 y;
     float4 w;
@@ -128,16 +124,15 @@ struct Clusters {
     uint unused;
 };
 
-// The height fog the frame's view is in, as fog.slang fogs light by it, `FogData` in src/fog.rs:
-// densest low down, thinning exponentially with height, lit from all around and by the sun.
+// The view's height fog (fog.slang): densest low down, thinning exponentially with height, lit
+// from all around and by the sun.
 struct Fog {
-    // The light it scatters toward the eye of the light from all around, exposed: in a frame with
-    // a sky, times the sky's diffuse light, `irradiance`, the way the eye looks.
+    // The ambient light it scatters toward the eye, exposed; with a sky, times the sky's
+    // `irradiance` the way the eye looks.
     float3 ambient;
-    // Its extinction, per unit of the world, at `height`: 0 in a frame without fog, which fogs
-    // nothing.
+    // Its extinction, per unit of the world, at `height`; 0 without fog.
     float density;
-    // The light it scatters toward the eye of the sun's, exposed, before its phase function.
+    // The sun's light it scatters toward the eye, exposed, before its phase function.
     float3 sun;
     // How fast it thins with height: its density at `height + h` is `density * exp(-falloff * h)`.
     float falloff;
@@ -153,35 +148,33 @@ struct Fog {
     uint unused;
 };
 
-// The atmosphere's aerial perspective, as aerial.slang reads it: `AerialData` in
-// src/atmosphere.rs, field for field.
+// The atmosphere's aerial perspective, as aerial.slang reads it.
 struct Aerial {
     // From the world to clip space, unjittered, where a point falls among the froxels.
     float4x4 clip_from_world;
-    // The froxels, a texture of the bindless set's, their slices side by side.
+    // The froxels, bindless, their slices side by side.
     uint texture;
-    // What their light is multiplied by, before the exposure: the sun's illuminance; 0 in a frame
-    // without an atmosphere.
+    // What their light is multiplied by before the exposure: the sun's illuminance; 0 without an
+    // atmosphere.
     float luminance;
 };
 
-// The game's view's reflections, as reflections.slang traces them and shading.slang's `reflection`
-// reads them: `ReflectionData` in src/reflections.rs, field for field.
+// The view's reflections, as reflections.slang traces them and shading.slang's `reflection` reads
+// them.
 struct Reflected {
-    // The view's reflections, a texture of the bindless set's of the view's size, in levels: at
-    // each pixel, the light its mirror ray found, exposed, times how much it's trusted, and that
-    // trust in alpha, each level the mean of the 2 by 2 under it; 0 in a frame without them, and in
-    // every pass but those that shade the view.
+    // A bindless texture of the view's size, in levels: each pixel's mirror-ray light, exposed,
+    // times its trust, and the trust in alpha; each level the mean of the 2 by 2 under it. 0
+    // without them, and in every pass but those shading the view.
     uint colors;
-    // How far a reflection at each pixel spreads, in pixels, for each unit of the tangent of a
-    // lobe's angle, a texture of the bindless set's of the view's size, in red.
+    // A bindless texture of the view's size: in red, how far each pixel's reflection spreads, in
+    // pixels per unit of the lobe angle's tangent.
     uint spread;
     // The roughness past which a surface takes the sky's specular light alone.
     float roughness;
     uint unused;
 };
 
-// What every draw's shader may read of the frame: `FrameData` in src/mesh.rs, field for field.
+// What every draw's shader may read of the frame.
 struct Frame {
     // Where the view sees from, in the world.
     float3 camera;
@@ -189,48 +182,39 @@ struct Frame {
     float time;
     // What lit shading multiplies light by.
     float exposure;
-    // How many lights there are, and where.
     uint light_count;
     Light* lights;
-    // Every model's material, by its index, which a model's draw's parameters carry.
+    // Every model's material, by the index a draw's parameters carry.
     Material* materials;
     // Where lit shading sees from: the camera's position and 1 for a perspective, or the way back
-    // toward it and 0 for an orthographic projection, so that the way to the eye from `p` is
+    // toward it and 0 for an orthographic projection. The way to the eye from `p` is
     // `eye.xyz - p * eye.w`.
     float4 eye;
-    // The sky's image, equirectangular, a texture of the bindless set's, which the view shows
-    // behind the world; 0 under an atmosphere, which the view draws from its own tables, though
-    // its light below is the atmosphere's.
+    // The sky's equirectangular image, bindless, shown behind the world. 0 under an atmosphere,
+    // which the view draws from its own tables; the light below is then the atmosphere's.
     uint sky;
-    // The sky's light from all around, prefiltered, cubes of the bindless set's: what Lambert's
-    // diffuse takes the way of a normal, the irradiance over π; and what GGX's specular takes the
-    // way of a reflection, a level for each step of roughness, from none at the first to 1 at the
-    // last, of `specular_levels`, which is 0 in a frame without a sky.
+    // The sky's prefiltered light, bindless cubes: `irradiance`, over π, for Lambert's diffuse by
+    // the normal; `specular` for GGX's by the reflection, `specular_levels` levels from roughness 0
+    // to 1. `specular_levels` is 0 without a sky.
     uint irradiance;
     uint specular;
     uint specular_levels;
-    // The split sum's table, a texture of the bindless set's: by the cosine of the view's angle
-    // across and the roughness down, GGX's reflectance as F0's scale in red and its bias in green.
+    // The split sum's table, bindless: by the view angle's cosine across and roughness down, GGX's
+    // reflectance as F0's scale in red and its bias in green.
     uint brdf;
-    // The luminance, in candela per square meter, that a texel of the sky's of 1 stands for: what
-    // its light is multiplied by, before the exposure.
+    // The luminance, in cd/m², that a sky texel of 1 stands for, before the exposure.
     float sky_luminance;
     // The shadows of one of its lights, if one casts them.
     Shadows shadows;
-    // The clusters its lights are binned into.
     Clusters clusters;
-    // The game's view's ambient occlusion, a texture of the bindless set's of the view's size: the
-    // fraction of the light from all around that reaches each pixel, in red, which a fragment loads
-    // at its pixel; 0 for none, which reads as 1.
+    // The view's ambient occlusion, bindless, of the view's size: in red, the share of ambient
+    // light reaching each pixel, loaded at the fragment's pixel. 0 for none, which reads as 1.
     uint ambient_occlusion;
-    // What the view shows in place of its light, as shading.slang's `SHOW_` constants number it:
-    // 0, `SHOW_LIGHT`, for its light, as games' shaders take it.
+    // What the view shows in place of its light, numbered by shading.slang's `SHOW_` constants. 0,
+    // `SHOW_LIGHT`, is its light, as games' shaders take it.
     uint show;
-    // The height fog its view is in.
     Fog fog;
-    // The haze its atmosphere puts between the viewer and what's lit.
     Aerial aerial;
-    // The game's view's reflections.
     Reflected reflections;
 };
 
@@ -243,23 +227,22 @@ struct Push<V, P> {
     float4x4* transforms;
     // Each instance's: its entity's, or 0.
     uint2* ids;
-    // Each instance's.
     P* params;
     // The view's size in pixels.
     float2 view;
     Frame* frame;
-    // For a draw of the meshlets a view kept of a mesh: the draw as the culling wrote it, in its
-    // first four, then each meshlet kept, its instance and its index among the mesh's.
+    // For a draw of kept meshlets: the culling's draw in its first four, then each kept meshlet's
+    // instance and index in the mesh.
     uint2* meshlets;
-    // For a draw of them into the visibility buffer: which run of the culling's and which of the
-    // game's view's passes it is, as `Push::draw` in src/mesh.rs says; 0 for any other draw.
+    // For their draw into the visibility buffer: its culling run and view pass, as `Push::draw` in
+    // src/mesh.rs says; 0 for any other draw.
     uint draw;
-    // How many transforms past each instance's its transform the frame before is: 0 where the
-    // engine has none, which reads the instance's own.
+    // How many transforms past each instance's is its transform the frame before: 0 where the
+    // engine has none, reading the instance's own.
     uint previous;
 };
 
-// The color, and the instance's ID, which picks read back where it shows.
+// The color, and the instance's ID, which picks read back.
 struct Targets {
     float4 color : SV_Target0;
     uint2 id : SV_Target1;

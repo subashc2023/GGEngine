@@ -1,86 +1,73 @@
-// Culls the instances of a frame's opaque runs on the GPU, for each view that draws them: the
-// game's view, in each of its two passes, and the shadows' cascades. Each instance is kept if the
-// sphere round its mesh's vertices, as its transform places it, reaches inside every plane of the
-// view, and draws at the level of detail the render thread would pick for it, as `LodView` in
-// src/mesh.rs picks; those kept are written, each level's in the order they came, into the view's
-// arrays, where the run's indirect draws, one for each of its mesh's levels, take them, as the
-// commands written for them say. `Push` matches `CullPush` in src/mesh/cull.rs field for field, and
-// culling.slang has what it shares with meshlets.slang.
+// GPU culling of a frame's opaque runs, per view: the game's view's two passes and the shadow
+// cascades. An instance is kept if its bounding sphere reaches inside every plane of the view, at
+// the level of detail `LodView` in src/mesh.rs picks. Kept instances go into the view's arrays, by
+// level in order, for the run's indirect draws, one per level. `Push` matches `CullPush` in
+// src/mesh/cull.rs field for field; culling.slang holds what meshlets.slang shares.
 //
-// The game's view keeps, in its first pass, what its second found unhidden the frame before; and in
-// its second, what its first didn't keep that the depth pyramid built from the first's depth doesn't
-// hide, finding again what's unhidden for the next frame's first, so that what comes into view
-// draws in the frame it does. A cascade keeps all that reaches inside its planes. What's unhidden
-// is a word for each instance, where it's gathered, the scene's before the draws', at the start of
-// the scratch, which the culling's buffer keeps from frame to frame: a frame in which instances
-// before one in that order came or went reads, for that one, what was another's, so that its first
-// pass draws some that are hidden and leaves out some that show, which its second then draws.
+// The game's view's first pass keeps what its second found unhidden last frame. The second keeps
+// what the first didn't and the depth pyramid doesn't hide, and records what's unhidden for the
+// next frame: what comes into view draws that frame. A cascade keeps all inside its planes.
+// Unhidden is a word per instance in gathered order, kept from frame to frame. Instances coming or
+// going earlier in that order shift it: the first pass then draws some hidden and leaves out some
+// shown, which the second draws.
 //
-// It runs as three passes, each waiting for the one before: `choose_main`, which finds where each
-// instance draws, and how many of each level each block of a run keeps; `offsets_main`, which adds
-// those up across a run's blocks, into its commands and where each block's go, and sets out the
-// draw of a run drawn by its meshlets; and `write_main`, which copies each instance kept to where
-// it goes, after which meshlets.slang culls the meshlets of those drawn by them. They run for the
-// first pass's views, the game's view's first and the cascades, and then, once the first pass has
-// drawn and the pyramid is built, again for the second's.
+// Three passes, for the first pass's views, then, once the pyramid is built, the second's; views
+// by the group's Y:
+// - `choose_main`: each instance's level, and each block's count per level.
+// - `offsets_main`: those summed per run into its commands and each block's place; and the draws
+//   of runs drawn by meshlets, which meshlets.slang then culls.
+// - `write_main`: each kept instance copied to its place.
 //
-// Each array is reached as a pointer the push constants hold, indexed, each view's part of it found
-// by an index too: no pointer is held in buffer memory, nor offset and kept in a variable. AMD's
-// driver (25.10.30.02) miscompiles both: it loaded only the low word of a `uint*` that a struct read
-// through an address held, and took it for the high word too; and it carried a pointer offset from
-// one pushed across a loop as another pushed one.
+// Each array is an indexed pointer from the push constants, each view's part an index: no pointer
+// is held in buffer memory, nor offset and kept in a variable. AMD's driver (25.10.30.02)
+// miscompiles both: it loaded a `uint*` read through a held address as its low word twice, and
+// carried a pointer offset from a pushed one across a loop as another pushed one.
 
 #include "culling.slang"
 
-// How many vertices a meshlet's draw through vertex shaders takes, three for each of the most
-// triangles a meshlet has, `MAX_MESHLET_TRIANGLES` in src/packed.rs.
+// For a meshlet's draw through vertex shaders: three per triangle of a meshlet's most,
+// `MAX_MESHLET_TRIANGLES` in src/packed.rs.
 static const uint MESHLET_VERTICES = 372;
 
 struct Push {
     Run* runs;
-    // Each block's run, and its first instance in the run.
+    // Each block's run and first instance in it.
     uint2* blocks;
     Level* levels;
-    // The views this dispatch culls for, by the group's Y.
     View* views;
-    // The frame's instances, of every run, as `gather.slang` gathered them, each one's transform
-    // the frame before `instances` past its own.
+    // As `gather.slang` gathered them, last frame's transforms `instances` past.
     float4x4* transforms;
     uint2* ids;
     uint* params;
-    // The arrays of the instances each view keeps, `instances` and `params_words` long, one view's
-    // after another's, each run's at its `output`; and past the views' transforms, those the frame
-    // before of what the game's view's passes keep, where their `View::previous` says.
+    // Each view's kept instances, `instances` and `params_words` long, each run's at its `output`.
+    // Past the views' transforms, last frame's of the game's view's, at `View::previous`.
     float4x4* kept_transforms;
     uint2* kept_ids;
     uint* kept_params;
-    // Each view's commands, `run_count` times `MAX_LEVELS` long, and after them all, each view's
-    // meshlets, where its `meshlets` says, in words: each run's draw of its meshlets, eight words,
-    // then its meshlets kept, two words each, as meshlets.slang keeps them.
+    // Each view's, `run_count * MAX_LEVELS`. Then each view's meshlets at its `meshlets`, in words:
+    // per run an eight-word draw, then its kept meshlets, two words each.
     Command* commands;
-    // Whether each instance was unhidden, `instances` long, then each view's codes and its blocks'
-    // levels, as `codes_at` and `block_levels_at` place them.
+    // Whether each instance was unhidden, `instances` long, then per view what `codes_at` and
+    // `block_levels_at` place.
     uint* scratch;
-    // What the game's view drew: its draws with an instance, its instances, and their triangles,
-    // as the low and the high word of a 64-bit count.
+    // Drawn in the game's view: draws with an instance, instances, then triangles as a 64-bit
+    // count, low word first.
     uint* counts;
-    // The game's view's depth pyramid, as `pyramid.slang` builds it, for `KEEP_UNHIDDEN`.
+    // For `KEEP_UNHIDDEN`: the game's view's, as `pyramid.slang` builds it.
     float* pyramid;
     uint run_count;
     uint block_count;
-    // The runs' instances, and the words of their parameters.
+    // The runs' instances and parameter words.
     uint instances;
     uint params_words;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// A block's counts of each level, 8 bits a level, four levels to a word: no level of a block keeps
-// more than its 64 instances.
+// Per level, 8 bits each, four to a word: a level keeps at most the block's 64.
 groupshared uint2 sums[BLOCK];
 
-// Where the `gathered`th instance, of `run`, that `transform` places in the world draws in `view`:
-// the level it draws at, or `CULLED`. For `KEEP_UNHIDDEN`, it writes too whether the instance is
-// unhidden, for the next frame's first pass.
+// The level `view` draws the instance at, or `CULLED`. `KEEP_UNHIDDEN` also records whether it's
+// unhidden, for the next frame.
 uint choose(Run run, View view, float4x4 transform, uint gathered) {
     float3x3 columns = transpose((float3x3)transform);
     float3 x = columns[0];
@@ -91,7 +78,7 @@ uint choose(Run run, View view, float4x4 transform, uint gathered) {
     bool inside = true;
     bool hidden = false;
     if (!isinf(run.sphere.w)) {
-        // The sphere grown by the most the transform stretches any way.
+        // Grown by the transform's most stretch.
         float radius = run.sphere.w * stretch(x, y, z);
         inside = reaches(view, center, radius);
         if (inside && view.keep == KEEP_UNHIDDEN) {
@@ -114,9 +101,8 @@ uint choose(Run run, View view, float4x4 transform, uint gathered) {
     if (run.level_count == 1) {
         return 0;
     }
-    // As `LodView::level`: the coarsest level whose error, scaled as the mesh is, spans no more
-    // than a pixel where the sphere is nearest, or the finest where the sphere reaches the
-    // camera's plane, or anything isn't a number.
+    // As `LodView::level`: the coarsest level whose scaled error spans at most a pixel at the
+    // sphere's nearest; the finest if it reaches the camera's plane, or on NaN.
     float scale = sqrt(max(lengths.x, max(lengths.y, lengths.z)));
     float w = dot(view.w.xyz, center) + view.w.w;
     float near = w - run.sphere.w * scale * view.w_slope;
@@ -133,8 +119,7 @@ uint choose(Run run, View view, float4x4 transform, uint gathered) {
     return level;
 }
 
-// For each block of each view, the group's Y: where each of its instances draws, and its place
-// among those of its level in the block, and how many of each level it keeps.
+// Each instance's code, as `codes_at` says, and the block's count per level.
 [shader("compute")]
 [numthreads(BLOCK, 1, 1)]
 void choose_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
@@ -142,10 +127,10 @@ void choose_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
     uint codes = codes_at(view.slot);
     uint block_levels = block_levels_at(view.slot);
     if (view.slot == FIRST && group.x == 0 && thread.x < 4) {
-        // `offsets_main` counts into these, after this pass and the second's.
+        // `offsets_main` counts into these in both passes.
         push.counts[thread.x] = 0;
     }
-    // The same for every thread of the group, so that each reaches each barrier.
+    // Uniform across the group, so every thread reaches each barrier.
     for (uint block = group.x; block < push.block_count; block += groups()) {
         uint2 at = push.blocks[block];
         Run run = push.runs[at.x];
@@ -159,7 +144,7 @@ void choose_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
             uint bit = 1u << ((level & 3) * 8);
             one = level < 4 ? uint2(bit, 0) : uint2(0, bit);
         }
-        // An inclusive scan of the block's counts, by Hillis and Steele's steps.
+        // An inclusive Hillis and Steele scan.
         sums[thread.x] = one;
         GroupMemoryBarrierWithGroupSync();
         for (uint offset = 1; offset < BLOCK; offset <<= 1) {
@@ -183,13 +168,12 @@ void choose_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
             push.scratch[block_levels + block * MAX_LEVELS + thread.x] =
                 (word >> ((thread.x & 3) * 8)) & 0xFF;
         }
-        // Before the next block's scan writes over this one's.
+        // Before the next block's scan overwrites this one's.
         GroupMemoryBarrierWithGroupSync();
     }
 }
 
-// For each run of each view, the group's Y: how many of each level its blocks keep, its commands
-// and where each block's go, from the first of its room, each level's after the level before's.
+// A thread a run; each level's place in the run's room follows the last's.
 [shader("compute")]
 [numthreads(BLOCK, 1, 1)]
 void offsets_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
@@ -198,7 +182,7 @@ void offsets_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
         return;
     }
     View view = push.views[group.y];
-    // The game's view's two passes count what they draw.
+    // Only the game's view's passes count.
     bool counted = view.keep != KEEP_ALL;
     uint block_levels = block_levels_at(view.slot);
     uint commands = view.slot * push.run_count * MAX_LEVELS;
@@ -216,7 +200,7 @@ void offsets_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
     uint start = 0;
     uint draws = 0;
     uint instances = 0;
-    // A run drawn by its meshlets counts its triangles as `meshlets_main` keeps them.
+    // `meshlets_main` counts the triangles of runs drawn by meshlets.
     bool by_meshlets = run.meshlets != NO_MESHLETS;
     for (uint l = 0; l < run.level_count; l++) {
         starts[l] = start;
@@ -233,10 +217,9 @@ void offsets_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
         }
     }
     if (by_meshlets) {
-        // Its draw of its meshlets, which `meshlets_main` fills: through vertex shaders,
-        // `MESHLET_VERTICES` vertices for each meshlet kept, and through a mesh shader, a workgroup
-        // for each, `ACROSS` across, as many rows down as they take; how many are drawn, and how
-        // many were kept, which may be more, past its room.
+        // Its meshlet draw, which `meshlets_main` fills: `MESHLET_VERTICES` per kept meshlet
+        // through vertex shaders, or a workgroup each, `ACROSS` across, through a mesh shader;
+        // then the count drawn, and the count kept, which may pass its room.
         uint record = view.meshlets + run.meshlet_draw;
         ((uint*)push.commands)[record] = MESHLET_VERTICES;
         ((uint*)push.commands)[record + 1] = 0;
@@ -261,7 +244,6 @@ void offsets_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
     }
 }
 
-// For each block of each view, the group's Y: each instance kept, copied to where it goes.
 [shader("compute")]
 [numthreads(BLOCK, 1, 1)]
 void write_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
@@ -282,8 +264,8 @@ void write_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
             continue;
         }
         uint place = push.scratch[block_levels + block * MAX_LEVELS + (code & 0xFF)] + (code >> 8);
-        // Within the run's room, as `offsets_main` places them, which this keeps to whatever it
-        // placed: a write past it could reach past the view's arrays.
+        // Within the run's room, whatever `offsets_main` placed: past it, a write could leave the
+        // view's arrays.
         if (place >= run.count) {
             continue;
         }

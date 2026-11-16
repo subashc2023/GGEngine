@@ -1,5 +1,4 @@
-// The model shader for opaque materials, whose alpha glTF ignores: model.slang, returning an alpha
-// of 1.
+// model.slang for opaque materials, whose alpha glTF ignores: it returns alpha 1.
 
 #define OPAQUE
 #include "model.slang"

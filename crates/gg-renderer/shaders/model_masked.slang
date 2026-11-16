@@ -1,5 +1,4 @@
-// The model shader for masked materials: model.slang, discarding what's less opaque than the
-// material's cutoff, and returning an alpha of 1 for the rest.
+// model.slang for masked materials: it discards below the cutoff, and returns alpha 1 elsewhere.
 
 #define MASKED
 #include "model.slang"
