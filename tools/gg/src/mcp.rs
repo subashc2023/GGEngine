@@ -1,10 +1,7 @@
-//! `gg mcp`: the tool API served to agents that speak MCP, the Model Context Protocol, over stdio:
-//! JSON-RPC 2.0 messages, a line each, read on stdin and answered on stdout, as MCP's stdio
-//! transport has them. Each tool is a method of the API, or `gg`'s `sessions`, and answers what
-//! they answer, as JSON text, a capture its PNG too if it's asked to inline it. Each call connects
-//! afresh to the game the options choose, so that one `gg run` restarted is the one it reaches, as
-//! the MCP client its `initialize` names, the author of the edits it applies; `mcp` if it names
-//! none.
+//! `gg mcp`: the tool API served to MCP agents over stdio, as JSON-RPC 2.0 lines. Each tool is an
+//! API method, or `gg`'s `sessions`, and answers JSON text, a capture its PNG too if inlined. Each
+//! call connects afresh, so a restarted `gg run` is reached. Edits are authored as the client
+//! `initialize` names, else `mcp`.
 
 use std::fs;
 use std::io::{self, BufRead, Write as _};
@@ -17,16 +14,14 @@ use serde_json::{Map, Value, json};
 use crate::game::{self, Pick};
 use crate::{probe, runs};
 
-/// The versions of MCP served, the latest first: a client's own, if it's one of them, or else the
-/// latest. Those that `initialize`, `tools/list` and `tools/call` are the same in, which is all
-/// that's served; not 2025-03-26, whose servers take batches of messages, which this doesn't.
+/// The MCP versions served, latest first: the client's if listed, else the latest. All agree on
+/// the three methods served; not 2025-03-26, whose servers take batches.
 const VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2024-11-05"];
 
-/// How many of the log's events `logs` gives without `from`, the last.
+/// The last events `logs` gives without `from`.
 const MOST_LOG_LINES: usize = 200;
 
-/// What the tools' `show` is, for their schemas: the names, and how a PNG's bytes read, as gg-api's
-/// `Shown` says.
+/// The tools' `show`, as gg-api's `Shown` says.
 const SHOWN: &str = "\
 A part of lit shading by name: `base_color` (sRGB, as a texture stores it), `normal` (which way \
 the point faces in the world, with its normal map: each axis -1 to 1 as byte / 255 * 2 - 1, X red, \
@@ -44,7 +39,7 @@ without antialiasing, fog, depth of field, motion blur, bloom, grade, lens, expo
 an image, from a frame drawn as the game's but without antialiasing, so every other pass's images \
 are there, as `bloom 1` or `depth of field near`.";
 
-/// What `initialize` tells the client of the tools, for its model.
+/// What `initialize` tells the client's model.
 const INSTRUCTIONS: &str = "\
 These tools reach a GGEngine game's development build as it runs, usually under `gg run`, through \
 its tool API: read its world, step and capture it, and edit it. Entities are named by their IDs, \
@@ -92,9 +87,7 @@ game started again from a snapshot: `wait` waits until the game runs it, or says
 with rustc's errors; while it rebuilds, the other tools fail with `gg.rebuilding`, and once a build \
 has failed and the game has ended, with `gg.build_failed`.";
 
-/// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
-///
-/// Fails with `gg.io` if stdin or stdout breaks.
+/// Serves until stdin ends. Fails with `gg.io` if stdin or stdout breaks.
 pub(crate) fn serve(mut pick: Pick) -> Result<(), Failure> {
     let io = |error: io::Error| Failure::new("gg.io", format!("stdin or stdout broke: {error}"));
     let stdin = io::stdin();
@@ -113,7 +106,7 @@ pub(crate) fn serve(mut pick: Pick) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The answer to the message `line`, as a line of JSON; none for a notification, or a response.
+/// None for a notification or a response.
 fn answer(pick: &mut Pick, line: &str) -> Option<Value> {
     let message: Value = match serde_json::from_str(line) {
         Ok(message) => message,
@@ -126,13 +119,12 @@ fn answer(pick: &mut Pick, line: &str) -> Option<Value> {
         }
     };
     let Some(method) = message.get("method").and_then(Value::as_str) else {
-        // A response to a request of ours, which there are none of, has a result or an error;
-        // anything else isn't a message, answered with its ID if it has one.
+        // We make no requests, so a result or error is a stray response; else not a message.
         let response = message.get("result").is_some() || message.get("error").is_some();
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         return (!response).then(|| rpc_error(id, -32600, "not a JSON-RPC request"));
     };
-    // A notification, such as `notifications/initialized`, needs no answer.
+    // No ID, as `notifications/initialized`: a notification, unanswered.
     let id = message.get("id")?.clone();
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     let result = match method {
@@ -148,8 +140,7 @@ fn answer(pick: &mut Pick, line: &str) -> Option<Value> {
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-/// What `initialize` answers: the version served, the tools, and what this is; and the client's
-/// name, from its `clientInfo`, which the edits it applies are authored as.
+/// Takes the client's `clientInfo` name as the edits' author.
 fn initialize(pick: &mut Pick, params: &Value) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
@@ -170,13 +161,11 @@ fn initialize(pick: &mut Pick, params: &Value) -> Value {
     })
 }
 
-/// The JSON-RPC error answering request `id`.
 fn rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
-/// A tool, as `tools/list` lists it: its name, what it does, and its input's JSON Schema, an object
-/// of `properties`, those `required`.
+/// `properties` and `required` make the input's JSON Schema.
 struct Tool {
     name: &'static str,
     description: &'static str,
@@ -184,7 +173,6 @@ struct Tool {
     required: &'static [&'static str],
 }
 
-/// The tools, in `tools/list`'s order.
 const TOOLS: &[Tool] = &[
     Tool {
         name: "sessions",
@@ -763,7 +751,6 @@ const TOOLS: &[Tool] = &[
     },
 ];
 
-/// The tools, each with its input's JSON Schema.
 fn tools() -> Value {
     let tool = |tool: &Tool| {
         json!({
@@ -779,12 +766,10 @@ fn tools() -> Value {
     TOOLS.iter().map(tool).collect()
 }
 
-/// The schema of an entity's ID.
 fn id() -> Value {
     json!({"type": "string", "description": "An entity's ID, 16 hex digits"})
 }
 
-/// The schema of an author of edits.
 fn author() -> Value {
     json!({
         "type": "string",
@@ -793,7 +778,6 @@ fn author() -> Value {
     })
 }
 
-/// The schema of an array of `count` numbers.
 fn numbers(count: usize, description: &str) -> Value {
     json!({
         "type": "array",
@@ -804,8 +788,7 @@ fn numbers(count: usize, description: &str) -> Value {
     })
 }
 
-/// The schema of an object of one key, `name`, whose value is `value`, as gg-api writes an enum's
-/// variant that holds something.
+/// An object of one key, as gg-api writes an enum's variant with a value.
 fn variant(name: &str, value: Value) -> Value {
     json!({
         "type": "object",
@@ -815,7 +798,6 @@ fn variant(name: &str, value: Value) -> Value {
     })
 }
 
-/// The schema of a `show`: a name, or an image's.
 fn shown() -> Value {
     json!({"anyOf": [
         {"type": "string", "minLength": 1, "maxLength": 64},
@@ -823,7 +805,6 @@ fn shown() -> Value {
     ]})
 }
 
-/// The schemas of a viewpoint's parts, as `look` and `frames` take them.
 fn viewpoint() -> Value {
     json!({
         "position": numbers(3, "[x, y, z]"),
@@ -837,14 +818,13 @@ fn viewpoint() -> Value {
     })
 }
 
-/// The passes, by the API's own names, so that the list can't fall behind it.
+/// Built from the API, so the list can't fall behind it.
 fn passes() -> Vec<Value> {
     (gg_api::Pass::ALL.iter())
         .map(|pass| serde_json::to_value(pass).expect("a pass's name"))
         .collect()
 }
 
-/// The schema of `input`'s events.
 fn input() -> Value {
     json!({
         "type": "array",
@@ -915,11 +895,9 @@ fn input() -> Value {
     })
 }
 
-/// What `tools/call` answers: the tool's result, or the error it failed with, as a result whose
-/// `isError` is set, as MCP has a tool's errors.
+/// A tool's error is a result with `isError` set, as MCP has it.
 ///
-/// Fails, saying why, for a call that doesn't name one of the tools, or gives arguments that aren't
-/// an object, which MCP has as a protocol's error.
+/// Fails, as a protocol error, for an unknown tool or arguments that aren't an object.
 fn call_tool(pick: &Pick, params: &Value) -> Result<Value, String> {
     let name = params
         .get("name")
@@ -952,15 +930,12 @@ fn call_tool(pick: &Pick, params: &Value) -> Result<Value, String> {
     Ok(done)
 }
 
-/// What a tool gave: JSON, or JSON and PNGs.
 enum Ran {
     Json(String),
     Image(String, Vec<Vec<u8>>),
 }
 
-/// Runs tool `name` with `arguments`.
-///
-/// Fails with `gg.args` for a tool there's none of, and as the call it makes fails.
+/// Fails with `gg.args` for an unknown tool, and as the call it makes fails.
 fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran, Failure> {
     let call = |method: &str, params: Value| {
         game::call(pick, method, params).map(|result| Ran::Json(result.get().to_owned()))
@@ -970,14 +945,13 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }
         _ if crate::NO_PARAMETERS.contains(&name) || name == "snapshot" => call(name, Value::Null),
-        // `scene`'s and `save_prefab`'s paths as given, from the game's asset root, as its status
-        // names scene files.
+        // `scene`'s and `save_prefab`'s paths stay as given: from the asset root.
         "step" | "scene" | "pick" | "input" | "entities" | "entity" | "get" | "apply"
         | "save_prefab" | "undo" | "redo" | "edits" | "assets" | "debug" => {
             call(name, Value::Object(arguments))
         }
         "look" | "frames" => {
-            // A name that isn't a variant's is an image's, as `capture`'s `show` has it.
+            // A name that isn't a variant's is an image's, as in `capture`.
             if let Some(show) = arguments.get_mut("show")
                 && !show.is_null()
             {
@@ -1064,7 +1038,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
                 }),
             };
             let params = match (number("from")?, number("run")?) {
-                // A cursor numbers one run's events, which a restart starts again.
+                // A cursor numbers one run's events; a restart starts again.
                 (Some(_), None) => {
                     let message = "takes `from` with the `run` of the answer it came from";
                     return Err(Failure::new("gg.args", message));
@@ -1089,16 +1063,13 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
     }
 }
 
-/// `given`, each a `show` of `capture` or `look`, as the API's `Shown`.
-///
-/// Fails with `gg.args` for one that isn't a name or an image's.
+/// Fails with `gg.args` for a show that isn't a name or an image's.
 fn shows_of(given: &[Value]) -> Result<Vec<Value>, Failure> {
     given.iter().map(game::shown).collect()
 }
 
-/// What captures that the game answered, `taken`, give: their answers, which name each PNG's path,
-/// for a tool that reads images to open, so that an agent's context doesn't hold every capture it
-/// takes, as an array if `listed`, else the one's; and with `inline`, each PNG too, in order.
+/// The answers, naming each PNG's path so an agent's context needn't hold every capture: an array
+/// if `listed`, else the one's; with `inline`, each PNG too, in order.
 ///
 /// Fails with `gg.io` if a PNG it inlines can't be read.
 fn captured_as(taken: &[Box<RawValue>], listed: bool, inline: bool) -> Result<Ran, Failure> {
@@ -1123,7 +1094,6 @@ fn captured_as(taken: &[Box<RawValue>], listed: bool, inline: bool) -> Result<Ra
     Ok(Ran::Image(answer, pngs))
 }
 
-/// `bytes` in base64, as MCP's images are.
 fn base64(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -1158,7 +1128,6 @@ mod tests {
         }
     }
 
-    /// A capture answers where its PNG is, and inlines the PNG only if it's asked to.
     #[test]
     fn a_capture_inlines_its_png_only_if_asked() {
         let path = std::env::temp_dir().join(format!("gg-mcp-capture-{}.png", std::process::id()));
@@ -1172,7 +1141,7 @@ mod tests {
         assert!(matches!(named, Ok(Ran::Json(answer)) if answer == captured));
         assert!(matches!(inlined, Ok(Ran::Image(answer, pngs))
             if answer == captured && pngs == [b"a png"]));
-        // An array of shows answers an array, even of one, and a PNG for each.
+        // A listed show answers an array, even of one.
         assert!(matches!(listed, Ok(Ran::Image(answer, pngs))
             if answer == format!("[{captured}]") && pngs.len() == 1));
         let gone = captured_as(&taken, true, true)
@@ -1181,7 +1150,6 @@ mod tests {
         assert_eq!(gone.as_deref(), Some("gg.io"));
     }
 
-    /// Several captures are an array of their answers, each with a PNG of its own if inlined.
     #[test]
     fn several_captures_answer_an_array_with_each_png() {
         let dir = std::env::temp_dir();
@@ -1208,8 +1176,8 @@ mod tests {
         assert_eq!(pngs, want);
     }
 
-    /// A `show` is a name, an image's name, which may hold spaces, or an object of one, in a
-    /// capture's and a look's schema alike; and the capture's takes an array.
+    /// `capture`'s and `look`'s `show` take a name or an image's (spaces allowed); `capture`'s
+    /// also an array.
     #[test]
     fn show_is_listed_for_capture_and_look_and_read_as_the_apis_shown() {
         use gg_api::Shown;
@@ -1225,7 +1193,7 @@ mod tests {
         let (capture, look) = (show("capture"), show("look"));
         assert!(capture["anyOf"][1]["type"] == "array", "{capture}");
         assert!(look["anyOf"][1]["type"] == "null", "{look}");
-        // Each of the API's variants is named in both descriptions.
+        // Both descriptions name each of the API's variants.
         let variants = [
             Shown::BaseColor,
             Shown::Normal,
@@ -1263,7 +1231,6 @@ mod tests {
         assert!(shows_of(&[json!(3)]).is_err());
     }
 
-    /// A look's `skip` takes a list of the passes, by the API's names, or null.
     #[test]
     fn skip_is_listed_for_look_by_the_apis_names() {
         let listed = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
@@ -1290,9 +1257,6 @@ mod tests {
         }
     }
 
-    /// `initialize` serves the client's version if it's one of those served, names the edits after
-    /// the client, and tells it of assets' ID files; a notification goes unanswered; and the tools
-    /// are listed, each with a schema, `assets` taking the kinds gg-api names.
     #[test]
     fn a_client_initializes_and_lists_the_tools() {
         let mut pick = pick();
@@ -1331,8 +1295,7 @@ mod tests {
         assert_eq!(broken["error"]["code"], -32700);
     }
 
-    /// Each tool is a command's, which `gg help` names and gives a section; `save_prefab` is
-    /// `save-prefab`'s.
+    /// `save_prefab` is `save-prefab`.
     #[test]
     fn each_tool_is_a_command_with_help() {
         for tool in tools().as_array().expect("tools") {
@@ -1341,9 +1304,7 @@ mod tests {
         }
     }
 
-    /// `probe` is listed, taking a pixel and whether to probe the game's own view, and describing
-    /// each field it answers; one given a pixel that isn't two numbers, not negative, or an `own`
-    /// that isn't a boolean, fails with `gg.args` before it looks for a game.
+    /// Bad `at` or `own` fail with `gg.args` before any game is reached.
     #[test]
     fn probe_is_listed_with_its_fields_and_refuses_odd_arguments() {
         let listed = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
@@ -1397,7 +1358,6 @@ mod tests {
         }
     }
 
-    /// `debug` is listed, its actions those gg-api's `debug` takes.
     #[test]
     fn debug_is_listed_with_the_apis_actions() {
         use gg_api::DebugAction::{Continue, Pause, StepInto, StepOut, StepOver};
@@ -1414,8 +1374,6 @@ mod tests {
         );
     }
 
-    /// `types` and `input` are listed, `types` taking nothing and `input` its events, each choice
-    /// of whose schema is a kind of gg-api's input events, and each kind one of its choices.
     #[test]
     fn input_and_types_are_listed_with_the_apis_events() {
         use gg_api::{Button, InputEvent, Scroll};
@@ -1434,7 +1392,7 @@ mod tests {
         assert_eq!(input["required"], json!(["events"]));
         let events = &input["properties"]["events"];
         assert_eq!(events["type"], "array");
-        // The kind each choice names: an object's one key, or a string's values.
+        // A choice's kind: an object's one key, or a string's values.
         let choices = events["items"]["anyOf"].as_array().expect("choices");
         let mut named: Vec<&str> = (choices.iter())
             .flat_map(|choice| match choice["enum"].as_array() {
@@ -1443,7 +1401,7 @@ mod tests {
             })
             .map(|name| name.as_str().expect("a kind"))
             .collect();
-        // An event of each kind, which the match keeps whole as kinds are added.
+        // One event of each kind; the match stays exhaustive as kinds are added.
         let each = [
             InputEvent::Key {
                 key: "KeyW".to_owned(),
@@ -1487,9 +1445,8 @@ mod tests {
         assert_eq!(named, kinds);
     }
 
-    /// A tool that fails, as one given a level there's none of, or a cursor that isn't a number,
-    /// does, before it looks for a game, answers a result whose `isError` is set; a tool there's
-    /// none of is a protocol's error.
+    /// A tool failing before a game is reached answers `isError`; an unknown tool is a protocol
+    /// error.
     #[test]
     fn a_tool_that_fails_answers_an_error_result() {
         for arguments in [

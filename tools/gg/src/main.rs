@@ -1,10 +1,7 @@
-//! `gg`, the command-line tool for GGEngine's games, as ARCHITECTURE.md's Agents and tools
-//! describes: it builds a game's development build and runs it, supervising it; runs headless
-//! checks; builds a game as it ships, laid out in a folder of its own; fetches the files a project
-//! uses that its repository doesn't hold; talks to running games through the tool API; and makes
-//! new games. Inside a game's project, it builds the project's game
-//! and reaches the project's games alone. It prints what it finds as JSON, a line at a time, for
-//! agents and scripts as much as for people.
+//! `gg`, the command-line tool for GGEngine's games (ARCHITECTURE.md's Agents and tools): it
+//! builds, runs and supervises them, checks, ships, fetches a project's missing files, talks to
+//! running games through the tool API, and makes new games. In a game's project, it builds and
+//! reaches that project's games alone. It prints JSON, a line at a time.
 
 #[cfg(test)]
 mod agents_md;
@@ -36,7 +33,7 @@ use game::Pick;
 use run::{Check, Run};
 use ship::Ship;
 
-/// `gg help`'s head, before the commands.
+/// `gg help`'s head.
 const OVERVIEW: &str = "\
 Usage: gg [options] <command> [options]   options before or after it: `gg --pid 7 status`
        gg help [<command>]               a command's options, output and codes
@@ -48,7 +45,7 @@ beside `project.ron` (`gg.project`). A manifest that doesn't read is an error. E
 on the whole workspace.
 ";
 
-/// `gg help`'s tail, after the commands.
+/// `gg help`'s tail.
 const OPTIONS: &str = "\
 Options for talking to a game:
   --pid <PID>          The game in process PID, when several run (else `gg.which_game`, naming
@@ -67,11 +64,10 @@ game speaks another revision of the tool API than gg, naming its session file. E
 1 on an error, a check that failed or a run that didn't end cleanly; 2 on bad arguments.
 ";
 
-/// A command's help: `gg help` lists its name and summary, and `gg help <name>` prints its usage,
-/// summary and details.
+/// A command's help: `gg help` lists name and summary, `gg help <name>` adds usage and details.
 struct Help {
     name: &'static str,
-    /// What follows `gg `; lines past the first are indented to line up under its options.
+    /// What follows `gg `; later lines are indented under its options.
     usage: &'static str,
     summary: &'static str,
     /// Empty where the summary says it all.
@@ -602,7 +598,6 @@ choose, kept to what `--grant` grants, as the agent: its MCP client's name autho
     ),
 ];
 
-/// What `gg help` prints: where gg works, a line for each command, and the shared options.
 fn overview() -> String {
     let mut text = OVERVIEW.to_owned() + "\n";
     for (group, commands) in COMMANDS {
@@ -614,9 +609,7 @@ fn overview() -> String {
     text + "\n" + OPTIONS.trim_end()
 }
 
-/// What `gg help <name>` prints: command `name`'s usage, summary and details.
-///
-/// Fails with `gg.args` for a name no command has, naming those there are.
+/// Fails with `gg.args` for an unknown name, naming the known.
 fn section(name: &str) -> Result<String, Failure> {
     let all = COMMANDS.iter().flat_map(|(_, commands)| commands.iter());
     let Some(help) = all.clone().find(|help| help.name == name) else {
@@ -634,8 +627,7 @@ fn section(name: &str) -> Result<String, Failure> {
     Ok(text)
 }
 
-/// The project gg works in, as `--project` names it or gg finds it: its manifest's path, absolute,
-/// in whose directory cargo runs, and the game it names.
+/// The project gg works in: its absolute manifest path, where cargo runs, and its game.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Scope {
     pub(crate) manifest: PathBuf,
@@ -643,23 +635,20 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
-    /// The project's directory.
     pub(crate) fn dir(&self) -> &Path {
         self.manifest.parent().unwrap_or(Path::new("."))
     }
 }
 
-/// What `gg` was asked to do.
 enum Command {
-    /// The help to print: `gg help`'s, or a command's.
     Help(String),
     Run(Run),
     Check(Check),
     Ship(Ship),
     Fetch(Scope),
-    /// A new game's name, and the engine a game outside the engine's workspace builds against.
+    /// A new game's name, and the engine a game outside the workspace builds against.
     New(String, Option<new::Engine>),
-    /// The running games, those of the project whose manifest it names alone.
+    /// The running games, of the project whose manifest it names alone.
     Sessions(Option<PathBuf>),
     Logs {
         pick: Pick,
@@ -671,22 +660,20 @@ enum Command {
         method: String,
         params: Value,
     },
-    /// Captures of several shows, from one world: `params` are what `capture` takes but `show`.
+    /// Captures of several shows of one world: `params` are `capture`'s but `show`.
     Capture {
         pick: Pick,
         params: Value,
         shows: Vec<Value>,
     },
-    /// The numbers of what shading took and made at a pixel of the view, as the view is shown or,
-    /// with `own`, as the game shows it on its own.
+    /// A pixel's shading, in the view as shown or, with `own`, the game's own.
     Probe {
         pick: Pick,
         at: [f64; 2],
         own: bool,
     },
     Mcp(Pick),
-    /// Waiting, for at most the time given, until the game of the `gg run` the pick reaches runs
-    /// the code of the edits saved before.
+    /// Waits, at most the time given, until the picked `gg run` runs the saved edits' code.
     Wait(Pick, Duration),
 }
 
@@ -700,7 +687,7 @@ fn main() -> ExitCode {
         Ok(command) => command,
         Err(failure) => {
             report(&failure);
-            // Bad arguments, or else a project's manifest that doesn't read, an error.
+            // Bad arguments exit 2; an unreadable manifest, 1.
             return ExitCode::from(if failure.code == "gg.args" { 2 } else { 1 });
         }
     };
@@ -759,19 +746,16 @@ fn main() -> ExitCode {
     }
 }
 
-/// Prints `line` on stdout, ignoring a stdout that's gone, as when piped into `head`.
+/// Ignores a closed stdout, as under `| head`.
 fn print(line: &str) {
     let _ = writeln!(std::io::stdout().lock(), "{line}");
 }
 
-/// Prints `failure` on stderr, as a line of JSON.
 fn report(failure: &Failure) {
     let error = json!({"error": {"code": failure.code, "message": failure.message}});
     let _ = writeln!(std::io::stderr().lock(), "{error}");
 }
 
-/// Prints a warning on stderr, as a line of JSON: its code, its message, and the file or directory
-/// `path` it's about.
 fn warn(code: &str, message: &str, path: &Path) {
     let warning = json!({"warning": {"code": code, "message": message, "path": path}});
     let _ = writeln!(std::io::stderr().lock(), "{warning}");
@@ -784,8 +768,7 @@ fn bad(message: String) -> Failure {
     )
 }
 
-/// `path`, given for the game to write at, made absolute, as the game's working directory may not
-/// be gg's.
+/// `path` made absolute: the game's working directory may not be gg's.
 ///
 /// Fails with `gg.args` if gg can't tell where it is.
 fn absolute(path: &str) -> Result<PathBuf, Failure> {
@@ -818,8 +801,7 @@ const VALUED: [&str; 21] = [
     "--within",
 ];
 
-/// The arguments after a command's name: what isn't a flag, the flags, each with its value if it
-/// takes one, and what follows `--`, for the game.
+/// The arguments after a command's name; what follows `--` is for the game.
 #[derive(Default)]
 struct Parsed {
     positional: Vec<String>,
@@ -860,22 +842,18 @@ impl Parsed {
         Ok(parsed)
     }
 
-    /// Takes flag `name`, returning whether it was given.
     fn switch(&mut self, name: &str) -> bool {
         self.take(name).is_some()
     }
 
-    /// Takes flag `name`'s value, if it was given.
     fn value(&mut self, name: &str) -> Option<String> {
         self.take(name).flatten()
     }
 
-    /// Takes the value of each time flag `name` was given, in order.
     fn values(&mut self, name: &str) -> Vec<String> {
         std::iter::from_fn(|| self.take(name)).flatten().collect()
     }
 
-    /// Takes flag `name`'s value as a `T`, or `default` if it wasn't given.
     fn number<T: FromStr>(&mut self, name: &str, default: T) -> Result<T, Failure> {
         match self.value(name) {
             Some(value) => value
@@ -885,10 +863,7 @@ impl Parsed {
         }
     }
 
-    /// Takes flag `name`'s value as a number of seconds to wait, more than 0, or `default`'s if it
-    /// wasn't given.
-    ///
-    /// Fails with `gg.args` for 0, which would give up before anything could answer.
+    /// Fails with `gg.args` for 0, which would give up before any answer.
     fn seconds(&mut self, name: &str, default: u64) -> Result<Duration, Failure> {
         match self.number(name, default)? {
             0 => Err(bad(format!(
@@ -903,8 +878,6 @@ impl Parsed {
         Some(self.flags.remove(at).1)
     }
 
-    /// The options for talking to a game, in the project gg works in, as [`scope`](Self::scope)
-    /// finds it.
     fn pick(&mut self) -> Result<Pick, Failure> {
         Ok(Pick {
             pid: self
@@ -925,13 +898,12 @@ impl Parsed {
         })
     }
 
-    /// The project gg works in: the one `--project` names, by its directory or its manifest, or
-    /// else the one the working directory is in, as gg-api's `Project::find` finds it; `None`
-    /// outside one.
+    /// The project gg works in: `--project`'s, else the working directory's, as gg-api's
+    /// `Project::find` finds it; `None` outside one.
     ///
-    /// Fails with `gg.args` if gg can't tell where the working directory, or `--project`'s path,
-    /// is; and with `project.read` or `project.bad` for a manifest that doesn't read, as
-    /// `Project::read` does, rather than working on the whole workspace.
+    /// Fails with `gg.args` if gg can't tell where the working directory or `--project` is; and
+    /// with `project.read` or `project.bad` for a manifest that doesn't read, as `Project::read`
+    /// does, rather than working on the whole workspace.
     fn scope(&mut self) -> Result<Option<Scope>, Failure> {
         let dir = match self.value("--project") {
             Some(given) => {
@@ -959,10 +931,7 @@ impl Parsed {
         }))
     }
 
-    /// The package `run`, `check` or `ship` builds, `command`'s: the one given, or else the game of
-    /// the project gg works in, `scope`.
-    ///
-    /// Fails with `gg.args` if neither is.
+    /// The package given, else `scope`'s game. Fails with `gg.args` if neither.
     fn package(&mut self, command: &str, scope: Option<&Scope>) -> Result<String, Failure> {
         let given = self
             .positional(0, 1, &format!("{command} [PACKAGE]"))?
@@ -971,8 +940,6 @@ impl Parsed {
         package.ok_or_else(|| bad(format!("outside a project, `gg {command}` takes a PACKAGE")))
     }
 
-    /// The positional arguments, checking that there are at least `least` and at most `most`, as
-    /// `usage` shows them.
     fn positional(
         &mut self,
         least: usize,
@@ -986,7 +953,6 @@ impl Parsed {
         Ok(std::mem::take(&mut self.positional))
     }
 
-    /// Checks that command `command` was given nothing it doesn't take.
     fn finish(self, command: &str) -> Result<(), Failure> {
         if let Some((flag, _)) = self.flags.first() {
             return Err(bad(format!("`gg {command}` takes no `{flag}`")));
@@ -998,11 +964,10 @@ impl Parsed {
     }
 }
 
-/// `args`, the arguments after `gg`, with the command's name first: the options before it, each
-/// with its value if it takes one, as `--pid 7` in `gg --pid 7 status`, go after it, where its own
-/// are read, and `--help` stays where it is, as the command it names.
+/// `args` with the command's name first: options before it, as in `gg --pid 7 status`, move after
+/// it. `--help` stays, as a command.
 ///
-/// Fails with `gg.args` for options that no command follows.
+/// Fails with `gg.args` for options no command follows.
 fn command_first(args: &[String]) -> Result<Vec<String>, Failure> {
     let mut at = 0;
     while let Some(arg) = args.get(at)
@@ -1028,14 +993,11 @@ fn command_first(args: &[String]) -> Result<Vec<String>, Failure> {
 }
 
 /// The game's methods that gg's commands and MCP's tools of the same name call with no parameters.
-/// Also gg's `quit`, which MCP has no tool for, and MCP's `snapshot`, whose command takes a path.
+/// Each side adds one: gg's `quit` (MCP has no tool) and MCP's `snapshot` (gg's takes a path).
 const NO_PARAMETERS: [&str; 10] = [
     "status", "pause", "resume", "play", "stop", "types", "hash", "cells", "ui", "images",
 ];
 
-/// The command `args`, the arguments after `gg`, give, in the project gg works in, as
-/// [`Parsed::scope`] finds it.
-///
 /// Fails with `gg.args` for arguments that aren't a command's, and as `Parsed::scope` does.
 fn parse(args: &[String]) -> Result<Command, Failure> {
     let args = command_first(args)?;
@@ -1068,8 +1030,6 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// The call of `method` with `params` that a command makes of the game the options in `parsed`
-/// pick.
 fn call(parsed: &mut Parsed, method: &str, params: Value) -> Result<Command, Failure> {
     Ok(Command::Call {
         pick: parsed.pick()?,
@@ -1078,7 +1038,6 @@ fn call(parsed: &mut Parsed, method: &str, params: Value) -> Result<Command, Fai
     })
 }
 
-/// Parses `help`: gg's help, or a command's.
 fn help_args(parsed: &mut Parsed) -> Result<Command, Failure> {
     let given = parsed.positional(0, 1, "help [<COMMAND>]")?;
     Ok(Command::Help(match given.first() {
@@ -1087,7 +1046,6 @@ fn help_args(parsed: &mut Parsed) -> Result<Command, Failure> {
     }))
 }
 
-/// Parses `run`, `check` or `ship`, the commands that build a package.
 fn build_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     let command = match name {
         "run" => {
@@ -1097,11 +1055,11 @@ fn build_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
                 project,
                 release: parsed.switch("--release"),
                 patches: !parsed.switch("--no-patch"),
-                // 0 for never, which tells no hang.
+                // 0: no hang detection.
                 hang: Some(parsed.number("--hang", 10)?)
                     .filter(|&seconds| seconds > 0)
                     .map(Duration::from_secs),
-                // 0 for none, which turns restarts off.
+                // 0: restarts off.
                 snapshot: Duration::from_secs(parsed.number("--snapshot", 5)?),
                 peers: parsed.number("--peers", 1)?,
                 embedded: parsed.switch("--embedded"),
@@ -1157,7 +1115,6 @@ fn build_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// Parses `fetch` or `new`, the commands that write a project's files.
 fn project_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     let command = match name {
         "fetch" => {
@@ -1192,7 +1149,6 @@ fn project_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// Parses `wait`, `step`, `scene` or `snapshot`, of the game's run.
 fn control_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     let command = match name {
         "wait" => {
@@ -1238,7 +1194,6 @@ fn control_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// Parses `input`, `capture`, `frames`, `look`, `pick` or `probe`, of the view.
 fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     let command = match name {
         "input" => {
@@ -1298,7 +1253,7 @@ fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             if let Some(file) = parsed.value("--viewpoints") {
                 let text = fs::read_to_string(&file)
                     .map_err(|error| bad(format!("can't read the viewpoints `{file}`: {error}")))?;
-                // Checked here, to say which file is wrong, and passed on as written.
+                // Checked here to name the wrong file; passed on as written.
                 let viewpoints = serde_json::from_str::<Value>(&text).and_then(|viewpoints| {
                     serde_json::from_value::<Vec<gg_api::Viewpoint>>(viewpoints.clone())
                         .map(|_| viewpoints)
@@ -1353,8 +1308,7 @@ fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
                 .collect::<Result<Vec<f64>, Failure>>()?
                 .try_into()
                 .expect("two numbers, as many as `positional` took");
-            // `within` left out unless it's given, so that a game of an older engine, which
-            // refuses a field it doesn't know, still takes the pick.
+            // `within` stays out unless given: a game of an older engine refuses unknown fields.
             let within = parsed.value("--within");
             let pick = serde_json::to_value(gg_api::Pick { at, within }).expect("JSON");
             call(parsed, "pick", pick)?
@@ -1383,7 +1337,6 @@ fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// Parses `sessions`, `logs`, `entities`, `assets`, `entity` or `get`, which read what runs.
 fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     let command = match name {
         "sessions" => {
@@ -1422,7 +1375,7 @@ fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
         }
         "assets" => {
             parsed.positional(0, 0, "assets [--kind <KIND>] [--skip <N>] [--take <N>]")?;
-            // The game refuses a kind there's none of, as it does a component.
+            // The game refuses an unknown kind.
             let kind = parsed.value("--kind");
             let skip: usize = parsed.number("--skip", 0)?;
             let take: usize = parsed.number("--take", 100)?;
@@ -1455,7 +1408,6 @@ fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// Parses `apply`, `save-prefab`, `set`, `undo`, `redo` or `edits`, of edits.
 fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     let command = match name {
         "apply" => {
@@ -1493,7 +1445,6 @@ fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// Parses `debug`, of the game's scripts' debugger.
 fn debug_args(parsed: &mut Parsed) -> Result<Command, Failure> {
     let usage = "debug [break <SCRIPT> [<LINE>...] | pause | continue | into | over | out] \
                  [--wait <SECONDS>]";
@@ -1521,10 +1472,9 @@ fn debug_args(parsed: &mut Parsed) -> Result<Command, Failure> {
     call(parsed, "debug", params)
 }
 
-/// Parses `mcp`, which serves agents.
 fn mcp_args(parsed: &mut Parsed) -> Result<Command, Failure> {
     parsed.positional(0, 0, "mcp")?;
-    // Its MCP client's name, once it says, and else its own.
+    // The MCP client's name, once it says, replaces `mcp`.
     let pick = parsed.pick()?;
     Ok(Command::Mcp(Pick {
         client: "mcp".to_owned(),
@@ -1532,7 +1482,6 @@ fn mcp_args(parsed: &mut Parsed) -> Result<Command, Failure> {
     }))
 }
 
-/// Parses `call`, of any method.
 fn call_args(parsed: &mut Parsed) -> Result<Command, Failure> {
     let mut given = parsed.positional(1, 2, "call <METHOD> [<PARAMS>]")?;
     let params = match given.get(1) {
@@ -1553,7 +1502,6 @@ mod tests {
         parse(&args)
     }
 
-    /// `wait` waits 300 seconds, or as long as `--timeout` says, for the game `--pid` picks.
     #[test]
     fn wait_takes_a_timeout_and_a_pick() {
         let Ok(Command::Wait(pick, timeout)) = parsed(&["wait"]) else {
@@ -1567,7 +1515,6 @@ mod tests {
         assert_eq!((pick.pid, timeout), (Some(7), Duration::from_secs(5)));
     }
 
-    /// `--grant` keeps a command's connection, or `mcp`'s, to the capabilities it names.
     #[test]
     fn grant_names_the_capabilities_a_connection_is_kept_to() {
         let granted = |args: &[&str]| match parsed(args) {
@@ -1580,7 +1527,6 @@ mod tests {
         assert_eq!(granted(&["status"]), None);
     }
 
-    /// `look`'s help names each pass a look can leave out, as the API names it.
     #[test]
     fn looks_help_names_every_pass() {
         let look = section("look").expect("a `look` section");
@@ -1591,8 +1537,6 @@ mod tests {
         }
     }
 
-    /// `capture`'s help names each part of shading its `--show` takes, and `probe`'s each one it
-    /// answers.
     #[test]
     fn the_help_names_every_part_of_shading() {
         let capture = section("capture").expect("a `capture` section");
@@ -1604,8 +1548,6 @@ mod tests {
         }
     }
 
-    /// `gg help` gives each command a line, each a command `parse` knows; `gg help <command>`
-    /// prints that command's section; and a name no command has is refused, naming those there are.
     #[test]
     fn help_lists_each_command_and_prints_its_section() {
         let Ok(Command::Help(overview)) = parsed(&[]) else {
@@ -1617,7 +1559,6 @@ mod tests {
             let listed = format!("  {name} ");
             let shown = overview.lines().any(|line| line.starts_with(&listed));
             assert!(shown, "{name}");
-            // Known, though it may take more than its name.
             let refused = parsed(&[name]).err().map(|failure| failure.message);
             let unknown = refused.is_some_and(|message| message.contains("there's no command"));
             assert!(!unknown, "{name}");
@@ -1667,7 +1608,6 @@ mod tests {
             panic!("a call");
         };
         assert_eq!(params, json!({"with": "Sprite", "skip": 0, "take": 5}));
-        // Options before the command, as after it.
         let Ok(Command::Call {
             pick,
             method,
@@ -1703,7 +1643,7 @@ mod tests {
                 vec!["--vsync".to_owned()]
             )
         );
-        // `--hang 0` tells no hang, however long the frames stop.
+        // `--hang 0` never reports a hang.
         for (args, hang) in [
             (&["run", "sandbox"][..], Some(Duration::from_secs(10))),
             (&["run", "sandbox", "--hang", "0"], None),
@@ -1734,9 +1674,8 @@ mod tests {
             refused.map(|failure| failure.code).as_deref(),
             Some("gg.args")
         );
-        // Tests run in the package's directory, which is in no project.
+        // Tests run outside any project.
         assert_eq!(run.project, None);
-        // A project, named by its directory or its manifest, whose game is the package.
         let dir = std::env::temp_dir().join(format!("gg-args-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("a directory");
@@ -1777,7 +1716,6 @@ mod tests {
             panic!("a new game");
         };
         assert_eq!(name, "probe");
-        // Outside the engine's workspace, against an engine by its checkout or its repository.
         let Ok(Command::New(_, Some(engine))) = parsed(&["new", "probe", "--engine", "../engine"])
         else {
             panic!("a new game");
@@ -1864,7 +1802,7 @@ mod tests {
                 &["look", r#"{"skip":["fog","shadows"]}"#],
                 json!({"skip": ["fog", "shadows"]}),
             ),
-            // A pixel outside the view too, which the game answers with none.
+            // A pixel outside the view too; the game answers none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
             (
                 &["pick", "3", "4", "--within", "00000000000000ff"],
@@ -1912,7 +1850,6 @@ mod tests {
             };
             assert_eq!((method.as_str(), params), (args[0], want), "{args:?}");
         }
-        // Several shows, repeated or comma-separated, are captures of one world.
         for args in [
             &[
                 "capture",
@@ -1942,7 +1879,6 @@ mod tests {
             panic!("captures");
         };
         assert_eq!((params, shows.len()), (json!({"own": true}), 2));
-        // Frames take their viewpoints from a file, each read as a viewpoint.
         let file = std::env::temp_dir().join(format!("gg-viewpoints-{}.json", std::process::id()));
         let viewpoint = json!({"position": [0.0, 1.0, 2.0], "rotation": [0.0, 0.0, 0.0, 1.0],
             "projection": {"Perspective": {"fov": 1.0, "near": 0.1}}});
@@ -1960,7 +1896,6 @@ mod tests {
             refused.err().map(|error| error.code).as_deref(),
             Some("gg.args")
         );
-        // A probe takes a pixel, in the view as it's shown, or the game's own.
         for (args, want_own) in [
             (&["probe", "3", "4.5"][..], false),
             (&["probe", "--own", "3", "4.5"], true),
@@ -1998,8 +1933,7 @@ mod tests {
             &["run", "a", "--snapshot", "often"],
             &["run", "a", "--peers", "3"],
             &["run", "a", "--peers", "0"],
-            // Waits of no time, which would kill a check as it starts, and give up on an answer
-            // before it could come.
+            // Zero waits would kill a check at its start and give up before any answer.
             &["run", "a", "--hang", "soon"],
             &["check", "a", "--timeout", "0"],
             &["status", "--timeout", "0"],
@@ -2037,7 +1971,7 @@ mod tests {
             &["capture", "--show"],
             &["capture", "--show", ""],
             &["capture", "--show", "normal,"],
-            // One PATH can't hold several PNGs.
+            // A PATH holds one PNG.
             &["capture", "--show", "normal,roughness", "view.png"],
             &[
                 "capture",
@@ -2067,7 +2001,7 @@ mod tests {
             &["probe", "1", "2", "3"],
             &["probe", "left", "2"],
             &["probe", "1", "NaN"],
-            // A pixel from the view's top left isn't negative.
+            // Pixels count from the view's top left, never negative.
             &["probe", "-1", "2"],
             &["probe", "1", "2", "--show", "normal"],
             &["probe", "1", "2", "--own=yes"],
@@ -2112,7 +2046,7 @@ mod tests {
             let error = parsed(args).err().map(|error| error.code);
             assert_eq!(error.as_deref(), Some("gg.args"), "{args:?}");
         }
-        // A project whose manifest doesn't read is an error, which isn't the arguments'.
+        // An unreadable manifest is an error, but not the arguments'.
         let error = parsed(&["status", "--project", "src"]).err();
         assert_eq!(
             error.map(|error| error.code).as_deref(),
