@@ -136,6 +136,7 @@ impl Lit {
         (alpha, origin): (f32, DVec3),
         started: u64,
     ) {
+        let _zone = gg_core::zone!();
         let (serial, version) = world.version();
         let seen = (self.seen).replace((serial, version, world.change_tick(), origin));
         let (Some(light), Some(transform)) =

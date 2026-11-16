@@ -137,6 +137,7 @@ impl Placed {
         started: u64,
         held: Option<ComponentId>,
     ) {
+        let _zone = gg_core::zone!();
         self.moving.clear();
         let pass = self.next_pass(world);
         self.drawing = pass;
