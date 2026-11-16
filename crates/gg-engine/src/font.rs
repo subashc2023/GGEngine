@@ -1,8 +1,8 @@
-//! Fonts: TrueType and OpenType files that layers load, or that text names, and the engine's own,
-//! Inter, each baked as it loads into its field, a texture of data holding a multi-channel signed
-//! distance field of each glyph of the characters Windows-1252 prints, which draws them crisp at
-//! any size; and text, shaped with the font's kerning, laid out in lines and drawn as those glyphs,
-//! as [`Context::draw_text`] draws it and the world draws a [`Text`].
+//! Fonts: TrueType and OpenType files that layers load or text names, and the engine's own, Inter.
+//! Each bakes on load into a field: a data texture of multi-channel signed distance fields, one
+//! per glyph of Windows-1252's printable characters, so glyphs draw crisp at any size. Text is
+//! shaped with kerning, laid out in lines and drawn as those glyphs by [`Context::draw_text`] and,
+//! for a [`Text`], the world.
 //!
 //! [`Context::draw_text`]: crate::Context::draw_text
 
@@ -31,47 +31,42 @@ use tracing::debug;
 use crate::package::{self, Files};
 use crate::{Component, Reflect, dirs, jobs};
 
-/// The engine's own font, Inter's regular weight, its digits tabular, as the UI draws in it: what
-/// text that names no font is drawn in.
+/// The engine's font, for text naming none: Inter regular, digits tabular, as the UI draws.
 pub(crate) static INTER: &[u8] = include_bytes!("../assets/fonts/Inter/Inter-Regular.ttf");
 
-/// A font that [`Context::add_font`](crate::Context::add_font) loaded, or that text named and the
-/// engine loaded: its index among its context's, which a [`TextStyle`] and a [`Text`] hold, and
-/// which scenes, recordings, snapshots and the tool API name as they name a texture, by its asset
-/// ID, or else its path.
+/// A font [`Context::add_font`](crate::Context::add_font) or named text loaded: its index in its
+/// context, held by [`TextStyle`] and [`Text`]. Scenes, recordings, snapshots and the tool API name
+/// it like a texture, by asset ID, else path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Font(u32);
 
 impl Font {
-    /// The font that's `index`th among its context's.
     pub(crate) fn new(index: usize) -> Self {
         Self(u32::try_from(index).expect("fewer than 2^32 fonts"))
     }
 
-    /// Its index among its context's fonts.
     pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
 
-/// How text is drawn: in which font, how large, in what color, and which point of it its origin
-/// is.
+/// How text is drawn: font, size, color, and which point of it is its origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextStyle {
-    /// None for the engine's own, Inter, as the UI draws in it.
+    /// `None` is the engine's own, Inter.
     pub font: Option<Font>,
-    /// How tall the font's em is, in the units of the space the text is drawn in, as its transform
-    /// takes them: a line of text is about 1.2 of it from one baseline to the next, as fonts go.
+    /// The font's em, in the drawn space's units after its transform. Baselines are about 1.2 of
+    /// it apart.
     pub size: f32,
     /// In linear RGBA, alpha not multiplied in.
     pub color: Vec4,
-    /// Which point of the text's box is at its origin, across, then down: across, its left, its
-    /// middle or its right, which each of its lines is aligned to alike; down, its top, its middle
-    /// or its bottom, the box reaching from its first line's ascent to its last line's descent.
+    /// The point of the text's box at its origin, across then down. Across: left, middle or right,
+    /// for every line alike. Down: top, middle or bottom of the box, which runs from the first
+    /// line's ascent to the last line's descent.
     pub align: [Align; 2],
 }
 
-/// Where along an axis of a text's box its origin is, as [`TextStyle::align`] says.
+/// Where along a text box's axis its origin is: [`TextStyle::align`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum Align {
     /// Its left, or its top.
@@ -83,31 +78,29 @@ pub enum Align {
     End,
 }
 
-/// Text in the world, which the world draws where its entity is, as
-/// [`Context::draw_text`](crate::Context::draw_text) draws text in a [`TextStyle`] of its fields,
-/// its glyphs in its transform's XY plane, facing +Z, as a sprite is, and a pick of them finding
-/// its entity. By default, "Text" in the engine's font, an em a unit tall, white, centered on its
-/// entity.
+/// Text the world draws at its entity, like [`Context::draw_text`](crate::Context::draw_text) with
+/// a [`TextStyle`] of its fields. Glyphs lie in the transform's XY plane facing +Z, like a sprite;
+/// picking them finds the entity. Default: "Text" in the engine's font, an em a unit tall, white,
+/// centered.
 #[derive(Clone, Debug, PartialEq, Component)]
 pub struct Text {
-    /// What it says: a line for each of its own, which `\n` ends.
+    /// What it says; `\n` ends a line.
     #[reflect(default = String::from("Text"))]
     pub text: String,
-    /// The font it's in, by its ID or its path: none for the engine's own, Inter.
+    /// The font, by ID or path; none is the engine's own, Inter.
     pub font: Option<Font>,
-    /// How tall its font's em is, in its transform's units.
+    /// How tall the font's em is, in the transform's units.
     #[reflect(min = 0.0, default = 1.0)]
     pub size: f32,
     /// In linear RGBA, alpha not multiplied in.
     #[reflect(color, default = Vec4::ONE)]
     pub color: Vec4,
-    /// Which point of its box is at its entity's origin, across, then down: its start, its middle
-    /// or its end, as a text style's alignment says.
+    /// Which point of the box is at the entity's origin, across then down: start, middle or end.
     #[reflect(default = CENTERED)]
     pub align: [Align; 2],
 }
 
-/// A text's box's middle, both ways, where a text's origin is by default.
+/// Where a text's origin is by default: the middle of its box, both ways.
 const CENTERED: [Align; 2] = [Align::Center; 2];
 
 impl Default for Text {
@@ -123,7 +116,7 @@ impl Default for Text {
 }
 
 impl Text {
-    /// How it's drawn, as [`TextStyle`] says.
+    /// How it's drawn.
     pub fn style(&self) -> TextStyle {
         TextStyle {
             font: self.font,
@@ -134,35 +127,30 @@ impl Text {
     }
 }
 
-/// How many of a field's texels an em spans: enough that text larger than about this many pixels
-/// keeps the field's corners and curves, which the field draws sharp at any size, and that a
-/// field of Windows-1252's glyphs fits about 1,024 texels square.
+/// Texels an em spans in a field: text above about this many pixels keeps corners and curves, and
+/// Windows-1252's glyphs fit a field about 1,024 texels square.
 const EM: f64 = 48.0;
 
-/// How far a field's distances reach, in its texels: from `-RANGE / 2` outside a glyph's edge to
-/// `RANGE / 2` inside it, which the field holds from 0 to 1. Each glyph's cell reaches as far past
-/// its outline, so that the field fades out before its edge; and text drawn smaller than the field
-/// still has a pixel to smooth its edges over down to an em of `EM / RANGE` pixels.
+/// How far a field's distances reach, in texels: `-RANGE / 2` outside a glyph's edge to `RANGE / 2`
+/// inside, held as 0 to 1. Cells reach as far past the outline, so the field fades out before the
+/// edge. Text down to an em of `EM / RANGE` pixels keeps a pixel to smooth edges over.
 const RANGE: f64 = 8.0;
 
-/// The texels between glyphs' cells in a field, which hold the farthest outside a glyph, so that a
-/// linear sampler at one cell's edge takes nothing of another's.
+/// Texels between cells, holding the farthest outside a glyph: a linear sampler at one cell's edge
+/// takes nothing of another's.
 const GAP: u32 = 1;
 
-/// The most bytes a font's file may hold: more than the largest single fonts, those of Chinese,
-/// Japanese and Korean, of some 20 MiB.
+/// The most bytes a font's file may hold: above the largest (CJK) fonts' some 20 MiB.
 const MAX_FILE: u64 = 1 << 28;
 
-/// The characters of Windows-1252 that aren't Latin-1's, which, with printable ASCII and Latin-1,
-/// a field holds the glyphs of.
+/// Windows-1252's characters that aren't Latin-1's; a field also holds printable ASCII and Latin-1.
 const WINDOWS_1252: [char; 27] = [
     '€', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', 'Ž', '‘', '’', '“', '”', '•', '–',
     '—', '˜', '™', 'š', '›', 'œ', 'ž', 'Ÿ',
 ];
 
-/// The characters a font's field holds the glyphs of: those Windows-1252 prints, as Western
-/// European languages write, but the soft hyphen, which shaping hides, as it draws only where a
-/// line breaks, and fonts such as Inter leave out.
+/// The characters a field holds: those Windows-1252 prints, but not the soft hyphen, which draws
+/// only at a line break and which fonts such as Inter leave out.
 fn characters() -> impl Iterator<Item = char> {
     let latin = (' '..='~')
         .chain('\u{a0}'..='\u{ac}')
@@ -170,9 +158,8 @@ fn characters() -> impl Iterator<Item = char> {
     latin.chain(WINDOWS_1252)
 }
 
-/// The features text is shaped without: those that put glyphs in place of others, which the field
-/// may not hold, as a ligature's or a contextual alternate's are. Kerning and marks' positions
-/// stay.
+/// Features text is shaped without: glyph substitutions the field may lack (ligatures, contextual
+/// alternates). Kerning and mark positioning stay.
 fn features() -> [Feature; 5] {
     let off = |tag: &[u8; 4]| Feature::new(Tag::new(tag), 0, ..);
     [
@@ -184,12 +171,11 @@ fn features() -> [Feature; 5] {
     ]
 }
 
-/// A font as it baked: its file's bytes, which text is shaped by, and how; where each glyph is in
-/// its field; and its lines' metrics, in ems.
+/// A baked font: its file's bytes and shaping, its glyphs' places in the field, its line metrics.
 pub(crate) struct Baked {
     bytes: Box<[u8]>,
     shaping: ShaperData,
-    /// For text left to right, in Latin script, without [`features`].
+    /// For left-to-right Latin text without [`features`].
     plan: ShapePlan,
     /// The glyphs of [`characters`] and the font's `.notdef`.
     glyphs: Glyphs,
@@ -198,22 +184,18 @@ pub(crate) struct Baked {
     lines: Lines,
 }
 
-/// Glyphs by their IDs, in order, each where it is in its field, or `None` for one with no outline,
-/// as a space's.
+/// Glyphs by ID, in order, each placed in the field, or `None` with no outline (a space).
 type Glyphs = Vec<(u32, Option<Placed>)>;
 
-/// Where a glyph is in its field.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Placed {
-    /// Its cell in the field, its top left then its bottom right, in texture coordinates.
+    /// The cell in the field: top left, then bottom right, in texture coordinates.
     rect: [Vec2; 2],
-    /// Where its cell is about its origin on the baseline: its bottom left, then its top right, in
-    /// ems, +Y being up.
+    /// The cell about the origin on the baseline: bottom left, then top right, in ems, +Y up.
     plane: [Vec2; 2],
 }
 
-/// A font's lines' metrics, in ems: how far above the baseline its ascent is, how far below it its
-/// descent is, a negative number, and the gap it leaves between lines.
+/// Line metrics, in ems: ascent above the baseline, descent below it (negative), gap between lines.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Lines {
     ascent: f32,
@@ -222,17 +204,16 @@ struct Lines {
 }
 
 impl Lines {
-    /// How far apart its lines' baselines are.
+    /// The distance between baselines.
     fn advance(&self) -> f32 {
         self.ascent - self.descent + self.gap
     }
 }
 
 impl Baked {
-    /// Where the glyph `id` is in the field, which shaping gave the character of `line` at byte
-    /// `cluster`: `None` if it has no outline, as a space's; the `.notdef`'s for a glyph the field
-    /// doesn't hold, or for a character the font lacks, but none for whitespace or a control
-    /// character, which draw nothing.
+    /// Where glyph `id`, shaped from the character of `line` at byte `cluster`, is in the field.
+    /// `None` if it has no outline. A glyph or character the font lacks gets the `.notdef`'s,
+    /// except whitespace and control characters, which draw nothing.
     fn placed(&self, id: u32, line: &str, cluster: u32) -> Option<Placed> {
         let found = self.glyphs.binary_search_by_key(&id, |&(id, _)| id);
         if id != 0
@@ -249,22 +230,20 @@ impl Baked {
     }
 }
 
-/// A font's field's texture, and what the font baked, once it has: `None` for the engine's own
-/// until text is drawn in it, and for a stand-in, which draws in the engine's until its file comes.
+/// A font's field texture and, once baked, the font. `baked` is `None` for the engine's own until
+/// text is drawn in it, and for a stand-in, which draws in Inter until its file comes.
 struct Slot {
     field: Texture,
     baked: Option<Baked>,
 }
 
-/// The fonts a context's layers loaded, or that text named, by their handles' indices, and the
-/// engine's own; and what drawing text shapes into, kept from one text to the next, so that drawing
-/// text allocates nothing once a text as long has been drawn.
+/// A context's fonts, by handle index, and the engine's own; and what drawing text shapes into,
+/// kept between texts so drawing allocates nothing once a text as long has been drawn.
 pub(crate) struct Fonts {
-    /// Inter, whose field's texture every context keeps from the start, so that no texture's index
-    /// depends on when text is first drawn in it, which bakes it.
+    /// Inter. Its field texture exists from the start, so no texture's index depends on when text
+    /// is first drawn in it, which bakes it.
     inter: Slot,
-    /// Inter's field's size and texels, from when it bakes until [`place`](Self::place) puts them
-    /// in its texture.
+    /// Inter's baked field size and texels, until [`place`](Self::place) puts them in its texture.
     unplaced: Option<([u32; 2], Vec<u8>)>,
     fonts: Vec<Slot>,
     buffer: Option<UnicodeBuffer>,
@@ -272,8 +251,7 @@ pub(crate) struct Fonts {
 }
 
 impl Fonts {
-    /// No fonts but the engine's, which keeps a texture of `textures` for its field, a texel of
-    /// nothing until it bakes.
+    /// No fonts but the engine's, whose field is a one-texel texture in `textures` until it bakes.
     pub(crate) fn new(textures: &mut Textures) -> Self {
         let field = textures.add("Inter field", [1, 1], [0; 4].as_slice(), Texels::Data);
         let field = field.expect("a texel takes a texture");
@@ -286,8 +264,8 @@ impl Fonts {
         }
     }
 
-    /// Puts the engine's font's field in its texture of `textures`, if it's baked since this was
-    /// last called: as a frame is handed off, so that the frame that draws text in it has it.
+    /// Puts Inter's field in its texture if it baked since the last call; called as a frame is
+    /// handed off.
     pub(crate) fn place(&mut self, textures: &mut Textures) {
         if let Some((size, pixels)) = self.unplaced.take() {
             let field = self.inter.field;
@@ -296,37 +274,32 @@ impl Fonts {
         }
     }
 
-    /// The texture of the engine's font's field.
     pub(crate) fn inter_field(&self) -> Texture {
         self.inter.field
     }
 
-    /// Takes the font whose field is `field`, and which baked `baked`, or a stand-in's, which bakes
-    /// nothing until its file comes, and hands out its handle.
+    /// Takes a font and hands out its handle; `baked` is `None` for a stand-in.
     pub(crate) fn push(&mut self, field: Texture, baked: Option<Baked>) -> Font {
         let font = Font::new(self.fonts.len());
         self.fonts.push(Slot { field, baked });
         font
     }
 
-    /// The texture of `font`'s field.
     #[cfg(feature = "dev")]
     pub(crate) fn field(&self, font: Font) -> Texture {
         self.fonts[font.index()].field
     }
 
-    /// Has `font` draw as `baked` from now on, as its file read again baked, its field's texture
-    /// replaced already.
+    /// Has `font` draw as `baked` from now on; its field texture is already replaced.
     #[cfg(feature = "dev")]
     pub(crate) fn set(&mut self, font: Font, baked: Baked) {
         self.fonts[font.index()].baked = Some(baked);
     }
 
-    /// The glyphs that draw `text` in `style`, where `transform` places its origin in the world,
-    /// each a transform and a glyph, each the draw of the entity of ID `id`, or of none for 0, as
-    /// [`Context::draw_text`] says: in the engine's font if the style names none, or a stand-in,
-    /// which bakes the first time, about 50 ms in release and 140 ms in a debug build, its field
-    /// waiting for [`place`](Self::place).
+    /// The glyphs drawing `text` in `style` with its origin at `transform`: each a transform and
+    /// glyph, for entity `id` (0 for none), as [`Context::draw_text`] says. Inter draws if the
+    /// style names no font, or for a stand-in; it bakes the first time, about 50 ms in release and
+    /// 140 ms in debug, its field waiting for [`place`](Self::place).
     ///
     /// # Panics
     ///
@@ -406,12 +379,9 @@ impl Fonts {
         glyphs.drain(..)
     }
 
-    /// How large `text` is in `style`, across then down, in the units its em is `style.size` of:
-    /// its widest line's advance, as [`lay_out`](Self::lay_out) aligns its lines by, and its box's
-    /// height, from its first line's ascent to its last line's descent, as `lay_out` aligns it
-    /// down by; for laying text out, as a game's UI fits a node to its text. It shapes the text as
-    /// `lay_out` does, in the memory `lay_out` keeps, and bakes the engine's font as `lay_out`
-    /// does where the style names none.
+    /// The size of `text` in `style`, across then down, in `style.size` units: the widest line's
+    /// advance and the box's height, as [`lay_out`](Self::lay_out) aligns by. A game's UI fits
+    /// nodes to text with it. Shares `lay_out`'s memory and baking.
     ///
     /// # Panics
     ///
@@ -448,9 +418,8 @@ impl Fonts {
     }
 }
 
-/// The field and what baked of the font `font` names among `fonts`, or of the engine's own,
-/// `inter`, for none or for a stand-in, which bakes the first time, its field waiting in `unplaced`
-/// for [`Fonts::place`].
+/// The field and baked font of `font` in `fonts`, or `inter`'s for none or a stand-in, baking it
+/// the first time, its field waiting in `unplaced` for [`Fonts::place`].
 ///
 /// # Panics
 ///
@@ -480,19 +449,19 @@ fn baked<'f>(
     (inter.field, &*baked)
 }
 
-/// What a font bakes into: its field's size and its rows of RGBA8, as [`Field`] has them, which a
-/// texture of data takes, and the font, which draws through that texture.
+/// What a font bakes into: the field's size and RGBA8 rows ([`Field`]), for a data texture, and the
+/// font drawing through it.
 pub(crate) struct Bake {
     pub(crate) size: [u32; 2],
     pub(crate) pixels: Vec<u8>,
     pub(crate) baked: Baked,
 }
 
-/// Reads the font file at `path`, font `name`'s, and bakes it, as [`Context::add_font`] says.
+/// Reads and bakes font `name`'s file at `path`, as [`Context::add_font`] says.
 ///
-/// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is more than
-/// 256 MiB, isn't a TrueType or OpenType font with outlines, or has glyphs that don't fit a field
-/// of [`MAX_TEXTURE_SIZE`] texels square, as [`field`] says.
+/// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is over 256 MiB,
+/// isn't a TrueType or OpenType font with outlines, or has glyphs that don't fit a field of
+/// [`MAX_TEXTURE_SIZE`] texels square (see [`field`]).
 ///
 /// [`Context::add_font`]: crate::Context::add_font
 pub(crate) fn bake(name: &str, path: &Path) -> Result<Bake> {
@@ -502,7 +471,7 @@ pub(crate) fn bake(name: &str, path: &Path) -> Result<Bake> {
         let message = format!("font {name:?} at {} {problem}", path.display());
         Error::new("engine.bad_font", message)
     };
-    // A byte past the most a font's file holds, so that a longer one is refused.
+    // One byte past the most, so a longer file is refused.
     let bytes = dirs::read_file(path, MAX_FILE + 1)
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     if bytes.len() as u64 > MAX_FILE {
@@ -511,10 +480,10 @@ pub(crate) fn bake(name: &str, path: &Path) -> Result<Bake> {
     bake_bytes(name, path, bytes.into_boxed_slice())
 }
 
-/// Reads font `name`'s file at `path` from `files` and bakes it, as [`bake`] does; or, from a game's
-/// package, reads it as `tools/cook` baked it, as [`Bake::bytes`] wrote it, which needs no baking.
+/// Like [`bake`], from `files`. In a game's package it reads the font `tools/cook` baked, in
+/// [`Bake::bytes`]' format, with no baking.
 ///
-/// Fails as `bake` does, and with `engine.bad_font` for a baked font that can't be read from the
+/// Fails like `bake`, and with `engine.bad_font` for a baked font that can't be read from the
 /// package or doesn't hold together.
 pub(crate) fn load(name: &str, path: &Path, files: &Files) -> Result<Bake> {
     if files.packaged().is_none() {
@@ -531,12 +500,11 @@ pub(crate) fn load(name: &str, path: &Path, files: &Files) -> Result<Bake> {
 }
 
 impl Bake {
-    /// What `tools/cook` puts in a game's package for the font, which [`read`](Self::read) reads
-    /// back: every number little-endian, the field's width and height, the font's units in an em,
-    /// its ascent, descent and gap, and its number of glyphs, then each glyph, its ID and whether
-    /// it's placed, and if it is its cell's rectangle in the field and its plane, each four floats;
-    /// then the font's file, after its length, then the field's texels. A change to it needs the
-    /// package's version moved on.
+    /// What `tools/cook` puts in a game's package; [`read`](Self::read) reads it back. Every number
+    /// is little-endian: the field's width and height, units per em, ascent, descent, gap and glyph
+    /// count; then each glyph's ID, whether it's placed, and if so its field rectangle and plane
+    /// (four floats each); then the font's file after its length; then the field's texels. A change
+    /// needs the package's version moved on.
     pub(crate) fn bytes(&self) -> Vec<u8> {
         let baked = &self.baked;
         let mut bytes = Vec::with_capacity(self.pixels.len() + baked.bytes.len() + 64);
@@ -568,10 +536,10 @@ impl Bake {
         bytes
     }
 
-    /// The font [`bytes`](Self::bytes) wrote into `bytes`, its shaping made again from its file.
-    /// The error says what doesn't hold together: a field of no texels or wider or taller than
-    /// [`MAX_TEXTURE_SIZE`], fewer than 1 unit per em, texels other than its size's, glyphs out of
-    /// order, a number that isn't finite, bytes left over, or a file that doesn't shape.
+    /// The font [`bytes`](Self::bytes) wrote, its shaping made again from its file. The error says
+    /// what doesn't hold together: a field of no texels or over [`MAX_TEXTURE_SIZE`] across, under
+    /// 1 unit per em, texels not matching the size, glyphs out of order, a non-finite number, bytes
+    /// left over, or a file that doesn't shape.
     fn read(bytes: &[u8]) -> std::result::Result<Self, String> {
         let mut read = Reading { bytes, at: 0 };
         let size = [read.u32()?, read.u32()?];
@@ -582,8 +550,7 @@ impl Bake {
             return Err(format!("its field is {} by {} texels", size[0], size[1]));
         }
         let units_per_em = read.float()?;
-        // As a font's file gives them, a whole number from 1, which shaped text's positions are
-        // divided by.
+        // A whole number from 1 in a font's file; shaped positions divide by it.
         if units_per_em < 1.0 {
             return Err(format!("it has {units_per_em} units per em"));
         }
@@ -637,14 +604,13 @@ impl Bake {
     }
 }
 
-/// Where [`Bake::read`] has got to in what it reads.
+/// [`Bake::read`]'s position in its bytes.
 struct Reading<'b> {
     bytes: &'b [u8],
     at: usize,
 }
 
 impl<'b> Reading<'b> {
-    /// The next `len` bytes.
     fn take(&mut self, len: usize) -> std::result::Result<&'b [u8], String> {
         let end = self.at.checked_add(len).ok_or("it ends too soon")?;
         let taken = self.bytes.get(self.at..end).ok_or("it ends too soon")?;
@@ -674,10 +640,10 @@ impl<'b> Reading<'b> {
     }
 }
 
-/// What shapes text in the font in `bytes`, left to right, in Latin script, without
-/// [`features`]. The error says what's wrong with the font, as a panic of its reading does.
+/// What shapes left-to-right Latin text in the font in `bytes`, without [`features`]. The error
+/// says what's wrong with the font, a panic in reading it included.
 fn shaping(bytes: &[u8]) -> std::result::Result<(ShaperData, ShapePlan), String> {
-    // harfrust can panic on a malformed font, as reading files is, so that's the file's doing.
+    // harfrust can panic on a malformed font: the file's doing.
     let shaping = panic::catch_unwind(AssertUnwindSafe(|| {
         let font = FontRef::new(bytes).map_err(|error| error.to_string())?;
         let shaping = ShaperData::new(&font);
@@ -690,13 +656,13 @@ fn shaping(bytes: &[u8]) -> std::result::Result<(ShaperData, ShapePlan), String>
     shaping.unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))
 }
 
-/// Bakes the engine's font, as [`bake`] does.
+/// Bakes the engine's font like [`bake`].
 fn bake_inter() -> Bake {
     let path = Path::new("gg-engine/assets/fonts/Inter/Inter-Regular.ttf");
     bake_bytes("Inter", path, INTER.into()).expect("the engine's font bakes")
 }
 
-/// Bakes the font in `bytes`, font `name`'s, read from `path`, as [`bake`] does.
+/// Bakes font `name`'s `bytes`, read from `path`, like [`bake`].
 fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
     let start = Instant::now();
     let bad = |problem: String| {
@@ -732,15 +698,14 @@ fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
     })
 }
 
-/// The field of the font in `bytes`, as [`field`] bakes it, and whether this process had baked it
-/// already, which it then takes. The error says what's wrong with the font.
+/// The [`field`] of the font in `bytes`, and whether this process had already baked it (then it
+/// takes that). The error says what's wrong with the font.
 ///
-/// A process keeps the field of each font it bakes, by the font's bytes, which always bake to the
-/// same field: tests build a game's context again and again, each adding its fonts and the engine's,
-/// and bake on their own thread alone, where a debug build takes about a second a font. A process
-/// bakes few fonts, each kept as long as it runs, some 2 MB of field and file; but each save of a
-/// font's file that a development run reloads keeps another, the old staying: if runs come to save
-/// fonts often, keep only the latest few.
+/// A process keeps each baked field, keyed by the font's bytes, which always bake the same. Tests
+/// build contexts again and again, each adding its fonts and the engine's, and would bake each
+/// anew, about a second a font in debug. Each kept font is some 2 MB of field and file, for the
+/// process's life; each save a development run reloads keeps another, the old staying: if runs
+/// save fonts often, keep only the latest few.
 fn field_of(bytes: &[u8]) -> Result<(Field, bool), String> {
     static FIELDS: Mutex<Vec<(Box<[u8]>, Field)>> = Mutex::new(Vec::new());
     let find = |fields: &[(Box<[u8]>, Field)]| {
@@ -751,8 +716,8 @@ fn field_of(bytes: &[u8]) -> Result<(Field, bool), String> {
     if let Some(field) = find(&lock()) {
         return Ok((field, true));
     }
-    // fdsm can panic on a malformed font, as reading files is, so that's the file's doing: the font
-    // fails as one that doesn't read does. gg-core's panic hook still logs it.
+    // fdsm can panic on a malformed font: the file's doing, so it fails like an unreadable one.
+    // gg-core's panic hook still logs it.
     let field = panic::catch_unwind(AssertUnwindSafe(|| field(bytes)));
     let field = field.unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))?;
     // Two threads may bake the same font at once: the first to finish keeps its field.
@@ -763,10 +728,9 @@ fn field_of(bytes: &[u8]) -> Result<(Field, bool), String> {
     Ok((field, false))
 }
 
-/// What a font bakes into, before its field is a texture: the field's size and its rows of RGBA8,
-/// tightly packed, top row first, each texel the distances to a glyph's nearest edges in its red,
-/// green and blue, multi-channel, and to its outline in its alpha; and where its glyphs are in it,
-/// and its lines' metrics.
+/// What a font bakes into before its field is a texture: the size and tightly packed RGBA8 rows,
+/// top row first, each texel holding distances to a glyph's nearest edges in red, green and blue
+/// (multi-channel) and to its outline in alpha; the glyphs' places; the line metrics.
 #[derive(Clone)]
 struct Field {
     size: [u32; 2],
@@ -776,34 +740,32 @@ struct Field {
     lines: Lines,
 }
 
-/// A glyph's outline in its cell's texels, before its field is generated: so that every cell's size
-/// is known, and checked, before any is made.
+/// A glyph's outline in cell texels, so every cell's size is checked before any field is made.
 struct Outline {
     id: u32,
-    /// Its contours, +Y up from its cell's bottom row, `RANGE / 2` texels in from its edges.
+    /// Contours, +Y up from the cell's bottom row, `RANGE / 2` texels in from its edges.
     shape: Shape<Contour>,
-    /// Where its cell's texels start about its origin on the baseline, in ems.
+    /// Where the cell's texels start about the origin on the baseline, in ems.
     low: Vec2,
-    /// Its cell's width and height, in texels.
+    /// The cell's width and height, in texels.
     size: [u32; 2],
 }
 
-/// A glyph's field, as its outline generates it, its rows from its bottom up.
+/// A glyph's generated field, rows from the bottom up.
 struct Cell {
     id: u32,
-    /// Where its texels start about its origin on the baseline, in ems.
+    /// Where the texels start about the origin on the baseline, in ems.
     low: Vec2,
     image: ImageBuffer<Rgba<f32>, Vec<f32>>,
 }
 
-/// Bakes the font in `bytes` into its field, as [`Field`] says, of the glyphs the font maps
-/// [`characters`] to and its `.notdef`, glyph 0; a glyph whose outline doesn't draw goes without,
-/// and draws as the `.notdef` does. The error says what's wrong with the font.
+/// Bakes the font in `bytes` into a [`Field`] of the glyphs it maps [`characters`] to and its
+/// `.notdef`, glyph 0. A glyph whose outline doesn't draw goes without and draws as the `.notdef`.
+/// The error says what's wrong with the font.
 ///
-/// Fails, before any glyph's field is made, if a glyph's outline has a point that isn't a finite
-/// number, if a glyph's cell would be wider or taller than [`MAX_TEXTURE_SIZE`], or if the cells
-/// would come to more texels than a field that size holds, as a crafted font's can, by gigabytes;
-/// and after, if they don't pack into one.
+/// Fails, before any field is generated, if an outline has a non-finite point, a cell would be
+/// over [`MAX_TEXTURE_SIZE`] across, or the cells would total more texels than a field that size
+/// holds (a crafted font's can, by gigabytes); and after, if they don't pack into one.
 fn field(bytes: &[u8]) -> Result<Field, String> {
     let font = FontRef::new(bytes)
         .map_err(|error| format!("isn't a TrueType or OpenType font: {error}"))?;
@@ -839,10 +801,9 @@ fn field(bytes: &[u8]) -> Result<Field, String> {
     if outlines.is_empty() {
         return Err("has no outlines of the glyphs it maps, as a font of bitmaps alone".to_owned());
     }
-    // No field holds more texels than a texture of the largest size, so cells that come to more
-    // couldn't pack into one; and they're refused before any is made, as each texel takes 16 bytes
-    // until it's packed, so that a crafted font's glyphs, each of a size a field can be, don't take
-    // hundreds of gigabytes together. The cells, all made at once, take 1 GiB at most.
+    // Cells totaling more texels than the largest texture couldn't pack: refuse them before making
+    // any. A texel takes 16 bytes until packed, so a crafted font's glyphs, each field-sized, could
+    // take hundreds of gigabytes together. Cells made at once take 1 GiB at most.
     let most = MAX_TEXTURE_SIZE;
     let texels: u64 = (outlines.iter())
         .map(|&Outline { size: [w, h], .. }| u64::from(w) * u64::from(h))
@@ -871,10 +832,9 @@ fn field(bytes: &[u8]) -> Result<Field, String> {
     })
 }
 
-/// The fields of the glyphs of `outlines`, in their order, as [`cell`] makes each, on the job
-/// system's threads, which each glyph's is apart from the others'.
+/// The [`cell`]s of `outlines`, in order, made on the job system's threads: each is independent.
 fn bake_glyphs(mut outlines: Vec<Outline>) -> Vec<Cell> {
-    // A few glyphs a job, about as long as a job takes to hand out.
+    // A few glyphs a job, about as long as handing one out takes.
     if outlines.len() > 4 {
         let rest = outlines.split_off(outlines.len() / 2);
         let first = || bake_glyphs(outlines);
@@ -885,11 +845,11 @@ fn bake_glyphs(mut outlines: Vec<Outline>) -> Vec<Cell> {
     outlines.into_iter().map(cell).collect()
 }
 
-/// The outline of glyph `id`, `contours` in font units, `units` to an em, in its cell's texels:
-/// `None` if it has none, as a space has.
+/// Glyph `id`'s outline in cell texels, from `contours` in font units, `units` to an em; `None` if
+/// it has none, like a space.
 ///
-/// Fails if a point of it isn't a finite number, or if its cell would be wider or taller than
-/// [`MAX_TEXTURE_SIZE`], which no field can be, as a crafted font's glyph's can be by far.
+/// Fails if a point isn't finite, or the cell would be over [`MAX_TEXTURE_SIZE`] across (a crafted
+/// font's can, by far).
 fn outline(id: u32, contours: &[Vec<Command>], units: f64) -> Result<Option<Outline>, String> {
     let points = || contours.iter().flatten().flat_map(Command::points);
     if !points().all(|point| point.x.is_finite() && point.y.is_finite()) {
@@ -906,8 +866,7 @@ fn outline(id: u32, contours: &[Vec<Command>], units: f64) -> Result<Option<Outl
     let Some((low, high)) = bounds else {
         return Ok(None);
     };
-    // From font units to the cell's texels, +Y up from its bottom row, its outline `RANGE / 2`
-    // texels in from its edges.
+    // Font units to cell texels, +Y up from the bottom row, `RANGE / 2` in from the edges.
     let scale = EM / units;
     let pad = RANGE / 2.0;
     let to_texels = |point: Point| {
@@ -929,7 +888,7 @@ fn outline(id: u32, contours: &[Vec<Command>], units: f64) -> Result<Option<Outl
     if shape.contours.is_empty() {
         return Ok(None);
     }
-    // Finite, as the points are: a side that wasn't a number would pass the check below.
+    // Finite, as the points are; a NaN side would pass the check below.
     let width = ((high.x - low.x) * scale + 2.0 * pad).ceil();
     let height = ((high.y - low.y) * scale + 2.0 * pad).ceil();
     let most = MAX_TEXTURE_SIZE;
@@ -948,7 +907,7 @@ fn outline(id: u32, contours: &[Vec<Command>], units: f64) -> Result<Option<Outl
     }))
 }
 
-/// The field of the glyph of `outline`, whose cell's size [`field`] has checked.
+/// The field of `outline`'s glyph; [`field`] has checked the cell's size.
 fn cell(outline: Outline) -> Cell {
     let Outline {
         id,
@@ -956,7 +915,7 @@ fn cell(outline: Outline) -> Cell {
         low,
         size: [width, height],
     } = outline;
-    // A fixed seed, so that a font bakes the same field every time.
+    // A fixed seed: a font bakes the same field every time.
     let colored = Shape::edge_coloring_simple(shape, 0.03, 0);
     let prepared = colored.prepare();
     let mut image = ImageBuffer::new(width, height);
@@ -968,8 +927,7 @@ fn cell(outline: Outline) -> Cell {
     Cell { id, low, image }
 }
 
-/// Packs `cells` into a field, on shelves, the tallest first, [`GAP`] texels apart: the field's
-/// size, its pixels, as [`Field`] has them, and where each glyph is in it.
+/// Packs `cells` into a field on shelves, tallest first, [`GAP`] apart: size, pixels, places.
 fn pack(cells: &[Cell]) -> Result<([u32; 2], Vec<u8>, Glyphs), String> {
     let mut order: Vec<&Cell> = cells.iter().collect();
     order.sort_by_key(|cell| (std::cmp::Reverse(cell.image.height()), cell.id));
@@ -981,7 +939,7 @@ fn pack(cells: &[Cell]) -> Result<([u32; 2], Vec<u8>, Glyphs), String> {
         .map(|cell| cell.image.width())
         .max()
         .unwrap_or(1);
-    // About square, a power of two across, which a shelf packing fills some way short of.
+    // About square, a power of two across; shelf packing fills some way short of it.
     let side = (area as f64 * 1.25).sqrt().ceil() as u32;
     let width = side.next_power_of_two().max(widest).min(MAX_TEXTURE_SIZE);
     let mut at = Vec::with_capacity(order.len());
@@ -1008,7 +966,7 @@ fn pack(cells: &[Cell]) -> Result<([u32; 2], Vec<u8>, Glyphs), String> {
     for (cell, [x, y]) in order.into_iter().zip(at) {
         let (w, h) = cell.image.dimensions();
         for (row, texels) in cell.image.rows().enumerate() {
-            // Its rows go from its bottom up, and the field's from its top down.
+            // Cell rows go bottom up; the field's, top down.
             let top = (y + h - 1 - row as u32) as usize;
             let start = (top * width as usize + x as usize) * 4;
             let to = &mut pixels[start..start + w as usize * 4];
@@ -1036,12 +994,12 @@ fn pack(cells: &[Cell]) -> Result<([u32; 2], Vec<u8>, Glyphs), String> {
 #[derive(Default)]
 struct Pen {
     contours: Vec<Vec<Command>>,
-    /// Where the contour drawn started, and where it's got to.
+    /// Where the current contour started, and where it's got to.
     start: Option<Point>,
     last: Option<Point>,
 }
 
-/// A part of a contour, from where the one before ended.
+/// A part of a contour, from where the previous one ended.
 #[derive(Clone, Copy, Debug)]
 enum Command {
     Line(Point, Point),
@@ -1059,8 +1017,7 @@ impl Command {
         points.into_iter().take(count)
     }
 
-    /// The segment it is, its points taken by `to`; `None` for a line of no length, which has no
-    /// direction to color it by.
+    /// The segment, points mapped by `to`; `None` for a zero-length line, which has no direction.
     fn segment(&self, to: impl Fn(Point) -> Point) -> Option<Segment> {
         Some(match *self {
             Self::Line(a, b) if a == b => return None,
@@ -1072,8 +1029,8 @@ impl Command {
 }
 
 impl Pen {
-    /// Adds `command` to the contour drawn, ending at `to`; ignored before any contour starts, as a
-    /// malformed outline's may be.
+    /// Adds `command` to the current contour, ending at `to`; ignored before any contour starts (a
+    /// malformed outline's may).
     fn draw(&mut self, command: impl FnOnce(Point) -> Command, to: Point) {
         let (Some(from), Some(contour)) = (self.last, self.contours.last_mut()) else {
             return;
@@ -1109,7 +1066,7 @@ impl OutlinePen for Pen {
         self.draw(|from| Command::Cubic(from, first, second, to), to);
     }
 
-    /// Closes the contour drawn with a line back to its start, if it ends elsewhere.
+    /// Closes the current contour with a line back to its start, if it ends elsewhere.
     fn close(&mut self) {
         if let (Some(start), Some(last)) = (self.start, self.last)
             && start != last

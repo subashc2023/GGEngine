@@ -19,8 +19,8 @@ fn inter() -> (Baked, Field) {
     (baked, field)
 }
 
-/// What the field holds at `uv`, filtered linearly as the GPU's sampler does, clamped to its
-/// edges: its red, green and blue, from 0 to 1.
+/// The field's red, green and blue at `uv`, 0 to 1, linearly filtered and edge-clamped like the
+/// GPU's sampler.
 fn sample(field: &Field, uv: Vec2) -> [f32; 3] {
     let [width, height] = field.size;
     let texel = |x: i64, y: i64| {
@@ -48,9 +48,9 @@ fn median([r, g, b]: [f32; 3]) -> f32 {
     r.min(g).max(r.max(g).min(b))
 }
 
-/// Glyph `character`'s coverage of each pixel of a square `pixels` across an em, its origin at
-/// the square's bottom left, as the text shader draws it from `field`, and as its outline covers
-/// each, sampled 4 by 4 within it: those that differ by more than half, and the pixels covered.
+/// Compares `character`'s coverage of each pixel of a square `pixels` across an em, as the text
+/// shader draws it from `field` and as the outline covers it (sampled 4 by 4): pixels differing by
+/// over half, and pixels covered.
 fn coverage(baked: &Baked, field: &Field, character: char, pixels: u32) -> (usize, usize) {
     let font = FontRef::new(INTER).expect("Inter reads");
     let id = font.charmap().map(character).expect("Inter maps it");
@@ -76,7 +76,7 @@ fn coverage(baked: &Baked, field: &Field, character: char, pixels: u32) -> (usiz
     }
     let prepared = shape.prepare();
     let [low, high] = placed.plane;
-    // How many of the view's pixels the field's range spans, as the shader finds it.
+    // View pixels the field's range spans, as the shader finds it.
     let range = (RANGE as f32 * pixels as f32 / EM as f32).max(1.0);
     let (mut wrong, mut covered) = (0, 0);
     let per_em = pixels as f32;
@@ -114,10 +114,9 @@ fn coverage(baked: &Baked, field: &Field, character: char, pixels: u32) -> (usiz
     (wrong, covered)
 }
 
-/// A field draws each glyph as its outline covers pixels, at sizes above and below its own: of
-/// the pixels a glyph covers, at most one in a hundred is drawn more than half wrong, as where
-/// a corner rounds off a little; and a glyph whose cell were placed, flipped or scaled wrongly,
-/// or whose distances' signs were the wrong way, would draw most of them wrong.
+/// A field draws glyphs as their outlines cover pixels, above and below its own size: at most 1%
+/// of covered pixels are over half wrong (a corner rounding off). A misplaced, flipped or misscaled
+/// cell, or a wrong distance sign, would get most wrong.
 #[test]
 fn a_field_draws_its_glyphs_as_their_outlines_cover() {
     let (baked, field) = inter();
@@ -132,9 +131,8 @@ fn a_field_draws_its_glyphs_as_their_outlines_cover() {
     }
 }
 
-/// A baked font reads back from what a game's package holds of it, its field, glyphs, metrics
-/// and file alike, its shaping made again from its file; what's cut short, has bytes past its
-/// field or has fewer than 1 unit per em, which text's positions are divided by, is refused.
+/// A baked font reads back from its package bytes. Bytes cut short, bytes past the field, or under
+/// 1 unit per em (positions divide by it) are refused.
 #[test]
 fn a_baked_font_reads_back_from_its_bytes() {
     let bake = bake_inter();
@@ -148,7 +146,7 @@ fn a_baked_font_reads_back_from_its_bytes() {
     assert_eq!(read.baked.bytes, bake.baked.bytes);
     assert_eq!(read.bytes(), bytes);
     assert!(Bake::read(&bytes[..bytes.len() - 1]).is_err(), "cut short");
-    // Its units per em, after the field's width and height.
+    // Units per em, after the field's width and height.
     for units in [0.0_f32, -2048.0, 0.5] {
         let mut unitless = bytes.clone();
         unitless[8..12].copy_from_slice(&units.to_le_bytes());
@@ -163,9 +161,9 @@ fn a_baked_font_reads_back_from_its_bytes() {
     assert!(Bake::read(&longer).is_err(), "a byte past its field");
 }
 
-/// A field holds a glyph for each character of Windows-1252 that the font maps, a space's
-/// without a cell, and the `.notdef`, which draws for a character the font lacks, but not for
-/// whitespace or a control character; and fits a texture every device takes.
+/// A field holds a glyph per mapped Windows-1252 character (a space's without a cell) and the
+/// `.notdef`, which draws for a character the font lacks, not whitespace or controls; and fits a
+/// texture every device takes.
 #[test]
 fn a_field_holds_windows_1252s_glyphs() {
     let (baked, field) = inter();
@@ -191,9 +189,8 @@ fn a_field_holds_windows_1252s_glyphs() {
     assert_eq!(field.pixels.len(), width as usize * height as usize * 4);
 }
 
-/// Text lays out left to right in lines a line apart, each aligned across as its style says,
-/// the box's middle or bottom at the origin as it says; and kerned, so that `AV` is narrower
-/// than an `A` and a `V` apart.
+/// Text lays out in lines a line apart, aligned as the style says; and kerned: `AV` is narrower
+/// than `A` and `V` apart.
 #[test]
 fn text_lays_out_in_aligned_lines_kerned() {
     let (baked, _) = inter();
@@ -221,7 +218,7 @@ fn text_lays_out_in_aligned_lines_kerned() {
     };
     assert_eq!(a, a_kerned);
     assert!(v_kerned.x < v.x, "{v_kerned} is kerned toward the A");
-    // Its first line's ascent at the top, and the next line's baseline a line below.
+    // First line's ascent at the top; the next baseline a line below.
     let lines = fonts.fonts[0].baked.as_ref().expect("baked").lines;
     assert!(a.y < 0.0 && a.y > -lines.ascent * 2.0, "{a}");
     let [first, second] = middles(&mut fonts, "A\nA", start)[..] else {
@@ -230,16 +227,16 @@ fn text_lays_out_in_aligned_lines_kerned() {
     assert_eq!(first, a);
     let below = first.y - lines.advance() * 2.0;
     assert!((second.y - below).abs() < 1e-5, "{second} on the next line");
-    // Its middle, then its bottom, at the origin: the box is the same, a line tall.
+    // Middle, then bottom, at the origin: the same box, a line tall.
     let middle = middles(&mut fonts, "A", [Align::Center; 2])[0];
     let end = middles(&mut fonts, "A", [Align::End; 2])[0];
     let tall = (lines.ascent - lines.descent) * 2.0;
     assert!((middle.y - (a.y + tall / 2.0)).abs() < 1e-5, "{middle}");
     assert!((end.y - (a.y + tall)).abs() < 1e-5, "{end}");
-    // Across, half its width left of where it starts, then all of it.
+    // Across: half the width left of the start, then all of it.
     assert!(end.x < middle.x && middle.x < a.x, "{a} {middle} {end}");
     assert!(((a.x - middle.x) * 2.0 - (a.x - end.x)).abs() < 1e-5);
-    // Each line aligned on its own: the shorter line's middle is the longer's.
+    // Each line aligns on its own: the shorter line's middle is the longer's.
     let [_, _, b] = middles(&mut fonts, "AA\nB", [Align::Center, Align::Start])[..] else {
         panic!("three letters")
     };
@@ -247,9 +244,8 @@ fn text_lays_out_in_aligned_lines_kerned() {
     assert!((b.x - centered.x).abs() < 1e-5, "{b} {centered}");
 }
 
-/// Text measures as it lays out: as wide as its widest line's advance, kerned, which aligns it,
-/// and as tall as its box, from its first line's ascent to its last line's descent, a line
-/// more for each line more; text of nothing is a line tall and nothing across.
+/// Text measures as it lays out: its widest line's kerned advance across, its box down, a line more
+/// per line. Empty text is a line tall, no width.
 #[test]
 fn text_measures_as_it_lays_out() {
     let (baked, _) = inter();
@@ -270,7 +266,7 @@ fn text_measures_as_it_lays_out() {
     assert_eq!(two.x, av.x, "its widest line");
     assert!((two.y - tall - lines.advance() * 2.0).abs() < 1e-5, "{two}");
     assert_eq!(fonts.measure("", &style), Vec2::new(0.0, a.y));
-    // Laid out from its right, it starts as far left of the origin as it's wide.
+    // Aligned right, it starts as far left of the origin as it's wide.
     let first = |fonts: &mut Fonts, align| {
         let style = TextStyle { align, ..style };
         let mut glyphs = fonts.lay_out(Mat4::IDENTITY, "AV", &style, 0);
@@ -282,30 +278,27 @@ fn text_measures_as_it_lays_out() {
     assert!((start - end - av.x).abs() < 1e-4, "{start} {end} {av}");
 }
 
-/// Inter with `units` font units to its em, as its `head` table says, its outlines as they are,
-/// so that its glyphs are `2048 / units` times as large as its own.
+/// Inter with `units` per em in its `head` table, outlines unchanged: glyphs `2048 / units` times
+/// as large.
 fn inter_of(units: u16) -> Vec<u8> {
     let mut bytes = INTER.to_vec();
     let tables = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
-    // Each table's record, past the font's 12 bytes of header: its tag, its checksum, where it
-    // starts and its length.
+    // A table's record, past the font's 12 header bytes: tag, checksum, start and length.
     let record = (0..tables)
         .map(|table| 12 + 16 * table)
         .find(|&at| &bytes[at..at + 4] == b"head")
         .expect("a head table");
     let start = bytes[record + 8..record + 12].try_into().expect("4 bytes");
     let head = u32::from_be_bytes(start) as usize;
-    // Past its version, its font's revision, its checksum's adjustment, its magic number and
-    // its flags.
+    // Past the version, font revision, checksum adjustment, magic number and flags.
     bytes[head + 18..head + 20].copy_from_slice(&units.to_be_bytes());
     bytes
 }
 
-/// A font whose glyph's cell would be larger than a field can be, or whose cells would come to
-/// more than a field holds, is refused before any cell is made, saying which, with the font's
-/// error: Inter at a unit to the em, whose cells would take tens of gigabytes each, and at 64,
-/// megabytes each and gigabytes together, which would otherwise be made, or fail to be and
-/// abort. An outline with a point that isn't a number is refused too.
+/// A font with a cell larger than a field can be, or cells totaling more than one holds, is
+/// refused with `engine.bad_font` before any cell is made, saying which. Inter at 1 unit to the em
+/// has cells of tens of gigabytes each; at 64, megabytes each and gigabytes together; either would
+/// otherwise be made, or fail and abort. A non-finite outline point is refused too.
 #[test]
 fn a_font_too_large_for_a_field_is_refused_before_its_cells_are_made() {
     let path = Path::new("large.ttf");
@@ -326,9 +319,8 @@ fn a_font_too_large_for_a_field_is_refused_before_its_cells_are_made() {
     assert!(error.contains("isn't a finite number"), "{error}");
 }
 
-/// A process bakes a font's bytes once: baked again, they take the field the first bake made;
-/// other bytes bake apart. Inter at 8,192 and 16,384 units to the em, a quarter and an eighth of
-/// its size, quick to bake, which no other test bakes, so that each first bake here is the
+/// A process bakes a font's bytes once; other bytes bake apart. Uses Inter at 8,192 and 16,384
+/// units to the em (quick to bake), which no other test bakes, so each first bake here is the
 /// process's first.
 #[test]
 fn a_process_bakes_a_fonts_bytes_once() {

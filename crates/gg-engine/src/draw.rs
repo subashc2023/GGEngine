@@ -14,55 +14,49 @@ use crate::placed::Placed;
 use crate::transform::from_origin;
 use crate::{Entity, EntityId, Parent, Text, Transform, World};
 
-/// What drawing the world sorts and computes, kept from frame to frame so that it allocates nothing
-/// once it's grown, and so that a frame that changes no entity's row and no z draws in the order the
-/// last one sorted its rows by ID, without sorting them by ID again.
+/// What drawing sorts and computes, kept between frames so it allocates nothing once grown. A
+/// frame that changes no entity's row and no z reuses the last frame's ID order.
 #[derive(Default)]
 pub(crate) struct Scratch {
     /// This frame's runs of rows at one z, back to front.
     segments: Vec<Segment>,
-    /// The segments `items` were sorted from, which each frame's are compared with.
+    /// The segments `items` were sorted from, compared with each frame's.
     last: Vec<Segment>,
-    /// The matrices of the rows of tables of roots that draw between ticks, from the frame's
-    /// origin, which draw by them: kept at its longest, so that the job system's threads write into
-    /// it rather than its being filled anew each frame.
+    /// Matrices from the frame's origin of root tables' rows that draw between ticks. Kept at its
+    /// longest so the job system's threads write into it.
     blended: Vec<Mat4>,
-    /// Where each table's rows start in `blended`, by the table's index, if they're there.
+    /// Where each table's rows start in `blended`, by table index, if they're there.
     blends: Vec<Option<usize>>,
-    /// Each row drawn, in the order they draw.
+    /// Each row drawn, in draw order.
     items: Vec<Item>,
     /// The rows of each z and kind, back to front.
     groups: Vec<Group>,
-    /// The world and its version when `items` were sorted, if they are.
+    /// The world and its version when `items` were sorted.
     sorted: Option<(u64, u64)>,
-    /// By table: how many rows it had, and those whose meshes blend, as they were at the change
-    /// tick `meshes_seen` has, of the world of its serial.
+    /// By table: its row count and the rows whose meshes blend, as of the change tick
+    /// `meshes_seen` has, of the world of its serial.
     blending: Vec<(usize, Vec<u32>)>,
     meshes_seen: Option<(u64, u64)>,
-    /// What each frame emits each emitter's particles from.
     emitters: Emitters,
 }
 
-/// A run of one table's rows at one z, of one kind, whose rows `sort` puts among the others of
-/// their z and kind.
+/// A run of one table's rows at one z and kind.
 #[derive(Clone)]
 struct Segment {
-    /// Its rows' z, as [`depth`] gives it.
+    /// As [`depth`] gives it.
     z: f64,
-    /// Which segment it was found as: tables in the order they were made, then a table's sprites,
-    /// circles, texts and meshes, then its rows in order.
+    /// Order found: tables in creation order, then a table's sprites, circles, texts and meshes,
+    /// then its rows in order.
     order: u32,
     kind: Kind,
     table: u32,
     rows: Range<u32>,
-    /// Whether its rows are children, which draw where they're placed; or else roots, which draw
-    /// by their transforms, or by `blended` from where `blends` says, while they draw between
-    /// ticks.
+    /// Whether its rows are children, which draw where placed. Roots draw by their transforms, or
+    /// between ticks by `blended` from where `blends` says.
     children: bool,
 }
 
-/// The same segment, its z bit for bit, as `total_cmp` tells z's apart, so that a NaN is the same
-/// as itself.
+/// Equal when z's are bit-equal, as `total_cmp` tells them apart, so a NaN equals itself.
 impl PartialEq for Segment {
     fn eq(&self, other: &Self) -> bool {
         self.z.to_bits() == other.z.to_bits()
@@ -74,8 +68,7 @@ impl PartialEq for Segment {
     }
 }
 
-/// What a row draws: at one z, sprites, then circles, then text, under the meshes that blend, under
-/// emitters' particles.
+/// What a row draws, in order at one z.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Sprite,
@@ -85,49 +78,48 @@ enum Kind {
     Particles,
 }
 
-/// A row drawn: its entity's ID, which orders it among the rows of its z and kind, and which it
-/// draws with, and where it is.
+/// A row drawn. Its entity's ID orders it among its z and kind, and is what it draws with.
 struct Item {
     id: EntityId,
-    /// Its segment, among the scratch's.
     segment: u32,
-    /// Its row in its segment's table.
     row: u32,
 }
 
-/// The rows of one z and one kind, a range of the scratch's items.
+/// The rows of one z and kind: a range of the scratch's items.
 struct Group {
     kind: Kind,
     items: Range<u32>,
 }
 
-/// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`], a [`Circle`],
-/// a [`Text`], a [`MeshDraw`] whose shader blends or a [`ParticleEmitter`], after where it has the
-/// renderer's scene draw, which holds the meshes whose shaders write depth, as [`OpaqueMeshes`] has
-/// them: back to front by z in the world, as the latest tick left them, -0.0 and 0.0 one z, at one
-/// z sprites, then circles, then text, then meshes, under particles; each z in the order of their
-/// entities' IDs, so that entities that overlap at one depth keep how they stack as others come and
-/// go. An emitter's particles are those `scratch`'s emitters give for the frame, `alpha` of the way
-/// through the latest of `ticks` ticks, as [`Emitters::emit`] says. Of a table's meshes, it
-/// looks at those that blend alone, which it finds again as the table's meshes or rows change, so
-/// that a table of many meshes that write depth costs it little. Circles draw with the engine's circle shader
-/// and text with its text shader, which `shaders` adds the first time any do; text is laid out in
-/// its font of `fonts`, as [`Fonts::lay_out`] says. Each draws `alpha` of the way from what `past`
-/// has it draw from to where the tick left it, while it draws between ticks; at 1, where the tick
-/// left it. Each draw's ID is its entity's, which picks read back where it shows. A child draws
-/// where its ancestors carry it, as `placed` has it draw, and is ordered by where the tick left
-/// it; roots, in tables without a [`Parent`], draw by their transforms alone, which those that
-/// draw between ticks blend first, in their tables' order, in runs of rows that the job system's
-/// threads take. Every draw's matrix is from `origin`, the frame's, in `f32`.
+/// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`], [`Circle`],
+/// [`Text`], [`MeshDraw`] whose shader blends, or [`ParticleEmitter`], after the renderer's scene
+/// draw, which holds the depth-writing meshes, as [`OpaqueMeshes`] has them.
 ///
-/// It sorts runs of consecutive rows at one z every frame, so it's quick while each table's rows at
-/// one z stay together. Spawning entities of a table at mixed z's, or despawning, which moves a
-/// table's last row into the gap, splits those runs; at worst, as when sprites each have their own
-/// z, as sorting by y gives them, it sorts every sprite every frame. The rows of each z are sorted
-/// by ID, and kept sorted in `scratch` while no entity's row and no z changes. A frame that changes
-/// them sorts every row of a shared z again, O(n log n), as the swarm's 100,000 at one z are; and
-/// every frame draws them in that order, reading their tables' rows out of order rather than in a
-/// sweep. A radix sort, or tables kept in ID order, waits for a game whose frames need the time.
+/// - Order: back to front by z as the latest tick left it, -0.0 and 0.0 one z. At one z: sprites,
+///   circles, text, meshes, then particles. Each z goes in entity ID order, so overlapping
+///   entities keep their stacking as others come and go.
+/// - Particles come from `scratch`'s emitters, `alpha` of the way through the latest of `ticks`
+///   ticks, as [`Emitters::emit`] says.
+/// - Only a table's blending meshes are looked at, found again when its meshes or rows change.
+/// - `shaders` adds the circle and text shaders on first use. Text is laid out in its font of
+///   `fonts`, as [`Fonts::lay_out`] says.
+/// - Between ticks each draws `alpha` of the way from what `past` has it draw from to where the
+///   tick left it; at 1, where the tick left it.
+/// - Each draw's ID is its entity's, which picks read back.
+/// - A child draws where its ancestors carry it, as `placed` has it, ordered by where the tick
+///   left it. Roots, in tables without a [`Parent`], draw by their transforms; those drawing
+///   between ticks blend first, in table order, in runs of rows the job system's threads take.
+/// - Matrices are from `origin`, the frame's, in `f32`.
+///
+/// It sorts runs of consecutive rows at one z every frame, so it's quick while a table's rows at
+/// one z stay together. Spawning at mixed z's, or despawning (which moves the table's last row
+/// into the gap), splits runs. At worst, with a z per sprite as sorting by y gives, it sorts every
+/// sprite every frame.
+///
+/// Each z's rows stay sorted by ID in `scratch` while no entity's row and no z changes. A frame
+/// that changes them re-sorts every row of a shared z, O(n log n), as the swarm's 100,000 at one z
+/// are; every frame then draws in that order, reading tables' rows out of order. A radix sort, or
+/// tables kept in ID order, waits for a game whose frames need the time.
 ///
 /// [`OpaqueMeshes`]: crate::opaque::OpaqueMeshes
 #[expect(
@@ -162,9 +154,7 @@ pub(crate) fn draw_world(
 }
 
 impl Scratch {
-    /// Finds the runs of each table's rows at one z that draw, of each kind, as `segments`, and
-    /// blends the matrices of the roots that draw between ticks into `blended`, as [`draw_world`]
-    /// says.
+    /// Finds the drawn runs as `segments` and blends the roots' matrices into `blended`.
     fn find(&mut self, poses: &Poses<'_>, columns: Columns) {
         let (world, placed, alpha, origin) = (poses.world, poses.placed, poses.alpha, poses.origin);
         let transform = poses.transform;
@@ -190,16 +180,15 @@ impl Scratch {
         };
         *meshes_seen = Some((world.serial(), world.change_tick()));
         blending.resize_with(world.tables().len(), Default::default);
-        // How many of `blended`'s matrices the frame's roots take.
+        // How many of `blended`'s matrices this frame's roots take.
         let mut blended_len = 0;
         for (index, rows) in world.tables().iter().enumerate() {
             let Some(transforms) = rows.column::<Transform>(transform) else {
                 continue;
             };
             let meshes = mesh.and_then(|id| rows.column::<MeshDraw>(id));
-            // The rows whose meshes blend, found again as its meshes change, or its rows, as one joins
-            // it, which marks it, or leaves it, which marks nothing but leaves it shorter; those that
-            // write depth the scene holds.
+            // The rows whose meshes blend, found again when its meshes change or its rows do (a
+            // row joining marks it; one leaving only shortens it).
             let (had, blending_rows) = &mut blending[index];
             match (meshes, mesh) {
                 (Some(meshes), Some(id)) => {
@@ -229,7 +218,7 @@ impl Scratch {
             let len = transforms.len();
             let children = parent.is_some_and(|id| rows.has(id));
             let entities = rows.entities();
-            // Its rows' z's, a child's where it's placed, as the latest tick left it.
+            // Its rows' z's: a child's where it's placed, as the latest tick left it.
             let z = |row: usize| match children {
                 true => {
                     (placed
@@ -276,7 +265,7 @@ impl Scratch {
         }
     }
 
-    /// Sorts `segments` back to front, and the rows they hold by ID, if they've changed.
+    /// Sorts `segments` back to front, and their rows by ID if changed.
     fn order(&mut self, world: &World) {
         let Self {
             segments,
@@ -298,7 +287,6 @@ impl Scratch {
         }
     }
 
-    /// Draws each group's rows into `draws`, as [`draw_world`] says.
     fn draw(
         &mut self,
         poses: &Poses<'_>,
@@ -328,7 +316,7 @@ impl Scratch {
             ..
         } = self;
         let tables = world.tables();
-        // A segment's table, its transforms, and what its rows draw by.
+        // A segment's table, transforms, and what its rows draw by.
         let placing = |index: u32| {
             let segment = &segments[index as usize];
             let table = &tables[segment.table as usize];
@@ -430,7 +418,7 @@ impl Scratch {
                         let (transforms, emitted, drawn) = found;
                         let row = item.row as usize;
                         let at = matrix(transforms, drawn, row);
-                        // Where the latest tick left it, which its bursts are born at.
+                        // Where the latest tick left it: its bursts are born there.
                         let ticked = match drawn {
                             Drawn::Placed(entities) => {
                                 let place = placed.kept(entities[row]);
@@ -449,7 +437,7 @@ impl Scratch {
     }
 }
 
-/// The components drawing reads, by their IDs among the world's, where it has them.
+/// The components drawing reads, where the world has them.
 #[derive(Clone, Copy)]
 struct Columns {
     sprite: Option<ComponentId>,
@@ -473,8 +461,8 @@ impl Columns {
     }
 }
 
-/// What a segment's rows draw by: their transforms, the matrices of roots blended between ticks,
-/// from the first row's on, or, for children, where they're placed.
+/// What a segment's rows draw by: transforms; roots' matrices blended between ticks, from the first
+/// row's on; or, for children, where placed.
 #[derive(Clone, Copy)]
 enum Drawn<'a> {
     Transforms,
@@ -482,18 +470,16 @@ enum Drawn<'a> {
     Placed(&'a [Entity]),
 }
 
-/// Where the world's entities draw this frame: each `alpha` of the way from what `past` has it draw
-/// from to where the latest tick left it, while it draws between ticks, or as `past` has it draw
-/// instead, as [`Past::instead`] says; and children where their ancestors carry them as they draw,
-/// as `placed` has them, once it has placed the world and drawn the frame; their matrices from
-/// `origin`, the frame's, as drawing's are.
+/// Where entities draw this frame. Between ticks each is `alpha` of the way from what `past` has
+/// it draw from to where the latest tick left it, or as `past` has it draw instead
+/// ([`Past::instead`]). Children are where their ancestors carry them, as `placed` has them once
+/// it has placed the world and drawn the frame. Matrices are from `origin`, the frame's.
 pub(crate) struct Poses<'a> {
     world: &'a World,
     past: &'a Past,
     placed: &'a Placed,
     alpha: f32,
     origin: DVec3,
-    /// [`Transform`]'s id among the world's components.
     transform: ComponentId,
 }
 
@@ -516,16 +502,16 @@ impl<'a> Poses<'a> {
         })
     }
 
-    /// What table `table`'s rows draw from, from its first row on, while they draw between ticks.
+    /// What table `table`'s rows draw from, between ticks.
     fn from(&self, table: usize) -> Option<&'a [Transform]> {
         (self.alpha < 1.0)
             .then(|| self.past.from(self.world, table))
             .flatten()
     }
 
-    /// The pose row `row` of table `table`, a root's, draws as, its transform `local` as the latest
-    /// tick left it: as the past has it draw instead, if it does, or else on its way from what it
-    /// draws from, while it draws between ticks; `None` where it draws as the tick left it.
+    /// The pose root row `row` of `table` draws as, given its `local` transform as the latest tick
+    /// left it: as the past has it draw instead, else on its way from what it draws from. `None`
+    /// where it draws as the tick left it.
     fn drawn(&self, table: usize, row: usize, local: &Transform) -> Option<Transform> {
         let instead = self.past.instead_of(table);
         if !instead.is_empty()
@@ -537,14 +523,13 @@ impl<'a> Poses<'a> {
         Some(interpolation::between(&from[row], local, self.alpha))
     }
 
-    /// Where row `row` of table `table`, a child, draws, as `placed` has it.
     fn placed(&self, table: usize, row: usize) -> crate::placed::Place {
         let entity = self.world.tables()[table].entities()[row];
         (self.placed.drawn(entity)).expect("a child is placed")
     }
 
-    /// Row `row` of table `table`, which has transforms: its transform, as the latest tick left it
-    /// and drawn between ticks while it is, and its parent, if it has one.
+    /// Row `row` of `table`, which has transforms: its transform as the tick left it and as drawn
+    /// between ticks, and its parent if any.
     fn row(
         &self,
         table: usize,
@@ -559,9 +544,8 @@ impl<'a> Poses<'a> {
         (local, drawn, parents.map(|parents| &parents[row]))
     }
 
-    /// The matrix row `row` of table `table`, which has transforms, draws by this frame, from the
-    /// frame's origin, as [`draw_world`] draws it, bit for bit: its transform's, drawn between
-    /// ticks while it is, and carried by its ancestors as they draw.
+    /// The matrix row `row` of `table`, which has transforms, draws by this frame, bit for bit as
+    /// [`draw_world`] draws it: its transform as drawn between ticks, carried by its ancestors.
     pub(crate) fn matrix(&self, table: usize, row: usize) -> Mat4 {
         let (local, drawn, parent) = self.row(table, row);
         match parent {
@@ -570,15 +554,15 @@ impl<'a> Poses<'a> {
         }
     }
 
-    /// The frame's origin, which [`matrix`](Self::matrix) is from.
+    /// The origin [`matrix`](Self::matrix) is from.
     pub(crate) fn origin(&self) -> DVec3 {
         self.origin
     }
 
-    /// Where row `row` of table `table`, which has transforms, draws this frame, for a viewpoint to
-    /// see from: its position, where a sprite of its transform draws, bit for bit; and its
-    /// rotation, its own turned by each ancestor's in turn as they draw, their scales aside, so
-    /// that a mirrored ancestor mirrors where it is but not which way it faces.
+    /// Where row `row` of `table`, which has transforms, draws this frame, for a viewpoint to see
+    /// from. Position is where a sprite of its transform draws, bit for bit. Rotation is its own
+    /// turned by each ancestor's in turn, scales aside, so a mirrored ancestor mirrors where it is
+    /// but not which way it faces.
     pub(crate) fn pose(&self, table: usize, row: usize) -> (DVec3, Quat) {
         let (local, drawn, parent) = self.row(table, row);
         if parent.is_none() {
@@ -592,9 +576,8 @@ impl<'a> Poses<'a> {
 /// How many rows a job blends.
 const CHUNK: usize = 1024;
 
-/// Writes into `out` the matrix of each row drawn `alpha` of the way from `from` to `to`, from
-/// `origin`, splitting the rows in two at a multiple of [`CHUNK`], for two jobs, until each run is
-/// a chunk or less.
+/// Writes into `out` each row's matrix, `alpha` of the way from `from` to `to`, from `origin`.
+/// Splits rows in two at a multiple of [`CHUNK`], for two jobs, until runs are a chunk or less.
 fn blend(out: &mut [Mat4], from: &[Transform], to: &[Transform], (alpha, origin): (f32, DVec3)) {
     let len = out.len();
     if len <= CHUNK {
@@ -614,8 +597,7 @@ fn blend(out: &mut [Mat4], from: &[Transform], to: &[Transform], (alpha, origin)
     );
 }
 
-/// Adds to `segments` the runs of consecutive rows at one z, which `z` gives, among `rows` of table
-/// `table`, in order, of `kind`, which are `children` or not.
+/// Adds to `segments` the runs of consecutive `rows` of `table` at one `z`, of `kind`.
 fn cut(
     segments: &mut Vec<Segment>,
     rows: impl Iterator<Item = usize>,
@@ -653,15 +635,14 @@ fn cut(
     }
 }
 
-/// `z` as drawing orders by it: -0.0 as 0.0, since they're one depth, and every other z as it is,
-/// bit for bit, which `total_cmp` orders the same way on every machine. Compared rather than added
-/// to 0.0, which would leave a NaN's bits to the platform.
+/// `z` as drawing orders by it: -0.0 as 0.0, one depth, every other z bit for bit, which
+/// `total_cmp` orders the same on every machine. Compared, not added to 0.0, which would leave a
+/// NaN's bits to the platform.
 fn depth(z: f64) -> f64 {
     if z == 0.0 { 0.0 } else { z }
 }
 
-/// Puts each row of `segments`, sorted, into `items`, a group of them for each z and kind, each
-/// group's in the order of its entities' IDs.
+/// Puts the sorted `segments`' rows into `items`: a group per z and kind, each in ID order.
 fn sort(world: &World, segments: &[Segment], items: &mut Vec<Item>, groups: &mut Vec<Group>) {
     items.clear();
     groups.clear();
@@ -682,7 +663,7 @@ fn sort(world: &World, segments: &[Segment], items: &mut Vec<Item>, groups: &mut
                 });
             }
         }
-        // Each entity's ID is its own, so that the order is the same however it's sorted.
+        // IDs are unique, so the order is the same however it's sorted.
         items[start..].sort_unstable_by_key(|item| item.id);
         let end = u32::try_from(items.len()).expect("fewer than 2^32 rows drawn");
         groups.push(Group {
@@ -693,13 +674,12 @@ fn sort(world: &World, segments: &[Segment], items: &mut Vec<Item>, groups: &mut
     }
 }
 
-/// How many segments' columns drawing keeps at hand, each in the slot its index picks. A group's
-/// segments have consecutive indices, so a group of this many or fewer, whose rows interleave in ID
-/// order, finds each one's columns once.
+/// How many segments' columns drawing keeps at hand, in the slot each index picks. A group's
+/// segments have consecutive indices, so a group of this many or fewer finds each one's columns
+/// once, though its rows interleave in ID order.
 const AT_HAND: usize = 16;
 
-/// What `find` gives for segment `index`: what `at` keeps for it, or else found, and kept in its
-/// slot.
+/// What `find` gives for segment `index`: what `at` keeps for it, else found and kept in its slot.
 // Called for each item drawn, so asked to be inlined: left to LLVM, whether it is turns on how
 // the crate splits into codegen units, and a frame of the swarm's 100,000 sprites shows the calls.
 #[inline]
@@ -730,14 +710,11 @@ mod tests {
     #[derive(Clone, Copy, Component)]
     struct Marked;
 
-    /// Draws `sprite` of entity `id` into `draws`, where `matrix` places it, as drawing the world
-    /// does: with the entity's ID.
     fn sprite_of(draws: &mut Draws, matrix: Mat4, sprite: Sprite, id: EntityId) {
         draws.extend_sprites(iter::once((matrix, sprite, id.get())));
     }
 
-    /// Where a scratch's buffers are, and how big, which drawing again without taking more memory
-    /// leaves as they were.
+    /// Where a scratch's buffers are and how big.
     fn held(scratch: &Scratch) -> [(usize, usize); 7] {
         let Scratch {
             segments,
@@ -762,23 +739,19 @@ mod tests {
         ]
     }
 
-    /// A shader for triangles whose parameter is their color, which blends as `blend` says, added
-    /// to `shaders`.
     fn flat_color(shaders: &mut Shaders, blend: Blend) -> Shader<[f32; 3], Vec4> {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
         let flat = shaders.add::<[f32; 3], Vec4>("flat color", &fixture, blend);
         flat.expect("the shader compiles")
     }
 
-    /// A triangle, added to `meshes`.
     fn add_triangle(meshes: &mut Meshes) -> Mesh<[f32; 3]> {
         let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
         let triangle = meshes.add("triangle", &corners, &[0, 1, 2]);
         triangle.expect("a mesh")
     }
 
-    /// A triangle, and a shader for it that blends, whose parameter is its color: a mesh that
-    /// draws back to front by its z, as sprites do.
+    /// A triangle and a blending color shader: a mesh that draws back to front by z, like sprites.
     fn flat_triangle() -> (Mesh<[f32; 3]>, Shader<[f32; 3], Vec4>) {
         let flat = flat_color(&mut Shaders::default(), Blend::Alpha);
         (add_triangle(&mut Meshes::default()), flat)
@@ -789,10 +762,9 @@ mod tests {
         Mesh(Entity, Transform, MeshDraw),
     }
 
-    /// Spawns sprites and meshes at several z's across tables, and checks that they're drawn back
-    /// to front, and at one z sprites under meshes, each in the order of their entities' IDs,
-    /// whatever tables they're in. Two tables' rows alternate between two z's, so that dozens of
-    /// runs share each, enough for an order by table or by row to show.
+    /// Sprites and meshes at several z's across tables draw back to front; at one z, sprites under
+    /// meshes, each in ID order whatever the table. Two tables' rows alternate between two z's, so
+    /// dozens of runs share each: enough for an order by table or row to show.
     #[test]
     fn the_world_draws_back_to_front_by_z() {
         let (triangle, flat) = flat_triangle();
@@ -876,9 +848,8 @@ mod tests {
         assert_eq!(draws, want);
     }
 
-    /// Sprites and meshes that blend, at 0.0 and -0.0 in turn, draw as one z, all the sprites under
-    /// all the meshes, each in the order of their IDs, whichever zero each is at; and a zero that
-    /// changes only its sign changes nothing, for a scratch kept from frame to frame too.
+    /// Sprites and blending meshes at 0.0 and -0.0 draw as one z: sprites under meshes, each in ID
+    /// order. A sign-only change changes nothing, in a kept scratch too.
     #[test]
     fn both_zeros_are_one_z() {
         let (triangle, flat) = flat_triangle();
@@ -925,7 +896,7 @@ mod tests {
         };
         let mut kept = Scratch::default();
         assert_eq!(drawn(&world, &mut kept), want);
-        // `==` takes -0.0 for 0.0, so the matrices drawn match whichever zero they're at.
+        // `==` takes -0.0 for 0.0, so matrices match whichever zero they're at.
         let (flipped, ..) = sprites[0];
         let at = world.get_mut::<Transform>(flipped).expect("alive");
         at.translation.z = -at.translation.z;
@@ -933,13 +904,12 @@ mod tests {
         assert_eq!(drawn(&world, &mut Scratch::default()), want);
     }
 
-    /// Draws children where their ancestors carry them, back to front by their z's in the world: a
-    /// child of a pivot that draws nothing, between two roots, where its own z would put it under
-    /// both; a grandchild whose table was made before its parent's; children with a sprite and a
-    /// mesh each, two of them at one z after the first in their table; and the child of an
-    /// ancestor without a transform. Their ancestors turn and scale unevenly, which doesn't
-    /// commute, so that matrices multiplied the wrong way round show. Drawing again in the same
-    /// scratch takes no more memory.
+    /// Children draw where their ancestors carry them, back to front by world z: a child of a
+    /// drawless pivot, between two roots where its own z would put it under both; a grandchild
+    /// whose table predates its parent's; children with a sprite and mesh, two at one z after the
+    /// first in their table; and the child of an ancestor without a transform. Ancestors turn and
+    /// scale unevenly, which doesn't commute, so reversed multiplication shows. Drawing again in
+    /// the same scratch takes no more memory.
     #[test]
     fn children_draw_where_their_ancestors_carry_them() {
         let (triangle, flat) = flat_triangle();
@@ -985,7 +955,7 @@ mod tests {
 
         // Back to front: 0.3, 0.41, 0.43, 0.44, 0.445, 0.45 and 0.5 in the world, each child's
         // matrix its parent's times its own, from the root down; at one z, sprites under meshes,
-        // each in the order of their IDs, which they draw with.
+        // each in ID order.
         let id = |entity: Entity| world.id(entity).expect("alive");
         let [lowest, middle_id, grand, meshed, kid, highest] =
             [lowest, middle, grand, meshed, kid, highest].map(id);
@@ -1067,14 +1037,18 @@ mod tests {
         assert_eq!(held(&scratch), before, "drawing again takes no more memory");
     }
 
-    /// Sprites, some with meshes, at one z across four tables, drawn after each change by a scratch
-    /// kept from frame to frame and by a fresh one, which draw the same each time: after nothing,
-    /// which takes no more memory; after the world is replaced by another spawned the same way,
-    /// which has the same tables, rows and z's and as many changes, but other IDs; after entities
-    /// despawned and others spawned in their tables, which keep their lengths, so that only which
-    /// entity is in a row shows; after two entities trade tables; after a z is set, which moves no
-    /// row; after two meshes are made opaque, one is set to another mesh, its z is set, and it's set
-    /// to blend again; and after a spawn and a despawn alone.
+    /// Sprites, some with meshes, at one z across four tables draw the same from a kept scratch as
+    /// from a fresh one after each change:
+    ///
+    /// - Nothing (takes no more memory).
+    /// - The world replaced by another spawned the same way: same tables, rows, z's and change
+    ///   count, other IDs.
+    /// - Entities despawned and others spawned in their tables, so only which entity is in a row
+    ///   shows.
+    /// - Two entities trading tables.
+    /// - A z set, which moves no row.
+    /// - Two meshes made opaque, one set to another mesh, its z set, and it set to blend again.
+    /// - A spawn and a despawn alone.
     #[test]
     fn a_kept_scratch_draws_as_a_fresh_one_does() {
         let (triangle, flat) = flat_triangle();
@@ -1144,8 +1118,8 @@ mod tests {
         world = World::default();
         let mut entities = populate(&mut world);
         step(&mut world, &mut kept, "the world replaced");
-        // Each round despawns one entity and spawns another into its table, which keeps its length,
-        // so that the order a stale scratch kept would draw other entities' rows.
+        // Each round despawns one entity and spawns another into its table, keeping its length, so
+        // a stale scratch's order would draw other entities' rows.
         for round in 0..20 {
             let gone = entities.swap_remove(round * 7 % entities.len());
             let meshed = world.get::<MeshDraw>(gone).is_some();
@@ -1178,9 +1152,9 @@ mod tests {
         step(&mut world, &mut kept, "a z set");
         z(&mut world, 0.5);
         step(&mut world, &mut kept, "the z set back");
-        // Two meshes made opaque, which draw first, by their meshes; one set to another mesh, which
-        // swaps them without moving a row or changing a z; its z set, which changes nothing; and
-        // set to blend again.
+        // Two meshes made opaque, which draw first, by their meshes; one set to another mesh,
+        // swapping them without moving a row or changing a z; its z set, changing nothing; and set
+        // to blend again.
         let opaque = flat_color(&mut Shaders::default(), Blend::Opaque);
         let mut meshes = Meshes::default();
         let others: [_; 3] = std::array::from_fn(|_| add_triangle(&mut meshes));
@@ -1218,9 +1192,8 @@ mod tests {
         step(&mut world, &mut kept, "a despawn");
     }
 
-    /// Leaves the world's opaque meshes to the renderer's scene, wherever they are, under a parent
-    /// too, and draws the meshes that blend and the sprites back to front, after the scene's
-    /// place.
+    /// Opaque meshes are left to the renderer's scene, under a parent too; blending meshes and
+    /// sprites draw back to front after it.
     #[test]
     fn opaque_meshes_are_left_to_the_scene() {
         let (mut shaders, mut meshes) = (Shaders::default(), Meshes::default());
@@ -1287,9 +1260,8 @@ mod tests {
         assert_eq!(draws, expected);
     }
 
-    /// Circles draw among the rest back to front by z, at one z over the sprites and under the
-    /// meshes that blend, each in the order of their IDs, with their entities' IDs, and children
-    /// where their ancestors carry them.
+    /// Circles draw among the rest back to front by z; at one z over sprites, under blending
+    /// meshes, each in ID order with their entities' IDs. Children draw where ancestors carry them.
     #[test]
     fn circles_draw_over_sprites_and_under_meshes() {
         let (triangle, flat) = flat_triangle();
@@ -1353,10 +1325,10 @@ mod tests {
         assert_eq!(draws, want);
     }
 
-    /// Text draws among the rest back to front by z, at one z over circles and under the meshes
-    /// that blend, its glyphs its entity's draws, where its transform places it; one that names no
-    /// font draws in the engine's own, which bakes as it's first drawn, its field waiting to be put
-    /// in the texture every context keeps for it.
+    /// Text draws among the rest back to front by z; at one z over circles, under blending meshes.
+    /// Its glyphs are its entity's draws, placed by its transform. Text naming no font uses the
+    /// engine's own, baked on first draw, its field waiting to go in the texture every context
+    /// keeps for it.
     #[test]
     fn text_draws_over_circles_and_under_meshes() {
         let (triangle, flat) = flat_triangle();
@@ -1421,7 +1393,6 @@ mod tests {
         assert_eq!(draws, want);
     }
 
-    /// A transform at `x` and `z`.
     fn at_x(x: f32, z: f32) -> Transform {
         Transform {
             translation: Vec3::new(x, 0.0, z).as_dvec3(),
@@ -1429,7 +1400,6 @@ mod tests {
         }
     }
 
-    /// What `world` draws with `scratch`, `alpha` of the way on from `past`, found for it.
     fn between_ticks(world: &World, past: &mut Past, alpha: f32, scratch: &mut Scratch) -> Draws {
         past.resolve(world);
         let mut draws = Draws::default();
@@ -1447,9 +1417,8 @@ mod tests {
         draws
     }
 
-    /// Roots blended in runs of rows on the job system's threads draw as each row's own blend has
-    /// them, bit for bit, on a pool of four threads and outside one: 5,000 movers, which isn't a
-    /// whole number of runs.
+    /// Roots blended in runs on the job system's threads draw bit for bit as each row's own blend,
+    /// on four threads and outside a pool: 5,000 movers, not a whole number of runs.
     #[test]
     fn blending_on_threads_draws_each_row_its_own_way() {
         let mut world = World::default();
@@ -1488,9 +1457,9 @@ mod tests {
         assert_eq!(bits(&four), bits(&want), "on four threads");
     }
 
-    /// A child of a pivot that turns a quarter turn a tick and draws nothing draws between ticks
-    /// on its orbit, by the pivot's transform drawn between them, then its own: not on the chord
-    /// between where the two ticks put it, as blending its world matrices would.
+    /// A child of a drawless pivot turning a quarter turn a tick draws between ticks on its orbit
+    /// (pivot's blended transform, then its own), not on the chord between the ticks' places, as
+    /// blending world matrices would.
     #[test]
     fn children_blend_their_locals_then_compose() {
         let mut world = World::default();
@@ -1520,12 +1489,11 @@ mod tests {
         assert_eq!(draws, want);
     }
 
-    /// Drawing between ticks keeps the order the latest tick sorted by: a sprite whose z passes
-    /// another's draws over it from the tick that passes it, though it's drawn below it on its way,
-    /// and so does a child, whose own transform blends under its parent's. What didn't move draws
-    /// bit for bit as the tick left it, at a z of -0.0 too, where a lerp of equal ends would round,
-    /// or lose the zero's sign; a mesh blends as a sprite does; and a scratch kept between frames
-    /// draws as a fresh one does.
+    /// Drawing between ticks keeps the latest tick's order. A sprite whose z passes another's draws
+    /// over it from the tick that passes it, though below on its way; so does a child, whose own
+    /// transform blends under its parent's. What didn't move draws bit for bit as the tick left
+    /// it, at z -0.0 too, where a lerp of equal ends would round or lose the zero's sign. A mesh
+    /// blends like a sprite, and a kept scratch draws as a fresh one.
     #[test]
     fn blending_keeps_the_order_the_ticks_sorted() {
         let (triangle, flat) = flat_triangle();
@@ -1533,7 +1501,7 @@ mod tests {
             color: Vec4::splat(n),
             ..Sprite::default()
         };
-        // Where glam's lerp of equal ends rounds, at the fractions drawn, and a turn that its
+        // Where glam's lerp of equal ends rounds at the fractions drawn, and a turn its
         // normalizing changes.
         let still = Transform {
             translation: DVec3::new(3.7, -1.9, 0.5),
@@ -1551,7 +1519,7 @@ mod tests {
         let passer = world.spawn((at_x(0.0, 0.375), sprite(3.0)));
         let mesh = MeshDraw::new(triangle, flat, Vec4::ONE);
         let meshed = world.spawn((at_x(0.0, 0.9), mesh));
-        // Children of a parent that stays where it is, one passing the other's z.
+        // Children of a parent that stays put, one passing the other's z.
         let parent = world.spawn(at_x(10.0, 0.0));
         let [passed, passing] = [(0.75, 30.0), (0.6875, 31.0)].map(|(z, n)| {
             let child = world.spawn((at_x(0.0, z), sprite(n)));
@@ -1576,17 +1544,17 @@ mod tests {
             moved(entity, at_x(i + 4.0, 0.1));
         }
         swarm.sort_by_key(|&(entity, _)| world.id(entity));
-        // glam's lerp, as drawing computes it for what moves, a translation in `f64`.
+        // glam's lerp as drawing computes it for what moves: a translation in `f64`.
         let lerp = |from: f32, to: f32, alpha: f32| {
             let (from, to, alpha) = (f64::from(from), f64::from(to), f64::from(alpha));
             from * (1.0 - alpha) + to * alpha
         };
-        // At `x` and `z` in `f64`, as a translation drawn on its way is.
+        // At `x` and `z` in `f64`, like a translation drawn on its way.
         let at = |x: f64, z: f64| Transform {
             translation: DVec3::new(x, 0.0, z),
             ..Transform::IDENTITY
         };
-        // Bit for bit, which `Debug` shows of a zero's sign, and `==` doesn't.
+        // Bit for bit: `Debug` shows a zero's sign, `==` doesn't.
         let bits = |draws: &Draws| format!("{draws:?}");
         let mut kept = Scratch::default();
         let id = |entity: Entity| world.id(entity).expect("alive");
