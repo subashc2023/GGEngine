@@ -345,102 +345,15 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         if NOT_REPLAYED.contains(&flag) {
             not_replayed.get_or_insert_with(|| flag.to_owned());
         }
-        match flag {
-            "-h" | "--help" => return Ok(None),
-            "--headless" => parsed.headless = true,
-            "--embedded" => parsed.embedded = true,
-            "--supervised" => parsed.supervised = true,
-            "--real-time" => parsed.real_time = true,
-            "--validation" => parsed.validation = true,
-            "--no-validation" => parsed.validation = false,
-            "--vsync" => parsed.vsync = true,
-            "--no-api" => parsed.api = false,
-            "--stopped" => parsed.stopped = true,
-            "--sync-test" => parsed.sync_test = true,
-            "--rollback" => parsed.rollback = true,
-            "--link" => {
-                let link = value_of(flag)?;
-                parsed.link = Some(conditions(&link).ok_or_else(|| {
-                    bad(format!(
-                        "`--link` takes the milliseconds each packet is held, the most more, and \
-                         the percent lost, from 0 to less than 100, such as `100,20,5`, not \
-                         `{link}`"
-                    ))
-                })?);
-            }
-            "--frames" => {
-                let frames = value_of(flag)?;
-                let frames = frames.parse().map_err(|_| {
-                    bad(format!(
-                        "`--frames` takes a whole number of frames, not `{frames}`"
-                    ))
-                })?;
-                parsed.frames = Some(frames);
-            }
-            "--size" => {
-                let size = value_of(flag)?;
-                parsed.size = Some(sides(&size).ok_or_else(|| {
-                    bad(format!(
-                        "`--size` takes the view's width and height in pixels, each from 1 to \
-                         {MAX_TEXTURE_SIZE}, such as `320x180`, not `{size}`"
-                    ))
-                })?);
-            }
-            "--capture" => {
-                let frame = value_of(flag)?;
-                parsed.capture = Some(frame.parse().map_err(|_| {
-                    bad(format!(
-                        "`--capture` takes a frame's number, from 1, not `{frame}`"
-                    ))
-                })?);
-            }
-            "--max-fps" => {
-                let max = value_of(flag)?;
-                parsed.max_fps = Some(max.parse().map_err(|_| {
-                    bad(format!(
-                        "`--max-fps` takes a whole number of frames a second, 1 or more, not \
-                         `{max}`"
-                    ))
-                })?);
-            }
-            "--threads" => {
-                let threads = value_of(flag)?;
-                parsed.threads = threads.parse().map_err(|_| {
-                    bad(format!(
-                        "`--threads` takes a number of threads, 1 or more, not `{threads}`"
-                    ))
-                })?;
-            }
-            "--gpu" => parsed.gpu = Some(value_of(flag)?),
-            "--record" => parsed.record = Some(value_of(flag)?.into()),
-            "--replay" => parsed.replay = Some(value_of(flag)?.into()),
-            // The last given, which `gg run` gives after the game's own.
-            "--restore" => parsed.restore = Some(value_of(flag)?.into()),
-            "--relay" => relay = Some(value_of(flag)?),
-            // Not echoed in its error, as it's a session's key, or nearly.
-            "--code" => {
-                parsed.code = Some(value_of(flag)?.parse().map_err(|why| {
-                    bad(format!(
-                        "`--code` takes the session's code, 16 digits and letters such as \
-                         `7KQ2-9XMB-4TZD-P0WH`: {why}"
-                    ))
-                })?);
-            }
-            "--mods" => parsed.mods = Some(value_of(flag)?.into()),
-            "--package" => parsed.package = Some(value_of(flag)?.into()),
-            "--dump" => {
-                let at = value_of(flag)?;
-                let dump = match at.as_str() {
-                    "attach" => Some(Dump::Attach),
-                    tick => tick.parse().ok().map(Dump::Tick),
-                };
-                parsed.dump = Some(dump.ok_or_else(|| {
-                    bad(format!(
-                        "`--dump` takes a tick's number, or `attach`, not `{at}`"
-                    ))
-                })?);
-            }
-            _ => return Err(bad(format!("unknown argument `{arg}`"))),
+        if matches!(flag, "-h" | "--help") {
+            return Ok(None);
+        }
+        let taken = option(&mut parsed, flag, &mut value_of)?
+            || development(&mut parsed, flag, &mut value_of)?
+            || determinism(&mut parsed, flag, &mut value_of)?
+            || networking(&mut parsed, &mut relay, flag, &mut value_of)?;
+        if !taken {
+            return Err(bad(format!("unknown argument `{arg}`")));
         }
         if value.is_some() {
             return Err(bad(format!("`{flag}` takes no value")));
@@ -482,6 +395,157 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             (End::Connect, None, Some(relay)) => Net::Connect(Toward::Relay(relay)),
         }),
     };
+    check(&parsed)?;
+    Ok(Some(parsed))
+}
+
+/// Takes `flag` into `parsed` if it's one of `--help`'s options, its value read through
+/// `value_of`; returns whether it was.
+fn option(
+    parsed: &mut Args,
+    flag: &str,
+    value_of: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<bool> {
+    match flag {
+        "--headless" => parsed.headless = true,
+        "--embedded" => parsed.embedded = true,
+        "--supervised" => parsed.supervised = true,
+        "--real-time" => parsed.real_time = true,
+        "--validation" => parsed.validation = true,
+        "--no-validation" => parsed.validation = false,
+        "--vsync" => parsed.vsync = true,
+        "--frames" => {
+            let frames = value_of(flag)?;
+            let frames = frames.parse().map_err(|_| {
+                bad(format!(
+                    "`--frames` takes a whole number of frames, not `{frames}`"
+                ))
+            })?;
+            parsed.frames = Some(frames);
+        }
+        "--size" => {
+            let size = value_of(flag)?;
+            parsed.size = Some(sides(&size).ok_or_else(|| {
+                bad(format!(
+                    "`--size` takes the view's width and height in pixels, each from 1 to \
+                     {MAX_TEXTURE_SIZE}, such as `320x180`, not `{size}`"
+                ))
+            })?);
+        }
+        "--capture" => {
+            let frame = value_of(flag)?;
+            parsed.capture = Some(frame.parse().map_err(|_| {
+                bad(format!(
+                    "`--capture` takes a frame's number, from 1, not `{frame}`"
+                ))
+            })?);
+        }
+        "--max-fps" => {
+            let max = value_of(flag)?;
+            parsed.max_fps = Some(max.parse().map_err(|_| {
+                bad(format!(
+                    "`--max-fps` takes a whole number of frames a second, 1 or more, not \
+                     `{max}`"
+                ))
+            })?);
+        }
+        "--threads" => {
+            let threads = value_of(flag)?;
+            parsed.threads = threads.parse().map_err(|_| {
+                bad(format!(
+                    "`--threads` takes a number of threads, 1 or more, not `{threads}`"
+                ))
+            })?;
+        }
+        "--gpu" => parsed.gpu = Some(value_of(flag)?),
+        "--mods" => parsed.mods = Some(value_of(flag)?.into()),
+        "--package" => parsed.package = Some(value_of(flag)?.into()),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Takes `flag` into `parsed` if it's one of development builds', as `option` takes an option.
+fn development(
+    parsed: &mut Args,
+    flag: &str,
+    value_of: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<bool> {
+    match flag {
+        "--no-api" => parsed.api = false,
+        "--stopped" => parsed.stopped = true,
+        // The last given, which `gg run` gives after the game's own.
+        "--restore" => parsed.restore = Some(value_of(flag)?.into()),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Takes `flag` into `parsed` if it's one of determinism's, as `option` takes an option.
+fn determinism(
+    parsed: &mut Args,
+    flag: &str,
+    value_of: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<bool> {
+    match flag {
+        "--sync-test" => parsed.sync_test = true,
+        "--record" => parsed.record = Some(value_of(flag)?.into()),
+        "--replay" => parsed.replay = Some(value_of(flag)?.into()),
+        "--dump" => {
+            let at = value_of(flag)?;
+            let dump = match at.as_str() {
+                "attach" => Some(Dump::Attach),
+                tick => tick.parse().ok().map(Dump::Tick),
+            };
+            parsed.dump = Some(dump.ok_or_else(|| {
+                bad(format!(
+                    "`--dump` takes a tick's number, or `attach`, not `{at}`"
+                ))
+            })?);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Takes `flag` into `parsed` if it's one of networking's, but the session flags `parse` takes, as
+/// `option` takes an option: `--relay`'s into `relay`.
+fn networking(
+    parsed: &mut Args,
+    relay: &mut Option<String>,
+    flag: &str,
+    value_of: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<bool> {
+    match flag {
+        "--rollback" => parsed.rollback = true,
+        "--link" => {
+            let link = value_of(flag)?;
+            parsed.link = Some(conditions(&link).ok_or_else(|| {
+                bad(format!(
+                    "`--link` takes the milliseconds each packet is held, the most more, and \
+                     the percent lost, from 0 to less than 100, such as `100,20,5`, not \
+                     `{link}`"
+                ))
+            })?);
+        }
+        "--relay" => *relay = Some(value_of(flag)?),
+        // Not echoed in its error, as it's a session's key, or nearly.
+        "--code" => {
+            parsed.code = Some(value_of(flag)?.parse().map_err(|why| {
+                bad(format!(
+                    "`--code` takes the session's code, 16 digits and letters such as \
+                     `7KQ2-9XMB-4TZD-P0WH`: {why}"
+                ))
+            })?);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Fails at the first of `parsed`'s flags that another rules out, or that needs one it hasn't, in
+/// the order a run given several of them meets them.
+fn check(parsed: &Args) -> Result<()> {
     if parsed.restore.is_some() && parsed.record.is_some() {
         return Err(bad(
             "`--restore` starts the run from a snapshot, which a recording, whose replay starts \
@@ -635,7 +699,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
              server was given or printed, so it needs `--code`"
         )));
     }
-    Ok(Some(parsed))
+    Ok(())
 }
 
 fn bad(message: String) -> Error {
