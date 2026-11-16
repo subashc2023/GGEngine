@@ -1,20 +1,20 @@
-//! Hot reload of games' assets, shaders, textures, models, fonts, prefabs, UIs, sounds and music,
-//! in development runs that serve the tool API. A thread of its own, `gg-watch`, watches the files
-//! each one read as it was loaded, a shader's own and those it includes, a texture's image, a
-//! model's glTF file and those it names, a font's file, a prefab's, a UI's, a sound's, a music's,
-//! and reads it again as they change, off the main thread: compiles the shader, decodes the image,
-//! reads the model, bakes the font, reads the prefab's text, reads the UI's tree, decodes the
-//! sound, reads the music. The main
-//! thread puts what it read in place of the asset, under the same handle, which the renderer draws
-//! once its frames have streamed it, drawing the asset as it was until then, a shader from the next
-//! frame, a sound's next play plays, and music's play crossfades to. A change that doesn't compile,
-//! decode, read or bake, or a shader's that breaks the contract that `Shaders::add` describes,
-//! warns, and the asset keeps drawing, or playing, as it did; until one reads, a change to any file
-//! beside its files reads it again too, such as an include it couldn't find, since a compile that
-//! fails lists none of the files it read. The thread follows a texture, a model, a font, a prefab
-//! or a UI whose file is renamed or moved, as the asset database has it, which the main thread
-//! tells it of; a sound or music, which has no asset ID, it watches where it was loaded from. A
-//! texture or a model removed it watches no more.
+//! Hot reload of games' shaders, textures, models, fonts, prefabs, UIs, sounds and music, in
+//! development runs that serve the tool API.
+//!
+//! The `gg-watch` thread watches the files each asset read as it loaded (a shader's includes, a
+//! model's glTF file and those it names) and rereads the asset off the main thread as they change.
+//! The main thread puts the result in place of the asset, under the same handle. The renderer
+//! draws it once its frames have streamed it, the old asset until then; a shader draws from the
+//! next frame, a sound's next play plays it, and music's play crossfades to it.
+//!
+//! A change that doesn't compile, decode, read or bake, or a shader's that breaks the contract
+//! `Shaders::add` describes, warns, and the asset keeps drawing or playing as it did. Until one
+//! reads, a change to any file beside its files rereads it too: a failed compile lists no files
+//! it read, so an include it couldn't find is otherwise missed.
+//!
+//! The thread follows a texture, model, font, prefab or UI whose file is renamed or moved, as the
+//! asset database has it; the main thread tells it. A sound or music has no asset ID, so it's
+//! watched where loaded from. A removed texture or model is watched no more.
 
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -41,39 +41,33 @@ use crate::package;
 use crate::prefab;
 use crate::{Font, Music, Prefab, Sound};
 
-/// How long the thread waits between looks at the files. A change reads on the look after the one
-/// that sees it, in about a tenth of a second more.
+/// How long the thread waits between looks. A change reads on the look after the one that sees it.
 const LOOK: Duration = Duration::from_millis(100);
 
-/// How long before the read that loaded an asset its files must have last changed for it to have
-/// read them as they are: files' times can trail the clock that the read's start is read from, as
-/// Windows and Linux stamp them from a clock that moves a tick at a time, and FAT keeps them to
-/// 2 s. A file changed within it reads the asset again, at worst for nothing.
+/// How long before an asset's loading read its files must have last changed for it to have read
+/// them as they are. File times can trail the read's clock (Windows and Linux stamp from a coarse
+/// clock; FAT keeps 2 s). A file changed within it rereads the asset, at worst for nothing.
 const MARGIN: Duration = Duration::from_secs(2);
 
-/// How many looks a change to a failing asset's files waits for the directories beside them to hold
-/// too: something may write beside them all the time, such as a log, which would otherwise keep
-/// the change from reading.
+/// How many looks a failing asset's change waits for the directories beside its files to hold too.
+/// Something may write there all the time (a log) and would block the reread.
 const SETTLE: u32 = 10;
 
-/// How long the run's end waits for a read under way, as a shader's compile, which slangc ends in
-/// about a tenth of a second, so that it removes what slangc wrote; one that hangs holds the end up
-/// no longer.
+/// How long the run's end waits for a read under way, so a shader's compile (about 0.1 s) removes
+/// what slangc wrote. A read that hangs holds the end up no longer.
 const STOP: Duration = Duration::from_secs(1);
 
-/// An asset as it was loaded, whose files the thread watches.
+/// An asset as it was loaded. Each file-backed kind has its handle, `name`, file `path` and
+/// `read_at`, when its loading read began.
 pub(crate) enum Source {
-    /// A game's shader.
     Shader(ShaderSource),
-    /// `texture`, loaded as `name` from the image file at `path`, by a read begun at `read_at`.
     Texture {
         texture: Texture,
         name: String,
         path: PathBuf,
         read_at: SystemTime,
     },
-    /// The model loaded as `name` from the file at `path`, which resolved to `file`, by a read
-    /// begun at `read_at` that read `files`, its own first.
+    /// `path` resolved to `file`; `files` is what the read read, its own first.
     Model {
         file: PathBuf,
         name: String,
@@ -81,36 +75,30 @@ pub(crate) enum Source {
         files: Vec<PathBuf>,
         read_at: SystemTime,
     },
-    /// `font`, loaded as `name` from the font file at `path`, by a read begun at `read_at`.
     Font {
         font: Font,
         name: String,
         path: PathBuf,
         read_at: SystemTime,
     },
-    /// `prefab`, loaded as `name` from the prefab file at `path`, by a read begun at `read_at`.
     Prefab {
         prefab: Prefab,
         name: String,
         path: PathBuf,
         read_at: SystemTime,
     },
-    /// UI file `ui`, by its index among its context's, loaded as `name` from the file at `path`,
-    /// by a read begun at `read_at`.
     Ui {
         ui: usize,
         name: String,
         path: PathBuf,
         read_at: SystemTime,
     },
-    /// `sound`, loaded as `name` from the audio file at `path`, by a read begun at `read_at`.
     Sound {
         sound: Sound,
         name: String,
         path: PathBuf,
         read_at: SystemTime,
     },
-    /// `music`, loaded as `name` from the audio file at `path`, by a read begun at `read_at`.
     Music {
         music: Music,
         name: String,
@@ -133,7 +121,6 @@ impl Source {
         }
     }
 
-    /// The file it's read from.
     fn path(&self) -> &Path {
         match self {
             Self::Shader(shader) => shader.path(),
@@ -147,7 +134,6 @@ impl Source {
         }
     }
 
-    /// The files its read read, its own first.
     fn files(&self) -> &[PathBuf] {
         match self {
             Self::Shader(shader) => shader.files(),
@@ -161,7 +147,6 @@ impl Source {
         }
     }
 
-    /// When the read that loaded it began: what its files hold from then on may not be in it.
     fn read_at(&self) -> SystemTime {
         match self {
             Self::Shader(shader) => shader.compiled_at(),
@@ -175,8 +160,7 @@ impl Source {
         }
     }
 
-    /// Which texture, model, font, prefab or UI it is; `None` for a shader, a sound or music, which
-    /// nothing follows by an asset ID.
+    /// `None` for a shader, sound or music, which have no asset ID.
     fn asset(&self) -> Option<Asset> {
         match self {
             Self::Shader(_) | Self::Sound { .. } | Self::Music { .. } => None,
@@ -188,10 +172,8 @@ impl Source {
         }
     }
 
-    /// Reads it again from its files, as it was loaded: compiles a shader and checks it against the
-    /// contract for the types it was added for, decodes a texture's image, reads a model, bakes a
-    /// font, reads a prefab's text, reads a UI's tree, decodes a sound, and reads music. Returns
-    /// what it read, and the files it read, its own first.
+    /// Rereads it as it was loaded (a shader is also checked against its types' contract).
+    /// Returns what it read and the files it read, its own first.
     ///
     /// Fails as loading it does.
     fn read(&self) -> Result<(Reloaded, Vec<PathBuf>)> {
@@ -221,7 +203,7 @@ impl Source {
             } => {
                 let read = gltf::read_listing(name, path, &package::Files::default());
                 let (mut imported, files) = read?;
-                // Here, rather than by the loader, as the model takes them at once.
+                // Here, not by the loader: the model takes them at once.
                 imported.decode_images(name, path)?;
                 let reloaded = Reloaded::Model {
                     file: file.clone(),
@@ -283,9 +265,8 @@ impl Source {
     }
 }
 
-/// A texture, a model, a font, a prefab or a UI that the thread watches, as the main thread knows
-/// it: a texture, a font and a prefab by its handle, a UI's file by its index, and a model by the
-/// file it resolved to as it was loaded, which the context keeps it by.
+/// An asset by the main thread's key: handle (texture, font, prefab), index (UI) or the file a
+/// model resolved to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Asset {
     Texture(Texture),
@@ -295,47 +276,41 @@ pub(crate) enum Asset {
     Ui(usize),
 }
 
-/// An asset that the thread read again, which the main thread puts in place of the one loaded.
+/// An asset reread from `path`, for the main thread to put in place of the one loaded.
 pub(crate) enum Reloaded {
     Shader(Compiled),
-    /// `texture`'s image, read from `path`.
     Texture {
         texture: Texture,
         path: PathBuf,
         image: Image,
     },
-    /// What the model loaded from `file` draws, read from `path`.
     Model {
         file: PathBuf,
         path: PathBuf,
         imported: Imported,
     },
-    /// What `font` baked again from `path`, boxed, as a bake is over 2 KiB and the rest are small.
+    /// Boxed: a bake is over 2 KiB and the rest are small.
     Font {
         font: Font,
         path: PathBuf,
         bake: Box<Bake>,
     },
-    /// What `prefab`'s file holds, read again from `path`.
     Prefab {
         prefab: Prefab,
         path: PathBuf,
         text: String,
     },
-    /// What UI file `ui`, by its index, holds, read again from `path`.
     Ui {
         ui: usize,
         path: PathBuf,
         document: Document,
     },
-    /// What `sound` decoded again from `path`, boxed, as kira's data, its settings among it, is
-    /// over 400 bytes, twice the next largest.
+    /// Boxed: kira's data, settings included, is over 400 bytes, twice the next largest.
     Sound {
         sound: Sound,
         path: PathBuf,
         data: Box<StaticSoundData>,
     },
-    /// What `music` read again from `path`.
     Music {
         music: Music,
         path: PathBuf,
@@ -345,39 +320,33 @@ pub(crate) enum Reloaded {
 
 /// What the main thread sends the thread.
 enum Message {
-    /// An asset to watch.
     Watch(Source),
-    /// A texture, a model, a font or a prefab whose file is at a path anew, renamed or moved, as
-    /// what it holds.
+    /// `asset`'s file is at a path anew (renamed or moved) and holds what it did.
     Moved(Asset, PathBuf),
-    /// A texture or a model removed, which it watches no more.
+    /// A removed texture or model: watch it no more.
     Unwatch(Asset),
 }
 
-/// The thread, from the main thread's side, which ends it as it drops.
+/// The thread, from the main thread's side. Dropping it ends the thread.
 pub(crate) struct HotReload {
-    /// How many of the shaders' sources it's been sent.
+    /// How many shader sources it's been sent.
     sent: usize,
-    /// `None` once it's dropping.
+    /// `None` once dropping.
     messages: Option<Sender<Message>>,
     reloaded: Receiver<Reloaded>,
-    /// The textures, models, fonts and prefabs it watches whose files are under the asset root, or
-    /// will be, which it follows by their asset IDs as the files are renamed or moved.
     followed: Vec<Followed>,
 }
 
-/// A texture, a model, a font or a prefab whose file is under the asset root, which
-/// [`HotReload::follow`] follows.
+/// An asset whose file is under the asset root, which [`HotReload::follow`] follows.
 struct Followed {
     asset: Asset,
     /// The name it was loaded as.
     name: String,
-    /// Its asset ID, once the asset database has one for its file: a file new to the run, as a
-    /// stand-in's that came, has none until the database's next scan gives it one.
+    /// Its asset ID, once the database has one for its file (a stand-in's new file has none until
+    /// the next scan).
     id: Option<AssetId>,
-    /// Its file's path from the asset root, as the asset database last had it, or else as it was
-    /// loaded from; `None` while the thread doesn't watch it, as for a stand-in for a texture whose
-    /// ID no asset has.
+    /// Its path from the asset root as the database last had it, else as loaded. `None` while the
+    /// thread doesn't watch it (a stand-in for a texture whose ID no asset has).
     at: Option<Arc<str>>,
 }
 
@@ -402,8 +371,7 @@ impl HotReload {
         })
     }
 
-    /// Sends the thread the games' shaders that `shaders` added since it last did. Once it's sent
-    /// them all, it allocates nothing.
+    /// Sends the thread the shaders added since the last call. Allocates nothing once all are sent.
     pub(crate) fn watch_shaders(&mut self, shaders: &Shaders) {
         for source in &shaders.sources()[self.sent..] {
             self.send(Message::Watch(Source::Shader(source.clone())));
@@ -411,9 +379,8 @@ impl HotReload {
         self.sent = shaders.sources().len();
     }
 
-    /// Has the thread watch `source`, a texture's or a model's, following its file as it's renamed
-    /// or moved, if it's at `at` from the asset root, as [`follow`](Self::follow) says: by its asset
-    /// ID, `id`, or by the one the asset database gives its file once it has one.
+    /// Watches `source`. If it's at `at` from the asset root, its file is followed
+    /// ([`follow`](Self::follow)) by `id`, or by the ID the database later gives the file.
     pub(crate) fn watch(&mut self, source: Source, id: Option<AssetId>, at: Option<Arc<str>>) {
         if let (Some(at), Some(asset)) = (at, source.asset()) {
             let name = source.name().to_owned();
@@ -428,9 +395,8 @@ impl HotReload {
         self.send(Message::Watch(source));
     }
 
-    /// Has the thread watch `asset`, a texture or a font loaded as `name`, a stand-in for the one
-    /// whose asset ID is `id`, which no asset has, once one has it, as [`follow`](Self::follow)
-    /// finds it: its file is read then, in the stand-in's place.
+    /// Watches `asset` (loaded as `name`), a stand-in for the one with asset ID `id`, which no
+    /// asset has. Once one does, [`follow`](Self::follow) finds it and reads its file in place.
     pub(crate) fn watch_for(&mut self, asset: Asset, name: &str, id: AssetId) {
         self.followed.push(Followed {
             asset,
@@ -440,11 +406,10 @@ impl HotReload {
         });
     }
 
-    /// Has the thread follow each texture, model and font it watches whose file the asset database
-    /// `catalog`, of the asset root `root`, has elsewhere since it last did, by its ID, which one
-    /// without takes from the database once it has one for the file: watching it at that path from
-    /// then on, as a file renamed or moved holds what it held; or, for a stand-in, whose ID no
-    /// asset had, reading the file it's at, as the next look finds it.
+    /// Follows each watched texture, model and font whose file `catalog` (the database of asset
+    /// root `root`) has elsewhere since the last call, by ID; one without an ID takes it from the
+    /// database once it has one. It's watched at the new path, since a renamed or moved file holds
+    /// what it held. A stand-in, whose ID no asset had, reads the file now at its path.
     pub(crate) fn follow(&mut self, catalog: &Catalog, root: &Path) {
         let mut messages = Vec::new();
         for followed in &mut self.followed {
@@ -459,7 +424,7 @@ impl HotReload {
             }
             let path = root.join(at);
             let name = followed.name.clone();
-            // Never read: it's read as it's first looked at.
+            // Never read, so the first look reads it.
             let read_at = SystemTime::UNIX_EPOCH;
             messages.push(match (&followed.at, &followed.asset) {
                 (None, &Asset::Texture(texture)) => Message::Watch(Source::Texture {
@@ -483,21 +448,19 @@ impl HotReload {
         }
     }
 
-    /// Has the thread watch `asset`, a texture or a model removed, no more, nor follow its file;
-    /// what it reads of it meanwhile is the main thread's to drop.
+    /// Stops watching removed `asset`; the main thread drops what was read of it meanwhile.
     pub(crate) fn unwatch(&mut self, asset: Asset) {
         self.followed.retain(|followed| followed.asset != asset);
         self.send(Message::Unwatch(asset));
     }
 
-    /// What the thread read again since it was last asked, an asset at a time.
     pub(crate) fn take(&self) -> Option<Reloaded> {
         self.reloaded.try_recv().ok()
     }
 
     fn send(&self, message: Message) {
         if let Some(messages) = &self.messages {
-            // The thread runs until this side drops, or until it panics, which the log has.
+            // The thread runs until this side drops or it panics (the log has that).
             let _ = messages.send(message);
         }
     }
@@ -505,12 +468,12 @@ impl HotReload {
 
 impl Drop for HotReload {
     /// Ends the thread, which starts no read once this side lets go, waiting up to [`STOP`] for one
-    /// under way, so that it removes what slangc wrote: slangc outlives a process that ends first,
-    /// and writes it after. What's read meanwhile isn't put in place.
+    /// under way so it removes what slangc wrote (slangc outlives a process that ends first).
+    /// What's read meanwhile isn't put in place.
     fn drop(&mut self) {
         drop(self.messages.take());
         let until = Instant::now() + STOP;
-        // Until the thread ends, letting go of its side.
+        // Until the thread ends and lets go of its side.
         while (self.reloaded)
             .recv_timeout(until.saturating_duration_since(Instant::now()))
             .is_ok()
@@ -518,10 +481,9 @@ impl Drop for HotReload {
     }
 }
 
-/// The thread: watches each asset it's sent, looking at its files every [`LOOK`] and sending
-/// `back` what reads again, until the main thread's side drops.
+/// The thread: looks at each asset's files every [`LOOK`] and sends `back` what rereads.
 fn watch(messages: &Receiver<Message>, back: &Sender<Reloaded>) {
-    // `None` where an asset is unwatched, until the look ends, as `look` says.
+    // `None` where an asset is unwatched, until the look ends.
     let mut watched: Vec<Option<(Source, Files)>> = Vec::new();
     loop {
         match messages.recv_timeout(LOOK) {
@@ -538,13 +500,11 @@ fn watch(messages: &Receiver<Message>, back: &Sender<Reloaded>) {
     }
 }
 
-/// Looks at the files of each asset `watched` holds, in order, reading again each whose files
-/// changed and held, as [`Files::look`] says, and sending `back` what reads, as [`read`] says.
-/// Before each read it takes what `messages` brought, as [`take`] does, so that no read starts
-/// once the main thread's side has let go, which waits for the one under way alone: an asset
-/// sent meanwhile is looked at from the next look, and one unwatched meanwhile isn't read, its
-/// place left `None` until the look ends, so that none of the places the look goes on to shifts.
-/// Returns false once that side has let go.
+/// Looks at each `watched` asset's files in order, rereading those that changed and held
+/// ([`Files::look`]) and sending `back` what reads ([`read`]). Before each read it takes `messages`
+/// ([`take`]), so no read starts once the main thread's side has let go. An asset sent meanwhile
+/// is looked at next look; one unwatched meanwhile isn't read and keeps its place as `None` until
+/// the look ends, so later places don't shift. Returns false once that side has let go.
 fn look(
     messages: &Receiver<Message>,
     watched: &mut Vec<Option<(Source, Files)>>,
@@ -569,8 +529,7 @@ fn look(
     true
 }
 
-/// Takes `message` into what the thread watches, `watched`, where an asset unwatched leaves
-/// `None` in its place.
+/// Applies `message` to `watched`; unwatching leaves `None`.
 fn take(message: Message, watched: &mut Vec<Option<(Source, Files)>>) {
     match message {
         Message::Watch(source) => {
@@ -606,8 +565,7 @@ fn take(message: Message, watched: &mut Vec<Option<(Source, Files)>>) {
     }
 }
 
-/// Takes what the thread has been sent since it last looked, if anything: false once the main
-/// thread's side has let go.
+/// Takes what was sent since the last look. False once the main thread's side has let go.
 fn take_all(messages: &Receiver<Message>, watched: &mut Vec<Option<(Source, Files)>>) -> bool {
     loop {
         match messages.try_recv() {
@@ -618,16 +576,15 @@ fn take_all(messages: &Receiver<Message>, watched: &mut Vec<Option<(Source, File
     }
 }
 
-/// Reads `source` again from its files, noting in `files` those it lists, and sends it `back` if
-/// it reads, as [`Source::read`] says; or says why it doesn't, unless it said so last time, from
-/// the same files.
+/// Rereads `source` ([`Source::read`]), noting in `files` those it lists, and sends it `back`;
+/// on failure, warns why unless it did last time from the same files.
 fn read(source: &Source, files: &mut Files, back: &Sender<Reloaded>) {
-    // As the read begins, so that a change while it fails reads it again.
+    // Taken as the read begins, so a change while it fails rereads.
     let dirs = files.dirs(stamp);
     match source.read() {
         Ok((reloaded, listed)) => {
             files.succeeded(&listed, stamp);
-            // Unless the main thread's side has let go, which ends the thread next.
+            // Fails only if the main thread's side has let go, which ends the thread next.
             let _ = back.send(reloaded);
         }
         Err(error) => {
@@ -689,13 +646,12 @@ fn read(source: &Source, files: &mut Files, back: &Sender<Reloaded>) {
     }
 }
 
-/// When a file was last changed, and its length, which show that it changed; `None` while it
-/// can't be read, as while an editor replaces it.
+/// A file's change time and length; `None` while unreadable (as while an editor replaces it).
 type Stamp = Option<(SystemTime, u64)>;
 
-/// The file at `path`'s stamp, as the file system has it. A directory's is when the latest of its
-/// entries changed, and a digest of their names and stamps for its length, which changes as a
-/// file in it is made, removed or changed, but not as one in a directory within it is changed.
+/// The stamp of `path`. A directory's is its latest entry's time and a digest of the entries'
+/// names and stamps, so it changes as a file in it is made, removed or changed, not one in a
+/// subdirectory.
 fn stamp(path: &Path) -> Stamp {
     let metadata = fs::metadata(path).ok()?;
     if metadata.is_dir() {
@@ -704,8 +660,8 @@ fn stamp(path: &Path) -> Stamp {
     Some((metadata.modified().ok()?, metadata.len()))
 }
 
-/// The stamp of the directory at `dir`, from its entries, which it reads each time: a ceiling in a
-/// directory of many files, which the OS's notifications of changes would lift.
+/// The stamp of `dir`, read from its entries each time: a ceiling of a few thousand files, which
+/// the OS's change notifications would lift.
 fn entries(dir: &Path) -> Stamp {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir).ok()? {
@@ -727,34 +683,30 @@ fn entries(dir: &Path) -> Stamp {
     Some((latest.unwrap_or(SystemTime::UNIX_EPOCH), digest.finish()))
 }
 
-/// The files an asset read, each with its stamp as the asset was last read from it, which the
-/// thread looks at to see them change.
+/// The files an asset read, each with its stamp as the asset was last read from it.
 struct Files {
-    /// Its own first, then the rest it read, as its load or its last read that succeeded listed
-    /// them: a shader's includes, a model's buffers and images.
+    /// Its own first, then the rest its load or last successful read listed (a shader's includes,
+    /// a model's buffers and images).
     files: Vec<(PathBuf, Stamp)>,
-    /// While its last read failed, the directories those files are in, with their stamps as it
-    /// began: a read that fails lists none of the files it read, so a change to any file in them
-    /// reads the asset again, such as a shader's include that it couldn't find, or found broken.
+    /// While its last read failed: those files' directories and their stamps as it began. A failed
+    /// read lists no files, so a change to any file there rereads the asset (such as an include it
+    /// couldn't find, or found broken).
     dirs: Vec<(PathBuf, Stamp)>,
-    /// Why its last read failed, and its files' stamps as it began, so that one that fails the
-    /// same way from the same files isn't news.
+    /// Why its last read failed and its files' stamps as it began; failing alike isn't news.
     failure: Option<(String, Vec<Stamp>)>,
-    /// The stamps on the last look, its files' and then its directories', where they differed
-    /// from those it was read from: a change, which reads once it holds for a look, so that an
-    /// editor's partial writes and atomic renames settle first.
+    /// The last look's stamps (files, then directories) where they differed from those it was read
+    /// from. A change reads once it holds for a look, so an editor's partial writes and atomic
+    /// renames settle first.
     changing: Option<Vec<Stamp>>,
-    /// How many looks in a row its files, changed from those it was read from, have held while
-    /// its directories haven't.
+    /// Looks in a row its changed files have held while its directories haven't.
     unsettled: u32,
 }
 
 impl Files {
-    /// The files `listed`, its own first, that an asset read as it was loaded, in a read begun at
-    /// `read_at`, each with its stamp as `stamp` finds it now. That's what the asset was read from
-    /// if each file last changed more than [`MARGIN`] before; if one changed since, or about then,
-    /// or is missing, the asset may be older than its files, and it starts with no stamps, as if it
-    /// had read no files, so that it's read again once they hold for a look.
+    /// The files `listed` (own first) of an asset loaded by a read begun at `read_at`, stamped
+    /// through `stamp` now. That's what it was read from if each file last changed more than
+    /// [`MARGIN`] before. If one changed since or about then, or is missing, the asset may be older
+    /// than its files, so it starts with no stamps and is reread once they hold for a look.
     fn new(listed: &[PathBuf], read_at: SystemTime, stamp: impl Fn(&Path) -> Stamp) -> Self {
         let mut files: Vec<(PathBuf, Stamp)> = (listed.iter())
             .map(|path| (path.clone(), stamp(path)))
@@ -778,13 +730,12 @@ impl Files {
         }
     }
 
-    /// Looks at the files, and the directories while its last read failed, as `stamp` finds them,
-    /// and returns whether the asset is to be read again: once they differ from what it was last
-    /// read from, and are as the look before found them. Its stamps are then theirs, as the read
-    /// will find them, so that a change while it reads, or one it read half done, reads it again;
-    /// and a read that fails waits for the next change. While the asset's own file is missing, it
-    /// waits for it. A change to its files that holds waits for the directories to hold too, but
-    /// no more than [`SETTLE`] looks.
+    /// Looks at the files (and the directories while its last read failed) through `stamp`.
+    /// Returns whether to reread: they differ from what it was last read from and match the
+    /// previous look. Its stamps then become theirs, as the read will find them, so a change during
+    /// the read rereads it; a failed read waits for the next change. A missing own file is waited
+    /// for. A held change to its files waits for the directories to hold too, for at most
+    /// [`SETTLE`] looks.
     fn look(&mut self, stamp: impl Fn(&Path) -> Stamp) -> bool {
         let watched = || self.files.iter().chain(&self.dirs);
         let now: Vec<Stamp> = watched().map(|(path, _)| stamp(path)).collect();
@@ -817,10 +768,9 @@ impl Files {
         held
     }
 
-    /// Takes the files a read that succeeded listed, `listed`: those watched already keep their
-    /// stamps, from before the read, and the rest take `stamp`'s as it ends. One the asset newly
-    /// reads, as a shader's new include, that changes while it's read waits for the next change.
-    /// The directories are watched no longer.
+    /// Takes the files `listed` by a successful read. Watched files keep their stamps from before
+    /// the read; new ones (a shader's new include) take `stamp`'s as it ends, so one that changes
+    /// during the read waits for the next change. The directories are watched no longer.
     fn succeeded(&mut self, listed: &[PathBuf], stamp: impl Fn(&Path) -> Stamp) {
         let files = (listed.iter())
             .map(|path| {
@@ -834,7 +784,6 @@ impl Files {
         self.failure = None;
     }
 
-    /// The directories its files are in, each once, as `stamp` finds them now.
     fn dirs(&self, stamp: impl Fn(&Path) -> Stamp) -> Vec<(PathBuf, Stamp)> {
         let mut dirs: Vec<(PathBuf, Stamp)> = Vec::new();
         for dir in self.files.iter().filter_map(|(file, _)| file.parent()) {
@@ -845,10 +794,9 @@ impl Files {
         dirs
     }
 
-    /// Notes that a read failed, as `why` says, its files' directories having been `dirs` as it
-    /// began, which it watches until one succeeds. Returns whether that's news: it isn't if the
-    /// last read failed the same way from the same files, as when a change beside them alone set
-    /// this one off.
+    /// Notes a failed read: `why`, and the files' `dirs` as it began, watched until one succeeds.
+    /// Returns whether that's news: not if the last read failed the same way from the same files
+    /// (as when a change beside them alone set this one off).
     fn failed(&mut self, dirs: Vec<(PathBuf, Stamp)>, why: &str) -> bool {
         self.dirs = dirs;
         let read: Vec<Stamp> = self.files.iter().map(|&(_, stamped)| stamped).collect();
@@ -857,9 +805,8 @@ impl Files {
         news
     }
 
-    /// Takes `path` as the asset's own file's from now on, with the stamp it was read with, as a
-    /// rename or a move keeps a file's time and length: so an edit made since it was read, at
-    /// either path, reads it again, and a rename alone doesn't.
+    /// Takes `path` as the own file, with the stamp it was read with (a rename or move keeps time
+    /// and length). An edit since the read, at either path, rereads it; a rename alone doesn't.
     fn moved(&mut self, path: &Path) {
         if let Some((own, _)) = self.files.first_mut() {
             path.clone_into(own);
@@ -886,7 +833,7 @@ mod tests {
     use crate::math::Vec4;
     use crate::testing::Codes;
 
-    /// Files' stamps as a test sets them, a number for each version of a file.
+    /// Stamps a test sets: a number per file version.
     #[derive(Default)]
     struct Disk(RefCell<HashMap<PathBuf, Stamp>>);
 
@@ -901,8 +848,7 @@ mod tests {
         }
     }
 
-    /// A shader whose own file, `own.slang`, includes `shared.slang`, both as version 1, which it
-    /// was added from, compiling well after they last changed.
+    /// A shader of `own.slang`, which includes `shared.slang`, both version 1, compiled long after.
     fn watched(disk: &Disk) -> Files {
         disk.set("own.slang", Some(1));
         disk.set("shared.slang", Some(1));
@@ -915,7 +861,7 @@ mod tests {
         let disk = Disk::default();
         let mut files = watched(&disk);
         assert!(!files.look(disk.stamp()), "nothing changed");
-        // An edit to the file it includes, written in three goes, then left.
+        // An include edited in three writes, then left.
         for version in 2..5 {
             disk.set("shared.slang", Some(version));
             assert!(!files.look(disk.stamp()), "still changing at {version}");
@@ -932,14 +878,13 @@ mod tests {
         disk.set("own.slang", Some(2));
         assert!(!files.look(disk.stamp()));
         assert!(files.look(disk.stamp()));
-        // Changed again while it compiled, which lists its files with their stamps from before.
+        // Changed again mid-compile; the compile lists files with their earlier stamps.
         disk.set("own.slang", Some(3));
         let listed = ["own.slang", "shared.slang"].map(PathBuf::from);
         files.succeeded(&listed, disk.stamp());
         assert!(!files.look(disk.stamp()));
         assert!(files.look(disk.stamp()), "the change during the compile");
-        // That compile failed, which noted nothing: the same files don't compile again until the
-        // next change.
+        // That compile failed, noting nothing: the same files wait for the next change.
         assert!(!files.look(disk.stamp()));
         assert!(!files.look(disk.stamp()));
         disk.set("own.slang", Some(4));
@@ -959,7 +904,7 @@ mod tests {
         disk.set("own.slang", Some(2));
         assert!(!files.look(disk.stamp()));
         assert!(files.look(disk.stamp()));
-        // A file it includes that goes missing does compile, which fails, as slangc says why.
+        // A missing include does compile; slangc fails it and says why.
         disk.set("shared.slang", None);
         assert!(!files.look(disk.stamp()));
         assert!(files.look(disk.stamp()));
@@ -987,15 +932,14 @@ mod tests {
         disk.set("own.slang", Some(1));
         disk.set("shared.slang", Some(1));
         let listed = ["own.slang", "shared.slang"].map(PathBuf::from);
-        // They last changed a moment before its compile began, by the file system's clock, which
-        // can trail the one the compile's start was read from: it may have read what was before.
+        // Changed just before its compile began, by a file system clock that can trail: it may
+        // have read the older text.
         let mut files = Files::new(&listed, SystemTime::UNIX_EPOCH + MARGIN / 2, disk.stamp());
         assert!(!files.look(disk.stamp()), "a look for them to hold");
         assert!(files.look(disk.stamp()), "held for a look");
         assert!(!files.look(disk.stamp()), "compiled from as they are");
 
-        // Its own file gone by the time the thread looks, as while an editor replaces it: it waits
-        // for it.
+        // Its own file gone by the first look (an editor replacing it): it waits.
         disk.set("own.slang", None);
         let mut files = Files::new(&listed, SystemTime::UNIX_EPOCH + MARGIN * 2, disk.stamp());
         for _ in 0..3 {
@@ -1066,7 +1010,7 @@ mod tests {
         assert!(files.look(disk.stamp()));
         let dirs = files.dirs(disk.stamp());
         assert!(files.failed(dirs, "a syntax error"));
-        // Something writing beside it at every look, as a log does, which alone compiles nothing.
+        // Something writing beside it every look, as a log does, compiles nothing alone.
         let mut written = 1;
         let mut write = || {
             written += 1;
@@ -1076,7 +1020,7 @@ mod tests {
             write();
             assert!(!files.look(disk.stamp()), "the directory never holds");
         }
-        // The fix, which waits for the directory to hold, but not for long.
+        // The fix waits for the directory to hold, but not for long.
         disk.set("shaders/own.slang", Some(3));
         for look in 0..SETTLE {
             write();
@@ -1090,8 +1034,7 @@ mod tests {
     fn a_file_moved_is_watched_where_it_is_as_it_was_read() {
         let disk = Disk::default();
         let mut files = watched(&disk);
-        // Renamed, keeping its time and length: gone from where it was, and at its new path as it
-        // was read.
+        // Renamed, keeping time and length: gone from the old path, as read at the new.
         disk.set("own.slang", None);
         disk.set("moved.slang", Some(1));
         assert!(!files.look(disk.stamp()), "missing, so waiting");
@@ -1103,7 +1046,7 @@ mod tests {
         assert!(!files.look(disk.stamp()));
         assert!(files.look(disk.stamp()), "edited where it is");
 
-        // Renamed again, then edited before the move is known: read again once it is.
+        // Renamed again and edited before the move is known: reread once it is.
         disk.set("moved.slang", None);
         disk.set("again.slang", Some(3));
         assert!(!files.look(disk.stamp()), "missing, so waiting");
@@ -1120,14 +1063,12 @@ mod tests {
         assert!(stopping.elapsed() < STOP, "{:?}", stopping.elapsed());
     }
 
-    /// The text of a shader that draws meshes in one color.
     fn flat_color() -> String {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
         fs::read_to_string(fixture).expect("the fixture")
     }
 
-    /// Writes `bytes` to the file at `path`, dated an hour back, so that an asset is loaded from
-    /// its file as it is.
+    /// Writes `bytes` to `path`, dated an hour back, so an asset is loaded from its file as is.
     fn written_long_ago(path: &Path, bytes: impl AsRef<[u8]>) {
         fs::write(path, bytes).expect("an asset's file");
         let an_hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
@@ -1135,9 +1076,8 @@ mod tests {
         (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
     }
 
-    /// The thread, watching `sources`: its side, which ends it as it drops; what it sends back; the
-    /// codes of the warnings it logs, as for a read that fails, which sends nothing back; and the
-    /// thread.
+    /// The thread watching `sources`: its side (drop ends it), what it sends back, the codes of
+    /// the warnings it logs, and the thread. A failed read sends nothing back.
     fn started(
         sources: impl IntoIterator<Item = Source>,
     ) -> (
@@ -1160,7 +1100,6 @@ mod tests {
         (messages, reloaded, warned, thread)
     }
 
-    /// `shaders`' sources, to watch.
     fn shaders_of(shaders: &Shaders) -> Vec<Source> {
         shaders
             .sources()
@@ -1170,7 +1109,6 @@ mod tests {
             .collect()
     }
 
-    /// The shader that `reloaded` compiled again.
     fn compiled(reloaded: Reloaded) -> Compiled {
         match reloaded {
             Reloaded::Shader(compiled) => compiled,
@@ -1194,7 +1132,7 @@ mod tests {
         let edit = |path: &Path, edit: u32| {
             fs::write(path, format!("{text}\n// Edit {edit}.\n")).expect("an edit");
         };
-        // b, edited once it's added but before the thread first looks at its file.
+        // b, edited after adding but before the thread's first look.
         edit(&paths[1], 1);
 
         let (messages, reloaded, _, thread) = started(shaders_of(&shaders));
@@ -1202,7 +1140,7 @@ mod tests {
         let came_back = |what: &str| compiled(reloaded.recv_timeout(a_while).expect(what));
         let b = came_back("b comes back compiled");
         assert_eq!(b.source(), &shaders.sources()[1]);
-        // a, as it was added, compiles only once it's edited.
+        // a compiles only once edited.
         let more = reloaded.recv_timeout(LOOK * 5);
         assert!(more.is_err(), "nothing else comes back");
         edit(&paths[0], 2);
@@ -1215,7 +1153,6 @@ mod tests {
         thread.join().expect("the thread ends as its side drops");
     }
 
-    /// The names of the files `compiled` read.
     fn names(compiled: &Compiled) -> Vec<&str> {
         (compiled.files().iter())
             .filter_map(|file| file.file_name()?.to_str())
@@ -1244,14 +1181,14 @@ mod tests {
             assert!(reloaded.try_recv().is_err(), "{what}");
         };
 
-        // An include it names that isn't there yet, made once the compile has failed.
+        // An include not there yet, made after the compile failed.
         fs::write(&path, format!("#include \"extra.slang\"\n{text}")).expect("an edit");
         failed("it doesn't compile without its include");
         fs::write(dir.join("extra.slang"), "static const float EXTRA = 1.0;\n").expect("one");
         let extra = came_back("it compiles with its include made");
         assert_eq!(names(&extra), ["shader.slang", "extra.slang"]);
 
-        // An include that's there but broken, fixed where it is once the compile has failed.
+        // A broken include, fixed in place after the compile failed.
         fs::write(dir.join("fix.slang"), "static const float FIX = ;\n").expect("one");
         fs::write(&path, format!("#include \"fix.slang\"\n{text}")).expect("an edit");
         failed("it doesn't compile with its include broken");
@@ -1265,7 +1202,7 @@ mod tests {
         thread.join().expect("the thread ends as its side drops");
     }
 
-    /// A PNG a pixel high, `width` pixels across, every byte of its RGBA8 `byte`.
+    /// A PNG `width` by 1 pixels, every RGBA8 byte `byte`.
     fn png(width: u32, byte: u8) -> Vec<u8> {
         let pixels = vec![byte; width as usize * 4];
         let (color, depth) = (::png::ColorType::Rgba, ::png::BitDepth::Eight);
@@ -1283,7 +1220,7 @@ mod tests {
         let read_at = SystemTime::now();
         let (mut imported, files) =
             gltf::read_listing("m", &model, &package::Files::default()).expect("a model");
-        // As a reload reads it, its images decoded, which it takes at once.
+        // As a reload reads it: images decoded.
         imported
             .decode_images("m", &model)
             .expect("its images decode");
@@ -1330,8 +1267,7 @@ mod tests {
         };
         assert_eq!(read.size, [3, 1]);
 
-        // Renamed, which the main thread follows: what it holds is what was read, until it's
-        // edited where it is.
+        // Renamed and followed: it holds what was read until edited in place.
         let renamed = dir.join("b.png");
         fs::rename(&image, &renamed).expect("renamed");
         let asset = Asset::Texture(Texture::WHITE);
@@ -1365,10 +1301,9 @@ mod tests {
         thread.join().expect("the thread ends as its side drops");
     }
 
-    /// A texture unwatched while a look is under way, as its removal sends, taken as the look
-    /// takes what's sent before it reads one that changed after it, isn't read, and shifts nothing
-    /// the look goes on to: the one that changed is read, as it is, and the look ends, the one
-    /// unwatched gone from those it watches.
+    /// A texture unwatched mid-look (its message taken before the look reads a later changed one)
+    /// isn't read and shifts nothing after it. The changed one is read, and the look ends with the
+    /// unwatched one gone from `watched`.
     #[test]
     fn a_texture_unwatched_while_a_look_is_under_way_shifts_none_it_reads() {
         let scratch = Scratch::new("unwatched-mid-look");

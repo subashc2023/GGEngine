@@ -1,22 +1,29 @@
-//! Snapshot files: a run's world saved whole as text, which a run given `--restore` starts from, in
-//! another process, after a crash or a rebuild, so that it goes on where the world was: its app,
-//! its engine and build, its layers from the bottom up, the ticks the simulation had run, the
-//! world's hash, the assets the layers had added, which name what's opaque in the world, the name
-//! of each texture its run named otherwise than by its path, as by its ID, with that path, which
-//! its values name textures by, read so in a run that names them otherwise, as after an ID file
-//! changed, and taken as its own by a lockstep joiner, whose host's world comes so, the scripts the
-//! layers had loaded, each its path from the project's root and its text as last applied, which a
-//! lockstep joiner runs in place of its own files', a run restored from it reading its files, the
-//! mods the layers had loaded, each its manifest's text, then each script's path in its folder and
-//! text, which a lockstep joiner runs in place of its own, a run restored from it loading those
-//! installed, the scene files the layers had loaded, each its path, its author and its text as last
-//! applied, as a recording's values write them, which the restored run watches, the open scene, its file's
-//! author or none and the IDs it made, written so too, and the world, as [`World::save_whole`]
-//! writes it; then, of a run the tool API had stopped, `stopped`, or of one playing a copy of the
-//! world as edited, which it held aside, `edited`, the ticks that world was at and its hash,
-//! followed by its scene files, its open scene and that world, written as the run's are; then
-//! `paused`, if its simulation was, as the tool API's `pause` leaves it; then `end`. A snapshot written before the open scene was holds no `open` line: the start scene's
-//! file is open, if its scene files hold it.
+//! Snapshot files: a run's world saved whole as text. A run given `--restore` starts from one, in
+//! another process, after a crash or rebuild, and goes on where the world was. In order, a file
+//! holds:
+//!
+//! - the app, the engine and build, and the layers from the bottom up;
+//! - the ticks run, and the world's hash;
+//! - the assets the layers added, which name what's opaque in the world;
+//! - each texture's name where its run named it otherwise than by path (as by ID), with the path.
+//!   Values name textures by these. A run that names them otherwise (after an ID file changed)
+//!   reads them so; a lockstep joiner takes them as its own, as its host's world comes so;
+//! - the scripts the layers loaded: path from the project's root, text as last applied. A lockstep
+//!   joiner runs these in place of its own; a restored run reads its files;
+//! - the mods: manifest text, then each script's path in its folder and text. A lockstep joiner
+//!   runs these in place of its own; a restored run loads those installed;
+//! - the scene files: path, author and text as last applied, written as a recording's values are.
+//!   The restored run watches them;
+//! - the open scene: its file's author or none, and the IDs it made, written likewise;
+//! - the world, as [`World::save_whole`] writes it;
+//! - `stopped` for a run the tool API stopped, or, for one playing a copy of the world as edited
+//!   (held aside), `edited`, that world's ticks and hash, then its scene files, open scene and
+//!   world, written as the run's are;
+//! - `paused` if its simulation was, as the tool API's `pause` leaves it;
+//! - `end`.
+//!
+//! A snapshot written before the open scene was holds no `open` line: the start scene's file is
+//! open, if its scene files hold it.
 //!
 //! ```text
 //! gg-snapshot 2
@@ -59,20 +66,19 @@ use crate::reflect::Value;
 use crate::scene_files::{Open, SceneFile};
 use crate::{World, WorldHash};
 
-/// A snapshot file's first line: its format, and the format's version, which a change to its lines
-/// or to its values' text that old files can't be read by takes to the next.
+/// A snapshot file's first line: the format and its version. A change to its lines or its values'
+/// text that old files can't be read by bumps the version.
 const FORMAT: &str = "gg-snapshot 2";
 
-/// What the run a snapshot is taken of is doing, which a run restored from it goes on doing.
+/// What a snapshot's run is doing; a restored run goes on doing it.
 pub(crate) enum Run {
     /// Playing from its start, holding no world as edited.
     Playing,
     /// Stopped, as the tool API's `stop` and `--stopped` leave it.
     #[cfg(feature = "dev")]
     Stopped,
-    /// Playing a copy of the world as edited, which it holds aside, as the tool API's `play` has
-    /// it: a copy of that world, its scene files as last applied, its open scene, and the ticks
-    /// it's at.
+    /// Playing a copy of the world as edited, which it holds aside (the tool API's `play`), with
+    /// that world's scene files as last applied, open scene and ticks.
     #[cfg(feature = "dev")]
     Held {
         world: Box<World>,
@@ -82,34 +88,32 @@ pub(crate) enum Run {
     },
 }
 
-/// What a snapshot is of: a run's world, with its scene files as last applied and its open scene,
-/// the scripts its layers loaded, each a path and its text as last applied, and its mods.
+/// What a snapshot is of: a run's world, scene files as last applied, open scene, scripts (path
+/// and text as last applied) and mods.
 pub(crate) struct Of<'r> {
     pub(crate) world: &'r World,
     pub(crate) scenes: &'r [SceneFile],
-    /// The scene files' texts the run keeps for its scene changes, as
-    /// [`Context::scene_text`](crate::Context::scene_text) keeps them.
+    /// The scene files' texts the run keeps for scene changes
+    /// ([`Context::scene_text`](crate::Context::scene_text)).
     pub(crate) cached: &'r [SceneFile],
     pub(crate) open: &'r Open,
     pub(crate) scripts: &'r [(String, String)],
     pub(crate) mods: &'r [ModText],
-    /// What a server's client sees of the world, as its snapshot holds it: the world written and
-    /// hashed as [`World::save_seen`] and [`World::hash_seen`] say, and the texts of the world's
-    /// cells' files, which a client never reads, left out. `None` for the world whole.
+    /// What a server's client sees: written and hashed as [`World::save_seen`] and
+    /// [`World::hash_seen`] say, without the cells' file texts, which a client never reads. `None`
+    /// for the world whole.
     pub(crate) seen: Option<&'r Seen>,
 }
 
-/// The text of the snapshot file of what `of` says, app `app`'s, whose layers are `layers`, from
-/// the bottom up, as the simulation had run `ticks` ticks, as its run does what `run` says, its
-/// simulation not paused.
+/// The snapshot text of `of` for app `app` with `layers` from the bottom up, after `ticks` ticks,
+/// its run doing `run`, its simulation not paused.
 ///
 /// Fails as [`World::save_whole`] does.
 pub(crate) fn write(of: &Of, run: &Run, app: &str, layers: &[&str], ticks: u64) -> Result<String> {
     write_paused(of, run, false, app, layers, ticks)
 }
 
-/// As [`write()`], of a run whose simulation is paused if `paused`, which the file's `paused` line
-/// says, as the restored run then is.
+/// Like [`write()`], with the simulation paused if `paused` (the file's `paused` line).
 ///
 /// Fails as `write` does.
 pub(crate) fn write_paused(
@@ -203,11 +207,10 @@ pub(crate) fn write_paused(
     Ok(out)
 }
 
-/// Writes a `scene` line after `out` for each of `scenes`, the scene files of `world`, but one
-/// whose path isn't Unicode, which isn't watched after a restore; and the `open` line of `open`,
-/// its open scene: untitled, if its file is one left out, which the restored run doesn't hold,
-/// owning what the file's text holds as it owns what it made, in a development build, which alone
-/// saves it.
+/// Writes a `scene` line per scene file of `scenes`, except one with a non-Unicode path (not
+/// watched after a restore), then `open`'s `open` line. If the open file is a left-out one, the
+/// scene is untitled and owns what the file's text holds as well as what it made; only
+/// development builds save that.
 fn write_scenes(out: &mut String, scenes: &[SceneFile], open: &Open, world: &World) {
     use crate::recording::text;
 
@@ -248,14 +251,14 @@ fn write_scenes(out: &mut String, scenes: &[SceneFile], open: &Open, world: &Wor
     out.push('\n');
 }
 
-/// The open scene that `line`, the text after an `open` line's `open `, gives: its file's author,
-/// or none, and the IDs it made, as [`write_scenes`] writes them.
+/// The open scene an `open` line's text `line` gives: file author or none, and IDs made
+/// ([`write_scenes`]).
 fn read_open(line: &str) -> Option<Open> {
     let text = Text::parse(line, "open ".len() + 1).ok()?;
     let Value::List(parts) = text.value(&World::default()) else {
         return None;
     };
-    // Whether it was edited, last, which a snapshot written before it was doesn't say.
+    // Whether it was edited comes last; older snapshots omit it.
     let (author, made, edited) = match <[Value; 3]>::try_from(parts) {
         Ok([author, made, Value::Bool(edited)]) => (author, made, edited),
         Ok(_) => return None,
@@ -283,8 +286,7 @@ fn read_open(line: &str) -> Option<Open> {
     })
 }
 
-/// The world's hash `text` gives: its content's and its layout's, in hex, as [`WorldHash`] writes
-/// them.
+/// The world hash `text` gives: content and layout, in hex, as [`WorldHash`] writes them.
 fn world_hash(text: &str) -> Option<WorldHash> {
     let (content, layout) = text.split_once(' ')?;
     let hex = |text: &str| u64::from_str_radix(text, 16).ok();
@@ -294,13 +296,13 @@ fn world_hash(text: &str) -> Option<WorldHash> {
     })
 }
 
-/// What a run restored from a snapshot takes again of one of its `asset` lines, as
-/// [`Context::load_restored`](crate::Context::load_restored) does: a texture, a model or a font
-/// it loads, from the path its line gives after the meshes, shaders and textures there were after
-/// it, as `texture 1 1 2 assets/logo.png`, a font's line alike, and a model's, its two types'
-/// names and sizes after its path, whatever build wrote them; or a removal, of a texture or a model
-/// by its index and its file's path, as `removed texture 2 assets/logo.png` gives them, or of a
-/// mesh by its index alone, as `removed mesh 3`.
+/// What a restored run takes again of an `asset` line
+/// ([`Context::load_restored`](crate::Context::load_restored)):
+/// - a texture, model or font to load, from the path after the mesh, shader and texture counts:
+///   `texture 1 1 2 assets/logo.png`. A model's line has its two types' names and sizes after the
+///   path, whatever build wrote them;
+/// - a removal of a texture or model by index and path (`removed texture 2 assets/logo.png`), or
+///   of a mesh by index (`removed mesh 3`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Again<'a> {
     Load(Asset<&'a str>),
@@ -309,8 +311,8 @@ pub(crate) enum Again<'a> {
     RemoveMesh(u32),
 }
 
-/// What a restored run takes again of `line`, as [`Again`] says: `None` for a line of another
-/// kind, as a mesh's or a shader's, which it adds as its layers load.
+/// What a restored run takes again of `line`. `None` for a mesh's or shader's, which its layers
+/// add as they load.
 pub(crate) fn again(line: &str) -> Option<Again<'_>> {
     let (kind, rest) = line.split_once(' ')?;
     if kind == "removed" {
@@ -326,7 +328,7 @@ pub(crate) fn again(line: &str) -> Option<Again<'_>> {
             _ => None,
         };
     }
-    // The meshes, shaders and textures there were after it, then its path.
+    // Three counts, then the path.
     let path = rest.splitn(4, ' ').nth(3)?;
     let asset = match kind {
         "texture" => Asset::Texture(path),
@@ -338,8 +340,7 @@ pub(crate) fn again(line: &str) -> Option<Again<'_>> {
     Some(Again::Load(asset))
 }
 
-/// Writes `text`, a snapshot file's, at `path`, whole or not at all, so that the last snapshot
-/// there stays whole if it can't.
+/// Writes the snapshot `text` at `path` whole or not at all, keeping the last one on failure.
 ///
 /// Fails with `snapshot.file` if it can't.
 #[cfg(feature = "dev")]
@@ -350,20 +351,19 @@ pub(crate) fn save(path: &Path, text: &str) -> Result<()> {
     })
 }
 
-/// A snapshot file, as a run restored from it reads it as it starts: its header, checked, the lines
-/// of its world, which load once the layers have, and what its run was doing.
+/// A snapshot file as a restored run reads it: the checked header, the world's lines (loaded once
+/// the layers have) and what its run was doing.
 pub(crate) struct Snapshot {
-    /// Where it came from, as messages name it: its file's path, or a lockstep host.
+    /// Where it came from: a file's path or a lockstep host.
     pub(crate) from: String,
     text: String,
     layers: Vec<String>,
     ticks: u64,
     hash: WorldHash,
-    /// What the layers of the run it was taken from had added, in order, and the textures it loaded
-    /// where they were named.
+    /// What its run's layers added, in order, and the textures it loaded where text named them.
     assets: Vec<String>,
-    /// The name that run gave each texture it named otherwise than by its path, by that path,
-    /// which its values name textures by.
+    /// The name its run gave each texture it named otherwise than by path, keyed by path. Its
+    /// values name textures by these.
     #[cfg_attr(
         not(feature = "dev"),
         allow(
@@ -372,34 +372,30 @@ pub(crate) struct Snapshot {
         )
     )]
     pub(crate) names: HashMap<Arc<str>, Arc<str>>,
-    /// The scripts that run's layers had loaded, each a path from the project's root and its text
-    /// as last applied.
+    /// Scripts: a path from the project's root and the text as last applied.
     pub(crate) scripts: Vec<(String, String)>,
-    /// The mods that run's layers had loaded.
     pub(crate) mods: Vec<ModText>,
-    /// The scene files that run's layers had loaded, as last applied.
+    /// Scene files as last applied.
     pub(crate) scenes: Vec<SceneFile>,
-    /// The scene files' texts that run kept for its scene changes.
+    /// The scene files' texts its run kept for scene changes.
     pub(crate) cached: Vec<SceneFile>,
-    /// That run's open scene; `None` for a snapshot written before the open scene was.
+    /// `None` for a snapshot written before the open scene was.
     pub(crate) open: Option<Open>,
     /// The indexes of its world's lines.
     world: Range<usize>,
-    /// Whether the run it was taken of was stopped.
     pub(crate) stopped: bool,
-    /// Whether that run's simulation was paused, which lasts across a stop.
+    /// Whether its simulation was paused (lasts across a stop).
     #[cfg_attr(
         not(feature = "dev"),
         allow(dead_code, reason = "only development builds pause")
     )]
     pub(crate) paused: bool,
-    /// The world as edited it holds, if it was taken while a copy of that world played.
+    /// The world as edited, if taken while a copy of it played.
     pub(crate) held: Option<Held>,
 }
 
-/// The world as edited that a snapshot taken while a copy of it played holds: the ticks it was at,
-/// its hash, its scene files as last applied, its open scene, if the snapshot holds it, and the
-/// indexes of its lines.
+/// The world as edited a snapshot holds: ticks, hash, scene files as last applied, open scene (if
+/// any) and line indexes.
 #[cfg_attr(
     not(feature = "dev"),
     allow(dead_code, reason = "only development builds hold one")
@@ -413,10 +409,12 @@ pub(crate) struct Held {
 }
 
 impl Snapshot {
-    /// Reads the snapshot file at `path`, for app `app`, checking its header.
+    /// Reads the snapshot file at `path` for app `app`, checking its header.
     ///
-    /// Fails with `snapshot.file` if it can't be read; and with `snapshot.format` for a file that
-    /// isn't a snapshot of this format, is another app's, or is cut short, its last line not `end`.
+    /// Fails with:
+    /// - `snapshot.file` if it can't be read;
+    /// - `snapshot.format` if it isn't a snapshot of this format, is another app's, or is cut short
+    ///   (its last line isn't `end`).
     pub(crate) fn read(path: &Path, app: &str) -> Result<Self> {
         let text = fs::read_to_string(path).map_err(|error| {
             let message = format!("can't read the snapshot {}", path.display());
@@ -425,14 +423,13 @@ impl Snapshot {
         Self::parse(text, path.display().to_string(), app)
     }
 
-    /// Reads `text`, a snapshot file's, from where `from` names, for app `app`, checking its header
-    /// and what follows its world: `stopped`, followed by `end` alone, or `edited`, the ticks and
-    /// the hash of the world as edited, followed by its scene files, its open scene and its lines,
-    /// the file holding no `stopped` or other `edited` after it; or `end`, of a run playing from
-    /// its start; any of them followed by `paused` before `end`, of a run that was paused.
+    /// Reads snapshot `text` from `from` for app `app`, checking its header and what follows its
+    /// world: `stopped` then `end`; or `edited`, the world as edited's ticks and hash, its scene
+    /// files, open scene and lines, with no `stopped` or other `edited` after; or `end`, for a run
+    /// playing from its start. Any takes `paused` before `end` if the run was paused.
     ///
-    /// Fails with `snapshot.format` as [`read`](Self::read) does, for a scene file's or the open
-    /// scene's line that isn't one, and for what follows its world otherwise.
+    /// Fails with `snapshot.format` as [`read`](Self::read) does, and for a bad scene file or open
+    /// scene line, or anything else after the world.
     pub(crate) fn parse(text: String, from: String, app: &str) -> Result<Self> {
         let refused = |what: String| Error::new("snapshot.format", format!("{from}: {what}"));
         let lines: Vec<&str> = text.lines().collect();
@@ -524,8 +521,7 @@ impl Snapshot {
             })?);
             world += 1;
         }
-        // The lines from line `at` on that start with `kind`, each a scene file, and the index of
-        // the line after them.
+        // The `kind` scene files from line `at` and the next line's index.
         let read_files = |mut at: usize, kind: &str| {
             let mut scenes = Vec::new();
             while let Some(scene) = lines.get(at).and_then(|line| line.strip_prefix(kind)) {
@@ -555,8 +551,7 @@ impl Snapshot {
             Ok((scenes, at))
         };
         let (cached, world) = read_files(world, "cached ")?;
-        // The scene lines from line `at` on, then the open scene's line, if there's one, and the
-        // index of the line after them.
+        // The scene lines from `at`, the open scene's if any, and the next line's index.
         let read_scenes = |at: usize| {
             let (scenes, mut at) = read_files(at, "scene ")?;
             let mut open = None;
@@ -573,15 +568,13 @@ impl Snapshot {
             Ok((scenes, open, at))
         };
         let (scenes, open, world) = read_scenes(world)?;
-        // The line that ends what the run was doing: `paused`, which comes last before `end`, if
-        // the run was, or else `end`.
+        // `paused` (last before `end`) if the run was, else `end`.
         let mut last = lines.len() - 1;
         let paused = last > world && lines[last - 1] == "paused";
         if paused {
             last -= 1;
         }
-        // The world's lines end at `end`, `paused`, `stopped` or `edited`, which none of them is
-        // or starts with.
+        // The world's lines end at `end`, `paused`, `stopped` or `edited`, which none starts with.
         let tails =
             |line: &str| line == "stopped" || line == "paused" || line.starts_with("edited ");
         let end = (world..=last)
@@ -647,22 +640,19 @@ impl Snapshot {
         })
     }
 
-    /// What the layers of the run it was taken from had added and removed, and what it loaded
-    /// where text named it, in order, as its `asset` lines give them: which a run restored from it
-    /// takes again, past what its own layers noted alike, before its world, as
-    /// [`Context::load_restored`](crate::Context::load_restored) does.
+    /// The `asset` lines, in order: what its run's layers added and removed, and what it loaded
+    /// where text named it. A restored run takes them again before its world, past what its own
+    /// layers noted alike ([`Context::load_restored`](crate::Context::load_restored)).
     pub(crate) fn added(&self) -> &[String] {
         &self.assets
     }
 
-    /// Has the snapshot name, by the path its file is at now, each texture, model and font its run
-    /// named by an ID that `catalog`, the asset database of the run restored from it, holds for an
-    /// asset at another path, its file gone from the path it had, as after a rename that the
-    /// snapshot's run, or this run's start, moved its ID file for: in its `asset` lines, its
-    /// removals' among them, and its names, so that the run loads the asset from there, and its
-    /// own `asset` line for it, which then is the snapshot's, keeps what's opaque in the world. An
-    /// asset whose file is where it was keeps its path, though a copy took its ID, as its ID
-    /// changed since. A model's images, which load with their model, keep their paths.
+    /// Repoints each texture, model and font its run named by ID to its file's current path, where
+    /// `catalog` (the restored run's database) holds that ID for another path and the old file is
+    /// gone (a rename whose ID file moved). It rewrites the `asset` lines (removals too) and
+    /// names, so the run loads the asset from there and its own `asset` line, now the snapshot's,
+    /// keeps what's opaque. An asset whose file is still in place keeps its path, even if a copy
+    /// took its ID. A model's images keep theirs.
     #[cfg(feature = "dev")]
     pub(crate) fn follow(&mut self, catalog: &crate::assets::Catalog) {
         let moved: HashMap<Arc<str>, Arc<str>> = (self.names.iter())
@@ -688,7 +678,7 @@ impl Snapshot {
             let Some(now) = moved.get(path) else {
                 continue;
             };
-            // Its kind and counts before its path, and a model's types after it.
+            // The kind and counts precede the path; a model's types follow it.
             let at = path.as_ptr() as usize - line.as_ptr() as usize;
             *line = format!("{}{now}{}", &line[..at], &line[at + path.len()..]);
         }
@@ -699,15 +689,14 @@ impl Snapshot {
         self.names = names.collect();
     }
 
-    /// Loads the snapshot's world into `world`, whose component types and assets the layers,
-    /// `layers` from the bottom up, have registered and added as they loaded, in place of its
-    /// entities, as [`World::load_whole`] does; what's opaque in it comes back if the layers added
-    /// the assets the snapshot's had, in the same order, as their first; and each texture its
-    /// values name by a name its run gave it, as by an ID since changed, comes back by the path
-    /// that name was given, the world hashed as that run named it to check it against the hash
-    /// saved, though the run goes on naming it its own way. Logs what it changed of
-    /// the world to match the types as they are, each change once, and returns the ticks the
-    /// simulation had run, which the run goes on from.
+    /// Loads the snapshot's world into `world`, replacing its entities ([`World::load_whole`]).
+    /// The layers (`layers`, bottom up) have registered its component types and added its assets.
+    ///
+    /// What's opaque comes back if the layers added the snapshot's assets as their first, in order.
+    /// A texture its values name by its run's name (as by an ID since changed) comes back by that
+    /// name's path; the hash is checked under the run's names, and the run then names it its own
+    /// way. Logs each change made to match current types, once. Returns the ticks the simulation
+    /// had run, which the run goes on from.
     ///
     /// Fails as `load_whole` does.
     pub(crate) fn restore(&self, world: &mut World, layers: &[&str]) -> Result<u64> {
@@ -733,9 +722,8 @@ impl Snapshot {
         Ok(self.ticks)
     }
 
-    /// Loads the world as edited that the snapshot holds, if it was taken while a copy of that
-    /// world played, into `world`, a copy of the world as the layers loaded it, as
-    /// [`restore`](Self::restore) loads the run's; nothing for a snapshot that holds none.
+    /// Like [`restore`](Self::restore) for the world as edited, into `world` (a copy of the world
+    /// as the layers loaded it). Does nothing if the snapshot holds none.
     ///
     /// Fails as `restore` does.
     #[cfg(feature = "dev")]
@@ -754,8 +742,8 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Loads the world whose lines are those at `lines`, as [`restore`](Self::restore) says,
-    /// checking it against `hash`, the hash it was saved with, and naming it `what` as it warns.
+    /// Loads the world at `lines` like [`restore`](Self::restore), checking its saved `hash` and
+    /// calling it `what` in warnings.
     ///
     /// Fails as [`World::load_whole`] does.
     fn load(
@@ -773,9 +761,8 @@ impl Snapshot {
                 .all(|(theirs, ours)| *theirs == **ours);
         let numbered =
             (lines.start + 1..).zip(self.text.lines().skip(lines.start).take(lines.len()));
-        // Its values and its hash name textures as its run did, so a run that names them otherwise,
-        // as after an ID file changed, reads and hashes them by those names for the load, by the
-        // paths they were given, and goes on with its own.
+        // Its values and hash use its run's texture names, so a run naming them otherwise (after
+        // an ID file changed) loads by those, then goes on with its own.
         #[cfg(feature = "dev")]
         let own = {
             let own = Arc::clone(world.shared_assets());
@@ -828,8 +815,7 @@ mod tests {
     use crate::layer::Stack;
     use crate::{Context, Layer, MeshDraw, Sprite, Text, Transform};
 
-    /// The text of the snapshot file of `world`, of no scripts or mods, as [`super::write`] writes
-    /// it.
+    /// [`super::write`] for `world`, with no scripts or mods.
     fn write(
         world: &World,
         scenes: &[SceneFile],
@@ -851,7 +837,6 @@ mod tests {
         super::write(&of, run, app, layers, ticks)
     }
 
-    /// Each texture, model and font `snapshot`'s `asset` lines load, in order.
     fn loads(snapshot: &Snapshot) -> Vec<Asset<&str>> {
         let taken = snapshot.added().iter().filter_map(|line| again(line));
         let loads = taken.filter_map(|again| match again {
@@ -861,9 +846,9 @@ mod tests {
         loads.collect()
     }
 
-    /// An `asset` line gives a texture's, a model's or a font's path, spaces and all, and a model's
-    /// whatever types its run's build gave it, to load again; a removal's gives what it removed,
-    /// by an index and a path, or a mesh's by its index; and a mesh's or a shader's gives nothing.
+    /// `asset` lines give a texture's, model's or font's path (spaces included; a model's with
+    /// any types), or a removal's index and path (a mesh's, index alone); a mesh's or shader's,
+    /// nothing.
     #[test]
     fn asset_lines_give_what_a_restore_takes_again() {
         use Again::{Load, RemoveMesh, RemoveModel, RemoveTexture};
@@ -908,10 +893,9 @@ mod tests {
         }
     }
 
-    /// A snapshot written and read back restores the world it was taken of, at its ticks, into a
-    /// world its layers loaded, with its scripts, its mods, its scene files and its open scene; one
-    /// written before the open scene was holds none; and one of another app, of another format, cut
-    /// short, or whose open scene's line, a script's or a mod's isn't one, is refused.
+    /// A snapshot read back restores its world, ticks, scripts, mods, scene files and open scene;
+    /// one written before the open scene was holds none. Another app's or format's, a cut-short
+    /// one, and one with a bad open scene, script or mod line are refused.
     #[test]
     fn a_snapshot_restores_the_world_it_was_taken_of() {
         let mut saved = Context::seeded(1);
@@ -924,7 +908,7 @@ mod tests {
             "(entities: {\n})\n".to_owned(),
         );
         let scenes = [scene];
-        // Edited by an author since it was saved, which the restored run's status says.
+        // Edited since saved, which the restored run's status says.
         let open = Open {
             author: Some("scenes/grid.ron".to_owned()),
             made: vec![saved.world().id(made).expect("alive")],
@@ -1008,8 +992,8 @@ mod tests {
         );
     }
 
-    /// The open scene of a file whose path isn't Unicode, which a snapshot leaves out, is written
-    /// untitled, owning what the file's text holds as it owns what it made.
+    /// The open scene of a file with a non-Unicode path (left out) is written untitled, owning
+    /// what the file's text holds as well as what it made.
     #[cfg(any(windows, unix))]
     #[test]
     fn the_open_scene_of_a_file_left_out_is_written_untitled() {
@@ -1051,10 +1035,9 @@ mod tests {
     }
 
     /// A snapshot taken while a copy of the world as edited played holds that world too, which
-    /// comes back, at its ticks, with its scene files, beside the copy's; one taken stopped says
-    /// so, and holds the run's world alone; one of a run playing from its start says neither; and
-    /// one that's stopped and holds a world as edited, or whose `stopped` or `edited` line is
-    /// broken, is refused.
+    /// comes back at its ticks with its scene files. A stopped one says so and holds the run's
+    /// world alone; one playing from its start says neither. A stopped snapshot holding a world as
+    /// edited, or with a broken `stopped` or `edited` line, is refused.
     #[test]
     fn a_snapshot_keeps_what_its_run_was_doing() {
         let mut edited = Context::seeded(1);
@@ -1071,8 +1054,7 @@ mod tests {
                 "(entities: {\n})\n".to_owned(),
             )
         };
-        // The world as edited's edited by an author, the copy's not, whose line is then as one
-        // written before the flag was.
+        // Only the world as edited's is flagged edited; the copy's line is as before the flag.
         let open = |author: &str| Open {
             author: Some(author.to_owned()),
             made: Vec::new(),
@@ -1126,8 +1108,8 @@ mod tests {
         }
     }
 
-    /// A snapshot of a run whose simulation was paused says so, whatever else its run was doing,
-    /// and one of a run that wasn't says nothing of it, as one written before pauses were kept.
+    /// A paused run's snapshot says so, whatever else it was doing; an unpaused one says nothing,
+    /// as before pauses were kept.
     #[test]
     fn a_snapshot_keeps_whether_its_run_was_paused() {
         let mut world = World::seeded(1);
@@ -1181,7 +1163,7 @@ mod tests {
         assert_eq!(refused.as_deref(), Some("snapshot.format"));
     }
 
-    /// A layer that adds a mesh as it loads, whose vertices are `N` floats.
+    /// Adds a mesh of `N`-float vertices as it loads.
     struct Drawn<const N: usize>;
 
     impl<const N: usize> Layer for Drawn<N> {
@@ -1191,9 +1173,8 @@ mod tests {
         }
     }
 
-    /// What's opaque, as a `MeshDraw` is, comes back into a run whose layers added the same assets
-    /// in the same order as the run it was taken in, and is left out otherwise, as where a mesh's
-    /// vertices are of another type, which its draws' bytes would be taken for.
+    /// What's opaque (a `MeshDraw`) comes back only into a run whose layers added the same assets
+    /// in the same order (another vertex type would misread its draws' bytes).
     #[test]
     fn what_is_opaque_comes_back_where_the_same_assets_were_added() {
         let mut saved = Context::seeded(3);
@@ -1225,11 +1206,9 @@ mod tests {
         }
     }
 
-    /// What's opaque comes back into a run whose layers added the same as the run it was taken in,
-    /// though that run, after its layers loaded, loaded a texture where text named it, removed it
-    /// and loaded it anew, and removed a mesh: the run restored takes the loads and the removals
-    /// again, in order, so that its notes are the snapshot's and every index lines up, the mesh
-    /// removed again among them.
+    /// What's opaque comes back though the snapshot's run later loaded a texture where text named
+    /// it, removed it, reloaded it and removed a mesh: the restored run takes these again in
+    /// order, so its notes are the snapshot's and every index lines up.
     #[test]
     fn what_is_opaque_comes_back_after_a_removal_and_a_reload() {
         let dir = Scratch::new("snapshot-removed");
@@ -1239,7 +1218,7 @@ mod tests {
             crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
         fs::write(root.join("assets/stone.png"), png).expect("a PNG");
         let stone = "assets/stone.png";
-        // What the layers add as they load.
+        // The layers' load.
         let load = |cx: &mut Context| {
             let tri = cx.add_mesh("tri", &[[0.0f32; 3]; 3], &[0, 1, 2]);
             tri.expect("a mesh")
@@ -1289,11 +1268,9 @@ mod tests {
         );
     }
 
-    /// A removal the snapshot's run made is taken again only while the restored run's notes are
-    /// the snapshot's up to it, so that the index it gives is the asset that run removed: a run
-    /// whose newer layers add the texture that run loaded where text named it, at that index and
-    /// from that path, then a mesh more, so that its notes part from the snapshot's before the
-    /// removal, keeps its texture.
+    /// A removal is taken again only while the restored run's notes match the snapshot's up to it,
+    /// so its index is the asset that run removed. Newer layers that add the texture at that index
+    /// and path, then one more mesh (notes part before the removal), keep it.
     #[test]
     fn a_removal_is_taken_again_only_where_the_notes_line_up() {
         let dir = Scratch::new("snapshot-parted");
@@ -1332,11 +1309,9 @@ mod tests {
         assert_eq!(removals.count(), 0);
     }
 
-    /// A snapshot names each texture its run named by an ID with its path, and its values hold
-    /// textures by those names; a run whose ID files give the texture another ID since, as after a
-    /// checkout, restores each to its texture all the same, its hash as the snapshot's run named
-    /// it the one saved, so that it warns of no change, and goes on by the run's own name, and so
-    /// hashes otherwise.
+    /// A run whose ID files since gave a texture another ID (as after a checkout) still restores
+    /// each texture the snapshot names by ID, hashing as saved under the snapshot's names, so no
+    /// change is warned of. It then goes on by its own name, and so hashes otherwise.
     #[test]
     fn a_texture_comes_back_by_the_name_its_snapshot_gave_it() {
         let logged = crate::testing::logged();
@@ -1382,12 +1357,10 @@ mod tests {
         assert_ne!(world.hash(), saved.world().hash());
     }
 
-    /// A texture the snapshot's run loaded where text named it, rather than as a layer loaded, is
-    /// loaded again, by the path its `asset` line gives, by a run restored from it, whose layers
-    /// don't load it; or, its file gone, stands in, named as the snapshot names it, so that the
-    /// world restored hashes as the one saved either way, warning of no change. A run that follows
-    /// another finds the file of an ID such a line gives, as a stand-in's does, by its own
-    /// database, the texture named by the ID still.
+    /// A texture loaded where text named it (not by a layer) is loaded again from its `asset`
+    /// line's path; if its file is gone, a stand-in named as the snapshot names it takes its
+    /// place. Either way the world hashes as saved, with no change warned of. A run that follows
+    /// another finds such a line's ID file (a stand-in's too) by its own database.
     #[test]
     fn a_texture_loaded_where_named_comes_back_or_stands_in() {
         let logged = crate::testing::logged();
@@ -1415,8 +1388,7 @@ mod tests {
         let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
         let snapshot = snapshot.expect("read");
         assert_eq!(loads(&snapshot), [Asset::Texture("assets/stone.png")]);
-        // A run that follows another, given no name for the file, finds by its own database an ID
-        // an `asset` line gives, as a stand-in's names one, the texture still named by the ID.
+        // Following another run, with no name for the file, it finds the ID by its own database.
         let mut following = Context::seeded(3).root(root.clone());
         following.name_as([]);
         following.load_named([Asset::Texture(id)], true);
@@ -1443,9 +1415,8 @@ mod tests {
         }
     }
 
-    /// A font the snapshot's run loaded where text named it, by its ID, is loaded again, by the
-    /// path its `asset` line gives, by a run restored from it, whose layers don't load it, so that
-    /// a text in it comes back in it, warning of no change.
+    /// A font loaded where text named it, by ID, is loaded again from its `asset` line's path, so
+    /// a text in it comes back in it, with no change warned of.
     #[test]
     fn a_font_loaded_where_named_comes_back() {
         let logged = crate::testing::logged();
@@ -1485,11 +1456,10 @@ mod tests {
         assert_eq!(font.map(|font| world.assets().font_name(font)), Some(id));
     }
 
-    /// A texture loaded where named, its file renamed since with its ID file, as the watcher moves
-    /// it, comes back from where its file is now in a run whose database holds its ID there, once
-    /// the snapshot follows it, the world restored warning of no change: its `asset` line, which
-    /// follows it too, is the one the run's load notes. One whose file is where it was, a copy
-    /// having taken its ID, keeps its path.
+    /// A texture loaded where named, its file since renamed with its ID file (as the watcher
+    /// moves it), comes back from the new place once the snapshot follows it, with no change
+    /// warned of; its `asset` line follows too. One whose file is still in place, a copy having
+    /// taken its ID, keeps its path.
     #[test]
     fn a_texture_renamed_since_comes_back_from_where_its_file_is() {
         let logged = crate::testing::logged();
@@ -1517,8 +1487,8 @@ mod tests {
         let text = text.expect("written");
         let assets = root.join("assets");
         let parsed = || Snapshot::parse(text.clone(), "a test".to_owned(), "Tested").expect("read");
-        // A copy made with its ID file, which a run's first scan gives the ID to, as the first by
-        // path whose ID file holds it, while the texture's file is where it was: no rename.
+        // A copy with its ID file, which a first scan gives the ID (first by path), while the
+        // texture's file stays put: no rename.
         for name in ["stone.png", "stone.png.meta"] {
             fs::copy(assets.join(name), assets.join(format!("a_{name}"))).expect("copied");
         }

@@ -1,6 +1,5 @@
-//! Patches of the game's code, which `dx tools hotpatch` builds for the game's process and the tool
-//! API's `patch` brings: where the game's `main` is in its process, which a patch is built against,
-//! and applying a patch, which only unsafe code does.
+//! Code patches, built by `dx tools hotpatch` and delivered by the tool API's `patch`. This module
+//! finds the game's `main` (what a patch is built against) and applies patches, which needs unsafe.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::OnceLock;
@@ -9,15 +8,13 @@ use gg_core::{Error, Result};
 use subsecond::JumpTable;
 use tracing::info;
 
-/// Where the game's `main` is in its process, which `dx tools hotpatch` builds a patch for the
-/// process against: 0 where subsecond finds no `main` that the executable exports, as in a build
-/// that cargo made for Windows or Linux, or in a build without debug assertions, without which
-/// subsecond's calls never look a patch up. A debug build that cargo made for macOS exports its
-/// `main` all the same, though only patches of the build that `dx build --fat-binary` made suit a
-/// process.
+/// Where the game's `main` is in its process: what `dx tools hotpatch` builds a patch against. 0
+/// where subsecond finds no exported `main` (cargo's Windows and Linux builds) or without debug
+/// assertions (subsecond's calls never look a patch up). A cargo debug build for macOS exports
+/// `main`, but only patches of a `dx build --fat-binary` build suit a process.
 pub(crate) fn aslr_reference() -> u64 {
-    // subsecond looks it up without a lock until it finds it, so asking on threads at once, as the
-    // tests that start the API do, would race.
+    // subsecond looks it up without a lock until found, so concurrent asks (as in the tests that
+    // start the API) would race.
     static REFERENCE: OnceLock<u64> = OnceLock::new();
     *REFERENCE.get_or_init(|| {
         if cfg!(debug_assertions) {
@@ -28,13 +25,14 @@ pub(crate) fn aslr_reference() -> u64 {
     })
 }
 
-/// Applies the patch `table` names, the simulation having run `ticks` ticks, so that each call made
-/// through subsecond's `HotFn` from then on, as the stack's calls of its layers' methods are, runs
-/// the patch's code for what it patches; and logs `Code patched`, naming the patch's library.
+/// Applies the patch `table` names at simulation tick `ticks`. Calls through subsecond's `HotFn`
+/// from then on (such as the stack's calls of layer methods) run the patch's code. Logs
+/// `Code patched` with the library.
 ///
-/// Fails with `api.patch`, changing nothing, if the process refuses the table, as [`refusal`] says,
-/// if the patch's library doesn't load, or if it isn't a patch of this build, as one that exports
-/// no `main` isn't, which subsecond panics on.
+/// Fails with `api.patch`, changing nothing, if:
+/// - the process refuses the table, per [`refusal`];
+/// - the patch's library doesn't load;
+/// - it isn't a patch of this build (one exporting no `main`; subsecond panics on it).
 pub(crate) fn apply(table: JumpTable, ticks: u64) -> Result<()> {
     let _zone = gg_core::zone!();
     if let Some(refused) = refusal(aslr_reference(), &table) {
@@ -43,20 +41,18 @@ pub(crate) fn apply(table: JumpTable, ticks: u64) -> Result<()> {
     let library = table.lib.clone();
     let apply = move || {
         // SAFETY: only a process that can read the session file's token can ask for a patch, and
-        // only the user the game runs as can read the file, from before it holds the token, as
-        // `dirs::write_private` writes it: on Unix of mode 0600, on Windows of a DACL that allows
-        // its owner alone. The API trusts that process as it trusts the user, since a table made
-        // up to could corrupt memory.
-        // `gg run` asks only with a patch that `dx tools hotpatch` built against this process's
-        // executable and the address of `main` in it that the session file gives, from edits it
-        // found inside function bodies alone, but for the items declared in them, so that its code
-        // lays out each type as this process does. It applies on the main thread, between ticks,
-        // the one thread that calls through `HotFn`, so no call reads the jump table as it changes.
+        // only the game's user can: `dirs::write_private` writes the file mode 0600 on Unix, with
+        // a DACL allowing its owner alone on Windows, before it holds the token. The API trusts
+        // that process as it trusts the user, since a made-up table could corrupt memory.
+        // `gg run` asks only with a patch `dx tools hotpatch` built against this process's
+        // executable and the `main` address the session file gives, from edits inside function
+        // bodies alone (but for items declared in them), so its code lays out each type as this
+        // process does. It applies on the main thread between ticks, the only caller of `HotFn`,
+        // so no call reads the jump table as it changes.
         unsafe { subsecond::apply_patch(table) }
     };
-    // subsecond panics, after loading the library and before taking its table, at a library that
-    // exports no `main` and at addresses that overflow as it moves them; gg-core's panic hook logs
-    // the panic as it happens.
+    // subsecond panics, after loading the library and before taking its table, on a library that
+    // exports no `main` and on addresses that overflow when moved. gg-core's panic hook logs it.
     match panic::catch_unwind(AssertUnwindSafe(apply)) {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
@@ -75,11 +71,11 @@ pub(crate) fn apply(table: JumpTable, ticks: u64) -> Result<()> {
     Ok(())
 }
 
-/// Why a process whose `main` is at `main` refuses the patch `table` names, before its library
-/// loads, if it does: it can't take patches, its `main` being 0, as [`aslr_reference`] says; or the
-/// table's reference is past its `main`, which subsecond subtracts the reference from to find how
-/// far the OS moved the executable, panicking where that's less than nothing, so the patch isn't
-/// for this process.
+/// Why a process whose `main` is at `main` refuses patch `table` before its library loads, if it
+/// does:
+/// - `main` is 0, so it takes no patches ([`aslr_reference`]);
+/// - the table's reference is past `main`: subsecond subtracts it to find how far the OS moved the
+///   executable and panics on a negative result, so the patch isn't for this process.
 fn refusal(main: u64, table: &JumpTable) -> Option<Error> {
     let message = if main == 0 {
         "this build can't take patches: subsecond finds no `main` that its executable exports, as \
@@ -101,8 +97,6 @@ fn refusal(main: u64, table: &JumpTable) -> Option<Error> {
 mod tests {
     use super::*;
 
-    /// The table of a patch whose library is `lib`, in the temporary directory, and whose
-    /// reference is `reference`.
     fn table(lib: &str, reference: u64) -> JumpTable {
         JumpTable {
             lib: std::env::temp_dir().join(lib),
@@ -113,8 +107,8 @@ mod tests {
         }
     }
 
-    /// A process refuses a patch if its `main` is 0, or before the table's reference, and takes one
-    /// whose reference is at or before its `main`, as a table that dx built for it has.
+    /// A process refuses a patch if its `main` is 0 or before the table's reference, and takes one
+    /// whose reference is at or before it, as dx's tables are.
     #[test]
     fn a_patch_is_refused_unless_its_table_fits_the_process() {
         let main = 0x7ff6_1234_5678;
@@ -135,8 +129,8 @@ mod tests {
         assert_eq!(refused(main, 0x1_4000_1000), None);
     }
 
-    /// A patch that can't apply, whether this process refuses it or its library doesn't load,
-    /// leaves the process without a jump table, so that its calls run its code as they did.
+    /// A patch that can't apply (refused, or its library doesn't load) leaves no jump table, so
+    /// calls run the original code.
     #[test]
     fn a_patch_that_cant_apply_leaves_the_code_as_it_was() {
         let none = format!("gg-engine-patch-{}-none.dll", std::process::id());
@@ -146,7 +140,7 @@ mod tests {
                 .map(|error| error.code());
             assert_eq!(refused, Some("api.patch"), "{reference:#x}");
         }
-        // SAFETY: the table is read at once, and no test applies a patch, which alone changes it.
+        // SAFETY: the table is read at once, and only a patch, which no test applies, changes it.
         assert!(unsafe { subsecond::get_jump_table() }.is_none());
     }
 }

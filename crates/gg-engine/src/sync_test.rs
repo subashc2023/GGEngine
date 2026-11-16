@@ -1,10 +1,9 @@
-//! The SyncTest (`--sync-test`): each tick run again, once it has run, on a copy of the world taken
-//! as it started, with the commands each layer's tick applied, and the copy then checked against
-//! the world, as rollback needs, which runs ticks again from a snapshot: a tick that goes by
-//! anything but the world, its commands and what its layer set up, as a layer's state kept from one
-//! tick to the next, or that a copy of the world doesn't hold all of, is named where the two part.
-//! The stack runs it, at each tick and each tick a replay runs. What a tick logs, it logs again
-//! as the SyncTest runs it again.
+//! The SyncTest (`--sync-test`) runs each tick again on a copy of the world taken as the tick
+//! started, with the commands the layers' ticks applied, then checks the copy against the world.
+//! Rollback needs that: it reruns ticks from a snapshot. A tick that depends on more than the
+//! world, its commands and what its layer set up (layer state kept between ticks, something a
+//! world copy doesn't hold) is named where the two part. The stack runs it at each tick, replayed
+//! ticks included. A tick's logs repeat on the second run.
 
 use gg_core::{Error, Result};
 
@@ -13,34 +12,30 @@ use crate::recording::text;
 use crate::reflect::Value;
 use crate::{Tick, World};
 
-/// What a SyncTest keeps of a tick, from its run to its run again.
+/// What a SyncTest keeps of a tick between its run and its rerun.
 #[derive(Default)]
 pub(crate) struct SyncTest {
-    /// The world as the tick started, taken in the memory of the copy of the tick before, which
-    /// the tick runs again on.
+    /// The world as the tick started, in the previous copy's memory; the tick reruns on it.
     world: World,
-    /// The commands each layer's tick applied, as values, after the layer's index from the bottom
-    /// of the stack.
+    /// The commands each layer's tick applied, as values, with the layer's index from the bottom.
     commands: Vec<(usize, Value)>,
-    /// The first command a layer's tick applied that its queue wouldn't queue again, as one holding
-    /// something opaque, which keeps the tick from running again.
+    /// The first applied command its queue wouldn't queue again (one holding something opaque).
+    /// It stops the rerun.
     refused: Option<Error>,
-    /// How many ticks ran again and left the copy as they left the world.
+    /// How many reruns left the copy as the world.
     matched: u64,
 }
 
 impl SyncTest {
-    /// Takes a copy of `world`, as the tick about to run finds it, in the memory of the copy it
-    /// holds, and forgets the commands of the tick before.
+    /// Copies `world` as the coming tick finds it, and forgets the previous tick's commands.
     pub(crate) fn take(&mut self, world: &World) {
         self.world.clone_from(world);
         self.commands.clear();
     }
 
-    /// Keeps the commands that `queue`, the queue of the layer at `layer` from the bottom of the
-    /// stack, of type `name`, holds as its tick is about to apply them in `world`; but the first
-    /// that its [`check`](Commands::check) says it wouldn't queue again keeps the tick from running
-    /// again, as [`refused`](Self::refused) says.
+    /// Keeps the commands `queue` (layer `layer` from the bottom, type `name`) holds as its tick
+    /// is about to apply them in `world`. The first its [`check`](Commands::check) rejects stops
+    /// the rerun ([`refused`](Self::refused)).
     pub(crate) fn queued(&mut self, layer: usize, name: &str, queue: &dyn Commands, world: &World) {
         for i in 0..queue.len() {
             let value = queue.value(i);
@@ -59,18 +54,17 @@ impl SyncTest {
         }
     }
 
-    /// Fails with `sync_test.bad_command`, naming the layer, the command and why, if a layer's tick
-    /// applied a command its queue wouldn't queue again, as [`queued`](Self::queued) says.
+    /// Fails with `sync_test.bad_command`, naming layer, command and why, if
+    /// [`queued`](Self::queued) met a command its queue wouldn't requeue.
     pub(crate) fn refused(&mut self) -> Result<()> {
         self.refused.take().map_or(Ok(()), Err)
     }
 
-    /// Empties `queue`, the queue of the layer at `layer` from the bottom of the stack, and queues
-    /// the commands its tick applied again.
+    /// Empties `queue` (layer `layer` from the bottom) and requeues its tick's applied commands.
     ///
     /// # Panics
     ///
-    /// If the queue refuses one that its check took, as [`Commands::check`] says it doesn't.
+    /// If the queue refuses a command its [`check`](Commands::check) took.
     pub(crate) fn give_back(&self, layer: usize, queue: &mut dyn Commands) {
         queue.clear();
         let commands = self.commands.iter().filter(|(at, _)| *at == layer);
@@ -80,16 +74,14 @@ impl SyncTest {
         }
     }
 
-    /// The copy of the world taken as the tick started, which it runs again on.
     pub(crate) fn world_mut(&mut self) -> &mut World {
         &mut self.world
     }
 
-    /// Checks that `tick`, run again on the copy, left it as it left `world`, as their hashes say.
+    /// Checks by hash that `tick`, rerun on the copy, left it as it left `world`.
     ///
-    /// Fails with `sync_test.diverged` if it didn't, naming the first entity and field where they
-    /// differ, with each world's value there, as [`World::difference`] finds it; or saying that
-    /// their layouts part, where they hold the same.
+    /// Fails with `sync_test.diverged` if not, naming the first differing entity and field
+    /// ([`World::difference`]) with each value, or saying their layouts part if they hold the same.
     pub(crate) fn compare(&mut self, tick: Tick, world: &World) -> Result<()> {
         if world.hash() == self.world.hash() {
             self.matched += 1;
@@ -114,7 +106,6 @@ impl SyncTest {
         Err(Error::new("sync_test.diverged", message))
     }
 
-    /// How many ticks ran again and left the copy as they left the world.
     pub(crate) fn matched(&self) -> u64 {
         self.matched
     }
@@ -132,12 +123,12 @@ mod tests {
     use crate::testing::logged;
     use crate::{Component, Entity, Place, Sound, Transform, audio};
 
-    /// A command of [`Pusher`]'s: moves the entity along x by this far.
+    /// Moves the entity along x by this far.
     #[derive(Reflect)]
     struct Push(Entity, f32);
 
-    /// Applies its pushes at each tick, playing its sound on each entity pushed: its ticks go by the
-    /// world and its commands alone.
+    /// Applies its pushes each tick, playing its sound on each entity pushed; depends on the world
+    /// and its commands alone.
     struct Pusher {
         pushes: Vec<Push>,
         sound: Sound,
@@ -158,14 +149,14 @@ mod tests {
         }
     }
 
-    /// How many ticks [`Counter`] has counted.
+    /// Ticks [`Counter`] counted.
     #[derive(Clone, Copy, Component)]
     struct Counted {
         ticks: u32,
     }
 
-    /// Counts its ticks in itself, and writes the count into the world: a tick run again counts on
-    /// from where its first run left the count.
+    /// Counts ticks in itself and writes the count into the world, so a rerun counts on from the
+    /// first run's count.
     #[derive(Default)]
     struct Counter {
         ticks: u32,
@@ -180,12 +171,10 @@ mod tests {
         }
     }
 
-    /// A command of [`Sealer`]'s, holding a handle of its own, which is opaque, so that no value
-    /// makes it.
+    /// Holds an opaque handle, so no value makes it.
     #[derive(Reflect)]
     struct Seal(#[reflect(opaque)] Handle);
 
-    /// Spawns an entity for each seal queued.
     struct Sealer(Vec<Seal>);
 
     impl Layer for Sealer {
@@ -200,10 +189,9 @@ mod tests {
         }
     }
 
-    /// Each tick runs again, once it has run, on a copy of the world taken as it started, with the
-    /// commands it applied: the world takes them once, keeps its serial, and plays the sounds the
-    /// tick queued, while the copy keeps those it queued again, which nothing plays; and the run
-    /// ends saying that the ticks left the copy as they left the world.
+    /// Each tick reruns on a copy taken as it started, with its applied commands. The world takes
+    /// them once, keeps its serial and plays the tick's sounds; the copy keeps its requeued
+    /// sounds, which nothing plays. The run ends saying the copy matched the world.
     #[test]
     fn each_tick_runs_again_on_a_copy_which_it_leaves_as_it_left_the_world() {
         let scratch = Scratch::new("sync-test-sounds");
@@ -249,10 +237,9 @@ mod tests {
         assert!(codes.contains(&"sync_test.matched".to_owned()), "{codes:?}");
     }
 
-    /// A layer that keeps what its tick changes from one tick to the next, which the tick run
-    /// again finds as its first run left it, parts the copy from the world: the run again fails
-    /// naming the entity and the field where they first differ, with both values; and a run's tick
-    /// ends the run with the error, and the SyncTest with it.
+    /// A layer keeping state between ticks, which the rerun finds as the first run left it, parts
+    /// the copy from the world: the rerun fails naming the first differing entity, field and both
+    /// values. In a run, that ends the run with the error, and the SyncTest too.
     #[test]
     fn a_layer_keeping_state_between_ticks_parts_the_copy_from_the_world_at_its_field() {
         let mut cx = Context::seeded(0);
@@ -293,9 +280,8 @@ mod tests {
         );
     }
 
-    /// A command a layer's tick applied that its queue wouldn't queue again, as one holding
-    /// something opaque, keeps the tick from running again: it applies to the world, and the run
-    /// again fails naming the layer, the command and why.
+    /// A command its queue wouldn't requeue (one holding something opaque) stops the rerun: it
+    /// applies to the world, and the rerun fails naming layer, command and why.
     #[test]
     fn a_command_its_queue_wouldnt_queue_again_keeps_the_tick_from_running_again() {
         let mut cx = Context::seeded(0);
