@@ -20,20 +20,19 @@ impl Context {
     /// into memory. Ticks queue it with [`World::play_sound`]; layers play it with
     /// [`play_sound`](Self::play_sound).
     ///
-    /// `name` names it in errors and the log. The add logs `asset.sound_loaded` at the debug
-    /// level, with how long it took. A file added again, by any form of its path, gives the first
-    /// sound without decoding again. In a development run that serves the tool API, the sound
-    /// decodes again as its file changes and plays the new file from its next play; a change that
-    /// doesn't decode warns, and the sound plays as before.
+    /// `name` names it in errors and the log; the add logs `asset.sound_loaded` at the debug level,
+    /// with its time. A file added again, by any form of its path, gives the first sound. In a
+    /// development run serving the tool API, it decodes again as its file changes, playing the new
+    /// file from its next play; a change that doesn't decode warns and keeps the old.
     ///
-    /// Windowed and embedded runs play sound, as ARCHITECTURE.md's Audio says. The first sound
-    /// loaded opens the default output device, so a game without sounds opens none. A run that
-    /// can't open one plays none, warning `audio.no_output`. Headless runs, replays and tests play
-    /// none. What plays follows the run: the tool API's `pause` holds it, `stop` stops it.
+    /// Windowed and embedded runs play sound (ARCHITECTURE.md's Audio). The first sound loaded
+    /// opens the default output device, so a game without sounds opens none. A run that can't
+    /// open one plays none, warning `audio.no_output`. Headless runs, replays and tests play none.
+    /// The tool API's `pause` holds what plays; `stop` stops it.
     ///
     /// Fails with `engine.bad_sound` if the file can't be read, isn't a regular file, is over
-    /// 16 MiB, doesn't decode, or decodes to over 2²⁴ frames (some 6 minutes at 48 kHz), which
-    /// it's refused as it passes. Longer audio is music: [`add_music`](Self::add_music) streams it.
+    /// 16 MiB, doesn't decode, or decodes past 2²⁴ frames (some 6 minutes at 48 kHz), refused as
+    /// it passes. Longer audio is music, which [`add_music`](Self::add_music) streams.
     pub fn add_sound(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Sound> {
         let path = path.as_ref();
         let file = self.files.file_of(path);
@@ -63,10 +62,10 @@ impl Context {
         Ok(sound)
     }
 
-    /// Plays `sound` from `place` now, in a run that plays sound ([`add_sound`](Self::add_sound)),
-    /// panned and faded as the game's view hears it there, as [`Place`] says. For a layer's UI;
-    /// ticks queue theirs with [`World::play_sound`]. Past 128 sounds at once it's left out,
-    /// warning `audio.full`. While the run is paused or stopped it isn't played.
+    /// Plays `sound` now from `place` ([`Place`]), in a run that plays sound
+    /// ([`add_sound`](Self::add_sound)). For a layer's UI; ticks queue theirs with
+    /// [`World::play_sound`]. Past 128 sounds at once it's dropped, warning `audio.full`. A paused
+    /// or stopped run doesn't play it.
     ///
     /// # Panics
     ///
@@ -75,21 +74,17 @@ impl Context {
         self.audio.play(sound, place, &self.world);
     }
 
-    /// Loads the audio file at `path` (WAV, Ogg Vorbis, FLAC or MP3) as music for layers to play
-    /// with [`play_music`](Self::play_music). It's read whole into memory, still compressed, and
-    /// decoded as it plays on a kira thread, so a long piece takes little memory.
+    /// Loads the audio file at `path` (WAV, Ogg Vorbis, FLAC or MP3) as music for
+    /// [`play_music`](Self::play_music). It's read whole, still compressed, and decoded as it plays
+    /// on a kira thread, so a long piece takes little memory.
     ///
-    /// `name` names it in errors and the log. The add logs `asset.music_loaded`, with how long it
-    /// took. A file added again, by any form of its path, gives the first music without reading
-    /// again. In a development run that serves the tool API, it's read again as its file changes;
-    /// a play of it crossfades to the new file from where it was. A change that doesn't read
-    /// warns, and it plays as before. It plays as sounds do ([`add_sound`](Self::add_sound)); the
-    /// first one loaded opens the output.
+    /// Like [`add_sound`](Self::add_sound) in naming, adding again, reloading and output, but it
+    /// logs `asset.music_loaded`, and a play crossfades to a changed file from where it was.
     ///
     /// Fails with `engine.bad_music` if the file can't be read, isn't a regular file, is over
-    /// 64 MiB, or isn't WAV, Ogg Vorbis, FLAC or MP3 of one or two channels that says its rate and
-    /// length and holds a frame, its first packet decoding. Later packets decode only as it plays:
-    /// a play that fails there warns `audio.music_failed` and stops.
+    /// 64 MiB, or isn't WAV, Ogg Vorbis, FLAC or MP3 of one or two channels that states its rate
+    /// and length and holds a frame whose first packet decodes. Later packets decode as it plays:
+    /// a failure there warns `audio.music_failed` and stops it.
     pub fn add_music(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Music> {
         let path = path.as_ref();
         let file = self.files.file_of(path);
@@ -118,14 +113,13 @@ impl Context {
         Ok(music)
     }
 
-    /// Plays `music` looping in place of the music playing, or `None` for none, in a run that
-    /// plays sound ([`add_music`](Self::add_music)). The old music fades out over `fade` as
-    /// `music` fades in from its start, on the music's bus. A zero fade takes kira's 10 ms, against
-    /// a click. Playing the music already playing changes nothing, so a layer can say each frame
-    /// which plays. Ticks don't play music: a layer that reads the world as it updates plays what
-    /// it calls for. While the run is stopped (`--stopped`, the tool API's `stop`) nothing plays;
-    /// when it plays, the music the layers last had play starts from its start, fading in over
-    /// its given fade.
+    /// Plays `music` looping in place of what plays (`None` for silence), in a run that plays
+    /// sound ([`add_music`](Self::add_music)). The old fades out over `fade` as `music` fades in
+    /// from its start, on the music bus. A zero fade takes kira's 10 ms, against a click. Playing
+    /// what already plays changes nothing, so a layer can call it each frame. Ticks don't play
+    /// music; a layer reading the world as it updates does. While the run is stopped
+    /// (`--stopped`, the tool API's `stop`) nothing plays; once it plays, the layers' last music
+    /// starts from its start, fading in over its fade.
     ///
     /// # Panics
     ///
@@ -134,17 +128,15 @@ impl Context {
         self.audio.play_music(music, fade);
     }
 
-    /// The music layers last had play ([`play_music`](Self::play_music)), also in a run that plays
-    /// no sound.
+    /// The last music given to [`play_music`](Self::play_music), even in a run without sound.
     pub fn music_playing(&self) -> Option<Music> {
         self.audio.music_playing()
     }
 
-    /// Fades `bus`'s volume to `volume` over `fade`, as [`play_music`](Self::play_music)'s fades
-    /// do: 1 is as loud as what plays through it, 0.5 half as loud (about -6 dB), 0 or less
-    /// silent. Each bus starts at 1 and keeps its volume for the run, also in a run that plays no
-    /// sound. Setting the volume it's going to changes nothing, so a layer can say each frame how
-    /// loud each is, as a menu that ducks the music does.
+    /// Fades `bus`'s volume to `volume` over `fade`, like [`play_music`](Self::play_music)'s
+    /// fades. 1 is full, 0.5 half (about -6 dB), 0 or less silent. Each bus starts at 1 and keeps
+    /// its volume for the run, even without sound. Setting the volume it's heading to changes
+    /// nothing, so a layer can set it each frame, as a menu ducking the music does.
     ///
     /// # Panics
     ///
@@ -164,13 +156,13 @@ impl Context {
         self.audio.play_queued(&mut self.world);
     }
 
-    /// Like [`play_queued`](Self::play_queued), but skips those in `played`, which earlier runs of
-    /// a tick that rollback reruns already played, and adds the ones it plays to `played`.
+    /// Like [`play_queued`](Self::play_queued), skipping those in `played` (played by earlier runs
+    /// of a tick rollback reruns) and adding what it plays.
     pub(crate) fn play_queued_again(&mut self, played: &mut Vec<Sound>) {
         self.audio.play_queued_again(&mut self.world, played);
     }
 
-    /// Has what plays follow `stopped` and `paused`, as [`Playback`](audio::Playback) says.
+    /// Has what plays follow `stopped` and `paused` ([`Playback`](audio::Playback)).
     #[cfg(feature = "dev")]
     pub(crate) fn follow_playback(&mut self, stopped: bool, paused: bool) {
         let playback = if stopped {
