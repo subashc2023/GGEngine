@@ -1,6 +1,5 @@
-//! Animation state machines: a model's root's states, each a clip or clips blended along a
-//! parameter, and the transitions between them on its parameters' values, which drive its
-//! animator's plays at the ticks.
+//! Animation state machines: states (a clip, or clips blended along a parameter) and transitions
+//! on parameters' values, which drive a model root's [`Animator`] plays.
 
 use std::fmt;
 use std::mem;
@@ -13,70 +12,72 @@ use super::animator::{Animator, Play, named};
 use super::skeleton::Clip;
 use crate::{Component, Entity, EntityId, ModelRoot, Reflect, Tick, World, reflect};
 
-/// A state machine of the clips a model's root plays, beside its [`Animator`], which it drives at
-/// the ticks [`step_animation`](super::step_animation) runs in, before the animator steps: its
-/// parameters, which code, scripts and tools set; its states, each a clip, or clips blended along a
-/// parameter; and its transitions from state to state on its parameters' values. Each tick, the
-/// transitions from its state, and from any state, are checked in their order, and the first that
-/// holds fires, the animator cross-fading to the state it enters as [`World::play`] has it do; then
-/// the state's plays take the weights its motion gives them, and every other play eases to 0 and
-/// leaves, so that a state of a lone clip, once its fade is done, plays it exactly. Its state and
-/// the seconds it has been in it are fields of its own, and its plays' times its animator's, so
-/// that a snapshot, a replay or a joining peer goes on exactly where it was. An entity without a
-/// [`ModelRoot`] steps none, and one without an animator is given one.
+/// A state machine driving a model root's [`Animator`], before the animator steps in
+/// [`step_animation`](super::step_animation).
 ///
-/// Entering a state, the play of each clip it plays that the animator holds eases to its weight
-/// from where it is, keeping its time, as `World::play` has it, unless the state plays once, which
-/// starts each of its clips afresh, from its end if the state plays backward, the plays of them the
-/// animator held easing out with the rest; a clip the animator hasn't joins from its start, at 0,
-/// or at its weight for a fade of 0. A blend's clips keep in step, each at the same fraction of its
-/// length, the heaviest held one's, the first in the blend's order of those as heavy, each played
-/// at the speed that brings it round in the blend's length: its clips' lengths weighted as the blend
-/// weights them, over the weights of those its model has of some length, so that a clip it hasn't,
-/// or one of no length, as a still pose, speeds up none of the others. So a walk and a run blend
-/// into a jog whose feet agree.
+/// Parameters (set by code, scripts and tools) and transitions on them move between states, each a
+/// clip or clips blended along a parameter. Each tick the transitions from the current state and
+/// from any state are checked in order and the first that holds fires, the animator cross-fading
+/// as [`World::play`] does. Then the state's plays take its motion's weights and every other play
+/// eases to 0 and leaves, so a lone clip plays exactly once its fade is done.
 ///
-/// What it names and hasn't is warned of once a world, by name: a state (`animation.no_state`),
-/// which, named as its own state, it leaves for its first, and to which no transition fires; a
-/// parameter (`animation.no_param`), whose conditions don't hold, and along which a blend blends as
-/// at 0; a test or a blend of a parameter of another kind (`animation.wrong_param`), likewise; and a
-/// clip its model hasn't (`animation.no_clip`), which it leaves out.
+/// The state and its seconds are fields here and the plays' times the animator's, so a snapshot,
+/// replay or joining peer continues exactly. An entity without a [`ModelRoot`] steps none; one
+/// without an animator is given one.
+///
+/// Entering a state, each play of its clips the animator holds eases to its weight from where it
+/// is, keeping its time, unless the state plays once: that starts each clip afresh (from its end if
+/// backward) and held plays ease out with the rest. A clip the animator lacks joins from its start
+/// at weight 0, or at its weight for a fade of 0.
+///
+/// A blend's clips keep in step at the same fraction of their lengths: the heaviest held clip's
+/// (the first in blend order among equals). Each plays at the speed that brings it round in the
+/// blend's length, their lengths weighted as the blend weights them over the clips its model has
+/// of some length. A missing clip or one of no length (a still pose) speeds up no other. So a walk
+/// and a run blend into a jog whose feet agree.
+///
+/// Names it lacks are warned of once per world, by name:
+/// - a state (`animation.no_state`): named as its own state, it leaves for the first; no
+///   transition to it fires;
+/// - a parameter (`animation.no_param`): its conditions don't hold and a blend along it blends as
+///   at 0;
+/// - a test or blend on a parameter of another kind (`animation.wrong_param`): likewise;
+/// - a clip its model lacks (`animation.no_clip`): left out.
 #[derive(Clone, Debug, Default, PartialEq, Component)]
 pub struct AnimationStates {
-    /// The values that transitions' conditions test and blends blend along, each by its name:
-    /// code sets them with [`World::set_param`], scripts with `gg.set_param`, and tools through
-    /// these fields.
+    /// The values transitions test and blends blend along, by name. Code sets them with
+    /// [`World::set_param`], scripts with `gg.set_param`, tools through these fields.
     pub params: Vec<AnimationParam>,
-    /// The states, each by its name.
+    /// The states, by name.
     pub states: Vec<AnimationState>,
-    /// The transitions, in the order they're checked.
+    /// The transitions, in the order checked.
     pub transitions: Vec<StateTransition>,
-    /// The state it's in, by its name. Empty, as a scene starts it, it enters the first at its first
-    /// tick; set to another, as by a tool, it cuts to that one's clips at the next, its time going
-    /// on from what it's given.
+    /// The current state's name. Empty, as a scene starts it, it enters the first at its first
+    /// tick; set to another (by a tool, say), it cuts to that state's clips at the next tick, its
+    /// time continuing from what it's given.
     pub state: String,
-    /// The seconds it has been in its state, which an exit time measures.
+    /// Seconds in the current state, which an exit time measures.
     pub time: f32,
 }
 
-/// A parameter of an [`AnimationStates`]: its name and its value.
+/// A parameter of an [`AnimationStates`]: a name and a value.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 pub struct AnimationParam {
-    /// Its name, which conditions, blends and setters name it by.
+    /// The name conditions, blends and setters use.
     pub name: String,
-    /// Its value, whose kind a value set to it keeps.
+    /// Its value; a value set to it keeps its kind.
     pub value: ParamValue,
 }
 
 /// The value of an [`AnimationParam`], and its kind.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub enum ParamValue {
-    /// A number, such as a speed, which a blend blends along, and which a condition tests is above
-    /// or below a value.
+    /// A number, such as a speed: a blend blends along it, a condition tests it above or below a
+    /// value.
     Float(f32),
-    /// A flag that stays as it's set.
+    /// A flag that stays as set.
     Bool(bool),
-    /// A flag that a transition that fires on it, as it's set, consumes, setting it back.
+    /// A flag that a transition firing on it consumes, setting it back.
     Trigger(bool),
 }
 
@@ -87,14 +88,13 @@ impl From<f32> for ParamValue {
 }
 
 impl From<bool> for ParamValue {
-    /// A bool, which sets a bool or a trigger alike.
+    /// A bool sets a bool or a trigger alike.
     fn from(set: bool) -> Self {
         Self::Bool(set)
     }
 }
 
 impl ParamValue {
-    /// The name of its variant.
     fn kind(self) -> &'static str {
         match self {
             Self::Float(_) => "Float",
@@ -104,19 +104,18 @@ impl ParamValue {
     }
 }
 
-/// A state of an [`AnimationStates`]: its name and what it plays, how fast and how it goes on at
-/// its end.
+/// A state of an [`AnimationStates`]: what it plays, how fast, and what happens at the end.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 pub struct AnimationState {
-    /// Its name, which the machine's `state` and transitions name it by.
+    /// The name the machine's `state` and transitions use.
     pub name: String,
     /// The clip it plays, or the clips it blends.
     pub motion: StateMotion,
-    /// How fast it plays: 1 as its clips go, 2 twice as fast, and backward below 0.
+    /// Playback rate: 1 as its clips go, 2 twice as fast, backward below 0.
     #[reflect(default = 1.0)]
     pub speed: f32,
-    /// Whether its clips play once and hold their last pose, loop, or go back and forth; played
-    /// once, each starts afresh as the state is entered, from its end if its speed is below 0.
+    /// Its clips play once and hold the last pose, loop, or go back and forth. Played once, each
+    /// starts afresh as the state is entered, from its end if `speed` is below 0.
     #[reflect(default = Playback::Loop)]
     pub playback: Playback,
 }
@@ -126,9 +125,9 @@ pub struct AnimationState {
 pub enum StateMotion {
     /// One clip, by its name among its model's.
     Clip(String),
-    /// Clips blended along the float parameter `param`, each at its point: the two nearest the
-    /// parameter's value either side weighted by how near it is to each, the clip at a point it's
-    /// at, or past every point the nearest, alone.
+    /// Clips blended along the float parameter `param`, each at its point. The two points nearest
+    /// the value, either side, weigh by nearness; at a point, or past every point, the nearest
+    /// clip plays alone.
     Blend {
         param: String,
         points: Vec<BlendPoint>,
@@ -138,29 +137,29 @@ pub enum StateMotion {
 /// A clip of a blend, at its point along the blend's parameter.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 pub struct BlendPoint {
-    /// The clip, by its name among its model's.
+    /// The clip's name among its model's.
     pub clip: String,
     /// The parameter's value at which it plays alone.
     pub at: f32,
 }
 
-/// A transition of an [`AnimationStates`] from a state, or from any, to another, once its
-/// conditions all hold.
+/// A transition of an [`AnimationStates`] from a state, or any, to another, once all its
+/// conditions hold.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 pub struct StateTransition {
-    /// The state it leaves, by its name; `None`, any but the one it enters.
+    /// The state it leaves, by name. `None`: any but the one it enters.
     pub from: Option<String>,
-    /// The state it enters, by its name.
+    /// The state it enters, by name.
     pub to: String,
-    /// What must all hold of the parameters for it to fire: none, and it fires as soon as its exit
-    /// time allows. It consumes each trigger it tests is set as it fires.
+    /// All must hold for it to fire. With none, it fires as soon as its exit time allows. Firing
+    /// consumes each trigger tested as set.
     pub conditions: Vec<ParamCondition>,
-    /// How much of its motion the state it leaves must have played first, if any: its seconds in
-    /// the state times the size of its speed, over its clip's length, or over its blend's, as its
-    /// weights are, as [`AnimationStates`] says; past 1 for more than a round of a loop.
+    /// How much of its motion the state it leaves must have played first: seconds in the state
+    /// times the size of its speed, over the clip's length or the blend's (weighted as
+    /// [`AnimationStates`] says). Past 1 is more than a loop's round.
     pub exit_time: Option<f32>,
-    /// The seconds the animator takes to cross-fade from the state it leaves to the one it enters,
-    /// as [`World::play`] fades: at 0, it cuts.
+    /// Seconds the animator takes to cross-fade from the state it leaves, as [`World::play`] does.
+    /// At 0 it cuts.
     #[reflect(min = 0.0)]
     pub fade: f32,
 }
@@ -168,7 +167,7 @@ pub struct StateTransition {
 /// What a [`StateTransition`] tests of a parameter.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 pub struct ParamCondition {
-    /// The parameter, by its name.
+    /// The parameter's name.
     pub param: String,
     /// What must hold of its value.
     pub test: ParamTest,
@@ -181,14 +180,14 @@ pub enum ParamTest {
     Above(f32),
     /// A float below this.
     Below(f32),
-    /// A bool that's true, or a trigger that's set, which the transition consumes as it fires.
+    /// A bool that's true, or a trigger that's set (the transition consumes it as it fires).
     True,
     /// A bool that's false, or a trigger that isn't set.
     False,
 }
 
 impl ParamTest {
-    /// What it tests, as a warning says it.
+    /// What it tests, for a warning.
     fn tests(self) -> &'static str {
         match self {
             Self::Above(_) | Self::Below(_) => "against a number, as a float's value is",
@@ -198,7 +197,7 @@ impl ParamTest {
 }
 
 impl AnimationStates {
-    /// The value of its parameter `name`, if it has one.
+    /// The value of parameter `name`, if any.
     pub fn param(&self, name: &str) -> Option<ParamValue> {
         let mut params = self.params.iter();
         params
@@ -206,12 +205,14 @@ impl AnimationStates {
             .map(|param| param.value)
     }
 
-    /// Sets its parameter `name` to `value`, keeping its kind: a float to a number, and a bool or a
-    /// trigger to a bool, a trigger set staying set until a transition that fires on it consumes
-    /// it, or it's set back.
+    /// Sets parameter `name` to `value`, keeping its kind: a float takes a number, a bool or
+    /// trigger takes a bool. A trigger set stays set until a transition firing on it consumes it,
+    /// or it's set back.
     ///
-    /// Fails with `animation.no_param`, naming its parameters, if it has none of that name; and with
-    /// `animation.wrong_param` for a value of another kind than the parameter's.
+    /// # Errors
+    ///
+    /// - `animation.no_param`, naming its parameters: no parameter `name`.
+    /// - `animation.wrong_param`: `value` is of another kind than the parameter's.
     pub fn set_param(&mut self, name: &str, value: impl Into<ParamValue>) -> Result<()> {
         let value = value.into();
         let Some(param) = self.params.iter_mut().find(|param| param.name == name) else {
@@ -247,14 +248,14 @@ impl AnimationStates {
         Ok(())
     }
 
-    /// The index of its state named `name`.
+    /// The index of state `name`.
     fn position(&self, name: &str) -> Option<usize> {
         self.states.iter().position(|state| state.name == name)
     }
 
-    /// Steps it a tick of `dt` seconds, `plays` its animator's, of a model whose clips are `clips`:
-    /// fires the first of its transitions that holds, then sets the plays for the state it's in,
-    /// as [`AnimationStates`] says, warning of what it names and hasn't through `warnings`.
+    /// Steps `dt` seconds over the animator's `plays` of a model with `clips`: fires the first
+    /// transition that holds, then sets the plays for the state, as [`AnimationStates`] says.
+    /// Missing names go to `warnings`.
     fn step(&mut self, clips: &[Clip], plays: &mut Vec<Play>, dt: f32, warnings: &mut Warnings) {
         if self.states.is_empty() {
             return;
@@ -287,8 +288,8 @@ impl AnimationStates {
         self.time += dt;
     }
 
-    /// The first of its transitions that holds in state `at`, as [`AnimationStates`] says, having
-    /// consumed the triggers it tests: the state it enters and the seconds its fade takes.
+    /// The first transition that holds in state `at`, its triggers consumed: the state it enters
+    /// and its fade's seconds.
     fn fired(
         &mut self,
         at: usize,
@@ -348,8 +349,8 @@ impl AnimationStates {
         Some((to, transition.fade))
     }
 
-    /// Whether `condition` holds of its parameters, warning of a parameter it hasn't, or of another
-    /// kind than its test's, which it doesn't hold of.
+    /// Whether `condition` holds. A missing parameter, or one of another kind than the test's, is
+    /// warned of and the condition doesn't hold.
     fn holds(&self, condition: &ParamCondition, warnings: &mut Warnings) -> bool {
         let name = &condition.param;
         let Some(value) = self.param(name) else {
@@ -380,8 +381,8 @@ impl AnimationStates {
         }
     }
 
-    /// The value of the float parameter `param` that a blend blends along, warning of a parameter
-    /// it hasn't or of another kind, which it takes as 0, if `warnings` are given.
+    /// The float parameter `param` a blend blends along. A missing one or one of another kind
+    /// counts as 0, warned of if `warnings` is given.
     fn along(&self, param: &str, warnings: Option<&mut Warnings>) -> f32 {
         let held = match self.param(param) {
             Some(ParamValue::Float(x)) => return x,
@@ -409,8 +410,8 @@ impl AnimationStates {
         0.0
     }
 
-    /// How much of its motion state `at` has played, as an exit time measures it: without end for
-    /// a motion of no length.
+    /// How much of state `at`'s motion has played, as an exit time measures it: infinite for a
+    /// motion of no length.
     fn played(&self, at: usize, clips: &[Clip]) -> f32 {
         let state = &self.states[at];
         let length = match &state.motion {
@@ -427,14 +428,14 @@ impl AnimationStates {
         }
     }
 
-    /// Sets `plays` for state `at`, which a transition of a fade of `entered` seconds entered at
-    /// this tick, if it did: each play of a clip of the state's to the weight its motion gives it,
-    /// with the state's speed and playback, a blend's in step, and a fade that's done once the
-    /// state's time is past it; and each other play to a weight of 0, as [`AnimationStates`] says.
-    /// A tick that enters no state, nor brings back a blend's clip that left at a weight of 0,
-    /// allocates nothing; one that does allocates the name of each clip it adds to the plays, but
-    /// where it takes the place of a play that leaves at the tick, as each play a cut leaves does,
-    /// and the plays' room, past what they held before.
+    /// Sets `plays` for state `at`, entered this tick with a fade of `entered` seconds, if at all.
+    /// Each play of the state's clips takes its motion's weight, the state's speed and playback, a
+    /// blend's step, and a fade that's done once the state's time passes it; every other play goes
+    /// to weight 0.
+    ///
+    /// A tick that enters no state and brings back no blend clip that left at weight 0 allocates
+    /// nothing. Otherwise it allocates each added clip's name and the plays' room beyond what they
+    /// held, except where an added play replaces one leaving this tick (as a cut leaves each).
     fn drive(
         &self,
         at: usize,
@@ -444,7 +445,7 @@ impl AnimationStates {
         warnings: &mut Warnings,
     ) {
         let state = &self.states[at];
-        // Played once, a state's clips start afresh as it's entered, from their ends backward.
+        // Played once, a state's clips start afresh on entry, from their ends if backward.
         let once = state.playback == Playback::Once;
         let fresh = entered.is_some() && once;
         let start = if once && state.speed < 0.0 { 1.0 } else { 0.0 };
@@ -457,7 +458,7 @@ impl AnimationStates {
             }
         };
         let blended = length.is_some();
-        // Each of its clips, with the weight its motion gives it, and its clip, if its model has it.
+        // Each clip's name, its motion's weight, and the clip if the model has it.
         let clip_of = |i: usize| {
             let (name, weight) = match &state.motion {
                 StateMotion::Clip(clip) => (clip.as_str(), 1.0),
@@ -482,8 +483,8 @@ impl AnimationStates {
                 }
             }
         }
-        // Where a blend's clips are, as a fraction of their lengths: where the heaviest held is, the
-        // first in the blend's order of those as heavy; or where a clip starts.
+        // Where a blend's clips are, as a fraction of their lengths: the heaviest held one's (the
+        // first in blend order among equals), or a clip's start.
         let mut heaviest: Option<(f32, f32)> = None;
         if blended && !fresh {
             for i in 0..count {
@@ -520,7 +521,7 @@ impl AnimationStates {
                 Some(held) => {
                     let play = &mut plays[held];
                     play.target = weight;
-                    // Once the state has been in for as long as its fade, its weight is its target.
+                    // Once the state has lasted its fade, the weight is the target.
                     if entered.is_none() && self.time >= play.fade {
                         play.fade = 0.0;
                     }
@@ -549,10 +550,9 @@ impl AnimationStates {
     }
 }
 
-/// The points of `points` that `x` falls between and how far it is from the first to the second,
-/// from 0 to 1: the nearest at or below it and the nearest at or above, the first of those at the
-/// same point; or, at a point, or past every point, the nearest alone, at 0. A value that isn't a
-/// number, or points that aren't, give the first point alone.
+/// The points `x` falls between, and how far it is from the first to the second, 0 to 1: the
+/// nearest at or below and the nearest at or above (the first, at the same point). At a point, or
+/// past every point, the nearest alone, at 0. A NaN value or points give the first point alone.
 fn between(points: &[BlendPoint], x: f32) -> Option<(usize, usize, f32)> {
     let (mut below, mut above): (Option<usize>, Option<usize>) = (None, None);
     for (i, point) in points.iter().enumerate() {
@@ -573,8 +573,7 @@ fn between(points: &[BlendPoint], x: f32) -> Option<(usize, usize, f32)> {
     }
 }
 
-/// The weight point `i` of a blend takes where its value falls `between` points, as [`between`]
-/// gives it.
+/// The weight of blend point `i` where its value falls [`between`] points.
 fn weight(between: Option<(usize, usize, f32)>, i: usize) -> f32 {
     match between {
         Some((low, _, t)) if i == low => 1.0 - t,
@@ -583,11 +582,10 @@ fn weight(between: Option<(usize, usize, f32)>, i: usize) -> f32 {
     }
 }
 
-/// The length of a blend of `points` whose value falls `between` them, as [`between`] gives it, of a
-/// model whose clips are `clips`: the lengths of the clips its model has of some length, weighted as
-/// the blend weights them over those clips' weights alone, so that a clip its model hasn't, or of no
-/// length, has no share of it, and speeds up none of the others; 0 if no clip with weight has a
-/// length.
+/// The length of a blend of `points` whose value falls [`between`] them, in a model with `clips`:
+/// the lengths of its clips of some length, weighted as the blend weights them over those clips'
+/// weights alone, so a missing clip or one of no length has no share and speeds up no other. 0 if
+/// no weighted clip has a length.
 fn blend_length(
     points: &[BlendPoint],
     between: Option<(usize, usize, f32)>,
@@ -605,21 +603,21 @@ fn blend_length(
     if total > 0.0 { weighted / total } else { 0.0 }
 }
 
-/// The index of the last play of `plays` of clip `name`, the newest.
+/// The index of the newest (last) play of clip `name`.
 fn last_of(plays: &[Play], name: &str) -> Option<usize> {
     plays.iter().rposition(|play| play.clip == name)
 }
 
-/// Whether `play` leaves its animator at this tick's step, eased to 0, as its fields stand: one
-/// that eases toward no weight from none, or at once.
+/// Whether `play` leaves its animator at this tick's step as its fields stand: its target is 0
+/// and it has no weight or no fade.
 fn leaves(play: &Play) -> bool {
     let kept = play.target > 0.0 || (play.fade > 0.0 && play.weight > 0.0);
     !kept
 }
 
-/// Adds `play`, as a play of clip `name`, after `plays`: in the room of a play that leaves at this
-/// tick's step, its clip's name's among it, if there is one, which can't show at the step, being at
-/// a weight of 0, so that what's sampled is as if it had been added after them all.
+/// Adds `play`, as a play of clip `name`, after `plays`, reusing the name's allocation of a play
+/// that leaves this tick, if any. That play is at weight 0 and can't show, so sampling is as if
+/// the new one were added after them all.
 fn add(plays: &mut Vec<Play>, name: &str, play: Play) {
     let leaving = plays.iter().position(leaves);
     let mut clip = leaving.map_or_else(String::new, |at| plays.remove(at).clip);
@@ -628,22 +626,21 @@ fn add(plays: &mut Vec<Play>, name: &str, play: Play) {
     plays.push(Play { clip, ..play });
 }
 
-/// What warns of a state machine's names that it hasn't, each once a world: the world, which keeps
-/// what it has warned of, and the machine's entity's ID.
+/// Warns of a machine's missing names, once per world: the world (which keeps what it warned of)
+/// and the machine's entity.
 struct Warnings<'w> {
     world: &'w mut World,
     id: EntityId,
 }
 
-/// What a world's state machines have named and hadn't, and been warned of: by their entities' IDs,
-/// the warnings' codes and the names, so that each warns once rather than at every tick, as few as
-/// a world's machines' mistakes, searched in turn. Snapshots copy it, so that a world restored from
-/// one warns as the one it was taken from would.
+/// What a world's machines have been warned of, by entity ID, code and name, so each warns once
+/// rather than every tick. As few as a world's machines' mistakes, searched in turn. Snapshots
+/// copy it, so a restored world warns as the original would.
 #[derive(Clone, Debug, Default)]
 struct Warned(Vec<(EntityId, &'static str, String)>);
 
 impl Warnings<'_> {
-    /// Warns, with `code`, that the machine `what`, of `name`, unless it has before.
+    /// Warns with `code` that the machine `what`, about `name`, unless it has before.
     fn once(&mut self, code: &'static str, name: &str, what: fmt::Arguments<'_>) {
         let id = self.id;
         if self.world.resource::<Warned>().is_none() {
@@ -663,9 +660,8 @@ impl Warnings<'_> {
     }
 }
 
-/// Steps each state machine of `world` a tick, [`Tick::DT`], as [`AnimationStates`] says, in the
-/// order queries find their entities: those of models' roots alone, each given an animator if it
-/// has none.
+/// Steps each state machine of a model's root one [`Tick::DT`] in query order, giving each root an
+/// animator if it has none.
 pub(super) fn step(world: &mut World) {
     let dt = Tick::DT.as_secs_f32();
     let mut roots = world.take_list();
@@ -687,7 +683,7 @@ pub(super) fn step(world: &mut World) {
         {
             continue;
         }
-        // Taken out of the world while it steps, and put back, as the animator's plays are.
+        // Taken out while it steps, then put back, as the animator's plays are.
         let machine = world.get_mut::<AnimationStates>(root);
         let mut machine = mem::take(machine.expect("listed with one"));
         let Animator(plays) = world.get_mut::<Animator>(root).expect("given one");
@@ -703,11 +699,14 @@ pub(super) fn step(world: &mut World) {
 
 impl World {
     /// Sets parameter `name` of `entity`'s [`AnimationStates`] to `value`, as
-    /// [`AnimationStates::set_param`] does: a number to a float, and a bool to a bool or a trigger,
-    /// as `world.set_param(fox, "speed", 2.5)` and `world.set_param(fox, "pounce", true)` do.
+    /// [`AnimationStates::set_param`] does: `world.set_param(fox, "speed", 2.5)` for a float,
+    /// `world.set_param(fox, "pounce", true)` for a bool or trigger.
     ///
-    /// Fails with `ecs.no_entity` if `entity` isn't alive, `reflect.missing_component` if it has no
-    /// state machine, and as `AnimationStates::set_param` does.
+    /// # Errors
+    ///
+    /// - `ecs.no_entity`: `entity` isn't alive.
+    /// - `reflect.missing_component`: it has no state machine.
+    /// - Those of `AnimationStates::set_param`.
     pub fn set_param(
         &mut self,
         entity: Entity,
@@ -749,7 +748,7 @@ mod tests {
     use crate::reflect::Value;
     use crate::{Context, Model, Transform};
 
-    /// A state of `name` that plays `clip`, as its `playback` says, as the clip goes.
+    /// A state `name` playing `clip` at its own speed.
     fn state(name: &str, clip: &str, playback: Playback) -> AnimationState {
         AnimationState {
             name: name.to_owned(),
@@ -759,7 +758,7 @@ mod tests {
         }
     }
 
-    /// A state of `name` that blends `points`, each a clip and its point, along `param`, looping.
+    /// A looping state `name` blending `points` (clip, point) along `param`.
     fn blend(name: &str, param: &str, points: &[(&str, f32)]) -> AnimationState {
         let points = points.iter().map(|&(clip, at)| BlendPoint {
             clip: clip.to_owned(),
@@ -783,8 +782,8 @@ mod tests {
         }
     }
 
-    /// A transition from `from`, or from any state, to `to`, cutting, once `conditions` hold, each a
-    /// parameter and its test.
+    /// A cutting transition from `from` (any state if `None`) to `to` once `conditions` (parameter,
+    /// test) hold.
     fn transition(
         from: Option<&str>,
         to: &str,
@@ -803,7 +802,7 @@ mod tests {
         }
     }
 
-    /// `transition`, fading over `fade` seconds, after `exit` of its state, if that's given.
+    /// `transition` fading over `fade` seconds, after `exit` of its state if given.
     fn faded(fade: f32, exit: Option<f32>, transition: StateTransition) -> StateTransition {
         StateTransition {
             fade,
@@ -812,7 +811,7 @@ mod tests {
         }
     }
 
-    /// A root of the animator's tests' model, with `machine`, and its context.
+    /// A root of the animator tests' model with `machine`, and its context.
     fn driven(machine: AnimationStates) -> (Context, Entity) {
         let (mut cx, root) = spawned();
         cx.world_mut().insert(root, machine).expect("alive");
@@ -833,8 +832,8 @@ mod tests {
         }
     }
 
-    /// A rest that slides, a move that blends a slide and a lift by speed, and a swing played once
-    /// at a trigger from any state, which goes back to moving once it's done.
+    /// A rest that slides, a move blending slide and lift by speed, and a swing played once at a
+    /// trigger from any state, then back to moving.
     fn moving() -> AnimationStates {
         AnimationStates {
             params: vec![param("speed", Float(0.0)), param("go", Trigger(false))],
@@ -861,9 +860,8 @@ mod tests {
         }
     }
 
-    /// A transition fires at the first tick that finds its conditions all hold, once its state has
-    /// been entered, on each kind of test: a float above or below a value, a bool true or false, and
-    /// a trigger set or not; and not while one doesn't, the other aside.
+    /// A transition fires at the first tick after entry that finds all conditions hold, on each
+    /// kind of test, and not while one doesn't.
     #[test]
     fn a_transition_fires_once_its_conditions_all_hold() {
         let cases = [
@@ -903,9 +901,9 @@ mod tests {
         }
     }
 
-    /// A trigger fires a transition that tests it once, which consumes it, so that the next tick
-    /// stays; one set in the state a transition from any state enters waits, as such a transition
-    /// skips the state it enters, until the state is left; and tools set it through its fields.
+    /// A trigger fires a transition testing it once and is consumed, so the next tick stays. One
+    /// set in the state a from-any transition enters waits until that state is left, as such a
+    /// transition skips the state it enters. Tools set it through its fields.
     #[test]
     fn a_trigger_fires_once_and_is_consumed() {
         let (mut cx, root) = driven(moving());
@@ -919,7 +917,7 @@ mod tests {
         let machine = machine_of(world, root);
         assert_eq!(machine.state, "Swing");
         assert_eq!(machine.param("go"), Some(Trigger(false)), "consumed");
-        // So that the move it goes back to stays.
+        // So the move it returns to stays.
         world.set_param(root, "speed", 2.0).expect("a float");
         run(world, 10);
         let machine = machine_of(world, root);
@@ -935,7 +933,7 @@ mod tests {
             ("Swing", 12.0 / 64.0)
         );
         assert_eq!(machine.param("go"), Some(Trigger(true)), "waiting");
-        // Swing's second of its clip, played, at the 64th tick in it; then the waiting trigger.
+        // Swing's one-second clip is played at its 64th tick; then the waiting trigger.
         run(world, 52);
         assert_eq!(machine_of(world, root).state, "Swing");
         run(world, 1);
@@ -946,9 +944,8 @@ mod tests {
         assert_eq!(machine.param("go"), Some(Trigger(false)));
     }
 
-    /// A transition with an exit time waits until its state has played that share of its motion, at
-    /// its speed; and cross-fades as `World::play` does, the play of the state it leaves easing out
-    /// as the state it enters eases in, which then plays alone, its fade done.
+    /// An exit time waits until the state has played that share of its motion, at its speed; the
+    /// transition cross-fades as `World::play` does, the entered state then playing alone.
     #[test]
     fn an_exit_time_waits_for_its_share_and_a_fade_cross_fades() {
         let lift = AnimationState {
@@ -962,7 +959,7 @@ mod tests {
         };
         let (mut cx, root) = driven(machine);
         let world = cx.world_mut();
-        // Half of Lift's two seconds, at twice its speed: half a second, 32 ticks after the first.
+        // Half of Lift's two seconds at double speed: 0.5 s, 32 ticks after the first.
         run(world, 32);
         assert_eq!(machine_of(world, root).state, "A");
         assert_eq!(plays_of(world, root)[0].speed, 2.0);
@@ -980,10 +977,9 @@ mod tests {
         assert_eq!(plays_of(world, root)[0].fade, 0.0, "its fade done");
     }
 
-    /// A blend weights the two clips whose points its parameter falls between by how near it is to
-    /// each, and plays each at the speed that brings it round in their weighted length, keeping
-    /// them at the same fraction of their lengths; past its last point it plays that one's clip
-    /// alone, and a clip that comes back joins where the others are.
+    /// A blend weights the two clips its parameter falls between by nearness, at speeds that keep
+    /// them at the same fraction of their lengths. Past the last point only that clip plays; a
+    /// clip that comes back joins where the others are.
     #[test]
     fn a_blend_weights_its_nearest_clips_and_keeps_them_in_step() {
         let machine = AnimationStates {
@@ -1000,7 +996,7 @@ mod tests {
         run(world, 1);
         let blended = [("Slide".to_owned(), 0.75), ("Lift".to_owned(), 0.25)];
         assert_eq!(weights(world, root), blended);
-        // A length of 1.25 seconds, Slide's one second and Lift's two weighted.
+        // Length 1.25 s: Slide's 1 s and Lift's 2 s, weighted.
         let speeds: Vec<f32> = plays_of(world, root)
             .iter()
             .map(|play| play.speed)
@@ -1026,9 +1022,8 @@ mod tests {
         in_step(world);
     }
 
-    /// A clip of a blend that its model hasn't, or one of no length, as a still pose, has no share
-    /// of the blend's length: the clip with a length plays at its own speed, however little of the
-    /// blend it weighs, and an exit time measures its length.
+    /// A blend clip its model lacks, or of no length (a still pose), has no share of the blend's
+    /// length: the other plays at its own speed, and an exit time measures its length.
     #[test]
     fn a_blend_s_length_leaves_out_clips_without_one() {
         for still in ["Pose", "Tango"] {
@@ -1056,7 +1051,7 @@ mod tests {
             let plays = plays_of(world, root);
             let lift = plays.iter().find(|play| play.clip == "Lift").expect("Lift");
             assert_eq!((lift.weight, lift.speed), (0.1, 1.0), "{still}");
-            // Half of Lift's two seconds, at its own speed: a second, 64 ticks after the first.
+            // Half of Lift's two seconds at its own speed: 1 s, 64 ticks after the first.
             run(world, 63);
             assert_eq!(machine_of(world, root).state, "Move", "{still}");
             run(world, 1);
@@ -1064,8 +1059,8 @@ mod tests {
         }
     }
 
-    /// A state played once backward starts its clip at its end and plays it to its start, its first
-    /// pose, which it reaches as its exit time, at the size of its speed, comes.
+    /// A state played once backward starts its clip at the end and plays to the first pose,
+    /// reached as its exit time (at the size of its speed) comes.
     #[test]
     fn a_one_shot_played_backward_goes_from_its_end_to_its_start() {
         let back = AnimationState {
@@ -1079,7 +1074,7 @@ mod tests {
         };
         let (mut cx, root) = driven(machine);
         let world = cx.world_mut();
-        // Slide's root goes from 0 to 2 along X over its second.
+        // Slide's root goes 0 to 2 along X in a second.
         let x = |world: &World| at(world, node(world, root, 0)).translation.x;
         run(world, 1);
         assert_eq!(x(world), 2.0 * 63.0 / 64.0, "from its end");
@@ -1092,9 +1087,8 @@ mod tests {
         assert_eq!(machine_of(world, root).state, "Rest");
     }
 
-    /// A blend entered while the animator holds its clips at phases apart, as one fading out has
-    /// drifted, takes its phase from the heaviest, which goes on where it was, the others brought
-    /// to it.
+    /// A blend entered while the animator holds its clips at different phases (as a fading-out
+    /// one drifts) takes the heaviest's phase: it goes on where it was, the others brought to it.
     #[test]
     fn a_blend_takes_its_phase_from_its_heaviest_held_clip() {
         let machine = AnimationStates {
@@ -1113,7 +1107,7 @@ mod tests {
         let plays = vec![held("Slide", 0.1, 0.2), held("Lift", 1.0, 0.8)];
         world.insert(root, Animator(plays)).expect("alive");
         run(world, 1);
-        // Halfway round Lift's two seconds, on by a tick of the blend's 1.5.
+        // Halfway round Lift's two seconds, plus a tick at the blend's 1.5.
         let phase = 0.5 + 1.0 / 64.0 / 1.5;
         let plays = plays_of(world, root);
         let phases = [plays[0].time, plays[1].time / 2.0];
@@ -1122,10 +1116,10 @@ mod tests {
         }
     }
 
-    /// A state, a parameter or a clip it names and hasn't, and a test of a parameter of another
-    /// kind, are warned of once each, however many ticks find them: a state it's in that it hasn't
-    /// leaves for its first, and a transition to one never fires; and code that sets a parameter it
-    /// hasn't, or to another kind, or of an entity without one, is refused.
+    /// A missing state, parameter or clip, and a test of a parameter of another kind, are each
+    /// warned of once however many ticks find them. A current state it lacks leaves for the first,
+    /// and a transition to one never fires. Code that sets a missing parameter, one of another
+    /// kind, or one of an entity without a machine, is refused.
     #[test]
     fn what_it_names_and_hasnt_is_warned_of_once() {
         let logged = crate::testing::logged();
@@ -1158,8 +1152,8 @@ mod tests {
         assert_eq!(codes, warned);
         assert_eq!(machine_of(world, root).state, "Rest");
         assert_eq!(weights(world, root), [("Slide".to_owned(), 1.0)]);
-        // A tool puts it in a state that blends a clip its model hasn't along a parameter it
-        // hasn't: what it played leaves, and the clip is left out.
+        // A tool enters a state blending a missing clip along a missing parameter: what played
+        // leaves, and the clip is left out.
         let dance = Value::String("Dance".to_owned());
         let set = world.set_field(root, "AnimationStates", "state", &dance);
         set.expect("a string");
@@ -1183,9 +1177,8 @@ mod tests {
         );
     }
 
-    /// A world restored from a snapshot taken as its state machine cross-fades goes on as the world
-    /// it was taken from did, tick for tick: the machine in the state it was in, as long, mid-fade,
-    /// with its parameters as they were.
+    /// A world restored from a snapshot taken mid-cross-fade goes on as the original did, tick for
+    /// tick: same state, time, fade and parameters.
     #[test]
     fn a_state_machine_restored_from_a_snapshot_goes_on_exactly() {
         let (mut cx, root) = driven(moving());
@@ -1218,8 +1211,8 @@ mod tests {
         assert_eq!(go_on(world), went);
     }
 
-    /// The Fox's states, as the showcase's: surveying as it stands, walking and running blended by
-    /// its speed, and looking about once at a trigger, from any state, before it goes on.
+    /// The showcase's Fox states: surveying while standing, walking and running blended by speed,
+    /// and a look about at a trigger from any state before going on.
     fn fox() -> AnimationStates {
         let look = AnimationState {
             speed: 1.5,
@@ -1255,18 +1248,16 @@ mod tests {
         }
     }
 
-    /// The world's hash after four of Khronos's skinned Fox, each driven by its state machine
-    /// through its states for eight seconds, from standing to a run and back, a blend's clips kept
-    /// in step, and a look at a trigger from the move, each fox a little after the one before, is
-    /// the same on every platform, as lockstep peers and replays need: a reference CI checks on
-    /// every platform it runs. A difference on some platforms only is a bug in determinism, not a
-    /// value to change here.
+    /// The world's hash after eight seconds of four skinned Khronos Foxes, each a little behind
+    /// the one before, driven from standing to a run and back (blend clips in step, a look at a
+    /// trigger from the move): a reference CI checks on every platform, as lockstep peers and
+    /// replays need. A difference on some platforms only is a determinism bug, not a value to
+    /// change.
     #[test]
     fn state_machines_hash_as_their_reference_says() {
         let logged = crate::testing::logged();
-        // The Fox's files without its ID file, under a root of their own: the hash reads the
-        // model's name, which is then its path from the root, with `dev` and without, wherever
-        // the checkout is.
+        // The Fox's files without its ID file, under their own root: the hash reads the model's
+        // name, then its path from the root, with `dev` and without, wherever the checkout is.
         let scratch = crate::dirs::tests::Scratch::new("states-hash");
         std::fs::create_dir_all(&scratch.0).expect("a directory");
         let files = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox");
@@ -1275,7 +1266,7 @@ mod tests {
         }
         let mut cx = Context::seeded(7).root(scratch.0.clone());
         let model = (cx.add_model("fox", scratch.0.join("Fox.gltf"))).expect("the Fox reads");
-        // A development build's scan warns of the files without ID files (`asset.no_id`).
+        // A development build's scan warns of files without ID files (`asset.no_id`).
         let _ = logged.codes.try_iter().count();
         let world = cx.world_mut();
         let foxes: Vec<Entity> = (0..4)
@@ -1292,7 +1283,7 @@ mod tests {
         let mut looked = [false; 4];
         for tick in 0..512 {
             for (i, &root) in foxes.iter().enumerate() {
-                // Up toward a run and back down to standing, 16 ticks apart.
+                // Up toward a run and back to standing, each fox 16 ticks behind.
                 let seconds = (tick as f32 - 16.0 * i as f32) / 64.0;
                 let speed = (1.5 * seconds).min(1.5 * (7.0 - seconds)).max(0.0);
                 world.set_param(root, "speed", speed).expect("a float");

@@ -1,13 +1,13 @@
-//! A model's skins and clips, as glTF's skins and animations give them: the joints that move a
-//! skinned mesh's vertices, and the keys that move a model's parts over time; and the poses they
-//! make, which bound where a skinned mesh's vertices reach.
+//! A model's skins and clips, as glTF gives them: the joints that move a skinned mesh's vertices,
+//! the keys that move its parts over time, and the poses they make, which bound where a skinned
+//! mesh's vertices reach.
 
 use gg_core::math::{DVec3, Mat4, Quat, Vec3, Vec4};
 
 use crate::Transform;
 
-/// The joints that move a skinned mesh's vertices: each one of the model's parts, and its inverse
-/// bind matrix, from the mesh's space to the joint's as the mesh was bound to it.
+/// The joints that move a skinned mesh's vertices: model parts, each with an inverse bind matrix
+/// (from the mesh's space to the joint's, as the mesh was bound).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Skin {
     /// Each joint's part, by its index among the model's parts.
@@ -16,7 +16,7 @@ pub(crate) struct Skin {
     pub(crate) inverse_binds: Vec<Mat4>,
 }
 
-/// What a channel moves of its part: its translation, its rotation or its scale.
+/// What a channel moves of its part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Path {
     Translation,
@@ -24,9 +24,9 @@ pub(crate) enum Path {
     Scale,
 }
 
-/// How a channel's values go from each key to the next, as glTF's samplers say: along a line, a
-/// rotation the shorter way round at a steady rate; holding each until the next; or along a cubic
-/// Hermite spline, through each key's value with its tangents.
+/// How a channel's values go from key to key, as glTF's samplers say: along a line (a rotation the
+/// shorter way at a steady rate), holding each until the next, or along a cubic Hermite spline
+/// through each value with its tangents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Interpolation {
     Linear,
@@ -34,33 +34,33 @@ pub(crate) enum Interpolation {
     CubicSpline,
 }
 
-/// A model's animation: channels that move its parts' transforms over time, each along its keys.
+/// A model's animation: channels that move its parts' transforms along their keys.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Clip {
-    /// Its name, as glTF's animation has it, or its index, as text, for one without.
+    /// The glTF animation's name, or its index as text for one without.
     pub(crate) name: String,
-    /// How long it plays, in seconds: until its channels' last key.
+    /// Seconds it plays: until its channels' last key.
     pub(crate) duration: f32,
     pub(crate) channels: Vec<Channel>,
 }
 
-/// Keys that move one of a model's parts' translation, rotation or scale.
+/// Keys that move one part's translation, rotation or scale.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Channel {
     /// The part it moves, by its index among the model's parts.
     pub(crate) part: u32,
     pub(crate) path: Path,
     pub(crate) interpolation: Interpolation,
-    /// Each key's time, in seconds, from 0 up, each after the last.
+    /// Each key's time in seconds, from 0, ascending.
     pub(crate) times: Vec<f32>,
-    /// Each key's value, three floats for a translation or a scale, four for a rotation, X, Y, Z
-    /// then W, a unit quaternion; along a cubic spline, each key's tangent coming in, its value and
-    /// its tangent going out, in turn.
+    /// Each key's value: three floats for a translation or scale, four (X, Y, Z, W; a unit
+    /// quaternion) for a rotation. A cubic spline holds, per key, the in-tangent, value and
+    /// out-tangent in turn.
     pub(crate) values: Vec<f32>,
 }
 
 impl Channel {
-    /// How many floats a value of it is.
+    /// Floats in a value.
     pub(crate) fn width(&self) -> usize {
         match self.path {
             Path::Rotation => 4,
@@ -68,14 +68,14 @@ impl Channel {
         }
     }
 
-    /// Its value at `time`: its first key's before it, its last's after it, and between, as its
-    /// interpolation goes; a translation or a scale in X, Y and Z, or a rotation, unit. A time that
-    /// isn't a number takes its first key's.
+    /// Its value at `time`: the first key's before it, the last's after, and between by its
+    /// interpolation. A translation or scale is X, Y, Z; a rotation is a unit quaternion. NaN takes
+    /// the first key's.
     pub(crate) fn sample(&self, time: f32) -> Vec4 {
         let keys = self.times.len();
         let width = self.width();
         let cubic = self.interpolation == Interpolation::CubicSpline;
-        // Key `k`'s value, its tangent coming in, or going out, each `width` floats.
+        // Key `k`'s value or in- or out-tangent, `width` floats each.
         let at = |k: usize, part: usize| {
             let start = if cubic {
                 (3 * k + part) * width
@@ -90,7 +90,7 @@ impl Channel {
             }
         };
         let value = |k: usize| at(k, usize::from(cubic));
-        // The first key past `time`, as the times ascend.
+        // The first key past `time`.
         let next = self.times.partition_point(|&key| key <= time);
         if next == 0 || time.is_nan() {
             return value(0);
@@ -109,7 +109,7 @@ impl Channel {
             }
             Interpolation::Linear => value(k).lerp(value(next), s),
             Interpolation::CubicSpline => {
-                // Hermite's basis, the tangents scaled by the span between the keys.
+                // Hermite's basis, tangents scaled by the keys' span.
                 let (s2, s3) = (s * s, s * s * s);
                 let point = (2.0 * s3 - 3.0 * s2 + 1.0) * value(k)
                     + (s3 - 2.0 * s2 + s) * span * at(k, 2)
@@ -124,7 +124,7 @@ impl Channel {
         }
     }
 
-    /// Sets what it moves of `transform` to `value`, as [`sample`](Self::sample) gives it.
+    /// Sets what it moves of `transform` to `value`, a [`sample`](Self::sample).
     pub(crate) fn apply(&self, transform: &mut Transform, value: Vec4) {
         match self.path {
             Path::Translation => transform.translation = value.truncate().as_dvec3(),
@@ -135,7 +135,7 @@ impl Channel {
 }
 
 impl Clip {
-    /// How many keys its channels have, all told.
+    /// Keys in all its channels.
     pub(crate) fn keys(&self) -> usize {
         self.channels
             .iter()
@@ -148,16 +148,15 @@ impl Clip {
         self.keys().min(MAX_POSES)
     }
 
-    /// Sets `times` to the times its poses are found at to bound where a skinned mesh reaches:
-    /// each of its keys' times, once, or, of a clip of more than [`MAX_POSES`] of them, that many
-    /// from its start to its end, evenly. On the way `times` holds each of its [`keys`](Self::keys)'
-    /// times, so that one with room for them allocates nothing.
+    /// Sets `times` to where poses are found to bound a skinned mesh's reach: each key's time
+    /// once, or, past [`MAX_POSES`] of them, that many evenly from start to end. `times` briefly
+    /// holds all [`keys`](Self::keys)' times, so one with room for them allocates nothing.
     pub(crate) fn pose_times(&self, times: &mut Vec<f32>) {
         times.clear();
         for channel in &self.channels {
             times.extend_from_slice(&channel.times);
         }
-        // Unstable, which takes no memory of its own, as equal times are the same.
+        // Unstable: no memory of its own, and equal times are the same.
         times.sort_unstable_by(f32::total_cmp);
         times.dedup();
         if times.len() > MAX_POSES {
@@ -171,10 +170,9 @@ impl Clip {
 /// The most poses of a clip that bound where a skinned mesh reaches.
 const MAX_POSES: usize = 64;
 
-/// Places the model's parts `needed`, in the order they come, given each part's transform,
-/// `locals`, and its parent, `parents`, which comes before it: sets each of theirs in `placed` to
-/// the matrix from its part's space to the model's, leaving the others' as they were. A part
-/// needed has its parent needed too.
+/// Sets `placed` for the parts `needed`, in order, to the matrix from the part's space to the
+/// model's, from `locals` and `parents` (each parent comes before its child). Other parts' entries
+/// stay. A part needed has its parent needed too.
 pub(crate) fn place(
     locals: &[Transform],
     parents: &[Option<usize>],
@@ -188,23 +186,23 @@ pub(crate) fn place(
     }
 }
 
-/// Where a skinned mesh's vertices are as its skin's joints hold them, which bounds them in any
-/// pose without visiting each vertex again: the vertices each joint moves, in the joint's space as
-/// the mesh was bound to it, parted into leaves of at most [`LEAF`] near one another, each held in
-/// a box and in a sphere from the box's center; the box round those that no joint moves; and the
-/// box round them all as they are. The joints' spaces have four dimensions, an inverse bind
-/// matrix's every row taken, as the skin pass takes them.
+/// Bounds a skinned mesh's vertices in any pose without revisiting each vertex.
+///
+/// The vertices each joint moves, in the joint's space as the mesh was bound, are parted into
+/// leaves of at most [`LEAF`] near ones, each held in a box and in a sphere from the box's center.
+/// Boxes also hold the vertices no joint moves, and all vertices as they are. The joints' spaces
+/// have four dimensions, every row of an inverse bind matrix taken, as the skin pass takes them.
 pub(crate) struct Influences {
-    /// The leaves, each joint's together, in the skin's order of its joints.
+    /// The leaves, each joint's together, in the skin's joint order.
     leaves: Vec<Leaf>,
-    /// Round the vertices that no joint moves, which stay where they were bound.
+    /// Box round the vertices no joint moves, which stay where bound.
     still: [Vec3; 2],
-    /// Round all of them as they are.
+    /// Box round all vertices as they are.
     rest: [Vec3; 2],
 }
 
-/// Some of the vertices a joint moves, as [`Influences`] holds them: the joint, by its index among
-/// its skin's, and its box's center, its half extents and its sphere's radius.
+/// Some of a joint's vertices, held by [`Influences`]: the joint (index in its skin), its box's
+/// center and half extents, and its sphere's radius.
 #[derive(Clone, Copy)]
 struct Leaf {
     joint: u32,
@@ -213,12 +211,12 @@ struct Leaf {
     radius: f32,
 }
 
-/// The most of the vertices a joint moves that a leaf of them holds: few enough that a box of them
-/// turned with its joint holds little more than they reach, as one of all of a limb's wouldn't,
-/// and enough that a pose costs a few of a mesh's vertices.
+/// The most vertices of a joint in a leaf: few enough that a box turned with its joint holds
+/// little more than they reach (one of a whole limb's wouldn't), enough that a pose costs a few of
+/// a mesh's vertices.
 const LEAF: usize = 16;
 
-/// A box that holds nothing, which any box grown by it is left as.
+/// A box that holds nothing: growing it by any box gives that box.
 const EMPTY: [Vec3; 2] = [Vec3::INFINITY, Vec3::NEG_INFINITY];
 
 /// The box round `a` and `b`.
@@ -226,15 +224,15 @@ fn union([low, high]: [Vec3; 2], [l, h]: [Vec3; 2]) -> [Vec3; 2] {
     [low.min(l), high.max(h)]
 }
 
-/// Whether a joint moves a vertex by `weight`, one of the vertex's weights, as the skin pass has
-/// it: one that isn't finite, or is less than 0, is taken as 0.
+/// Whether a joint moves a vertex by `weight`, as the skin pass has it: a weight that isn't finite
+/// or is under 0 counts as 0.
 fn moves(weight: f32) -> bool {
     weight.is_finite() && weight > 0.0
 }
 
-/// Each of `joints` that moves a vertex as much as `weights` say, as the skin pass has them, of a
-/// skin of `count` joints: none, for a vertex whose weights add up to 0, or to more than a float
-/// holds, which stays where it was bound; a joint past the skin's taken as its last.
+/// The `joints` that move a vertex by `weights`, as the skin pass has it, in a skin of `count`
+/// joints: none if the weights add up to 0 or more than a float holds (the vertex stays where
+/// bound); a joint past the skin's counts as its last.
 fn moved_by(joints: [u16; 4], weights: [f32; 4], count: usize) -> impl Iterator<Item = usize> {
     let total: f32 = weights.into_iter().filter(|&weight| moves(weight)).sum();
     let moved = total > 0.0 && total.is_finite();
@@ -244,30 +242,31 @@ fn moved_by(joints: [u16; 4], weights: [f32; 4], count: usize) -> impl Iterator<
 }
 
 impl Influences {
-    /// How many times a joint of a skin of `count` joints moves a vertex, each moved by `joints`
-    /// as much as `weights` say: what [`bytes`](Self::bytes) takes.
+    /// How many times a joint of a `count`-joint skin moves a vertex, over all vertices' `joints`
+    /// and `weights`: what [`bytes`](Self::bytes) takes.
     pub(crate) fn moved(count: usize, joints: &[[u16; 4]], weights: &[[f32; 4]]) -> usize {
         (joints.iter().zip(weights))
             .map(|(&joints, &weights)| moved_by(joints, weights, count).count())
             .sum()
     }
 
-    /// The most bytes [`new`](Self::new) holds, besides its own, for a skin of `count` joints that
-    /// moves vertices `moved` times: each joint's place of each vertex it moves, and the leaves.
+    /// The most bytes [`new`](Self::new) holds besides its own, for a `count`-joint skin moving
+    /// vertices `moved` times: each joint's place of each vertex, and the leaves.
     pub(crate) fn bytes(count: usize, moved: usize) -> usize {
         moved * size_of::<(u32, Vec4)>() + Self::most_leaves(count, moved) * size_of::<Leaf>()
     }
 
-    /// The most leaves a skin of `count` joints that moves vertices `moved` times parts them into:
-    /// a joint's are each at least half of [`LEAF`], but for a joint's only one.
+    /// The most leaves a `count`-joint skin moving vertices `moved` times parts them into: a
+    /// joint's leaves are each at least half of [`LEAF`], except that a joint's only one may be
+    /// smaller.
     pub(crate) fn most_leaves(count: usize, moved: usize) -> usize {
         moved / (LEAF / 2) + count
     }
 
-    /// `positions`, as `skin`'s joints carry them, each vertex moved by `joints` as much as
-    /// `weights` say, as the skin pass has them: a weight that isn't finite, or is less than 0,
-    /// taken as 0, and a vertex whose weights add up to 0, or to more than a float holds, staying
-    /// where it was bound; a joint past the skin's taken as its last.
+    /// Bounds `positions` as `skin`'s joints carry them, each vertex moved by `joints` and
+    /// `weights` as the skin pass has it: a weight that isn't finite or is under 0 counts as 0, a
+    /// vertex whose weights add up to 0 or more than a float holds stays where bound, and a joint
+    /// past the skin's counts as its last.
     pub(crate) fn new(
         skin: &Skin,
         positions: &[[f32; 3]],
@@ -291,8 +290,8 @@ impl Influences {
                 still = union(still, [position; 2]);
             }
         }
-        // Each joint's together. Unstable, as each sort here is, which takes no memory of its own,
-        // and parts the same places the same way every time a model is read.
+        // Each joint's together. Unstable, as each sort here is: no memory of its own, and parts
+        // the same way every time a model is read.
         bound.sort_unstable_by_key(|&(joint, _)| joint);
         let mut leaves = Vec::with_capacity(Self::most_leaves(count, moved));
         for each in bound.chunk_by_mut(|a, b| a.0 == b.0) {
@@ -305,16 +304,15 @@ impl Influences {
         }
     }
 
-    /// The box, its least corner and its most, round the vertices as `skin`'s joints carry them,
-    /// posed as `placed` places the model's parts, the mesh drawn by part `mesh`: round each
+    /// The box (least corner, most corner) round the vertices as `skin`'s joints carry them, with
+    /// the model's parts placed by `placed` and the mesh drawn by part `mesh`. It encloses each
     /// leaf's box and sphere as its joint carries them, which hold each vertex wherever its
-    /// weights put it between its joints. A part whose matrix doesn't invert, as one scaled to
-    /// nothing, gives the box of the positions as they are.
+    /// weights put it between joints. If the mesh part's matrix doesn't invert (scaled to
+    /// nothing), the box of the positions as they are.
     pub(crate) fn posed(&self, placed: &[Mat4], mesh: usize, skin: &Skin) -> [Vec3; 2] {
         let into_mesh = placed[mesh].inverse();
         let mut posed = self.still;
-        // The last leaf's joint, its matrix, and that matrix's rows, made absolute, and their
-        // lengths.
+        // The last leaf's joint, its matrix, the matrix's absolute rows, and their lengths.
         let mut last: Option<(u32, Mat4, [Vec4; 3], Vec3)> = None;
         for leaf in &self.leaves {
             let (_, matrix, abs, lengths) = match last {
@@ -324,9 +322,9 @@ impl Influences {
                     if !matrix.is_finite() {
                         return self.rest;
                     }
-                    // Each axis of the mesh's space a row of the matrix, along which a box's
-                    // corners reach as far as the row's absolute values take its half extents, and
-                    // a sphere as far as the row's length takes its radius.
+                    // Each mesh-space axis is a matrix row: a box's corners reach as far as the
+                    // row's absolute values take its half extents, a sphere as far as the row's
+                    // length takes its radius.
                     let rows = [0, 1, 2].map(|row| matrix.row(row));
                     let lengths = Vec3::from_array(rows.map(Vec4::length));
                     *last.insert((leaf.joint, matrix, rows.map(Vec4::abs), lengths))
@@ -341,9 +339,8 @@ impl Influences {
     }
 }
 
-/// Adds to `leaves` the leaves of `bound`, the places of vertices that a joint moves, each with
-/// the joint: one of all of them, if they're at most [`LEAF`]; or else those of each half of them,
-/// as they go along the axis their box is longest on.
+/// Adds to `leaves` the leaves of `bound`, a joint's vertex places: one if at most [`LEAF`], else
+/// those of each half, split along the box's longest axis.
 fn leaf(bound: &mut [(u32, Vec4)], leaves: &mut Vec<Leaf>) {
     let (low, high) = (bound.iter()).fold((Vec4::INFINITY, Vec4::NEG_INFINITY), |(l, h), p| {
         (l.min(p.1), h.max(p.1))
@@ -370,9 +367,9 @@ fn leaf(bound: &mut [(u32, Vec4)], leaves: &mut Vec<Leaf>) {
 mod tests {
     use super::*;
 
-    /// Where the skin pass moves `position`, by `joints` as much as `weights` say, `skin`'s
-    /// joints placed by `placed` and the mesh by part 0: weights that aren't finite or are less
-    /// than 0 taken as 0, the rest scaled to add up to 1, and a vertex whose add up to 0 staying.
+    /// Where the skin pass moves `position` by `joints` and `weights`, with `skin`'s joints placed
+    /// by `placed` and the mesh by part 0: weights not finite or under 0 count as 0, the rest are
+    /// scaled to add up to 1, and a vertex whose weights add up to 0 stays.
     fn skinned(
         skin: &Skin,
         placed: &[Mat4],
@@ -397,10 +394,10 @@ mod tests {
             .sum()
     }
 
-    /// Each vertex, whatever its weights, negative, not numbers, infinite, adding up to more than
-    /// 1 or to 0, stays within the box its leaves bound it by in each pose, of joints turned and
-    /// scaled unevenly, one of them bound by a matrix that isn't affine; and a pose whose mesh's
-    /// matrix doesn't invert gives the box of the vertices as they are.
+    /// Each vertex, whatever its weights (negative, NaN, infinite, summing over 1 or to 0), stays
+    /// within the box its leaves bound in each pose of joints turned and scaled unevenly, one bound
+    /// by a non-affine matrix. A pose whose mesh matrix doesn't invert gives the box of the
+    /// vertices as they are.
     #[test]
     fn a_skinned_meshs_leaves_hold_each_vertex_whatever_its_weights() {
         let mut projective = Mat4::from_rotation_y(0.3);
@@ -423,7 +420,7 @@ mod tests {
             [f32::INFINITY, 0.5, 0.0, 0.0],
             [0.5, 0.5, 0.0, 0.0],
         ];
-        // Enough vertices that each joint's part into several leaves.
+        // Enough vertices to part each joint's into several leaves.
         let positions: Vec<[f32; 3]> = (0..80)
             .map(|i: u32| {
                 let scattered = |by: u32, of: u32| (i * by % of) as f32 / of as f32 * 2.0 - 1.0;

@@ -11,47 +11,46 @@ use super::skeleton::{Channel, Clip, Path};
 use crate::ecs::node_id;
 use crate::{Component, Entity, ModelRoot, Reflect, Tick, Transform, World};
 
-/// What a model's root plays on its model's parts, at the ticks
-/// [`step_animation`](super::step_animation) runs in: clips of its model, each at a weight, which
-/// blend where they move the same parts, as a play's [`weight`](Play::weight) says, so that a walk
-/// and a run blend into a jog, and cross-fade as their weights ease, as [`World::play`] has them
-/// do. A part no play moves keeps its transform, as the model spawned it or code set it; a part
-/// whose node has a skin's joints moves the skinned mesh's vertices with it, as the frame draws
-/// them. An entity without a [`ModelRoot`] plays nothing.
+/// What a model's root plays on its parts: clips of its model, each at a weight.
+///
+/// Plays that move the same part blend by [`weight`](Play::weight), so a walk and a run make a
+/// jog, and cross-fade as their weights ease ([`World::play`]). A part no play moves keeps its
+/// transform, as spawned or set by code. A part whose node has a skin's joints moves the skinned
+/// mesh's vertices with it. An entity without a [`ModelRoot`] plays nothing.
 #[derive(Clone, Debug, Default, PartialEq, Component)]
 pub struct Animator(pub Vec<Play>);
 
 /// A clip an [`Animator`] plays.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 pub struct Play {
-    /// The clip, by its name among its model's: its glTF animation's name, or, for one without, its
-    /// index among them, as text, such as `"0"`.
+    /// The clip's name among its model's: its glTF animation's name, or for one without, its
+    /// index as text, such as `"0"`.
     pub clip: String,
-    /// The seconds it has played, which each tick moves on by its speed: brought back within a
-    /// round as it loops, and kept at its end once it has played once. Negative, while it plays
-    /// forward, it waits that long at its start.
+    /// Seconds played. Each tick advances it by `speed`; looping wraps it within a round, and
+    /// playing once stops it at the end. Negative, playing forward, it waits that long at the
+    /// start.
     pub time: f32,
-    /// How fast it plays: 1 as the clip goes, 2 twice as fast, and backward below 0.
+    /// Playback rate: 1 as the clip goes, 2 twice as fast, backward below 0.
     #[reflect(default = 1.0)]
     pub speed: f32,
-    /// Whether it plays once and holds its last pose, loops, or goes back and forth.
+    /// Plays once and holds the last pose, loops, or goes back and forth.
     #[reflect(default = Playback::Loop)]
     pub playback: Playback,
-    /// How much it gives of the pose of each part it moves among the plays that move it, as
-    /// weights blend: of two at 1 and 3, a quarter and three quarters.
+    /// Its share of the pose of each part it moves, among the plays that move it: two at 1 and 3
+    /// give a quarter and three quarters.
     #[reflect(min = 0.0, default = 1.0)]
     pub weight: f32,
-    /// The weight it eases to, at a steady rate, as `fade` says; one that has eased to 0 leaves the
-    /// animator.
+    /// The weight it eases to, at a steady rate set by `fade`. A play that has eased to 0 leaves
+    /// the animator.
     #[reflect(min = 0.0, default = 1.0)]
     pub target: f32,
-    /// The seconds its weight takes to ease from 0 to 1, or back: at 0, it's at its target at once.
+    /// Seconds its weight takes to ease from 0 to 1, or back. At 0 it's at `target` at once.
     #[reflect(min = 0.0)]
     pub fade: f32,
 }
 
 impl Play {
-    /// A play of `clip`, from its start, as it goes, looping, at a weight of 1.
+    /// A play of `clip` from its start, at its speed, looping, at weight 1.
     pub fn new(clip: &str) -> Self {
         Self {
             clip: clip.to_owned(),
@@ -64,8 +63,8 @@ impl Play {
         }
     }
 
-    /// Moves it on by `dt` seconds through a clip of `duration` seconds, and its weight toward its
-    /// target, as its fields say.
+    /// Advances its time by `dt` seconds through a clip of `duration`, and its weight toward its
+    /// target.
     fn advance(&mut self, duration: f32, dt: f32) {
         if self.speed.is_finite() {
             self.time += self.speed * dt;
@@ -104,8 +103,8 @@ impl Play {
         };
     }
 
-    /// Where it is in a clip of `duration` seconds: its start while it waits, and back from the
-    /// end on its way back, going back and forth.
+    /// Its place in a clip of `duration` seconds: the start while waiting, counting back from the
+    /// end on a ping-pong's way back.
     fn clip_time(&self, duration: f32) -> f32 {
         let time = self.time.max(0.0);
         match self.playback {
@@ -115,22 +114,24 @@ impl Play {
     }
 }
 
-/// The clip of `clips` named `name`, the first of that name.
+/// The first clip named `name`.
 pub(super) fn named<'c>(clips: &'c [Clip], name: &str) -> Option<&'c Clip> {
     clips.iter().find(|clip| clip.name == name)
 }
 
-/// The channel of `clip` that moves `part`'s `path`, the first.
+/// The first channel of `clip` that moves `part`'s `path`.
 fn moving(clip: &Clip, part: u32, path: Path) -> Option<&Channel> {
     (clip.channels.iter()).find(|channel| channel.part == part && channel.path == path)
 }
 
-/// Steps each animator of `world` a tick, [`Tick::DT`]: each play moves on and eases its weight,
-/// one of a clip its model hasn't leaving with a warning (`animation.no_clip`), and one eased to
-/// 0 leaving; then each part a play moves takes the plays' poses blended by their weights, a
-/// translation or scale as their mean, a rotation as their normalized sum, each the same way
-/// round as the first, written only where it changed. Each part's node is found by the ID
-/// [`node_id`] mixes from the root's, without a map, so a tick allocates nothing.
+/// Steps each animator one [`Tick::DT`].
+///
+/// Each play advances and eases its weight. A play of a clip its model lacks is warned of
+/// (`animation.no_clip`) and leaves, as does one eased to 0. Then each part a play moves takes the
+/// plays' poses blended by weight: translation or scale as their weighted mean, rotation as their
+/// normalized sum, each the same way round as the first. A part is written only where it changed.
+/// Its node is found by the ID [`node_id`] mixes from the root's, without a map, so a tick
+/// allocates nothing.
 pub(super) fn step(world: &mut World) {
     let dt = Tick::DT.as_secs_f32();
     let mut roots = world.take_list();
@@ -172,7 +173,7 @@ pub(super) fn step(world: &mut World) {
             let clip = named(&clips, &play.clip).expect("kept for its clip");
             for channel in &clip.channels {
                 let (part, path) = (channel.part, channel.path);
-                // Blended where the first play that moves it is.
+                // Blended at the first play that moves it.
                 let earlier = plays[..i].iter().filter(|play| shown(play));
                 if earlier
                     .filter_map(|play| named(&clips, &play.clip))
@@ -204,9 +205,8 @@ pub(super) fn step(world: &mut World) {
     world.keep_list(roots);
 }
 
-/// The pose of `part`'s `path` that `plays`, which `clips` are of, give blended by their weights, of
-/// those whose clips move it, as [`step`] says: the first's alone, as it samples, if it's the only
-/// one.
+/// The pose of `part`'s `path` blended by weight from `plays` whose clips move it, as [`step`]
+/// says. A lone play's sample is used as it is.
 fn blend(clips: &[Clip], plays: &[Play], part: u32, path: Path) -> Vec4 {
     let mut first: Option<Vec4> = None;
     let (mut sum, mut total, mut count) = (Vec4::ZERO, 0.0, 0);
@@ -235,15 +235,15 @@ fn blend(clips: &[Clip], plays: &[Play], part: u32, path: Path) -> Vec4 {
 }
 
 impl World {
-    /// Has `entity`, a model's root, play its model's clip `clip`, cross-fading from what its
-    /// [`Animator`] plays over `fade` seconds: each other play eases to a weight of 0, and leaves
-    /// once it's there; and the play of `clip` eases to 1, from where it is, if the animator plays
-    /// it, or from its start, at 0, looping, if it doesn't. A fade of 0 cuts to it at once. Gives
-    /// the entity an animator if it has none.
+    /// Has `entity`, a model's root, play its model's `clip`, cross-fading over `fade` seconds
+    /// from what its [`Animator`] plays: every other play eases to weight 0 and leaves there, and
+    /// `clip` eases to 1 from where it is, or from its start at weight 0, looping, if not playing.
+    /// A fade of 0 cuts at once. Gives the entity an animator if it has none.
     ///
-    /// Fails with `animation.no_clip`, naming the model's clips, if the entity has no
-    /// [`ModelRoot`], or its model has no clip of that name; and with `reflect.out_of_range` for a
-    /// fade that's negative or isn't a number.
+    /// # Errors
+    ///
+    /// - `animation.no_clip`, naming the model's clips: no [`ModelRoot`], or no such clip.
+    /// - `reflect.out_of_range`: `fade` is negative or NaN.
     pub fn play(&mut self, entity: Entity, clip: &str, fade: f32) -> Result<()> {
         if fade.is_nan() || fade < 0.0 {
             return Err(Error::new(
@@ -304,10 +304,10 @@ pub(crate) mod tests {
     use crate::model::tests::added;
     use crate::{Context, Model};
 
-    /// A model of a root part and its child, and clips of them: "Slide", the root along X from 0
-    /// to 2 over a second, along a line, and the child about Z a quarter turn; "Lift", the root
-    /// along Y to 4 over two seconds by steps of a second; and "Swing", the child about Z along a
-    /// cubic spline, whose tangents are 0, so that it eases in and out.
+    /// A model of a root part and its child, with clips: "Slide", the root along X from 0 to 2 in
+    /// a second, linearly, and the child a quarter turn about Z; "Lift", the root along Y to 4 in
+    /// two seconds, in steps of a second; "Swing", the child about Z on a cubic spline with 0
+    /// tangents, so it eases in and out.
     pub(crate) fn clips() -> Imported {
         let part = |parent| Part {
             name: None,
@@ -377,7 +377,7 @@ pub(crate) mod tests {
             .expect("spawned")
     }
 
-    /// A context with the model of [`clips`], and a root of it, which it returns.
+    /// A context with the model of [`clips`], and the root it spawns.
     pub(crate) fn spawned() -> (Context, Entity) {
         let mut cx = Context::seeded(1);
         let (model, _) = added(&mut cx, "m", clips());
@@ -390,7 +390,7 @@ pub(crate) mod tests {
         *world.get::<Transform>(entity).expect("placed")
     }
 
-    /// The clips and weights of `root`'s animator's plays.
+    /// The clips and weights of `root`'s plays.
     pub(crate) fn weights(world: &World, root: Entity) -> Vec<(String, f32)> {
         let Animator(plays) = world.get::<Animator>(root).expect("an animator");
         plays
@@ -399,9 +399,9 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// A clip's channels sample along their keys: a line between them, a rotation the shorter
-    /// way round, steps held until the next, and a cubic spline through its values with its
-    /// tangents; the first key's before them and the last's after.
+    /// Channels sample along their keys: a line between them, rotation the shorter way, steps held
+    /// until the next, a cubic spline through the values with its tangents. Before the first key
+    /// the first holds, after the last the last.
     #[test]
     fn channels_sample_along_their_keys() {
         let clips = clips().clips;
@@ -421,8 +421,7 @@ pub(crate) mod tests {
             [y(0.0), y(0.99), y(1.0), y(1.5), y(2.0)],
             [0.0, 0.0, 2.0, 2.0, 4.0]
         );
-        // Eased in and out: a quarter of the way in time, less than a quarter of the way round,
-        // and halfway at half.
+        // Eased in and out: under a quarter round at a quarter of the time, halfway at half.
         let angle = |time| {
             let (axis, angle) = Quat::from_vec4(swing.channels[0].sample(time)).to_axis_angle();
             angle * axis.z.signum()
@@ -433,9 +432,8 @@ pub(crate) mod tests {
         assert!((angle(1.0) - quarter).abs() < 1e-5, "{}", angle(1.0));
     }
 
-    /// A play moves its model's parts as its clip samples at its time, which each tick moves on by
-    /// its speed: looping, it starts again; once, it holds its last pose; and back and forth, it
-    /// comes back the way it went. A part it doesn't move keeps its transform.
+    /// A play moves its model's parts as its clip samples at its time: looping restarts, once holds
+    /// the last pose, a ping-pong comes back. A part it doesn't move keeps its transform.
     #[test]
     fn a_play_moves_its_parts_through_its_clip_as_its_playback_says() {
         for (playback, ticks, x) in [
@@ -462,7 +460,7 @@ pub(crate) mod tests {
                 "{playback:?} after {ticks} ticks"
             );
         }
-        // Lift moves the root alone, so its child keeps the transform it spawned with.
+        // Lift moves the root alone: the child keeps its spawned transform.
         let (mut cx, root) = spawned();
         let world = cx.world_mut();
         world
@@ -480,9 +478,9 @@ pub(crate) mod tests {
         assert_eq!(at(world, child), rest);
     }
 
-    /// Plays that move the same part blend by their weights; one eased to 0 leaves; and
-    /// `World::play` cross-fades, the play of the clip asked for easing to 1 as each other eases
-    /// to 0, over the fade, then alone; a clip it doesn't play joins at 0, from its start.
+    /// Plays on the same part blend by weight; one eased to 0 leaves; `World::play` cross-fades,
+    /// its clip easing to 1 as the others ease to 0, then alone; a clip not playing joins at 0,
+    /// from its start.
     #[test]
     fn plays_blend_by_their_weights_and_cross_fade() {
         let (mut cx, root) = spawned();
@@ -503,11 +501,11 @@ pub(crate) mod tests {
         for _ in 0..128 {
             step_animation(world);
         }
-        // Slide's (2, 0, 0) a quarter and Lift's (0, 4, 0) three quarters.
+        // A quarter of Slide's (2, 0, 0) and three quarters of Lift's (0, 4, 0).
         let root_node = node(world, root, 0);
         assert_eq!(at(world, root_node).translation, DVec3::new(0.5, 3.0, 0.0));
         world.play(root, "Slide", 0.25).expect("its clip");
-        // Slide, at 1, has nowhere to ease to; Lift eases from 3 toward 0 at 4 a second.
+        // Slide is at 1 already; Lift eases from 3 toward 0 at 4 a second.
         step_animation(world);
         let eased = [
             ("Slide".to_owned(), 1.0),
@@ -525,8 +523,8 @@ pub(crate) mod tests {
         assert_eq!(joined[1], ("Swing".to_owned(), 2.0 / 64.0), "{joined:?}");
     }
 
-    /// A play of a clip its model hasn't is warned of and leaves the animator, the others going
-    /// on; and `World::play` refuses one, a root without a model, and a fade that isn't 0 or more.
+    /// A play of a clip its model lacks is warned of and leaves, the others going on;
+    /// `World::play` refuses one, a root without a model, and a fade under 0 or NaN.
     #[test]
     fn a_clip_its_model_hasnt_is_refused_or_left_out() {
         let logged = crate::testing::logged();
@@ -554,10 +552,9 @@ pub(crate) mod tests {
         assert_eq!(fade.code(), "reflect.out_of_range");
     }
 
-    /// The world's hash after roots have played each clip, looping, once and back and forth, at
-    /// their own speeds, blended, and cross-faded part of the way through, is the same on every
-    /// platform, as a model's clips, sampled and blended, must be for lockstep peers and replays:
-    /// a reference CI checks on every platform it runs.
+    /// The world's hash after roots play each clip (looping, once, ping-pong, at their own speeds),
+    /// blended and cross-faded midway: a reference CI checks on every platform, as sampled and
+    /// blended clips must match for lockstep peers and replays.
     #[test]
     fn skeletal_animation_hashes_as_its_reference_says() {
         let logged = crate::testing::logged();

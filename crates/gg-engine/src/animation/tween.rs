@@ -12,54 +12,54 @@ use crate::ecs::ComponentId;
 use crate::reflect::{self, Value};
 use crate::{Component, Entity, Reflect, Tick, World};
 
-/// Fields of its entity's components eased from one value to another, each a [`Tween`], at the
-/// ticks [`step_animation`](super::step_animation) runs in, in the order they're listed: each sets
-/// its field as its time says, but where the field holds that already, so that a tween at rest
-/// leaves its component's rows unmarked. One played once leaves the list as it ends, its field at
-/// its end; one that can't set its field, as of a component its entity hasn't, or a value its
-/// field refuses, as one past its bounds that a curve overshooting reaches, is warned of and left
-/// out (`tween.failed`).
+/// Fields of its entity's components eased from one value to another, each a [`Tween`], stepped
+/// in list order by [`step_animation`](super::step_animation).
 ///
-/// Scenes list them, and code and scripts start them: [`World::tween`], and scripts' `gg.tween`,
-/// which give an entity its `Tweens` if it has none, and take the place of a tween of the same
-/// field.
+/// Each sets its field as its time says, unless the field already holds that, so a tween at rest
+/// leaves the component's rows unmarked. A tween played once leaves the list at its end, its field
+/// at its end. One that can't set its field (a component the entity lacks, a value the field
+/// refuses, such as one past its bounds that an overshooting curve reaches) is warned of
+/// (`tween.failed`) and left out.
+///
+/// Scenes list them. Code and scripts start them with [`World::tween`] and `gg.tween`, which give
+/// the entity a `Tweens` if it has none and replace a tween of the same field.
 #[derive(Clone, Debug, Default, PartialEq, Component)]
 pub struct Tweens(pub Vec<Tween>);
 
-/// A field eased from `from` to `to` over `seconds`, as its `curve` and its `ease` shape the way,
-/// and as its `playback` says once it reaches `to`: the field of its entity's `component` named
-/// `field`, such as `Transform`'s `translation`; or one of a vector field's components, such as
-/// `translation.y`, or a `Sprite`'s `color.w`, its alpha. `from` and `to` hold what the field
-/// does: a number, a vector of its size, or a rotation, which turns the shortest way at a steady
-/// rate; a number for a vector's component. A field of another kind refuses it.
+/// Eases `field` of the entity's `component` from `from` to `to` over `seconds`, shaped by
+/// `curve` and `ease`, then as `playback` says.
+///
+/// `field` is a field such as `Transform`'s `translation`, or one component of a vector field:
+/// `translation.y`, a `Sprite`'s `color.w` (alpha). `from` and `to` take the field's kind: a
+/// number, a vector of its size, or a rotation (shortest way, steady rate); a number for a
+/// vector's component. A field of another kind refuses them.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 pub struct Tween {
     /// The component type's name, as scenes name it.
     pub component: String,
     /// The field's name, or the name and a vector's component, as `translation.y`.
     pub field: String,
-    /// Where the field starts, of the kind it holds.
+    /// The field's start, of the kind it holds.
     pub from: TweenValue,
-    /// Where the field ends, of the kind it holds.
+    /// The field's end, of the kind it holds.
     pub to: TweenValue,
-    /// The seconds from `from` to `to`: at 0, it's at `to` at once.
+    /// Seconds from `from` to `to`. At 0 it's at `to` at once.
     #[reflect(min = 0.0, default = 1.0)]
     pub seconds: f32,
     /// The shape of the way from `from` to `to`.
     pub curve: Curve,
-    /// Which end of the way the curve shapes: its start, its end, or both.
+    /// Which end of the way the curve shapes: the start, the end, or both.
     pub ease: Ease,
-    /// Whether it plays once, leaving the list at its end, loops, or goes back and forth.
+    /// Plays once (leaving the list at its end), loops, or goes back and forth.
     pub playback: Playback,
-    /// The seconds it has played, which each tick moves on: brought back within a round as it
-    /// loops. Negative, it waits that long before it starts, leaving its field as it is.
+    /// Seconds played. Each tick advances it; looping wraps it within a round. Negative, it waits
+    /// that long before starting, leaving the field as it is.
     pub time: f32,
 }
 
 impl Tween {
-    /// A tween of `component`'s `field` from `from` to `to` over `seconds`, along a straight line,
-    /// played once from now; the rest is set as its fields are, as `Tween { curve: Curve::Back,
-    /// ..Tween::new(..) }`.
+    /// A straight-line tween of `component`'s `field` from `from` to `to` over `seconds`, played
+    /// once from now. Set the rest as fields: `Tween { curve: Curve::Back, ..Tween::new(..) }`.
     pub fn new(
         component: &str,
         field: &str,
@@ -80,8 +80,8 @@ impl Tween {
         }
     }
 
-    /// How far it is from `from` to `to` at its time, from 0 to 1, as its playback says, bringing
-    /// its time back within a round as it loops; and whether it has ended, as one played once does.
+    /// How far along it is at its time, from 0 to 1 by its playback, wrapping its time within a
+    /// round as it loops; and whether it has ended (only one played once does).
     fn progress(&mut self) -> (f32, bool) {
         let seconds = self.seconds;
         let once = self.playback == Playback::Once;
@@ -108,8 +108,7 @@ impl Tween {
         }
     }
 
-    /// Moves its time on by `dt` seconds, and sets its field of `entity`'s component as its time
-    /// says; returns whether it has ended.
+    /// Advances its time by `dt` seconds and sets `entity`'s field; returns whether it has ended.
     fn step(&mut self, world: &mut World, entity: Entity, dt: f32) -> Result<bool> {
         self.time += dt;
         if self.time < 0.0 {
@@ -126,14 +125,14 @@ impl Tween {
 /// What a [`Tween`] eases between: a value of the kind its field holds.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub enum TweenValue {
-    /// For a field of an `f32` or an `f64`, as a script's numbers are, or a vector's component.
+    /// For an `f32` or `f64` field, or a vector's component.
     Number(f64),
     Vec2(Vec2),
-    /// For an `f32` vector or an `f64` one, as an entity's translation is: in `f64`s, so that a
-    /// tween far from the origin ends where it's told.
+    /// For an `f32` or `f64` vector. Held in `f64`s so a tween far from the origin ends where it's
+    /// told.
     Vec3(DVec3),
     Vec4(Vec4),
-    /// For a rotation, a unit quaternion.
+    /// For a rotation: a unit quaternion.
     Quat(Quat),
 }
 
@@ -180,7 +179,7 @@ impl From<Quat> for TweenValue {
 }
 
 impl TweenValue {
-    /// `value`, of a field a tween can ease, as a tween's: `None` for one of another kind.
+    /// `value` as a tween's, or `None` for a kind a tween can't ease.
     pub fn of(value: &Value) -> Option<Self> {
         Some(match *value {
             Value::F32(x) => Self::Number(x.into()),
@@ -194,7 +193,6 @@ impl TweenValue {
         })
     }
 
-    /// The name of its variant.
     fn kind(&self) -> &'static str {
         match self {
             Self::Number(_) => "Number",
@@ -206,44 +204,44 @@ impl TweenValue {
     }
 }
 
-/// The shape of a [`Tween`]'s way from its start to its end, which its [`Ease`] says which end of
-/// is shaped: the curves Robert Penner named, as most tools do.
+/// The shape of a [`Tween`]'s way from start to end (its [`Ease`] picks the end shaped): Robert
+/// Penner's curves, as most tools have them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum Curve {
-    /// At a steady rate, whatever its ease.
+    /// A steady rate, whatever the ease.
     #[default]
     Linear,
-    /// A quarter of a sine wave's: gently.
+    /// A quarter of a sine wave: gentle.
     Sine,
-    /// As the square of the time.
+    /// The square of the time.
     Quad,
-    /// As its cube: sharper.
+    /// The cube of the time: sharper.
     Cubic,
-    /// Going back a little past its start before it goes, or on a little past its end before it
-    /// comes back to it.
+    /// Goes a little back past the start before going, or a little past the end before coming
+    /// back.
     Back,
-    /// Springing about its start or its end, past both.
+    /// Springs about the start or end, past both.
     Elastic,
-    /// Bouncing on its start or its end, as a ball dropped does.
+    /// Bounces on the start or end, as a dropped ball.
     Bounce,
 }
 
 /// Which end of a [`Tween`]'s way its [`Curve`] shapes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum Ease {
-    /// Its start: it sets off slowly.
+    /// The start: sets off slowly.
     In,
-    /// Its end: it comes to it slowly.
+    /// The end: comes to it slowly.
     Out,
-    /// Both, the first half as `In`, the second as `Out`.
+    /// Both: the first half as `In`, the second as `Out`.
     #[default]
     InOut,
 }
 
 impl Curve {
-    /// How far along a tween along this curve, eased at `ease`, is at `at`, from 0 at its start to
-    /// 1 at its end: 0 at 0 and before, 1 at 1 and past, and between as the curve says, which a
-    /// curve that overshoots, as `Back`, `Elastic` and `Bounce` do, takes past 0 or 1.
+    /// How far along a tween on this curve, eased at `ease`, is at `at`, from 0 at the start to 1
+    /// at the end: 0 at 0 and before, 1 at 1 and past. Between, `Back`, `Elastic` and `Bounce`
+    /// overshoot 0 or 1.
     pub fn eased(self, ease: Ease, at: f32) -> f32 {
         if at.is_nan() || at <= 0.0 {
             return 0.0;
@@ -259,7 +257,7 @@ impl Curve {
         }
     }
 
-    /// The curve eased in, at `at`, from 0 to 1: as easings.net gives each.
+    /// The curve eased in, at `at` from 0 to 1, as easings.net gives each.
     fn ease_in(self, at: f32) -> f32 {
         match self {
             Self::Linear => at,
@@ -279,7 +277,7 @@ impl Curve {
     }
 }
 
-/// A ball's bounces coming to rest at 1, at `at`, from 0 to 1.
+/// A ball's bounces coming to rest at 1, at `at` from 0 to 1.
 fn bounce_out(at: f32) -> f32 {
     const N: f32 = 7.5625;
     const D: f32 = 2.75;
@@ -296,8 +294,8 @@ fn bounce_out(at: f32) -> f32 {
     N * at * at + up
 }
 
-/// Where a tween's field is: its component's type, the field's index in it, and the component of
-/// it, if the tween eases one of a vector's.
+/// Where a tween's field is: the component type, the field's index, and the vector component
+/// eased, if any.
 struct Target {
     id: ComponentId,
     index: u32,
@@ -305,11 +303,10 @@ struct Target {
 }
 
 impl Target {
-    /// Finds the field `field` of component type `component` in `world`, as [`Tween`] names it:
-    /// without allocating, but to fail.
+    /// Finds `field` of `component` in `world`, as [`Tween`] names it. Allocates only to fail.
     ///
     /// Fails with `reflect.unknown_type` if there's no such component type, and `reflect.no_field`
-    /// if it has no such field, or the field no such component.
+    /// if it has no such field, or the field no such vector component.
     fn find(world: &World, component: &str, field: &str) -> Result<Self> {
         let Some(id) = world.component_named(component) else {
             return Err(Error::new(
@@ -356,12 +353,11 @@ impl Target {
         Ok(Self { id, index, part })
     }
 
-    /// Sets the field of `entity`'s component to what's `eased` of the way `between` its ends, a
-    /// tween's, but where it holds that already: without allocating, but to fail.
+    /// Sets `entity`'s field to `eased` of the way `between` a tween's ends, unless it holds that
+    /// already. Allocates only to fail.
     ///
-    /// Fails as [`World::field_to_set`] does, as for an entity that hasn't the component, or a
-    /// value outside the field's bounds; and with `reflect.wrong_kind` for ends of another kind
-    /// than the field holds.
+    /// Fails as [`World::field_to_set`] does (an entity without the component, a value outside the
+    /// field's bounds), and with `reflect.wrong_kind` for ends of another kind than the field.
     fn set(
         &self,
         world: &mut World,
@@ -379,10 +375,9 @@ impl Target {
     }
 }
 
-/// The value a field that holds `held` takes `eased` of the way `between` a tween's ends, `part`
-/// of it alone if it's a vector's component that the tween eases: each component `eased` of the way
-/// along a straight line, which is at either end exactly at 0 and 1, and a rotation along the
-/// shortest arc, at a steady rate.
+/// The value a field holding `held` takes `eased` of the way `between` a tween's ends (`part`
+/// alone, if the tween eases one vector component). Components go along a straight line, exactly
+/// at either end at 0 and 1; a rotation along the shortest arc at a steady rate.
 ///
 /// Fails with `reflect.wrong_kind` for ends of another kind than the field holds.
 fn eased_value(
@@ -438,8 +433,8 @@ fn eased_value(
     })
 }
 
-/// The error that a tween from `from` to `to` can't ease a field that holds `held`, `part` of it
-/// if it's a vector's component that the tween eases.
+/// The error for a tween from `from` to `to` that can't ease a field holding `held` (`part` of it,
+/// for a vector component).
 fn unlike(held: &Value, part: Option<usize>, from: &TweenValue, to: &TweenValue) -> Error {
     let holds = match part {
         Some(_) => "a number, one of a vector's components",
@@ -458,14 +453,15 @@ fn unlike(held: &Value, part: Option<usize>, from: &TweenValue, to: &TweenValue)
 }
 
 impl World {
-    /// Starts `tween` on `entity`, in its [`Tweens`]: in place of one of the same field, if it has
-    /// one; at the end of the list, if not; and in a `Tweens` given it, if it has none.
+    /// Starts `tween` on `entity` in its [`Tweens`]: replacing a tween of the same field, else
+    /// appended, creating the `Tweens` if there is none.
     ///
-    /// Fails with `ecs.no_entity` if `entity` isn't alive; as the tween's first step would, as
-    /// [`Tweens`] says: with `reflect.unknown_type`, `reflect.missing_component` or
-    /// `reflect.no_field` for a field it hasn't, and `reflect.wrong_kind` for ends of another kind
-    /// than the field holds; with `reflect.out_of_range` for seconds that are negative or aren't a
-    /// number, as a scene's are refused; and starting nothing.
+    /// Starts nothing and fails with:
+    /// - `ecs.no_entity` if `entity` isn't alive;
+    /// - what the tween's first step would: `reflect.unknown_type`, `reflect.missing_component` or
+    ///   `reflect.no_field` for a field it hasn't, `reflect.wrong_kind` for ends of another kind
+    ///   than the field;
+    /// - `reflect.out_of_range` for seconds that are negative or NaN, as a scene's are refused.
     pub fn tween(&mut self, entity: Entity, tween: Tween) -> Result<()> {
         if tween.seconds.is_nan() || tween.seconds < 0.0 {
             return Err(Error::new(
@@ -488,15 +484,14 @@ impl World {
     }
 }
 
-/// Moves each tween's time on a tick, and sets its field as its time says, in the order queries
-/// find their entities, and each entity's tweens in their order; leaving out those that end, and
-/// those that fail, warned of.
+/// Advances each tween a tick and sets its field, in query order over entities and list order
+/// within one. Tweens that end leave; those that fail are warned of and leave.
 pub(super) fn step(world: &mut World) {
     let dt = Tick::DT.as_secs_f32();
     let mut entities = world.take_list();
     entities.extend(world.query::<(Entity, &Tweens)>().map(|(entity, _)| entity));
     for &entity in &entities {
-        // Taken out of the world while they set its fields, and put back.
+        // Taken out while they set fields, then put back.
         let mut tweens = match world.get_mut::<Tweens>(entity) {
             Some(Tweens(tweens)) => mem::take(tweens),
             None => continue,
@@ -539,9 +534,8 @@ mod tests {
         *world.get::<Transform>(entity).expect("placed")
     }
 
-    /// A tween played once moves its field steadily from its start to its end, exactly, over its
-    /// seconds, and then leaves its entity's list, the field at its end; one waiting leaves its
-    /// field as it is until its time comes.
+    /// A tween played once moves its field steadily and exactly from start to end over its
+    /// seconds, then leaves the list; a waiting one leaves the field alone until its time comes.
     #[test]
     fn a_tween_moves_its_field_to_its_end_and_leaves() {
         let mut world = World::default();
@@ -575,8 +569,8 @@ mod tests {
         assert_eq!(moved, DVec3::new(4.0, 0.5, 0.0), "the rest left as it was");
     }
 
-    /// A tween of a translation 1,000 km out moves it in `f64`: halfway between two points 20 cm
-    /// apart, to the micrometer, where `f32` would be 6 mm off.
+    /// A translation 1,000 km out tweens in `f64`: halfway between two points 20 cm apart, to the
+    /// micrometer, where `f32` would be 6 mm off.
     #[test]
     fn a_far_translation_tweens_in_f64() {
         let mut world = World::default();
@@ -590,8 +584,8 @@ mod tests {
         assert!(half.abs_diff_eq(want, 1e-6), "{half}");
     }
 
-    /// A loop starts again at its end, a ping-pong comes back, and both stay within a round; a
-    /// rotation turns the shortest way, and a sprite's alpha fades alone.
+    /// Loops restart and ping-pongs come back, both within a round; a rotation turns the shortest
+    /// way; a sprite's alpha fades alone.
     #[test]
     fn loops_ping_pongs_rotations_and_components_go_as_they_say() {
         let mut world = World::default();
@@ -615,12 +609,11 @@ mod tests {
         assert_eq!(transform(&world, entity).scale.x, 1.5);
         let alpha = |world: &World| world.get::<Sprite>(entity).expect("a sprite").color;
         assert_eq!(alpha(&world), Vec4::new(1.0, 1.0, 1.0, 0.5));
-        // A quarter of the way, a quarter of the turn.
+        // A quarter of the way: a quarter of the turn.
         let quarter = Quat::from_rotation_y(PI / 8.0);
         assert!(transform(&world, entity).rotation.angle_between(quarter) < 1e-3);
         run(&mut world, 24);
-        // 40 ticks, 0.625 seconds: the loop a quarter into its second round, the ping-pong a
-        // quarter of the way back.
+        // 40 ticks, 0.625 s: the loop a quarter into round two, the ping-pong a quarter back.
         assert_eq!(transform(&world, entity).scale.x, 1.25);
         assert_eq!(alpha(&world).w, 0.25);
         run(&mut world, 64 * 10);
@@ -634,8 +627,8 @@ mod tests {
         );
     }
 
-    /// Each curve starts at 0 and ends at 1 exactly, eased at either end or both; `Back` goes back
-    /// past its start, and the rest within them, `Bounce` and `Elastic` but at their far ends.
+    /// Each curve starts at 0 and ends at 1 exactly, at either ease; `Back` goes back past its
+    /// start, and the rest stay within them except `Bounce` and `Elastic` at their far ends.
     #[test]
     fn curves_start_at_0_end_at_1_and_overshoot_where_they_should() {
         let curves = [
@@ -668,15 +661,15 @@ mod tests {
         assert!(Curve::Elastic.eased(Ease::Out, 0.1) > 1.0);
         let bounced = (1..100).map(|i| Curve::Bounce.eased(Ease::Out, i as f32 / 100.0));
         assert!(bounced.clone().all(|at| (0.0..=1.0).contains(&at)));
-        // It lands three times before it rests.
+        // Three landings before rest.
         let bounced: Vec<f32> = bounced.collect();
         let landings = bounced.windows(3).filter(|w| w[1] > w[0] && w[1] > w[2]);
         assert_eq!(landings.count(), 3);
     }
 
-    /// A tween of a field it can't set is refused as it starts, and one that comes to fail as it
-    /// steps, as of a component its entity loses, leaves the list, warned of, the others going on;
-    /// and one of a field already where it would set it leaves the component's rows unmarked.
+    /// A tween of a field it can't set is refused at the start. One that comes to fail while
+    /// stepping (its entity lost the component) is warned of and leaves, the others going on. A
+    /// field already at the value leaves the component's rows unmarked.
     #[test]
     fn tweens_that_cant_set_their_fields_are_refused_or_leave() {
         let mut world = World::default();
@@ -725,7 +718,7 @@ mod tests {
         assert_eq!(tweens.len(), 1);
         assert_eq!(tweens[0].field, "translation.x");
         assert_eq!(transform(&world, entity).translation.x, 0.125);
-        // A tween of the same field takes the other's place.
+        // The same field replaces the other tween.
         let again = Tween::new("Transform", "translation.x", 5.0, 5.0, 1.0);
         world.tween(entity, again).expect("a field it has");
         assert_eq!(world.get::<Tweens>(entity).expect("tweens").0.len(), 1);
