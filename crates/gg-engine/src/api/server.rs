@@ -474,7 +474,6 @@ impl Api {
             reply,
         }) = self.next(came)
         {
-            let world = cx.world();
             match call {
                 // What a quit leaves would go with the run, and a snapshot that quits is what a
                 // run started again goes on from: so nothing past either applies, nor says so.
@@ -496,337 +495,446 @@ impl Api {
                                    first";
                     reply.send(Err(Failure::new("api.paused", message)));
                 }
-                Call::Step(_) if stepper.stopped() => {
-                    let message = "the game is stopped, and runs no ticks until `play`";
-                    reply.send(Err(Failure::new("api.stopped", message)));
-                }
-                Call::Status => reply.result(&self.status(cx, stepper)),
-                Call::Pause => {
-                    stepper.pause();
-                    reply.result(&self.status(cx, stepper));
-                }
-                Call::Resume => {
-                    stepper.resume();
-                    let status = self.status(cx, stepper);
-                    for (waiting, _) in self.steps.drain(..) {
-                        waiting.result(&status);
-                    }
-                    reply.result(&status);
-                }
-                Call::Play => {
-                    if stepper.stopped() {
-                        stack.play(cx, stepper.ticks);
-                        stepper.play();
-                    }
-                    reply.result(&self.status(cx, stepper));
-                }
-                Call::Stop => match stack.refuses_stop() {
-                    Some(why) => {
-                        let message = format!("the game can't stop: {why}");
-                        reply.send(Err(Failure::new("api.no_stop", message)));
-                    }
-                    None => {
-                        if !stepper.stopped() {
-                            self.stop(cx, stack, stepper);
-                        }
-                        reply.result(&self.status(cx, stepper));
-                    }
-                },
-                Call::Scene(scene) => match self.scene(cx, stack, stepper, scene) {
-                    Ok(()) => reply.result(&self.status(cx, stepper)),
-                    Err(error) => reply.send(Err(failure(&error))),
-                },
-                Call::Step(ticks) => {
-                    stepper.step_by(ticks);
-                    let until = stepper.ticks + stepper.steps();
-                    self.steps.push((reply, until));
-                }
-                Call::Capture {
-                    path,
-                    at,
-                    own,
-                    show,
-                } => self.asked.push(Capturing {
-                    reply,
-                    path,
-                    at,
-                    own,
-                    show: show.as_ref().map(Shown::of),
-                    since: Instant::now(),
-                }),
-                Call::Frames {
-                    dir,
-                    count,
-                    viewpoints,
-                    rect,
-                    show,
-                } => {
-                    // A view of no area, or none, fails as the frames come back without one.
-                    let size = (rect.map(|[_, _, width, height]| [width, height]))
-                        .or(cx.view().map(|view| view.size));
-                    let held = size.map_or(0, |[width, height]| {
-                        u64::from(count) * u64::from(width) * u64::from(height) * 4
-                    });
-                    if held > gg_api::MOST_FRAMES_BYTES {
-                        let [width, height] = size.unwrap_or_default();
-                        let what = format!(
-                            "holds at most {} bytes of pixels, and {count} frames of \
-                             {width}x{height} would hold {held}: ask for fewer frames, or a \
-                             smaller `rect`",
-                            gg_api::MOST_FRAMES_BYTES
-                        );
-                        reply.send(Err(bad_params("frames", what)));
-                    } else {
-                        self.films.push(Filming {
-                            reply,
-                            dir,
-                            count,
-                            viewpoints: viewpoints.iter().map(engine_viewpoint).collect(),
-                            rect,
-                            show: show.as_ref().map(Shown::of),
-                            since: Instant::now(),
-                            started: false,
-                            handed: Vec::new(),
-                            back: Vec::new(),
-                        });
-                    }
-                }
-                // A second writer of the memory would write the slot the first holds.
-                Call::View(memory) if memory.is_some() && memory == self.memory => {
-                    reply.send(Ok("{}".to_owned()));
-                }
-                Call::View(memory) => match memory.as_deref().map(Writer::open).transpose() {
-                    Ok(writer) => {
-                        match &memory {
-                            Some(memory) => info!(memory, "Publishing the view"),
-                            None => info!("No longer publishing the view"),
-                        }
-                        self.pacer = writer.as_ref().map(Writer::pacer);
-                        self.viewing = Some(writer);
-                        self.memory = memory;
-                        self.view_warned = false;
-                        reply.send(Ok("{}".to_owned()));
-                    }
-                    Err(error) => {
-                        let name = memory.unwrap_or_default();
-                        let message = format!("can't open the view's memory {name:?}: {error}");
-                        reply.send(Err(Failure::new("api.view", message)));
-                    }
-                },
-                Call::Input(events) => {
-                    let origin = cx.view().map_or([0, 0], |view| view.origin);
-                    for given in &events {
-                        let event = input_event(given, origin);
-                        let _ = stack.event(cx, &event.expect("checked as it was read"));
-                    }
-                    reply.send(Ok("{}".to_owned()));
-                }
-                Call::Look(given) => {
-                    self.set_look(cx, given, &client);
-                    let seen = cx.look.seen.as_ref().map(api_viewpoint);
-                    // The game's own camera may be placed by numbers that aren't finite, which JSON
-                    // has none for, and a client couldn't read back.
-                    self.look.seen = seen.filter(gg_api::Viewpoint::is_finite);
-                    reply.result(&self.look);
-                }
-                Call::Pick(at, within) => self.picks.push(Picking {
-                    at,
-                    within,
-                    ticket: None,
-                    named: names,
-                    reply,
-                }),
-                Call::Images => self.images_asked.push(reply),
-                Call::Entities { with, skip, take } => {
-                    reply.send(list(world, with.as_deref(), skip, take));
-                }
-                Call::Entity(id) => reply.send(entity(world, cx.meshes(), id)),
-                Call::Get {
-                    id,
-                    component,
-                    path,
-                } => reply.send(field(world, id, &component, &path)),
-                Call::Types => reply.result(&json::describe(world)),
-                Call::Hash => {
-                    let hash = world.hash();
-                    reply.result(&Hash {
-                        content: format!("{:016x}", hash.content),
-                        layout: format!("{:016x}", hash.layout),
-                    });
-                }
-                Call::Assets { kind, skip, take } => {
-                    // While frames pause, a look the thread takes would wait for the next request
-                    // to be answered, so the database as the thread last sent it answers; and a run
-                    // that no thread watches the root for scans it here.
-                    let look = if paused { None } else { cx.ask_assets() };
-                    match look {
-                        Some(look) => self.listing.push(Listing {
-                            reply,
-                            look,
-                            kind,
-                            skip,
-                            take,
-                        }),
-                        None => {
-                            if !cx.watches_assets() {
-                                cx.scan_assets(stack.watches_files());
-                            }
-                            reply.send(assets(cx, kind, skip, take));
-                        }
-                    }
-                }
-                Call::Ui => reply.result(&cx.ui_list()),
-                Call::Cells => reply.result(&cx.cells_read(stepper.stopped(), stepper.ticks)),
-                // A run stopped, or playing a copy, is snapshotted before its first tick too, so
-                // that a restart keeps the world as edited; what the layers queued as they attached
-                // goes, as it does at a `stop` that brings that world back. One restored from a
-                // snapshot, whose layers attached nothing, is too, as one restored paused may not
-                // tick for a while.
-                Call::Snapshot { .. }
-                    if stepper.fresh() && !stepper.stopped() && cx.edited.is_none() =>
-                {
-                    let message = "the simulation hasn't ticked since the run started, and a \
-                                   snapshot before then would miss what the layers queued for its \
-                                   first tick; ask once it has";
-                    reply.send(Err(Failure::new("api.not_ticked", message)));
-                }
-                Call::Snapshot { path, quit: quits } => {
-                    let named = path.is_none();
-                    let path = path.unwrap_or_else(|| {
-                        self.snapshotted += 1;
-                        let name = format!("{}-{}.snapshot", self.stem, self.snapshotted);
-                        self.snapshots.join(name)
-                    });
-                    let run = match &cx.edited {
-                        Some(edited) => Run::Held {
-                            world: Box::new(edited.world.clone()),
-                            scenes: edited.scenes.clone(),
-                            open: edited.open.clone(),
-                            ticks: edited.ticks,
-                        },
-                        None if stepper.stopped() => Run::Stopped,
-                        None => Run::Playing,
-                    };
-                    let mut reply = reply;
-                    let landing = quits.then(|| reply.landing());
-                    let taken = Taken {
-                        world: world.clone(),
-                        scenes: cx.scenes.files.clone(),
-                        cached: cx.scenes.cached.clone(),
-                        open: cx.scenes.open.clone(),
-                        scripts: cx.hosts.applied(),
-                        mods: cx.mods.applied(),
-                        run,
-                        paused: stepper.paused(),
-                        ticks: stepper.ticks,
-                        path,
-                        named,
-                        reply,
-                        written: None,
-                    };
-                    if quits {
-                        // Written before the run ends, which ends the thread with it: the main
-                        // thread waits for it, as the run would only end anyway, and the snapshots
-                        // asked before it are written first.
-                        let (written, done) = mpsc::channel();
-                        let taken = Taken {
-                            written: Some(written),
-                            ..taken
-                        };
-                        // One that fails leaves the run going, as one that isn't taken does.
-                        quit = self.taken.send(taken).is_ok() && done.recv().unwrap_or(false);
-                        // Its answer goes out before the run ends, which would end the thread that
-                        // writes it, and a client would take the snapshot for one that failed.
-                        if quit && let Some(landing) = landing {
-                            let _ = landing.recv_timeout(ANSWERING);
-                        }
-                    } else {
-                        // The thread runs until the API drops.
-                        let _ = self.taken.send(taken);
-                    }
-                }
-                Call::Patch(table) => match stack.offer_patch(table) {
-                    Ok(ticket) => self.offered.push((reply, ticket, Offer::Patch)),
-                    Err(table) => {
-                        let patched = stack.patch(table, stepper.ticks);
-                        let done = patched.map(|()| Done::Applied(Vec::new()));
-                        answer_done(reply, &Offer::Patch, stepper.ticks, done);
-                    }
-                },
-                Call::Apply(given, gesture) => {
-                    // What its values name that isn't loaded is loaded first, as a scene's is.
-                    let named = assets_named(world, &given);
-                    cx.load_named(named, false);
-                    match operations(cx.world(), cx.world(), given) {
-                        Ok(operations) => {
-                            let author = client.to_string();
-                            let edit = match gesture {
-                                Some(gesture) => Edit::Amend {
-                                    author,
-                                    gesture,
-                                    operations,
-                                },
-                                None => Edit::Apply { author, operations },
-                            };
-                            let offered = stack.offer(cx, edit);
-                            self.answer_offered(reply, offered, Offer::Apply, stepper.ticks);
-                        }
-                        Err(failure) => reply.send(Err(failure)),
-                    }
-                }
-                Call::SavePrefab { id, path } => match save_prefab(cx, stack, id, path) {
-                    Ok(saved) => {
-                        let name = cx.world().assets().prefab_name(saved.prefab).to_owned();
-                        // Checked as the save wrote the file, in this world as it is: it applies.
-                        let link = Operation::Link {
-                            entity: id,
-                            prefab: saved.prefab,
-                        };
-                        let edit = Edit::Apply {
-                            author: client.to_string(),
-                            operations: vec![link],
-                        };
-                        let offered = stack.offer(cx, edit);
-                        let path = saved.path;
-                        let offer = Offer::Prefab { path, name };
-                        self.answer_offered(reply, offered, offer, stepper.ticks);
-                    }
-                    Err(error) => reply.send(Err(failure(&error))),
-                },
-                Call::Undo { author, redo } => {
-                    let author = author.unwrap_or_else(|| client.to_string());
-                    let edit = if redo {
-                        Edit::Redo {
-                            author: author.clone(),
-                        }
-                    } else {
-                        Edit::Undo {
-                            author: author.clone(),
-                        }
-                    };
-                    let offered = stack.offer(cx, edit);
-                    self.answer_offered(reply, offered, Offer::Step { author }, stepper.ticks);
-                }
-                Call::Edits(author) => {
-                    let logs = cx.authors.logs(world);
-                    let logs =
-                        logs.filter(|(name, _)| author.as_deref().is_none_or(|a| a == *name));
-                    let authors = logs.map(|(name, log)| Authored {
-                        author: name.to_owned(),
-                        done: log.edits().map(words).collect(),
-                        undone: log.undone().map(words).collect(),
-                    });
-                    reply.result(&History {
-                        authors: authors.collect(),
-                    });
-                }
-                Call::Quit => {
-                    reply.send(Ok("{}".to_owned()));
-                    quit = true;
+                Call::Status
+                | Call::Pause
+                | Call::Resume
+                | Call::Play
+                | Call::Stop
+                | Call::Scene(_)
+                | Call::Step(_)
+                | Call::Quit => quit = self.answer_control(cx, stack, stepper, call, reply),
+                Call::Capture { .. }
+                | Call::Frames { .. }
+                | Call::View(_)
+                | Call::Input(_)
+                | Call::Look(_)
+                | Call::Pick(..)
+                | Call::Images => self.answer_view(cx, stack, call, &client, names, reply),
+                Call::Entities { .. }
+                | Call::Entity(_)
+                | Call::Get { .. }
+                | Call::Types
+                | Call::Hash
+                | Call::Assets { .. }
+                | Call::Ui
+                | Call::Cells
+                | Call::Edits(_) => self.answer_read(cx, stack, stepper, call, paused, reply),
+                Call::Snapshot { .. } => quit = self.answer_snapshot(cx, stepper, call, reply),
+                Call::Patch(_) | Call::Apply(..) | Call::SavePrefab { .. } | Call::Undo { .. } => {
+                    self.answer_edit(cx, stack, stepper, call, &client, reply);
                 }
             }
         }
         quit
+    }
+
+    /// Answers `call`, which controls the run: `status`, `pause`, `resume`, `play`, `stop`,
+    /// `scene`, `step` or `quit`; returns whether it asked the run to end.
+    fn answer_control(
+        &mut self,
+        cx: &mut Context,
+        stack: &mut Stack,
+        stepper: &mut Stepper,
+        call: Call,
+        reply: Reply,
+    ) -> bool {
+        let mut quit = false;
+        match call {
+            Call::Step(_) if stepper.stopped() => {
+                let message = "the game is stopped, and runs no ticks until `play`";
+                reply.send(Err(Failure::new("api.stopped", message)));
+            }
+            Call::Status => reply.result(&self.status(cx, stepper)),
+            Call::Pause => {
+                stepper.pause();
+                reply.result(&self.status(cx, stepper));
+            }
+            Call::Resume => {
+                stepper.resume();
+                let status = self.status(cx, stepper);
+                for (waiting, _) in self.steps.drain(..) {
+                    waiting.result(&status);
+                }
+                reply.result(&status);
+            }
+            Call::Play => {
+                if stepper.stopped() {
+                    stack.play(cx, stepper.ticks);
+                    stepper.play();
+                }
+                reply.result(&self.status(cx, stepper));
+            }
+            Call::Stop => match stack.refuses_stop() {
+                Some(why) => {
+                    let message = format!("the game can't stop: {why}");
+                    reply.send(Err(Failure::new("api.no_stop", message)));
+                }
+                None => {
+                    if !stepper.stopped() {
+                        self.stop(cx, stack, stepper);
+                    }
+                    reply.result(&self.status(cx, stepper));
+                }
+            },
+            Call::Scene(scene) => match self.scene(cx, stack, stepper, scene) {
+                Ok(()) => reply.result(&self.status(cx, stepper)),
+                Err(error) => reply.send(Err(failure(&error))),
+            },
+            Call::Step(ticks) => {
+                stepper.step_by(ticks);
+                let until = stepper.ticks + stepper.steps();
+                self.steps.push((reply, until));
+            }
+            Call::Quit => {
+                reply.send(Ok("{}".to_owned()));
+                quit = true;
+            }
+            _ => unreachable!("`answer` passes the run's controls alone"),
+        }
+        quit
+    }
+
+    /// Answers `call`, of the view: `capture`, `frames`, `view`, `input`, `look`, `pick` or
+    /// `images`, from `client`, whose picks answer names if `names`.
+    fn answer_view(
+        &mut self,
+        cx: &mut Context,
+        stack: &mut Stack,
+        call: Call,
+        client: &str,
+        names: bool,
+        reply: Reply,
+    ) {
+        match call {
+            Call::Capture {
+                path,
+                at,
+                own,
+                show,
+            } => self.asked.push(Capturing {
+                reply,
+                path,
+                at,
+                own,
+                show: show.as_ref().map(Shown::of),
+                since: Instant::now(),
+            }),
+            Call::Frames {
+                dir,
+                count,
+                viewpoints,
+                rect,
+                show,
+            } => {
+                // A view of no area, or none, fails as the frames come back without one.
+                let size = (rect.map(|[_, _, width, height]| [width, height]))
+                    .or(cx.view().map(|view| view.size));
+                let held = size.map_or(0, |[width, height]| {
+                    u64::from(count) * u64::from(width) * u64::from(height) * 4
+                });
+                if held > gg_api::MOST_FRAMES_BYTES {
+                    let [width, height] = size.unwrap_or_default();
+                    let what = format!(
+                        "holds at most {} bytes of pixels, and {count} frames of \
+                         {width}x{height} would hold {held}: ask for fewer frames, or a \
+                         smaller `rect`",
+                        gg_api::MOST_FRAMES_BYTES
+                    );
+                    reply.send(Err(bad_params("frames", what)));
+                } else {
+                    self.films.push(Filming {
+                        reply,
+                        dir,
+                        count,
+                        viewpoints: viewpoints.iter().map(engine_viewpoint).collect(),
+                        rect,
+                        show: show.as_ref().map(Shown::of),
+                        since: Instant::now(),
+                        started: false,
+                        handed: Vec::new(),
+                        back: Vec::new(),
+                    });
+                }
+            }
+            // A second writer of the memory would write the slot the first holds.
+            Call::View(memory) if memory.is_some() && memory == self.memory => {
+                reply.send(Ok("{}".to_owned()));
+            }
+            Call::View(memory) => match memory.as_deref().map(Writer::open).transpose() {
+                Ok(writer) => {
+                    match &memory {
+                        Some(memory) => info!(memory, "Publishing the view"),
+                        None => info!("No longer publishing the view"),
+                    }
+                    self.pacer = writer.as_ref().map(Writer::pacer);
+                    self.viewing = Some(writer);
+                    self.memory = memory;
+                    self.view_warned = false;
+                    reply.send(Ok("{}".to_owned()));
+                }
+                Err(error) => {
+                    let name = memory.unwrap_or_default();
+                    let message = format!("can't open the view's memory {name:?}: {error}");
+                    reply.send(Err(Failure::new("api.view", message)));
+                }
+            },
+            Call::Input(events) => {
+                let origin = cx.view().map_or([0, 0], |view| view.origin);
+                for given in &events {
+                    let event = input_event(given, origin);
+                    let _ = stack.event(cx, &event.expect("checked as it was read"));
+                }
+                reply.send(Ok("{}".to_owned()));
+            }
+            Call::Look(given) => {
+                self.set_look(cx, given, client);
+                let seen = cx.look.seen.as_ref().map(api_viewpoint);
+                // The game's own camera may be placed by numbers that aren't finite, which JSON
+                // has none for, and a client couldn't read back.
+                self.look.seen = seen.filter(gg_api::Viewpoint::is_finite);
+                reply.result(&self.look);
+            }
+            Call::Pick(at, within) => self.picks.push(Picking {
+                at,
+                within,
+                ticket: None,
+                named: names,
+                reply,
+            }),
+            Call::Images => self.images_asked.push(reply),
+            _ => unreachable!("`answer` passes the view's calls alone"),
+        }
+    }
+
+    /// Answers `call`, a read: `entities`, `entity`, `get`, `types`, `hash`, `assets`, `ui`,
+    /// `cells` or `edits`.
+    fn answer_read(
+        &mut self,
+        cx: &mut Context,
+        stack: &Stack,
+        stepper: &Stepper,
+        call: Call,
+        paused: bool,
+        reply: Reply,
+    ) {
+        let world = cx.world();
+        match call {
+            Call::Entities { with, skip, take } => {
+                reply.send(list(world, with.as_deref(), skip, take));
+            }
+            Call::Entity(id) => reply.send(entity(world, cx.meshes(), id)),
+            Call::Get {
+                id,
+                component,
+                path,
+            } => reply.send(field(world, id, &component, &path)),
+            Call::Types => reply.result(&json::describe(world)),
+            Call::Hash => {
+                let hash = world.hash();
+                reply.result(&Hash {
+                    content: format!("{:016x}", hash.content),
+                    layout: format!("{:016x}", hash.layout),
+                });
+            }
+            Call::Assets { kind, skip, take } => {
+                // While frames pause, a look the thread takes would wait for the next request
+                // to be answered, so the database as the thread last sent it answers; and a run
+                // that no thread watches the root for scans it here.
+                let look = if paused { None } else { cx.ask_assets() };
+                match look {
+                    Some(look) => self.listing.push(Listing {
+                        reply,
+                        look,
+                        kind,
+                        skip,
+                        take,
+                    }),
+                    None => {
+                        if !cx.watches_assets() {
+                            cx.scan_assets(stack.watches_files());
+                        }
+                        reply.send(assets(cx, kind, skip, take));
+                    }
+                }
+            }
+            Call::Ui => reply.result(&cx.ui_list()),
+            Call::Cells => reply.result(&cx.cells_read(stepper.stopped(), stepper.ticks)),
+            Call::Edits(author) => {
+                let logs = cx.authors.logs(world);
+                let logs = logs.filter(|(name, _)| author.as_deref().is_none_or(|a| a == *name));
+                let authors = logs.map(|(name, log)| Authored {
+                    author: name.to_owned(),
+                    done: log.edits().map(words).collect(),
+                    undone: log.undone().map(words).collect(),
+                });
+                reply.result(&History {
+                    authors: authors.collect(),
+                });
+            }
+            _ => unreachable!("`answer` passes the reads alone"),
+        }
+    }
+
+    /// Answers `call`, a `snapshot`; returns whether the run ends, as one that quits does once
+    /// it's written.
+    fn answer_snapshot(
+        &mut self,
+        cx: &Context,
+        stepper: &Stepper,
+        call: Call,
+        reply: Reply,
+    ) -> bool {
+        let mut quit = false;
+        match call {
+            // A run stopped, or playing a copy, is snapshotted before its first tick too, so
+            // that a restart keeps the world as edited; what the layers queued as they attached
+            // goes, as it does at a `stop` that brings that world back. One restored from a
+            // snapshot, whose layers attached nothing, is too, as one restored paused may not
+            // tick for a while.
+            Call::Snapshot { .. }
+                if stepper.fresh() && !stepper.stopped() && cx.edited.is_none() =>
+            {
+                let message = "the simulation hasn't ticked since the run started, and a \
+                               snapshot before then would miss what the layers queued for its \
+                               first tick; ask once it has";
+                reply.send(Err(Failure::new("api.not_ticked", message)));
+            }
+            Call::Snapshot { path, quit: quits } => {
+                let named = path.is_none();
+                let path = path.unwrap_or_else(|| {
+                    self.snapshotted += 1;
+                    let name = format!("{}-{}.snapshot", self.stem, self.snapshotted);
+                    self.snapshots.join(name)
+                });
+                let run = match &cx.edited {
+                    Some(edited) => Run::Held {
+                        world: Box::new(edited.world.clone()),
+                        scenes: edited.scenes.clone(),
+                        open: edited.open.clone(),
+                        ticks: edited.ticks,
+                    },
+                    None if stepper.stopped() => Run::Stopped,
+                    None => Run::Playing,
+                };
+                let mut reply = reply;
+                let landing = quits.then(|| reply.landing());
+                let taken = Taken {
+                    world: cx.world().clone(),
+                    scenes: cx.scenes.files.clone(),
+                    cached: cx.scenes.cached.clone(),
+                    open: cx.scenes.open.clone(),
+                    scripts: cx.hosts.applied(),
+                    mods: cx.mods.applied(),
+                    run,
+                    paused: stepper.paused(),
+                    ticks: stepper.ticks,
+                    path,
+                    named,
+                    reply,
+                    written: None,
+                };
+                if quits {
+                    // Written before the run ends, which ends the thread with it: the main
+                    // thread waits for it, as the run would only end anyway, and the snapshots
+                    // asked before it are written first.
+                    let (written, done) = mpsc::channel();
+                    let taken = Taken {
+                        written: Some(written),
+                        ..taken
+                    };
+                    // One that fails leaves the run going, as one that isn't taken does.
+                    quit = self.taken.send(taken).is_ok() && done.recv().unwrap_or(false);
+                    // Its answer goes out before the run ends, which would end the thread that
+                    // writes it, and a client would take the snapshot for one that failed.
+                    if quit && let Some(landing) = landing {
+                        let _ = landing.recv_timeout(ANSWERING);
+                    }
+                } else {
+                    // The thread runs until the API drops.
+                    let _ = self.taken.send(taken);
+                }
+            }
+            _ => unreachable!("`answer` passes a `snapshot` alone"),
+        }
+        quit
+    }
+
+    /// Answers `call`, an edit, as client `client`: `patch`, `apply`, `save_prefab`, `undo` or
+    /// `redo`.
+    fn answer_edit(
+        &mut self,
+        cx: &mut Context,
+        stack: &mut Stack,
+        stepper: &Stepper,
+        call: Call,
+        client: &str,
+        reply: Reply,
+    ) {
+        match call {
+            Call::Patch(table) => match stack.offer_patch(table) {
+                Ok(ticket) => self.offered.push((reply, ticket, Offer::Patch)),
+                Err(table) => {
+                    let patched = stack.patch(table, stepper.ticks);
+                    let done = patched.map(|()| Done::Applied(Vec::new()));
+                    answer_done(reply, &Offer::Patch, stepper.ticks, done);
+                }
+            },
+            Call::Apply(given, gesture) => {
+                // What its values name that isn't loaded is loaded first, as a scene's is.
+                let named = assets_named(cx.world(), &given);
+                cx.load_named(named, false);
+                match operations(cx.world(), cx.world(), given) {
+                    Ok(operations) => {
+                        let author = client.to_string();
+                        let edit = match gesture {
+                            Some(gesture) => Edit::Amend {
+                                author,
+                                gesture,
+                                operations,
+                            },
+                            None => Edit::Apply { author, operations },
+                        };
+                        let offered = stack.offer(cx, edit);
+                        self.answer_offered(reply, offered, Offer::Apply, stepper.ticks);
+                    }
+                    Err(failure) => reply.send(Err(failure)),
+                }
+            }
+            Call::SavePrefab { id, path } => match save_prefab(cx, stack, id, path) {
+                Ok(saved) => {
+                    let name = cx.world().assets().prefab_name(saved.prefab).to_owned();
+                    // Checked as the save wrote the file, in this world as it is: it applies.
+                    let link = Operation::Link {
+                        entity: id,
+                        prefab: saved.prefab,
+                    };
+                    let edit = Edit::Apply {
+                        author: client.to_string(),
+                        operations: vec![link],
+                    };
+                    let offered = stack.offer(cx, edit);
+                    let path = saved.path;
+                    let offer = Offer::Prefab { path, name };
+                    self.answer_offered(reply, offered, offer, stepper.ticks);
+                }
+                Err(error) => reply.send(Err(failure(&error))),
+            },
+            Call::Undo { author, redo } => {
+                let author = author.unwrap_or_else(|| client.to_string());
+                let edit = if redo {
+                    Edit::Redo {
+                        author: author.clone(),
+                    }
+                } else {
+                    Edit::Undo {
+                        author: author.clone(),
+                    }
+                };
+                let offered = stack.offer(cx, edit);
+                self.answer_offered(reply, offered, Offer::Step { author }, stepper.ticks);
+            }
+            _ => unreachable!("`answer` passes the edits alone"),
+        }
     }
 
     /// Stops the game, which plays, as `stop` asks of a run that can stop: brings back the world as
