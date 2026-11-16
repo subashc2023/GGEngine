@@ -492,7 +492,7 @@ impl Context {
         for file in files {
             self.loaded.models.remove(&file);
             #[cfg(feature = "dev")]
-            if let Some(hot_reload) = &mut self.hot_reload {
+            if let Some(hot_reload) = &mut self.dev.hot_reload {
                 hot_reload.unwatch(HotAsset::Model(file));
             }
         }
@@ -547,7 +547,7 @@ impl Context {
         #[cfg(feature = "dev")]
         {
             self.loaded.sheets.retain(|&sheet| sheet != texture);
-            if let Some(hot_reload) = &mut self.hot_reload {
+            if let Some(hot_reload) = &mut self.dev.hot_reload {
                 hot_reload.unwatch(HotAsset::Texture(texture));
             }
         }
@@ -837,13 +837,13 @@ impl Context {
         // The worlds let go of their shares for the change.
         self.world.share_assets(&Arc::default());
         #[cfg(feature = "dev")]
-        if let Some(edited) = &mut self.edited {
+        if let Some(edited) = &mut self.dev.edited {
             edited.world.share_assets(&Arc::default());
         }
         let added = add(Arc::make_mut(&mut self.assets));
         self.world.share_assets(&self.assets);
         #[cfg(feature = "dev")]
-        if let Some(edited) = &mut self.edited {
+        if let Some(edited) = &mut self.dev.edited {
             edited.world.share_assets(&self.assets);
         }
         added

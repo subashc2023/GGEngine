@@ -93,7 +93,7 @@ pub(super) fn save_prefab(
         Some("it runs from its package, which holds no files under its root to write")
     } else if stack.is_peer() {
         Some("the run is networked, and its prefabs would part from the session's others'")
-    } else if cx.edited.is_some() {
+    } else if cx.dev.edited.is_some() {
         Some(
             "a copy of the world as edited plays, whose entities `stop` takes away, the link \
              with them: stop it first",

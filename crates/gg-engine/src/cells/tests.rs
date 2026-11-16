@@ -1147,7 +1147,7 @@ fn a_run_of_made_cells_replays_naming_no_made_cell() {
 /// Has the look's viewpoint at x `x`, as the editor's camera is.
 #[cfg(feature = "dev")]
 pub(crate) fn look_at(cx: &mut Context, x: f32) {
-    cx.look.viewpoint = Some(gg_renderer::Viewpoint {
+    cx.dev.look.viewpoint = Some(gg_renderer::Viewpoint {
         position: DVec3::new(f64::from(x), 0.0, 0.0),
         ..Default::default()
     });

@@ -376,14 +376,14 @@ impl Api {
             (None, None, None) => None,
         };
         (self.bare, self.shown) = kind.unwrap_or_default();
-        cx.look.bare = self.bare;
-        cx.look.captured = self.shown.clone();
+        cx.dev.look.bare = self.bare;
+        cx.dev.look.captured = self.shown.clone();
         let filming = film.filter(|film| !self.bare && self.shown == film.show);
         let filmed = filming.and_then(Filming::viewpoint);
         if let Some(viewpoint) = filmed {
-            cx.look.viewpoint = Some(viewpoint);
+            cx.dev.look.viewpoint = Some(viewpoint);
         } else if self.film_viewpoint {
-            cx.look.viewpoint = self.look.viewpoint.as_ref().map(engine_viewpoint);
+            cx.dev.look.viewpoint = self.look.viewpoint.as_ref().map(engine_viewpoint);
         }
         self.film_frame = filming.is_some();
         self.film_viewpoint = filmed.is_some();
@@ -688,7 +688,7 @@ impl Api {
             }
             Call::Look(given) => {
                 self.set_look(cx, given, client);
-                let seen = cx.look.seen.as_ref().map(api_viewpoint);
+                let seen = cx.dev.look.seen.as_ref().map(api_viewpoint);
                 // The game's own camera may be placed by numbers that aren't finite, which JSON
                 // has none for, and a client couldn't read back.
                 self.look.seen = seen.filter(gg_api::Viewpoint::is_finite);
@@ -792,7 +792,7 @@ impl Api {
             // snapshot, whose layers attached nothing, is too, as one restored paused may not
             // tick for a while.
             Call::Snapshot { .. }
-                if stepper.fresh() && !stepper.stopped() && cx.edited.is_none() =>
+                if stepper.fresh() && !stepper.stopped() && cx.dev.edited.is_none() =>
             {
                 let message = "the simulation hasn't ticked since the run started, and a \
                                snapshot before then would miss what the layers queued for its \
@@ -806,7 +806,7 @@ impl Api {
                     let name = format!("{}-{}.snapshot", self.stem, self.snapshotted);
                     self.snapshots.join(name)
                 });
-                let run = match &cx.edited {
+                let run = match &cx.dev.edited {
                     Some(edited) => Run::Held {
                         world: Box::new(edited.world.clone()),
                         scenes: edited.scenes.clone(),
@@ -1007,7 +1007,7 @@ impl Api {
                 None
             }
         };
-        if cx.edited.is_some() {
+        if cx.dev.edited.is_some() {
             self.stop(cx, stack, stepper);
         }
         match opening {
@@ -1032,6 +1032,7 @@ impl Api {
             unsaved,
             // The world as edited's, as `unsaved` is.
             edited: cx
+                .dev
                 .edited
                 .as_ref()
                 .map_or(cx.scenes.open.edited, |edited| edited.open.edited),

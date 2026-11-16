@@ -551,12 +551,13 @@ mod open_scene {
                 }
             }
         }?;
-        let mut folders = (cx.folders.iter()).filter_map(|folder| fs::canonicalize(folder).ok());
+        let mut folders =
+            (cx.dev.folders.iter()).filter_map(|folder| fs::canonicalize(folder).ok());
         let inside = folders.any(|folder| found.starts_with(folder));
         let root_found = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
         let rest = found.strip_prefix(&root_found).ok().filter(|_| inside);
         let Some(rest) = rest else {
-            let folders = cx.folders.iter();
+            let folders = cx.dev.folders.iter();
             let named = folders.map(|folder| crate::assets::name_of(Some(root), folder));
             let message = format!(
                 "{} isn't in one of the project's scenes folders, {}, where the game's scenes are",
@@ -586,7 +587,7 @@ mod open_scene {
     /// The world as edited, its scene files and its open scene: those held aside while a copy
     /// plays, as [`Stack::play`] holds them, and else the context's own.
     fn as_edited(cx: &Context) -> (&World, &[SceneFile], &Open) {
-        match &cx.edited {
+        match &cx.dev.edited {
             Some(edited) => (&edited.world, edited.scenes.as_slice(), &edited.open),
             None => (cx.world(), cx.scenes.files.as_slice(), &cx.scenes.open),
         }
@@ -595,7 +596,7 @@ mod open_scene {
     /// The texts kept for scene changes of the world as edited, as [`as_edited`] says: those held
     /// aside while a copy plays, and else the context's own.
     fn cached_as_edited(cx: &Context) -> &[SceneFile] {
-        match &cx.edited {
+        match &cx.dev.edited {
             Some(edited) => &edited.cached,
             None => &cx.scenes.cached,
         }
@@ -878,7 +879,7 @@ mod open_scene {
         // Its text for the scene changes to come, as read, which the watch applies nothing of;
         // and its cells' files'.
         let written = || std::iter::once(&saved).chain(cells.iter().map(|(_, file)| file));
-        match &mut cx.edited {
+        match &mut cx.dev.edited {
             Some(edited) => {
                 follow(&mut edited.scenes, &mut edited.open, old, &saved);
                 edited.open.made = made;
@@ -1168,7 +1169,7 @@ mod open_scene {
         if cx.start.is_none() {
             return false;
         }
-        let ticks = cx.edited.as_ref().map_or(ticks, |edited| edited.ticks);
+        let ticks = cx.dev.edited.as_ref().map_or(ticks, |edited| edited.ticks);
         if let Some((at, unsaved)) = cx.scenes.unsaved
             && at == ticks
         {

@@ -58,7 +58,7 @@ impl Context {
                 .filter(|_| assets::is_id(asset))?;
             catalog.path(id).map(Arc::from)
         });
-        if let (Some(hot_reload), Some(root)) = (&mut self.hot_reload, &self.root) {
+        if let (Some(hot_reload), Some(root)) = (&mut self.dev.hot_reload, &self.root) {
             hot_reload.follow(self.assets.catalog(), root);
         }
     }
@@ -80,7 +80,7 @@ impl Context {
         }
         if serves {
             match HotReload::start() {
-                Ok(hot_reload) => self.hot_reload = Some(hot_reload),
+                Ok(hot_reload) => self.dev.hot_reload = Some(hot_reload),
                 Err(error) => warn!(
                     code = error.code(),
                     "{error:#}; assets don't reload as their files change"
@@ -90,7 +90,7 @@ impl Context {
         let Some(root) = self.root.clone() else {
             return;
         };
-        let cache = self.asset_cache.clone().filter(|_| writes);
+        let cache = self.dev.asset_cache.clone().filter(|_| writes);
         let mut prints = match &cache {
             Some(cache) => Prints::read(cache, &root),
             None => Prints::default(),
@@ -101,7 +101,7 @@ impl Context {
         }
         let catalog = self.assets.catalog().clone();
         match AssetWatch::start(root, catalog, prints, writes, cache) {
-            Ok(watch) => self.asset_watch = Some(watch),
+            Ok(watch) => self.dev.asset_watch = Some(watch),
             Err(error) => warn!(
                 code = error.code(),
                 "{error:#}; the tool API's `assets` scans the asset root itself"
@@ -113,7 +113,7 @@ impl Context {
     /// and has the worlds share it: as a frame starts, before the tool API's requests are answered.
     #[cfg(feature = "dev")]
     pub(crate) fn take_assets(&mut self) {
-        let catalog = self.asset_watch.as_mut().and_then(AssetWatch::take);
+        let catalog = self.dev.asset_watch.as_mut().and_then(AssetWatch::take);
         if let Some(catalog) = catalog {
             self.set_catalog(catalog);
         }
@@ -122,7 +122,7 @@ impl Context {
     /// Whether a thread watches the asset root, keeping the database.
     #[cfg(feature = "dev")]
     pub(crate) fn watches_assets(&self) -> bool {
-        self.asset_watch.is_some()
+        self.dev.asset_watch.is_some()
     }
 
     /// Asks the thread that watches the asset root to look now, as the tool API's `assets` does;
@@ -130,13 +130,14 @@ impl Context {
     /// it's taken; `None` in a run that no thread watches the root for.
     #[cfg(feature = "dev")]
     pub(crate) fn ask_assets(&self) -> Option<u64> {
-        self.asset_watch.as_ref().map(AssetWatch::ask)
+        self.dev.asset_watch.as_ref().map(AssetWatch::ask)
     }
 
     /// The looks [`ask_assets`](Self::ask_assets) asked for that have been taken: those up to it.
     #[cfg(feature = "dev")]
     pub(crate) fn assets_answered(&self) -> u64 {
-        self.asset_watch
+        self.dev
+            .asset_watch
             .as_ref()
             .map_or(u64::MAX, AssetWatch::answered)
     }

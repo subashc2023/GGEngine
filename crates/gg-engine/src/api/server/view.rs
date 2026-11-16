@@ -120,7 +120,7 @@ impl Api {
         if changed.contains(&true) {
             *revision += 1;
         }
-        let look = &mut cx.look;
+        let look = &mut cx.dev.look;
         look.viewpoint = viewpoint.as_ref().map(engine_viewpoint);
         look.outline = outline.as_ref().map(|outline| Outlining {
             ids: (outline.ids.iter())
@@ -158,7 +158,7 @@ impl Api {
                 writer,
                 skip: false,
                 ticks,
-                started: cx.started,
+                started: cx.dev.started,
                 failed: None,
             });
         }
@@ -173,7 +173,7 @@ impl Api {
             }
             publish.skip = self.apart();
             publish.ticks = ticks;
-            publish.started = cx.started;
+            publish.started = cx.dev.started;
         }
         let back = (frame.captured.take()).map(|shot| shot.map(Arc::new));
         let streaming = frame.loading > 0 || !frame.streaming.is_empty();

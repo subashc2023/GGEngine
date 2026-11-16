@@ -336,7 +336,7 @@ impl Context {
     /// no package, as it reads no ID file; and `asset.outside_root` for an absolute path.
     pub(super) fn asset_path(&self, name: &str, kind: &str, stand_in: bool) -> Result<Arc<str>> {
         #[cfg(feature = "dev")]
-        if let Some(given) = &self.given {
+        if let Some(given) = &self.dev.given {
             if let Some((path, _)) = given.iter().find(|(_, given)| ***given == *name) {
                 return Ok(path.clone());
             }
@@ -407,7 +407,7 @@ impl Context {
     /// whose list doesn't read. It reads the list each time, as only an error asks.
     #[cfg(feature = "dev")]
     fn fetched(&self, id: AssetId) -> Option<String> {
-        let list = gg_api::Fetch::read(self.project_dir.as_deref()?).ok()?;
+        let list = gg_api::Fetch::read(self.dev.project_dir.as_deref()?).ok()?;
         let mut files = list.files();
         files.find(|file| file.id == Some(id)).map(|file| file.path)
     }
@@ -438,7 +438,7 @@ impl Context {
     pub(super) fn named_file(&mut self, name: &str, path: &str) -> Result<PathBuf> {
         // Before anything can fail, so that a stand-in is named so too.
         #[cfg(feature = "dev")]
-        if let Some(given) = &mut self.given
+        if let Some(given) = &mut self.dev.given
             && name != path
             && !given.contains_key(path)
         {
@@ -669,7 +669,7 @@ impl Context {
             None => named.into(),
         };
         #[cfg(feature = "dev")]
-        if let Some(given) = &self.given {
+        if let Some(given) = &self.dev.given {
             return given.get(&at).cloned().unwrap_or(at);
         }
         match (self.id_of(path, file), image) {
@@ -822,7 +822,7 @@ impl Context {
     /// lockstep host names the textures it adds after its joiner has joined.
     #[cfg(feature = "dev")]
     pub(crate) fn name_also(&mut self, names: impl IntoIterator<Item = (Arc<str>, Arc<str>)>) {
-        let mut given = self.given.take().unwrap_or_default();
+        let mut given = self.dev.given.take().unwrap_or_default();
         given.extend(names.into_iter().map(|(name, path)| (path, name)));
         self.rename(given);
     }
@@ -831,6 +831,6 @@ impl Context {
     #[cfg(feature = "dev")]
     fn rename(&mut self, given: HashMap<Arc<str>, Arc<str>>) {
         self.add_assets(|assets| assets.rename(&given));
-        self.given = Some(given);
+        self.dev.given = Some(given);
     }
 }

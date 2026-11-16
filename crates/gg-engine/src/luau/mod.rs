@@ -551,7 +551,7 @@ impl Scripts {
         cx.hosts.add(&self.host);
         #[cfg(feature = "dev")]
         if !cx.reads_package() {
-            cx.scripts.watch(name, path, text);
+            cx.dev.scripts.watch(name, path, text);
         }
         Ok(component)
     }
@@ -2502,7 +2502,7 @@ mod watch {
     /// runs its host's scripts.
     pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
         let now = Instant::now();
-        let files = &mut cx.scripts;
+        let files = &mut cx.dev.scripts;
         if !stack.watches_files()
             || files.files.is_empty()
             || files.looked.is_some_and(|looked| now - looked < LOOK)

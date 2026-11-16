@@ -82,7 +82,7 @@ fn the_cells_draw_where_the_look_s_grid_does() {
         cx.over.len() - before
     };
     assert_eq!(lines(&mut cx), 0, "no grid");
-    cx.look.grid = Some(Plane::XZ);
+    cx.dev.look.grid = Some(Plane::XZ);
     assert_eq!(lines(&mut cx), 3 * 12);
 }
 
@@ -133,7 +133,7 @@ fn the_origin_follows_the_view_a_step_of_1024_at_a_time() {
     #[cfg(feature = "dev")]
     {
         let looked = DVec3::new(-5000.0, 0.0, 0.0);
-        cx.look.viewpoint = Some(Viewpoint {
+        cx.dev.look.viewpoint = Some(Viewpoint {
             position: looked,
             ..far
         });
@@ -475,27 +475,27 @@ fn the_view_cuts_to_and_from_the_tools_look() {
         position: DVec3::new(1.0, 2.0, 10.0),
         ..Viewpoint::default()
     };
-    cx.look.viewpoint = Some(looked);
+    cx.dev.look.viewpoint = Some(looked);
     assert_eq!(seen(&mut cx), (true, true), "the look set");
     assert_eq!(seen(&mut cx), (false, true), "the look held");
-    cx.look.viewpoint = Some(Viewpoint {
+    cx.dev.look.viewpoint = Some(Viewpoint {
         position: DVec3::ZERO,
         ..looked
     });
     assert_eq!(seen(&mut cx), (true, true), "the look changed");
-    cx.look.bare = true;
+    cx.dev.look.bare = true;
     assert_eq!(
         seen(&mut cx),
         (true, false),
         "a bare frame among the look's"
     );
-    cx.look.bare = false;
+    cx.dev.look.bare = false;
     assert_eq!(seen(&mut cx), (true, true), "the look's frame after it");
-    cx.look.viewpoint = None;
+    cx.dev.look.viewpoint = None;
     assert_eq!(seen(&mut cx), (true, false), "the look cleared");
-    cx.look.bare = true;
+    cx.dev.look.bare = true;
     assert_eq!(seen(&mut cx), (false, false), "a bare frame without a look");
-    cx.look.bare = false;
+    cx.dev.look.bare = false;
     assert_eq!(seen(&mut cx), (false, false), "the frame after it");
 }
 
@@ -579,7 +579,7 @@ fn the_passes_the_look_leaves_out_are_left_out_of_the_frame_but_a_bare_one() {
             .map(|adaptation| adaptation.rendered()),
     );
     assert_eq!(drawn, game, "the game's own");
-    cx.look.skip = gg_api::Pass::ALL.to_vec();
+    cx.dev.look.skip = gg_api::Pass::ALL.to_vec();
     let none = (
         None,
         None,
@@ -594,12 +594,12 @@ fn the_passes_the_look_leaves_out_are_left_out_of_the_frame_but_a_bare_one() {
         None,
     );
     assert_eq!(passes(&handed_off(&mut cx)), none, "every pass left out");
-    cx.look.skip = vec![gg_api::Pass::Reflections];
+    cx.dev.look.skip = vec![gg_api::Pass::Reflections];
     let mut reflectionless = game;
     reflectionless.1 = None;
     assert_eq!(passes(&handed_off(&mut cx)), reflectionless, "one left out");
-    cx.look.skip = gg_api::Pass::ALL.to_vec();
-    cx.look.bare = true;
+    cx.dev.look.skip = gg_api::Pass::ALL.to_vec();
+    cx.dev.look.bare = true;
     assert_eq!(passes(&handed_off(&mut cx)), game, "a bare frame");
     let world = cx.world();
     assert_eq!(world.get::<Environment>(environment), Some(&everything));
@@ -1539,7 +1539,7 @@ fn a_runs_start_keeps_the_id_of_an_asset_renamed_while_none_watched() {
     let started = |serves, writes| {
         let mut cx = Context::seeded(1);
         cx.root = Some(root.clone());
-        cx.asset_cache = Some(cache.clone());
+        cx.dev.asset_cache = Some(cache.clone());
         cx.start_assets(serves, writes);
         cx
     };
@@ -1609,7 +1609,7 @@ fn a_texture_edited_renamed_or_come_reloads_under_its_handle() {
     written_long_ago("sheet.png", &png(2));
     let logged = crate::testing::logged();
     let mut cx = Context::seeded(0).root(root.clone());
-    cx.hot_reload = Some(HotReload::start().expect("the thread"));
+    cx.dev.hot_reload = Some(HotReload::start().expect("the thread"));
     let stone = cx.add_texture("stone", assets.join("stone.png"));
     let stone = stone.expect("a texture");
     let sheet = cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [1, 1]);
@@ -1932,7 +1932,7 @@ fn a_scene_names_a_model_by_its_id_whose_nodes_reload_as_it_changes() {
     std::fs::write(&scene, text).expect("written");
 
     let mut cx = Context::seeded(0).root(root.clone());
-    cx.hot_reload = Some(HotReload::start().expect("the thread"));
+    cx.dev.hot_reload = Some(HotReload::start().expect("the thread"));
     cx.load_scene_file(&scene).expect("loaded");
     let model = cx.assets.model(id).expect("loaded by its ID");
     assert_eq!(cx.assets.model_path(model), "assets/tri.gltf");
@@ -2050,7 +2050,7 @@ fn a_scene_names_a_prefab_by_its_id_whose_instances_reload_as_it_changes() {
     std::fs::write(&scene, &text).expect("written");
 
     let mut cx = Context::seeded(0).root(root.clone());
-    cx.hot_reload = Some(HotReload::start().expect("the thread"));
+    cx.dev.hot_reload = Some(HotReload::start().expect("the thread"));
     cx.load_scene_file(&scene).expect("loaded");
     let prefab = cx.assets.prefab(id).expect("loaded by its ID");
     assert_eq!(cx.assets.prefab_path(prefab), "assets/lamp.prefab");
@@ -2171,7 +2171,7 @@ fn a_ui_added_by_its_id_reloads_as_its_file_changes() {
     written_long_ago(logo, &png);
 
     let mut cx = Context::seeded(0).root(root.clone());
-    cx.hot_reload = Some(HotReload::start().expect("the thread"));
+    cx.dev.hot_reload = Some(HotReload::start().expect("the thread"));
     let ui = cx.add_ui("menu", id).expect("added by its ID");
     assert!(cx.assets.texture(logo).is_some(), "what it names");
     let listed = cx.ui_list();
@@ -2352,7 +2352,7 @@ fn a_prefab_change_one_world_refuses_changes_neither() {
     let root = prefab.spawn(cx.world_mut(), Transform::IDENTITY);
     let root = root.expect("spawned");
     // Held aside as a copy plays, which registers a type the world as edited hasn't.
-    cx.edited = Some(Edited {
+    cx.dev.edited = Some(Edited {
         world: cx.world.clone(),
         ticks: 0,
         scenes: Vec::new(),
@@ -2433,7 +2433,7 @@ fn a_scene_names_a_texts_font_by_its_id_which_bakes_again_as_it_changes() {
     std::fs::write(&scene, text).expect("written");
 
     let mut cx = Context::seeded(0).root(root.clone());
-    cx.hot_reload = Some(HotReload::start().expect("the thread"));
+    cx.dev.hot_reload = Some(HotReload::start().expect("the thread"));
     let roots = cx.load_scene_file(&scene).expect("loaded");
     let title = cx.assets.font(id).expect("loaded by its ID");
     assert_eq!(cx.assets.font_path(title), "fonts/title.ttf");
@@ -2870,7 +2870,7 @@ fn a_removed_texture_is_watched_no_more() {
         (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
     }
     let mut cx = Context::seeded(0).root(scratch.0.clone());
-    cx.hot_reload = Some(HotReload::start().expect("the thread"));
+    cx.dev.hot_reload = Some(HotReload::start().expect("the thread"));
     let gone = cx.add_texture("gone", scratch.0.join("gone.png"));
     let gone = gone.expect("a texture");
     let kept = cx.add_texture("kept", scratch.0.join("kept.png"));
@@ -2887,7 +2887,7 @@ fn a_removed_texture_is_watched_no_more() {
             "the kept texture reads again"
         );
         std::thread::sleep(Duration::from_millis(5));
-        let hot_reload = cx.hot_reload.as_ref().expect("started");
+        let hot_reload = cx.dev.hot_reload.as_ref().expect("started");
         while let Some(reloaded) = hot_reload.take() {
             if let Reloaded::Texture { texture, .. } = reloaded {
                 read.push(texture);
@@ -2975,7 +2975,7 @@ fn a_sound_decodes_again_as_its_file_changes() {
     let file = std::fs::File::options().write(true).open(&path);
     (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
     let mut cx = Context::seeded(0);
-    cx.hot_reload = Some(HotReload::start().expect("the thread"));
+    cx.dev.hot_reload = Some(HotReload::start().expect("the thread"));
     let sound = cx.add_sound("chime", &path).expect("a sound");
     std::fs::write(&path, audio::tests::wav(&[0; 960])).expect("an edit");
     let until = std::time::Instant::now() + Duration::from_secs(30);
@@ -3030,7 +3030,7 @@ fn music_reads_again_as_its_file_changes() {
     let file = std::fs::File::options().write(true).open(&path);
     (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
     let mut cx = Context::seeded(0);
-    cx.hot_reload = Some(HotReload::start().expect("the thread"));
+    cx.dev.hot_reload = Some(HotReload::start().expect("the thread"));
     let theme = cx.add_music("theme", &path).expect("music");
     cx.play_music(Some(theme), Duration::ZERO);
     std::fs::write(&path, audio::tests::wav(&[0; 960])).expect("an edit");
@@ -3314,7 +3314,7 @@ fn stop_brings_back_the_world_as_edited_that_play_held() {
     assert_eq!((queued(&mut stack), restored.get()), (1, 0));
     let (edited, hash) = (cx.world().serial(), cx.world().hash());
     stack.play(&mut cx, 40);
-    let held = cx.edited.as_ref().expect("the world as edited, held");
+    let held = cx.dev.edited.as_ref().expect("the world as edited, held");
     assert_eq!((held.world.serial(), held.ticks), (edited, 40));
     assert_eq!(held.scenes, std::slice::from_ref(&file));
     assert_ne!(cx.world().serial(), edited, "a copy plays");
@@ -3322,7 +3322,7 @@ fn stop_brings_back_the_world_as_edited_that_play_held() {
     cx.apply_edit(set(2.0)).expect("set in the copy");
     cx.scenes.files.clear();
     assert_eq!(stack.stop(&mut cx), Some(40));
-    assert!(cx.edited.is_none());
+    assert!(cx.dev.edited.is_none());
     assert_eq!((cx.world().serial(), cx.world().hash()), (edited, hash));
     assert_eq!(cx.scenes.files, [file]);
     let logs = cx.authors.logs(cx.world());

@@ -32,11 +32,11 @@ impl Context {
     /// unless something came back.
     #[cfg(feature = "dev")]
     pub(crate) fn take_reloaded(&mut self, recorded: bool) {
-        let Some(hot_reload) = &mut self.hot_reload else {
+        let Some(hot_reload) = &mut self.dev.hot_reload else {
             return;
         };
         hot_reload.watch_shaders(&self.shaders);
-        while let Some(reloaded) = self.hot_reload.as_ref().and_then(HotReload::take) {
+        while let Some(reloaded) = self.dev.hot_reload.as_ref().and_then(HotReload::take) {
             match reloaded {
                 Reloaded::Shader(compiled) => {
                     let source = compiled.source();
@@ -258,7 +258,7 @@ impl Context {
         if nodes != was {
             self.add_assets(|assets| assets.set_nodes(model, nodes));
             self.world.fit_model(model, &was);
-            if let Some(edited) = &mut self.edited {
+            if let Some(edited) = &mut self.dev.edited {
                 edited.world.fit_model(model, &was);
             }
         }
@@ -302,7 +302,7 @@ impl Context {
         let text: Arc<str> = text.into();
         // Each world's found before either takes them, so that both take the text or neither does.
         let refits = self.world.refits(prefab, &text).and_then(|refits| {
-            let edited = self.edited.as_ref();
+            let edited = self.dev.edited.as_ref();
             let edited = edited.map(|edited| edited.world.refits(prefab, &text));
             Ok((refits, edited.transpose()?))
         });
@@ -318,7 +318,7 @@ impl Context {
             }
         };
         self.world.refit_prefab(refits);
-        if let (Some(edited), Some(refits)) = (&mut self.edited, edited_refits) {
+        if let (Some(edited), Some(refits)) = (&mut self.dev.edited, edited_refits) {
             edited.world.refit_prefab(refits);
         }
         self.add_assets(|assets| assets.set_prefab_text(prefab, text));
@@ -365,7 +365,7 @@ impl Context {
             .ok()
             .filter(|_| assets::is_id(named));
         let (id, at) = self.followed(id, path);
-        if let Some(hot_reload) = &mut self.hot_reload {
+        if let Some(hot_reload) = &mut self.dev.hot_reload {
             let source = Source::Ui {
                 ui: file,
                 name: name.to_owned(),
@@ -393,7 +393,7 @@ impl Context {
             .ok()
             .filter(|_| assets::is_id(named));
         let (id, at) = self.followed(id, path);
-        if let Some(hot_reload) = &mut self.hot_reload {
+        if let Some(hot_reload) = &mut self.dev.hot_reload {
             let source = Source::Prefab {
                 prefab,
                 name: name.to_owned(),
@@ -421,7 +421,7 @@ impl Context {
             .ok()
             .filter(|_| assets::is_id(named));
         let (id, at) = self.followed(id, path);
-        if let Some(hot_reload) = &mut self.hot_reload {
+        if let Some(hot_reload) = &mut self.dev.hot_reload {
             let source = Source::Texture {
                 texture,
                 name: name.to_owned(),
@@ -437,7 +437,7 @@ impl Context {
     #[cfg(feature = "dev")]
     pub(super) fn watch_for(&mut self, texture: Texture, name: &str) {
         let id = name.parse::<AssetId>().ok().filter(|_| assets::is_id(name));
-        if let (Some(hot_reload), Some(id)) = (&mut self.hot_reload, id) {
+        if let (Some(hot_reload), Some(id)) = (&mut self.dev.hot_reload, id) {
             hot_reload.watch_for(HotAsset::Texture(texture), name, id);
         }
     }
@@ -455,7 +455,7 @@ impl Context {
         read_at: SystemTime,
     ) {
         let (id, at) = self.followed(self.asset_id(path, Some(file)), path);
-        if let Some(hot_reload) = &mut self.hot_reload {
+        if let Some(hot_reload) = &mut self.dev.hot_reload {
             let source = Source::Model {
                 file: file.to_owned(),
                 name: name.to_owned(),
@@ -484,7 +484,7 @@ impl Context {
             .ok()
             .filter(|_| assets::is_id(named));
         let (id, at) = self.followed(id, path);
-        if let Some(hot_reload) = &mut self.hot_reload {
+        if let Some(hot_reload) = &mut self.dev.hot_reload {
             let source = Source::Font {
                 font,
                 name: name.to_owned(),
@@ -505,7 +505,7 @@ impl Context {
         path: &Path,
         read_at: SystemTime,
     ) {
-        if let Some(hot_reload) = &mut self.hot_reload {
+        if let Some(hot_reload) = &mut self.dev.hot_reload {
             let source = Source::Sound {
                 sound,
                 name: name.to_owned(),
@@ -526,7 +526,7 @@ impl Context {
         path: &Path,
         read_at: SystemTime,
     ) {
-        if let Some(hot_reload) = &mut self.hot_reload {
+        if let Some(hot_reload) = &mut self.dev.hot_reload {
             let source = Source::Music {
                 music,
                 name: name.to_owned(),
@@ -542,7 +542,7 @@ impl Context {
     #[cfg(feature = "dev")]
     pub(super) fn watch_font_for(&mut self, font: Font, name: &str) {
         let id = name.parse::<AssetId>().ok().filter(|_| assets::is_id(name));
-        if let (Some(hot_reload), Some(id)) = (&mut self.hot_reload, id) {
+        if let (Some(hot_reload), Some(id)) = (&mut self.dev.hot_reload, id) {
             hot_reload.watch_for(HotAsset::Font(font), name, id);
         }
     }

@@ -406,13 +406,8 @@ pub struct Context {
     shown: Option<[u32; 2]>,
     shown_bytes: Vec<u8>,
     shown_new: bool,
-    /// When the frame being made started, by the machine's clock, as the frames of a view
-    /// published to a tool say.
-    #[cfg(feature = "dev")]
-    pub(crate) started: std::time::SystemTime,
-    /// The look the tool API's clients set, which the frames draw with over what the layers set.
-    #[cfg(feature = "dev")]
-    pub(crate) look: crate::api::Look,
+    /// What a development build keeps for its tools, as [`Dev`] says.
+    pub(crate) dev: Dev,
     /// The number of the next pick's ticket.
     tickets: u64,
     /// The picks asked this frame, at most [`MAX_PICKS`], each with where, in the main window's
@@ -456,13 +451,6 @@ pub struct Context {
     ///
     /// [`App::project`]: crate::App::project
     pub(crate) start: Option<PathBuf>,
-    /// The project's scenes folders, which the tool API's `scene` opens and saves scene files in.
-    #[cfg(feature = "dev")]
-    pub(crate) folders: Vec<PathBuf>,
-    /// The project's directory, where its manifest is, and its fetch list, which an ID no asset
-    /// has is looked for in, as [`asset_path`](Self::asset_path) says: a project's game's alone.
-    #[cfg(feature = "dev")]
-    project_dir: Option<PathBuf>,
     /// The directory of what the app keeps for the user from run to run, beside the dock's layout,
     /// as [`read_state`](Self::read_state) says: a windowed run's alone.
     state: Option<PathBuf>,
@@ -472,28 +460,10 @@ pub struct Context {
     /// The textures, models, fonts, shaders, sounds and music the layers added, by the file each
     /// resolves to, which a second add of that file, by whatever path, gives again.
     loaded: Loaded,
-    /// The names given the textures the layers add, by their paths, in place of the IDs the asset
-    /// database holds, as [`name_as`](Self::name_as) says: `None` while the run names its textures
-    /// by the database's.
-    #[cfg(feature = "dev")]
-    given: Option<HashMap<Arc<str>, Arc<str>>>,
     /// Whether the run goes as another run went, as a replay or a lockstep joiner does, whose texts
     /// name textures as that run did: a texture they name that can't be loaded then stands in, as
     /// [`load_named`](Self::load_named) says, rather than refusing what names it.
     pub(crate) follows: bool,
-    /// Where the run keeps the prints of what its assets hold between runs, as [`assets::cache`]
-    /// says, if it can: a run's, never a test's.
-    #[cfg(feature = "dev")]
-    asset_cache: Option<PathBuf>,
-    /// The thread that keeps the asset database as the root changes, in a run that serves the tool
-    /// API, as [`start_assets`](Self::start_assets) starts it.
-    #[cfg(feature = "dev")]
-    asset_watch: Option<AssetWatch>,
-    /// The thread that reads the layers' shaders, textures, models, fonts, prefabs, sounds and
-    /// music again as their files change, in a run that serves the tool API, as
-    /// [`start_assets`](Self::start_assets) starts it.
-    #[cfg(feature = "dev")]
-    hot_reload: Option<HotReload>,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -514,18 +484,12 @@ pub struct Context {
     pub(crate) authors: Authors,
     /// The scene files the layers loaded, which development builds watch.
     pub(crate) scenes: SceneFiles,
-    /// The script files the layers loaded, which development builds watch.
-    #[cfg(feature = "dev")]
-    pub(crate) scripts: crate::luau::Files,
     /// What runs the layers' scripts, which a script reloads through as an edit asks, and a world
     /// brought back migrates through, as [`Scripts`](crate::Scripts) says.
     pub(crate) hosts: crate::luau::Hosts,
     /// The run's mods: where they come from, and those the layers loaded, as
     /// [`Mods`](crate::Mods) says.
     pub(crate) mods: crate::luau::RunMods,
-    /// The world as edited, while a copy of it plays in its place, as [`Stack::play`] holds it.
-    #[cfg(feature = "dev")]
-    pub(crate) edited: Option<Edited>,
     /// The local player, in a lockstep session.
     player: Option<u8>,
     /// Whether the run takes part in a networked session, as the layers attach or pick up from a
@@ -560,10 +524,6 @@ pub struct Context {
     /// [`stream_cells`](Self::stream_cells) says, and what it prepares of them, as
     /// [`cells_ready`](Self::cells_ready) says.
     pub(crate) cells: CellRun,
-    /// Whether a SyncTest runs each tick again (`--sync-test`), as the layers attach or pick up
-    /// from a restore.
-    #[cfg(feature = "dev")]
-    sync_tested: bool,
 }
 
 /// How the sessions a game hosts and joins from its own UI start, as [`Context::host`] says.
@@ -590,6 +550,80 @@ pub(crate) enum Asked {
     Start(Box<Session>),
     /// The end of the run's session, as [`Context::leave`] asks.
     Leave,
+}
+
+/// What a development build's context keeps for its tools. A build without `dev` has a twin that
+/// holds nothing, whose methods do nothing.
+#[cfg(feature = "dev")]
+pub(crate) struct Dev {
+    /// When the frame being made started, by the machine's clock, as the frames of a view
+    /// published to a tool say.
+    pub(crate) started: std::time::SystemTime,
+    /// The look the tool API's clients set, which the frames draw with over what the layers set.
+    pub(crate) look: crate::api::Look,
+    /// The project's scenes folders, which the tool API's `scene` opens and saves scene files in.
+    pub(crate) folders: Vec<PathBuf>,
+    /// The project's directory, where its manifest is, and its fetch list, which an ID no asset
+    /// has is looked for in, as [`asset_path`](Context::asset_path) says: a project's game's alone.
+    project_dir: Option<PathBuf>,
+    /// The names given the textures the layers add, by their paths, in place of the IDs the asset
+    /// database holds, as [`name_as`](Context::name_as) says: `None` while the run names its
+    /// textures by the database's.
+    given: Option<HashMap<Arc<str>, Arc<str>>>,
+    /// Where the run keeps the prints of what its assets hold between runs, as [`assets::cache`]
+    /// says, if it can: a run's, never a test's.
+    asset_cache: Option<PathBuf>,
+    /// The thread that keeps the asset database as the root changes, in a run that serves the tool
+    /// API, as [`start_assets`](Context::start_assets) starts it.
+    asset_watch: Option<AssetWatch>,
+    /// The thread that reads the layers' shaders, textures, models, fonts, prefabs, sounds and
+    /// music again as their files change, in a run that serves the tool API, as
+    /// [`start_assets`](Context::start_assets) starts it.
+    hot_reload: Option<HotReload>,
+    /// The script files the layers loaded, which development builds watch.
+    pub(crate) scripts: crate::luau::Files,
+    /// The world as edited, while a copy of it plays in its place, as [`Stack::play`] holds it.
+    pub(crate) edited: Option<Edited>,
+    /// Whether a SyncTest runs each tick again (`--sync-test`), as the layers attach or pick up
+    /// from a restore.
+    sync_tested: bool,
+}
+
+#[cfg(feature = "dev")]
+impl Dev {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: std::time::SystemTime::UNIX_EPOCH,
+            look: crate::api::Look::default(),
+            folders: Vec::new(),
+            project_dir: None,
+            given: None,
+            asset_cache: None,
+            asset_watch: None,
+            hot_reload: None,
+            scripts: crate::luau::Files::default(),
+            edited: None,
+            sync_tested: false,
+        }
+    }
+
+    /// Notes that the frame being made starts now, as [`started`](Self::started) says.
+    pub(crate) fn start_frame(&mut self) {
+        self.started = std::time::SystemTime::now();
+    }
+}
+
+/// A build without `dev`'s [`Dev`]: nothing.
+#[cfg(not(feature = "dev"))]
+pub(crate) struct Dev;
+
+#[cfg(not(feature = "dev"))]
+impl Dev {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+
+    pub(crate) fn start_frame(&mut self) {}
 }
 
 /// The world as edited, which the tool API's `play` holds aside while a copy of it plays in its

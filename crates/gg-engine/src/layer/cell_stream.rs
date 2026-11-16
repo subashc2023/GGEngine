@@ -212,7 +212,7 @@ impl Context {
         }
         let viewers = self.world.query::<(Entity, &cells::Viewer)>();
         let radius = viewers.fold(VIEWED_RADIUS, |most, (_, viewer)| most.max(viewer.radius));
-        let viewer = (self.look.viewpoint).map(|seen| {
+        let viewer = (self.dev.look.viewpoint).map(|seen| {
             let at = seen.position.to_array().map(f64::from);
             (at, f64::from(radius))
         });
@@ -288,6 +288,10 @@ impl Context {
         }
     }
 
+    /// Nothing: a build without `dev` never stops.
+    #[cfg(not(feature = "dev"))]
+    pub(crate) fn stream_stopped(&mut self) {}
+
     /// The world's cells, as the tool API's `cells` reads them, the world as edited at `ticks`, as
     /// [`scene_files::unsaved_cells`] finds those a save would write; `stopped` whether the run is,
     /// as the look's viewpoint is a viewer then, as [`stream_stopped`](Self::stream_stopped) says.
@@ -310,7 +314,7 @@ impl Context {
         }
         if stopped
             && !self.client
-            && let Some(seen) = self.look.viewpoint
+            && let Some(seen) = self.dev.look.viewpoint
         {
             viewers.push(gg_api::ViewerAt {
                 entity: None,
@@ -387,7 +391,7 @@ impl Context {
     /// aside while a copy plays, and else of the context's own, between ticks.
     #[cfg(feature = "dev")]
     pub(crate) fn note_filed(&mut self, cells: impl IntoIterator<Item = (Cell, u64)>) {
-        let world = match &mut self.edited {
+        let world = match &mut self.dev.edited {
             Some(edited) => &mut edited.world,
             None => &mut self.world,
         };

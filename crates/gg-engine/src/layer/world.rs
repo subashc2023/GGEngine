@@ -406,7 +406,13 @@ impl Context {
             let name = assets::name_of(Some(&root), folder);
             package::inside(&name) && scene_files::named_exactly(&root, &name).is_ok()
         };
-        let mut folders: Vec<PathBuf> = self.folders.iter().filter(|f| named(f)).cloned().collect();
+        let mut folders: Vec<PathBuf> = self
+            .dev
+            .folders
+            .iter()
+            .filter(|f| named(f))
+            .cloned()
+            .collect();
         while let Some(folder) = folders.pop() {
             let Ok(entries) = std::fs::read_dir(&folder) else {
                 continue;

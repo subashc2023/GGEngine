@@ -484,7 +484,7 @@ impl Stack {
         self.tell_session(cx);
         #[cfg(feature = "dev")]
         {
-            cx.sync_tested = self.sync_test.is_some();
+            cx.dev.sync_tested = self.sync_test.is_some();
         }
         self.load(cx);
         #[cfg(feature = "dev")]
@@ -520,7 +520,7 @@ impl Stack {
         self.tell_session(cx);
         #[cfg(feature = "dev")]
         {
-            cx.sync_tested = self.sync_test.is_some();
+            cx.dev.sync_tested = self.sync_test.is_some();
         }
         self.load(cx);
         cx.attached = true;
@@ -537,7 +537,7 @@ impl Stack {
                 let start = cx.start.as_deref();
                 let open =
                     (held.open.clone()).unwrap_or_else(|| scene_files::opened(start, &held.scenes));
-                cx.edited = Some(Edited {
+                cx.dev.edited = Some(Edited {
                     world,
                     ticks: held.ticks,
                     scenes: held.scenes.clone(),
@@ -597,7 +597,7 @@ impl Stack {
         let copy = cx.world.clone();
         let world = mem::replace(&mut cx.world, copy);
         let entities = world.entities(None).map_or(0, |entities| entities.len());
-        cx.edited = Some(Edited {
+        cx.dev.edited = Some(Edited {
             world,
             ticks,
             scenes: cx.scenes.files.clone(),
@@ -618,7 +618,7 @@ impl Stack {
     /// from its start holds none: `None`, and nothing changes.
     #[cfg(feature = "dev")]
     pub(crate) fn stop(&mut self, cx: &mut Context) -> Option<u64> {
-        let edited = cx.edited.take()?;
+        let edited = cx.dev.edited.take()?;
         let _zone = gg_core::zone!();
         cx.world = edited.world;
         cx.share_assets();

@@ -11,7 +11,7 @@ use tracing::error;
 
 #[cfg(doc)]
 use super::Layer;
-use super::{Asked, Context, OwnSessions, Window};
+use super::{Asked, Context, Dev, OwnSessions, Window};
 #[cfg(any(test, doc))]
 use crate::Event;
 use crate::args::{Listen, Net, Toward};
@@ -81,10 +81,11 @@ impl Context {
         #[cfg(feature = "dev")]
         if !cx.reads_package() {
             if let Some(manifest) = app.manifest() {
-                cx.folders.clone_from(&manifest.scenes);
-                cx.project_dir = manifest.path.parent().map(Path::to_owned);
+                cx.dev.folders.clone_from(&manifest.scenes);
+                cx.dev.project_dir = manifest.path.parent().map(Path::to_owned);
             }
-            cx.asset_cache = (cx.root.as_deref()).and_then(|root| assets::cache(app.name, root));
+            cx.dev.asset_cache =
+                (cx.root.as_deref()).and_then(|root| assets::cache(app.name, root));
         }
         cx
     }
@@ -134,8 +135,8 @@ impl Context {
         cx.start = Some(manifest.start);
         #[cfg(feature = "dev")]
         {
-            cx.folders = manifest.scenes;
-            cx.project_dir = Some(dir.as_ref().to_owned());
+            cx.dev.folders = manifest.scenes;
+            cx.dev.project_dir = Some(dir.as_ref().to_owned());
         }
         Ok(cx)
     }
@@ -276,10 +277,7 @@ impl Context {
             shown: None,
             shown_bytes: Vec::new(),
             shown_new: false,
-            #[cfg(feature = "dev")]
-            started: std::time::SystemTime::UNIX_EPOCH,
-            #[cfg(feature = "dev")]
-            look: crate::api::Look::default(),
+            dev: Dev::new(),
             tickets: 0,
             picks: Vec::new(),
             unseen: Vec::new(),
@@ -296,22 +294,10 @@ impl Context {
             root: None,
             files: Files::default(),
             start: None,
-            #[cfg(feature = "dev")]
-            folders: Vec::new(),
-            #[cfg(feature = "dev")]
-            project_dir: None,
             state: None,
             assets,
             loaded: Loaded::default(),
-            #[cfg(feature = "dev")]
-            given: None,
             follows: false,
-            #[cfg(feature = "dev")]
-            asset_cache: None,
-            #[cfg(feature = "dev")]
-            asset_watch: None,
-            #[cfg(feature = "dev")]
-            hot_reload: None,
             perf: Perf::default(),
             paused: false,
             exiting: false,
@@ -319,12 +305,8 @@ impl Context {
             load_started: None,
             authors: Authors::default(),
             scenes: SceneFiles::default(),
-            #[cfg(feature = "dev")]
-            scripts: crate::luau::Files::default(),
             hosts: crate::luau::Hosts::default(),
             mods: crate::luau::RunMods::default(),
-            #[cfg(feature = "dev")]
-            edited: None,
             player: None,
             networked: false,
             own: OwnSessions::default(),
@@ -336,8 +318,6 @@ impl Context {
             scene_seen: 0,
             refused_seen: 0,
             cells: CellRun::default(),
-            #[cfg(feature = "dev")]
-            sync_tested: false,
         }
     }
 
@@ -346,7 +326,7 @@ impl Context {
     /// started, for the tick's run again.
     #[cfg(feature = "dev")]
     pub(crate) fn sync_tested(&self) -> bool {
-        self.sync_tested
+        self.dev.sync_tested
     }
 
     /// The player this run plays: 0 for a lockstep host (`--host`, or [`host`](Self::host)), 1 for
@@ -658,5 +638,18 @@ impl Context {
             "File dialog closed"
         );
         picked
+    }
+
+    /// Whether a script has stopped in a tick since this last answered, pausing the frames while it
+    /// waited, as [`Hosts::took_stop`](crate::luau::Hosts::took_stop) says.
+    #[cfg(feature = "dev")]
+    pub(crate) fn script_stopped(&self) -> bool {
+        self.hosts.took_stop()
+    }
+
+    /// Never: a build without `dev` stops no script.
+    #[cfg(not(feature = "dev"))]
+    pub(crate) fn script_stopped(&self) -> bool {
+        false
     }
 }

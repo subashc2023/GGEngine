@@ -188,4 +188,8 @@ impl Context {
         };
         self.audio.follow(playback);
     }
+
+    /// Nothing: a build without `dev` neither pauses nor stops.
+    #[cfg(not(feature = "dev"))]
+    pub(crate) fn follow_playback(&mut self, _stopped: bool, _paused: bool) {}
 }

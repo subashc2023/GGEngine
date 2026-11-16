@@ -1487,7 +1487,7 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
         cx.world().get::<Transform>(hero),
         Some(&Transform::IDENTITY)
     );
-    assert!(cx.edited.is_none());
+    assert!(cx.dev.edited.is_none());
 }
 
 /// A client saves the open scene, which the watch's next look applies nothing of, then saves it
@@ -2277,11 +2277,11 @@ fn frames_are_captured_in_a_row_from_their_viewpoints() {
             // What a film's first two frames back showed was on its way.
             let film = api.films.first().filter(|film| !film.started);
             if film.is_some() {
-                waiting.push(cx.look.viewpoint);
+                waiting.push(cx.dev.look.viewpoint);
             }
             frame.loading = u32::from(film.is_some() && waiting.len() <= 2);
             api.frame_back(&mut frame, cx, stepper.ticks);
-            drawn_from = cx.look.viewpoint.unwrap_or_default();
+            drawn_from = cx.dev.look.viewpoint.unwrap_or_default();
         },
     );
     assert_eq!(refused, ["api.bad_params"; 7]);
@@ -2313,7 +2313,7 @@ fn frames_are_captured_in_a_row_from_their_viewpoints() {
         numbers.windows(2).all(|pair| pair[1] == pair[0] + 1),
         "{numbers:?}"
     );
-    assert_eq!(cx.look.viewpoint, Some(engine_viewpoint(&at_z(9.0))));
+    assert_eq!(cx.dev.look.viewpoint, Some(engine_viewpoint(&at_z(9.0))));
     assert!(!frame.capture, "nothing reads its view back after them");
 }
 
@@ -2562,7 +2562,7 @@ fn clients_set_the_look_part_by_part_the_last_setter_winning() {
         ..By::default()
     };
     assert_eq!((&back.by, back.revision), (&left, 3));
-    let look = &cx.look;
+    let look = &cx.dev.look;
     assert_eq!(
         (look.viewpoint, look.grid, look.colliders),
         (None, Some(Plane::XY), None)
@@ -2610,7 +2610,10 @@ fn the_passes_a_look_leaves_out_are_a_set() {
     );
     assert_eq!(emptied.revision, 2);
     assert_eq!((fog.skip, fog.revision), (Some(vec![Pass::Fog]), 3));
-    assert_eq!((&cx.look.skip, cx.look.revision), (&vec![Pass::Fog], 3));
+    assert_eq!(
+        (&cx.dev.look.skip, cx.dev.look.revision),
+        (&vec![Pass::Fog], 3)
+    );
 }
 
 /// The look draws as a layer that set it would: its viewpoint and outline in place of a
@@ -2693,7 +2696,7 @@ fn the_look_draws_over_what_the_layers_set_but_in_a_bare_frame() {
         (frame.viewpoint, frame.outline),
         (viewpoint, expected.outline)
     );
-    assert_eq!((frame.look, cx.look.seen), (1, Some(viewpoint)));
+    assert_eq!((frame.look, cx.dev.look.seen), (1, Some(viewpoint)));
     assert!(!cx.colliders_shown(), "as the layers set");
     // Seen from the look's viewpoint, whose exposure adapts apart, as the layer's own isn't.
     assert!(frame.looked && !expected.looked);
@@ -2701,16 +2704,16 @@ fn the_look_draws_over_what_the_layers_set_but_in_a_bare_frame() {
     assert_eq!(frame.show, Some(depth.clone()), "what the look shows");
     // What a capture riding with the frame shows, in place of the look's.
     let rough = Shown::Shading(gg_renderer::Channel::Roughness);
-    cx.look.captured = Some(rough.clone());
+    cx.dev.look.captured = Some(rough.clone());
     set(&mut cx);
     assert_eq!(
         drawn(&mut cx).show,
         Some(rough.clone()),
         "what the capture shows"
     );
-    cx.look.captured = None;
+    cx.dev.look.captured = None;
     // Bare, as the layers set alone.
-    cx.look.bare = true;
+    cx.dev.look.bare = true;
     set(&mut cx);
     let frame = drawn(&mut cx);
     let (mut twin, _) = world(9);
@@ -2722,7 +2725,7 @@ fn the_look_draws_over_what_the_layers_set_but_in_a_bare_frame() {
     assert!(!frame.looked, "a bare frame is the game's own view");
     assert_eq!(frame.show, None, "without what the look shows");
     // Bare, but showing what a capture of the game's own view asks.
-    cx.look.captured = Some(rough.clone());
+    cx.dev.look.captured = Some(rough.clone());
     set(&mut cx);
     assert_eq!(drawn(&mut cx).show, Some(rough), "what the capture shows");
 }
@@ -2836,7 +2839,7 @@ fn captures_ride_with_frames_of_their_kind_and_bare_ones_go_unpublished() {
     let mut frames = Vec::new();
     for _ in 0..7 {
         api.serve(&mut cx, &mut Stack::default(), &mut stepper);
-        let (bare, shows) = (cx.look.bare, cx.look.shown().is_some());
+        let (bare, shows) = (cx.dev.look.bare, cx.dev.look.shown().is_some());
         let asked = api.picks[0].ticket.is_some();
         api.frame_back(&mut frame, &cx, stepper.ticks);
         let skip = frame.publish.as_ref().expect("published").skip;

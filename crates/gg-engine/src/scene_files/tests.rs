@@ -867,7 +867,7 @@ fn the_open_scene_lasts_across_play_stop_and_a_snapshots_restore() {
     let played = cx.scenes.open.clone();
     assert_eq!(played.made, sorted([&made[..], &copied[..]].concat()));
     let run = Run::Held {
-        world: Box::new(cx.edited.as_ref().expect("held").world.clone()),
+        world: Box::new(cx.dev.edited.as_ref().expect("held").world.clone()),
         scenes: cx.scenes.files.clone(),
         open: edited.clone(),
         ticks: 0,
@@ -897,7 +897,7 @@ fn the_open_scene_lasts_across_play_stop_and_a_snapshots_restore() {
     let restored = restore(&text);
     assert_eq!(restored.scenes.open, played);
     assert_eq!(
-        restored.edited.as_ref().map(|held| &held.open),
+        restored.dev.edited.as_ref().map(|held| &held.open),
         Some(&edited)
     );
     let older: Vec<&str> = text
@@ -912,7 +912,7 @@ fn the_open_scene_lasts_across_play_stop_and_a_snapshots_restore() {
     };
     assert_eq!(restored.scenes.open, start);
     assert_eq!(
-        restored.edited.as_ref().map(|held| &held.open),
+        restored.dev.edited.as_ref().map(|held| &held.open),
         Some(&start)
     );
 }
@@ -1007,7 +1007,12 @@ fn edited_is_set_by_authors_edits_alone_and_cleared_by_saves() {
     assert!(!cx.scenes.open.edited, "a save clears it");
     stack.play(&mut cx, 1);
     apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 7.0)]);
-    assert!(cx.edited.as_ref().is_some_and(|edited| !edited.open.edited));
+    assert!(
+        cx.dev
+            .edited
+            .as_ref()
+            .is_some_and(|edited| !edited.open.edited)
+    );
     stack.stop(&mut cx);
     assert!(!cx.scenes.open.edited, "the copy's edit went with it");
     apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 6.0)]);

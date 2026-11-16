@@ -414,10 +414,7 @@ pub(crate) fn run_frame(
     cx.perf.start_frame(dt);
     let _zone = gg_core::zone!();
     let start = Instant::now();
-    #[cfg(feature = "dev")]
-    {
-        cx.started = std::time::SystemTime::now();
-    }
+    cx.dev.start_frame();
     stack.take_asked(cx);
     if let Some(ticks) = stack.net_turn(cx, stepper.ticks) {
         stepper.jump_to(ticks);
@@ -425,7 +422,6 @@ pub(crate) fn run_frame(
     cx.session = stack.session_status();
     let owed = stack.paced(dt);
     // As the requests served before the frame left the run, before its ticks queue sounds.
-    #[cfg(feature = "dev")]
     cx.follow_playback(stepper.stopped(), stepper.paused());
     let tick = |tick: Tick| {
         if stack.net_waits(tick.number) {
@@ -436,17 +432,14 @@ pub(crate) fn run_frame(
     };
     stepper.step(owed, tick, || start.elapsed());
     // A world edited while no tick runs has its cells come and go around the look's viewpoint.
-    #[cfg(feature = "dev")]
     if stepper.stopped() {
         cx.stream_stopped();
     }
     // A script that stopped in a tick paused the frames while it waited.
-    #[cfg(feature = "dev")]
-    if cx.hosts.took_stop() {
+    if cx.script_stopped() {
         cx.paused = true;
     }
     let ticked = Instant::now();
-    #[cfg(feature = "dev")]
     cx.follow_look();
     stack.update(cx, dt);
     stack.interpolate(cx, dt);
@@ -454,26 +447,34 @@ pub(crate) fn run_frame(
     gg_core::plot!("alpha", f64::from(alpha));
     cx.draw_world(alpha, stepper.time(alpha), stepper.ticks);
     let updated = Instant::now();
-    #[cfg(feature = "dev")]
-    let pass = ui.map(|(egui, dock, input)| {
-        let _zone = gg_core::zone!("egui");
-        let mut layers_draw = false;
-        // egui may run the pass again in a frame, as it asks for one.
-        let output = egui.run_ui(input, |root| {
-            dock.begin(root);
-            let mut ui = Ui::new(root, dock);
-            // The engine's settings come before the layers'.
-            frame_rate::settings(&mut ui, cx);
-            layers_draw |= stack.ui(cx, &mut ui);
-            dock.end(root);
-        });
-        (output, layers_draw)
-    });
-    #[cfg(not(feature = "dev"))]
-    let pass = ui.map(|(never, _)| match never {});
+    let pass = ui.map(|ui| run_ui(stack, cx, ui));
     cx.perf
         .ran(ticked - start, updated - ticked, updated.elapsed());
     pass
+}
+
+/// Has the layers draw their UI in a pass of egui's, given egui, the dock and egui's input, as
+/// [`run_frame`] says.
+#[cfg(feature = "dev")]
+fn run_ui(stack: &mut Stack, cx: &mut Context, (egui, dock, input): EguiPass<'_>) -> Passed {
+    let _zone = gg_core::zone!("egui");
+    let mut layers_draw = false;
+    // egui may run the pass again in a frame, as it asks for one.
+    let output = egui.run_ui(input, |root| {
+        dock.begin(root);
+        let mut ui = Ui::new(root, dock);
+        // The engine's settings come before the layers'.
+        frame_rate::settings(&mut ui, cx);
+        layers_draw |= stack.ui(cx, &mut ui);
+        dock.end(root);
+    });
+    (output, layers_draw)
+}
+
+/// Never runs: a build without `dev` has no pass to run.
+#[cfg(not(feature = "dev"))]
+fn run_ui(_: &mut Stack, _: &mut Context, (never, _): EguiPass<'_>) -> Passed {
+    match never {}
 }
 
 /// Whether egui runs from the next frame on, after a pass in which `layers_draw` says whether any
@@ -809,8 +810,7 @@ impl Stepper {
         self.steps += ticks;
     }
 
-    /// Whether the simulation is paused.
-    #[cfg(feature = "dev")]
+    /// Whether the simulation is paused: never in a build without `dev`.
     pub(crate) fn paused(&self) -> bool {
         self.paused
     }
@@ -839,8 +839,7 @@ impl Stepper {
         self.owed = Duration::ZERO;
     }
 
-    /// Whether the simulation is stopped.
-    #[cfg(feature = "dev")]
+    /// Whether the simulation is stopped: never in a build without `dev`.
     pub(crate) fn stopped(&self) -> bool {
         self.stopped
     }

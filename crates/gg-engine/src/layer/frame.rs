@@ -101,10 +101,14 @@ impl Context {
     /// near it as precisely as the frames after.
     #[cfg(feature = "dev")]
     pub(crate) fn follow_look(&mut self) {
-        if let Some(looked) = self.look.viewpoint.filter(|_| !self.look.bare) {
+        if let Some(looked) = self.dev.look.viewpoint.filter(|_| !self.dev.look.bare) {
             self.origin = followed(self.origin, looked.position);
         }
     }
+
+    /// Nothing: a build without `dev` has no look.
+    #[cfg(not(feature = "dev"))]
+    pub(crate) fn follow_look(&mut self) {}
 
     /// Where the game's view was in the main window as the last frame handed it to the renderer:
     /// its physical pixels from the window's top left, as [`Input::cursor`] places the cursor. The
@@ -442,9 +446,9 @@ impl Context {
         (self.lit).find(world, past, placed, (alpha, self.origin), self.tick_started);
         self.time = time;
         #[cfg(feature = "dev")]
-        if let Some(plane) = self.look.grid.filter(|_| !self.look.bare) {
+        if let Some(plane) = self.dev.look.grid.filter(|_| !self.dev.look.bare) {
             let seen = self.seen.map(|(_, seen)| seen);
-            let viewpoint = self.look.viewpoint.or(self.viewpoint).or(seen);
+            let viewpoint = self.dev.look.viewpoint.or(self.viewpoint).or(seen);
             self.draw_grid(&viewpoint.unwrap_or_default(), plane);
             self.draw_cells();
         }
@@ -515,8 +519,8 @@ impl Context {
     /// a frame that isn't bare, or else as the layers set.
     fn colliders_drawn(&self) -> bool {
         #[cfg(feature = "dev")]
-        if !self.look.bare
-            && let Some(shown) = self.look.colliders
+        if !self.dev.look.bare
+            && let Some(shown) = self.dev.look.colliders
         {
             return shown;
         }
@@ -610,11 +614,11 @@ impl Context {
         };
         let layers = outline.map(|(color, width)| (&self.outline_root[..], color, width));
         #[cfg(feature = "dev")]
-        let (seen, outline) = if self.look.bare {
+        let (seen, outline) = if self.dev.look.bare {
             (seen, layers)
         } else {
-            let looked = (self.look.viewpoint).map(|looked| (Seer::Look(looked), looked));
-            let wanted = (self.look.outline.as_ref())
+            let looked = (self.dev.look.viewpoint).map(|looked| (Seer::Look(looked), looked));
+            let wanted = (self.dev.look.outline.as_ref())
                 .map(|Outlining { ids, color, width }| (&ids[..], *color, *width));
             (looked.unwrap_or(seen), wanted.or(layers))
         };
@@ -636,11 +640,11 @@ impl Context {
         });
         #[cfg(feature = "dev")]
         {
-            self.look.seen = Some(frame.viewpoint);
-            frame.look = self.look.revision;
-            frame.bare = self.look.bare;
-            frame.show = self.look.shown();
-            self.look.leave_out(frame);
+            self.dev.look.seen = Some(frame.viewpoint);
+            frame.look = self.dev.look.revision;
+            frame.bare = self.dev.look.bare;
+            frame.show = self.dev.look.shown();
+            self.dev.look.leave_out(frame);
             // As the look's viewpoint shows, so that a frame that turns to or from it is cut to.
             frame.looked = matches!(seer, Seer::Look(_));
         }
@@ -666,7 +670,7 @@ impl Context {
         frame.uploads.take_scene(&mut self.scene);
         frame.picks.clear();
         #[cfg(feature = "dev")]
-        if self.look.bare {
+        if self.dev.look.bare {
             return;
         }
         let [left, top] = viewport.origin.map(f64::from);
