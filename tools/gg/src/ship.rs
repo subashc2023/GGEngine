@@ -1,12 +1,9 @@
-//! `gg ship`: a game built as it ships, without `dev` in the shipping profile, beside the package
-//! the cooker of the engine it builds with cooks from its project, laid out in a folder of its own,
-//! named as the game is, as gg-api's `Project::name` says, with the notices of what it's made from:
-//! on Windows and Linux, whose GPUs' drivers install the Vulkan loader, the executable and its
-//! package side by side, on Windows with the Visual C++ runtime; on macOS, an app bundle holding
-//! them with the Vulkan SDK's loader and KosmicKrisp, its Vulkan driver over Metal, and the game's
-//! icon, signed ad hoc. The build's symbols are laid out in a folder beside it, by the OS's own
-//! tools, from which the frames a panic logs are turned into lines, as ARCHITECTURE.md's
-//! Diagnostics says.
+//! `gg ship`: the game built as it ships, with its cooked package and the notices of what it's made
+//! from, in a folder named for the game (gg-api's `Project::name`). On Windows and Linux, whose GPU
+//! drivers install the Vulkan loader, that's the executable and package side by side, on Windows
+//! with the Visual C++ runtime. On macOS it's an app bundle with the Vulkan SDK's loader,
+//! KosmicKrisp (its Vulkan driver over Metal) and the icon, signed ad hoc. The symbols go in a
+//! folder beside it, to turn a panic's logged frames into lines (ARCHITECTURE.md's Diagnostics).
 
 use std::ffi::OsString;
 use std::fs;
@@ -25,68 +22,63 @@ pub(crate) struct Ship {
     pub(crate) project: Option<Scope>,
 }
 
-/// Cargo's flags for a build as it ships: without the game's `dev`, in the shipping profile, which
-/// the workspace's `.cargo/config.toml` gives.
+/// Cargo's flags for a build as it ships; the `shipping` profile is in `.cargo/config.toml`.
 const SHIPPING: [&str; 3] = ["--no-default-features", "--profile", "shipping"];
 
-/// The loader's name in a bundle's `Contents/Frameworks`, which gg-gpu loads it by, and the link
-/// to its file in the Vulkan SDK.
+/// The loader's name, in a bundle's `Contents/Frameworks` (gg-gpu loads it by it) and as the SDK's
+/// link.
 const LOADER: &str = "libvulkan.1.dylib";
 
-/// KosmicKrisp's library, and its manifest, by the Vulkan SDK's names, which a bundle keeps.
+/// KosmicKrisp's library and manifest, by the Vulkan SDK's names.
 const DRIVER: &str = "libvulkan_kosmickrisp.dylib";
 const DRIVER_MANIFEST: &str = "libkosmickrisp_icd.json";
 
-/// The oldest loader a bundle holds, the Vulkan SDK 1.4.363.0's: the first SDK whose KosmicKrisp is
-/// a conformant Vulkan 1.4 driver, and whose loader honors `VK_LOADER_SEARCH_ONLY_IN_BUNDLE`, which
-/// the bundle's Info.plist sets.
+/// The oldest loader a bundle holds, SDK 1.4.363.0's: the first with a conformant Vulkan 1.4
+/// KosmicKrisp and a loader that honors `VK_LOADER_SEARCH_ONLY_IN_BUNDLE`.
 const OLDEST_LOADER: [u32; 3] = [1, 4, 363];
 
-/// The notices of the loader and KosmicKrisp, which a bundle's NOTICES.txt adds: their licenses at
-/// the Vulkan SDK 1.4.363's release, with the copyright holders their sources name. A bundle of a
-/// later SDK's needs them read again.
+/// The loader's and KosmicKrisp's licenses at SDK 1.4.363, with the copyright holders their
+/// sources name. A later SDK's need reading again.
 const BUNDLED_NOTICES: [&str; 2] = [
     include_str!("../notices/vulkan-loader.txt"),
     include_str!("../notices/kosmickrisp.txt"),
 ];
 
-/// The template cargo-about writes the licenses of a game's crates with, embedded, as an installed
-/// gg runs without its sources.
+/// Cargo-about's template, embedded: an installed gg runs without its sources.
 const LICENSES_TEMPLATE: &str = include_str!("../notices.hbs");
 
-/// The Visual C++ runtime's DLLs a game's executable imports, for Luau's and VMA's C++, which
-/// Windows doesn't include: a folder that holds them beside the executable starts on a PC without
-/// the Visual C++ Redistributable, as Microsoft documents for deploying them locally.
+/// The Visual C++ runtime DLLs the executable imports, for Luau's and VMA's C++. Beside it they
+/// let it start without the Redistributable (Microsoft documents local deployment).
 const RUNTIME: [&str; 3] = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"];
 
-/// The name of the folder of Visual Studio's redist folder that holds the runtime for the
-/// architecture gg runs on, which builds the game.
+/// The redist folder for the architecture gg runs on, which builds the game.
 const RUNTIME_ARCH: &str = if cfg!(target_arch = "aarch64") {
     "arm64"
 } else {
     "x64"
 };
 
-/// Builds `ship`'s package as it ships, cooks its project into its package beside its executable,
-/// where a build without `dev` finds it, with the cooker of the engine it builds with, as
-/// [`cooker`] says, and lays the two out in `ship/<package>` in the target
-/// directory, emptied first, as [`files`] says, with the notices [`notices`] writes; on Windows, with
-/// the Visual C++ runtime, as [`runtime`] finds it; on macOS, with the loader and KosmicKrisp of
-/// the Vulkan SDK that `VULKAN_SDK` names and the project's icon, signed as [`sign`] says. Lays the
-/// build's symbols out in `ship/<package>-symbols`, as [`symbols`] says. Prints a line of JSON
-/// naming each folder and each file in it, with its size.
+/// Builds `ship`'s package as it ships, cooks its project into the package beside the executable
+/// (where a build without `dev` finds it) with the engine's [`cooker`], and lays both out in
+/// `ship/<package>` of the target directory ([`files`]) with the [`notices`], plus on Windows the
+/// [`runtime`], on macOS the SDK's loader and KosmicKrisp (from `VULKAN_SDK`) and the icon,
+/// [`sign`]ed. Lays the symbols out in `ship/<package>-symbols` ([`symbols`]). Prints a line of
+/// JSON naming each folder and each file in it, with its size. A folder that fails is removed, so
+/// none looks shipped that isn't.
 ///
-/// Fails as [`run::check_game`] does; with `project.read` or `project.bad` for a package whose
-/// directory holds no project that reads, `gg.project` for one whose project names another game,
-/// and `gg.cook` for one that doesn't build with gg-engine, whose cooker would cook it; before
-/// building, with `gg.notices` if cargo-about can't run, on Windows as [`redist`] and
-/// [`runtime`] do, and on macOS as [`sdk`] does, or with `gg.ship` if the icon can't be read;
-/// with `gg.build` if the workspace has no such package, it has no binary or it doesn't build,
-/// `gg.cook` if its project doesn't cook, and `gg.cargo` if cargo can't run to say what the
-/// workspace holds; as [`licenses`] does; with `gg.symbols` if the symbols can't be kept, as
-/// [`pdb`], [`strip`] and [`dsym`] say; with `gg.ship` if a folder can't be laid out; and as `sign`
-/// does. Folders that fail to be laid out or signed are removed, so that none looks shipped that
-/// isn't.
+/// # Errors
+///
+/// - As [`run::check_game`] does.
+/// - `project.read` or `project.bad`: the package's directory holds no project that reads.
+/// - `gg.project`: the project names another game.
+/// - `gg.cook`: the package doesn't build with gg-engine.
+/// - Before building, `gg.notices` if cargo-about can't run; as [`redist`] and [`runtime`] do on
+///   Windows; as [`sdk`] does on macOS; `gg.ship` if the icon can't be read.
+/// - `gg.build`: the package is missing, has no binary or doesn't build.
+/// - `gg.cook`: its project doesn't cook.
+/// - `gg.cargo`: cargo can't say what the workspace holds.
+/// - As [`licenses`] does; `gg.symbols` ([`pdb`], [`strip`], [`dsym`]); `gg.ship`: a folder can't
+///   be laid out; as `sign` does.
 pub(crate) fn ship(ship: &Ship) -> Result<(), Failure> {
     let dir = ship.project.as_ref().map(Scope::dir);
     run::check_game(&ship.package, ship.project.as_ref())?;
@@ -213,12 +205,9 @@ pub(crate) fn ship(ship: &Ship) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Cargo's arguments that run the cooker of the engine whose checkout is `engine`, for a game in
-/// the workspace whose root is `root`, built into `target`, up to the cooker's own: the cooker's
-/// manifest, in the engine's `tools/cook`; and, for an engine outside the workspace, as a game of
-/// its own builds with, a target directory of the cooker's in the game's, `gg-cook`, as the
-/// engine's own may be in cargo's checkout of a git revision. In the engine's workspace, the
-/// workspace's target, where its other builds are.
+/// Cargo's arguments that run the cooker of the engine at `engine`, up to the cooker's own: its
+/// `tools/cook` manifest and, for an engine outside the game's workspace `root`, `target/gg-cook`
+/// (the engine's own may sit in cargo's git checkout).
 fn cooker(engine: &Path, root: &Path, target: &Path) -> Vec<OsString> {
     let manifest = engine.join("tools").join("cook").join("Cargo.toml");
     let mut args: Vec<OsString> = vec!["run".into(), "--manifest-path".into(), manifest.into()];
@@ -229,11 +218,12 @@ fn cooker(engine: &Path, root: &Path, target: &Path) -> Vec<OsString> {
     args
 }
 
-/// Cooks the project in directory `project` into the package at `ggpk`, with the cooker that
-/// `cooker`, cargo's arguments as [`cooker`] gives them, runs, through cargo run in `dir`; the
-/// lines the cooker prints go to stderr, as gg prints one of its own.
+/// Cooks `project` into the package at `ggpk`, running cargo in `dir` with [`cooker`]'s arguments.
+/// Its output goes to stderr, keeping stdout for gg's line.
 ///
-/// Fails with `gg.cook` if cargo can't run, or the cooker fails, as it said on stderr.
+/// # Errors
+///
+/// - `gg.cook`: cargo can't run or the cooker fails.
 fn cook(
     project: &Path,
     ggpk: &Path,
@@ -257,47 +247,40 @@ fn cook(
     Ok(())
 }
 
-/// What a file of a shipped folder holds: a copy of a file, or bytes written.
 #[derive(Debug, PartialEq)]
 enum Content {
     Copy(PathBuf),
     Bytes(Vec<u8>),
 }
 
-/// What a game's shipped folder is made of.
 struct Folder<'a> {
-    /// The game's package, and its name, as `Project::name` gives it, which its files take.
+    /// The game's package, and its `Project::name`, which its files take.
     game: &'a str,
     name: &'a str,
-    /// Its version, its package's.
     version: &'a str,
     /// The executable players get, and its package.
     exe: &'a Path,
     ggpk: &'a Path,
-    /// The text of its NOTICES.txt.
+    /// The text of NOTICES.txt.
     notices: String,
-    /// The Visual C++ runtime's DLLs, on Windows.
+    /// On Windows.
     runtime: &'a [PathBuf],
-    /// What a macOS bundle holds besides, on macOS.
+    /// On macOS.
     bundle: Option<&'a Bundle>,
 }
 
-/// What a macOS bundle holds besides the game: the Vulkan SDK's loader and KosmicKrisp, and the
-/// project's icon, a PNG's bytes, if it names one.
+/// What a macOS bundle holds besides the game: the SDK's parts, and the icon (a PNG's bytes).
 struct Bundle {
     sdk: Sdk,
     icon: Option<Vec<u8>>,
 }
 
-/// The files of `folder`, by their paths in it, `/` between their parts, named after the game, its
-/// executable keeping its extension, as `Shards.exe`: its executable and its package side by side,
-/// with the runtime's DLLs; or, with a bundle, as on macOS, an app bundle holding them, named after
-/// the game, as Apple lays bundles out, the executable in `Contents/MacOS` and the package, which is
-/// data, in `Contents/Resources`, where an executable in a bundle finds it, with the icon as
-/// [`icns`] makes it; with the SDK's loader and KosmicKrisp in `Contents/Frameworks`, the manifest
-/// by which the loader finds KosmicKrisp in `Contents/Resources/vulkan/icd.d`, where a loader in a
-/// bundle looks, and the bundle's Info.plist, as [`info_plist`] says. NOTICES.txt beside them, out
-/// of the bundle's seal.
+/// The files of `folder`, by `/`-separated path, named for the game, the executable keeping its
+/// extension (`Shards.exe`). Without a bundle, all side by side. With one (macOS), as Apple lays
+/// it out: the executable in `Contents/MacOS`; the package, being data, in `Contents/Resources`
+/// with the [`icns`]; the loader and KosmicKrisp in `Contents/Frameworks`; the manifest in
+/// `Contents/Resources/vulkan/icd.d`, where a bundled loader looks; the [`info_plist`]. NOTICES.txt
+/// sits beside the bundle, outside its seal.
 fn files(folder: &Folder) -> Vec<(String, Content)> {
     let name = folder.name;
     let extension = (folder.exe.extension())
@@ -350,9 +333,8 @@ fn files(folder: &Folder) -> Vec<(String, Content)> {
     files
 }
 
-/// An icns holding `png`, a PNG of 256 by 256 pixels, as its one entry, `ic08`, which macOS reads
-/// as it is: the file's type and length, then the entry's, each length its header's 8 bytes and
-/// what follows, big-endian.
+/// An icns of `png`, 256 by 256 pixels, as its one entry `ic08`. File and entry each have a type
+/// and a big-endian length counting its 8-byte header.
 fn icns(png: &[u8]) -> Vec<u8> {
     let entry = 8 + png.len() as u32;
     let mut icns = b"icns".to_vec();
@@ -363,13 +345,11 @@ fn icns(png: &[u8]) -> Vec<u8> {
     icns
 }
 
-/// The Info.plist of the app bundle of game `game`, named `name`, whose executable is `exe`, of
-/// version `version`, the package's: its identifier `com.ggengine.<game>`, with `-` for `_`, which
-/// identifiers can't hold; its name cut to the 15 characters macOS shows; its versions the
-/// version's numbers alone, `MAJOR.MINOR.PATCH`, as macOS reads them; with `icon`, its icon
-/// `<name>.icns`; for macOS 26 and later, as KosmicKrisp needs; and, as the app starts from Finder or
-/// `open`, the loader kept to the bundle's own driver, as Launch Services sets `LSEnvironment` for
-/// its launches alone.
+/// The Info.plist of the app bundle of `game`, named `name`, with executable `exe`. The identifier
+/// is `com.ggengine.<game>`, `-` for `_` (identifiers can't hold it). The name is cut to the 15
+/// characters macOS shows; the versions are `version`'s `MAJOR.MINOR.PATCH`. macOS 26, for
+/// KosmicKrisp. `LSEnvironment` keeps the loader to the bundle's own driver, but Launch Services
+/// sets it for Finder and `open` launches alone.
 fn info_plist(game: &str, name: &str, version: &str, exe: &str, icon: bool) -> String {
     let identifier = format!("com.ggengine.{}", game.replace('_', "-"));
     let escaped = |text: &str| {
@@ -427,22 +407,21 @@ fn info_plist(game: &str, name: &str, version: &str, exe: &str, icon: bool) -> S
 /// What a macOS bundle holds of the Vulkan SDK.
 #[derive(Debug, PartialEq)]
 struct Sdk {
-    /// The loader's file, which the bundle holds as [`LOADER`].
+    /// The loader's file, held as [`LOADER`].
     loader: PathBuf,
-    /// KosmicKrisp's library.
     driver: PathBuf,
-    /// KosmicKrisp's manifest, naming its library where the bundle holds it, as
-    /// [`bundled_manifest`] says.
+    /// KosmicKrisp's manifest, naming its library as the bundle holds it ([`bundled_manifest`]).
     manifest: String,
 }
 
-/// What a bundle holds of the Vulkan SDK whose `macOS` folder `dir`, `VULKAN_SDK`'s value, names:
-/// its loader, the file `lib/libvulkan.1.dylib` links to, which names its release, as
-/// `libvulkan.1.4.363.dylib`; and KosmicKrisp, its library in `lib` and its manifest in
-/// `share/vulkan/icd.d`.
+/// What a bundle holds of the SDK whose `macOS` folder is `dir` (`VULKAN_SDK`): the loader (the
+/// file `lib/libvulkan.1.dylib` links to, whose name gives its release), and KosmicKrisp's library
+/// in `lib` and manifest in `share/vulkan/icd.d`.
 ///
-/// Fails with `gg.no_sdk` without `dir`, or if a file isn't there or doesn't read, and with
-/// `gg.sdk_version` for a loader older than [`OLDEST_LOADER`], or whose file names no release.
+/// # Errors
+///
+/// - `gg.no_sdk`: no `dir`, or a file isn't there or doesn't read.
+/// - `gg.sdk_version`: the loader is older than [`OLDEST_LOADER`] or its file names no release.
 fn sdk(dir: Option<OsString>) -> Result<Sdk, Failure> {
     let install = "install the Vulkan SDK, 1.4.363.0 or later, and set VULKAN_SDK to its `macOS` \
                    folder, whose loader and KosmicKrisp a macOS bundle holds";
@@ -480,8 +459,7 @@ fn sdk(dir: Option<OsString>) -> Result<Sdk, Failure> {
     })
 }
 
-/// The release of the loader whose file is named `name`, as `[1, 4, 363]` for
-/// `libvulkan.1.4.363.dylib`; `None` for a name that gives none.
+/// The release in a loader file's `name`: `[1, 4, 363]` for `libvulkan.1.4.363.dylib`.
 fn loader_release(name: &str) -> Option<[u32; 3]> {
     let release = name.strip_prefix("libvulkan.")?.strip_suffix(".dylib")?;
     let mut numbers = release.split('.').map(|number| number.parse::<u32>().ok());
@@ -489,10 +467,9 @@ fn loader_release(name: &str) -> Option<[u32; 3]> {
     numbers.next().is_none().then_some(release)
 }
 
-/// KosmicKrisp's manifest, `shipped` as the Vulkan SDK ships it, naming its library where a bundle
-/// holds it, by its path from the manifest's directory, as the loader resolves it, from
-/// `Contents/Resources/vulkan/icd.d` to `Contents/Frameworks`; its other fields as shipped. `None`
-/// for text that isn't a driver's manifest, which names its library in `ICD.library_path`.
+/// KosmicKrisp's `shipped` manifest with its library at the path from the bundle's manifest
+/// directory to `Contents/Frameworks`. `None` if it isn't a driver's manifest (naming its library
+/// in `ICD.library_path`).
 fn bundled_manifest(shipped: &str) -> Option<String> {
     let mut manifest: Value = serde_json::from_str(shipped).ok()?;
     let library = manifest.get_mut("ICD")?.get_mut("library_path")?;
@@ -504,14 +481,14 @@ fn bundled_manifest(shipped: &str) -> Option<String> {
     Some(text + "\n")
 }
 
-/// The redist folder of the Visual Studio whose C++ tools build the game, which holds the Visual C++
-/// runtime: `var`, `VCToolsRedistDir`, as a developer prompt sets it; or else the newest Visual
-/// Studio's, previews included, as vswhere, which Visual Studio's installer installs, finds it,
-/// at the version its `VC/Auxiliary/Build/Microsoft.VCRedistVersion.default.txt` names. A newer
-/// runtime runs what an older Visual Studio built, as Microsoft keeps it compatible.
+/// The Visual C++ runtime's redist folder: `var` (`VCToolsRedistDir`, set by a developer prompt),
+/// else the newest Visual Studio's, previews included, by vswhere, at the version
+/// `VC/Auxiliary/Build/Microsoft.VCRedistVersion.default.txt` names. A newer runtime runs older
+/// builds.
 ///
-/// Fails with `gg.no_redist` if vswhere can't run or finds no Visual Studio, or the version can't be
-/// read.
+/// # Errors
+///
+/// - `gg.no_redist`: vswhere can't run or finds no Visual Studio, or the version can't be read.
 fn redist(var: Option<OsString>) -> Result<PathBuf, Failure> {
     if let Some(dir) = var.filter(|dir| !dir.is_empty()) {
         return Ok(PathBuf::from(dir));
@@ -545,10 +522,11 @@ fn redist(var: Option<OsString>) -> Result<PathBuf, Failure> {
     Ok(install.join("VC/Redist/MSVC").join(version.trim()))
 }
 
-/// The Visual C++ runtime's DLLs, as [`RUNTIME`] names them, in redist folder `redist`, for
-/// architecture `arch`, as Visual Studio names its folders: in its `<arch>/Microsoft.VC*.CRT`.
+/// The [`RUNTIME`] DLLs in `redist`'s `<arch>/Microsoft.VC*.CRT`.
 ///
-/// Fails with `gg.no_redist` if that folder or a DLL isn't there.
+/// # Errors
+///
+/// - `gg.no_redist`: that folder or a DLL isn't there.
 fn runtime(redist: &Path, arch: &str) -> Result<Vec<PathBuf>, Failure> {
     let failed = |what: String| {
         let message = format!("{what}, the Visual C++ runtime a game shipped for Windows holds");
@@ -570,9 +548,11 @@ fn runtime(redist: &Path, arch: &str) -> Result<Vec<PathBuf>, Failure> {
     Ok(dlls.into())
 }
 
-/// Checks that cargo-about runs, through cargo run in the workspace's root, `root`.
+/// Checks that cargo-about runs in the workspace root `root`.
 ///
-/// Fails with `gg.notices` if it doesn't, saying how to install it.
+/// # Errors
+///
+/// - `gg.notices`: it doesn't, saying how to install it.
 fn about(root: &Path) -> Result<(), Failure> {
     let ran = (build::cargo(Some(root)).args(["about", "--version"]))
         .stdout(Stdio::null())
@@ -586,16 +566,15 @@ fn about(root: &Path) -> Result<(), Failure> {
     Err(Failure::new("gg.notices", message))
 }
 
-/// The licenses of the game whose manifest is `manifest`, in the workspace at `root`, as its build
-/// as it ships depends on its crates, on the OS and architecture gg runs on: cargo-about's, with the
-/// workspace's `about.toml` and [`LICENSES_TEMPLATE`], written beside `out` with the extension
-/// `hbs`, as cargo-about reads templates from files alone, offline and with `Cargo.lock` as it is,
-/// which a build made before has fetched what it names, written at `out`, beside the build, and
-/// read back; what cargo-about logs going to stderr.
+/// The licenses of the crates the game at `manifest` (workspace `root`) ships with, for gg's OS and
+/// architecture, by cargo-about into `out`, with `about.toml` and [`LICENSES_TEMPLATE`] (written
+/// beside `out`: it reads templates from files alone). It runs offline with `Cargo.lock` as is: an
+/// earlier build fetched what it names. Its log goes to stderr.
 ///
-/// Fails with `gg.notices` if rustc can't say what it builds for, the template can't be written,
-/// or cargo-about fails, as for a license `about.toml` doesn't accept, as it said on stderr, or
-/// what it wrote can't be read.
+/// # Errors
+///
+/// - `gg.notices`: rustc can't say what it builds for, the template can't be written, cargo-about
+///   fails (as for a license `about.toml` doesn't accept) or its output can't be read.
 fn licenses(root: &Path, manifest: &Path, out: &Path) -> Result<String, Failure> {
     let failed = |what: String| Failure::new("gg.notices", what);
     let rustc = (Command::new("rustc").arg("-vV").current_dir(root))
@@ -607,8 +586,7 @@ fn licenses(root: &Path, manifest: &Path, out: &Path) -> Result<String, Failure>
     let template = out.with_extension("hbs");
     fs::write(&template, LICENSES_TEMPLATE)
         .map_err(|error| failed(format!("can't write {}: {error}", template.display())))?;
-    // Into a file, as cargo-about refuses to write to a pipe where it finds PowerShell, which
-    // would re-encode it.
+    // To a file: cargo-about refuses a pipe where it finds PowerShell, which would re-encode it.
     let status = (build::cargo(Some(root)).args(["about", "generate", "--fail", "--frozen"]))
         .args(["--no-default-features", "--target", host])
         .arg("--config")
@@ -633,10 +611,8 @@ fn licenses(root: &Path, manifest: &Path, out: &Path) -> Result<String, Failure>
         .map_err(|error| failed(format!("can't read {}: {error}", out.display())))
 }
 
-/// The text of a shipped folder's NOTICES.txt, for game `name` of version `version`: its name and
-/// version; its project's `credits`, `CREDITS.txt` beside its manifest, as they are, if it has
-/// them; the `licenses` of the crates it's built from, as [`licenses`] gives them; and with
-/// `bundled`, those of the loader and KosmicKrisp a macOS bundle holds.
+/// NOTICES.txt for game `name` of `version`: its `credits` (`CREDITS.txt` beside its manifest), if
+/// any; the crates' `licenses`; with `bundled`, the loader's and KosmicKrisp's.
 fn notices(
     name: &str,
     version: &str,
@@ -659,22 +635,19 @@ fn notices(
     text
 }
 
-/// How a build's debug info is kept apart from what players get, by the OS's own tools.
+/// How a build's debug info is kept apart from what players get.
 enum Kept {
-    /// Windows': the PDB the linker wrote beside the executable, which the executable names by its
-    /// file name, as rustc has it.
+    /// Windows: the linker's PDB.
     Pdb(PathBuf),
-    /// Linux's: the executable as built, the players' copy stripped of its debug info, as
-    /// [`strip`] says.
+    /// Linux: the executable as built; players get a [`strip`]ped copy.
     Built,
-    /// macOS's: a dSYM, as [`dsym`] makes it.
+    /// macOS: a [`dsym`].
     Dsym,
 }
 
-/// The files of the symbols folder of game `name`, built as `exe`, its debug info kept as `kept`
-/// says, and `build`, `build.txt`, as [`build_text`] writes it: on Windows, the executable, named
-/// as the players' is, and its PDB; on Linux, the executable as built, named so; on macOS nothing
-/// more, as the dSYM is made in the folder once it's laid out.
+/// The files of game `name`'s symbols folder: `build.txt`, and, per `kept`, `exe` named as
+/// players' and its PDB on Windows, `exe` on Linux, nothing more on macOS: the dSYM is made in the
+/// folder once laid out.
 fn symbols(name: &str, exe: &Path, kept: &Kept, build: String) -> Vec<(String, Content)> {
     let mut files = Vec::new();
     let extension = (exe.extension())
@@ -693,9 +666,8 @@ fn symbols(name: &str, exe: &Path, kept: &Kept, build: String) -> Vec<(String, C
     files
 }
 
-/// `build.txt`, which says which build a symbols folder is of, as a log's `Starting GGEngine` line
-/// does: game `game`, its version, `version`, the digest of the source its code is compiled from,
-/// `source`, if its build gave one, and the OS and architecture it's built for, gg's own.
+/// `build.txt`, saying which build the symbols are of, as a log's `Starting GGEngine` line does:
+/// the `source` digest if any, and gg's OS and architecture.
 fn build_text(game: &str, version: &str, source: Option<&str>) -> String {
     let mut text = format!("game {game}\nversion {version}\n");
     if let Some(source) = source {
@@ -706,9 +678,11 @@ fn build_text(game: &str, version: &str, source: Option<&str>) -> String {
     text
 }
 
-/// The PDB of the executable `exe`, beside it as rustc names it, after its crate, with `_` for `-`.
+/// The PDB beside `exe`, named after the crate with `_` for `-`, as rustc does.
 ///
-/// Fails with `gg.symbols` if it isn't there.
+/// # Errors
+///
+/// - `gg.symbols`: it isn't there.
 fn pdb(exe: &Path) -> Result<PathBuf, Failure> {
     let stem = exe.file_stem().unwrap_or_default().to_string_lossy();
     let pdb = exe.with_file_name(format!("{}.pdb", stem.replace('-', "_")));
@@ -719,11 +693,12 @@ fn pdb(exe: &Path) -> Result<PathBuf, Failure> {
     Ok(pdb)
 }
 
-/// A copy of the executable `exe` stripped of its debug info, by binutils' objcopy, beside it, as
-/// `gg-shards-stripped`, which players get: its symbols stay, which name its functions in a
-/// panic's backtrace.
+/// A copy of `exe` beside it, `gg-shards-stripped`, without debug info, which players get. Its
+/// symbols stay, naming functions in a panic's backtrace.
 ///
-/// Fails with `gg.symbols` if objcopy can't run or fails.
+/// # Errors
+///
+/// - `gg.symbols`: objcopy can't run or fails.
 fn strip(exe: &Path) -> Result<PathBuf, Failure> {
     let name = exe.file_name().unwrap_or_default().to_string_lossy();
     let stripped = exe.with_file_name(format!("{name}-stripped"));
@@ -733,18 +708,22 @@ fn strip(exe: &Path) -> Result<PathBuf, Failure> {
     Ok(stripped)
 }
 
-/// A dSYM of the executable `exe`, made by dsymutil from the objects its debug map names, at `out`.
+/// A dSYM of `exe` at `out`, by dsymutil from the objects its debug map names.
 ///
-/// Fails with `gg.symbols` if dsymutil can't run or fails.
+/// # Errors
+///
+/// - `gg.symbols`: dsymutil can't run or fails.
 fn dsym(exe: &Path, out: &Path) -> Result<(), Failure> {
     let mut dsymutil = Command::new("dsymutil");
     dsymutil.arg(exe).arg("-o").arg(out);
     tool(dsymutil, "dsymutil")
 }
 
-/// Runs `command`, a tool `name`, its stdout going to stderr, as gg prints a line of its own.
+/// Runs `command`, tool `name`, with its stdout on stderr, keeping stdout for gg's line.
 ///
-/// Fails with `gg.symbols` if it can't run, or fails.
+/// # Errors
+///
+/// - `gg.symbols`: it can't run or fails.
 fn tool(mut command: Command, name: &str) -> Result<(), Failure> {
     let failed = |what: String| Failure::new("gg.symbols", what);
     let status = (command.stdout(io::stderr()).status())
@@ -755,16 +734,16 @@ fn tool(mut command: Command, name: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The path of `path`, a file's in a shipped folder, `/` between its parts, in directory `dir`.
 fn at(dir: &Path, path: &str) -> PathBuf {
     path.split('/')
         .fold(dir.to_owned(), |at, part| at.join(part))
 }
 
-/// Lays `files` out in directory `out`, which is emptied first, and nothing else, and returns each
-/// file's path in it, with its size, as gg prints them.
+/// Lays `files` out in `out`, emptied first and nothing else; returns each path and size.
 ///
-/// Fails with `gg.ship` if `out` can't be emptied, or a file can't be written there, naming it.
+/// # Errors
+///
+/// - `gg.ship`: `out` can't be emptied or a file can't be written, naming it.
 fn lay_out(out: &Path, files: &[(String, Content)]) -> Result<Vec<Value>, Failure> {
     let failed = |path: &Path, error: io::Error| {
         Failure::new(
@@ -789,12 +768,13 @@ fn lay_out(out: &Path, files: &[(String, Content)]) -> Result<Vec<Value>, Failur
     Ok(laid)
 }
 
-/// Signs the app bundle `app` ad hoc, inside out, as Apple has bundles signed, never with
-/// `--deep`, which it deprecates for signing: each of `libraries`, those it holds, then the bundle,
-/// sealing what it holds; without the hardened runtime, under which the app would load no library
-/// that a team of its own didn't sign. Then checks the signatures strictly, as Gatekeeper would.
+/// Signs the app bundle `app` ad hoc, inside out (`--deep` is deprecated for signing): each of its
+/// `libraries`, then the bundle. No hardened runtime: the app would load no library a team of its
+/// own didn't sign. Then verifies strictly, as Gatekeeper does.
 ///
-/// Fails with `gg.sign` if codesign can't run, or fails, as it said on stderr.
+/// # Errors
+///
+/// - `gg.sign`: codesign can't run or fails.
 fn sign(app: &Path, libraries: &[PathBuf]) -> Result<(), Failure> {
     for path in libraries.iter().map(PathBuf::as_path).chain([app]) {
         codesign(&["--force", "--sign", "-"], path)?;
@@ -802,9 +782,11 @@ fn sign(app: &Path, libraries: &[PathBuf]) -> Result<(), Failure> {
     codesign(&["--verify", "--deep", "--strict", "--verbose=2"], app)
 }
 
-/// Runs codesign with `args` on `path`, its stdout going to stderr, as gg prints a line of its own.
+/// Runs codesign with `args` on `path`, its stdout on stderr, keeping stdout for gg's line.
 ///
-/// Fails with `gg.sign` if it can't run, or fails.
+/// # Errors
+///
+/// - `gg.sign`: it can't run or fails.
 fn codesign(args: &[&str], path: &Path) -> Result<(), Failure> {
     let shown = format!("codesign {} {}", args.join(" "), path.display());
     let failed = |what: String| Failure::new("gg.sign", what);
@@ -822,7 +804,6 @@ fn codesign(args: &[&str], path: &Path) -> Result<(), Failure> {
 mod tests {
     use super::*;
 
-    /// A directory of the test's own, empty.
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gg-ship-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -840,7 +821,6 @@ mod tests {
         }
     }"#;
 
-    /// A folder of Shards, its executable `exe`, its runtime `runtime` and its bundle `bundle`.
     fn shards<'a>(exe: &'a Path, runtime: &'a [PathBuf], bundle: Option<&'a Bundle>) -> Folder<'a> {
         Folder {
             game: "shards",
@@ -1032,7 +1012,7 @@ mod tests {
         }
     }
 
-    /// Without `VULKAN_SDK`, or with an SDK that has no loader, there's nothing to bundle.
+    /// Without `VULKAN_SDK`, or an SDK lacking a loader, there's nothing to bundle.
     #[test]
     fn an_sdk_that_isnt_there_is_refused() {
         let empty = scratch("empty-sdk");
@@ -1043,7 +1023,7 @@ mod tests {
         assert!(refused.iter().all(no_sdk), "{refused:?}");
     }
 
-    /// An SDK's loader is the file its link names, which gives its release, refused if older.
+    /// The loader is the file the link names, whose name gives its release; older is refused.
     #[cfg(unix)]
     #[test]
     fn an_sdks_loader_is_the_file_its_link_names_of_a_release_new_enough() {
@@ -1075,8 +1055,7 @@ mod tests {
         assert_eq!(refused.as_deref(), Some("gg.sdk_version"));
     }
 
-    /// The runtime is the three DLLs in the architecture's CRT folder, not onecore's, which
-    /// targets other editions of Windows.
+    /// The runtime is in the architecture's CRT folder, not onecore's (other Windows editions).
     #[test]
     fn the_runtime_is_found_in_the_architectures_crt_folder() {
         let redist = scratch("redist");
@@ -1166,8 +1145,7 @@ mod tests {
         assert_eq!(found, Ok(dir.join("gg_shards.pdb")));
     }
 
-    /// The cooker is the engine's, built where the workspace's builds are in the engine's workspace,
-    /// and apart in the game's target for an engine outside it.
+    /// The cooker is built with the workspace's in the engine's workspace, apart outside it.
     #[test]
     fn the_cooker_is_the_engines_built_apart_for_an_engine_outside() {
         let args = |engine: &str, root: &str| -> Vec<PathBuf> {
@@ -1189,7 +1167,7 @@ mod tests {
         assert_eq!(args("/e", "/g"), paths(&outside));
     }
 
-    /// The folder is emptied of what an earlier ship left, and nothing beside it is touched.
+    /// The folder is emptied of an earlier ship's files; nothing beside it is touched.
     #[test]
     fn a_folder_is_laid_out_afresh_and_nothing_beside_it_is_touched() {
         let dir = scratch("lay-out");

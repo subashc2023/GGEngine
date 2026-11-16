@@ -1,9 +1,8 @@
-//! The engine's settings a game keeps as its engine has them, which `gg check` holds against the
-//! engine's own: the methods clippy refuses, in clippy.toml, the float methods whose bits differ by
-//! platform among them, and the Rust release, in rust-toolchain.toml, which `gg new` copies into a
-//! game of its own. The engine's are read from the checkout the game builds against, not from gg's
-//! embedded copies, so that a gg of another revision compares the right files. Inside the engine's
-//! workspace, a game's files are the engine's.
+//! The settings a game keeps as its engine has them, which `gg check` compares: the methods clippy
+//! refuses (clippy.toml, among them the float methods whose bits differ by platform) and the Rust
+//! release (rust-toolchain.toml, which `gg new` copies). The engine's are read from the checkout
+//! the game builds against, not gg's embedded copies, so a gg of another revision compares the
+//! right files. In the engine's workspace, a game's files are the engine's.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -11,21 +10,20 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::Document;
 
-/// A setting of a game's that isn't its engine's: what's amiss, and the file it's about, or the
-/// directory no file was found from.
+/// A game's setting that isn't its engine's: what's amiss, and its file, or the directory searched
+/// if none was found.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Drift {
     pub(crate) message: String,
     pub(crate) path: PathBuf,
 }
 
-/// How a game's settings differ from those of the engine whose checkout is at `engine`: the
-/// clippy.toml clippy finds from `clippy_from` up, as it looks from `CLIPPY_CONF_DIR` or else the
-/// crate's directory, lacking a method the engine's bans; and the rust-toolchain.toml rustup finds
-/// from `toolchain_from` up, the directory cargo builds in, pinning another release than the
-/// engine's. A file that can't be read or parsed, the engine's too, is a drift, naming why. Rustup's
-/// overrides, `RUSTUP_TOOLCHAIN` and `rustup override`, and its older `rust-toolchain` file, which
-/// `gg new` doesn't write, aren't read.
+/// How a game's settings differ from the engine's at `engine`: the clippy.toml clippy finds from
+/// `clippy_from` up (`CLIPPY_CONF_DIR`, else the crate's directory) lacks a banned method, or the
+/// rust-toolchain.toml rustup finds from `toolchain_from` up (where cargo builds) pins another
+/// release. An unreadable or unparsable file, the engine's too, is a drift. Rustup's overrides
+/// (`RUSTUP_TOOLCHAIN`, `rustup override`) and older `rust-toolchain` file (`gg new` doesn't write
+/// it) aren't read.
 pub(crate) fn drifts(clippy_from: &Path, toolchain_from: &Path, engine: &Path) -> Vec<Drift> {
     [
         clippy(clippy_from, engine),
@@ -36,7 +34,6 @@ pub(crate) fn drifts(clippy_from: &Path, toolchain_from: &Path, engine: &Path) -
     .collect()
 }
 
-/// Whether the clippy.toml found from `from` up bans each method the engine's at `engine` does.
 fn clippy(from: &Path, engine: &Path) -> Result<(), Drift> {
     let engines = engine.join("clippy.toml");
     let bans = banned(&parsed(&engines)?);
@@ -65,8 +62,6 @@ fn clippy(from: &Path, engine: &Path) -> Result<(), Drift> {
     Err(drift(message, &games))
 }
 
-/// Whether the rust-toolchain.toml found from `from` up pins the release the engine's at `engine`
-/// does.
 fn toolchain(from: &Path, engine: &Path) -> Result<(), Drift> {
     let engines = engine.join("rust-toolchain.toml");
     let engine_doc = parsed(&engines)?;
@@ -96,8 +91,7 @@ fn toolchain(from: &Path, engine: &Path) -> Result<(), Drift> {
     Err(drift(message, &games))
 }
 
-/// The paths of the methods `clippy`, a clippy.toml, refuses: its `disallowed-methods`, each a path
-/// or a table with one, inline or not, as clippy takes them.
+/// The paths in `clippy`'s `disallowed-methods`: strings or tables with a `path`, inline or not.
 fn banned(clippy: &Document<String>) -> BTreeSet<String> {
     let Some(methods) = clippy.get("disallowed-methods") else {
         return BTreeSet::new();
@@ -112,12 +106,10 @@ fn banned(clippy: &Document<String>) -> BTreeSet<String> {
     inline.chain(tables).map(str::to_owned).collect()
 }
 
-/// The release `toolchain`, a rust-toolchain.toml, pins: its toolchain's channel.
 fn channel(toolchain: &Document<String>) -> Option<&str> {
     toolchain.get("toolchain")?.get("channel")?.as_str()
 }
 
-/// The TOML file at `path`, or a drift saying why it can't be read.
 fn parsed(path: &Path) -> Result<Document<String>, Drift> {
     let text = fs::read_to_string(path).map_err(|error| {
         let message = format!("can't read {}: {error}", path.display());
@@ -129,8 +121,7 @@ fn parsed(path: &Path) -> Result<Document<String>, Drift> {
     })
 }
 
-/// The first of the files `names` in directory `dir`, or else in the nearest directory above it
-/// that holds one.
+/// The first of `names` in `dir`, else in the nearest ancestor holding one.
 fn found(dir: &Path, names: &[&str]) -> Option<PathBuf> {
     (dir.ancestors())
         .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
@@ -148,8 +139,7 @@ fn drift(message: String, path: &Path) -> Drift {
 mod tests {
     use super::*;
 
-    /// An engine's checkout, `engine` in a directory of the test's own: its clippy.toml bans
-    /// `f32::sin` and `f64::cos`, and its rust-toolchain.toml pins 1.99.1.
+    /// An engine checkout banning `f32::sin` and `f64::cos`, pinning 1.99.1.
     fn engine(test: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gg-settings-{test}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -163,7 +153,6 @@ mod tests {
         engine
     }
 
-    /// A game of `engine`'s, beside it, with its files `files`, each a name and its text.
     fn game(engine: &Path, files: &[(&str, &str)]) -> PathBuf {
         let game = engine.with_file_name("game");
         let _ = fs::remove_dir_all(&game);
@@ -174,9 +163,7 @@ mod tests {
         game
     }
 
-    /// A game inside the engine's workspace, whose files are the engine's, and one of its own with
-    /// the engine's bans, written as tables of their own, and one more, and its release, drift in
-    /// nothing.
+    /// A game in the engine's workspace, and one with its bans (as tables, plus one) and release.
     #[test]
     fn a_game_with_the_engines_settings_drifts_in_nothing() {
         let engine = engine("same");
@@ -198,10 +185,8 @@ mod tests {
         assert_eq!(found, [vec![], vec![]]);
     }
 
-    /// A game whose clippy.toml lacks a method the engine bans, or whose rust-toolchain.toml pins
-    /// another release, drifts, naming the file and what it lacks or pins; `.clippy.toml` is read
-    /// before `clippy.toml`, as clippy reads it, and both are found from a directory below the
-    /// game's as from the game's.
+    /// A game lacking a ban or pinning another release drifts, naming the file. `.clippy.toml`
+    /// is read before `clippy.toml`, as clippy does; both are found from below the game's.
     #[test]
     fn a_game_lacking_a_ban_or_pinning_another_release_drifts() {
         let engine = engine("apart");
@@ -246,8 +231,7 @@ mod tests {
         assert_eq!(from_below, found);
     }
 
-    /// A game without the files, or with one that isn't TOML, and an engine without its own, drift,
-    /// saying so.
+    /// A game without the files or with non-TOML ones, and an engine without its own, drift.
     #[test]
     fn missing_or_unreadable_settings_drift() {
         let engine = engine("missing");

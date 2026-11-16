@@ -1,7 +1,6 @@
-//! Cargo, for `gg`: building a package and finding its executable; the workspace's target
-//! directory, where games write their session files; what `gg run`'s patches and `gg ship` need of
-//! a package; and whether a project's game is the package beside its manifest. Each runs cargo in a
-//! directory it's given, a project's, where it finds the workspace, or else in `gg`'s own.
+//! Cargo, for `gg`: building a package, the target directory (where games write session files),
+//! what `gg run` and `gg ship` need of a package, and whether a project's game is the package
+//! beside its manifest. Each runs cargo in a given directory, else `gg`'s own.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -15,8 +14,7 @@ use serde_json::Value;
 
 use crate::{Scope, dx};
 
-/// Cargo, run in directory `dir`, or in `gg`'s own: the one running `gg`, as `cargo gg` does, or
-/// else the first on the `PATH`.
+/// Cargo, run in `dir`, or `gg`'s own: the one running `gg` (`cargo gg`), else the first on `PATH`.
 pub(crate) fn cargo(dir: Option<&Path>) -> Command {
     let mut command =
         Command::new(std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
@@ -26,20 +24,18 @@ pub(crate) fn cargo(dir: Option<&Path>) -> Command {
     command
 }
 
-/// What a build made: its executable, and the digest of the source a game's code is compiled from,
-/// `GG_SOURCE`, which its build script gives, as gg-api's `build` says, if the build ran one that
-/// does.
+/// What a build made: its executable, and `GG_SOURCE` if its build script gives one (gg-api's
+/// `build`).
 pub(crate) struct Built {
     pub(crate) exe: PathBuf,
     pub(crate) source: Option<String>,
 }
 
-/// Builds package `package`, with `args`, cargo's flags that pick its profile and features, as
-/// `--release`, through cargo run in `dir`, whose messages about the code go to stderr as rustc
-/// renders them, in color on a terminal; and returns what it made.
+/// Builds `package` in `dir` with `args` (`--release`...), showing rustc's messages on stderr.
 ///
-/// Fails with `gg.build` if cargo can't run, the build fails, with rustc's errors, or it makes no
-/// executable.
+/// # Errors
+///
+/// - `gg.build`: cargo can't run, the build fails (with rustc's errors) or makes no executable.
 pub(crate) fn build(package: &str, args: &[&str], dir: Option<&Path>) -> Result<Built, Failure> {
     let mut command = cargo(dir);
     command.args(["build", "--package", package]).args(args);
@@ -77,15 +73,13 @@ pub(crate) fn build(package: &str, args: &[&str], dir: Option<&Path>) -> Result<
     })
 }
 
-/// How many of a build's errors its failure gives, the first, as rustc reports them: the rest, which
-/// an error early on often causes, are counted.
+/// How many errors a failure gives; an early one often causes the rest, which are counted.
 const MOST_ERRORS: usize = 5;
 
-/// How long each error a build's failure gives may be, in bytes.
+/// The most bytes of each error a failure gives.
 const MOST_ERROR: usize = 2_000;
 
-/// `text`, cut to at most `most` bytes at a character's boundary, saying so where it's cut, as a
-/// note's message is bounded, and a build's errors may run past it.
+/// `text` cut to `most` bytes at a character boundary, saying so: a note's message is bounded.
 pub(crate) fn fit(text: &str, most: usize) -> String {
     const CUT: &str = "\n\n(cut short: `gg run`'s output holds the rest)";
     if text.len() <= most {
@@ -95,15 +89,13 @@ pub(crate) fn fit(text: &str, most: usize) -> String {
     format!("{}{CUT}", &text[..end])
 }
 
-/// Whether `error`, one of rustc's, plain, is its summary of the others, `error: aborting due to 2
-/// previous errors`, which says nothing they don't.
+/// Whether plain `error` is rustc's summary (`error: aborting due to 2 previous errors`).
 pub(crate) fn summary(error: &str) -> bool {
     error.starts_with("error: aborting due to")
 }
 
-/// A build's `errors`, rustc's, plain, as its failure gives them: the first [`MOST_ERRORS`], each
-/// cut to [`MOST_ERROR`] bytes, as [`fit`] cuts it, then how many more there are, so that a
-/// failure, which `gg run` tells of with each call while no game answers, stays small.
+/// The first [`MOST_ERRORS`] of `errors`, each [`fit`] to [`MOST_ERROR`], then a count of the
+/// rest: `gg run` repeats it with each call while no game answers.
 pub(crate) fn listed_errors(errors: &[String]) -> String {
     let shown = errors
         .iter()
@@ -118,9 +110,8 @@ pub(crate) fn listed_errors(errors: &[String]) -> String {
     listed
 }
 
-/// What a build's messages, cargo's lines of JSON, said: the executable it made, the last; the
-/// `GG_SOURCE` a build script gave, which cargo says of a script it ran and of one it didn't need
-/// to; and rustc's errors, each once, as plain text.
+/// What a build said: the last executable; `GG_SOURCE`, whether or not cargo ran the build script;
+/// rustc's errors, plain, each once.
 #[derive(Debug, Default, PartialEq)]
 struct Said {
     exe: Option<PathBuf>,
@@ -128,7 +119,7 @@ struct Said {
     errors: Vec<String>,
 }
 
-/// Reads `lines`, cargo's messages, giving `show` each of rustc's, as rustc rendered it.
+/// Reads cargo's JSON `lines`, giving `show` each rustc message as rendered.
 fn read_messages(lines: impl Iterator<Item = String>, mut show: impl FnMut(&str)) -> Said {
     let mut said = Said::default();
     for line in lines {
@@ -167,17 +158,21 @@ fn read_messages(lines: impl Iterator<Item = String>, mut show: impl FnMut(&str)
     said
 }
 
-/// The directory cargo builds the workspace into, as `cargo metadata`, run in `dir`, says.
+/// The directory cargo builds the workspace into.
 ///
-/// Fails with `gg.cargo` if cargo can't say, as outside a workspace.
+/// # Errors
+///
+/// - `gg.cargo`: cargo can't say, as outside a workspace.
 pub(crate) fn target_dir(dir: Option<&Path>) -> Result<PathBuf, Failure> {
     target_of(&metadata(false, dir)?)
 }
 
-/// What `cargo metadata`, run in `dir`, says of the workspace, and with `deps`, of the packages it
-/// depends on and how they resolve.
+/// `cargo metadata` in `dir`: the workspace and, with `deps`, its dependencies and their
+/// resolution.
 ///
-/// Fails with `gg.cargo` if cargo can't say, as outside a workspace.
+/// # Errors
+///
+/// - `gg.cargo`: cargo can't say, as outside a workspace.
 pub(crate) fn metadata(deps: bool, dir: Option<&Path>) -> Result<Value, Failure> {
     let failed = |what: String| Failure::new("gg.cargo", what);
     let mut command = cargo(dir);
@@ -197,9 +192,9 @@ pub(crate) fn metadata(deps: bool, dir: Option<&Path>) -> Result<Value, Failure>
         .map_err(|error| failed(format!("`cargo metadata` gave what isn't JSON: {error}")))
 }
 
-/// The target directory `metadata`, what `cargo metadata` said, names.
+/// # Errors
 ///
-/// Fails with `gg.cargo` if it names none.
+/// - `gg.cargo`: `metadata` names no target directory.
 fn target_of(metadata: &Value) -> Result<PathBuf, Failure> {
     let target = metadata["target_directory"]
         .as_str()
@@ -209,51 +204,53 @@ fn target_of(metadata: &Value) -> Result<PathBuf, Failure> {
 
 /// A package of the workspace, as `gg run`'s patches and `gg ship` need it.
 pub(crate) struct Package {
-    /// The binary it runs, as `cargo run` would pick it: `gg-sandbox` for the sandbox.
+    /// The binary `cargo run` would pick: `gg-sandbox` for the sandbox.
     pub(crate) bin: String,
-    /// Its manifest.
     pub(crate) manifest: PathBuf,
-    /// Its version, as its manifest gives it: `0.1.0`.
+    /// The manifest's version: `0.1.0`.
     pub(crate) version: String,
-    /// The directory of its binary's root module, under which its modules are, as
-    /// `apps/sandbox/src`.
+    /// The directory of the binary's root module: `apps/sandbox/src`.
     pub(crate) modules: PathBuf,
-    /// Its build script, if it has one.
     pub(crate) build_script: Option<PathBuf>,
-    /// Whether it has a library beside its binary, which is a crate of its own.
+    /// Whether it has a library beside its binary.
     pub(crate) library: bool,
-    /// The directories of the workspace's packages its binary depends on, directly or not, but for
-    /// those only its tests do.
+    /// The directories of the workspace packages its binary depends on, except through dev
+    /// dependencies.
     pub(crate) deps: Vec<PathBuf>,
-    /// The release of subsecond its binary depends on, if it does.
+    /// The release of subsecond its binary depends on, if any.
     pub(crate) subsecond: Option<String>,
-    /// The engine's checkout its binary builds with, if it does: two directories above gg-engine's
-    /// manifest, as the engine keeps its crates in `crates/`; the workspace's root in the engine's
-    /// workspace, else a checkout outside it, by path or cargo's of a git revision.
+    /// The engine checkout its binary builds with: two directories above gg-engine's manifest
+    /// (its crates are in `crates/`), so the engine's workspace root or a checkout outside it, by
+    /// path or cargo's of a git revision.
     pub(crate) engine: Option<PathBuf>,
     /// The workspace's root directory, and the directory cargo builds it into.
     pub(crate) root: PathBuf,
     pub(crate) target: PathBuf,
 }
 
-/// Package `name` of the workspace, as cargo run in `dir` finds it, as `gg run`'s patches and
-/// `gg ship` need it.
+/// Package `name` of the workspace.
 ///
-/// Fails with `gg.cargo` if cargo can't say, and as [`package_in`] does.
+/// # Errors
+///
+/// - `gg.cargo`: cargo can't say.
+/// - As [`package_in`] does.
 pub(crate) fn package(name: &str, dir: Option<&Path>) -> Result<Package, Failure> {
     package_in(&metadata(true, dir)?, name)
 }
 
-/// Checks that the game the project `scope` names is the package whose manifest is beside the
-/// project's, as a manifest copied from another game's wouldn't be.
+/// Checks that `scope`'s game is the package beside the project's manifest: a copied manifest
+/// fails.
 ///
-/// Fails with `gg.project` if it isn't, naming both, and with `gg.cargo` if cargo can't say.
+/// # Errors
+///
+/// - `gg.project`: it isn't, naming both.
+/// - `gg.cargo`: cargo can't say.
 pub(crate) fn check_project(scope: &Scope) -> Result<(), Failure> {
     beside(&metadata(false, Some(scope.dir()))?, scope)
 }
 
-/// As [`check_project`], with `metadata`, what `cargo metadata` said of the workspace, comparing
-/// the directories canonical where they're there, as the project's may be named in another form.
+/// [`check_project`] on `metadata`, comparing canonical directories, as the project's may be named
+/// otherwise.
 fn beside(metadata: &Value, scope: &Scope) -> Result<(), Failure> {
     let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
     let game = scope.game.as_str();
@@ -276,11 +273,13 @@ fn beside(metadata: &Value, scope: &Scope) -> Result<(), Failure> {
     Err(Failure::new("gg.project", message))
 }
 
-/// Package `name`, as `metadata`, what `cargo metadata` said with the dependencies, has it.
+/// Package `name` of `metadata`, which has the dependencies.
 ///
-/// Fails with `gg.build` if the workspace has no such package, or the package has no binary that
-/// `cargo run` would pick: one, or the one its `default-run` names; and with `gg.cargo` if
-/// `metadata` names no target directory.
+/// # Errors
+///
+/// - `gg.build`: the workspace lacks it, or it has no binary `cargo run` would pick (the only one,
+///   or its `default-run`).
+/// - `gg.cargo`: `metadata` names no target directory.
 fn package_in(metadata: &Value, name: &str) -> Result<Package, Failure> {
     let failed = |what: String| Failure::new("gg.build", what);
     let path = |value: &Value| PathBuf::from(value.as_str().unwrap_or_default());
@@ -318,8 +317,7 @@ fn package_in(metadata: &Value, name: &str) -> Result<Package, Failure> {
     let build_script = targets.iter().find(|target| is(target, "custom-build"));
     let libraries = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
     let library = (targets.iter()).any(|target| libraries.iter().any(|kind| is(&target, kind)));
-    // The packages its binary builds with: those its dependencies reach, but for those only tests
-    // and benchmarks do.
+    // What its binary builds with: all it reaches, except through dev dependencies.
     let nodes: HashMap<&str, &Value> = (list(&metadata["resolve"]["nodes"]).iter())
         .filter_map(|node| Some((node["id"].as_str()?, node)))
         .collect();
@@ -374,7 +372,6 @@ fn package_in(metadata: &Value, name: &str) -> Result<Package, Failure> {
     })
 }
 
-/// The array `value` is, or none if it isn't one.
 fn list(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or_default()
 }
@@ -385,8 +382,8 @@ mod tests {
 
     use super::*;
 
-    /// A build's messages give its executable, its game's source and rustc's errors, each once and
-    /// plain, every one of rustc's messages shown as rendered, warnings too.
+    /// A build's messages give its executable, source and errors, each once and plain; every
+    /// rustc message, warnings too, is shown.
     #[test]
     fn a_builds_messages_give_its_executable_source_and_errors() {
         let error = |text: &str| json!({"reason": "compiler-message", "message": {"level": "error", "rendered": text}});
@@ -419,7 +416,7 @@ mod tests {
         assert_eq!(shown.len(), 4);
     }
 
-    /// A failure gives a build's first errors, each cut short if it's long, and counts the rest.
+    /// A failure gives the first errors, long ones cut, and counts the rest.
     #[test]
     fn a_builds_errors_are_bounded() {
         let errors: Vec<String> = (0..8).map(|at| format!("error {at}")).collect();
@@ -435,9 +432,8 @@ mod tests {
         assert!(long.len() <= MOST_ERROR && long.ends_with("holds the rest)"));
     }
 
-    /// A workspace's metadata: a game whose binary depends on an engine, which builds with macros
-    /// and depends on subsecond, and whose tests depend on a tool; and a game with two binaries and
-    /// a library.
+    /// A game whose binary depends on an engine (with macros and subsecond) and whose tests
+    /// depend on a tool; and a game with two binaries and a library.
     fn workspace() -> Value {
         fn target(kind: &str, name: &str, src: &str) -> Value {
             json!({"kind": [kind], "name": name, "src_path": src})
@@ -487,8 +483,7 @@ mod tests {
         })
     }
 
-    /// A project's game is the package beside its manifest, which a copied manifest's isn't, nor
-    /// one of a package the workspace hasn't.
+    /// A project's game is the package beside its manifest, not a copied one's nor a missing one.
     #[test]
     fn a_projects_game_is_the_package_beside_it() {
         let scope = |game: &str| Scope {
@@ -517,7 +512,7 @@ mod tests {
             Some(Path::new("/w/game/build.rs"))
         );
         assert!(!game.library);
-        // Not the tool its tests use, nor subsecond, which isn't the workspace's.
+        // Not the tool its tests use, nor subsecond (not a member).
         let deps = [Path::new("/w/engine"), Path::new("/w/macros")];
         assert_eq!(game.deps, deps);
         assert_eq!(game.subsecond.as_deref(), Some("0.7.2"));
@@ -542,12 +537,11 @@ mod tests {
         assert_eq!(none.as_deref(), Some("gg.build"));
     }
 
-    /// A binary's engine is the checkout of the gg-engine it builds with, in the workspace or
-    /// outside it, and none that only its tests use.
+    /// A binary's engine is the gg-engine checkout it builds with, inside or outside the
+    /// workspace, never one only its tests use.
     #[test]
     fn a_packages_engine_is_the_checkout_of_the_gg_engine_its_binary_builds_with() {
-        // The game's metadata with gg-engine's manifest at `manifest`, which node `node` of the
-        // resolve depends on as `kind`.
+        // The game's metadata plus gg-engine at `manifest`, a `kind` dependency of node `node`.
         let engine = |manifest: &str, node: usize, kind: Value| {
             let mut metadata = workspace();
             let id = "gg-engine 0.1.0";
