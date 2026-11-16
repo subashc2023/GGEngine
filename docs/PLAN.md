@@ -171,6 +171,7 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **What a shipped build owes** (2026-11-14)
 - **Round trips and joins in the logs** (2026-11-14)
 - **The engine reads no game's folder** (2026-11-14)
+- **A game of its own, outside the workspace** (2026-11-15)
 
 ## Now
 
@@ -179,8 +180,9 @@ of Foxball's shipped builds through the rented relay, its numbers read from both
 relay's and what they call for fixed, as Next has it. The builds are made and rehearsed through that
 relay, a Windows host and a Linux joiner on one network, and wait for players at hand.
 
-Phase 22 is under way, its next milestone a game outside the workspace, which starts from a game
-made by hand outside it, whose failures the milestone's steps fix.
+Phase 22 is under way, its next milestone Foxball's move to a repository of its own, which starts
+by covering in the engine what Foxball alone covers in CI, and needs the repository and a deploy
+key that reads the engine's.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.

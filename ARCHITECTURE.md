@@ -20,7 +20,7 @@ are in [AGENTS.md](AGENTS.md).
   agent can perform, and every result is machine-readable.
 - **Any kind of game, at any scale, single-player or multiplayer.** Game code is native Rust,
   and the engine supplies what each multiplayer model needs.
-- **Grown with games.** The engine grows alongside games of its own: small demos first, each
+- **Grown with games.** The engine grows alongside games made with it: small demos first, each
   built to exercise part of it, the first a simple networked game that the v0.1 loop is tested on;
   then a flagship, picked from the demos, whose needs set the engine's priorities and whose
   shipping proves the engine.
@@ -270,12 +270,30 @@ before:
 ## Game code
 
 Game code is Rust, as fast and as unrestricted as the engine's own. Each game is a crate that
-depends on `gg-engine` and builds its own player, statically linked and optimized for shipping. Game
-crates forbid `unsafe`, so a bug in game code panics rather than corrupting memory. Games built
-alongside the engine, the demos and then the flagship, live in `games/` in this workspace, among its
-members, so one change can span engine and game, each a [project](#project-state), which `gg new`
-makes; anyone else's game depends on the engine from its own repository.
+depends on `gg-engine` and builds its own player, statically linked and optimized for shipping, and
+a [project](#project-state), which `gg new` makes. Game crates forbid `unsafe`, so a bug in game
+code panics rather than corrupting memory. The engine's demos and test beds live in `games/` in this
+workspace, among its members, so one change can span engine and game; the engine's code and tests
+depend on none of them, a test's files being its crate's own, as CI's layering job checks. A game
+made for players, as the flagship, is a game of its own, in a repository of its own, which depends
+on the engine as anyone else's game does.
 
+- **A game of its own is a workspace of its own,** which `gg new <NAME> --engine <ENGINE>` makes
+  outside the engine's workspace. It depends on the engine's crates by a checkout's path, or by git
+  at a revision, `<URL>#<REVISION>`, which its `Cargo.lock` names, so that the engine's commit
+  reaches the digest a session names its build by, as [gg-api's `build`](crates/gg-api/src/build.rs)
+  says. A `[patch]` putting a checkout in a git engine's place would reach the build but not the
+  digest, as `cargo metadata --no-deps` lists no patches: a game is developed against a checkout by
+  its path instead. Its build takes the engine's settings from copies of the engine's files that
+  `gg new` writes: `.cargo/config.toml` but for the `cargo gg` alias, with the profiles and Luau's
+  C++ flags; `clippy.toml`, `rust-toolchain.toml`, `about.toml` and `.gitattributes`; and a
+  `Cargo.lock` that starts as the engine's, so that the crates beneath the engine resolve as its
+  tests ran them. `gg check` warns where its clippy.toml or its toolchain's pin isn't the engine's,
+  and gg-engine's build refuses Luau's C++ without its flag, as [ECS](#ecs) says. There `gg` is
+  installed from the engine the game builds against, as [`tools/gg`](#crates) says, and warns where
+  a game speaks another revision of the tool API than its own, as [Agents and
+  tools](#agents-and-tools) says; `gg ship` cooks with that engine's cooker, as [Builds](#builds)
+  says.
 - **The game runs in its own process.** The development tools launch the game's development
   build and work on it through the [tool API](#agents-and-tools). A crash, panic or hang in
   game code stops only the game, and the tools restart it from its last snapshot. The same

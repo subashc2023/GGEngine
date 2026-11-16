@@ -65,6 +65,9 @@ Each topic's one home. A crate's own docs are its root's `//!` comment and its i
   [Navigation](ARCHITECTURE.md#navigation), [Audio](ARCHITECTURE.md#audio); the demos' rules,
   [Shards'](games/shards/AGENTS.md) and [Foxball's](games/foxball/AGENTS.md) AGENTS.md.
 - Diagnostics and their codes: [Diagnostics](ARCHITECTURE.md#diagnostics).
+- A game of its own, in a repository of its own, which `gg new --engine` makes outside the
+  workspace, and the `gg` installed to run it: [Game code](ARCHITECTURE.md#game-code); what an agent
+  in its repository reads, the AGENTS.md it gets, in [gg new's template](tools/gg/src/new.rs).
 - The editor, each panel, menu and control: [its game layer's root](apps/editor/src/game.rs).
 - Tests to imitate: images against references, [gg-renderer's GPU
   tests](crates/gg-renderer/tests/gpu.rs); frames that don't allocate,
@@ -104,6 +107,8 @@ cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names cont
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
 cargo gg run --peers 2 [-- --rollback]   # in games/shards: a host and joiner, lockstep or predicting
 cargo gg new <NAME>               # a new game, games/NAME, a project with an empty start scene
+cargo install --locked --path tools/gg   # `gg`, run in a game of its own as `cargo gg` is here
+gg new <NAME> --engine <ENGINE>   # outside: ./NAME, a game of its own; ENGINE a checkout or URL#REV
 cargo gg fetch                    # in games/showcase: Sponza and Bistro, which git doesn't hold
 ```
 
