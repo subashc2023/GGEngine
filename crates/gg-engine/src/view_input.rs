@@ -1,23 +1,24 @@
-//! What of the main window's input reaches the layers in a dockspace, whose game's view is a panel
-//! among egui's: the rule windowed runs route that input by.
+//! The rule windowed runs route the main window's input by: what reaches the layers in a
+//! dockspace, whose game view is a panel among egui's.
 
 use tracing::debug;
 
 use crate::dock::Under;
 use crate::{Event, MouseButton};
 
-/// What of the main window's input reaches the layers in a dockspace, whose game's view is a panel
-/// among egui's: the mouse's presses and its wheel over the view, and the drags those start; and
-/// keys, as [`keys`](Self::keys) says. Modifier keys reach them wherever they're pressed, while
-/// none of egui's widgets has focus, so that one pressed over a panel and held onto the view counts
-/// there; and releases reach them wherever they come, so that none is left holding what it saw
-/// pressed.
+/// What of the main window's input reaches the layers in a dockspace:
+///
+/// - Mouse presses and the wheel over the view, and the drags those start.
+/// - Keys, as [`keys`](Self::keys) says.
+/// - Modifier presses anywhere while no egui widget has focus, so a modifier pressed over a panel
+///   and held onto the view counts there.
+/// - Releases anywhere, so no layer is left holding what it saw pressed.
 pub(crate) struct ViewInput {
-    /// Whether the view has the keys, as it does from the start.
+    /// Whether the view has the keys; true from the start.
     focused: bool,
-    /// The mouse buttons pressed over the view and not yet let go, a bit each, as [`bit`] gives.
+    /// The mouse buttons pressed over the view and not yet released, a [`bit`] each.
     held: u8,
-    /// The cursor's last move, if the layers didn't get it, in physical pixels.
+    /// The cursor's last move, if the layers missed it, in physical pixels.
     withheld: Option<(f64, f64)>,
     /// Whether the cursor is in the window: from a move in it until it leaves.
     inside: bool,
@@ -28,8 +29,7 @@ pub(crate) struct ViewInput {
 pub(crate) enum Reach {
     Nothing,
     Event,
-    /// The cursor's move to `x` and `y`, which they didn't get, then the event: a press, which a
-    /// drag then starts from.
+    /// The cursor move to `x`, `y` they missed, then the event: a press that starts a drag.
     MoveThen {
         x: f64,
         y: f64,
@@ -46,12 +46,13 @@ impl ViewInput {
         }
     }
 
-    /// Whether keys reach the layers, their presses, repeats and text, and Tab, which goes past
-    /// egui to them alone then: while none of egui's widgets has focus, no modal of egui's is
-    /// open, which keeps them whether the view has them or the cursor, and the view shows
-    /// (`shown`); and either the view has the keys or the cursor is in the window over the view or
-    /// the UI over it, as `under` says, while egui drags none of its own widgets, as a press there
-    /// needs too.
+    /// Whether keys (presses, repeats, text, and Tab, which then bypasses egui) reach the layers.
+    /// All must hold:
+    ///
+    /// - No egui widget has focus and no egui modal is open: egui keeps keys then.
+    /// - The view shows (`shown`).
+    /// - The view has the keys, or the cursor is in the window over the view or the UI over it
+    ///   (`under`) while egui drags none of its own widgets, as a press there needs too.
     pub(crate) fn keys(&self, egui: &egui::Context, under: Under, shown: bool) -> bool {
         let free = !egui.egui_wants_keyboard_input()
             && egui.memory(|memory| memory.top_modal_layer()).is_none();
@@ -61,10 +62,10 @@ impl ViewInput {
         free && shown && (self.focused || hovered)
     }
 
-    /// What of `event` reaches the layers, as egui keeps it if `consumed`, with the cursor over
-    /// what `under` says, as the view, which `shown` says shows. Releases always reach them, and a
-    /// modifier key's press does unless egui keeps it, as it keeps keys while one of its widgets has
-    /// focus. A press over the view, or over the UI over it, gives it focus and takes egui's.
+    /// What of `event` reaches the layers, given whether egui keeps it (`consumed`), what the
+    /// cursor is `under` and whether the view `shown` shows. Releases always reach them; so does
+    /// a modifier's press unless egui keeps it. A press over the view or the UI over it gives
+    /// the view focus and takes egui's.
     pub(crate) fn route(
         &mut self,
         egui: &egui::Context,
@@ -85,8 +86,8 @@ impl ViewInput {
                 button,
                 pressed: true,
             } => match under {
-                // egui uses the pointer for the view's own widget while a button is held there, and
-                // otherwise for one of its own, such as a splitter dragged over the view.
+                // egui uses the pointer for the view's widget while a button is held there, else
+                // for its own, such as a splitter dragged over the view.
                 Under::View if self.held != 0 || !egui.egui_is_using_pointer() => {
                     self.held |= bit(button);
                     self.give_focus(egui);
@@ -143,21 +144,21 @@ impl ViewInput {
         }
     }
 
-    /// Whether the view has the keys, as it does from the start, and from a press over it, or the
-    /// UI over it, until a press elsewhere.
+    /// Whether the view has the keys: from the start or a press over it or the UI over it, until
+    /// a press elsewhere.
     pub(crate) fn focused(&self) -> bool {
         self.focused
     }
 
     /// Gives the view the keys, as a press on it does, and takes egui's focus, which would keep
-    /// them: from a text field, which keeps it until a click elsewhere, which a drag isn't, or any
-    /// widget. For a layer's control too, as [`Ui::focus_view`](crate::Ui::focus_view) says.
+    /// them: a text field keeps it until a click elsewhere (a drag isn't one). Also for a layer's
+    /// control: [`Ui::focus_view`](crate::Ui::focus_view).
     pub(crate) fn give_focus(&mut self, egui: &egui::Context) {
         egui.memory_mut(|memory| memory.stop_text_input());
         self.focus(true);
     }
 
-    /// Whether the cursor is in the window: from a move in it until it leaves.
+    /// Whether the cursor is in the window.
     pub(crate) fn inside(&self) -> bool {
         self.inside
     }
@@ -186,7 +187,7 @@ fn modifier(key: crate::Key) -> bool {
     )
 }
 
-/// `button`'s bit among those [`ViewInput`] holds; none for a button without a name.
+/// `button`'s bit in [`ViewInput`]'s held set; 0 for an unnamed button.
 fn bit(button: MouseButton) -> u8 {
     match button {
         MouseButton::Left => 1,
@@ -205,7 +206,7 @@ mod tests {
     use super::*;
     use crate::{Key, Scroll};
 
-    /// egui, after a pass that had a widget pressed if `pressing`, so that egui uses the pointer.
+    /// egui after a pass with a widget pressed if `pressing`, so egui uses the pointer.
     fn context(pressing: bool) -> egui::Context {
         let egui = egui::Context::default();
         let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 200.0));
@@ -252,7 +253,6 @@ mod tests {
     fn the_view_has_the_keys_from_the_start_and_from_a_press_on_it() {
         let egui = context(false);
         let mut input = ViewInput::new();
-        // Before it first shows, keys reach nothing.
         assert_eq!(
             input.route(&egui, &key(true), false, Under::Other, false),
             Reach::Nothing
@@ -263,7 +263,6 @@ mod tests {
                 Reach::Event
             );
         }
-        // A press elsewhere takes the keys away, but not their releases.
         let elsewhere = button(MouseButton::Left, true);
         assert_eq!(
             input.route(&egui, &elsewhere, true, Under::Other, true),
@@ -277,14 +276,13 @@ mod tests {
         ] {
             assert_eq!(input.route(&egui, &event, false, Under::Other, true), reach);
         }
-        // A press on the view, which egui counts as its own, gives them back.
         let press = button(MouseButton::Left, true);
         assert_eq!(
             input.route(&egui, &press, true, Under::View, true),
             Reach::Event
         );
         assert!(input.keys(&egui, Under::Other, true));
-        // Not those egui keeps, as while one of its widgets has focus.
+        // Not keys egui keeps.
         assert_eq!(
             input.route(&egui, &key(true), true, Under::View, true),
             Reach::Nothing
@@ -305,8 +303,7 @@ mod tests {
         assert!(!egui.egui_wants_keyboard_input());
     }
 
-    /// A layer's control, such as an editor's Play, gives the view back the keys its press took,
-    /// taking egui's focus, which would keep them.
+    /// A layer's control (the editor's Play) gives the view back the keys its press took.
     #[test]
     fn a_layers_control_gives_the_view_the_keys_its_press_took() {
         let egui = context(false);
@@ -330,7 +327,7 @@ mod tests {
             input.route(&egui, &right(true), true, Under::View, true),
             Reach::Event
         );
-        // egui uses the pointer for the view's widget now, and the drag goes past the view.
+        // egui now uses the pointer for the view's widget; the drag goes past the view.
         let using = context(true);
         for event in [MOVE, WHEEL] {
             assert_eq!(
@@ -338,7 +335,6 @@ mod tests {
                 Reach::Event
             );
         }
-        // Another button pressed over the view joins in.
         let left = |pressed| button(MouseButton::Left, pressed);
         assert_eq!(
             input.route(&using, &left(true), true, Under::View, true),
@@ -356,17 +352,16 @@ mod tests {
             input.route(&using, &left(false), true, Under::Other, true),
             Reach::Event
         );
-        // Let go, egui's moves and wheel are egui's.
+        // Released: moves and wheel are egui's.
         for event in [MOVE, WHEEL] {
             assert_eq!(
                 input.route(&using, &event, true, Under::View, true),
                 Reach::Nothing
             );
         }
-        // The layers get the move they missed before the next press, which a drag starts from.
+        // The layers get the missed move before the next press.
         let next = input.route(&egui, &right(true), true, Under::View, true);
         assert_eq!(next, Reach::MoveThen { x: 10.0, y: 20.0 });
-        // A move they get leaves none to miss.
         input.route(&egui, &right(false), false, Under::View, true);
         input.route(&egui, &MOVE, false, Under::View, true);
         assert_eq!(
@@ -391,8 +386,8 @@ mod tests {
         );
     }
 
-    /// The mouse's raw motion reaches the layers as keys do, while the view has them, as it does
-    /// grabbing the cursor, and while a drag the view started goes on.
+    /// Raw mouse motion (it serves cursor grabs) reaches the layers as keys do, and during a drag
+    /// the view started.
     #[test]
     fn the_mouses_motion_reaches_the_layers_while_the_view_has_the_keys_or_a_drag() {
         let egui = context(false);
@@ -417,7 +412,6 @@ mod tests {
             input.route(&using, &motion, false, Under::Other, true),
             Reach::Event
         );
-        // Nor while the view doesn't show.
         input.route(&egui, &right(false), false, Under::View, true);
         assert_eq!(
             input.route(&egui, &motion, false, Under::View, false),
@@ -456,7 +450,7 @@ mod tests {
         );
         assert!(input.keys(&egui, Under::Other, true));
         assert!(!egui.egui_wants_keyboard_input());
-        // Its release reaches the layers, as every release does, but it holds nothing.
+        // Its release reaches the layers, but it holds nothing.
         assert_eq!(
             input.route(&egui, &left(false), true, Under::Overlay, true),
             Reach::Event
@@ -487,7 +481,6 @@ mod tests {
             input.route(&egui, &MOVE, true, Under::View, true),
             Reach::Nothing
         );
-        // The view keeps the keys.
         assert!(input.keys(&egui, Under::Other, true));
     }
 
@@ -506,7 +499,7 @@ mod tests {
         );
     }
 
-    /// A view whose keys a press elsewhere took, with the cursor moved into the window.
+    /// A view whose keys a press elsewhere took, with the cursor then moved in.
     fn unfocused(egui: &egui::Context) -> ViewInput {
         let mut input = ViewInput::new();
         let elsewhere = button(MouseButton::Left, true);
@@ -519,9 +512,9 @@ mod tests {
         input
     }
 
-    /// Once a press on a panel has taken the view's focus, keys follow the cursor: they reach the
-    /// layers while it's over the view or the toolbar over it, their repeats and text too; but not
-    /// while it's over a panel, nor while the view doesn't show. Hovering gives the view no focus.
+    /// After a panel press takes the view's focus, keys follow the cursor: over the view or the
+    /// toolbar over it they reach the layers (repeats and text too); over a panel or a hidden
+    /// view they don't. Hovering gives no focus.
     #[test]
     fn keys_follow_the_cursor_onto_the_view_and_the_ui_over_it() {
         let egui = context(false);
@@ -547,8 +540,7 @@ mod tests {
         assert!(!input.focused);
     }
 
-    /// While a text field has focus, keys are its, wherever the cursor is and whether or not the
-    /// view has focus.
+    /// A focused text field gets the keys, wherever the cursor is.
     #[test]
     fn keys_reach_nothing_while_a_text_field_has_focus() {
         let egui = context(false);
@@ -569,7 +561,7 @@ mod tests {
         }
     }
 
-    /// egui after a pass that showed a modal, which keeps it open in the passes after.
+    /// egui after a pass that showed a modal, which stays open in later passes.
     fn showing_a_modal() -> egui::Context {
         let egui = egui::Context::default();
         let input = RawInput {
@@ -584,8 +576,7 @@ mod tests {
         egui
     }
 
-    /// Under a modal, keys reach nothing, though the view has focus or the cursor is over it; but
-    /// modifiers do, while none of egui's widgets has focus.
+    /// Under a modal keys reach nothing; modifiers do, while no egui widget has focus.
     #[test]
     fn keys_reach_nothing_under_a_modal() {
         let egui = showing_a_modal();
@@ -608,8 +599,7 @@ mod tests {
         }
     }
 
-    /// The cursor counts over the view only from a move in the window until it leaves it, where
-    /// it was last over the view: keys don't follow it out of the window.
+    /// The cursor counts over the view from a move in the window until it leaves.
     #[test]
     fn keys_dont_follow_the_cursor_out_of_the_window() {
         let egui = context(false);
@@ -628,8 +618,8 @@ mod tests {
         );
     }
 
-    /// While egui drags one of its own widgets across the view, such as a splitter, the cursor
-    /// over the view gives it no keys, as it gives the layers no press.
+    /// While egui drags its own widget (a splitter) across the view, the cursor over the view
+    /// gives it no keys, as it gives the layers no press.
     #[test]
     fn keys_dont_follow_a_drag_of_egui_s_own_across_the_view() {
         let egui = context(false);
@@ -643,8 +633,8 @@ mod tests {
         assert!(input.keys(&egui, Under::View, true), "once it's let go");
     }
 
-    /// Modifiers pressed over a panel reach the layers, so that one held onto the view counts
-    /// there, but not while a widget of egui's has them; other keys there don't.
+    /// Modifiers pressed over a panel reach the layers unless an egui widget has them; other keys
+    /// there don't.
     #[test]
     fn modifiers_pressed_over_a_panel_reach_the_layers() {
         let egui = context(false);

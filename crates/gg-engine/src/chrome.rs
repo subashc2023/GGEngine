@@ -1,9 +1,7 @@
-//! The frame around the app's windows: who draws it, and what the UI draws when it's the UI's:
-//! the main window's title bar, which holds a button that opens the menus in a drawer, which
-//! slides out from the window's left edge, the controls layers put at its middle, a gear that opens
-//! the settings, the buttons that hide and show the panels docked left of, below and right of the
-//! view, and those that minimize, maximize and close a window; and the edges that resize one. On
-//! Windows the rest of the frame stays the OS's own, which `windows_frame` gives back.
+//! The frame around the app's windows: who draws it, and what the UI draws when it does. The main
+//! window's title bar holds a menu drawer's button, the layers' controls, a settings gear and
+//! panel toggles; every window gets minimize, maximize and close buttons and resizing edges. On
+//! Windows the rest of the frame stays the OS's, which `windows_frame` gives back.
 
 use std::mem;
 
@@ -18,53 +16,49 @@ use egui::{
 use winit::dpi::LogicalSize;
 use winit::window::WindowAttributes;
 
-/// The height of the title bar the UI draws, and of the bar the menus get below the OS's, in
-/// points.
+/// The title bar's height in points, also the menus' bar below the OS's.
 pub(crate) const BAR: f32 = 32.0;
-/// The height around the traffic lights, which centers them.
+/// The height that centers the traffic lights.
 const BAR_AROUND_TRAFFIC_LIGHTS: f32 = 28.0;
-/// The width of each of a title bar's buttons, in points, as on Windows 11.
+/// Each title-bar button's width in points, as on Windows 11.
 pub(crate) const BUTTON: f32 = 46.0;
-/// The width of each of the bar's own buttons, which open the menus and hide and show panels, and
-/// the side of their icons, in points.
+/// The bar's own buttons' width in points, and their icons' side.
 pub(crate) const TOOL: f32 = 36.0;
 const ICON: f32 = 16.0;
-/// Where the menu button starts, from the left of the bar, in points.
+/// The menu button's start from the bar's left, in points.
 pub(crate) const INSET: f32 = 6.0;
-/// Where it starts on macOS, clear of the traffic lights. Not yet checked on a Mac.
+/// The same on macOS, clear of the traffic lights. Not yet checked on a Mac.
 const TRAFFIC_LIGHTS: f32 = 72.0;
-/// How wide the menus' drawer is, in points, and how long it takes to slide out, in seconds.
+/// The drawer's width in points and slide time in seconds.
 const DRAWER: f32 = 200.0;
 const SLIDE: f32 = 0.15;
-/// How wide the settings are, in points.
+/// The settings' width in points.
 const SETTINGS: f32 = 240.0;
-/// How thick a window's edges are, and how far along one from either end it resizes diagonally,
-/// in points.
+/// A window edge's thickness, and its diagonal-resize reach from either end, in points.
 const EDGE: f32 = 5.0;
 const CORNER: f32 = 16.0;
-/// The close button under the pointer, and pressed, as on Windows.
+/// The close button hovered, and pressed, as on Windows.
 const CLOSE: Color32 = Color32::from_rgb(196, 43, 28);
 const CLOSE_PRESSED: Color32 = Color32::from_rgb(166, 36, 24);
 
 /// Who draws the frame around the app's windows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Chrome {
-    /// The OS. The menus and the layers' controls get a bar of their own, below its title bar.
+    /// The OS. Menus and controls get a bar of their own below its title bar.
     Os,
-    /// The UI: the title bar, with the menus in it, its buttons and the edges. On X11 and
-    /// Wayland.
+    /// The UI: title bar, buttons and edges. On X11 and Wayland.
     Drawn,
-    /// The UI's title bar, with its buttons, in Windows' own frame: the OS's borders resize the
-    /// window, the bar's free space moves it as the OS's own title bar does, and the OS shows
-    /// Snap Layouts over the maximize button. On Windows.
+    /// The UI's title bar and buttons in Windows' own frame: the OS's borders resize the window,
+    /// the bar's free space moves it as the OS's title bar does, and the OS shows Snap Layouts
+    /// over the maximize button. On Windows.
     InWindowsFrame,
-    /// The UI, around the OS's buttons, the traffic lights, which keeps the edges too. On macOS.
+    /// The UI around the OS's traffic lights, which keep the edges too. On macOS.
     AroundTrafficLights,
 }
 
 impl Chrome {
-    /// The frame of an app's windows: the UI's if the app asks for it, with
-    /// [`App::custom_title_bar`](crate::App::custom_title_bar), and otherwise the OS's.
+    /// The UI's frame if the app asks ([`App::custom_title_bar`](crate::App::custom_title_bar)),
+    /// else the OS's.
     pub(crate) fn new(custom_title_bar: bool) -> Self {
         if !custom_title_bar {
             Self::Os
@@ -83,8 +77,8 @@ impl Chrome {
     }
 }
 
-/// The main window's `attributes` with the frame `chrome` says. On Windows, the OS's frame comes
-/// back once the window is open, around the UI's title bar.
+/// `attributes` for the main window with `chrome`'s frame. On Windows the OS's frame returns
+/// around the UI's title bar once the window is open.
 pub(crate) fn attributes(chrome: Chrome, attributes: WindowAttributes) -> WindowAttributes {
     if chrome == Chrome::Os {
         return attributes;
@@ -108,8 +102,7 @@ fn frameless(attributes: WindowAttributes) -> WindowAttributes {
     attributes.with_decorations(false)
 }
 
-/// The panels docked left of, below or right of the view, which a button of the title bar hides and
-/// shows.
+/// The panels docked left of, below or right of the view, toggled by a title-bar button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sidebar {
     Left,
@@ -117,53 +110,47 @@ pub(crate) enum Sidebar {
     Right,
 }
 
-/// The main window's title bar, or, under the OS's frame, a bar below its title bar: the button
-/// that opens the menus' drawer, and the drawer, the layers' controls at its middle, and where the
-/// UI draws the frame, the gear that opens the settings, and the settings, the buttons that hide
-/// and show the panels left of, below and right of the view, and the window's own. The dock owns
-/// it, since it comes off the window before the dock arranges the rest.
+/// The main window's title bar, or under the OS's frame a bar below its title bar: the menus'
+/// drawer and button, the layers' controls and, where the UI draws the frame, the gear, settings,
+/// panel toggles and window buttons. The dock owns it: it comes off the window before the dock
+/// arranges the rest.
 pub(crate) struct TitleBar {
     chrome: Chrome,
-    /// The bar this pass, and the Ui its buttons go in until the pass ends; where its buttons
-    /// start, at the menu button, and where its free space starts, after it.
+    /// The bar this pass and its Ui; `lead` is where its buttons start (the menu button), `start`
+    /// where its free space starts.
     bar: Rect,
     ui: Option<egui::Ui>,
     lead: f32,
     start: f32,
-    /// The Ui the menus go in, in the drawer the menu button opens, while it's open, until the pass
-    /// ends; and how tall they were in the last pass it was open, which the drawer takes, since
+    /// The drawer's Ui while open, and the menus' height last pass, which the drawer takes since
     /// they come after it shows.
     drawer: Option<egui::Ui>,
     drawer_height: f32,
     /// Whether a press has come since the drawer opened, whose click may close it.
     pressed: bool,
-    /// The Ui the settings go in, below the gear, while they're open, until the pass ends; how
-    /// tall they were in the last pass they were open, which they take, since they come after they
-    /// show; and how many groups of them were added this pass, which a line parts.
+    /// The same for the settings, and how many groups were added this pass (a line parts them).
     settings: Option<egui::Ui>,
     settings_height: f32,
     settings_added: usize,
-    /// The Ui the layers' controls go in, at the middle of the bar, until the pass ends; how wide
-    /// they were in the last pass, which centers them; and whether any were added this pass and in
-    /// the last.
+    /// The controls' Ui, their width last pass (which centers them), and whether any were added
+    /// this pass and the last.
     middle: Option<egui::Ui>,
     middle_width: f32,
     controls: bool,
     had_controls: bool,
-    /// The menus shown this pass, and whether any showed in the last.
+    /// The menus shown this pass, and whether any showed last.
     shown: Vec<String>,
     had_menus: bool,
     /// Where the bar was right-clicked, in points, for the OS's window menu.
     window_menu: Option<Pos2>,
-    /// The parts of the bar that were the OS's last pass, and how the OS says the maximize
-    /// button looks.
+    /// The bar's OS-owned parts last pass, and the maximize button's OS look.
     caption: Option<Caption>,
     maximize: Look,
 }
 
-/// The parts of the main window's title bar that are the OS's under
-/// [`Chrome::InWindowsFrame`], in the window's points: the free space, which moves the window as
-/// the OS's own title bar does, and the maximize button, over which the OS shows Snap Layouts.
+/// The main window's title bar parts that are the OS's under [`Chrome::InWindowsFrame`], in
+/// points: the free space, which moves the window like the OS's title bar, and the maximize
+/// button, over which the OS shows Snap Layouts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Caption {
     /// Left of the menu button; and right of it, either side of the controls, or, without any, as
@@ -198,22 +185,19 @@ impl TitleBar {
         }
     }
 
-    /// Starts a pass: takes the bar off the top of `root`, with the button that opens the menus'
-    /// drawer once a menu has shown, the drawer while it's open, the middle, which the controls go
-    /// in, and where the UI draws the title bar, the gear and the settings while they're open.
-    /// Under [`Chrome::Os`] it's a bar of its own below the OS's title bar, from the pass after a
-    /// menu or a control first shows.
+    /// Starts a pass: takes the bar off the top of `root`. Under [`Chrome::Os`], from the pass
+    /// after a menu or control first shows.
     pub(crate) fn begin(&mut self, root: &mut egui::Ui) {
         self.had_menus = !self.shown.is_empty();
         self.shown.clear();
         self.had_controls = mem::take(&mut self.controls);
         self.settings_added = 0;
         let ctx = root.ctx().clone();
-        // Every pass, so that the drawer slides out from the edge each time it opens.
+        // Every pass, so it slides out each time it opens.
         let open = Popup::is_id_open(&ctx, drawer_id());
         let out =
             ctx.animate_bool_with_time_and_easing(drawer_id(), open, SLIDE, easing::cubic_out);
-        // So that the release of the click that opens it doesn't close it.
+        // So the opening click's release doesn't close it.
         self.pressed = open && (self.pressed || ctx.input(|i| i.pointer.any_pressed()));
         if self.chrome == Chrome::Os && !self.had_menus && !self.had_controls {
             return;
@@ -247,8 +231,7 @@ impl TitleBar {
                     }
                     self.drawer = self.show_drawer(&ui, out);
                 }
-                // At the middle of the bar where they fit there, as the title is, by their width
-                // last pass.
+                // Centered where they fit, like the title, by last pass's width.
                 let end = bar.max.x - self.right();
                 let half = self.middle_width / 2.0;
                 let x = (bar.center().x)
@@ -258,13 +241,13 @@ impl TitleBar {
                 let middle = Rect::from_center_size(pos2(x, bar.center().y), size);
                 let layout = Layout::left_to_right(Align::Center);
                 self.middle = Some(ui.new_child(UiBuilder::new().max_rect(middle).layout(layout)));
-                // Left of the sidebars' buttons, which `end` draws.
+                // Left of the toggles, which `end` draws.
                 if self.chrome != Chrome::Os {
                     let gear = Rect::from_min_size(pos2(end, bar.min.y), vec2(TOOL, bar.height()));
                     let open = Popup::is_id_open(&ctx, settings_id());
                     let button = tool(&mut ui, gear, Tool::Settings, open, true);
-                    // Before the settings show, so that a click on the gear while they're open
-                    // closes them rather than closing them as a click outside and opening them.
+                    // Before the settings show, so a gear click while open closes them instead of
+                    // closing them as a click outside and reopening them.
                     if button.on_hover_text("Settings").clicked() {
                         Popup::toggle_id(&ctx, settings_id());
                     }
@@ -274,9 +257,7 @@ impl TitleBar {
             });
     }
 
-    /// How much of the bar's right its buttons take: the gear and those that hide and show the
-    /// panels around the view, where the UI draws the title bar, and the window's, where it draws
-    /// them.
+    /// The width of the bar's right-hand buttons: gear, panel toggles, window buttons.
     fn right(&self) -> f32 {
         let sidebars = if self.chrome == Chrome::Os {
             0.0
@@ -291,10 +272,9 @@ impl TitleBar {
         sidebars + window
     }
 
-    /// Shows the menus' drawer while it's open, against the window's left edge below the bar, `out`
-    /// of the way out as it slides from that edge, over the dock rather than pushing it aside,
-    /// which would resize the game's view as it slid; and returns the Ui the menus go in. It closes
-    /// on its button, Escape, and, as [`TitleBar::end`] says, clicks; its menus, as egui's do.
+    /// Shows the drawer while open, at the left edge below the bar, `out` of the way out as it
+    /// slides, over the dock: pushing it aside would resize the game's view. Returns the menus'
+    /// Ui. It closes on its button, Escape and, per [`TitleBar::end`], clicks.
     fn show_drawer(&self, ui: &egui::Ui, out: f32) -> Option<egui::Ui> {
         let ctx = ui.ctx();
         // Square against the edges it comes from.
@@ -306,9 +286,8 @@ impl TitleBar {
         let height = self.drawer_height;
         let mut menus = None;
         let edge = self.bar.with_max_x(self.bar.min.x);
-        // egui would check for a click that closes the drawer as it shows, before its menus come,
-        // and close it whatever's open in them, which `end` does instead; its menus close on a
-        // click as egui's do.
+        // egui would check the closing click as the drawer shows, before its menus, and close it
+        // whatever's open in them; `end` does that instead.
         let config = MenuConfig::new()
             .close_behavior(PopupCloseBehavior::CloseOnClick)
             .style(crate::menu_style);
@@ -336,24 +315,21 @@ impl TitleBar {
         menus
     }
 
-    /// Adds menu `name` to the drawer this pass, with what `add_contents` draws in it while it's
-    /// open: an item, while the drawer's open, whose menu opens beside it as the pointer comes
-    /// onto it, as a submenu does. A second menu of the same name doesn't show.
+    /// Adds menu `name` (`add_contents`) to the drawer, opening beside it as a submenu does. A
+    /// repeated name doesn't show.
     pub(crate) fn menu(&mut self, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
         if self.shown.iter().any(|shown| shown == name) {
             return;
         }
         self.shown.push(name.to_owned());
         if let Some(drawer) = &mut self.drawer {
-            // Named by its name rather than its place, so that an open menu stays open as others
-            // come and go.
+            // Named, not placed, so an open menu stays open as others come and go.
             drawer.push_id(name, |ui| SubMenuButton::new(name).ui(ui, add_contents));
         }
     }
 
-    /// Shows the settings while they're open, below the gear at `gear`, their right edge at its
-    /// right, over the dock; and returns the Ui they go in. They close on the gear, Escape and a
-    /// click outside them, as egui's popups do.
+    /// Shows the settings while open, below `gear`, over the dock. They close on the gear,
+    /// Escape and a click outside.
     fn show_settings(&self, ui: &egui::Ui, gear: Rect) -> Option<egui::Ui> {
         let height = self.settings_height;
         let mut settings = None;
@@ -371,8 +347,8 @@ impl TitleBar {
         settings
     }
 
-    /// Adds what `add_contents` draws to the settings this pass, after those added before, parted
-    /// from them by a line, while they're open; nothing under [`Chrome::Os`], which has no gear.
+    /// Adds a group to the open settings, parted by a line. Nothing under [`Chrome::Os`], which
+    /// has no gear.
     pub(crate) fn settings(&mut self, add_contents: impl FnOnce(&mut egui::Ui)) {
         let Some(settings) = &mut self.settings else {
             return;
@@ -384,10 +360,8 @@ impl TitleBar {
         add_contents(settings);
     }
 
-    /// Adds what `add_contents` draws to the controls at the middle of the bar this pass, after
-    /// those added before, in place of the window's title; and returns what it returned, unless
-    /// the bar doesn't show. Under [`Chrome::Os`], the bar shows from the pass after the first
-    /// control is added.
+    /// Adds to the controls at the bar's middle, in place of the title; returns `add_contents`'s
+    /// result, or `None` while the bar doesn't show.
     pub(crate) fn controls<R>(
         &mut self,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
@@ -396,20 +370,18 @@ impl TitleBar {
         self.middle.as_mut().map(add_contents)
     }
 
-    /// Ends the pass: draws the window's title at the middle of the bar, unless the layers put
-    /// controls there; where the UI draws the title bar, the buttons that hide and show the panels
-    /// left of, below and right of the view, as `sidebars` says of each (`None` while none is
-    /// docked there, or whether they show), and where it draws the frame, the window's buttons and
-    /// edges; and has the bar's free space move the window. Returns the side whose button was
-    /// clicked, if any.
+    /// Ends the pass: draws the title (unless controls take the middle), the panel toggles
+    /// (`sidebars` says per side: `None` if nothing is docked there, else whether it shows) and,
+    /// where the UI draws the frame, the window's buttons and edges. Returns the side whose
+    /// toggle was clicked.
     pub(crate) fn end(&mut self, sidebars: impl Fn(Sidebar) -> Option<bool>) -> Option<Sidebar> {
         self.caption = None;
-        // Dropped within the pass, since dropping a Ui records its rect in egui.
+        // Dropped within the pass: a Ui's drop records its rect in egui.
         let (drawer, middle) = (self.drawer.take(), self.middle.take());
         let settings = self.settings.take();
         let mut ui = self.ui.take()?;
         let ctx = ui.ctx().clone();
-        // As the drawer does, a pass the settings outgrew or shrank from goes again.
+        // As below, a pass the settings outgrew is redone.
         if let Some(settings) = settings {
             let height = settings.min_rect().height();
             if height != self.settings_height {
@@ -418,15 +390,14 @@ impl TitleBar {
             }
         }
         if let Some(drawer) = drawer {
-            // A pass the menus outgrew or shrank from goes again, rather than show the drawer
-            // another size than theirs.
+            // A pass the menus outgrew or shrank from is redone, not shown at the wrong size.
             let height = drawer.min_rect().height();
             if height != self.drawer_height {
                 self.drawer_height = height;
                 ctx.request_discard("the menus' drawer changed size");
             }
-            // Closed as an item chosen closes its menu, or by a click, pressed while it was open,
-            // while none of its menus is: one that is takes the click, as egui's menus do.
+            // Closed by a chosen item, or by a click pressed while open with none of its menus
+            // open: an open menu takes the click, as egui's menus do.
             let clicked = self.pressed && ctx.input(|i| i.pointer.any_click());
             let menu_open = !MenuState::is_deepest_open_sub_menu(&ctx, drawer_id());
             if drawer.should_close() || (clicked && !menu_open) {
@@ -457,7 +428,7 @@ impl TitleBar {
         let free = Rect::from_min_max(pos2(self.start, bar.min.y), pos2(end, bar.max.y));
 
         if controls.is_none() {
-            // The title, at the middle of the bar where it fits there, and elided to fit.
+            // The title, centered where it fits, elided to fit.
             let width = (free.width() - 2.0 * INSET).max(0.0);
             let galley = WidgetText::from(title).into_galley(
                 &ui,
@@ -479,11 +450,10 @@ impl TitleBar {
             ui.painter().galley(at, galley, color);
         }
 
-        // The bar left of the menu button, where the traffic lights are on macOS, and the free
-        // space stand for the OS's title bar. None of it covers a button or a control, which
-        // would then take the press, and the free space the drag. In Windows' frame they're the
-        // OS's own title bar, with the maximize button, and egui sees the pointer over them only
-        // while it takes the whole bar.
+        // The bar left of the menu button (the traffic lights' place on macOS) and the free
+        // space stand for the OS's title bar, covering no button or control. In Windows' frame
+        // they're the OS's own, and egui sees the pointer over them only while it takes the whole
+        // bar.
         let drag = match controls {
             Some(controls) => [
                 bar.with_max_x(self.lead),
@@ -508,10 +478,9 @@ impl TitleBar {
         for (i, rect) in drag.filter(|(_, rect)| rect.is_positive()) {
             let id = Id::unique(("gg title bar free space", i));
             let response = ui.interact(rect, id, Sense::click_and_drag());
-            // egui starts a drag once the pointer has moved a few points or the button has been
-            // held a while, so that a click doesn't move the window. The window catches up with
-            // the pointer, keeping the point held under it, and the OS moves it from there while
-            // the button stays down. A maximized window, the OS restores under the pointer.
+            // egui starts a drag after a few points of movement or a hold. The window catches up
+            // with the pointer, then the OS moves it while the button stays down, and restores a
+            // maximized one under the pointer.
             if response.drag_started_by(PointerButton::Primary)
                 && let Some(moved) = held
             {
@@ -528,8 +497,7 @@ impl TitleBar {
             }
         }
 
-        // As far right as the window's buttons, which stay the rightmost, as the OS's are, right
-        // of the gear.
+        // Right of the gear; the window's buttons stay rightmost, as the OS's do.
         let mut toggled = None;
         let all = [Sidebar::Left, Sidebar::Bottom, Sidebar::Right];
         for (i, sidebar) in all.into_iter().enumerate() {
@@ -589,8 +557,8 @@ impl TitleBar {
         toggled
     }
 
-    /// The parts of the bar that were the OS's last pass: none unless the frame is Windows'
-    /// own, nor while egui shows something over the bar.
+    /// The bar's OS-owned parts last pass: none unless the frame is Windows' own, or while egui
+    /// shows something over the bar.
     #[cfg_attr(
         not(target_os = "windows"),
         allow(dead_code, reason = "only Windows' frame asks")
@@ -599,8 +567,7 @@ impl TitleBar {
         self.caption
     }
 
-    /// How the maximize button looks from the next pass, as the OS says where it hit-tests the
-    /// button.
+    /// The maximize button's look from the next pass, as the OS says when it hit-tests it.
     #[cfg_attr(
         not(target_os = "windows"),
         allow(dead_code, reason = "only Windows' frame says")
@@ -609,15 +576,14 @@ impl TitleBar {
         self.maximize = look;
     }
 
-    /// Where the bar was right-clicked since this was last asked, in the main window's points,
-    /// for the OS's window menu.
+    /// Where the bar was right-clicked since the last call, in points, for the OS's window menu.
     pub(crate) fn take_window_menu(&mut self) -> Option<Pos2> {
         self.window_menu.take()
     }
 }
 
-/// Whether egui shows something over `bar`, such as a window, or has a menu open, which a click
-/// on the bar should close: then the UI takes the whole bar, leaving none of it to the OS.
+/// Whether egui shows something over `bar` (a window) or has a menu open that a click on the bar
+/// should close: then the UI takes the whole bar, none to the OS.
 fn covered(ctx: &Context, bar: Rect) -> bool {
     ctx.any_popup_open()
         || ctx.memory(|memory| {
@@ -630,9 +596,8 @@ fn covered(ctx: &Context, bar: Rect) -> bool {
         })
 }
 
-/// Has the edges of the window this pass draws resize it: Areas above everything else along
-/// them, so that a press there reaches neither the game nor egui's widgets beneath. None while
-/// the window is maximized or fullscreen.
+/// Has the window's edges resize it, as Areas above everything, so a press there reaches neither
+/// the game nor egui's widgets. None while maximized or fullscreen.
 pub(crate) fn edges(ctx: &Context) {
     let (window, maximized, fullscreen) = ctx.input(|i| {
         let info = i.viewport();
@@ -659,7 +624,7 @@ pub(crate) fn edges(ctx: &Context) {
             .constrain(false)
             .sense(Sense::hover())
             .show(ctx, |ui| {
-                // Only drags, so that what's beneath gets no clicks either.
+                // Only drags, so what's beneath gets no clicks either.
                 let response = ui.allocate_rect(edge, Sense::drag());
                 if let Some(pos) = response.hover_pos() {
                     ctx.set_cursor_icon(cursor(direction(window, pos)));
@@ -674,8 +639,7 @@ pub(crate) fn edges(ctx: &Context) {
     }
 }
 
-/// Which way a press at `pos`, on an edge of `window`, resizes it: diagonally within a corner's
-/// length of one.
+/// The resize direction of a press at `pos` on an edge: diagonal within `CORNER` of a corner.
 fn direction(window: Rect, pos: Pos2) -> ResizeDirection {
     let near = |distance: f32| distance < CORNER;
     let north = near(pos.y - window.min.y);
@@ -707,7 +671,6 @@ fn cursor(direction: ResizeDirection) -> CursorIcon {
     }
 }
 
-/// What a title bar's button does, which its icon shows.
 #[derive(Clone, Copy, Debug, Hash)]
 pub(crate) enum Icon {
     Minimize,
@@ -716,18 +679,15 @@ pub(crate) enum Icon {
     Close,
 }
 
-/// How a title bar's button looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Look {
     Idle,
-    /// Under the pointer.
     Hovered,
     Pressed,
 }
 
-/// A title bar's button over `rect`, drawn with its icon, which lights up under the pointer: red
-/// for Close, as on Windows. Where the OS hit-tests the button instead, egui sees no pointer over
-/// it, and `os` is how the OS says it looks.
+/// A title-bar button over `rect`, lit under the pointer: red for Close, as on Windows. Where the
+/// OS hit-tests it, egui sees no pointer, and `os` is the look the OS reports.
 pub(crate) fn button(ui: &egui::Ui, rect: Rect, icon: Icon, os: Look) -> Response {
     let response = ui.interact(
         rect,
@@ -790,24 +750,20 @@ fn drawer_id() -> Id {
     Id::unique("gg title bar drawer")
 }
 
-/// The id of the settings.
 fn settings_id() -> Id {
     Id::unique("gg title bar settings")
 }
 
-/// One of the bar's own buttons, rather than the window's.
+/// One of the bar's own buttons, not the window's.
 #[derive(Clone, Copy)]
 enum Tool {
-    /// Three lines across, as menus behind a button have.
     Menu,
-    /// A gear, as settings behind a button have.
     Settings,
     /// A window with a strip along one side, filled while the panels there show.
     Sidebar(Sidebar, bool),
 }
 
 impl Tool {
-    /// Paints its icon in `rect`, a square, in `color`.
     fn paint(self, painter: &Painter, rect: Rect, color: Color32) {
         let scale = rect.width() / ICON;
         // From the top left of a square 16 across.
@@ -855,9 +811,8 @@ impl Tool {
     }
 }
 
-/// Draws `tool` over `rect`, of the bar's full height: its icon, on a rounded light inset from the
-/// bar's edges under the pointer, or while `lit`, as the layers' controls are; off unless
-/// `enabled`.
+/// Draws `tool` over `rect`, the bar's full height, lit under the pointer or while `lit`; off
+/// unless `enabled`.
 fn tool(ui: &mut egui::Ui, rect: Rect, tool: Tool, lit: bool, enabled: bool) -> Response {
     let icon = Atom::paint(Vec2::splat(ICON), move |ui, args| {
         tool.paint(ui.painter(), args.rect, args.fallback_text_color);
@@ -883,19 +838,18 @@ mod tests {
     struct Run {
         ctx: Context,
         bar: TitleBar,
-        /// The menus layers add each frame, and the width of a control they add, if they add one.
+        /// The menus layers add each frame, and their control's width, if any.
         menus: &'static [&'static str],
         control: Option<f32>,
-        /// What the sidebars' buttons say of the left side, the bottom and the right side.
+        /// The toggles' state for the left, bottom and right sides.
         sidebars: [Option<bool>; 3],
-        /// Where egui shows an area of a layer's each frame, if anywhere.
+        /// Where egui shows a layer's area each frame, if anywhere.
         area: Option<Rect>,
         frame: u32,
         pointer: Pos2,
-        /// What egui knows of the window.
         info: ViewportInfo,
-        /// Where the bar leaves the rest of the window, the menus open, the control, the side
-        /// whose button was clicked, and what egui drew, as of the last pass.
+        /// Last pass: where the bar leaves the window, the menus open, the control, the side
+        /// clicked, and what egui drew.
         top: f32,
         open: Rc<RefCell<Vec<&'static str>>>,
         shown: Option<Rect>,
@@ -904,7 +858,7 @@ mod tests {
     }
 
     impl Run {
-        /// Runs a couple of frames, with File and Edit menus.
+        /// Runs two frames, with File and Edit menus.
         fn new(chrome: Chrome) -> Self {
             Self::with_menus(chrome, &["File", "Edit"])
         }
@@ -930,8 +884,8 @@ mod tests {
             run
         }
 
-        /// Runs a frame, and returns the commands it sent the window that move, resize,
-        /// minimize, maximize or close it.
+        /// Runs a frame; returns the commands it sent the window that move, resize, minimize,
+        /// maximize or close it.
         fn frame(&mut self, events: Vec<Event>) -> Vec<ViewportCommand> {
             let mut input = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
@@ -944,7 +898,7 @@ mod tests {
             let (bar, menus, top, open) = (&mut self.bar, self.menus, &mut self.top, &self.open);
             let (control, sidebars, area) = (self.control, self.sidebars, self.area);
             let (shown, toggled) = (&mut self.shown, &mut self.toggled);
-            // A pass egui runs again gets no events, so a click is the first pass's.
+            // A rerun pass gets no events, so a click is the first pass's.
             *toggled = None;
             let mut output = self.ctx.run_ui(input, |root| {
                 open.borrow_mut().clear();
@@ -1016,7 +970,7 @@ mod tests {
             }])
         }
 
-        /// Clicks at `pos`, and returns the commands sent on the way.
+        /// Clicks at `pos`; returns the commands sent on the way.
         fn click_with(&mut self, button: PointerButton, pos: Pos2) -> Vec<ViewportCommand> {
             let mut commands = self.move_to(pos);
             commands.extend(self.button(button, true));
@@ -1028,8 +982,8 @@ mod tests {
             self.click_with(PointerButton::Primary, pos)
         }
 
-        /// Presses at `from`, drags to `to` over a few frames and lets go, and returns the
-        /// commands sent on the way.
+        /// Presses at `from`, drags to `to` over a few frames, releases; returns the commands
+        /// sent on the way.
         fn drag(&mut self, from: Pos2, to: Pos2) -> Vec<ViewportCommand> {
             let mut commands = self.move_to(from);
             commands.extend(self.button(PointerButton::Primary, true));
@@ -1052,7 +1006,6 @@ mod tests {
             Popup::is_id_open(&self.ctx, settings_id())
         }
 
-        /// Presses Escape, which closes what's open.
         fn escape(&mut self) {
             self.frame(vec![Event::Key {
                 key: Key::Escape,
@@ -1075,7 +1028,7 @@ mod tests {
             found.collect()
         }
 
-        /// The middle of `text`, which the last pass drew.
+        /// The middle of `text` as the last pass drew it.
         fn text(&self, text: &str) -> Pos2 {
             let found = self.texts(text);
             found
@@ -1097,8 +1050,8 @@ mod tests {
             Run::new(Chrome::AroundTrafficLights).top,
             BAR_AROUND_TRAFFIC_LIGHTS
         );
-        // Under the OS's frame, it's a bar of its own from the frame after a menu or a control
-        // first shows, and without either there's none.
+        // Under the OS's frame it's a bar of its own from the frame after a menu or control
+        // first shows; with neither there's none.
         assert_eq!(Run::new(Chrome::Os).top, BAR);
         let mut run = Run::with_menus(Chrome::Os, &[]);
         assert_eq!(run.top, 0.0);
@@ -1107,9 +1060,8 @@ mod tests {
         assert_eq!(run.top, BAR);
     }
 
-    /// The menu button opens the drawer, which slides out from the window's left edge below the
-    /// bar, and lists the menus, each opening beside it as the pointer comes onto it; an item
-    /// chosen closes the drawer, as its button and Escape do.
+    /// The menu button opens the drawer, listing menus that open beside it under the pointer. A
+    /// chosen item, its button and Escape close it.
     #[test]
     fn the_menu_button_opens_the_drawer_whose_menus_open_beside_it() {
         for chrome in [Chrome::Drawn, Chrome::Os] {
@@ -1148,9 +1100,8 @@ mod tests {
         }
     }
 
-    /// The layers' controls show at the middle of the bar, centered on it, in place of the
-    /// window's title; the free space either side of them is the OS's caption in Windows' frame,
-    /// and where the UI draws the frame, a drag on them doesn't move the window.
+    /// Controls show centered in place of the title. The free space either side is the OS's
+    /// caption in Windows' frame; elsewhere a drag on the controls doesn't move the window.
     #[test]
     fn controls_take_the_middle_of_the_bar_in_place_of_the_title() {
         let mut run = Run::new(Chrome::InWindowsFrame);
@@ -1172,9 +1123,8 @@ mod tests {
         assert_eq!(run.drag(at, at + vec2(30.0, 20.0)), []);
     }
 
-    /// The sidebars' buttons, left, bottom and right, sit left of the window's buttons, or at the
-    /// right end of the bar around the traffic lights; a click on one says which, while panels are
-    /// docked on its side. Under the OS's frame, there are none.
+    /// The toggles sit left of the window's buttons (at the bar's end around the traffic lights);
+    /// a click says which side, while panels are docked there. None under the OS's frame.
     #[test]
     fn the_sidebars_buttons_say_which_was_clicked() {
         let left_of_buttons = SCREEN.x - 3.0 * BUTTON;
@@ -1208,10 +1158,9 @@ mod tests {
         assert_eq!(run.toggled, None);
     }
 
-    /// Where the UI draws the title bar, the gear, left of the sidebars' buttons, opens the
-    /// settings below it, against its right, each group added under the one before; a click in
-    /// them leaves them open, and the gear, a click outside them and Escape close them. Under the
-    /// OS's frame there's no gear.
+    /// The gear, left of the toggles, opens the settings below it, groups stacked. A click inside
+    /// leaves them open; the gear, a click outside and Escape close them. No gear under the OS's
+    /// frame.
     #[test]
     fn the_gear_opens_the_settings_below_it() {
         let left_of_buttons = SCREEN.x - 3.0 * BUTTON;
@@ -1254,8 +1203,8 @@ mod tests {
     fn dragging_the_free_space_moves_the_window_and_dragging_a_button_doesnt() {
         let mut run = Run::new(Chrome::Drawn);
         run.info.outer_rect = Some(Rect::from_min_size(pos2(100.0, 50.0), SCREEN));
-        // egui starts the drag a step in, (7.5, 5) points from the press, where the window
-        // catches up before the OS moves it.
+        // egui starts the drag a step in, (7.5, 5) points from the press; the window catches up
+        // there before the OS moves it.
         let (from, to) = (FREE, FREE + vec2(30.0, 20.0));
         let catch_up = ViewportCommand::OuterPosition(pos2(107.5, 55.0));
         assert_eq!(run.drag(from, to), [catch_up, ViewportCommand::StartDrag]);
@@ -1263,7 +1212,7 @@ mod tests {
         // A click doesn't move it.
         run.frames(30);
         assert_eq!(run.click(FREE), []);
-        // A maximized window, the OS restores under the pointer.
+        // The OS restores a maximized window under the pointer.
         run.info.maximized = Some(true);
         run.frames(30);
         assert_eq!(run.drag(from, to), [ViewportCommand::StartDrag]);
@@ -1305,8 +1254,7 @@ mod tests {
         let [left, free, none] = caption.drag;
         let bar = run.bar.bar;
         assert_eq!(left, bar.with_max_x(INSET));
-        // From the menu button to the gear, left of the sidebars' buttons, without controls
-        // between.
+        // From the menu button to the gear, without controls between.
         let end = pos2(SCREEN.x - 3.0 * BUTTON - 4.0 * TOOL, bar.max.y);
         assert_eq!(free, Rect::from_min_max(pos2(INSET + TOOL, 0.0), end));
         assert_eq!(none, Rect::NOTHING);
@@ -1314,8 +1262,7 @@ mod tests {
             .with_min_x(SCREEN.x - 2.0 * BUTTON)
             .with_max_x(SCREEN.x - BUTTON);
         assert_eq!(caption.maximize, maximize);
-        // A click on the bar closes the menus' drawer, so egui takes the whole bar while it's
-        // open.
+        // A click on the bar closes the drawer, so egui takes the whole bar while it's open.
         run.click(MENU);
         assert!(run.drawer_open());
         assert_eq!(run.bar.caption(), None);
@@ -1411,7 +1358,7 @@ mod tests {
             );
             run.button(PointerButton::Primary, false);
         }
-        // Beside the central area, the edges are egui's, and the game gets no press there.
+        // The edges are egui's, so the game gets no press there.
         run.move_to(pos2(2.0, 300.0));
         assert!(run.ctx.is_pointer_over_egui());
         run.move_to(pos2(12.0, 300.0));

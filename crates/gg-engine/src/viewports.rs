@@ -1,7 +1,5 @@
-//! The windows of their own that the dock's torn-off groups live in: egui's immediate
-//! viewports. egui runs each one's pass inside the main window's, through a callback, so the
-//! callback opens the windows as egui asks for them, and the main window's frame renders them
-//! all.
+//! The windows of the dock's torn-off groups: egui's immediate viewports. A callback opens them
+//! as egui asks and runs each pass inside the main window's; its frame renders them all.
 
 use std::cell::RefCell;
 use std::iter;
@@ -28,32 +26,30 @@ use crate::chrome::Chrome;
 use crate::render_thread::TextureChanges;
 
 scoped_tls::scoped_thread_local! {
-    /// The event loop while a frame runs, which egui's callback opens windows with.
     static EVENT_LOOP: ActiveEventLoop
 }
 
-/// Runs `frame` where egui's callback can open windows.
+/// Runs `frame` with the event loop set, for egui's callback to open windows.
 pub(crate) fn with_event_loop<R>(event_loop: &ActiveEventLoop, frame: impl FnOnce() -> R) -> R {
     EVENT_LOOP.set(event_loop, frame)
 }
 
-/// The windows of their own, which open and close as egui shows their viewports.
+/// The windows that open and close as egui shows their viewports.
 pub(crate) struct Viewports {
     shared: Rc<RefCell<Shared>>,
 }
 
 /// What the main window's frame shares with egui's callback. Neither holds a borrow while egui
-/// runs a pass, since the callback runs inside the main window's.
+/// runs a pass: the callback runs inside the main window's.
 struct Shared {
     /// The main window, which owns the others, and what egui knows of it.
     main: Arc<Window>,
     main_info: ViewportInfo,
     children: Vec<Child>,
-    /// What the windows' passes drew this frame, in the order they ran.
+    /// This frame's passes, in run order.
     passes: Vec<Pass>,
-    /// The deferred viewports warned about, which don't open.
+    /// Deferred viewports already warned about; they don't open.
     warned: ViewportIdSet,
-    /// Who draws the windows' frames.
     chrome: Chrome,
 }
 
@@ -62,12 +58,11 @@ struct Child {
     window: Arc<Window>,
     input: WindowInput,
     info: ViewportInfo,
-    /// What egui last asked of the window, which it compares what it asks next with.
+    /// What egui last asked, to diff against its next ask.
     builder: ViewportBuilder,
     /// Whether the renderer presents to it yet.
     presented: bool,
-    /// The size it last took, while the renderer was away rendering, which it's told of once
-    /// it's back.
+    /// The size taken while the renderer was away, told to it once back.
     resized: Option<PhysicalSize<u32>>,
 }
 
@@ -78,7 +73,7 @@ struct Pass {
     textures: TextureChanges,
 }
 
-/// What a window's pass drew, for the renderer.
+/// What a window's pass drew.
 pub(crate) struct Drawn {
     key: u64,
     primitives: Vec<ClippedPrimitive>,
@@ -87,7 +82,7 @@ pub(crate) struct Drawn {
 }
 
 impl Drawn {
-    /// The window's key in the renderer, and its UI.
+    /// The window's renderer key, and its UI.
     pub(crate) fn ui(&mut self) -> (u64, gg_renderer::Ui<'_>) {
         let ui = gg_renderer::Ui {
             primitives: &self.primitives,
@@ -99,9 +94,8 @@ impl Drawn {
 }
 
 impl Viewports {
-    /// Lets egui open windows of their own, which `main` owns, framed as `chrome` says. On
-    /// Wayland, where windows can't be placed, egui keeps its viewports inside the main window
-    /// instead.
+    /// Lets egui open windows that `main` owns, framed by `chrome`. On Wayland, where windows
+    /// can't be placed, egui keeps viewports inside the main window.
     pub(crate) fn new(
         egui: &egui::Context,
         event_loop: &ActiveEventLoop,
@@ -120,7 +114,7 @@ impl Viewports {
         }));
         let display = event_loop.display_handle().map(|display| display.as_raw());
         egui.set_embed_viewports(matches!(display, Ok(RawDisplayHandle::Wayland(_))));
-        // The callback lasts as long as the thread, and the windows only as long as this.
+        // The callback outlives this; the windows don't.
         let weak = Rc::downgrade(&shared);
         egui::Context::set_immediate_viewport_renderer(move |egui, viewport| {
             let shared = weak
@@ -131,7 +125,7 @@ impl Viewports {
         Self { shared }
     }
 
-    /// The main window's input for a frame, which tells egui where every window is.
+    /// The main window's input for a frame, with every window's place.
     pub(crate) fn input(&self, main: &mut WindowInput) -> RawInput {
         let mut shared = self.shared.borrow_mut();
         let shared = &mut *shared;
@@ -145,12 +139,11 @@ impl Viewports {
         input
     }
 
-    /// After the main window's pass, with the renderer back from rendering: makes the changes egui
-    /// asks of the windows, closes those it no longer shows, tells the renderer the sizes the
-    /// others took meanwhile, and has it present to the new ones. `main` is the main window's
-    /// input. Returns what the windows' passes drew, in the order they ran, and whether
-    /// egui asked to close the main window, which, as with the OS's close button, is the
-    /// layers' to allow.
+    /// After the main window's pass, with the renderer back: applies egui's window changes,
+    /// closes windows it no longer shows, tells the renderer their new sizes and has it present
+    /// to new windows. `main` is the main window's input. Returns the windows' drawing in pass
+    /// order, and whether egui asked to close the main window; the layers allow that, as with
+    /// the OS's close button.
     pub(crate) fn end_frame(
         &self,
         egui: &egui::Context,
@@ -162,7 +155,7 @@ impl Viewports {
         let mut shared = self.shared.borrow_mut();
         let shared = &mut *shared;
         for (&id, output) in &outputs {
-            // A pass run after the main window's would leave egui's state pointing at the other
+            // A pass after the main window's would leave egui's state pointing at the other
             // window.
             if output.class == ViewportClass::Deferred && shared.warned.insert(id) {
                 let title = title(&output.builder);
@@ -174,7 +167,7 @@ impl Viewports {
                 );
             }
         }
-        // What the main window opened with stays as it was: only its commands apply.
+        // The main window's builder stays as opened; only its commands apply.
         let mut close = false;
         if let Some(output) = outputs.remove(&ViewportId::ROOT) {
             let mut commands = output.commands;
@@ -188,9 +181,9 @@ impl Viewports {
                 renderer.close_window(key(child.id));
                 return false;
             };
-            // This frame's passes saw its events.
+            // This frame's passes saw them.
             child.info.events.clear();
-            // What changes only with a new window, the dock never changes.
+            // The dock never changes what only a new window changes.
             let (mut commands, _) = child.builder.patch(output.builder);
             commands.extend(output.commands);
             apply(
@@ -200,7 +193,7 @@ impl Viewports {
                 &child.window,
                 commands,
             );
-            // A window that opens now has the size it took already.
+            // A new window already has the size it took.
             let resized = child.resized.take();
             if !child.presented {
                 let size = child.window.inner_size();
@@ -218,8 +211,7 @@ impl Viewports {
             }
             true
         });
-        // Tessellated only now, since the rest of the main window's pass could grow the font
-        // atlas the shapes' text is in.
+        // Tessellated now: the main window's pass could grow the font atlas.
         let drawn = (shared.passes.drain(..))
             .map(|pass| Drawn {
                 key: key(pass.viewport),
@@ -231,9 +223,8 @@ impl Viewports {
         (drawn, close)
     }
 
-    /// Hands an event of one of the windows of their own to egui. Their events never reach the
-    /// layers. A new size waits for [`Viewports::end_frame`] to reach the renderer, which is away
-    /// rendering between frames.
+    /// Hands egui a window's event; the layers never see them. A new size waits for
+    /// [`Viewports::end_frame`]: the renderer is away rendering between frames.
     pub(crate) fn window_event(&self, id: WindowId, event: &WindowEvent) {
         let mut shared = self.shared.borrow_mut();
         let Some(child) = shared
@@ -251,13 +242,13 @@ impl Viewports {
             WindowEvent::CloseRequested => child.info.events.push(ViewportEvent::Close),
             _ => {}
         }
-        // What egui doesn't keep goes nowhere else.
+        // Nothing else gets what egui doesn't keep.
         let _ = child.input.on_window_event(&child.window, event);
     }
 }
 
 impl Shared {
-    /// What egui knows of every window, which each pass's input carries.
+    /// What egui knows of every window, for each pass's input.
     fn infos(&self) -> ViewportIdMap<ViewportInfo> {
         let children = (self.children.iter()).map(|child| (child.id, child.info.clone()));
         iter::once((ViewportId::ROOT, self.main_info.clone()))
@@ -266,8 +257,7 @@ impl Shared {
     }
 }
 
-/// egui's callback: runs the pass of a window of its own, inside the main window's, opening the
-/// window first if it's new.
+/// egui's callback: runs a window's pass inside the main window's, opening the window if new.
 fn run(shared: &RefCell<Shared>, egui: &egui::Context, viewport: ImmediateViewport<'_>) {
     let ImmediateViewport {
         ids,
@@ -300,7 +290,7 @@ fn run(shared: &RefCell<Shared>, egui: &egui::Context, viewport: ImmediateViewpo
             },
         };
         input.viewports = shared.infos();
-        // A window that couldn't open still has its pass, as egui needs, though nothing shows it.
+        // A window that couldn't open still gets its pass, as egui needs; nothing shows it.
         input.viewports.entry(ids.this).or_default();
         input
     };
@@ -319,12 +309,11 @@ fn run(shared: &RefCell<Shared>, egui: &egui::Context, viewport: ImmediateViewpo
         .iter_mut()
         .find(|pass| pass.viewport == ids.this)
     {
-        // egui discarded the frame's first pass and ran another, which draws; the texture
-        // changes add up. The renderer applies the windows' changes before all of the main
-        // window's, as eframe does, though here the passes took turns: a texture changed in
-        // both, such as a font atlas that grows, can end up missing the windows' changes.
-        // Ordering them exactly needs egui to hand over each of the main window's passes'
-        // changes apart.
+        // egui discarded the first pass and ran another, which draws; texture changes add up.
+        // The renderer applies the windows' changes before all the main window's, as eframe
+        // does, though the passes took turns here: a texture changed in both (a growing font
+        // atlas) can miss the windows' changes. Exact order needs egui to hand over each
+        // main-window pass's changes apart.
         Some(pass) => {
             pass.shapes = output.shapes;
             pass.pixels_per_point = output.pixels_per_point;
@@ -361,7 +350,7 @@ impl Child {
                 )
                 .with_source(error)
             })?;
-        // What egui sets once the window is on a monitor, at that monitor's scale.
+        // What egui sets once the window is on a monitor, at its scale.
         egui_winit::apply_viewport_builder_to_window(egui, &window, builder);
         os_frame(chrome, &window)?;
         let mut info = ViewportInfo {
@@ -388,10 +377,10 @@ impl Child {
     }
 }
 
-/// Makes the changes egui asks of `window`. Moving or resizing a window hands the pointer to the
-/// OS, which on macOS, X11 and Wayland may never send the button's release back, so egui gets it
-/// now, when egui-winit starts the move: only while the window has focus. On Windows the release
-/// comes back as well, which egui and the layers ignore, having seen no press.
+/// Applies egui's changes to `window`. A move or resize hands the pointer to the OS, which on
+/// macOS, X11 and Wayland may never send back the button's release, so egui gets it as
+/// egui-winit starts the move, only while focused. On Windows the release comes back too; egui
+/// and the layers ignore it, having seen no press.
 fn apply(
     egui: &egui::Context,
     info: &mut ViewportInfo,
@@ -407,12 +396,11 @@ fn apply(
     if moves {
         input.release(egui::PointerButton::Primary);
     }
-    // egui's requests to cut, copy and paste, which nothing in the engine sends, go unanswered.
+    // egui's cut, copy and paste requests go unanswered; the engine sends none.
     egui_winit::process_viewport_commands(egui, info, commands, window, &mut Vec::new());
 }
 
-/// On Windows, the main window owns the others: they stay above it, and hide while it's
-/// minimized.
+/// On Windows the main window owns the others: they stay above it and hide when it's minimized.
 #[cfg(target_os = "windows")]
 fn owned_by(attributes: WindowAttributes, main: &Window) -> WindowAttributes {
     use winit::platform::windows::WindowAttributesExtWindows;
@@ -442,8 +430,8 @@ fn os_frame(_: Chrome, _: &Window) -> Result<()> {
     Ok(())
 }
 
-/// Keeps egui's viewports inside the main window from the next frame, after window `title`
-/// couldn't open, so that the dock floats their groups over it.
+/// After window `title` fails to open, keeps viewports inside the main window from the next
+/// frame: the dock floats their groups over it.
 fn embed(egui: &egui::Context, error: &Error, title: &str) {
     warn!(
         code = error.code(),
@@ -453,18 +441,17 @@ fn embed(egui: &egui::Context, error: &Error, title: &str) {
     egui.set_embed_viewports(true);
 }
 
-/// The title of the window `builder` opens: for the dock's, the panel showing in it.
+/// The title of the window `builder` opens: the dock's is its showing panel.
 fn title(builder: &ViewportBuilder) -> &str {
     builder.title.as_deref().unwrap_or_default()
 }
 
-/// The renderer's key for viewport `id`'s window.
+/// The renderer's key for `id`'s window.
 fn key(id: ViewportId) -> u64 {
     id.0.value()
 }
 
-/// egui's view of one window: egui-winit's, which turns the window's events into egui's input,
-/// and where the cursor last was in the window.
+/// egui's view of one window: egui-winit's state and the cursor.
 pub(crate) struct WindowInput {
     pub(crate) state: egui_winit::State,
     viewport: ViewportId,
@@ -489,14 +476,14 @@ impl WindowInput {
         }
     }
 
-    /// Where the cursor last was in the window, in points.
+    /// The cursor's position, in points.
     pub(crate) fn cursor(&self) -> Pos2 {
         self.cursor
     }
 
-    /// Hands `event` to egui. egui-winit drops a button's release when the cursor has left the
-    /// window and not moved since, which would leave egui's drags, and the dock's, holding on,
-    /// so that release goes in at the cursor's last position.
+    /// Hands `event` to egui. egui-winit drops a release when the cursor has left the window and
+    /// not moved since, leaving egui's and the dock's drags held; so that release goes in at the
+    /// cursor's last position.
     pub(crate) fn on_window_event(
         &mut self,
         window: &Window,
@@ -521,7 +508,6 @@ impl WindowInput {
         self.state.on_window_event(window, event)
     }
 
-    /// Lets go of `button` in egui, at the cursor's last position.
     fn release(&mut self, button: egui::PointerButton) {
         let modifiers = (self.state.egui_ctx()).input_for(self.viewport, |i| i.modifiers);
         self.state
@@ -536,7 +522,6 @@ impl WindowInput {
     }
 }
 
-/// egui's name for a mouse button, as egui-winit names them.
 fn pointer_button(button: MouseButton) -> Option<egui::PointerButton> {
     match button {
         MouseButton::Left => Some(egui::PointerButton::Primary),

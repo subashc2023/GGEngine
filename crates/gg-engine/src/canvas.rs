@@ -1,6 +1,6 @@
-//! The canvas: a game's own UI, its HUDs and menus, apart from the development UI, which layers lay
-//! out as they update, each frame, in the game's view's own space, anchored to its edges and scaled
-//! with it, as text and sprites that the engine draws into the view over the world.
+//! The canvas: a game's own UI (HUDs, menus), apart from the development UI. Layers lay it out
+//! each frame as text and sprites in the view's space, anchored to its edges and scaled with it.
+//! The engine draws it over the world.
 
 use std::mem;
 
@@ -10,14 +10,12 @@ use gg_renderer::{Draws, Shaders, Sprite, Viewport};
 use crate::font::Fonts;
 use crate::{Align, TextStyle};
 
-/// How tall the game's view is in the canvas's units, however many pixels it is: what's drawn on
-/// the canvas scales with the view's height, and the view is as many units across as its aspect
-/// ratio makes, 1,920 at 16:9.
+/// The view's height in canvas units, whatever its pixels. Drawings scale with the height; the
+/// width follows the aspect ratio: 1,920 at 16:9.
 pub const CANVAS_HEIGHT: f32 = 1080.0;
 
-/// What layers drew on the canvas this frame, until it's handed off: the draws, each in the
-/// canvas's units from its anchor, and where each run of them of one anchor starts; and the clip
-/// of the draws from here on, likewise.
+/// This frame's canvas draws until handed off: each in canvas units from its anchor, where each
+/// anchor's run starts, and the clip of later draws.
 #[derive(Default)]
 pub(crate) struct Drawn {
     draws: Draws,
@@ -26,9 +24,8 @@ pub(crate) struct Drawn {
 }
 
 impl Drawn {
-    /// Has the draws from here on placed from `anchor`, until another's, and clipped to `clip`, in
-    /// the canvas's units from it, until another: a clip set again where the anchor changes, so
-    /// that its draws' run starts there, and its clip is placed with them.
+    /// Places later draws from `anchor` and clips them to `clip` (canvas units from the anchor).
+    /// A new anchor starts a run and sets the clip again, so the clip is placed with its run.
     fn anchor(&mut self, anchor: [Align; 2], clip: Option<[Vec2; 2]>) {
         let moved = self.anchors.last().is_none_or(|&(_, last)| last != anchor);
         if moved {
@@ -40,9 +37,8 @@ impl Drawn {
         }
     }
 
-    /// Places this frame's draws in the pixels of a view `size` across and down, from its bottom
-    /// left, as the renderer's canvas takes them, and swaps them for `into`'s, which it forgets,
-    /// keeping their memory for the next frame's.
+    /// Places this frame's draws in the pixels of a view `size`, from its bottom left, and swaps
+    /// them into `into`, forgetting its old draws but keeping their memory for the next frame.
     pub(crate) fn place(&mut self, size: [u32; 2], into: &mut Draws) {
         let len = self.draws.len();
         for (i, &(start, anchor)) in self.anchors.iter().enumerate() {
@@ -56,8 +52,8 @@ impl Drawn {
     }
 }
 
-/// Where `anchor` is on a view `size` pixels across and down, from its bottom left, and how many of
-/// its pixels a unit of the canvas spans: [`CANVAS_HEIGHT`] units to the view's height.
+/// Where `anchor` is on a view `size`, from its bottom left, and the pixels a canvas unit spans:
+/// [`CANVAS_HEIGHT`] units to the view's height.
 fn anchored(anchor: [Align; 2], size: [u32; 2]) -> (Vec2, f32) {
     let [width, height] = size.map(|side| side as f32);
     let across = match anchor[0] {
@@ -73,24 +69,22 @@ fn anchored(anchor: [Align; 2], size: [u32; 2]) -> (Vec2, f32) {
     (Vec2::new(across, up), height / CANVAS_HEIGHT)
 }
 
-/// The matrix from the canvas's space at `anchor` to the pixels of a view `size` across and down,
-/// from its bottom left, as [`anchored`] places and scales it.
+/// The matrix from canvas space at `anchor` to a view `size`'s pixels, per [`anchored`].
 fn from_anchor(anchor: [Align; 2], size: [u32; 2]) -> Mat4 {
     let (at, scale) = anchored(anchor, size);
     Mat4::from_translation(at.extend(0.0)) * Mat4::from_scale(Vec3::new(scale, scale, 1.0))
 }
 
-/// Where a layer draws on the game's view's canvas, from one of the view's edges, corners or its
-/// middle, as [`Context::canvas`](crate::Context::canvas) gives it.
+/// Where a layer draws on the game view's canvas, from an edge, corner or the middle of the view.
+/// [`Context::canvas`](crate::Context::canvas) gives it.
 pub struct Canvas<'a> {
     drawn: &'a mut Drawn,
     fonts: &'a mut Fonts,
     shaders: &'a mut Shaders,
     anchor: [Align; 2],
-    /// What it draws within, as [`set_clip`](Self::set_clip) set it.
+    /// Set by [`set_clip`](Self::set_clip).
     clip: Option<[Vec2; 2]>,
-    /// Where the game's view was as the last frame handed it off, and the cursor, in the main
-    /// window's pixels.
+    /// The view as the last frame handed it off, and the cursor, in the main window's pixels.
     view: Option<Viewport>,
     cursor: Option<[f64; 2]>,
 }
@@ -115,31 +109,26 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Has what this canvas draws from here on show only within `clip`, a rectangle in the
-    /// canvas's units from its anchor, +Y up, as transforms place draws, its least corner then its
-    /// greatest: what of a draw falls outside it isn't drawn, to the view's pixel, each edge at the
-    /// nearest pixel's, as a list that scrolls hides what's scrolled out of it. `None`, as a canvas
-    /// starts, clips nothing. Each clip is drawn as a scissor of its own, so a canvas that changes
-    /// its clip at each draw draws each apart, rather than as one instanced draw of them all.
+    /// Shows later draws only within `clip`: a rectangle in canvas units from the anchor, +Y up,
+    /// least corner then greatest. Edges snap to the nearest pixel. `None`, the start, clips
+    /// nothing. Each clip is its own scissor, so changing it at each draw costs a draw each
+    /// instead of one instanced draw.
     pub fn set_clip(&mut self, clip: Option<[Vec2; 2]>) {
         self.clip = clip;
     }
 
-    /// Draws `sprite` on the canvas this frame, where `transform` places it from the canvas's
-    /// anchor, over everything drawn before it, the world's nearest entities too, within its clip.
-    /// Unscaled, a sprite is a unit square around the transform's translation, as [`Sprite`] says,
-    /// so a sprite 400 units across is scaled by 400. It's of no entity, so a
-    /// [pick](crate::Context::pick) where it's on top finds none.
+    /// Draws `sprite` this frame, placed by `transform` from the anchor, within the clip, over
+    /// everything drawn before, the world too. Unscaled it's a unit square ([`Sprite`]), so 400
+    /// units across is scale 400. It belongs to no entity: a [pick](crate::Context::pick) on top
+    /// of it finds none.
     pub fn draw_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         self.drawn.anchor(self.anchor, self.clip);
         self.drawn.draws.push_sprite(transform, sprite);
     }
 
-    /// Draws `text` on the canvas this frame in `style`, where `transform` places its origin from
-    /// the canvas's anchor, over everything drawn before it, the world's nearest entities too,
-    /// within its clip, laid out as [`Context::draw_text`](crate::Context::draw_text) lays it out,
-    /// its em `style.size` of the canvas's units. It's of no entity, so a
-    /// [pick](crate::Context::pick) where it's on top finds none.
+    /// Like [`draw_sprite`](Self::draw_sprite) for `text` in `style`, its origin placed by
+    /// `transform`. Laid out like [`Context::draw_text`](crate::Context::draw_text), its em
+    /// `style.size` canvas units.
     ///
     /// # Panics
     ///
@@ -150,10 +139,9 @@ impl<'a> Canvas<'a> {
         self.drawn.draws.extend_glyphs(self.shaders, glyphs);
     }
 
-    /// Where the cursor is on the canvas, in its units from its anchor, +Y up, as the view showed
-    /// it in the last frame handed off, which is what the cursor was over; `None` while the cursor
-    /// isn't over the view, as [`Context::view`](crate::Context::view) gives it, or the view has no
-    /// area, and in headless runs, which have no cursor but what the tool API's `input` moves.
+    /// The cursor in canvas units from the anchor, +Y up, over the view as the last frame handed
+    /// it off. `None` when it isn't over the view ([`Context::view`](crate::Context::view)), the
+    /// view has no area, or in headless runs unless the tool API's `input` moved it.
     pub fn cursor(&self) -> Option<Vec2> {
         let view = self.view?;
         let [x, y] = self.cursor?;
@@ -175,10 +163,8 @@ mod tests {
 
     use super::*;
 
-    /// Draws on the canvas from each anchor, interleaved, and checks that handing them off places
-    /// each in the view's pixels from its anchor, scaled to the view's height, whatever its size:
-    /// the draws laid out once are placed again for a view of another size; and that the next
-    /// frame's start afresh, in the memory the last's had.
+    /// Handing off places interleaved draws from each anchor, scaled to the view's height, again
+    /// for a view of another size; the next frame starts afresh in the last's memory.
     #[test]
     fn handing_off_places_each_draw_from_its_anchor() {
         let mut textures = Textures::default();
@@ -202,7 +188,7 @@ mod tests {
         };
         let mut handed = Draws::default();
         for (size, scale, points) in [
-            // 1,080 pixels high, a pixel a unit: top left, middle, top left, bottom right.
+            // 1,080 high, a pixel a unit: top left, middle, top left, bottom right.
             (
                 [1920, 1080],
                 1.0,
@@ -226,7 +212,7 @@ mod tests {
             assert_eq!(handed, want, "a view of {size:?}");
             assert!(drawn.draws.is_empty() && drawn.anchors.is_empty());
         }
-        // Text joins its anchor's run, which another anchor's sprite ends.
+        // Text joins its anchor's run; another anchor's sprite ends it.
         let style = TextStyle {
             font: None,
             size: 50.0,
@@ -243,9 +229,8 @@ mod tests {
         assert_eq!(drawn.anchors, [(0, top_right), (3, middle)]);
     }
 
-    /// A canvas's clip goes with its draws, placed from its anchor as they are, in the view's
-    /// pixels: a clip of one rectangle from two anchors is two, each placed from its own, and the
-    /// draws after it's taken away are clipped no more.
+    /// A clip is placed with its draws: one rectangle from two anchors is two clips, each placed
+    /// from its own anchor; draws after it's cleared are unclipped.
     #[test]
     fn a_clip_is_placed_with_its_draws() {
         let mut textures = Textures::default();
@@ -290,15 +275,15 @@ mod tests {
         assert_eq!(handed, want);
     }
 
-    /// The cursor over the view is where the canvas draws at its pixel, from any anchor, the view's
-    /// origin in the window aside; outside the view, or without a cursor or a view, it's nowhere.
+    /// The cursor is where the canvas draws at its pixel, from any anchor, offset by the view's
+    /// origin; outside the view, or without a cursor or view, it's `None`.
     #[test]
     fn the_cursor_is_where_the_canvas_draws_under_it() {
         let mut textures = Textures::default();
         let mut fonts = Fonts::new(&mut textures);
         let mut shaders = Shaders::default();
         let mut drawn = Drawn::default();
-        // 540 pixels high, two to a unit, 100 from the window's left and 50 from its top.
+        // 540 pixels high, two to a unit, at (100, 50) in the window.
         let view = Viewport {
             origin: [100, 50],
             size: [800, 540],
@@ -306,7 +291,7 @@ mod tests {
         let mut found = |anchor, view, cursor| {
             Canvas::new(&mut drawn, &mut fonts, &mut shaders, anchor, view, cursor).cursor()
         };
-        // 300 right of the view's left and 90 above its bottom.
+        // 300 right of the view's left, 90 above its bottom.
         let over = Some([400.0, 500.0]);
         let at = [
             ([Align::Start, Align::Start], Vec2::new(600.0, -900.0)),
