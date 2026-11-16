@@ -1,10 +1,9 @@
-//! Passes that compute: dispatches of compute shaders, which write the storage images a graph's
-//! pass declares and sample the images it samples.
+//! Passes that compute: dispatches of compute shaders that write the storage images a graph's pass
+//! declares and sample the images it samples.
 //!
-//! The SAFETY comments here lean on what the parent module keeps, as pass.rs's do: commands record
-//! until the frame is submitted, `Frame::outside_pass` checks that no pass is open, and
-//! `Frame::open_pass` has placed the barriers that put each image a pass uses in the layout it uses
-//! it in.
+//! The SAFETY comments lean on what the parent module keeps, as pass.rs's do: commands record until
+//! the frame is submitted, `Frame::outside_pass` checks that no pass is open, and
+//! `Frame::open_pass` has placed the barriers that put each image a pass uses in its layout.
 
 use std::ffi::CStr;
 use std::ops::Range;
@@ -19,13 +18,14 @@ use crate::ComputePipeline;
 use crate::bindless::PUSH_CONSTANTS;
 
 impl<'a> Frame<'a> {
-    /// Records `pass`, a pass of the frame's graph that computes, which must be the next of its
-    /// passes to record. Its dispatches end when it's dropped.
+    /// Records `pass`, which must be the graph's next pass to record and compute. Its dispatches
+    /// end when it's dropped.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, `pass` isn't the graph's next, or doesn't compute; or if
-    /// it samples a target that no pass has drawn into or written since it was made.
+    /// - A forgotten pass is still open.
+    /// - `pass` isn't the graph's next, or doesn't compute.
+    /// - It samples a target no pass has drawn into or written since it was made.
     pub fn compute(&mut self, pass: PassId) -> Compute<'_, 'a> {
         let decl = self.take_pass(pass, PassKind::Compute);
         self.open_pass(pass);
@@ -41,16 +41,17 @@ impl<'a> Frame<'a> {
     }
 }
 
-/// Dispatching compute shaders in a frame's pass, which ends when it's dropped; a pass forgotten
-/// instead stays open, which the frame's next call catches. Shaders read data through addresses
-/// pushed as push constants, of [`Upload`]s or the buffers the pass uses, write the storage images
-/// the pass writes through their levels' slots, write the buffers it writes through their
-/// addresses, and sample textures from the bindless set, the images the pass samples among them.
+/// Dispatching compute shaders in a frame's pass, which ends when it's dropped. A forgotten pass
+/// stays open, which the frame's next call catches.
+///
+/// Shaders read [`Upload`]s and the buffers the pass uses through addresses pushed as push
+/// constants, write storage images through their levels' slots and buffers through their
+/// addresses, and sample the bindless set's textures, among them the images the pass samples.
 pub struct Compute<'p, 'a> {
     frame: &'p mut Frame<'a>,
     /// Its uses, in its graph's.
     uses: Range<usize>,
-    /// Its uses of buffers, in its graph's.
+    /// Its buffer uses, in its graph's.
     buffer_uses: Range<usize>,
     /// How many labels inside it are open, which its drop closes.
     labels: u32,
@@ -59,8 +60,8 @@ pub struct Compute<'p, 'a> {
 }
 
 impl<'a> Compute<'_, 'a> {
-    /// The index in the bindless set that shaders sample `image` through, which the pass samples,
-    /// as its graph declared, during the pass alone.
+    /// The bindless index shaders sample `image` through, during the pass alone. The pass must
+    /// sample it, as its graph declared.
     ///
     /// # Panics
     ///
@@ -75,11 +76,12 @@ impl<'a> Compute<'_, 'a> {
     }
 
     /// The index among the bindless set's storage images that shaders write and read level
-    /// `level` of `image` through, an image the pass writes, as its graph declared, during the
-    /// pass alone: a `RWTexture2DArray` of its layers, a cube's six faces in Vulkan's order, +X,
-    /// -X, +Y, -Y, +Z, -Z, of 16-bit floats in RGBA, or of a 32-bit float for an image of scalars
-    /// ([`Graph::scalar`](crate::Graph::scalar)); an image of the graph's own has one layer and one
-    /// level.
+    /// `level` of `image` through, during the pass alone. The pass must write `image`, as its
+    /// graph declared.
+    ///
+    /// It is a `RWTexture2DArray` of the layers, a cube's six faces in Vulkan's order (+X, -X, +Y,
+    /// -Y, +Z, -Z), of 16-bit floats in RGBA, or of a 32-bit float for an image of scalars
+    /// ([`Graph::scalar`](crate::Graph::scalar)). A graph's own image has one layer and one level.
     ///
     /// # Panics
     ///
@@ -116,8 +118,8 @@ impl<'a> Compute<'_, 'a> {
         self.frame.graph.uses[self.uses.clone()].contains(&(image, use_))
     }
 
-    /// The address that shaders read, or write, `buffer` through, which the pass reads or writes,
-    /// as its graph declared, during the pass alone.
+    /// The address shaders read or write `buffer` through, during the pass alone. The pass must
+    /// read or write it, as its graph declared.
     ///
     /// # Panics
     ///
@@ -138,8 +140,8 @@ impl<'a> Compute<'_, 'a> {
         self.frame.upload(bytes)
     }
 
-    /// Opens a label inside the pass, named `name`, which captures show the dispatches after it
-    /// under, until [`Compute::end_label`] closes it, or the pass ends.
+    /// Opens a label `name` that captures show the dispatches after it under, until
+    /// [`Compute::end_label`] or the pass's end closes it.
     pub fn begin_label(&mut self, name: &CStr) {
         // SAFETY: the commands are recording.
         unsafe { self.frame.frames.device.begin_label(self.commands(), name) };
@@ -178,7 +180,7 @@ impl<'a> Compute<'_, 'a> {
         }
     }
 
-    /// Sets the push constants, from offset 0, that the dispatches which follow see.
+    /// Sets the push constants, from offset 0, for the dispatches that follow.
     ///
     /// # Panics
     ///
@@ -206,8 +208,8 @@ impl<'a> Compute<'_, 'a> {
     ///
     /// # Panics
     ///
-    /// If no pipeline is set, or `groups` passes the device's `maxComputeWorkGroupCount`, which is
-    /// at least 65,535 each way.
+    /// - No pipeline is set.
+    /// - `groups` passes the device's `maxComputeWorkGroupCount`, at least 65,535 each way.
     pub fn dispatch(&mut self, groups: [u32; 3]) {
         assert!(self.pipeline_set, "a dispatch needs a pipeline set first");
         let device = &self.frame.frames.device;

@@ -1,8 +1,8 @@
-//! The harness gg-gpu's and gg-renderer's GPU tests share, hidden, as no game uses it.
+//! The harness gg-gpu's and gg-renderer's GPU tests share; hidden, as no game uses it.
 //!
-//! Each runs its tests in one process with a main of its own, which [`begin`]s before any thread
-//! exists, then runs the tests one after another through [`Tests`]: those whose names contain an
-//! argument that isn't a flag, as libtest picks them, or all of them without one.
+//! Each runs its tests in one process with a main of its own. It [`begin`]s before any thread
+//! exists, then runs the tests one after another through [`Tests`]: those whose names contain a
+//! non-flag argument, as libtest picks them, or all without one.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -10,8 +10,8 @@ use std::process::ExitCode;
 
 use crate::Validation;
 
-/// Readies a run of GPU tests, `name`'s, logging into `dir`: the JSON log's path, or `None` where
-/// the tests are skipped, which it prints.
+/// Readies a run of `name`'s GPU tests, logging into `dir`. Returns the JSON log's path, or `None`
+/// where the tests are skipped, which it prints.
 ///
 /// # Safety
 ///
@@ -34,12 +34,12 @@ pub unsafe fn begin(name: &str, dir: &Path) -> Option<PathBuf> {
         println!("GPU tests skipped: GG_SKIP_GPU_TESTS is set");
         return None;
     }
-    // Overlays such as Steam's and OBS's load into every instance as implicit layers, and can
-    // add validation errors of their own. Apps keep implicit layers, since RenderDoc's capture
-    // layer is one; the loader warns about each one it leaves out here. Unless `RUST_LOG` is set,
-    // only warnings and errors are logged, and of the loader's and other layers' messages only
-    // errors, so that a passing run's output is its tests' results rather than what each
-    // instance, device and pipeline logs as it's made.
+    // Overlays such as Steam's and OBS's load into every instance as implicit layers and can add
+    // validation errors of their own. Apps keep implicit layers, since RenderDoc's capture layer
+    // is one; the loader warns about each one left out here. Unless `RUST_LOG` is set, only
+    // warnings and errors are logged, and of the loader's and other layers' messages only errors,
+    // so a passing run's output is its test results, not what each instance, device and pipeline
+    // logs as it's made.
     // SAFETY: the caller guarantees that no other thread exists yet to read the environment.
     unsafe {
         std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~");
@@ -52,8 +52,8 @@ pub unsafe fn begin(name: &str, dir: &Path) -> Option<PathBuf> {
 
 /// Runs the tests the arguments pick, one after another, and counts how they go.
 pub struct Tests {
-    /// The arguments that aren't libtest's flags, nor the values they take: a test runs if its
-    /// name contains one of them, or if there are none.
+    /// The arguments that aren't libtest's flags or their values: a test runs if its name
+    /// contains one, or if there are none.
     filters: Vec<String>,
     passed: usize,
     failed: usize,
@@ -87,8 +87,8 @@ impl Tests {
         }
     }
 
-    /// Runs `test` if the filters pick it, and prints whether it passed. A test that fails goes
-    /// no further, and the log shows its panic, but the tests after it still run.
+    /// Runs `test` if the filters pick it, and prints whether it passed. A failing test stops
+    /// there and the log shows its panic, but later tests still run.
     pub fn run(&mut self, name: &str, test: impl FnOnce()) {
         let picked = self.filters.is_empty()
             || (self.filters.iter()).any(|filter| name.contains(filter.as_str()));

@@ -15,8 +15,8 @@ use crate::frame::graph::ImageKind;
 use crate::{Device, vk_error, vk_failed};
 
 /// The pixel formats of what a pass renders into, which pipelines are made for: its color
-/// target's, its IDs', if it has them, its motion's beside those, if it has it, and its depth's, if
-/// it has it, as a [`Graph`]'s passes declare them; or its depth's alone.
+/// target's, its IDs' and motion's beside it if it has them, and its depth's if it has it, as a
+/// [`Graph`]'s passes declare them; or its depth's alone.
 ///
 /// [`Graph`]: crate::Graph
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,22 +32,21 @@ pub struct Format {
 }
 
 impl Format {
-    /// The format of the colors of high dynamic range that a [`Graph`]'s own images of them hold
-    /// ([`Graph::hdr`]), 16-bit floats, without IDs or depth.
+    /// The format of a [`Graph`]'s high-dynamic-range images ([`Graph::hdr`]), 16-bit floats,
+    /// without IDs or depth.
     ///
     /// [`Graph`]: crate::Graph
     /// [`Graph::hdr`]: crate::Graph::hdr
     pub const HDR: Self = Self::new(ImageKind::Hdr.format());
 
     /// The format of a visibility buffer ([`Graph::visibility`]), two 32-bit unsigned integers a
-    /// pixel, without IDs or depth: a pipeline into one writes them at location 0, and blends as
-    /// [`Blend::Opaque`] alone, as integers don't blend.
+    /// pixel, without IDs or depth. A pipeline into one writes them at location 0 and blends only
+    /// as [`Blend::Opaque`], as integers don't blend.
     ///
     /// [`Graph::visibility`]: crate::Graph::visibility
     pub const VISIBILITY: Self = Self::new(ImageKind::Visibility.format());
 
-    /// The format of a pass that draws depth alone, as one into a shadow map ([`Graph::depth`])
-    /// does.
+    /// The format of a pass drawing depth alone, as into a shadow map ([`Graph::depth`]).
     ///
     /// [`Graph::depth`]: crate::Graph::depth
     pub const DEPTH: Self = Self::new(vk::Format::UNDEFINED).with_depth();
@@ -62,8 +61,7 @@ impl Format {
         }
     }
 
-    /// This format with IDs': what a pass into a target of this format with IDs beside it
-    /// ([`RenderPass::ids`](crate::RenderPass::ids)) renders into, as a second color target.
+    /// This format with IDs' ([`RenderPass::ids`](crate::RenderPass::ids)), a second color target.
     pub const fn with_ids(self) -> Self {
         Self {
             ids: ImageKind::Ids.format(),
@@ -71,9 +69,9 @@ impl Format {
         }
     }
 
-    /// This format with motion's: what a pass into a target of this format with IDs and motion
-    /// beside it ([`RenderPass::motion`](crate::RenderPass::motion)) renders into, as a third color
-    /// target, which a pipeline that writes depth writes at location 2, as 16-bit floats in RGBA.
+    /// This format with motion's ([`RenderPass::motion`](crate::RenderPass::motion)), a third
+    /// color target, which a pipeline that writes depth writes at location 2, as 16-bit floats in
+    /// RGBA.
     pub const fn with_motion(self) -> Self {
         Self {
             motion: ImageKind::Motion.format(),
@@ -81,8 +79,7 @@ impl Format {
         }
     }
 
-    /// This format with depth's: what a pass into a target of this format with depth
-    /// ([`RenderPass::depth`](crate::RenderPass::depth)) renders into.
+    /// This format with depth's ([`RenderPass::depth`](crate::RenderPass::depth)).
     pub const fn with_depth(self) -> Self {
         Self {
             depth: ImageKind::Depth.format(),
@@ -115,12 +112,12 @@ pub enum Blend {
     /// The output goes over it by its alpha, which its color isn't multiplied by: straight alpha,
     /// as images store it.
     Alpha,
-    /// The output, whose color is already multiplied by its alpha, goes over it.
+    /// The output, its color already multiplied by its alpha, goes over it.
     PremultipliedAlpha,
 }
 
 impl Blend {
-    /// The color target's blend state, which combines the output with it this way.
+    /// The color target's blend state for this blend.
     fn attachment(self) -> vk::PipelineColorBlendAttachmentState {
         match self {
             Self::Opaque => vk::PipelineColorBlendAttachmentState::default(),
@@ -145,20 +142,18 @@ impl Blend {
     }
 }
 
-/// Which of a mesh's triangles draw, by the way their corners wind as they show on screen.
-/// Vulkan tells it in framebuffer coordinates, whose Y points down, and flips the sign of the
-/// area it measures there, so its counterclockwise is as seen; the renderer's cameras show the
-/// world upright. Whichever draw, a fragment shader's front face, `SV_IsFrontFace`, is a triangle
-/// that winds counterclockwise.
+/// Which of a mesh's triangles draw, by how their corners wind on screen. Vulkan measures in
+/// framebuffer coordinates, whose Y points down, and flips the area's sign, so its
+/// counterclockwise is as seen; the renderer's cameras show the world upright. Whichever draw, a
+/// fragment shader's front face, `SV_IsFrontFace`, is a triangle that winds counterclockwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Faces {
     /// All of them: what a pass starts drawing.
     Both,
-    /// Those whose corners wind counterclockwise: the fronts of a mesh whose fronts wind so seen
-    /// from in front, as glTF's do, drawn with a transform that doesn't mirror it.
+    /// Triangles winding counterclockwise: the fronts of a mesh whose fronts wind so seen from in
+    /// front, as glTF's do, drawn with a transform that doesn't mirror it.
     CounterClockwise,
-    /// Those whose corners wind clockwise: such a mesh's fronts drawn with a transform that
-    /// mirrors it.
+    /// Triangles winding clockwise: such a mesh's fronts drawn with a mirroring transform.
     Clockwise,
 }
 
@@ -173,62 +168,59 @@ impl Faces {
     }
 }
 
-/// What a graphics pipeline is made from. It draws triangle lists, and its viewport, scissor and
-/// which [`Faces`] draw are set as it draws, a pass starting with both. Where its targets have
-/// depth, it tests it, drawing only where it's as near as what was drawn there before or nearer:
-/// depth runs from 1 at the near plane to 0 far away, as the renderer's cameras project it.
+/// What a graphics pipeline is made from. It draws triangle lists; its viewport, scissor and
+/// [`Faces`] are set as it draws, a pass starting with both. Where its targets have depth, it
+/// tests it, drawing only where it's as near as what was drawn there or nearer: depth runs from 1
+/// at the near plane to 0 far away, as the renderer's cameras project it.
 pub struct GraphicsDesc<'a> {
     /// The debug name.
     pub name: &'a str,
     /// A SPIR-V module holding its entry points, but a mesh shader's, which slangc compiled. It's
-    /// trusted to be valid and to keep to the pipeline layout: to read only the push constants set
-    /// before a draw, to use only the device's enabled features, and to bind nothing but the
-    /// bindless set's textures and samplers. Vulkan checks none of it; validation does in debug
-    /// builds.
+    /// trusted to be valid and keep to the pipeline layout: read only the push constants set
+    /// before a draw, use only the device's enabled features, and bind nothing but the bindless
+    /// set's textures and samplers. Vulkan checks none of it; validation does in debug builds.
     pub spirv: &'a [u8],
     pub vertex: &'a CStr,
-    /// A mesh shader's module, holding `vertex` alone, in place of a vertex shader, which only a
-    /// device that draws through mesh shaders takes ([`Device::mesh_shaders`]): the pipeline draws
+    /// A mesh shader's module, holding `vertex` alone, in place of a vertex shader; only a device
+    /// that draws through mesh shaders takes it ([`Device::mesh_shaders`]). The pipeline draws
     /// through [`Pass::draw_mesh_tasks_indirect`](crate::Pass::draw_mesh_tasks_indirect). Trusted
-    /// as `spirv` is. A module of its own, as validation before the Vulkan SDK 1.4.328's, as
-    /// Debian 13's, refuses a mesh shader beside a fragment shader in one module: it checked the
-    /// mesh shader's outputs against every entry point of the module (SPIRV-Tools #6313).
+    /// as `spirv` is. A module of its own, as validation before Vulkan SDK 1.4.328's, as Debian
+    /// 13's, refuses a mesh shader beside a fragment shader in one module: it checked the mesh
+    /// shader's outputs against every entry point of the module (SPIRV-Tools #6313).
     pub mesh: Option<&'a [u8]>,
     /// `None` for a pipeline that draws depth alone, all of each triangle, as a shadow map's
     /// opaque casters are drawn.
     pub fragment: Option<&'a CStr>,
     /// The formats of the targets it draws into. Where they have IDs, its fragment shader writes
-    /// them at location 1, as two 32-bit unsigned integers, which replace what's there wherever it
-    /// draws, however its color blends, if [`ids_write`](Self::ids_write) says it writes them.
-    /// Where they have motion, a pipeline that writes depth
-    /// writes it at location 2, a float4 that replaces what's there, as the motion belongs to what
-    /// owns the depth; one that doesn't leaves it as it was.
+    /// them at location 1, as two 32-bit unsigned integers, replacing what's there wherever it
+    /// draws, however its color blends, if [`ids_write`](Self::ids_write). Where they have
+    /// motion, a pipeline that writes depth writes it at location 2, a float4 replacing what's
+    /// there, as the motion belongs to what owns the depth; one that doesn't leaves it as it was.
     ///
     /// lavapipe, once a command buffer has bound a pipeline without color targets, writes every
     /// target of the pipelines it binds after as it writes the color target, by its blending and
     /// write mask (Mesa's `lvp_execute.c` clears `independent_blend_enable` then, and only a new
     /// command buffer sets it again, through Mesa 25.3 at least). So there, a fragment shader that
     /// returns nothing at a location its targets have, even one the pipeline doesn't write, leaves
-    /// undefined values in that target, which differ from one run to the next; zeros returned there
-    /// leave a target that blends as it was.
+    /// undefined values in that target, differing from run to run; zeros returned there leave a
+    /// target that blends as it was.
     pub format: Format,
     pub blend: Blend,
     /// Whether it writes its depth where it draws, for later draws to test against. Only a
     /// pipeline whose targets have depth can.
     pub depth_write: bool,
     /// Whether it writes its IDs where it draws. Only a pipeline whose targets have IDs can. One
-    /// that doesn't leaves the IDs of what's under what it draws, as a draw that's for seeing by
-    /// does, such as the engine's grid, so that a pick there finds what's under it.
+    /// that doesn't leaves the IDs under what it draws, as a draw for seeing by does, such as the
+    /// engine's grid, so a pick there finds what's under it.
     pub ids_write: bool,
-    /// How far each fragment's depth goes back, away from the near plane, in multiples of the most
-    /// its triangle's depth changes across a pixel: slope-scaled depth bias, which keeps the depths
-    /// of a shadow map behind the surfaces they're of where those slope away from the light, so
-    /// that a surface doesn't shadow itself. 0 for none. Depth runs from 1 at the near plane, so
-    /// going back takes depth down: Vulkan's slope factor is this negated.
+    /// Slope-scaled depth bias: how far each fragment's depth goes back from the near plane, in
+    /// multiples of the most its triangle's depth changes across a pixel. It keeps a shadow map's
+    /// depths behind surfaces sloping away from the light, so a surface doesn't shadow itself. 0
+    /// for none. Depth runs from 1 at the near plane, so going back lowers it: Vulkan's slope
+    /// factor is this negated.
     pub depth_bias: f32,
-    /// Whether depth nearer than the near plane, or farther than the far, is clamped to it, where
-    /// otherwise what's past them would be clipped: as a shadow map's casters between the light
-    /// and its near plane still cast shadows, from it.
+    /// Whether depth nearer than the near plane or farther than the far is clamped to it, not
+    /// clipped: a shadow map's casters between the light and its near plane still cast shadows.
     pub depth_clamp: bool,
 }
 
@@ -248,15 +240,16 @@ impl Pipeline {
     ///
     /// # Panics
     ///
-    /// If it writes, biases or clamps depth for targets without it, writes IDs for targets without
-    /// them, it has no fragment shader but
-    /// its targets have colors, it blends into a visibility buffer, its targets have IDs but no
-    /// color or motion but no IDs, or its geometry is a mesh shader and the device draws through
-    /// none.
+    /// - It writes, biases or clamps depth for targets without it.
+    /// - It writes IDs for targets without them.
+    /// - It has no fragment shader but its targets have colors.
+    /// - It blends into a visibility buffer.
+    /// - Its targets have IDs but no color, or motion but no IDs.
+    /// - Its geometry is a mesh shader and the device draws through none.
     pub fn graphics(device: &Arc<Device>, desc: &GraphicsDesc<'_>) -> Result<Self> {
         let depth = desc.format.has_depth();
-        // No pass draws IDs without a color target, and the targets below take their locations
-        // from the color's: without it, the IDs would be at location 0, which shaders write at 1.
+        // Locations below follow the color's: without it, IDs would be at location 0, but shaders
+        // write them at 1. No pass draws IDs without color.
         assert!(
             desc.format.has_color() || !desc.format.has_ids(),
             "a pipeline draws IDs only beside a color target, its first"
@@ -333,7 +326,7 @@ impl Pipeline {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let attachment = desc.blend.attachment();
         // Integers don't blend (VUID-VkGraphicsPipelineCreateInfo-renderPass-06062), so the IDs'
-        // state differs from a blended color's, which takes independent blending.
+        // state differs from a blended color's: independent blending.
         let ids =
             vk::PipelineColorBlendAttachmentState::default().color_write_mask(if desc.ids_write {
                 vk::ColorComponentFlags::R | vk::ColorComponentFlags::G
@@ -355,8 +348,7 @@ impl Pipeline {
             1 + usize::from(desc.format.has_ids()) + usize::from(desc.format.has_motion());
         let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(&attachments[first..targets]);
-        // Or equal, so that what draws later at one depth goes over what drew there before, as 2D
-        // games stack what they draw at one z.
+        // Or equal, so later draws at one depth go over earlier ones, as 2D games stack at one z.
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(depth)
             .depth_write_enable(desc.depth_write)
@@ -372,7 +364,6 @@ impl Pipeline {
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&formats[first..targets])
             .depth_attachment_format(desc.format.depth);
-        // How long the driver took, and whether the device's pipeline cache held the pipeline.
         let mut feedback = vk::PipelineCreationFeedback::default();
         let mut feedback_info = vk::PipelineCreationFeedbackCreateInfo::default()
             .pipeline_creation_feedback(&mut feedback);
@@ -389,12 +380,12 @@ impl Pipeline {
             .layout(device.bindless().pipeline_layout())
             .push_next(&mut rendering)
             .push_next(&mut feedback_info);
-        // SAFETY: the modules, the layout and the pipeline cache, if the device has one, are live,
-        // and the infos outlive the call; the modules can go once the pipeline is made. The modules
-        // are trusted to have their entry points and to keep to the layout, as `GraphicsDesc::spirv`
-        // says. The device has depth clamp, which `Candidate::new` checked, and mesh shaders, for a
-        // mesh shader's pipeline, as asserted; Vulkan ignores the vertex input and input assembly
-        // of a pipeline with a mesh shader.
+        // SAFETY: the modules, the layout and the pipeline cache, if any, are live, and the infos
+        // outlive the call; the modules can go once the pipeline is made. The modules are trusted
+        // to have their entry points and keep to the layout, as `GraphicsDesc::spirv` says. The
+        // device has depth clamp, which `Candidate::new` checked, and mesh shaders, for a mesh
+        // shader's pipeline, as asserted; Vulkan ignores the vertex input and input assembly of a
+        // pipeline with a mesh shader.
         let made = unsafe {
             let cache = device.raw_pipeline_cache();
             let made = raw_device.create_graphics_pipelines(cache, &[info], None);
@@ -435,8 +426,8 @@ impl Pipeline {
         self.format
     }
 
-    /// Whether its geometry is a mesh shader, which draws through
-    /// [`Pass::draw_mesh_tasks_indirect`](crate::Pass::draw_mesh_tasks_indirect) alone.
+    /// Whether its geometry is a mesh shader, which draws only through
+    /// [`Pass::draw_mesh_tasks_indirect`](crate::Pass::draw_mesh_tasks_indirect).
     pub(crate) fn mesh(&self) -> bool {
         self.mesh
     }
@@ -448,8 +439,8 @@ impl Drop for Pipeline {
     }
 }
 
-/// A compute pipeline, which a [`Graph`]'s compute passes dispatch. Dropping it retires it until
-/// the GPU is done with it.
+/// A compute pipeline for a [`Graph`]'s compute passes. Dropping it retires it until the GPU is
+/// done with it.
 ///
 /// [`Graph`]: crate::Graph
 pub struct ComputePipeline {
@@ -458,10 +449,10 @@ pub struct ComputePipeline {
 }
 
 impl ComputePipeline {
-    /// Makes a pipeline, named `name`, of the entry point `entry` of `spirv`, a SPIR-V module
-    /// that slangc compiled, through the device's pipeline cache if it has one. The module is
-    /// trusted as [`GraphicsDesc::spirv`] says, and to write only the bindless set's storage images.
-    /// Fails as [`Pipeline::graphics`] does.
+    /// Makes a pipeline `name` of the entry point `entry` of `spirv`, a SPIR-V module slangc
+    /// compiled, through the device's pipeline cache if it has one. The module is trusted as
+    /// [`GraphicsDesc::spirv`] says, and to write only the bindless set's storage images. Fails
+    /// as [`Pipeline::graphics`] does.
     pub fn new(device: &Arc<Device>, name: &str, spirv: &[u8], entry: &CStr) -> Result<Self> {
         let module = shader_module(device, name, spirv)?;
         let stage = vk::PipelineShaderStageCreateInfo::default()
@@ -515,7 +506,7 @@ impl Drop for ComputePipeline {
     }
 }
 
-/// A shader module of `spirv`, for pipeline `name`, which it names after it.
+/// A shader module of `spirv`, named for pipeline `name`.
 ///
 /// Fails with `gpu.bad_shader` if `spirv` isn't SPIR-V.
 fn shader_module(device: &Device, name: &str, spirv: &[u8]) -> Result<vk::ShaderModule> {
@@ -527,9 +518,9 @@ fn shader_module(device: &Device, name: &str, spirv: &[u8]) -> Result<vk::Shader
         .with_source(error)
     })?;
     let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
-    // SAFETY: the device is live, and the code is a whole number of words that starts with
-    // SPIR-V's magic number, which `read_spv` checked. The module itself is trusted to be valid
-    // SPIR-V, as `GraphicsDesc::spirv` says.
+    // SAFETY: the device is live, and the code is a whole number of words starting with SPIR-V's
+    // magic number, which `read_spv` checked. The module is trusted to be valid SPIR-V, as
+    // `GraphicsDesc::spirv` says.
     let module =
         unsafe { device.raw().create_shader_module(&module_info, None) }.map_err(vk_failed(
             "vkCreateShaderModule",
@@ -540,8 +531,7 @@ fn shader_module(device: &Device, name: &str, spirv: &[u8]) -> Result<vk::Shader
     Ok(module)
 }
 
-/// Logs that pipeline `name` was made: how long the driver took, and whether the device's
-/// pipeline cache held it.
+/// Logs that pipeline `name` was made: the driver's time, and whether the pipeline cache held it.
 fn made_log(name: &str, feedback: vk::PipelineCreationFeedback) {
     let flags = feedback.flags;
     debug!(

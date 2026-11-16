@@ -1,35 +1,34 @@
-//! A frame's batches: the runs of its commands that each queue runs between where it waits for the
-//! other queue and where the other waits for it. A frame's passes run on the graphics queue, but
-//! those added to run on the compute queue, on a device that has one. Each queue's batches signal a
-//! timeline of the queue's own as they end, which a batch of the other waits for before it begins
-//! where its first pass uses a buffer that the other queue used last and must follow it: so that
+//! A frame's batches: the runs of commands a queue records between waiting for the other queue and
+//! being waited for. Passes run on the graphics queue, except those added to run on the compute
+//! queue, on a device that has one.
+//!
+//! Each queue's batches signal a timeline of the queue's own as they end. A batch waits on the
+//! other's timeline before it begins when its first pass uses a buffer the other queue used last:
 //! one queue reads what the other wrote once it's written, and writes what the other read or wrote
 //! once that's done. A frame plans its batches as it begins, from its graph's passes and what the
-//! frames before left of each buffer, so that recording them fails nothing; and submits them in an
-//! order that has each after the batches it waits for, which the order they're planned in is.
+//! frames before left of each buffer, so recording fails nothing. It submits them in planning
+//! order, which has each after the batches it waits for.
 //!
-//! A semaphore's wait takes in all the other queue did before its signal, and all its own queue
-//! does after the wait, so a batch waits only where it hasn't already waited for as much: and so
-//! that what a frame records outside its passes, which goes in the graphics queue's first batch,
-//! may be waited for alone, that batch ends before the first pass where a pass runs on the compute
-//! queue. The frame's timeline is signaled after the graphics queue's last batch, which comes
-//! after all the compute queue ran, so that a frame done is done on both.
+//! A semaphore's wait takes in all the other queue did before its signal and all its own queue does
+//! after the wait, so a batch waits only where it hasn't already waited for as much. What a frame
+//! records outside its passes goes in the graphics queue's first batch. That batch ends before the
+//! first compute-queue pass, so it may be waited for alone. The frame's timeline is signaled after
+//! the graphics queue's last batch, which follows all the compute queue ran: done is done on both.
 
 use super::graph::{Graph, PassId, Queue};
 
-/// How far each queue's timeline has been planned, and how far of the other's each has waited
-/// for, by [`Queue::index`].
+/// How far each queue's timeline is planned, and how far of the other's each has waited for, by
+/// [`Queue::index`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Timelines {
     /// The value of each queue's last batch.
     pub(crate) made: [u64; 2],
-    /// The highest value of the other queue's timeline each has waited for: what the other ran up
-    /// to there comes before all the queue runs after.
+    /// The highest value of the other queue's timeline each has waited for.
     pub(crate) waited: [u64; 2],
 }
 
-/// What a buffer's uses on the two queues left, for its next to wait for: the queue and batch of
-/// its last write, and the last batch of each queue that read it since.
+/// What a buffer's uses left for its next to wait for: the queue and batch of its last write, and
+/// each queue's last batch that read it since.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Crossing {
     written: Option<(Queue, u64)>,
@@ -37,9 +36,8 @@ pub(crate) struct Crossing {
 }
 
 impl Crossing {
-    /// The value of the other queue's timeline a use on `queue` waits for, which writes if
-    /// `writes`: the last write, if the other queue made it, and for a write, the other's reads
-    /// since; 0 for none.
+    /// The value of the other queue's timeline a use on `queue` waits for: its last write, if the
+    /// other queue made it, and for a write, the other's reads since; 0 for none.
     fn wait(&self, queue: Queue, writes: bool) -> u64 {
         let other = queue.other();
         let written = match self.written {
@@ -50,7 +48,7 @@ impl Crossing {
         written.max(read)
     }
 
-    /// Notes a use on `queue`, which writes if `writes`, in its batch of value `value`.
+    /// Notes a use on `queue`, in its batch of value `value`.
     fn record(&mut self, queue: Queue, writes: bool, value: u64) {
         if writes {
             *self = Self {
@@ -63,8 +61,8 @@ impl Crossing {
     }
 }
 
-/// A batch planned: its queue, its value on that queue's timeline, and the value of the other's
-/// that it waits for before it begins, 0 for none.
+/// A planned batch: its queue, its value on that queue's timeline, and the value of the other's
+/// it waits for first, 0 for none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Batch {
     pub(crate) queue: Queue,
@@ -72,13 +70,13 @@ pub(crate) struct Batch {
     pub(crate) waits: u64,
 }
 
-/// A frame's batches, in the order they're planned, the first the graphics queue's; and each pass's,
-/// and what the frame leaves of each buffer and of the timelines. Kept between frames, so that one
-/// that plans no more than the last allocates nothing.
+/// A frame's batches in planning order, the first the graphics queue's, each pass's batch, and what
+/// the frame leaves of each buffer and the timelines. Kept between frames, so a frame that plans no
+/// more than the last allocates nothing.
 #[derive(Default)]
 pub(crate) struct Plan {
     pub(crate) batches: Vec<Batch>,
-    /// Each pass's batch, in `batches`.
+    /// Each pass's index in `batches`.
     pub(crate) of_pass: Vec<usize>,
     /// Each of the graph's buffers' crossing, as the frame leaves it.
     pub(crate) crossings: Vec<Crossing>,
@@ -88,8 +86,8 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// Plans the batches of a frame of `graph`'s passes, after frames that left the timelines as
-    /// `timelines` has them and each of the graph's buffers as `crossing` gives it, by its index:
-    /// on a device with a compute queue if `computes`, and on the graphics queue alone otherwise.
+    /// `timelines` has them and each buffer as `crossing` gives it, by index. Uses the compute
+    /// queue if `computes`, else the graphics queue alone.
     pub(crate) fn make(
         &mut self,
         graph: &Graph,
@@ -135,8 +133,8 @@ impl Plan {
         }
     }
 
-    /// Plans a batch on `queue` that waits for `waits` of the other queue's timeline first, and
-    /// returns its index in `batches`.
+    /// Plans a batch on `queue` that first waits for `waits` of the other's timeline; returns its
+    /// index.
     fn begin(&mut self, queue: Queue, waits: u64) -> usize {
         let own = queue.index();
         self.timelines.made[own] += 1;
@@ -175,8 +173,8 @@ mod tests {
         }
     }
 
-    /// A frame as the renderer's are: a pass on the compute queue that writes a buffer, after the
-    /// graphics passes it runs beside, and a graphics pass that reads it, then one more.
+    /// A frame as the renderer's are: a compute-queue pass that writes a buffer, beside graphics
+    /// passes, then a graphics pass that reads it, then one more.
     fn frame(graph: &mut Graph) -> BufferId {
         graph.clear();
         let shadows = graph.buffer("shadows", 64);
@@ -213,9 +211,9 @@ mod tests {
         assert_eq!(plan.last_graphics(), 0);
     }
 
-    /// The graphics queue's first batch ends before the passes, the compute pass's batch begins
-    /// after the graphics passes before it, without waiting for them, and the graphics pass that
-    /// reads what it wrote begins a batch that waits for it, the frame's last.
+    /// The graphics queue's first batch ends before the passes. The compute pass's batch begins
+    /// without waiting for the graphics passes before it. The graphics pass that reads what it
+    /// wrote begins the frame's last batch, which waits for it.
     #[test]
     fn a_compute_pass_runs_beside_the_graphics_passes_before_what_takes_its_buffer() {
         let mut graph = Graph::default();
@@ -239,8 +237,8 @@ mod tests {
                 waited: [1, 0],
             }
         );
-        // The next frame's compute pass writes what the last frame's view read, and waits for it:
-        // for the graphics queue's last batch, which the frame's own batches all follow.
+        // The next frame's compute pass writes what the last frame's view read, so it waits for
+        // the graphics queue's last batch, which the frame's own batches all follow.
         let crossings = first.crossings.clone();
         let next = plan(&graph, true, &crossings, first.timelines);
         assert_eq!(
@@ -261,10 +259,9 @@ mod tests {
         );
     }
 
-    /// What the compute queue runs that the graphics queue doesn't take after it is waited for by
-    /// a batch of the graphics queue's at the frame's end, so that the frame's timeline, signaled
-    /// after it, follows all the frame ran; and a pass on the compute queue that reads what one on
-    /// the graphics queue wrote waits for it, ending the graphics batch there.
+    /// A graphics batch at the frame's end waits for the compute work nothing else took, so the
+    /// frame's timeline follows all the frame ran. A compute-queue pass that reads what a graphics
+    /// pass wrote waits for it, ending the graphics batch there.
     #[test]
     fn the_frame_ends_after_all_the_compute_queue_ran() {
         let mut graph = Graph::default();
@@ -291,8 +288,8 @@ mod tests {
         assert_eq!(plan.last_graphics(), 4);
     }
 
-    /// A write waits for the other queue's reads since the last write, not only for the write; and
-    /// a queue that has waited for as much already doesn't wait again.
+    /// A write waits for the other queue's reads since the last write, not only the write; a queue
+    /// doesn't wait again for what it has waited for.
     #[test]
     fn a_write_waits_for_the_reads_on_the_other_queue_and_waits_arent_repeated() {
         let mut crossing = Crossing::default();
@@ -316,7 +313,7 @@ mod tests {
                 .add();
         }
         let plan = plan(&graph, true, &[], Timelines::default());
-        // The second read waits for no more than the first did.
+        // The second read waits for no more than the first.
         assert_eq!(
             plan.batches,
             [

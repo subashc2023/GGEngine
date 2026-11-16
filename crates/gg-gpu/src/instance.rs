@@ -1,5 +1,4 @@
-//! The Vulkan instance: the loader, validation, and the messenger that turns what Vulkan reports
-//! into log events.
+//! The Vulkan instance: the loader, validation, and the messenger that logs what Vulkan reports.
 
 use std::borrow::Cow;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -19,12 +18,11 @@ const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
 /// What an [`Instance`] is created with.
 pub struct InstanceDesc<'a> {
-    /// The app's name, which GPU tools such as RenderDoc show.
+    /// Shown by GPU tools such as RenderDoc.
     pub app_name: &'a str,
     /// Run under the Khronos validation layer, with synchronization validation.
     pub validation: bool,
-    /// A window on the display the instance will present to, or `None` to render offscreen
-    /// only.
+    /// A window on the display to present to, or `None` to render offscreen only.
     pub window: Option<&'a dyn HasDisplayHandle>,
 }
 
@@ -36,13 +34,12 @@ pub struct Instance {
     debug_utils: Option<ext::debug_utils::Instance>,
     messenger: vk::DebugUtilsMessengerEXT,
     validation: Validation,
-    /// Done once a device has named the instance and its GPU, as [`Instance::name_through`] says.
+    /// Done once a device has named the instance and its GPU.
     named: Once,
 }
 
 /// Counts the validation warnings and errors an instance reports. It outlives the instance, so
-/// what validation reports while the instance is destroyed, such as objects left undestroyed,
-/// counts too.
+/// reports made while the instance is destroyed, such as objects left undestroyed, count too.
 #[derive(Clone)]
 pub struct Validation {
     messages: Arc<AtomicU32>,
@@ -56,14 +53,13 @@ impl Validation {
         self.messages.load(Ordering::Relaxed)
     }
 
-    /// Whether the instance ran under the validation layer. It doesn't when validation was
-    /// asked for but the layer isn't installed.
+    /// Whether the instance ran under the validation layer. It didn't if the layer isn't installed.
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
-    /// Whether the validation layer validated synchronization too. It didn't when the layer is too
-    /// old to take settings (`VK_EXT_layer_settings`), when RenderDoc's layer hides them, or when
+    /// Whether the layer validated synchronization too. It didn't when the layer is too old to
+    /// take settings (`VK_EXT_layer_settings`), when RenderDoc's layer hides them, or when
     /// validation is off.
     pub fn synchronization(&self) -> bool {
         self.synchronization
@@ -71,13 +67,16 @@ impl Validation {
 }
 
 impl Instance {
-    /// Loads the Vulkan loader and makes an instance that can present to `desc.window`'s
-    /// display, if given, under the validation layer if `desc.validation` asks for it and it's
-    /// installed, as [`Instance::validation`] tells. The loader is the one the OS finds by its
-    /// name, but in a macOS app's bundle that holds one, `Contents/Frameworks/libvulkan.1.dylib`,
-    /// which loads by its path. Fails with `gpu.no_loader` without a loader, `gpu.window` if the
-    /// window can't give its display, and `gpu.vulkan` or `gpu.out_of_memory` if a Vulkan call
-    /// fails.
+    /// Loads the Vulkan loader and makes an instance that can present to `desc.window`'s display,
+    /// under the validation layer if `desc.validation` and installed, as
+    /// [`Instance::validation`] tells.
+    /// The loader is the one the OS finds by name, but a macOS app's bundle loads its own,
+    /// `Contents/Frameworks/libvulkan.1.dylib`, by path.
+    ///
+    /// Fails with:
+    /// - `gpu.no_loader` without a loader.
+    /// - `gpu.window` if the window can't give its display.
+    /// - `gpu.vulkan` or `gpu.out_of_memory` if a Vulkan call fails.
     pub fn new(desc: &InstanceDesc<'_>) -> Result<Arc<Self>> {
         let _zone = gg_core::zone!();
         let bundled = (std::env::current_exe().ok())
@@ -192,11 +191,10 @@ impl Instance {
             // added through the extensions it was promoted from. Devices must still support 1.4.
             .api_version(vk::API_VERSION_1_3);
         let validation_layers = [VALIDATION_LAYER.as_ptr()];
-        // ash's `LayerSettingEXT::values` sets the count in bytes rather than values, so the
-        // setting is filled in by hand (ash #985). ash's next release, which fixes it and has 1.4's
-        // headers, lets the setting go through `values`, the instance and VMA ask for 1.4, and a
-        // frame wait for its uploads' ownership transfers in fewer stages, through maintenance8,
-        // as `Frame::send` says.
+        // ash's `LayerSettingEXT::values` sets the count in bytes, not values, so the setting is
+        // filled in by hand (ash #985). ash's next release fixes it and has 1.4's headers: then the
+        // setting goes through `values`, the instance and VMA ask for 1.4, and a frame waits for
+        // its uploads' ownership transfers in fewer stages, through maintenance8 (`Frame::send`).
         let on = vk::TRUE;
         let settings = [vk::LayerSettingEXT {
             p_layer_name: VALIDATION_LAYER.as_ptr(),
@@ -240,8 +238,8 @@ impl Instance {
             );
             vk_error("vkCreateInstance", subject, e)
         })?;
-        // Once the instance is made, by when RenderDoc's library is in the process if its layer,
-        // whose pre-instance hooks hide the extension, is active.
+        // Checked after creation: by then RenderDoc's library is loaded if its layer, whose
+        // pre-instance hooks hide the extension, is active.
         if validating && !layer_settings {
             let why = if capture::renderdoc().is_some() {
                 "RenderDoc's layer hides the validation layer's settings, so synchronization isn't validated"
@@ -313,10 +311,9 @@ impl Instance {
         self.debug_utils.is_some()
     }
 
-    /// Names the instance `instance`, and `device`'s GPU by its name, through `device`, made from
-    /// them, unless a device has: naming an object must be externally synchronized, and devices
-    /// may be made on several threads. A device names no GPU but its own, so a GPU that only later
-    /// devices are made from keeps no name.
+    /// Through `device`, names the instance `instance` and `device`'s GPU by its name, unless a
+    /// device has: naming must be externally synchronized, and devices may be made on several
+    /// threads. A device names only its own GPU, so a GPU only later devices use keeps no name.
     pub(crate) fn name_through(&self, device: &Device) {
         // SAFETY: the instance is live, and the device was made from it and from its GPU, the one
         // physical device it may name (VUID-vkSetDebugUtilsObjectNameEXT-pNameInfo-07873).
@@ -340,11 +337,12 @@ impl Drop for Instance {
     }
 }
 
-/// The Vulkan loader of the app whose executable is at `exe`, on `os`, as [`std::env::consts::OS`]
-/// gives it, if its bundle holds one: on macOS, which has no loader of its own, for an executable in
-/// an app's bundle, its directory `MacOS` in the bundle's `Contents`, the bundle's
-/// `Contents/Frameworks/libvulkan.1.dylib`, as `gg ship` lays the bundle out; `None` elsewhere. The
-/// loader finds the driver the bundle holds in `Contents/Resources/vulkan/icd.d`.
+/// The Vulkan loader in the bundle of the app whose executable is at `exe`, on `os` as
+/// [`std::env::consts::OS`] gives it.
+///
+/// Only macOS, which has no loader of its own, has one: for an executable in `Contents/MacOS`, the
+/// bundle's `Contents/Frameworks/libvulkan.1.dylib`, as `gg ship` lays it out. `None` elsewhere.
+/// The loader finds the bundle's driver in `Contents/Resources/vulkan/icd.d`.
 fn bundled_loader(exe: &Path, os: &str) -> Option<PathBuf> {
     let macos = exe
         .parent()
@@ -368,8 +366,8 @@ fn names<'a>(names: impl IntoIterator<Item = &'a CStr>) -> String {
     names.join(", ")
 }
 
-/// The messenger reports warnings and errors, and also the loader's and layers' informational
-/// messages when trace logging is on for either of [`on_message`]'s targets.
+/// Reports warnings and errors, and the loader's and layers' informational messages when trace
+/// logging is on for either of [`on_message`]'s targets.
 fn messenger_info(validation: &Validation) -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
     use vk::DebugUtilsMessageSeverityFlagsEXT as Severity;
     use vk::DebugUtilsMessageTypeFlagsEXT as Type;
@@ -443,9 +441,9 @@ unsafe extern "system" fn on_message(
             }
         };
     }
-    // The loader's and other layers' messages under a target of their own, which a filter can
-    // quiet without quieting validation, as the GPU tests quiet the loader's warning for each
-    // implicit layer it leaves out.
+    // The loader's and other layers' messages have a target of their own, so a filter can quiet
+    // them without quieting validation: the GPU tests quiet the loader's warning per skipped
+    // implicit layer.
     if code == "gpu.general" {
         log!("gg_gpu::vulkan::general");
     } else {
@@ -466,8 +464,8 @@ unsafe fn slice<'a, T>(pointer: *const T, len: u32) -> &'a [T] {
     }
 }
 
-/// The objects a message is about, as `IMAGE 0x2a0b "offscreen color"`. It only exists inside
-/// the messenger's callback, where the names are valid.
+/// The objects a message is about, as `IMAGE 0x2a0b "offscreen color"`. Valid only inside the
+/// callback.
 struct Objects<'a>(&'a [vk::DebugUtilsObjectNameInfoEXT<'a>]);
 
 impl fmt::Display for Objects<'_> {
@@ -486,8 +484,8 @@ impl fmt::Display for Objects<'_> {
     }
 }
 
-/// The debug labels open in the command buffer a message is about. Like [`Objects`], it only
-/// exists inside the callback.
+/// The debug labels open in the command buffer a message is about. Valid only inside the
+/// callback.
 struct Labels<'a>(&'a [vk::DebugUtilsLabelEXT<'a>]);
 
 impl fmt::Display for Labels<'_> {
@@ -509,8 +507,8 @@ impl fmt::Display for Labels<'_> {
 mod tests {
     use super::*;
 
-    /// On macOS, an executable in an app's bundle loads the loader in the bundle's Frameworks;
-    /// one outside a bundle, and any on another OS, the one the OS finds.
+    /// On macOS, an executable in an app's bundle loads the bundle's loader; any other, the one
+    /// the OS finds.
     #[test]
     fn a_macos_bundle_has_its_own_loader() {
         let exe = Path::new("/Applications/Shards.app/Contents/MacOS/gg-shards");

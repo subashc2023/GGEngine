@@ -24,23 +24,22 @@ pub(super) struct Candidate {
     pub(super) vram_mib: u64,
     pub(super) limits: vk::PhysicalDeviceLimits,
     pub(super) identity: Identity,
-    /// A queue family with graphics that can also present to the surface, if there is one.
+    /// A queue family with graphics that can also present to the surface.
     pub(super) graphics: Option<u32>,
-    /// A queue family for uploads apart from graphics, if there is one.
+    /// A queue family for uploads apart from graphics.
     pub(super) transfer: Option<u32>,
-    /// A queue family for compute apart from graphics and from `transfer`, if there is one.
+    /// A queue family for compute apart from graphics and `transfer`.
     pub(super) compute: Option<u32>,
-    /// The least a copy to or from an image moves on the graphics family's queues, and on the
-    /// transfer family's (`minImageTransferGranularity`), in texels, or in blocks of a compressed
-    /// image.
+    /// The least a copy to or from an image moves on the graphics and transfer families'
+    /// queues (`minImageTransferGranularity`), in texels, or blocks of a compressed image.
     pub(super) graphics_granularity: vk::Extent3D,
     pub(super) transfer_granularity: vk::Extent3D,
-    /// How many of the bits of the timestamps the graphics family's queues write count
-    /// (`timestampValidBits`), and the compute family's; 0 for none.
+    /// How many bits of the graphics and compute families' timestamps count
+    /// (`timestampValidBits`); 0 for none.
     pub(super) timestamp_bits: u32,
     pub(super) compute_timestamp_bits: u32,
-    /// Whether the driver reads the GPU's clock at once, without a submission
-    /// (`VK_KHR_calibrated_timestamps`, with the device's own time domain).
+    /// Whether the driver reads the GPU's clock without a submission
+    /// (`VK_KHR_calibrated_timestamps`, in the device's own time domain).
     pub(super) calibrated: bool,
     pub(super) host_copy: HostCopy,
     pub(super) memory: vk::PhysicalDeviceMemoryProperties,
@@ -48,18 +47,18 @@ pub(super) struct Candidate {
     pub(super) memory_budget: bool,
     /// Whether it draws through mesh shaders (`VK_EXT_mesh_shader`), with `geometryShader`.
     pub(super) mesh_shaders: bool,
-    /// Whether its samplers filter anisotropically: on every GPU but lavapipe (llvmpipe), Mesa's
-    /// CPU driver, whose anisotropic filter returns NaN where a texture coordinate's derivatives
-    /// are 0, as across a triangle whose corners share their texture coordinates, as flat-colored
-    /// and palette-textured models' triangles do. Mesa 25.0's does, Debian 13's, which CI's GPU
-    /// tests run on: the skinned-mesh test's strips, whose texture coordinates are all 0, drew
-    /// black. To take out once a Mesa release filters them, Debian's among them.
+    /// Whether its samplers filter anisotropically: every GPU but lavapipe (llvmpipe), Mesa's
+    /// CPU driver. Its anisotropic filter returns NaN where a texture coordinate's derivatives
+    /// are 0, as across triangles whose corners share their coordinates (flat-colored and
+    /// palette-textured models). Mesa 25.0's does, Debian 13's, which CI's GPU tests run on:
+    /// the skinned-mesh test's strips, whose coordinates are all 0, drew black. Remove once a
+    /// Mesa release filters them, Debian's among them.
     pub(super) anisotropy: bool,
     pub(super) problem: Option<String>,
 }
 
 /// Whether a GPU can write the engine's textures from the CPU (host image copy), and whether its
-/// driver says that costs the GPU anything in reading them, such as compression it turns off.
+/// driver says that slows the GPU's reads, as by turning compression off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HostCopy {
     Unsupported,
@@ -199,11 +198,10 @@ impl Candidate {
         } else if core.depth_clamp != vk::TRUE {
             Some("doesn't support depth clamp (depthClamp), which shadow maps need".to_owned())
         } else if core.texture_compression_bc != vk::TRUE {
-            // Games' cooked textures are BC7 and BC5, so every device must take them. Unlike depth,
-            // this needs no query of the format's features: Vulkan requires the feature to give
-            // every BC format's images sampling, linear filtering and copies into them (the
-            // Features chapter's textureCompressionBC, and the Formats chapter's required format
-            // support).
+            // Cooked textures are BC7 and BC5. Unlike depth, no format query is needed: the feature
+            // requires every BC format's images to support sampling, linear filtering and copies
+            // into them (Features chapter's textureCompressionBC; Formats chapter's required
+            // format support).
             Some(
                 "doesn't support BC texture compression (textureCompressionBC), which games' \
                  cooked textures need"
@@ -235,10 +233,10 @@ impl Candidate {
             memory,
             memory_budget: has_extension(&extensions, vk::EXT_MEMORY_BUDGET_NAME),
             // The extension requires its `meshShader` feature (vk.xml's `<feature>` among its
-            // requirements), so it isn't queried: querying it under the Vulkan SDK 1.4.335's
-            // validation layer crashed test runs that open dozens of devices, well after the query.
-            // A fragment shader behind a mesh shader reads the primitive's ID, which a mesh shader
-            // writes for each, through SPIR-V's Geometry capability, which `geometryShader` gives.
+            // requirements), so it isn't queried: under Vulkan SDK 1.4.335's validation layer the
+            // query crashed test runs that open dozens of devices, well after it.
+            // A fragment shader behind a mesh shader reads the primitive's ID through SPIR-V's
+            // Geometry capability, which `geometryShader` gives.
             mesh_shaders: properties.api_version >= REQUIRED_VERSION
                 && has_extension(&extensions, vk::EXT_MESH_SHADER_NAME)
                 && core.geometry_shader == vk::TRUE,
@@ -257,8 +255,7 @@ impl Candidate {
         }
     }
 
-    /// Whether the GPU draws through mesh shaders: as `wanted` says, if it's given, and otherwise if
-    /// it can.
+    /// Whether the GPU draws through mesh shaders: as `wanted` says, else if it can.
     ///
     /// Fails with `gpu.no_mesh_shaders` if they're wanted and the GPU has none.
     pub(super) fn mesh_shaders(&self, wanted: Option<bool>) -> Result<bool> {
@@ -286,9 +283,8 @@ impl Candidate {
         }
     }
 
-    /// How the GPU uploads: by `wanted`, if given; otherwise through a transfer queue if it has
-    /// one, by host image copy if its driver says that's free, and through the graphics queue if
-    /// neither.
+    /// How the GPU uploads: by `wanted`; else through a transfer queue if it has one, else by host
+    /// image copy if that's free, else through the graphics queue.
     pub(super) fn upload_path(&self, wanted: Option<UploadPath>) -> Result<UploadPath> {
         let Some(wanted) = wanted else {
             return Ok(if self.transfer.is_some() {
@@ -316,11 +312,11 @@ impl Candidate {
     }
 }
 
-/// Whether a device renders depth into depth images' format, D32_SFLOAT, and samples it by
-/// comparison, as shadow maps are. Vulkan requires the first of it or of X8_D24_UNORM_PACK32, and
-/// the second of no format, but nearly every device has both, AMD's among them, which have no
-/// 24-bit depth, and Apple's GPUs, whose Metal has 32-bit float depth everywhere. Called for a
-/// device of Vulkan 1.3 or later, whose format properties tell the comparison.
+/// Whether a device renders depth into D32_SFLOAT, the depth images' format, and samples it by
+/// comparison, as shadow maps do. Vulkan requires the first of D32_SFLOAT or
+/// X8_D24_UNORM_PACK32, and the second of no format, but nearly every device has both: AMD's
+/// have no 24-bit depth, and Apple's GPUs have 32-bit float depth everywhere. Called for Vulkan
+/// 1.3 or later, whose format properties tell the comparison.
 fn has_depth(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
     let mut features3 = vk::FormatProperties3::default();
     let mut properties = vk::FormatProperties2::default().push_next(&mut features3);
@@ -359,13 +355,12 @@ fn has_extension(extensions: &[vk::ExtensionProperties], name: &CStr) -> bool {
         .any(|extension| extension.extension_name_as_c_str() == Ok(name))
 }
 
-/// The queue family that uploads go through apart from graphics, if there is one: of those
-/// without graphics that can copy, as compute families can without saying so, the one that does
-/// the fewest other kinds of work, then the first. A family for transfers alone is the GPU's copy
-/// engine. Sparse binding and protected memory are features rather than kinds of work, and don't
-/// count. A family whose least image transfer granularity is (0, 0, 0), which copies images only
-/// whole, a level at a time, takes no uploads, since textures stream by rows within a frame's
-/// budget (VUID-vkCmdCopyBufferToImage-imageOffset-07738).
+/// The queue family uploads go through apart from graphics: of those without graphics that can
+/// copy (compute families can without saying so), the one doing the fewest other kinds of work,
+/// then the first. A transfer-only family is the GPU's copy engine. Sparse binding and protected
+/// memory are features, not work, and don't count. A family whose least image transfer
+/// granularity is (0, 0, 0) copies images only whole, a level at a time, so it takes no uploads:
+/// textures stream by rows within a frame's budget (VUID-vkCmdCopyBufferToImage-imageOffset-07738).
 fn transfer_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
     let copies = vk::QueueFlags::TRANSFER | vk::QueueFlags::COMPUTE;
     let features = vk::QueueFlags::SPARSE_BINDING | vk::QueueFlags::PROTECTED;
@@ -395,9 +390,9 @@ fn transfer_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
         .map(|(_, index)| index)
 }
 
-/// The queue family that compute passes run on beside the graphics queue, if there is one: of
-/// those with compute but without graphics, other than `transfer`'s, which uploads may take, the
-/// one that does the fewest other kinds of work, then the first.
+/// The queue family compute passes run on beside the graphics queue: of those with compute and
+/// without graphics, other than `transfer`'s, the one doing the fewest other kinds of work, then
+/// the first.
 fn compute_family(families: &[vk::QueueFamilyProperties], transfer: Option<u32>) -> Option<u32> {
     let features = vk::QueueFlags::SPARSE_BINDING | vk::QueueFlags::PROTECTED;
     families
@@ -416,8 +411,8 @@ fn compute_family(families: &[vk::QueueFamilyProperties], transfer: Option<u32>)
         .map(|(_, index)| index)
 }
 
-/// Whether the device's driver reads its clock in the device's own time domain through
-/// `VK_KHR_calibrated_timestamps`, which it lists.
+/// Whether the driver reads its clock in the device's own time domain through
+/// `VK_KHR_calibrated_timestamps`, which the device lists.
 fn reads_clock(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
     let functions =
         ash::khr::calibrated_timestamps::Instance::new(instance.entry(), instance.raw());
@@ -428,9 +423,9 @@ fn reads_clock(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
 }
 
 /// Whether the device can write the engine's textures from the CPU, and at what cost: host image
-/// copy for every texture format, BC7 and BC5 among them, at every size a texture has, into the
-/// shader-read-only layout the bindless set declares textures in. Nothing past the extension's
-/// name is queried unless the device lists the extension.
+/// copy for every texture format (BC7 and BC5 among them) at every texture size, into the
+/// shader-read-only layout the bindless set declares textures in. Nothing is queried past the
+/// extension's name unless the device lists it.
 fn host_copy_support(
     instance: &Instance,
     physical: vk::PhysicalDevice,
@@ -501,8 +496,8 @@ fn host_copy_support(
     }
 }
 
-/// Picks the GPU to use: of those without a problem whose names contain `gpu`, if given, the
-/// best-ranked kind, then the most memory, then the first the loader listed.
+/// Picks the GPU: of those without a problem whose names contain `gpu`, the best-ranked kind,
+/// then the most memory, then the first the loader listed.
 pub(super) fn pick<'a>(candidates: &'a [Candidate], gpu: Option<&str>) -> Result<&'a Candidate> {
     let wanted = gpu.map(str::to_lowercase);
     let named: Vec<&Candidate> = candidates
@@ -664,8 +659,8 @@ mod tests {
         // lavapipe's one family has graphics, so compute passes run on the graphics queue there.
         assert_eq!(transfer_family(&families(&[all])), None);
         assert_eq!(compute_family(&families(&[all]), None), None);
-        // A compute family that leaves out the transfer bit it implies, as RADV may: it copies, but
-        // a family for transfers alone after it does less else.
+        // A compute family without the transfer bit it implies, as RADV may: it copies, but a
+        // transfer-only family after it does less else.
         let compute = families(&[Q::GRAPHICS | Q::COMPUTE | Q::TRANSFER, Q::COMPUTE]);
         assert_eq!(transfer_family(&compute), Some(1));
         // The one family apart from graphics takes the uploads, not compute passes too.
@@ -676,8 +671,8 @@ mod tests {
         // Video before transfers alone.
         let video = families(&[all, Q::TRANSFER | Q::VIDEO_DECODE_KHR, Q::TRANSFER]);
         assert_eq!(transfer_family(&video), Some(2));
-        // A family that copies images only whole takes no uploads, which stream by rows: the
-        // compute family does, and no compute passes run beside the graphics queue.
+        // A whole-image-only family takes no uploads, which stream by rows: compute does, and no
+        // compute passes run beside the graphics queue.
         let mut whole = families(&[all, Q::TRANSFER, Q::COMPUTE]);
         whole[1].min_image_transfer_granularity = vk::Extent3D::default();
         assert_eq!(transfer_family(&whole), Some(2));

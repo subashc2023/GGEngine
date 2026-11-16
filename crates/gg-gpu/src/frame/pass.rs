@@ -1,11 +1,11 @@
-//! Passes that draw: rendering into the attachments a graph's pass declares, and the draws recorded
-//! there.
+//! Passes that draw: rendering into the attachments a graph's pass declares, and its draws.
 //!
-//! The SAFETY comments here lean on what the parent module keeps: [`Frames::begin`] begins a slot's
-//! commands, and resets its arena, only once the GPU has finished the slot's last frame, and they
-//! record until the frame is submitted; `Frame::outside_pass` checks that no pass is open, which
-//! only a pass's drop closes; and `Frame::open_pass` has placed the barriers that put each image a
-//! pass uses in the layout it uses it in.
+//! The SAFETY comments here lean on what the parent module keeps:
+//! - [`Frames::begin`] begins a slot's commands and resets its arena only once the GPU has finished
+//!   the slot's last frame, and they record until the frame is submitted.
+//! - `Frame::outside_pass` checks that no pass is open; only a pass's drop closes one.
+//! - `Frame::open_pass` has placed the barriers that put each image a pass uses in the layout it
+//!   uses it in.
 //!
 //! [`Frames::begin`]: crate::Frames::begin
 
@@ -22,20 +22,20 @@ use crate::bindless::PUSH_CONSTANTS;
 use crate::{ColorImage, Device, Faces, Format, GpuBuffer, Pipeline};
 
 impl<'a> Frame<'a> {
-    /// Records `pass`, a pass of the frame's graph that draws, which must be the next of its passes
-    /// to record: its attachments cleared or kept as it declared them, its depth cleared to 0, as far
-    /// away as depth goes, and its IDs to 0, for none, unless they're kept. Rendering ends when the
-    /// pass is dropped.
-    /// Returns `None`, recording nothing, for a pass into a swapchain that had no image ready this
+    /// Records `pass`, a drawing pass of the frame's graph, which must be the graph's next to
+    /// record. Attachments are cleared or kept as declared; depth clears to 0, as far away as depth
+    /// goes, and IDs to 0, for none, unless kept. Rendering ends when the pass is dropped.
+    /// Returns `None`, recording nothing, for a pass into a swapchain with no image ready this
     /// frame; the first target always has one.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, `pass` isn't the graph's next, or doesn't draw; if it
-    /// draws over or samples a target that no pass has drawn into since it was made, or since its
-    /// swapchain's image was acquired; if its attachments aren't all its color target's size, or
-    /// its depth's, for a pass of depth alone; or if they're larger than the device's viewports
-    /// reach, as [`Pass::set_viewport`] says.
+    /// - A forgotten pass is open.
+    /// - `pass` isn't the graph's next, or doesn't draw.
+    /// - It draws over or samples a target no pass has drawn into since it was made or its
+    ///   swapchain's image was acquired.
+    /// - Its attachments aren't all its color target's size (its depth's, for a pass of depth
+    ///   alone), or are larger than the device's viewports reach, as [`Pass::set_viewport`] says.
     pub fn render(&mut self, pass: PassId) -> Option<Pass<'_, 'a>> {
         let decl = self.take_pass(pass, PassKind::Render);
         let graph = self.graph;
@@ -48,14 +48,14 @@ impl<'a> Frame<'a> {
         {
             return None;
         }
-        // What the pass's size and format go by: its color target, or its depth, for a pass of depth
-        // alone, which is one of the graph's own.
+        // What size and format go by: the color target, or the depth (one of the graph's own) for a
+        // pass of depth alone.
         let first = color.unwrap_or_else(|| {
             (uses.iter())
                 .find_map(|&(image, use_)| matches!(use_, Use::Depth { .. }).then_some(image))
                 .expect("a pass that draws has a color target or depth, as it was checked to")
         });
-        // Before anything is recorded, as a refusal records nothing.
+        // Before recording: a refusal records nothing.
         let (_, _, extent) = self.parts(first);
         for &(image, use_) in uses {
             let (_, _, size) = self.parts(image);
@@ -156,10 +156,10 @@ impl<'a> Frame<'a> {
         let commands = self.commands();
         let raw = device.raw();
         let (cull_mode, front_face) = Faces::Both.state();
-        // SAFETY: the commands are recording outside a pass, and the images and views live until
-        // the frame has finished: the swapchain waits for its frames before destroying its images,
-        // and an offscreen image or one of the graph's own retires until then. Every pipeline takes
-        // its faces as dynamic state, which a draw needs set, and binding one doesn't change.
+        // SAFETY: the commands are recording outside a pass. The images and views live until the
+        // frame has finished: the swapchain waits for its frames before destroying its images, and
+        // an offscreen image or one of the graph's own retires until then. Every pipeline takes its
+        // faces as dynamic state, which a draw needs set and binding one doesn't change.
         unsafe {
             raw.cmd_begin_rendering(commands, &rendering);
             raw.cmd_set_viewport(commands, 0, &[viewport]);
@@ -193,12 +193,13 @@ impl<'a> Frame<'a> {
     }
 }
 
-/// Rendering into a frame's target, which ends when the pass is dropped; a pass forgotten
-/// instead stays open, which the frame's next call catches. Draws read geometry and data through
-/// addresses pushed as push constants, of [`Upload`]s, [`GpuBuffer`]s or the buffers the pass
-/// reads, take indices from either of the first two, and textures from the bindless set, the
-/// images the pass samples among them; indirect draws take their commands from a buffer the pass
-/// takes them from.
+/// Rendering into a frame's target, which ends when the pass is dropped. A forgotten pass stays
+/// open, which the frame's next call catches.
+///
+/// Draws read geometry and data through addresses, pushed as push constants, of [`Upload`]s,
+/// [`GpuBuffer`]s or the buffers the pass reads. They take indices from the first two, and
+/// textures, the pass's sampled images among them, from the bindless set. Indirect draws take
+/// their commands from a buffer the pass takes them from.
 pub struct Pass<'p, 'a> {
     frame: &'p mut Frame<'a>,
     extent: vk::Extent2D,
@@ -207,11 +208,11 @@ pub struct Pass<'p, 'a> {
     uses: Range<usize>,
     /// Its uses of buffers, in its graph's.
     buffer_uses: Range<usize>,
-    /// How many labels inside it are open, which its drop closes.
+    /// How many labels inside it are open; its drop closes them.
     labels: u32,
     /// Whether a pipeline is set, which draws need.
     pipeline_set: bool,
-    /// Whether the pipeline set last draws through a mesh shader.
+    /// Whether the last pipeline set draws through a mesh shader.
     mesh_pipeline: bool,
 }
 
@@ -221,14 +222,14 @@ impl<'a> Pass<'_, 'a> {
         [self.extent.width, self.extent.height]
     }
 
-    /// The formats of its color target, its IDs, its motion and its depth, of those it has, which
-    /// the pipelines it draws with must be made for.
+    /// The formats of its color target, IDs, motion and depth, those it has. Its pipelines must be
+    /// made for them.
     pub fn format(&self) -> Format {
         self.format
     }
 
-    /// The index in the bindless set that shaders sample `image` through, which the pass samples,
-    /// as its graph declared, during the pass alone.
+    /// The index in the bindless set that shaders sample `image` through; the pass samples it, as
+    /// its graph declared, during the pass alone.
     ///
     /// # Panics
     ///
@@ -243,8 +244,8 @@ impl<'a> Pass<'_, 'a> {
         self.frame.sampled_index(image)
     }
 
-    /// The address that shaders read `buffer` through, which the pass reads, or takes commands
-    /// from, as its graph declared, during the pass alone.
+    /// The address that shaders read `buffer` through; the pass reads it or takes commands from
+    /// it, as its graph declared, during the pass alone.
     ///
     /// # Panics
     ///
@@ -267,8 +268,8 @@ impl<'a> Pass<'_, 'a> {
         self.frame.upload(bytes)
     }
 
-    /// Opens a label inside the pass, named `name`, which captures show the draws after it under,
-    /// until [`Pass::end_label`] closes it, or the pass ends.
+    /// Opens a label `name` that captures show the draws after it under, until
+    /// [`Pass::end_label`] closes it or the pass ends.
     pub fn begin_label(&mut self, name: &CStr) {
         // SAFETY: the commands are recording.
         unsafe { self.frame.frames.device.begin_label(self.commands(), name) };
@@ -305,9 +306,9 @@ impl<'a> Pass<'_, 'a> {
         );
         self.pipeline_set = true;
         self.mesh_pipeline = pipeline.mesh();
-        // SAFETY: the commands are recording inside a pass whose formats, its target's, its IDs',
-        // its motion's and its depth image's, are the pipeline's, and the pipeline retires until
-        // the frame has finished.
+        // SAFETY: the commands are recording inside a pass whose formats (target's, IDs', motion's
+        // and depth image's) are the pipeline's, and the pipeline retires until the frame has
+        // finished.
         unsafe {
             self.frame.frames.device.raw().cmd_bind_pipeline(
                 self.commands(),
@@ -322,8 +323,8 @@ impl<'a> Pass<'_, 'a> {
     ///
     /// # Panics
     ///
-    /// If `size` has no area, which a viewport can't have, or the viewport is larger than the
-    /// device's `maxViewportDimensions` or reaches past its `viewportBoundsRange`.
+    /// If `size` has no area, or the viewport is larger than the device's `maxViewportDimensions`
+    /// or reaches past its `viewportBoundsRange`.
     pub fn set_viewport(&mut self, origin: [u32; 2], size: [u32; 2]) {
         let viewport = viewport(&self.frame.frames.device, origin, size);
         // SAFETY: the commands are recording, and the viewport keeps within the device's limits.
@@ -337,7 +338,7 @@ impl<'a> Pass<'_, 'a> {
         self.set_scissor(origin, size);
     }
 
-    /// Has the draws that follow draw only the triangles `faces` names: a pass starts drawing
+    /// Has the draws that follow draw only the triangles `faces` names. A pass starts drawing
     /// both.
     pub fn set_faces(&mut self, faces: Faces) {
         let (cull_mode, front_face) = faces.state();
@@ -374,7 +375,7 @@ impl<'a> Pass<'_, 'a> {
         }
     }
 
-    /// Sets the push constants, from offset 0, that the draws which follow see in every stage.
+    /// Sets the push constants, from offset 0, that the following draws see in every stage.
     ///
     /// # Panics
     ///
@@ -398,7 +399,7 @@ impl<'a> Pass<'_, 'a> {
         }
     }
 
-    /// Draws `vertices` vertices, `instances` times, with the pipeline set last: the vertex shader
+    /// Draws `vertices` vertices, `instances` times, with the pipeline set last. The vertex shader
     /// sees each vertex's index, from 0, as `SV_VulkanVertexID`, and each instance's as
     /// `SV_VulkanInstanceID`.
     ///
@@ -418,9 +419,8 @@ impl<'a> Pass<'_, 'a> {
     }
 
     /// Draws `count` of `indices`, starting `first` indices in, `instances` times, with the
-    /// pipeline set last: the vertex shader sees each instance's index, from 0, as
-    /// `SV_VulkanInstanceID`. Each index is offset by `vertex_offset` before the vertex shader
-    /// sees it.
+    /// pipeline set last. The vertex shader sees each instance's index, from 0, as
+    /// `SV_VulkanInstanceID`, and each index offset by `vertex_offset`.
     ///
     /// # Panics
     ///
@@ -461,17 +461,18 @@ impl<'a> Pass<'_, 'a> {
     }
 
     /// Draws `indices` as the command at byte `offset` of `commands` says, a buffer the pass takes
-    /// commands from, as an earlier pass wrote it, with the pipeline set last: a
-    /// `VkDrawIndexedIndirectCommand`, five 32-bit words, how many indices, how many instances,
-    /// the first index, what each index is offset by and the first instance, whose index the
-    /// vertex shader sees as `SV_VulkanInstanceID`, counted from it. What wrote the command is
+    /// commands from, as an earlier pass wrote it, with the pipeline set last.
+    ///
+    /// The command is a `VkDrawIndexedIndirectCommand`, five 32-bit words: index count, instance
+    /// count, first index, what each index is offset by, and first instance. The vertex shader sees
+    /// instance indices counted from the first as `SV_VulkanInstanceID`. What wrote the command is
     /// trusted to keep the indices it draws within `indices`, as shaders are trusted with
     /// addresses.
     ///
     /// # Panics
     ///
-    /// If no pipeline is set; the pass doesn't take commands from `commands`; the command isn't
-    /// 4-byte aligned, or runs past the buffer's end; or the indices are a buffer no frame has
+    /// If no pipeline is set, the pass doesn't take commands from `commands`, the command isn't
+    /// 4-byte aligned or runs past the buffer's end, or the indices are a buffer no frame has
     /// filled or another device made.
     pub fn draw_indexed_indirect<'i>(
         &mut self,
@@ -489,7 +490,7 @@ impl<'a> Pass<'_, 'a> {
         self.check_vertices();
         let buffer = self.command_buffer(commands, offset, COMMAND);
         // SAFETY: the commands are recording inside a pass with a pipeline set, after the barrier
-        // that lets draws read the command, which lies within its buffer; the buffer and the
+        // that lets draws read the command, which lies within its buffer. The buffer and the
         // indices live until the frame has finished, as the graph's own buffers retire until then.
         unsafe {
             let raw = self.frame.frames.device.raw();
@@ -504,16 +505,16 @@ impl<'a> Pass<'_, 'a> {
     }
 
     /// Draws as the command at byte `offset` of `commands` says, a buffer the pass takes commands
-    /// from, as an earlier pass wrote it, with the pipeline set last: a `VkDrawIndirectCommand`,
-    /// four 32-bit words, how many vertices, how many instances, the first vertex and the first
-    /// instance, each vertex's index seen by the vertex shader as `SV_VulkanVertexID` and each
-    /// instance's as `SV_VulkanInstanceID`, counted from them.
+    /// from, as an earlier pass wrote it, with the pipeline set last.
+    ///
+    /// The command is a `VkDrawIndirectCommand`, four 32-bit words: vertex count, instance count,
+    /// first vertex, first instance. The vertex shader sees indices counted from the first as
+    /// `SV_VulkanVertexID` and `SV_VulkanInstanceID`.
     ///
     /// # Panics
     ///
-    /// If no pipeline is set, or the one set draws through a mesh shader; the pass doesn't take
-    /// commands from `commands`; or the command isn't 4-byte aligned, or runs past the buffer's
-    /// end.
+    /// If no pipeline is set or the one set draws through a mesh shader, the pass doesn't take
+    /// commands from `commands`, or the command isn't 4-byte aligned or runs past the buffer's end.
     pub fn draw_indirect(&mut self, commands: BufferId, offset: u64) {
         /// A `VkDrawIndirectCommand`'s bytes.
         const COMMAND: u64 = 16;
@@ -529,16 +530,17 @@ impl<'a> Pass<'_, 'a> {
     }
 
     /// Draws through the mesh shader of the pipeline set last as the command at byte `offset` of
-    /// `commands` says, a buffer the pass takes commands from, as an earlier pass wrote it: a
-    /// `VkDrawMeshTasksIndirectCommandEXT`, three 32-bit words, how many workgroups across, down
-    /// and deep, each of which the mesh shader sees as `SV_GroupID`. What wrote the command is
-    /// trusted to keep them within the device's limits, as shaders are trusted with addresses.
+    /// `commands` says, a buffer the pass takes commands from, as an earlier pass wrote it.
+    ///
+    /// The command is a `VkDrawMeshTasksIndirectCommandEXT`, three 32-bit words: workgroups
+    /// across, down and deep, each seen by the mesh shader as `SV_GroupID`. What wrote the command
+    /// is trusted to keep them within the device's limits, as shaders are trusted with addresses.
     ///
     /// # Panics
     ///
-    /// If no pipeline is set, or the one set doesn't draw through a mesh shader; the pass doesn't
-    /// take commands from `commands`; or the command isn't 4-byte aligned, or runs past the buffer's
-    /// end.
+    /// If no pipeline is set or the one set doesn't draw through a mesh shader, the pass doesn't
+    /// take commands from `commands`, or the command isn't 4-byte aligned or runs past the
+    /// buffer's end.
     pub fn draw_mesh_tasks_indirect(&mut self, commands: BufferId, offset: u64) {
         /// A `VkDrawMeshTasksIndirectCommandEXT`'s bytes.
         const COMMAND: u64 = 12;
@@ -562,7 +564,7 @@ impl<'a> Pass<'_, 'a> {
         }
     }
 
-    /// Checks that a pipeline is set for a draw of vertices, as the draws but
+    /// Checks that a pipeline is set for a draw of vertices, as all draws but
     /// [`draw_mesh_tasks_indirect`](Self::draw_mesh_tasks_indirect) are.
     fn check_vertices(&self) {
         assert!(self.pipeline_set, "a draw needs a pipeline set first");
@@ -572,12 +574,12 @@ impl<'a> Pass<'_, 'a> {
         );
     }
 
-    /// The buffer of the graph's own `commands`, whose `size` bytes at `offset` are a command the
-    /// pass's indirect draws take.
+    /// The buffer of the graph's own `commands`, whose `size` bytes at `offset` are a command for
+    /// the pass's indirect draws.
     ///
     /// # Panics
     ///
-    /// If the pass doesn't take commands from `commands`, or the command isn't 4-byte aligned, or
+    /// If the pass doesn't take commands from `commands`, or the command isn't 4-byte aligned or
     /// runs past the buffer's end.
     fn command_buffer(&self, commands: BufferId, offset: u64, size: u64) -> vk::Buffer {
         assert!(
@@ -616,13 +618,12 @@ impl Drop for Pass<'_, '_> {
     }
 }
 
-/// The viewport over the `size` pixels at `origin`, which keeps within `device`'s limits.
+/// The viewport over the `size` pixels at `origin`, within `device`'s limits.
 ///
 /// # Panics
 ///
-/// If `size` has no area, which a viewport can't have, or the viewport is larger than the device's
-/// `maxViewportDimensions` or reaches past its `viewportBoundsRange`, which the driver doesn't
-/// check.
+/// If `size` has no area, or the viewport is larger than the device's `maxViewportDimensions` or
+/// reaches past its `viewportBoundsRange`, which the driver doesn't check.
 fn viewport(device: &Device, origin: [u32; 2], size: [u32; 2]) -> vk::Viewport {
     assert!(
         size[0] > 0 && size[1] > 0,
@@ -669,7 +670,7 @@ pub struct Indices<'a> {
     count: u64,
     /// The handle of the device that made the buffer.
     device: vk::Device,
-    /// The indices borrow what holds them, so that it outlives the draw's recording.
+    /// Borrows what holds the indices, so that it outlives the draw's recording.
     holder: PhantomData<&'a ()>,
 }
 
@@ -688,8 +689,8 @@ impl<'a> From<Upload<'a>> for Indices<'a> {
 impl<'a> From<&'a GpuBuffer> for Indices<'a> {
     /// # Panics
     ///
-    /// If no frame has filled the buffer: its indices are undefined until then, and a fill after
-    /// the draw in the same frame would race it.
+    /// If no frame has filled the buffer: its indices are undefined until then, and a later fill
+    /// in the same frame would race the draw.
     fn from(buffer: &'a GpuBuffer) -> Self {
         assert!(
             buffer.written(),

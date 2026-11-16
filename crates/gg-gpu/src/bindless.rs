@@ -1,10 +1,9 @@
-//! The bindless descriptor sets: every texture shaders can sample, a fixed set of samplers, and
-//! the levels of the storage images compute shaders write, in one descriptor set for each frame in
-//! flight, of one layout, that every pipeline shares. Shaders pick a texture, a sampler and a
-//! storage image by index, and read buffers through their device addresses, so nothing else is
-//! ever bound. A frame binds the set of its slot; a slot's view changes in the set of the frame
-//! being recorded at once, and in each other set as that set's next frame begins, once the frame
-//! that last used it has finished.
+//! The bindless descriptor sets: every texture shaders sample, a fixed set of samplers, and the
+//! levels of the storage images compute shaders write. There is one set per frame in flight, all
+//! of one layout that every pipeline shares. Shaders pick a texture, sampler and storage image by
+//! index and read buffers by device address, so nothing else is ever bound. A frame binds the set
+//! of its slot. A slot's view changes at once in the set of the frame being recorded, and in each
+//! other set as its next frame begins, once the frame that last used it has finished.
 
 use std::collections::HashSet;
 use std::iter;
@@ -22,22 +21,21 @@ const SETS: usize = FRAMES_IN_FLIGHT as usize;
 /// How many textures the set holds. A device with descriptor indexing holds at least 500,000.
 pub(crate) const TEXTURES: u32 = 65_536;
 
-/// How many of the set's slots, from the first, are placed: the texture made for one names it, as
-/// [`Texture::placed`](crate::Texture::placed) does, so that its index is known before it's made.
+/// How many of the set's slots, from the first, are placed: a texture names its slot, as
+/// [`Texture::placed`](crate::Texture::placed) does, so its index is known before it's made.
 /// The other 4,096 are given out wherever one is free.
 pub const PLACED_TEXTURES: u32 = TEXTURES - 4_096;
 
-/// How many storage images the set holds, a mip level of an image each, which compute shaders
-/// write and read by index, in the general layout. A device with descriptor indexing holds at least
-/// 500,000.
+/// How many storage images the set holds, a mip level each, which compute shaders write and read
+/// by index, in the general layout. A device with descriptor indexing holds at least 500,000.
 pub(crate) const STORAGE_IMAGES: u32 = 4_096;
 
 /// The bytes of push constants every pipeline gets: 128, the most every device allows. Shaders
 /// see them from offset 0, in every stage.
 pub(crate) const PUSH_CONSTANTS: u32 = 128;
 
-/// How shaders sample a texture: its filter, and what lies past its edges. Shaders take the
-/// sampler from the set by [`Sampler::index`].
+/// A texture's filter and what lies past its edges. Shaders take the sampler from the set by
+/// [`Sampler::index`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sampler {
     LinearClamp,
@@ -91,7 +89,7 @@ impl Sampler {
     }
 }
 
-/// What a sampler gives past a texture's edges: the edges' texels, the texture repeated, or the
+/// What a sampler gives past a texture's edges: the edge texels, the texture repeated, or the
 /// texture mirrored at each edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Wrap {
@@ -103,11 +101,11 @@ pub enum Wrap {
 impl Wrap {
     const ALL: [Self; 3] = [Self::Clamp, Self::Repeat, Self::Mirror];
 
-    /// Where shaders find, after every [`Sampler`], the anisotropic sampler that wraps this way: it
-    /// filters linearly within and between a texture's mip levels, with up to 16 samples along the
-    /// way a surface recedes, as models' textures are sampled; on lavapipe, without those samples,
-    /// as `Candidate::anisotropy` in src/device/candidate.rs says why. Not for sprites, whose texels
-    /// it would read past, since its samples spread around the point a shader asks for.
+    /// Where shaders find, after every [`Sampler`], the anisotropic sampler that wraps this way.
+    /// It filters linearly within and between mip levels, with up to 16 samples along the way a
+    /// surface recedes, for models' textures; on lavapipe without those samples, as
+    /// `Candidate::anisotropy` in src/device/candidate.rs says. Not for sprites: its samples
+    /// spread around the requested point and read past their texels.
     pub fn anisotropic(self) -> u32 {
         Sampler::ALL.len() as u32 + self as u32
     }
@@ -120,9 +118,9 @@ impl Wrap {
         }
     }
 
-    /// What its anisotropic sampler is made from: 16 samples at most, the least
-    /// `maxSamplerAnisotropy` a device with anisotropy may have, and every Vulkan 1.4 device has it;
-    /// or, without `anisotropy`, linear filtering alone.
+    /// Its anisotropic sampler: 16 samples at most, the least `maxSamplerAnisotropy` a device with
+    /// anisotropy may have, which every Vulkan 1.4 device has; without `anisotropy`, linear
+    /// filtering alone.
     fn anisotropic_info(self, anisotropy: bool) -> vk::SamplerCreateInfo<'static> {
         let address = self.address();
         vk::SamplerCreateInfo::default()
@@ -139,19 +137,19 @@ impl Wrap {
 }
 
 /// Where shaders find, after every [`Sampler`] and [`Wrap`]'s anisotropic ones, the sampler that
-/// compares depth, which they take as a `SamplerComparisonState` for `SampleCmp`, to sample a shadow
-/// map, an image of depth ([`Graph::depth`](crate::Graph::depth)), by: each of the four texels
-/// nearest the point is 1 where the depth compared is as near as the texel's or nearer, depth
-/// running from 1 at the near plane, and 0 where it's farther, and the four filter linearly, as
-/// percentage-closer filtering takes them; past the edges, the edges' texels. Through it, shaders
-/// sample nothing else, nor sample anything but by comparison.
+/// compares depth: a `SamplerComparisonState` for `SampleCmp`, to sample a shadow map, an image
+/// of depth ([`Graph::depth`](crate::Graph::depth)). Each of the four texels nearest the point
+/// is 1 where the depth compared is as near as the texel's or nearer (depth runs from 1 at the
+/// near plane), else 0, and the four filter linearly, as percentage-closer filtering takes them.
+/// Past the edges, the edge texels. Shaders sample nothing else through it, and nothing but by
+/// comparison.
 pub const COMPARISON_SAMPLER: u32 = (Sampler::ALL.len() + Wrap::ALL.len()) as u32;
 
-/// How many samplers the set has: every [`Sampler`], then [`Wrap`]'s anisotropic ones, then the
-/// one that compares.
+/// How many samplers the set has: every [`Sampler`], [`Wrap`]'s anisotropic ones, then the
+/// comparison one.
 const SAMPLERS: usize = COMPARISON_SAMPLER as usize + 1;
 
-/// What the sampler that compares, [`COMPARISON_SAMPLER`], is made from.
+/// [`COMPARISON_SAMPLER`]'s create info.
 fn comparison_info() -> vk::SamplerCreateInfo<'static> {
     let clamp = vk::SamplerAddressMode::CLAMP_TO_EDGE;
     vk::SamplerCreateInfo::default()
@@ -174,29 +172,28 @@ fn sampler_names() -> impl Iterator<Item = String> {
     .chain(iter::once("Comparison sampler".to_owned()))
 }
 
-/// The sets, their layout and the pipeline layout built on it, which texture slots are free, and
-/// the writes each set takes as its next frame begins.
+/// The sets, their layout and pipeline layout, which texture slots are free, and the writes each
+/// set takes as its next frame begins.
 pub(crate) struct Bindless {
     samplers: Vec<vk::Sampler>,
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    /// One for each frame in flight, in the order of their slots.
+    /// One per frame in flight, in the order of their slots.
     sets: Vec<vk::DescriptorSet>,
     pipeline_layout: vk::PipelineLayout,
     /// Also held while writing a set, which Vulkan requires one thread at a time to do.
     state: Mutex<State>,
 }
 
-/// What the lock guards.
 struct State {
     slots: Slots,
     storage: StorageSlots,
     rewrites: Rewrites,
 }
 
-/// Which storage image slots are in use: by a storage image's level, or by one retired until the
-/// GPU is done with the frames that may write it. Each takes its view in every set at once, and
-/// keeps it until it's freed.
+/// Which storage image slots are in use: by a level of a storage image, or retired until the GPU
+/// is done with the frames that may write it. Each takes its view in every set at once and keeps
+/// it until freed.
 struct StorageSlots {
     /// Slots whose views were destroyed, to reuse first.
     free: Vec<u32>,
@@ -205,7 +202,7 @@ struct StorageSlots {
 }
 
 impl StorageSlots {
-    /// Takes a free slot for a level of the image named `name`.
+    /// Takes a free slot for a level of the image `name`.
     fn take(&mut self, name: &str) -> Result<u32> {
         match self.free.pop() {
             Some(index) => Ok(index),
@@ -227,8 +224,8 @@ impl StorageSlots {
 /// The views queued for texture slots in the sets of frames that may still be running, each
 /// written into its set as that set's next frame begins.
 struct Rewrites {
-    /// For each set, the slots to write and the views to put in them. Each slot is in a set's
-    /// list at most once: the last view queued for it.
+    /// Per set, the slots to write and their views. A slot is in a list at most once, with the
+    /// last view queued for it.
     queued: Vec<Vec<(u32, vk::ImageView)>>,
 }
 
@@ -239,10 +236,10 @@ impl Rewrites {
         }
     }
 
-    /// Notes that texture slot `index` took `view` in set `written`, which was written at once,
-    /// and queues `view` for it in every other set, in place of any view queued for it before:
-    /// the last queued wins. Nothing is queued for `written`, the set of the frame being recorded:
-    /// its list was emptied as that frame began, and only the frame being recorded queues.
+    /// Notes that texture slot `index` took `view` in set `written`, written at once, and queues
+    /// `view` for it in every other set, replacing any view queued before: the last wins. Nothing
+    /// is queued for `written`, the set of the frame being recorded: its list was emptied as that
+    /// frame began, and only the frame being recorded queues.
     fn queue(&mut self, written: usize, index: u32, view: vk::ImageView) {
         debug_assert!(
             !self.queued[written].iter().any(|&(slot, _)| slot == index),
@@ -259,7 +256,7 @@ impl Rewrites {
         }
     }
 
-    /// Forgets what's queued for texture slot `index` in every set: it was written into them all.
+    /// Forgets what's queued for slot `index` in every set: it was written into them all.
     fn clear(&mut self, index: u32) {
         for queued in &mut self.queued {
             queued.retain(|&(slot, _)| slot != index);
@@ -272,14 +269,14 @@ impl Rewrites {
     }
 }
 
-/// Which texture slots are in use: by a texture, or by one retired until the GPU is done with the
-/// frames that may sample it.
+/// Which texture slots are in use: by a texture, or retired until the GPU is done with the frames
+/// that may sample it.
 struct Slots {
     /// The placed slots in use.
     placed: HashSet<u32>,
-    /// Slots past the placed ones whose textures were destroyed, to reuse first.
+    /// Unplaced slots whose textures were destroyed, to reuse first.
     free: Vec<u32>,
-    /// The first slot past the placed ones never used.
+    /// The first unplaced slot never used.
     next: u32,
 }
 
@@ -292,8 +289,7 @@ impl Slots {
         }
     }
 
-    /// Takes `slot`, a placed one, or with `None` a free slot past them, for the image named
-    /// `name`.
+    /// Takes `slot`, a placed one, or with `None` a free unplaced one, for the image `name`.
     ///
     /// # Panics
     ///
@@ -338,8 +334,7 @@ impl Slots {
 }
 
 impl Bindless {
-    /// The set, whose [`Wrap::anisotropic`] samplers filter anisotropically if `anisotropy` says
-    /// they do on the device.
+    /// The set; its [`Wrap::anisotropic`] samplers filter anisotropically if `anisotropy`.
     ///
     /// # Safety
     ///
@@ -387,9 +382,9 @@ impl Bindless {
                     .map_err(vk_failed("vkCreateSampler", format_args!("{name:?}")))?;
                 self.samplers.push(sampler);
             }
-            // Textures change while frames that use other textures are in flight, and a slot of
-            // the set of the frame being recorded changes while the frame before samples it
-            // through the other set; storage images come and go while frames that use others are.
+            // Textures change while frames using other textures are in flight, and a slot of the
+            // recording frame's set changes while the frame before samples it through the other
+            // set; storage images come and go while frames using others are.
             let texture_flags = vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
                 | vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING
                 | vk::DescriptorBindingFlags::PARTIALLY_BOUND;
@@ -462,8 +457,8 @@ impl Bindless {
             self.sets = device
                 .allocate_descriptor_sets(&allocate_info)
                 .map_err(vk_failed("vkAllocateDescriptorSets", "the bindless sets"))?;
-            // Written into each set once, before any pipeline uses it, rather than made immutable
-            // in its layout: AMD's driver (25.10.30) reads immutable samplers that shaders index
+            // Written into each set once, before any pipeline uses it, not made immutable in the
+            // layout: AMD's driver (25.10.30) reads immutable samplers that shaders index
             // non-uniformly as a sampler of zeros, which filters by the nearest texel and never
             // leaves a texture's first level.
             let samplers: Vec<_> = (self.samplers.iter())
@@ -500,12 +495,12 @@ impl Bindless {
         Ok(())
     }
 
-    /// The set the frames of slot `slot` bind.
+    /// The set frames of slot `slot` bind.
     pub(crate) fn set(&self, slot: usize) -> vk::DescriptorSet {
         self.sets[slot]
     }
 
-    /// Gives the samplers, the sets, and the layouts and pool they're made with their debug names.
+    /// Names the samplers, sets, layouts and pool.
     ///
     /// # Safety
     ///
@@ -526,14 +521,13 @@ impl Bindless {
         }
     }
 
-    /// The layout every pipeline is made with.
+    /// The layout every pipeline uses.
     pub(crate) fn pipeline_layout(&self) -> vk::PipelineLayout {
         self.pipeline_layout
     }
 
-    /// Puts `view`, of the image named `name`, in texture slot `slot`, a placed one, or with `None`
-    /// a free slot past them, and returns the slot's index: [`Bindless::reserve`], then
-    /// [`Bindless::write`].
+    /// Puts `view`, of the image `name`, in texture slot `slot`, a placed one, or with `None` a
+    /// free unplaced one, and returns its index: [`Bindless::reserve`], then [`Bindless::write`].
     ///
     /// # Safety
     ///
@@ -556,10 +550,9 @@ impl Bindless {
         Ok(index)
     }
 
-    /// Takes texture slot `slot`, a placed one, or with `None` a free slot past them, for the view
-    /// [`Bindless::write`] puts in it, of the image named `name`, and returns the slot's index. A
-    /// texture reserves its slot before it makes its image, so that a refused slot leaves nothing
-    /// to leak.
+    /// Takes texture slot `slot`, a placed one, or with `None` a free unplaced one, for the view
+    /// [`Bindless::write`] puts in it, of the image `name`, and returns its index. A texture
+    /// reserves its slot before making its image, so a refused slot leaks nothing.
     ///
     /// # Panics
     ///
@@ -574,9 +567,9 @@ impl Bindless {
     /// # Safety
     ///
     /// `device` must be the sets', and `view` a live view of a sampled image of it, in the
-    /// shader-read-only layout whenever a shader samples it; and no submitted frame that the GPU
-    /// may still run may use the slot, which the binding's flags allow updating only while unused:
-    /// a frame still recording takes the new view.
+    /// shader-read-only layout whenever a shader samples it. No submitted frame the GPU may still
+    /// run may use the slot, as the binding's flags allow updating only while unused; a frame
+    /// still recording takes the new view.
     pub(crate) unsafe fn write(&self, device: &ash::Device, view: vk::ImageView, index: u32) {
         let mut state = self.lock();
         for set in 0..SETS {
@@ -584,21 +577,21 @@ impl Bindless {
             // the slot; the lock is held.
             unsafe { write_slot(device, self.sets[set], index, view) };
         }
-        // Nothing queued for the slot before, as for a texture that had it, may write over it.
+        // Nothing queued for the slot before, for a texture that had it, may write over it.
         state.rewrites.clear(index);
     }
 
-    /// Puts `view` in texture slot `index`, which frames that the GPU may still run may sample
-    /// through the sets of their slots: in the set of slot `recording`, the frame being recorded,
-    /// at once, and in each other set as that set's next frame begins ([`Bindless::apply`]), once
-    /// the frame that last used it has finished. The view the slot held stays in use until then,
-    /// so it retires by frames as any resource does.
+    /// Puts `view` in texture slot `index`, which frames the GPU may still run may sample through
+    /// their sets: at once in the set of slot `recording`, the frame being recorded, and in each
+    /// other set as its next frame begins ([`Bindless::apply`]), once the frame that last used it
+    /// has finished. The view the slot held stays in use until then, so it retires by frames as
+    /// any resource does.
     ///
     /// # Safety
     ///
     /// `device` must be the sets', `view` as for [`Bindless::write`], and `recording` the slot of
-    /// the frame being recorded, whose set no submitted frame that the GPU may still run uses:
-    /// the frame that last used it has finished. `view` must also live until the frame being
+    /// the frame being recorded, whose set no submitted frame the GPU may still run uses: the
+    /// frame that last used it has finished. `view` must also live until the frame being
     /// recorded has finished, as a view that retires by frames does: each other set takes it as
     /// its next frame begins, having waited only for frames before this one.
     pub(crate) unsafe fn rewrite(
@@ -614,19 +607,19 @@ impl Bindless {
         state.rewrites.queue(recording, index, view);
     }
 
-    /// Writes into the set of slot `slot` the views queued for it by [`Bindless::rewrite`], as
-    /// the slot's next frame begins.
+    /// Writes into the set of slot `slot` the views [`Bindless::rewrite`] queued for it, as the
+    /// slot's next frame begins.
     ///
     /// # Safety
     ///
-    /// `device` must be the sets', and no submitted frame that the GPU may still run may use the
-    /// set: the frame that last used the slot has finished.
+    /// `device` must be the sets', and no submitted frame the GPU may still run may use the set:
+    /// the frame that last used the slot has finished.
     pub(crate) unsafe fn apply(&self, device: &ash::Device, slot: usize) {
         let mut state = self.lock();
         for (index, view) in state.rewrites.take(slot) {
             // SAFETY: the caller guarantees the device and the set; the lock is held. The view was
             // queued by a frame begun since the set's last, on another set, and lives until that
-            // frame has finished, as `rewrite` requires; the frame beginning has waited only for
+            // frame has finished, as `rewrite` requires. The frame beginning has waited only for
             // the set's last, and destroyed only what no later frame may use, so the view is live.
             unsafe { write_slot(device, self.sets[slot], index, view) };
         }
@@ -638,14 +631,14 @@ impl Bindless {
         self.lock().slots.release(index);
     }
 
-    /// Puts `view`, of a level of the storage image named `name`, in a free storage slot, in every
-    /// set at once, and returns the slot's index.
+    /// Puts `view`, of a level of the storage image `name`, in a free storage slot in every set at
+    /// once, and returns its index.
     ///
     /// # Safety
     ///
-    /// `device` must be the sets', and `view` a live view of one level of a storage image of it, in
-    /// the general layout whenever a shader reads or writes it; no frame uses the slot, which is
-    /// free as it's taken.
+    /// `device` must be the sets', and `view` a live view of one level of a storage image of it,
+    /// in the general layout whenever a shader reads or writes it; no frame uses the slot, which
+    /// is free as it's taken.
     pub(crate) unsafe fn add_storage(
         &self,
         device: &ash::Device,
@@ -702,8 +695,8 @@ impl Bindless {
 ///
 /// # Safety
 ///
-/// `device` must be `set`'s, `view` as for [`Bindless::write`], no submitted frame that the GPU
-/// may still run may use the set, and the lock must be held.
+/// `device` must be `set`'s, `view` as for [`Bindless::write`], no submitted frame the GPU may
+/// still run may use the set, and the lock must be held.
 unsafe fn write_slot(
     device: &ash::Device,
     set: vk::DescriptorSet,
@@ -730,9 +723,9 @@ mod tests {
     use super::*;
 
     /// A view queued for a slot reaches every set but the one written at once, as each set's turn
-    /// comes; a later view for the slot, queued by the same frame, takes its place in the sets it
-    /// hasn't reached; a later one queued by the next frame, whose set took the first as it began,
-    /// is owed to the first frame's set.
+    /// comes. A later view queued by the same frame replaces it in the sets not yet reached. One
+    /// queued by the next frame, whose set took the first as it began, is owed to the first
+    /// frame's set.
     #[test]
     fn a_rewrite_reaches_each_other_set_in_turn_and_the_last_queued_wins() {
         let view = |n: u64| vk::ImageView::from_raw(n);

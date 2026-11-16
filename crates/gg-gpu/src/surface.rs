@@ -9,26 +9,25 @@ use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 
 use crate::{Instance, vk_failed};
 
-/// A window the engine can present to: any window type with raw window handles, such as
-/// winit's.
+/// A window the engine can present to: any type with raw window handles, such as winit's.
 pub trait Window: HasWindowHandle + HasDisplayHandle + Send + Sync {}
 
 impl<T: HasWindowHandle + HasDisplayHandle + Send + Sync + ?Sized> Window for T {}
 
-/// A window's Vulkan surface. It holds on to the window, which must outlive it.
+/// A window's Vulkan surface. It holds the window, which must outlive it.
 pub struct Surface {
     instance: Arc<Instance>,
     raw: vk::SurfaceKHR,
-    /// What the surface's and its swapchain's debug names and errors call the window.
+    /// What the debug names and errors of the surface and its swapchain call the window.
     name: String,
-    /// Held so that it outlives the surface, and so that a surface lost can be made again for it.
+    /// Held so it outlives the surface, and a lost surface can be remade for it.
     window: Arc<dyn Window>,
 }
 
 impl Surface {
     /// A surface for `window`, which must be on the display `instance` was created for. `name`
-    /// tells the window apart in the debug names and errors of the surface, `{name} surface`, and
-    /// of its swapchain, such as `{name} swapchain image 0`.
+    /// tells the window apart in debug names and errors: the surface's, `{name} surface`, and its
+    /// swapchain's, such as `{name} swapchain image 0`.
     pub fn new(instance: &Arc<Instance>, window: Arc<dyn Window>, name: &str) -> Result<Self> {
         if instance.surface_fn().is_none() {
             return Err(Error::new(
@@ -57,8 +56,8 @@ impl Surface {
         })
     }
 
-    /// Another surface for the same window, of the same name, in place of this one, lost: fails if
-    /// the window is gone, as a closed window's handles are.
+    /// A surface for the same window and name, replacing this one when lost. Fails if the window
+    /// is gone, as a closed window's handles are.
     pub(crate) fn remake(&self) -> Result<Self> {
         Self::new(&self.instance, self.window.clone(), &self.name)
     }
@@ -67,13 +66,12 @@ impl Surface {
         self.raw
     }
 
-    /// What its window is called, as [`Surface::new`] says.
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    /// Checks that the surface is `instance`'s: Vulkan lets a surface be used only with the
-    /// devices of the instance that made it.
+    /// Checks that the surface is `instance`'s: it works only with devices of the instance that
+    /// made it.
     ///
     /// # Panics
     ///

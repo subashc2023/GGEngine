@@ -1,5 +1,5 @@
-//! Textures: images shaders sample, each in a slot of the bindless sets, which shows the texture's
-//! own image, or another texture's as a stand-in until it has one.
+//! Textures: images shaders sample, each in a bindless slot showing its own image, or another
+//! texture's as a stand-in until it has one.
 
 use std::iter;
 use std::sync::Arc;
@@ -11,24 +11,24 @@ use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
 use crate::{COLOR_RANGE, Device, UploadPath, vk_error};
 
-/// The most pixels a side a texture has: what every Vulkan 1.4 device takes, the version the
-/// engine requires.
+/// The most pixels a side a texture has: what every Vulkan 1.4 device, the required version,
+/// takes.
 pub const MAX_TEXTURE_SIZE: u32 = 8192;
 
 /// The most mip levels a texture has: a full chain of [`MAX_TEXTURE_SIZE`] pixels a side.
 pub(crate) const MAX_LEVELS: usize = MAX_TEXTURE_SIZE.ilog2() as usize + 1;
 
-/// The sizes of the levels of a full mip chain of a `width` by `height` image, largest first: each
-/// half the one before, rounded down but at least a pixel a side, down to a pixel. A texture made
-/// mipmapped has these levels.
+/// The level sizes of a full mip chain of a `width` by `height` image, largest first: each half
+/// the one before, rounded down but at least a pixel a side, down to a pixel. A mipmapped texture
+/// has these levels.
 pub fn mip_sizes(width: u32, height: u32) -> impl Iterator<Item = [u32; 2]> {
     iter::successors(Some([width, height]), |&[width, height]| {
         (width > 1 || height > 1).then(|| [(width / 2).max(1), (height / 2).max(1)])
     })
 }
 
-/// The sizes of the first `count` levels of a `width` by `height` image's mip chain, and where each
-/// one's pixels, stored in `format`, start among all of theirs, a level's after the one before's.
+/// The sizes of the first `count` levels of a `width` by `height` image's mip chain, and where
+/// each level's pixels, stored in `format`, start among all of them, packed in order.
 fn levels(
     format: TextureFormat,
     width: u32,
@@ -48,31 +48,29 @@ fn levels(
 /// How a texture's pixels are stored, and how they read in shaders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
-    /// 8-bit RGBA channels, which shaders read as they are, scaled to 0 to 1: for data, and for
-    /// color a shader decodes itself.
+    /// 8-bit RGBA channels, read as they are, scaled to 0 to 1: for data, and for color a shader
+    /// decodes itself.
     Rgba8Unorm,
-    /// 8-bit RGBA channels, which shaders read as color decoded from sRGB to linear, before it's
-    /// filtered, and alpha as it is: for color as images store it.
+    /// 8-bit RGBA channels, read as color decoded from sRGB to linear before filtering, alpha as
+    /// it is: for color as images store it.
     Rgba8Srgb,
-    /// Colors compressed as BC7, in blocks of 4 by 4 pixels of 16 bytes each, sRGB-encoded as
-    /// [`TextureFormat::Rgba8Srgb`]'s are: shaders read them decoded to linear, before they're
-    /// filtered, and alpha as it is. For color as games' cooked textures store it. A side that
-    /// isn't a multiple of 4, as a mip level's may not be, ends in a block that is whole all the
-    /// same.
+    /// Color compressed as BC7, in blocks of 4 by 4 pixels of 16 bytes each, sRGB-encoded as
+    /// [`TextureFormat::Rgba8Srgb`]'s are: read decoded to linear before filtering, alpha as it
+    /// is. For color as games' cooked textures store it. A side that isn't a multiple of 4, as a
+    /// mip level's may not be, still ends in a whole block.
     Bc7Srgb,
-    /// Data compressed as BC7, as [`TextureFormat::Bc7Srgb`]'s blocks are, which shaders read as
-    /// [`TextureFormat::Rgba8Unorm`]'s: as cooked materials' maps of data store it.
+    /// Data compressed as BC7, as [`TextureFormat::Bc7Srgb`]'s blocks are, read as
+    /// [`TextureFormat::Rgba8Unorm`]'s: as cooked materials' data maps store it.
     Bc7Unorm,
-    /// Two channels of data compressed as BC5, in blocks of 4 by 4 pixels of 16 bytes each, 8 for
-    /// each channel, which shaders read as red and green from 0 to 1, blue as 0 and alpha as 1: as
-    /// cooked normal maps store their X and Y.
+    /// Two channels of data compressed as BC5, in blocks of 4 by 4 pixels of 16 bytes each, 8 per
+    /// channel, read as red and green from 0 to 1, blue 0 and alpha 1: as cooked normal maps store
+    /// their X and Y.
     Bc5Unorm,
-    /// 16-bit floats in linear RGBA, 8 bytes a pixel, which shaders read as they are: for colors of
-    /// high dynamic range, as a sky's.
+    /// 16-bit floats in linear RGBA, 8 bytes a pixel, read as they are: for high-dynamic-range
+    /// colors, as a sky's.
     Rgba16Float,
-    /// Colors of high dynamic range compressed as BC6H, unsigned, in blocks of 4 by 4 pixels of 16
-    /// bytes each, which shaders read as [`TextureFormat::Rgba16Float`]'s, alpha as 1: as cooked
-    /// skies store them.
+    /// High-dynamic-range colors compressed as BC6H, unsigned, in blocks of 4 by 4 pixels of 16
+    /// bytes each, read as [`TextureFormat::Rgba16Float`]'s, alpha 1: as cooked skies store them.
     Bc6hUfloat,
 }
 
@@ -100,19 +98,18 @@ impl TextureFormat {
         }
     }
 
-    /// Whether it's compressed, in blocks of 4 by 4 pixels, which copies move whole: so streamed,
-    /// never written a pixel at a time.
+    /// Whether it's compressed, in blocks of 4 by 4 pixels, which copies move whole: so it's
+    /// streamed, never written a pixel at a time.
     pub fn compressed(self) -> bool {
         self.block_size() != [1, 1]
     }
 
     /// How many bytes fill a texture of `size` pixels in this format, as [`Frame::stream_texture`]
-    /// takes them: its levels packed largest first, the first level alone unless `mipmapped`, and
-    /// otherwise every level that [`mip_sizes`] gives. A level of RGBA8 has 4 bytes a pixel, and of
-    /// 16-bit floats 8. A level of BC7, BC5 or BC6H has 16 bytes for each block of 4 by 4 pixels,
-    /// its sides rounded up to whole blocks, so that a level of a pixel has a block. A level's bytes
-    /// are a multiple of a pixel's or a block's, so that each level starts as aligned as the first,
-    /// as copies need.
+    /// takes them: levels packed largest first, the first alone unless `mipmapped`, else every
+    /// level [`mip_sizes`] gives. A level of RGBA8 has 4 bytes a pixel, of 16-bit floats 8. A
+    /// level of BC7, BC5 or BC6H has 16 bytes per block of 4 by 4 pixels, its sides rounded up to
+    /// whole blocks, so a one-pixel level has a block. A level's bytes are a multiple of a pixel's
+    /// or block's, so each level starts as aligned as the first, as copies need.
     ///
     /// [`Frame::stream_texture`]: crate::Frame::stream_texture
     pub fn bytes(self, size: [u32; 2], mipmapped: bool) -> u64 {
@@ -128,8 +125,8 @@ impl TextureFormat {
         u64::from(width.div_ceil(bw)) * u64::from(height.div_ceil(bh)) * self.block_bytes()
     }
 
-    /// The pixels across and down of the texel block the format stores together, which copies
-    /// move whole: a pixel of RGBA8 or of 16-bit floats, and 4 by 4 of BC7, BC5 and BC6H.
+    /// The pixels across and down of the texel block copies move whole: 1 by 1 for RGBA8 and
+    /// 16-bit floats, 4 by 4 for BC7, BC5 and BC6H.
     fn block_size(self) -> [u32; 2] {
         match self {
             Self::Rgba8Unorm | Self::Rgba8Srgb | Self::Rgba16Float => [1, 1],
@@ -137,8 +134,8 @@ impl TextureFormat {
         }
     }
 
-    /// The bytes of a texel block, which each level's pixels, and each copy's, start a multiple of
-    /// bytes after the first's.
+    /// The bytes of a texel block: each level's and each copy's pixels start a multiple of it
+    /// after the first's.
     fn block_bytes(self) -> u64 {
         match self {
             Self::Rgba8Unorm | Self::Rgba8Srgb => 4,
@@ -148,52 +145,52 @@ impl TextureFormat {
     }
 }
 
-/// An image shaders sample, in one of the [`TextureFormat`]s, through a slot in the bindless
-/// sets. Made with [`Texture::new`], it has an image of its own at once, with one mip level or a
-/// full chain of them, whose pixels are undefined until a frame writes them
-/// ([`Frame::write_texture`](crate::Frame::write_texture)): the UI's textures. Made with
-/// [`Texture::placed`], its slot shows another texture's image, a stand-in, until an image
-/// streamed into it a part at a time ([`Texture::refill`], then
-/// [`Frame::stream_texture`](crate::Frame::stream_texture)) is shown in its place, once its last
-/// part is there ([`Frame::finish_texture`](crate::Frame::finish_texture)); another refill streams
-/// another image, shown when it's there in place of the one before, which keeps showing until
-/// then; and the slot can show a stand-in again
-/// ([`Frame::hide_texture`](crate::Frame::hide_texture)). Dropping it retires its images, and its
-/// slot, until the GPU is done with them; an image that slots of other textures show as their
-/// stand-in retires once none does.
+/// An image shaders sample, in one of the [`TextureFormat`]s, through a bindless slot.
+///
+/// - Made with [`Texture::new`], it has an image of its own at once, one mip level or a full
+///   chain, whose pixels are undefined until a frame writes them
+///   ([`Frame::write_texture`](crate::Frame::write_texture)): the UI's textures.
+/// - Made with [`Texture::placed`], its slot shows another texture's image, a stand-in, until an
+///   image streamed into it a part at a time ([`Texture::refill`], then
+///   [`Frame::stream_texture`](crate::Frame::stream_texture)) is shown in its place once its
+///   last part is there ([`Frame::finish_texture`](crate::Frame::finish_texture)). Another
+///   refill streams another image, shown when it's there; the one before shows until then. The
+///   slot can show a stand-in again ([`Frame::hide_texture`](crate::Frame::hide_texture)).
+///
+/// Dropping it retires its images and slot until the GPU is done with them; an image other
+/// textures' slots show as their stand-in retires once none does.
 pub struct Texture {
     device: Arc<Device>,
     index: u32,
     /// Its own image, which its slot shows: none while the slot shows a stand-in.
     shown: Option<Image>,
-    /// The stand-in's image its slot shows while it has none of its own, held so that it lives
-    /// while the slot shows it, however long the stand-in itself does.
+    /// The stand-in's image its slot shows while it has none of its own, held so it lives while
+    /// the slot shows it, however long the stand-in itself does.
     stood_in: Option<Arc<Owned>>,
-    /// The image being streamed into it, which its slot shows once the last part is copied.
+    /// The image being streamed into it, shown once the last part is copied.
     pending: Option<Pending>,
     /// Its debug name, which its errors name it by.
     name: String,
 }
 
-/// A texture's image: in GPU memory, with its view.
+/// A texture's image in GPU memory, with its view.
 pub(crate) struct Image {
     pub(crate) raw: vk::Image,
     pub(crate) view: vk::ImageView,
-    /// The image, its view and its memory, which the slots that show it as a stand-in hold too.
+    /// The image, view and memory, which slots showing it as a stand-in hold too.
     owned: Arc<Owned>,
     pub(crate) extent: vk::Extent2D,
-    /// How many mip levels it has.
     pub(crate) levels: u32,
     pub(crate) format: TextureFormat,
     /// Whether a frame has filled or written it, which leaves it in the shader-read-only layout.
     pub(crate) written: bool,
 }
 
-/// A texture's image and view in GPU memory, held by the texture whose image it is and by the
-/// textures whose slots show it as their stand-in: it retires, until the GPU is done with the
-/// frames and copies that may use it, once none of them holds it. A slot that stops showing it
-/// has the new view in the set of the frame being recorded at once and in each other set as its
-/// next frame begins, which retiring by frames covers, as for a texture's own image.
+/// A texture's image and view in GPU memory, held by its texture and by the textures whose slots
+/// show it as their stand-in. It retires, until the GPU is done with the frames and copies that
+/// may use it, once none holds it. A slot that stops showing it has the new view in the recording
+/// frame's set at once and in each other set as its next frame begins, which retiring by frames
+/// covers, as for a texture's own image.
 pub(crate) struct Owned {
     device: Arc<Device>,
     raw: vk::Image,
@@ -215,8 +212,8 @@ pub(crate) struct Pending {
     pub(crate) image: Image,
     /// How many bytes of its pixels have been copied, from the first.
     pub(crate) copied: u64,
-    /// The submission of copies on the transfer queue that hands it over to the graphics queue,
-    /// once its last part is recorded; 0 before.
+    /// The submission of transfer-queue copies that hands it over to the graphics queue once its
+    /// last part is recorded; 0 before.
     pub(crate) released: u64,
 }
 
@@ -226,10 +223,9 @@ impl Texture {
         vk::ImageUsageFlags::SAMPLED.as_raw() | vk::ImageUsageFlags::TRANSFER_DST.as_raw(),
     );
 
-    /// A texture of `width` by `height` pixels, with the full chain of mip levels that
-    /// [`mip_sizes`] gives if `mipmapped`, and otherwise one, in a free slot of the bindless sets
-    /// past the placed ones, with `name` as its debug name. It has an image of its own at once,
-    /// whose pixels are undefined until a frame writes them.
+    /// A texture `name` of `width` by `height` pixels, with the full [`mip_sizes`] chain if
+    /// `mipmapped`, else one level, in a free unplaced bindless slot. It has an image of its own
+    /// at once, whose pixels are undefined until a frame writes them.
     ///
     /// # Panics
     ///
@@ -266,12 +262,12 @@ impl Texture {
         })
     }
 
-    /// A texture in placed slot `slot`, one of the first [`PLACED_TEXTURES`](crate::PLACED_TEXTURES),
-    /// so that its index is known before it's made, with `name` as its debug name. It has no image
-    /// of its own: its slot shows the image `stand_in` shows, as a texture [`Texture::new`] made
-    /// does, until an image streamed into it is shown. The texture holds that image while its slot
-    /// shows it, so the stand-in may be dropped, refilled or hidden meanwhile: the image retires
-    /// once neither it nor a slot that shows it holds it.
+    /// A texture `name` in placed slot `slot`, one of the first
+    /// [`PLACED_TEXTURES`](crate::PLACED_TEXTURES), so its index is known before it's made. It
+    /// has no image of its own: its slot shows the image `stand_in` shows, as a [`Texture::new`]
+    /// texture does, until an image streamed into it is shown. The texture holds that image while
+    /// its slot shows it, so the stand-in may be dropped, refilled or hidden meanwhile: the image
+    /// retires once neither it nor a slot showing it holds it.
     ///
     /// # Panics
     ///
@@ -296,13 +292,13 @@ impl Texture {
         })
     }
 
-    /// Makes an image for the texture to stream pixels into, `width` by `height` pixels, with the
-    /// full chain of mip levels that [`mip_sizes`] gives if `mipmapped` and otherwise one, in
-    /// `format`: frames then copy its pixels a part at a time
-    /// ([`Frame::stream_texture`](crate::Frame::stream_texture)), and once the last is there, show
-    /// it in the texture's slot ([`Frame::finish_texture`](crate::Frame::finish_texture)), in
-    /// place of what the slot showed. An image made before that isn't shown yet retires, with
-    /// whatever was copied into it. If it fails, the texture is as it was.
+    /// Makes an image in `format` for the texture to stream pixels into, `width` by `height`, with
+    /// the full [`mip_sizes`] chain if `mipmapped`, else one level. Frames then copy its pixels a
+    /// part at a time ([`Frame::stream_texture`](crate::Frame::stream_texture)) and, once the last
+    /// is there, show it in the texture's slot
+    /// ([`Frame::finish_texture`](crate::Frame::finish_texture)), replacing what it showed. An
+    /// earlier image not yet shown retires, with whatever was copied into it. If it fails, the
+    /// texture is as it was.
     ///
     /// # Panics
     ///
@@ -326,17 +322,17 @@ impl Texture {
         Ok(())
     }
 
-    /// Drops the image being streamed into the texture, if one is: it retires, with whatever was
+    /// Drops the image being streamed into the texture, if any: it retires, with whatever was
     /// copied into it, once the frames and copies that may use it have finished. The slot keeps
-    /// showing what it shows. For an image given up on before it's shown, as one replaced is.
+    /// showing what it shows. For an image given up on before it's shown, as a replaced one is.
     pub fn discard(&mut self) {
         if let Some(pending) = self.pending.take() {
             pending.image.retire();
         }
     }
 
-    /// How many bytes frames have copied into the image being streamed into the texture, from
-    /// the first; 0 without one.
+    /// How many bytes frames have copied into the image being streamed, from the first; 0 without
+    /// one.
     pub fn streamed(&self) -> u64 {
         self.pending.as_ref().map_or(0, |pending| pending.copied)
     }
@@ -346,8 +342,8 @@ impl Texture {
         self.index
     }
 
-    /// The width and height in pixels, of the first and largest level of the image it shows;
-    /// `[0, 0]` while its slot shows a stand-in.
+    /// The width and height in pixels of the first, largest level of the image it shows; `[0, 0]`
+    /// while its slot shows a stand-in.
     pub fn size(&self) -> [u32; 2] {
         self.shown.as_ref().map_or([0, 0], Image::size)
     }
@@ -362,11 +358,11 @@ impl Texture {
         self.shown.as_ref()
     }
 
-    /// The image it shows, which `what` names in the panic if it has none of its own.
+    /// The image it shows.
     ///
     /// # Panics
     ///
-    /// If its slot shows a stand-in.
+    /// If its slot shows a stand-in; `what` names the image in the message.
     pub(crate) fn image_shown(&self, what: &str) -> &Image {
         self.shown.as_ref().unwrap_or_else(|| {
             panic!(
@@ -388,18 +384,17 @@ impl Texture {
         self.pending.as_mut()
     }
 
-    /// Shows `image` in its slot's place in the texture's own state, taking the image it showed
-    /// before, which the caller retires, and letting go of the stand-in's, which retires once
-    /// nothing else holds it: the slot's rewrite is the frame's, and comes first.
+    /// Shows `image` in the texture's own state, not the slot (the frame rewrites the slot, and
+    /// comes first). Returns the image it showed, which the caller retires, and lets go of the
+    /// stand-in's, which retires once nothing else holds it.
     pub(crate) fn show(&mut self, image: Image) -> Option<Image> {
         self.stood_in = None;
         self.shown.replace(image)
     }
 
-    /// Shows `stand_in`'s image in its slot's place in the texture's own state, holding it while
-    /// the slot shows it, and letting go of the stand-in's it showed before, if it did: the slot's
-    /// rewrite is the frame's, and comes first. The image it showed of its own is the caller's to
-    /// take and retire.
+    /// Shows `stand_in`'s image in the texture's own state, not the slot (the frame rewrites the
+    /// slot, and comes first), holding it while the slot shows it and letting go of any earlier
+    /// stand-in's. The caller takes and retires the image it showed of its own.
     pub(crate) fn stand_in(&mut self, stand_in: &Image) {
         self.stood_in = Some(stand_in.owned.clone());
     }
@@ -416,9 +411,9 @@ impl Texture {
 }
 
 impl Image {
-    /// An image of `width` by `height` pixels in `format`, for a texture on `device`, with the
-    /// full chain of mip levels that [`mip_sizes`] gives if `mipmapped` and otherwise one, in GPU
-    /// memory, and its view, both named `name`.
+    /// An image of `width` by `height` pixels in `format` for a texture on `device`, with the full
+    /// [`mip_sizes`] chain if `mipmapped`, else one level, in GPU memory; it and its view are
+    /// named `name`.
     ///
     /// # Panics
     ///
@@ -441,8 +436,8 @@ impl Image {
         } else {
             1
         };
-        // Host copies need it, and only devices whose drivers say it costs them nothing upload
-        // that way, unless a test asks.
+        // Host copies need it; only devices whose drivers say it's free upload that way, unless
+        // a test asks.
         let usage = if device.upload_path() == UploadPath::HostImageCopy {
             Texture::USAGE | vk::ImageUsageFlags::HOST_TRANSFER_EXT
         } else {
@@ -499,9 +494,9 @@ impl Image {
         [self.extent.width, self.extent.height]
     }
 
-    /// Its mip levels' sizes, largest first, and where each one's pixels start among all of
-    /// theirs, packed a level after the one before. Each level has a multiple of its format's
-    /// pixel's or block's bytes, so each starts as aligned as the first.
+    /// Its mip levels' sizes, largest first, and where each level's pixels start among all of
+    /// them, packed in order. A level's bytes are a multiple of its format's pixel's or block's,
+    /// so each starts as aligned as the first.
     pub(crate) fn levels(&self) -> impl Iterator<Item = ([u32; 2], u64)> {
         levels(
             self.format,
@@ -516,8 +511,8 @@ impl Image {
         self.format.bytes(self.size(), self.levels > 1)
     }
 
-    /// Retires the image until the GPU is done with the frames and copies that may use it, once
-    /// no slot that shows it as a stand-in holds it.
+    /// Retires the image until the GPU is done with the frames and copies that may use it, once no
+    /// slot showing it as a stand-in holds it.
     pub(crate) fn retire(self) {
         drop(self);
     }
@@ -538,29 +533,28 @@ impl Drop for Texture {
     }
 }
 
-/// A part of a texture's pixels that one copy takes, by the regions of its image it fills: whole
-/// rows of texel blocks of one level, or every level from one on, when what's left of the texture
-/// fits a copy, so that the small levels of a mip tail go together.
+/// The part of a texture's pixels one copy takes, as the image regions it fills: whole rows of
+/// texel blocks of one level, or every level from one on when what's left of the texture fits a
+/// copy, so a mip tail's small levels go together.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Part {
     pub(crate) regions: [Region; MAX_LEVELS],
     /// How many of `regions` there are.
     pub(crate) count: usize,
-    /// Where its bytes start among the texture's, and how many there are: the regions', one
-    /// region's after another.
+    /// Where its bytes start among the texture's, and how many: the regions', in order.
     pub(crate) offset: u64,
     pub(crate) bytes: u64,
 }
 
-/// A region of a part: rows of one level, from the top row of texels `y` down.
+/// A region of a part: rows of one level, from the top texel row `y` down.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Region {
     pub(crate) level: u32,
-    /// Where its bytes start among the texture's pixels, and how many there are.
+    /// Where its bytes start among the texture's pixels, and how many.
     pub(crate) offset: u64,
     pub(crate) bytes: u64,
     pub(crate) y: u32,
-    /// Its texels across, the level's, and down.
+    /// Its texels across (the level's) and down.
     pub(crate) size: [u32; 2],
 }
 
@@ -571,15 +565,17 @@ impl Part {
 }
 
 /// The next part of a texture's pixels to copy, in `format`, in the levels `levels` gives as
-/// [`Image::levels`] does, after the first `copied` bytes, which earlier parts copied: as many of
-/// its bytes as fit `budget`, but at least the smallest whole part, so that each copy makes
-/// progress. A part is whole rows of blocks of one level, their count a multiple of `unit`, the
-/// copying queue's transfer granularity down, in blocks, unless the part reaches the level's
-/// bottom, which Vulkan lets a copy's extent do unaligned, as it lets a copy of a compressed image
-/// end inside a block there (VUID-vkCmdCopyBufferToImage-imageOffset-07738 and -dstImage-00207
-/// and -00208); or, from the start of a level, every level left, when they all fit, so that a mip
-/// tail of small levels goes in one copy. A part's bytes start where a level's or a row's do, a
-/// multiple of the texel block's bytes after the first (VUID-vkCmdCopyBufferToImage-dstImage-07975).
+/// [`Image::levels`] does, after the first `copied` bytes: as many bytes as fit `budget`, but at
+/// least the smallest whole part, so each copy makes progress. A part is either:
+/// - Whole rows of blocks of one level, their count a multiple of `unit`, the copying queue's
+///   transfer granularity down, in blocks, unless it reaches the level's bottom: Vulkan lets a
+///   copy's extent there be unaligned, and a compressed image's copy end inside a block
+///   (VUID-vkCmdCopyBufferToImage-imageOffset-07738 and -dstImage-00207 and -00208).
+/// - From the start of a level, every level left, when they all fit, so a mip tail of small
+///   levels goes in one copy.
+///
+/// A part's bytes start where a level's or row's do, a multiple of the texel block's bytes after
+/// the first (VUID-vkCmdCopyBufferToImage-dstImage-07975).
 ///
 /// # Panics
 ///
@@ -718,7 +714,7 @@ mod tests {
     #[test]
     fn bytes_fill_the_last_level_and_start_every_level_aligned() {
         for format in TextureFormat::ALL {
-            // What a copy needs each level's pixels aligned to: the format's texel block size.
+            // Copies need each level aligned to the format's texel block size.
             let alignment = format.block_bytes();
             for size in [[1, 1], [2, 2], [3, 7], [4, 4], [13, 5], [64, 1], [211, 5]] {
                 let count = mip_sizes(size[0], size[1]).count() as u32;
@@ -726,7 +722,7 @@ mod tests {
                 let ([width, height], at) = *all.last().expect("a level");
                 let last = format.bytes([width, height], false);
                 assert_eq!(at + last, format.bytes(size, true), "{format:?} {size:?}");
-                // The first level alone is what the second's pixels start after.
+                // The second level's pixels start after the first alone.
                 let first = all.get(1).map_or(at + last, |&(_, second)| second);
                 assert_eq!(first, format.bytes(size, false), "{format:?} {size:?}");
                 assert!(all.iter().all(|&(_, at)| at % alignment == 0), "{all:?}");
@@ -734,9 +730,8 @@ mod tests {
         }
     }
 
-    /// The parts that copy a `size` texture in `format`, mipmapped or not, a part a call, each
-    /// within `budget` but for the smallest whole part, with rows in multiples of `unit`: their
-    /// regions, and the bytes each takes.
+    /// The parts copying a `size` texture in `format`, one per call, each within `budget` but for
+    /// the smallest whole part, rows in multiples of `unit`: their regions and bytes.
     fn parts(
         format: TextureFormat,
         size: [u32; 2],
@@ -804,8 +799,8 @@ mod tests {
         assert_eq!(whole[0].0.len(), 7);
     }
 
-    /// With a transfer granularity of 8 rows, a part is 8 rows though the budget holds 3, and 16
-    /// where it holds 19; the rows left at a level's bottom go however many they are.
+    /// With a granularity of 8 rows, a part is 8 rows though the budget holds 3, and 16 where it
+    /// holds 19; the rows left at a level's bottom go however many they are.
     #[test]
     fn parts_rows_are_multiples_of_the_granularity_unless_they_reach_the_bottom() {
         let rgba8 = TextureFormat::Rgba8Unorm;
@@ -826,8 +821,8 @@ mod tests {
     }
 
     /// BC7's rows are rows of blocks, 4 texels down, a part's extent reaching the level's bottom
-    /// inside a block; a 13x5 chain's first level, two block rows of 64 bytes, goes in one part
-    /// under a granularity of 2 blocks though the budget holds one row, and its tail together.
+    /// inside a block. A 13x5 chain's first level, two block rows of 64 bytes, goes in one part
+    /// under a granularity of 2 blocks though the budget holds one row; its tail goes together.
     #[test]
     fn bc7_parts_are_rows_of_blocks() {
         let bc7 = TextureFormat::Bc7Srgb;

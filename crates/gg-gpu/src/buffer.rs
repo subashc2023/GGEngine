@@ -18,15 +18,14 @@ pub(crate) struct Buffer {
     size: u64,
     /// Where shaders find it, if its usage includes `SHADER_DEVICE_ADDRESS`; 0 otherwise.
     address: vk::DeviceAddress,
-    /// Its debug name, which its errors name it by.
+    /// Its debug name, which its errors use.
     name: String,
 }
 
 impl Buffer {
     /// A buffer of `size` bytes, with `name` as its debug name, shared by every queue the device
-    /// has, so that one reads what another wrote once it has waited for it, as frames' semaphores
-    /// have it, without handing it over: sharing can cost an image its compression, which buffers
-    /// don't have.
+    /// has: one queue reads what another wrote once it has waited for it, as frames' semaphores
+    /// have it, without a handover. Sharing can cost an image its compression; buffers have none.
     pub(crate) fn new(
         device: &Arc<Device>,
         size: u64,
@@ -81,8 +80,8 @@ impl Buffer {
             .expect("a live buffer has its allocation")
     }
 
-    /// Copies `bytes` into the buffer at `offset`, for memory the CPU writes. The GPU sees
-    /// them once [`Buffer::flush`] has covered them.
+    /// Copies `bytes` into the buffer at `offset`, for memory the CPU writes. The GPU sees them
+    /// once [`Buffer::flush`] has covered them.
     ///
     /// # Panics
     ///
@@ -121,8 +120,8 @@ impl Buffer {
         Ok(bytes)
     }
 
-    /// Copies the buffer's bytes from `offset` into `out`, as many as it holds, once the GPU has
-    /// finished writing them, without allocating.
+    /// Copies the buffer's bytes from `offset` into `out`, once the GPU has finished writing them,
+    /// without allocating.
     ///
     /// # Panics
     ///
@@ -157,11 +156,10 @@ impl Drop for Buffer {
     }
 }
 
-/// A buffer in the GPU's own memory, which frames fill a part at a time
-/// ([`Frame::stream_buffer`]) and then take for drawing ([`Frame::finish_buffer`]): vertices and
-/// other data that shaders read through its address, and the indices that draws take; or which
-/// frames write into as its data changes ([`Frame::write_buffer`]), as materials'. Dropping it
-/// retires it until the GPU is done with it.
+/// A buffer in GPU memory. Frames either fill it a part at a time ([`Frame::stream_buffer`]) and
+/// then take it for drawing ([`Frame::finish_buffer`]), for vertices, other data shaders read
+/// through its address, and draws' indices; or write into it as its data changes
+/// ([`Frame::write_buffer`]), as materials' do. Dropping it retires it until the GPU is done.
 ///
 /// [`Frame::stream_buffer`]: crate::Frame::stream_buffer
 /// [`Frame::finish_buffer`]: crate::Frame::finish_buffer
@@ -170,16 +168,15 @@ pub struct GpuBuffer {
     buffer: Buffer,
     /// How many of its bytes frames have copied, from the first.
     copied: u64,
-    /// The submission of copies on the transfer queue that hands it over to the graphics queue,
-    /// once its last part is recorded; 0 before.
+    /// The transfer-queue submission of copies that hands it over to the graphics queue once its
+    /// last part is recorded; 0 before.
     released: u64,
     /// Whether frames have filled it and taken it for drawing.
     written: bool,
 }
 
 impl GpuBuffer {
-    /// A buffer of `size` bytes, with `name` as its debug name. What it holds is undefined until
-    /// frames fill it.
+    /// A buffer of `size` bytes, with `name` as its debug name. Undefined until frames fill it.
     ///
     /// # Panics
     ///
@@ -216,7 +213,6 @@ impl GpuBuffer {
         self.buffer.raw()
     }
 
-    /// The handle of the device that made it.
     pub(crate) fn device(&self) -> vk::Device {
         self.buffer.device.handle()
     }
@@ -229,8 +225,7 @@ impl GpuBuffer {
         self.written = true;
     }
 
-    /// How many of its bytes frames have copied, from the first, and the submission of copies
-    /// that hands it over, to read and to set.
+    /// Mutable `copied` and `released`.
     pub(crate) fn progress(&mut self) -> (&mut u64, &mut u64) {
         (&mut self.copied, &mut self.released)
     }

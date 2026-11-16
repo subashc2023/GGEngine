@@ -1,14 +1,16 @@
 //! Frames in flight. Each frame records its commands and submits them, and a timeline semaphore
-//! paces them, so that the CPU gets at most `FRAMES_IN_FLIGHT` frames ahead of the GPU. A frame
-//! runs the passes of a [`Graph`], in order, which place every barrier between them, and can
-//! render into several targets, such as an app's windows, presenting all their swapchains at once;
-//! its later passes can sample what its earlier ones rendered offscreen. Passes added to run on the
-//! compute queue run there, on a device that has one, in batches of their own, which semaphores
-//! order against the graphics queue's, as `batches` says. It reads back a few pixels of the IDs
-//! its passes render, and small buffers its compute shaders write, which the frame two later,
-//! which reuses its resources once it has finished, finds read, with the times its passes took on
-//! the GPU. On a device that uploads through a transfer queue, a frame's copies go in a submission
-//! of their own, which another timeline paces, and no frame waits for.
+//! paces them, so the CPU gets at most `FRAMES_IN_FLIGHT` frames ahead of the GPU.
+//!
+//! - A frame runs the passes of a [`Graph`] in order, placing every barrier between them. It can
+//!   render into several targets, such as an app's windows, presenting all their swapchains at
+//!   once. Its later passes can sample what its earlier ones rendered offscreen.
+//! - Passes added to run on the compute queue run there, on a device that has one, in batches of
+//!   their own that semaphores order against the graphics queue's, as `batches` says.
+//! - It reads back a few pixels of the IDs its passes render and small buffers its compute shaders
+//!   write, with the times its passes took on the GPU. The frame two later, which reuses its
+//!   resources once it has finished, finds them read.
+//! - On a device that uploads through a transfer queue, a frame's copies go in a submission of
+//!   their own, paced by another timeline that no frame waits for.
 
 mod batches;
 mod compute;
@@ -59,12 +61,12 @@ pub const MAX_READS: usize = 64;
 /// The bytes of an ID read back: two 32-bit unsigned integers.
 const ID_BYTES: usize = size_of::<[u32; 2]>();
 
-/// What the frames' own arenas hold, which [`Frame::upload`] copies into, and the most a frame has
-/// taken of its own, in bytes, as [`Frames::arenas`] gives them: for a run's log, which compares the
-/// two, as an arena grows by doubling and keeps what it grew to.
+/// What the frames' arenas hold, which [`Frame::upload`] copies into, and the most a frame has
+/// taken of its own, in bytes, as [`Frames::arenas`] gives them. A run's log compares the two: an
+/// arena grows by doubling and keeps what it grew to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Arenas {
-    /// The bytes of every frame slot's arena's buffers.
+    /// The bytes of every slot's arena's buffers.
     pub held: u64,
     /// The most bytes one frame's uploads took of its arena, each from a multiple of 16.
     pub peak: u64,
@@ -89,8 +91,8 @@ pub struct Frames {
     timeline: vk::Semaphore,
     submitted: u64,
     slots: Vec<Slot>,
-    /// For a device with a compute queue, each queue's timeline, by [`Queue::index`], which
-    /// reaches N when the queue has run its Nth batch; null otherwise.
+    /// For a device with a compute queue, each queue's timeline, by [`Queue::index`]. Reaches N
+    /// when the queue has run its Nth batch; null otherwise.
     queue_timelines: [vk::Semaphore; 2],
     /// How far the timelines are planned and waited for, as the last frame begun left them.
     timelines: Timelines,
@@ -99,9 +101,8 @@ pub struct Frames {
     /// The command buffer of each of its batches, as `plan` has them.
     batch_commands: Vec<vk::CommandBuffer>,
     /// Whether the frame being recorded has written a buffer outside its passes, in its first
-    /// batch, which a batch on the compute queue then waits for.
+    /// batch, which a compute-queue batch then waits for.
     buffers_written: bool,
-    /// Each slot's arena.
     arenas: Vec<Arena>,
     staging: Arena,
     /// For a device that uploads through a transfer queue, reaches N when the Nth submission of
@@ -110,43 +111,42 @@ pub struct Frames {
     /// How many times copies have been submitted, counted apart from frames, since a frame may
     /// submit none.
     transfers_submitted: u64,
-    /// The command buffers copies record into, each with the submission it was last in: a frame
-    /// takes one whose submission has finished, or makes another, so that none waits.
+    /// The command buffers copies record into, each with the submission it was last in. A frame
+    /// takes one whose submission has finished, or makes another, so none waits.
     transfers: Vec<TransferCommands>,
-    /// What the transfer timeline had reached as the frame being recorded began: the copies
-    /// submitted up to then have finished.
+    /// What the transfer timeline had reached as the frame being recorded began: copies submitted
+    /// up to then have finished.
     transfers_finished: u64,
-    /// The submission of copies the frame being recorded waits on, the last of those that filled
-    /// what it takes over from the transfer queue; 0 for none.
+    /// The submission of copies the frame being recorded waits on, the last that filled what it
+    /// takes over from the transfer queue; 0 for none.
     transfer_wait: u64,
-    /// What frames read IDs back into, [`MAX_READS`] of them for each slot, in the slots' order:
-    /// made by the first read, so that apps that read none hold none.
+    /// What frames read IDs back into, [`MAX_READS`] for each slot, in slot order. Made by the
+    /// first read, so apps that read none hold none.
     reads: Option<Buffer>,
-    /// What the last frame to use the slot of the frame being begun read back, as that one finds
-    /// it: [`Frame::ids_read`]'s.
+    /// What the last frame to use the slot of the frame being begun read back:
+    /// [`Frame::ids_read`]'s.
     read: Read,
-    /// What frames read buffers back into ([`Frame::read_back`]), [`MAX_BUFFER_READ`] bytes for
-    /// each of a frame's [`MAX_BUFFER_READS`], each slot's after the one before's: made by the
+    /// What frames read buffers back into ([`Frame::read_back`]): [`MAX_BUFFER_READ`] bytes for
+    /// each of a frame's [`MAX_BUFFER_READS`], each slot's after the one before's. Made by the
     /// first read.
     buffer_reads: Option<Buffer>,
-    /// The number of the frame whose buffer reads the frame being begun gives, 0 for none, what it
-    /// read, and the bytes of each read: [`Frame::buffer_read`]'s.
+    /// The number of the frame whose buffer reads the frame being begun gives (0 for none), what
+    /// it read, and the bytes of each read: [`Frame::buffer_read`]'s.
     buffer_read: (
         u64,
         BufferReads,
         [[u8; MAX_BUFFER_READ as usize]; MAX_BUFFER_READS],
     ),
-    /// What each slot's frames read offscreen images back into ([`Frame::read_image`]), in the
-    /// slots' order.
+    /// What each slot's frames read offscreen images back into ([`Frame::read_image`]), in slot
+    /// order.
     image_reads: Vec<ImageReads>,
-    /// For each target of the frame being recorded, its image as the frame's commands so far
-    /// leave it. `None` for a swapchain that had no image ready.
+    /// For each target of the frame being recorded, its image as the commands so far leave it.
+    /// `None` for a swapchain that had no image ready.
     images: Vec<Option<Tracked>>,
-    /// The images of the graphs' own.
     transients: Transients,
     /// The passes' timestamps on each queue, by [`Queue::index`].
     timers: [Timer; 2],
-    /// The barriers before the pass being recorded, kept so that frames don't allocate.
+    /// The barriers before the pass being recorded, kept so frames don't allocate.
     barriers: Vec<vk::ImageMemoryBarrier2<'static>>,
     buffer_barriers: Vec<vk::BufferMemoryBarrier2<'static>>,
     /// The last frame's list of targets, emptied, whose memory the next frame reuses.
@@ -154,15 +154,15 @@ pub struct Frames {
     scratch: Scratch,
     /// How long the last `begin` waited, which [`Frames::waited`] describes.
     waited: Duration,
-    /// Whether a frame begun is still being recorded: cleared as it's submitted or dropped, so
-    /// that one forgotten instead is caught as the next begins.
+    /// Whether a frame begun is still being recorded: cleared as it's submitted or dropped, so a
+    /// forgotten one is caught as the next begins.
     recording: bool,
-    /// Whether a frame failed after acquiring an image, other than by another target's swapchain
-    /// failing, or to submit, or the device was lost, which can leave the semaphores its acquires
-    /// signaled with no wait pending: no frame begins after that. A swapchain's own failure is its
-    /// alone, since a failed acquire signals nothing and a present waits on nothing of the frame's. A
-    /// failed submit can leave batches of the frame's running too, which the frame timeline never
-    /// counts, so the drop waits for the device whole after one.
+    /// Whether a frame failed after acquiring an image (other than by another target's swapchain
+    /// failing), failed to submit, or lost the device. That can leave the semaphores its acquires
+    /// signaled with no wait pending, so no frame begins after. A swapchain's own failure is its
+    /// alone: a failed acquire signals nothing and a present waits on nothing of the frame's. A
+    /// failed submit can leave the frame's batches running, which the frame timeline never counts,
+    /// so the drop waits for the whole device after one.
     failed: bool,
 }
 
@@ -182,20 +182,20 @@ struct Slot {
     /// Each queue's command pool, by [`Queue::index`]; null for a queue the device hasn't.
     pools: [vk::CommandPool; 2],
     /// The command buffers made from each pool, which the frame's batches on its queue take in
-    /// turn, each with its name, kept to name it again as it's begun, without allocating.
+    /// turn, each with its name, kept to name it again as it's begun without allocating.
     commands: [Vec<(vk::CommandBuffer, CString)>; 2],
-    /// For each target, signaled when the swapchain image the frame renders into is ready for
-    /// it. There are as many as the most targets a frame has had.
+    /// For each target, signaled when the swapchain image the frame renders into is ready. There
+    /// are as many as the most targets a frame has had.
     acquired: Vec<vk::Semaphore>,
-    /// The number of the frame that last began in the slot, 0 for none, and how many IDs it read
+    /// The number of the frame that last began in the slot (0 for none), and how many IDs it read
     /// back into the slot's part of `Frames::reads`.
     reads: (u64, usize),
     /// The buffers that frame read back into the slot's part of `Frames::buffer_reads`.
     buffer_reads: BufferReads,
 }
 
-/// The buffers a frame read back, in the order it read them, each into a part of its own of its
-/// slot's: each one's name and how many bytes it read, and how many it read.
+/// The buffers a frame read back, in order, each into its own part of its slot's: each one's name
+/// and bytes read, and how many it read.
 #[derive(Clone, Copy, Debug, Default)]
 struct BufferReads {
     reads: [(&'static str, usize); MAX_BUFFER_READS],
@@ -206,11 +206,11 @@ struct BufferReads {
 struct TransferCommands {
     pool: vk::CommandPool,
     commands: vk::CommandBuffer,
-    /// The pool's and the commands' name, kept to name the commands again as they're begun,
+    /// The pool's and the commands' name, kept to name the commands again as they're begun
     /// without allocating.
     name: CString,
-    /// The submission of copies it was last in; 0 for none. It's free once the transfer timeline
-    /// has reached it.
+    /// The submission of copies it was last in; 0 for none. Free once the transfer timeline has
+    /// reached it.
     submitted: u64,
 }
 
@@ -223,18 +223,18 @@ struct Read {
     values: [[u32; 2]; MAX_READS],
 }
 
-/// The buffer a slot's frames read an offscreen image back into, made, or made larger, by the
-/// first read that needs it, and what the last of them read.
+/// The buffer a slot's frames read an offscreen image back into, made or made larger by the first
+/// read that needs it, and what the last read.
 #[derive(Default)]
 struct ImageReads {
     buffer: Option<Buffer>,
-    /// The number of the frame that read into it last, 0 for none, and the image's size.
+    /// The number of the frame that read into it last (0 for none), and the image's size.
     frame: u64,
     size: [u32; 2],
 }
 
-/// An offscreen image as a frame read it back ([`Frame::read_image`]), once the frame has
-/// finished, which [`Frames::image_read`] gives.
+/// An offscreen image as a frame read it back ([`Frame::read_image`]) once it finished, which
+/// [`Frames::image_read`] gives.
 pub struct ImageRead<'a> {
     size: [u32; 2],
     buffer: &'a Buffer,
@@ -271,7 +271,7 @@ struct Submission {
     waits_on: u64,
 }
 
-/// The lists submissions and their present are built in, kept so that frames don't allocate.
+/// The lists submissions and their present are built in, kept so frames don't allocate.
 #[derive(Default)]
 struct Scratch {
     /// The regions of a buffer's write, as [`Frame::write_buffer_pieces`] copies them.
@@ -297,8 +297,8 @@ impl Frames {
     /// If the device has a `Frames`, or had one that began a frame, whose frame numbers this
     /// one's would repeat.
     pub fn new(device: &Arc<Device>) -> Result<Self> {
-        // Before the claim, as they hold nothing of the device's until a frame is timed, so that
-        // neither a failure here nor a refused claim leaves anything to destroy.
+        // Before the claim: they hold nothing of the device's until a frame is timed, so neither a
+        // failure here nor a refused claim leaves anything to destroy.
         let timers = [
             Timer::new(device, Queue::Graphics)?,
             Timer::new(device, Queue::Compute)?,
@@ -384,7 +384,7 @@ impl Frames {
             }
         }
         for i in 0..FRAMES_IN_FLIGHT {
-            // In the list first, so that dropping `frames` destroys the pools made.
+            // In the list first, so dropping `frames` destroys the pools made.
             frames.slots.push(Slot {
                 pools: [vk::CommandPool::null(); 2],
                 commands: [Vec::new(), Vec::new()],
@@ -404,40 +404,44 @@ impl Frames {
         Ok(frames)
     }
 
-    /// Starts a frame that runs `graph`'s passes, rendering into `targets`, which the graph's
-    /// targets are by their indices, once the GPU has finished the frame that last used this
-    /// one's resources. The first target paces the frame: for a swapchain, it waits until the
-    /// display has let go of an image. The others are rendered into only if their swapchains have
-    /// an image to give at once, so that a window on a slower display doesn't slow the frame; an
-    /// offscreen image is always rendered into. Returns `None` if the first target has nothing to
-    /// render into this time, as with the swapchain of a minimized window. A swapchain after the
-    /// first that's lost for good ([`Swapchain::lost`]), or whose acquire fails other than by the
-    /// device's loss, is left out as one without an image free is, warning as it fails; the first
-    /// target's failure fails the frame, with its error, before anything is acquired. A swapchain
-    /// whose surface was lost makes another for its window as it acquires.
+    /// Starts a frame that runs `graph`'s passes, rendering into `targets` (the graph's targets,
+    /// by index), once the GPU has finished the frame that last used this one's resources.
     ///
-    /// The graph's own images are those an earlier frame made, for a graph that declared them
-    /// alike, by their names, kinds and sizes, while the uses of those that share memory still
-    /// don't overlap; otherwise they're made again, as the frame begins, and those before retire.
-    /// A failure to make them fails the frame before it acquires anything, as one of a side past
-    /// the device's most does, with `gpu.image_too_large`.
+    /// Targets:
     ///
-    /// Once the frame that last used this one's resources has finished, it copies what that frame
-    /// read back ([`Frame::read_ids`], [`Frame::read_back`]), which the frame begun gives
-    /// ([`Frame::ids_read`], [`Frame::buffer_read`]), and the time its passes took on the GPU
-    /// ([`Frames::gpu_time`]). A frame that doesn't begin leaves what was read for the next that
-    /// does: the slot forgets it only as one begins.
+    /// - The first paces the frame: a swapchain waits until the display lets go of an image.
+    ///   Returns `None` if it has nothing to render into, as a minimized window's swapchain.
+    /// - The others are rendered into only if their swapchains have an image free at once, so a
+    ///   slower display doesn't slow the frame. An offscreen image always is.
+    /// - A later swapchain lost for good ([`Swapchain::lost`]), or whose acquire fails other than
+    ///   by device loss, is left out as one without an image free is, with a warning.
+    /// - A swapchain whose surface was lost makes another for its window as it acquires.
     ///
-    /// Fails with `gpu.frame_failed` once a frame has failed after acquiring an image, other than
-    /// by another target's swapchain failing, or to submit, or the device was lost: the semaphores
-    /// its acquires signaled may have no wait pending, so no frame can begin again, and the frames
-    /// can only be dropped. A swapchain's present that fails otherwise is that swapchain's alone.
+    /// The graph's own images are an earlier frame's, if its graph declared them alike by name,
+    /// kind and size and the uses of those sharing memory still don't overlap. Otherwise they're
+    /// made again, and the old ones retire.
+    ///
+    /// Once this slot's last frame has finished, its read-backs ([`Frame::read_ids`],
+    /// [`Frame::read_back`]) come out through [`Frame::ids_read`] and [`Frame::buffer_read`], and
+    /// its pass times through [`Frames::gpu_time`]. The slot forgets them only as a frame begins.
+    ///
+    /// Fails before anything is acquired:
+    ///
+    /// - with the first target's error;
+    /// - if the graph's images can't be made, as with `gpu.image_too_large` for a side past the
+    ///   device's limit.
+    ///
+    /// Fails with `gpu.frame_failed` once a frame has failed after acquiring an image (but by
+    /// another target's swapchain failing), failed to submit, or lost the device. Its acquires'
+    /// semaphores may have no wait pending, so no frame can begin again: the frames can only be
+    /// dropped. A swapchain's present that fails otherwise fails it alone.
     ///
     /// # Panics
     ///
-    /// If `targets` is empty or holds one another device made; if the graph uses a target that
-    /// `targets` hasn't, or uses a swapchain's other than to draw into it; or if the last frame
-    /// was forgotten rather than submitted or dropped.
+    /// - `targets` is empty or holds one another device made.
+    /// - The graph uses a target `targets` hasn't, or uses a swapchain's other than to draw into
+    ///   it.
+    /// - The last frame was forgotten rather than submitted or dropped.
     pub fn begin<'a>(
         &'a mut self,
         targets: impl IntoIterator<Item = Target<'a>>,
@@ -491,7 +495,7 @@ impl Frames {
         let mut list: Vec<Target<'a>> = std::mem::take(&mut self.spare_targets);
         list.extend(targets);
         assert!(!list.is_empty(), "a frame renders into at least one target");
-        // Before any image is acquired, which a panic or a failure would leave unpresented.
+        // Before any image is acquired: a panic or failure would leave it unpresented.
         for target in &list {
             match target {
                 Target::Swapchain(swapchain) => self
@@ -566,19 +570,19 @@ impl Frames {
         }))
     }
 
-    /// Acquires `targets`' images into `images`, as [`Frames::begin`] says, and, given one for
-    /// the first, readies slot `slot`'s arena, and the commands and timestamps of the batches
-    /// planned, and begins recording them. `images` stays empty if the first target has no image.
+    /// Acquires `targets`' images into `images`, as [`Frames::begin`] says. Given one for the
+    /// first, readies slot `slot`'s arena and the planned batches' commands and timestamps, and
+    /// begins recording them. `images` stays empty if the first target has no image.
     fn start(&mut self, slot: usize, targets: &mut [Target<'_>]) -> Result<()> {
         for (i, target) in targets.iter_mut().enumerate() {
             let acquired = self.slots[slot].acquired[i];
             let image = match target {
-                // Left out, as one without an image free is, since it presents nothing again.
+                // Left out, as one without an image free is: it presents nothing again.
                 Target::Swapchain(swapchain) if i > 0 && swapchain.lost() => None,
                 Target::Swapchain(swapchain) => {
                     // SAFETY: the semaphore is new, or the frame that last used this slot waited
                     // on it or left it unsignaled and has finished, so it's unsignaled with no
-                    // wait pending: a frame forgotten or failed, which could have left it
+                    // wait pending. A forgotten or failed frame, which could have left it
                     // signaled, keeps frames from beginning.
                     let acquired = unsafe { swapchain.acquire(acquired, i == 0, &mut self.waited) };
                     skip_lost(acquired, i)?.map(|index| Tracked {
@@ -659,8 +663,8 @@ impl Frames {
                         &[],
                     );
                 }
-                // Every push constant set, to zeros, before any pass: without maintenance4, a
-                // draw or dispatch whose shader uses one a pass didn't push is invalid
+                // Every push constant set to zeros before any pass: without maintenance4, a draw
+                // or dispatch whose shader uses one a pass didn't push is invalid
                 // (VUID-vkCmdDraw-maintenance4-08602), and with it reads what's undefined. Every
                 // pipeline shares the layout, so what's pushed holds across the batch.
                 raw.cmd_push_constants(
@@ -680,8 +684,8 @@ impl Frames {
         Ok(())
     }
 
-    /// Copies what slot `slot`'s last frame read back, once it has finished, for the frame begun
-    /// in the slot to give.
+    /// Copies what slot `slot`'s last frame read back, once finished, for the frame begun in the
+    /// slot to give.
     fn find_read(&mut self, slot: usize) -> Result<()> {
         let (frame, count) = self.slots[slot].reads;
         let buffers = self.slots[slot].buffer_reads;
@@ -710,16 +714,16 @@ impl Frames {
         Ok(())
     }
 
-    /// How long the last [`Frames::begin`] waited: for the GPU to finish the frame that last used
-    /// this one's resources, and for the display to let go of the first target's image.
+    /// How long the last [`Frames::begin`] waited for the GPU to finish the frame that last used
+    /// its resources, and for the display to let go of the first target's image.
     pub fn waited(&self) -> Duration {
         self.waited
     }
 
-    /// The time on the GPU of the last frame whose timestamps came back, which a frame's begin
-    /// reads from the frame two before it: from its first pass's beginning, on either queue, to
-    /// its last's end, their barriers' and semaphores' waits among it. `None` before then, after
-    /// a frame of no passes, and for a GPU whose graphics queue writes no timestamps.
+    /// The GPU time of the last frame whose timestamps came back, which a frame's begin reads from
+    /// the frame two before it: from its first pass's beginning, on either queue, to its last's
+    /// end, barrier and semaphore waits included. `None` before then, after a frame of no passes,
+    /// and for a GPU whose graphics queue writes no timestamps.
     pub fn gpu_time(&self) -> Option<Duration> {
         let spans = self.timers.iter().filter_map(Timer::span);
         let (first, last) = spans.reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))?;
@@ -729,8 +733,8 @@ impl Frames {
         ))
     }
 
-    /// The bytes of GPU memory the graphs' own images are in, as the last frame begun made them,
-    /// or kept them: those whose uses in a frame don't overlap share it.
+    /// The bytes of GPU memory the graphs' own images are in, as the last frame begun made or
+    /// kept them. Images whose uses in a frame don't overlap share it.
     pub fn transient_bytes(&self) -> u64 {
         self.transients.bytes()
     }
@@ -741,7 +745,7 @@ impl Frames {
         self.submitted
     }
 
-    /// What the frames' own arenas hold, and the most a frame has taken of its own, as [`Arenas`]
+    /// What the frames' arenas hold, and the most a frame has taken of its own, as [`Arenas`]
     /// says.
     pub fn arenas(&self) -> Arenas {
         Arenas {
@@ -751,9 +755,8 @@ impl Frames {
     }
 
     /// What the `frame`th frame read back of an offscreen image ([`Frame::read_image`]), once the
-    /// GPU has finished that frame, which this waits for: `None` if it read none, wasn't
-    /// submitted, or a frame since has read back into its slot's buffer, as the frame two after it
-    /// may.
+    /// GPU has finished that frame, which this waits for. `None` if it read none, wasn't
+    /// submitted, or a later frame (the one two after, say) has read into its slot's buffer.
     pub fn image_read(&self, frame: u64) -> Result<Option<ImageRead<'_>>> {
         let Some(slot) = frame.checked_sub(1) else {
             return Ok(None);
@@ -777,12 +780,13 @@ impl Frames {
     }
 }
 
-/// What a frame takes of how acquiring the image of its target `target`, a swapchain's, went:
-/// the image, or none, as acquired; for a target after the first, none in place of a failure
-/// other than the device's loss, which is logged, so that the other targets' images, acquired
-/// already, are presented, and the frame goes on without the window, whose swapchain tries again
-/// at the next acquire or is lost for good, as [`Failure`] says; and otherwise the failure, which
-/// fails the frame, the first target's before it has acquired anything.
+/// What a frame takes of acquiring the image of its swapchain target `target`: the image or none,
+/// as acquired.
+///
+/// For a target after the first, a failure other than the device's loss is logged and gives none,
+/// so the other targets' images, acquired already, are presented and the frame goes on without
+/// the window. Its swapchain tries again at the next acquire or is lost for good, as [`Failure`]
+/// says. Any other failure fails the frame, the first target's before it has acquired anything.
 fn skip_lost(acquired: Result<Option<u32>>, target: usize) -> Result<Option<u32>> {
     match acquired {
         Err(error) if target > 0 && failure(&error) != Failure::Device => {
@@ -826,7 +830,7 @@ fn buffer_read_offset(slot: usize, read: usize) -> u64 {
 ///
 /// # Panics
 ///
-/// If it doesn't.
+/// If a check fails.
 fn check_targets(graph: &Graph, targets: &[Target<'_>]) {
     for (i, &decl) in graph.images.iter().enumerate() {
         let ImageDecl::Target(target) = decl else {
@@ -864,7 +868,7 @@ fn check_targets(graph: &Graph, targets: &[Target<'_>]) {
     }
 }
 
-/// A target's image, its view and its size: for a swapchain's, its image `index`.
+/// A target's image, view and size; for a swapchain's, its image `index`.
 fn target_parts(target: &Target<'_>, index: u32) -> (vk::Image, vk::ImageView, vk::Extent2D) {
     match target {
         Target::Swapchain(swapchain) => swapchain.image(index),
@@ -881,9 +885,9 @@ fn target_range(target: &Target<'_>) -> vk::ImageSubresourceRange {
     }
 }
 
-/// Empties `list` for the next use's, which borrows for another lifetime, as the next frame's
-/// targets do, keeping its memory, so that frames don't allocate: `T` and `U` are one type but for
-/// their lifetimes. Not by collecting it, whose reuse of the memory std doesn't promise.
+/// Empties `list` for a next use that borrows for another lifetime, as the next frame's targets
+/// do, keeping its memory so frames don't allocate. `T` and `U` are one type but for their
+/// lifetimes. Not done by collecting, whose reuse of the memory std doesn't promise.
 fn emptied<T, U>(mut list: Vec<T>) -> Vec<U> {
     const {
         assert!(size_of::<T>() == size_of::<U>() && align_of::<T>() == align_of::<U>());
@@ -906,7 +910,7 @@ impl Drop for Frames {
                 "A frame was forgotten rather than submitted or dropped, so its images were never presented"
             );
         }
-        // The copies run apart from the frames, so both are waited for, but a wait can fail. Frames
+        // The copies run apart from the frames, so both are waited for; a wait can fail. Frames
         // that submitted none may have failed to make their timeline.
         let frames_waited = if self.submitted > 0 {
             self.wait(self.submitted)
@@ -925,8 +929,8 @@ impl Drop for Frames {
                 Ok(())
             }
         });
-        // After a frame that failed, the device is waited for whole too: a failed submit may follow
-        // others of the frame's batches, which run on past the last frame submitted, as the frame
+        // After a failed frame, the device is waited for whole too: a failed submit may follow
+        // others of the frame's batches, which run past the last frame submitted, as the frame
         // timeline's signal is in its last batch.
         if self.failed || waited.is_err() {
             let _ = self.device.wait_idle();
@@ -962,38 +966,36 @@ impl Drop for Frames {
                 raw.destroy_semaphore(timeline, None);
             }
         }
-        // Last, as another `Frames` may then claim the device's frames: if these began none.
+        // Last: another `Frames` may then claim the device's frames, if these began none.
         self.device.release_frames();
     }
 }
 
-/// A frame being recorded. Submitting it, or dropping it, sends its commands to the GPU and
-/// presents the images of its swapchains; forgetting it instead is caught as the next frame
-/// begins.
+/// A frame being recorded. Submitting or dropping it sends its commands to the GPU and presents
+/// its swapchains' images; forgetting it is caught as the next frame begins.
 #[must_use = "a frame's commands reach the GPU when it's submitted"]
 pub struct Frame<'a> {
     frames: &'a mut Frames,
     targets: Vec<Target<'a>>,
-    /// The passes it runs.
     graph: &'a Graph,
     /// The graph's next pass to record.
     next: usize,
     slot: usize,
     submitted: bool,
-    /// The command buffer the frame's copies on the transfer queue record into, among
-    /// `Frames::transfers`, once they've begun.
+    /// The command buffer the frame's transfer-queue copies record into, among
+    /// `Frames::transfers`, once begun.
     transfers: Option<usize>,
     /// The commands of the batch of the pass recorded last, and its queue.
     commands: vk::CommandBuffer,
     queue: Queue,
-    /// Whether a pass is open, which only its drop closes: the frame records nothing of its own
-    /// while one is, so a pass forgotten rather than dropped is caught at the frame's next call.
+    /// Whether a pass is open, which only its drop closes. The frame records nothing of its own
+    /// while one is, so a forgotten pass is caught at the frame's next call.
     rendering: bool,
     /// Whether a pass has begun in the frame. What the frame records outside its passes, its
     /// writes and uploads, goes in its first batch, which runs before them all, so it's recorded
-    /// before them; and a texture that comes to show an image takes it into its slot in the
-    /// frame's bindless set at once, which every pass recorded before it would sample as the frame
-    /// is submitted, before what makes the image ready.
+    /// before them. A texture that comes to show an image takes it into its slot in the frame's
+    /// bindless set at once, which every pass recorded before it would sample as the frame is
+    /// submitted, before what makes the image ready.
     pass_begun: bool,
 }
 
@@ -1003,20 +1005,19 @@ impl<'a> Frame<'a> {
         self.frames.submitted + 1
     }
 
-    /// What the frame that last used this one's resources, two before it, read back
-    /// ([`Frame::read_ids`]), which has finished: its number, and the IDs it read, in the order
-    /// it read them; none if it read none, and 0 for the number of no frame, as before the first
-    /// two. A frame that doesn't begin, as a minimized window's doesn't, leaves them for the next
-    /// that does.
+    /// What the finished frame that last used this one's resources, two before it, read back
+    /// ([`Frame::read_ids`]): its number, and the IDs it read, in order. None if it read none; the
+    /// number is 0 for no frame, as before the first two. A frame that doesn't begin, as a
+    /// minimized window's doesn't, leaves them for the next that does.
     pub fn ids_read(&self) -> (u64, &[[u32; 2]]) {
         let read = &self.frames.read;
         (read.frame, &read.values[..read.count])
     }
 
-    /// What the frame that last used this one's resources, two before it, read back of the buffer
-    /// named `name` ([`Frame::read_back`]), which has finished: its number, and the buffer's bytes,
-    /// as its last read of one of that name found them; none if it read none of that name, and 0
-    /// for the number of no frame, as [`Frame::ids_read`] gives what it read of IDs.
+    /// What the finished frame that last used this one's resources, two before it, read back of
+    /// the buffer named `name` ([`Frame::read_back`]): its number, and the buffer's bytes as its
+    /// last read of that name found them. None if it read none of that name; the number is 0 for
+    /// no frame, as [`Frame::ids_read`] gives.
     pub fn buffer_read(&self, name: &str) -> (u64, &[u8]) {
         let (frame, buffers, bytes) = &self.frames.buffer_read;
         let reads = buffers.reads[..buffers.count].iter().zip(bytes);
@@ -1027,7 +1028,7 @@ impl<'a> Frame<'a> {
         )
     }
 
-    /// Checks that no pass is open: only outside one does the frame record its own commands, or
+    /// Checks that no pass is open: only outside one does the frame record its own commands or
     /// end them.
     ///
     /// # Panics
@@ -1041,12 +1042,12 @@ impl<'a> Frame<'a> {
         );
     }
 
-    /// Checks that `pass` is the graph's next pass to record, and of `kind`, and counts it
+    /// Checks that `pass` is the graph's next pass to record and of `kind`, and counts it
     /// recorded.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, or `pass` isn't the next, or of `kind`.
+    /// If a forgotten pass is still open, or `pass` isn't the next or of `kind`.
     fn take_pass(&mut self, pass: PassId, kind: PassKind) -> &'a graph::PassDecl {
         self.outside_pass();
         let graph = self.graph;
@@ -1079,7 +1080,7 @@ impl<'a> Frame<'a> {
     /// # Panics
     ///
     /// If a forgotten pass is still open, or a pass has begun in the frame: its writes and uploads
-    /// are recorded before its passes, as they run before them.
+    /// are recorded before its passes.
     fn before_passes(&self) -> vk::CommandBuffer {
         self.outside_pass();
         assert!(
@@ -1089,18 +1090,18 @@ impl<'a> Frame<'a> {
         self.frames.batch_commands[0]
     }
 
-    /// Starts `pass`: its timestamp and its label, and the barriers its uses need after the uses
-    /// before them, which put each image it uses in the layout it uses it in.
+    /// Starts `pass`: its timestamp and label, and the barriers its uses need after the uses
+    /// before them, which put each image it uses in its layout.
     ///
     /// # Panics
     ///
-    /// If it draws over, samples or copies from a target that no pass has drawn into or written
-    /// since it was made, or since its swapchain's image was acquired.
+    /// If it draws over, samples or copies from a target no pass has drawn into or written since
+    /// it was made, or since its swapchain's image was acquired.
     fn open_pass(&mut self, pass: PassId) {
         let graph = self.graph;
         let decl = &graph.passes[pass.0 as usize];
-        // Before anything is recorded, as a refusal records nothing. A storage image's first
-        // write finds it undefined, as it says.
+        // Before anything is recorded: a refusal records nothing. A storage image's first write
+        // finds it undefined, as it says.
         for &(image, use_) in graph.uses(pass) {
             if let ImageDecl::Target(target) = graph.images[image.0 as usize] {
                 let tracked = self.frames.images[target]
@@ -1178,7 +1179,7 @@ impl<'a> Frame<'a> {
         self.frames.buffer_barriers = buffer_barriers;
     }
 
-    /// Ends the pass started last: its label, and its timestamp.
+    /// Ends the pass started last: its label and timestamp.
     fn close_pass(&mut self) {
         let commands = self.commands();
         let device = &self.frames.device;
@@ -1188,8 +1189,8 @@ impl<'a> Frame<'a> {
         timer.end(device, commands, self.slot);
     }
 
-    /// `image`'s image, its view and its size, for recording commands that use it: for a target,
-    /// the one the frame acquired.
+    /// `image`'s image, view and size, for recording commands that use it; for a target, the one
+    /// the frame acquired.
     ///
     /// # Panics
     ///
@@ -1208,12 +1209,10 @@ impl<'a> Frame<'a> {
         }
     }
 
-    /// The commands of the batch of the pass recorded last.
     fn commands(&self) -> vk::CommandBuffer {
         self.commands
     }
 
-    /// The index in the bindless set that shaders sample `image` through, which a pass samples.
     fn sampled_index(&self, image: ImageId) -> u32 {
         match self.graph.images[image.0 as usize] {
             ImageDecl::Target(target) => match &self.targets[target] {
@@ -1226,16 +1225,16 @@ impl<'a> Frame<'a> {
         }
     }
 
-    /// Records `pass`, a pass of the frame's graph that reads an image back, which must be the
-    /// next of its passes to record: the image, as the passes before left it, for
-    /// [`Frames::image_read`] to give once the frame has finished. The slot's first read, and a
-    /// read of a larger image than it read before, makes the buffer it reads into, and fails if it
-    /// can't be made.
+    /// Records `pass`, which must be the graph's next pass to record and read an image back: the
+    /// image as the passes before left it, for [`Frames::image_read`] to give once the frame has
+    /// finished. The slot's first read, and a read of a larger image than before, makes the buffer
+    /// it reads into, and fails if it can't be made.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, `pass` isn't the graph's next, or doesn't read an image
-    /// back, or reads a target back that no pass has drawn into since it was made.
+    /// - A forgotten pass is still open.
+    /// - `pass` isn't the graph's next, or doesn't read an image back.
+    /// - It reads back a target no pass has drawn into since it was made.
     pub fn read_image(&mut self, pass: PassId) -> Result<()> {
         self.take_pass(pass, PassKind::ReadImage);
         let [(image, _)] = *self.graph.uses(pass) else {
@@ -1251,7 +1250,7 @@ impl<'a> Frame<'a> {
             .as_ref()
             .is_none_or(|buffer| buffer.size() < bytes)
         {
-            // The slot's last frame has finished, and its read with it.
+            // The slot's last frame has finished, and its read.
             let name = format!("frame {} image read", self.slot);
             let usage = vk::BufferUsageFlags::TRANSFER_DST;
             let device = &self.frames.device;
@@ -1295,23 +1294,24 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Records `pass`, a pass of the frame's graph that reads IDs back, which must be the next of
-    /// its passes to record: the IDs at `pixels`, each a pixel's column and row from its top left,
-    /// as the passes before left them, the first of them, in order, up to [`MAX_READS`] a frame,
-    /// less those this frame has read already. Returns how many it read. They're read once the
-    /// frame has finished, which the frame that next uses its resources, two later, waits for as
-    /// it begins: [`Frame::ids_read`] gives them there. The first read makes the buffer the frames
-    /// read into, of a kibibyte, and fails if it can't be made.
+    /// Records `pass`, which must be the graph's next pass to record and read IDs back: the IDs at
+    /// `pixels`, each a pixel's column and row from its top left, as the passes before left them.
+    /// It reads the first in order, up to [`MAX_READS`] a frame less those this frame has read
+    /// already, and returns how many. They're read once the frame has finished, which the frame
+    /// that next uses its resources, two later, waits for as it begins: [`Frame::ids_read`] gives
+    /// them there. The first read makes the buffer the frames read into, of a kibibyte, and fails
+    /// if it can't be made.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, `pass` isn't the graph's next, or doesn't read IDs back,
-    /// or a pixel is outside them.
+    /// - A forgotten pass is still open.
+    /// - `pass` isn't the graph's next, or doesn't read IDs back.
+    /// - A pixel is outside the IDs.
     pub fn read_ids(&mut self, pass: PassId, pixels: &[[u32; 2]]) -> Result<usize> {
         let [(ids, _)] = *self.graph.uses(pass) else {
             panic!("pass {} reads IDs back from an image alone", pass.0);
         };
-        // Before the pass is taken, as a refusal records nothing.
+        // Before the pass is taken: a refusal records nothing.
         if let ImageDecl::Transient { size, .. } = self.graph.images[ids.0 as usize] {
             let [width, height] = size;
             if let Some(pixel) = pixels.iter().find(|&&[x, y]| x >= width || y >= height) {
@@ -1329,7 +1329,7 @@ impl<'a> Frame<'a> {
             let reads = Buffer::new(device, size, usage, memory, "ids read")?;
             self.frames.reads = Some(reads);
         }
-        // Whether it reads any, so that the passes after find the IDs where it leaves them.
+        // Whether it reads any, so the passes after find the IDs where it leaves them.
         self.open_pass(pass);
         if count > 0 {
             let buffer = (self.frames.reads.as_ref())
@@ -1350,10 +1350,10 @@ impl<'a> Frame<'a> {
             let commands = self.commands();
             let raw = self.frames.device.raw();
             // SAFETY: the commands are recording outside a pass, with the IDs in the layout copies
-            // read them in; the regions lie within the image and within the slot's part of the
-            // buffer, past what the frame read before; and both live until the frame has
-            // finished: the image retires until then, and the buffer lives as long as the frames,
-            // which wait for theirs before they go.
+            // read them in; the regions lie within the image and the slot's part of the buffer,
+            // past what the frame read before; and both live until the frame has finished: the
+            // image retires until then, and the buffer lives as long as the frames, which wait
+            // for theirs before they go.
             unsafe {
                 raw.cmd_copy_image_to_buffer(
                     commands,
@@ -1374,16 +1374,16 @@ impl<'a> Frame<'a> {
         Ok(count)
     }
 
-    /// Records `pass`, a pass of the frame's graph that reads a buffer back, which must be the
-    /// next of its passes to record: the buffer, as the passes before left it, read once the frame
-    /// has finished, which the frame that next uses its resources, two later, waits for as it
-    /// begins: [`Frame::buffer_read`] gives it there, by the buffer's name. A frame reads up to
-    /// [`MAX_BUFFER_READS`] buffers back, each into a part of its own. The first read makes the
-    /// buffer the frames read into, and fails if it can't be made.
+    /// Records `pass`, which must be the graph's next pass to record and read a buffer back: the
+    /// buffer as the passes before left it, read once the frame has finished, which the frame that
+    /// next uses its resources, two later, waits for as it begins. [`Frame::buffer_read`] gives it
+    /// there, by the buffer's name. A frame reads up to [`MAX_BUFFER_READS`] buffers back, each
+    /// into its own part. The first read makes the buffer the frames read into, and fails if it
+    /// can't be made.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, or `pass` isn't the graph's next, or doesn't read a
+    /// If a forgotten pass is still open, or `pass` isn't the graph's next or doesn't read a
     /// buffer back.
     pub fn read_back(&mut self, pass: PassId) -> Result<()> {
         self.take_pass(pass, PassKind::ReadBack);
@@ -1440,10 +1440,10 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// The address that shaders reach `buffer`, one of the graph's own, through during the frame,
-    /// for data that a pass reads where it is, as a table of where compute shaders write: a pass
-    /// that reaches it must use it as its graph declared, as [`Pass::address`] and
-    /// [`Compute::address`] give it.
+    /// The address shaders reach `buffer`, one of the graph's own, through during the frame, for
+    /// data a pass reads in place, as a table of where compute shaders write. A pass that reaches
+    /// it must use it as its graph declared, as [`Pass::address`] and [`Compute::address`] give
+    /// it.
     ///
     /// # Panics
     ///
@@ -1452,13 +1452,13 @@ impl<'a> Frame<'a> {
         self.buffer_parts(buffer).0
     }
 
-    /// The address of `buffer`, one of the graph's own, and its bytes, as the graph declared it.
+    /// The address of `buffer`, one of the graph's own, and its declared bytes.
     fn buffer_parts(&self, buffer: BufferId) -> (u64, u64) {
         let address = self.frames.transients.buffer(buffer).address();
         (address, self.graph.buffers[buffer.0 as usize].size)
     }
 
-    /// Sends the frame's commands to the GPU and presents the images of its swapchains.
+    /// Sends the frame's commands to the GPU and presents its swapchains' images.
     ///
     /// # Panics
     ///
@@ -1474,14 +1474,14 @@ impl<'a> Frame<'a> {
         self.finish()
     }
 
-    /// Ends the frame: submits and presents it, unless a forgotten pass is still open, whose
-    /// rendering never ended, so that the frame's commands can't end either and its images go
+    /// Ends the frame: submits and presents it, unless a forgotten pass is still open. Its
+    /// rendering never ended, so the frame's commands can't end either and its images go
     /// unpresented; that's an error rather than a panic, since a drop may already be unwinding.
-    /// After a failure to submit, or the device's loss, no frame begins again; a present that
+    /// After a failure to submit, or the device's loss, no frame begins again. A present that
     /// fails otherwise is its swapchain's alone, as [`Frame::present`] says, since the submission
     /// waited on what the frame's acquires signaled.
     fn finish(&mut self) -> Result<()> {
-        // Set first, so that dropping the frame after a failure doesn't submit it again.
+        // Set first, so dropping the frame after a failure doesn't submit it again.
         self.submitted = true;
         self.frames.recording = false;
         let sent = if self.rendering {
@@ -1513,8 +1513,8 @@ impl<'a> Frame<'a> {
         } = &mut *self.frames;
         arenas[self.slot].flush()?;
         staging.flush()?;
-        // Its buffers retire with this frame and with the copies being recorded, so they last
-        // until the GPU has finished both.
+        // Its buffers retire with this frame and the copies being recorded, so they last until
+        // the GPU has finished both.
         staging.clear();
         let frame = *submitted + 1;
         scratch.waits.clear();
@@ -1526,8 +1526,8 @@ impl<'a> Frame<'a> {
         scratch.images.clear();
         self.submit_uploads(frame)?;
         // The presents' barriers end the graphics queue's last batch, which signals what the
-        // presents wait on after every command, the layout changes included, so the barriers need
-        // no second scope.
+        // presents wait on after every command, layout changes included, so the barriers need no
+        // second scope.
         let last = self.frames.plan.last_graphics();
         self.ready_presents(last);
         self.plan_submissions(frame, last);
@@ -1588,8 +1588,8 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Ends the graphics queue's `last` batch with each swapchain image's barrier to present,
-    /// listing what the present waits on and shows.
+    /// Ends the graphics queue's `last` batch with each swapchain image's barrier to present, and
+    /// lists what the present waits on and shows.
     fn ready_presents(&mut self, last: usize) {
         let Frames {
             device,
@@ -1634,7 +1634,7 @@ impl<'a> Frame<'a> {
         }
     }
 
-    /// Lists each batch's waits, signals and commands, frame `frame`'s, whose timeline batch
+    /// Lists each batch's waits, signals and commands for frame `frame`, whose timeline batch
     /// `last` signals.
     fn plan_submissions(&mut self, frame: u64, last: usize) {
         let Frames {
@@ -1664,7 +1664,7 @@ impl<'a> Frame<'a> {
             let mut waits_on = batch.waits;
             if Some(i) == first_compute && *buffers_written {
                 // What the frame wrote outside its passes, in its first batch, the graphics
-                // queue's, which a pass on the compute queue may read.
+                // queue's, which a compute-queue pass may read.
                 waits_on = waits_on.max(plan.batches[0].value);
                 timelines.waited[own] = timelines.waited[own].max(waits_on);
             }
@@ -1675,7 +1675,7 @@ impl<'a> Frame<'a> {
             }
             if first && *transfer_wait > 0 {
                 // For what the frame takes over from the transfer queue, whose copies have
-                // finished already: the ownership transfer of a texture still needs the semaphore
+                // finished already: a texture's ownership transfer still needs the semaphore
                 // between its halves. Without maintenance8, which ash's headers predate, a wait
                 // for an ownership transfer's release is for all commands.
                 let wait = vk::SemaphoreSubmitInfo::default().semaphore(*transfer_timeline);
@@ -1743,9 +1743,9 @@ impl<'a> Frame<'a> {
             plan,
             ..
         } = &mut *self.frames;
-        // Runs of one queue's batches, each after the batches of the other's it waits for, which
-        // were planned before it, the compute queue's first where they can be, so that its work
-        // begins as soon as it can. Each queue's batches up to the frame's are submitted.
+        // Runs of one queue's batches, each after the other's batches it waits for, which were
+        // planned before it. The compute queue's go first where they can, so its work begins as
+        // soon as it can. Each queue's batches up to the frame's are submitted.
         let mut done = [Queue::Graphics, Queue::Compute].map(|queue| {
             let first = plan.batches.iter().find(|batch| batch.queue == queue);
             first.map_or(timelines.made[queue.index()], |batch| batch.value - 1)
@@ -1803,11 +1803,11 @@ impl<'a> Frame<'a> {
         sent
     }
 
-    /// Presents the images of the frame's swapchains, which its submission readied. Each
-    /// swapchain's result says how its own present went, and each swapchain tries again at its
-    /// next acquire, or is lost for good, as [`Failure`] says. Returns the device's loss, whether
-    /// a swapchain's result or the whole present's said it, else the first target's failure
-    /// that lost its swapchain for good; the other failures are logged, as [`heard`] sorts them.
+    /// Presents the frame's swapchains' images, which its submission readied. Each swapchain's
+    /// result says how its own present went; each swapchain tries again at its next acquire, or is
+    /// lost for good, as [`Failure`] says. Returns the device's loss, whether a swapchain's result
+    /// or the whole present's said it, else the first target's failure that lost its swapchain for
+    /// good. The other failures are logged, as [`heard`] sorts them.
     fn present(&mut self) -> Result<()> {
         let Frames {
             device,
@@ -1836,9 +1836,9 @@ impl<'a> Frame<'a> {
             // semaphore.
             unsafe { device.present(&info) }
         };
-        // A present that failed for lack of memory enqueued nothing, and may not have said so of
-        // each swapchain: each left as presented takes the failure, so that none goes on with an
-        // image it never presented.
+        // A present that failed for lack of memory enqueued nothing and may not have said so of
+        // each swapchain: each left as presented takes the failure, so none goes on with an image
+        // it never presented.
         if let Err(
             e @ (vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY),
         ) = presented
@@ -1881,15 +1881,15 @@ impl<'a> Frame<'a> {
     }
 }
 
-/// How a frame's present takes the failure of target `target`'s, a swapchain's that `lost` says
-/// is lost for good after it.
+/// How a frame's present takes the failure of target `target`'s swapchain, which `lost` says is
+/// lost for good after it.
 #[derive(Debug, PartialEq, Eq)]
 enum Heard {
-    /// The device's loss, which the present returns before any other failure, and which fails
-    /// every frame after.
+    /// The device's loss, which the present returns before any other failure and which fails every
+    /// frame after.
     Device,
-    /// The first target's swapchain lost for good, which the present returns, unless the device
-    /// was lost.
+    /// The first target's swapchain lost for good, which the present returns unless the device was
+    /// lost.
     Returned,
     /// Logged: another target's, or one the swapchain tries again from at its next acquire.
     Logged,
@@ -1904,8 +1904,8 @@ fn heard(target: usize, error: &Error, lost: bool) -> Heard {
 }
 
 /// What a frame's present returns, given the device's loss and the first target's failure it
-/// heard ([`heard`]), if any: the device's loss wins, so that it fails the frames after, as
-/// [`fails_frames`] says, with the first target's logged.
+/// heard ([`heard`]), if any. The device's loss wins, failing the frames after as [`fails_frames`]
+/// says, with the first target's logged.
 fn outcome(device_lost: Option<Error>, first: Option<Error>) -> Result<()> {
     match (device_lost, first) {
         (Some(device_lost), first) => {
@@ -1919,9 +1919,9 @@ fn outcome(device_lost: Option<Error>, first: Option<Error>) -> Result<()> {
     }
 }
 
-/// Whether a frame's present that went as `presented` did keeps frames from beginning: only the
-/// device's loss does, since the frame's submission waited on what its acquires signaled, and a
-/// swapchain's failure otherwise is its alone.
+/// Whether a frame's present that went as `presented` keeps frames from beginning. Only the
+/// device's loss does: the frame's submission waited on what its acquires signaled, and a
+/// swapchain's other failure is its alone.
 fn fails_frames(presented: &Result<()>) -> bool {
     presented
         .as_ref()
@@ -1940,8 +1940,8 @@ impl Drop for Frame<'_> {
     }
 }
 
-/// A command pool of `family`'s, named `name`, which its errors give, whose command buffers are
-/// each recorded for one submission at a time.
+/// A command pool of `family`'s, named `name`, which its errors give. Its command buffers are each
+/// recorded for one submission at a time.
 fn command_pool(device: &Device, family: u32, name: &str) -> Result<vk::CommandPool> {
     let pool_info = vk::CommandPoolCreateInfo::default()
         .flags(vk::CommandPoolCreateFlags::TRANSIENT)
@@ -1956,8 +1956,8 @@ fn command_pool(device: &Device, family: u32, name: &str) -> Result<vk::CommandP
     Ok(pool)
 }
 
-/// A command buffer made from `pool`, a pool of the device's, named `name`, which its errors give;
-/// the name comes back as a C string, to name the commands again as they're begun without
+/// A command buffer made from `pool`, a pool of the device's, named `name`, which its errors give.
+/// The name comes back as a C string, to name the commands again as they're begun without
 /// allocating.
 fn allocate_commands(
     device: &Device,
@@ -1980,8 +1980,8 @@ fn allocate_commands(
     Ok((commands, name))
 }
 
-/// A command pool of `family`'s and its one command buffer, for one submission at a time, both
-/// named `name`, as [`command_pool`] and [`allocate_commands`] make them.
+/// A command pool of `family`'s and its one command buffer, for one submission at a time, as
+/// [`command_pool`] and [`allocate_commands`] make them, both named `name`.
 fn command_buffer(
     device: &Device,
     family: u32,
@@ -1999,7 +1999,7 @@ fn command_buffer(
 }
 
 /// Resets `pool` and begins recording `commands`, its command buffer, for one submission, as
-/// [`begin_commands`] does. Both have `name` as their debug name, which their errors give.
+/// [`begin_commands`] does. Both are named `name`, which their errors give.
 ///
 /// # Safety
 ///
@@ -2024,7 +2024,7 @@ unsafe fn begin_recording(
 }
 
 /// Begins recording `commands`, whose pool was reset since its last recording, for one
-/// submission, naming it again for captures as `name`, which its errors give.
+/// submission, naming it for captures `name`, which its errors give.
 ///
 /// # Safety
 ///
@@ -2047,8 +2047,8 @@ unsafe fn begin_commands(device: &Device, commands: vk::CommandBuffer, name: &CS
 mod tests {
     use super::*;
 
-    /// A list emptied for a use of another lifetime keeps its memory, as frames keep their lists
-    /// of targets and submissions; one never filled stays without memory.
+    /// A list emptied for another lifetime keeps its memory, as frames keep their lists of targets
+    /// and submissions; one never filled stays without memory.
     #[test]
     fn emptied_lists_keep_their_memory() {
         let borrowed = String::from("a target");
@@ -2062,8 +2062,8 @@ mod tests {
         assert_eq!(never_filled.capacity(), 0);
     }
 
-    /// A swapchain after the first that's lost is left out, and the frame goes on with the images
-    /// acquired before it; the first target's, or the device's loss, fails the frame.
+    /// A swapchain after the first that's lost is left out and the frame goes on with the images
+    /// acquired before it; the first target's loss, or the device's, fails the frame.
     #[test]
     fn a_swapchain_lost_alone_is_left_out_unless_its_the_first_target() {
         let failed = |result| vk_error("vkAcquireNextImageKHR", "a swapchain", result);
@@ -2082,8 +2082,8 @@ mod tests {
     }
 
     /// The device's loss in a present wins over the first target's failure, however the targets
-    /// come, so that the frames after fail; the first target's swapchain lost for good is
-    /// returned otherwise, and the rest, which their swapchains try again from, are logged.
+    /// come, so the frames after fail. Otherwise the first target's swapchain lost for good is
+    /// returned, and the rest, which their swapchains try again from, are logged.
     #[test]
     fn a_presents_device_loss_wins_over_a_surface_lost() {
         let failed = |result| vk_error("vkQueuePresentKHR", "a swapchain", result);
@@ -2110,7 +2110,7 @@ mod tests {
         assert!(outcome(None, None).is_ok());
     }
 
-    /// Only the device's loss in a frame's present keeps frames from beginning: a swapchain whose
+    /// Only the device's loss in a frame's present keeps frames from beginning; a swapchain whose
     /// present fails otherwise is lost alone.
     #[test]
     fn only_the_devices_loss_in_a_present_fails_the_frames_after() {

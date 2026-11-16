@@ -19,18 +19,17 @@ use crate::vma::{Allocation, Allocator};
 use crate::{Instance, Surface, Version, vk_error, vk_failed};
 use candidate::{Candidate, pick};
 
-/// A resource that was dropped while frames, or copies on the transfer queue, that may use it
-/// could still be running on the GPU.
+/// A resource dropped while frames, or copies on the transfer queue, that may use it could still
+/// be running on the GPU.
 pub(crate) enum Retired {
     Buffer(vk::Buffer, Allocation),
     Image(vk::Image, vk::ImageView, Allocation),
     /// An image with a slot in the bindless sets.
     Texture(vk::Image, vk::ImageView, Allocation, u32),
-    /// An image made in memory that others share, with its slot in the bindless sets, if it has
-    /// one.
+    /// An image made in memory that others share, with its bindless slot, if it has one.
     Alias(vk::Image, vk::ImageView, Option<u32>),
-    /// A view of a level of a storage image, with its storage slot in the bindless sets: retired
-    /// before its image, so that it goes first.
+    /// A view of a level of a storage image, with its storage slot in the bindless sets. It's
+    /// retired before its image, so it goes first.
     StorageView(vk::ImageView, u32),
     /// Memory that images were made in, which goes once they're done with.
     Memory(Allocation),
@@ -49,12 +48,12 @@ struct Retirement {
     claimed: bool,
     /// The last frame that began recording.
     begun: u64,
-    /// The last frame the GPU finished, which the frames before it finished first.
+    /// The last frame the GPU finished; those before it finished first.
     finished: u64,
     /// The submission of copies on the transfer queue being recorded, numbered from 1; 0 for
     /// none.
     transfer_recording: u64,
-    /// The last submission of copies made, and the last the GPU finished, which those before it
+    /// The last submission of copies made, and the last the GPU finished; those before it
     /// finished first.
     transfers_submitted: u64,
     transfers_finished: u64,
@@ -64,7 +63,7 @@ struct Retirement {
 
 impl Retirement {
     /// The last submission of copies that may use a resource dropped now: the one being recorded,
-    /// if one is, else the last made.
+    /// else the last made.
     fn transfer_mark(&self) -> u64 {
         if self.transfer_recording > 0 {
             self.transfer_recording
@@ -100,26 +99,26 @@ impl Retirement {
     }
 }
 
-/// How meshes and textures reach the GPU's memory: the GPU's best way, or one a test or a
-/// measurement asks for. Whichever it is, frames copy them a part at a time, within a budget, and
-/// draw them once every part is there.
+/// How meshes and textures reach the GPU's memory: the GPU's best way, or one a test or
+/// measurement asks for. Frames copy them a part at a time, within a budget, and draw them once
+/// every part is there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UploadPath {
     /// Copied by a queue apart from graphics, beside the frames the GPU renders, which don't wait
-    /// for the copies: the way of GPUs with a queue family for transfers, or for compute, apart
+    /// for the copies. The way of GPUs with a queue family for transfers, or for compute, apart
     /// from graphics.
     TransferQueue,
-    /// Textures written by the CPU straight into their images (host image copy), and buffers
-    /// copied by the graphics queue: the way of GPUs without such a family whose drivers say that
-    /// costs the GPU nothing in reading the images.
+    /// Textures written by the CPU straight into their images (host image copy), buffers copied by
+    /// the graphics queue. The way of GPUs without such a family whose drivers say that costs the
+    /// GPU nothing in reading the images.
     HostImageCopy,
-    /// Copied by the graphics queue, at the start of the frames that take their parts: the other
+    /// Copied by the graphics queue, at the start of the frames that take their parts. The other
     /// GPUs'.
     GraphicsQueue,
 }
 
 /// How much of the GPU's own memory is in use, and how much the driver gives the process before
-/// it starts paging, which [`Device::memory_budget`] gives.
+/// it starts paging, from [`Device::memory_budget`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryBudget {
     pub usage: u64,
@@ -169,11 +168,11 @@ pub struct Device {
     /// The queue uploads are copied on, for a device that uploads through a transfer queue.
     transfer: Option<Queue>,
     /// The queue compute passes run on beside the graphics queue, for a device with a family for
-    /// compute apart from graphics and from uploads; they run on the graphics queue otherwise.
+    /// compute apart from graphics and from uploads. Otherwise they run on the graphics queue.
     compute: Option<Queue>,
-    /// The families of the queues above, each once: every buffer is shared by them all, so that
-    /// any of the queues reads what another wrote once it has waited for it, without handing it
-    /// over. Images are the graphics queue's alone, but textures that the transfer queue fills.
+    /// The families of the queues above, each once. Every buffer is shared by them all, so any
+    /// queue reads what another wrote once it has waited for it, without a handover. Images are
+    /// the graphics queue's alone, but for textures the transfer queue fills.
     families: Vec<u32>,
     /// The host image copy functions, for a device that uploads by host image copy.
     host_image_copy_fn: Option<ext::host_image_copy::Device>,
@@ -181,18 +180,17 @@ pub struct Device {
     /// The least a copy to an image moves on the queue that copies textures, in texels, or in
     /// blocks of a compressed image.
     copy_granularity: vk::Extent3D,
-    /// How many of the bits of the timestamps the graphics queue writes count, and the compute
-    /// queue's; 0 for a queue that writes none.
+    /// How many bits of the graphics queue's timestamps count, and the compute queue's; 0 for a
+    /// queue that writes none.
     timestamp_bits: u32,
     compute_timestamp_bits: u32,
-    /// What reads the GPU's clock at once, for Tracy's timelines, with gg-core's `tracy` feature,
-    /// on a device whose driver can.
+    /// Reads the GPU's clock at once, for Tracy's timelines, with gg-core's `tracy` feature on a
+    /// device whose driver can.
     calibrated: Option<khr::calibrated_timestamps::Device>,
     /// Which memory heaps are the GPU's own, by their indices' bits.
     device_local_heaps: u32,
     /// RenderDoc, for a device it can capture: one its layer is active on.
     renderdoc: Option<&'static RenderDoc>,
-    /// The mesh shaders' functions, for a device that draws through them.
     mesh_shader_fn: Option<ext::mesh_shader::Device>,
 }
 
@@ -213,8 +211,8 @@ impl Device {
     /// Opens the best GPU that supports Vulkan 1.4 and, given a surface, can present to it.
     /// Given `gpu`, only GPUs whose names contain it, ignoring case, are considered. Discrete
     /// GPUs come first, then integrated ones; among equals, the one with the most memory. It
-    /// uploads by `uploads`, if given, and otherwise by the best way the GPU has; and draws through
-    /// mesh shaders as `mesh_shaders` says, if given, and otherwise if the GPU has them.
+    /// uploads by `uploads`, if given, else by the GPU's best way, and draws through mesh shaders
+    /// as `mesh_shaders` says, if given, else if the GPU has them.
     ///
     /// Fails with `gpu.no_device` if no GPU can run the engine, `gpu.no_upload_path` if the GPU
     /// hasn't the upload path asked for, and `gpu.no_mesh_shaders` if it hasn't the mesh shaders
@@ -269,8 +267,8 @@ impl Device {
             .transfer
             .filter(|_| uploads == UploadPath::TransferQueue);
         let compute = chosen.compute;
-        // A family for transfers or compute has no graphics, and the compute family isn't the
-        // transfer family, so each is another family.
+        // A transfer or compute family has no graphics, and the compute family isn't the transfer
+        // family, so each is another family.
         let families: Vec<u32> = [Some(graphics), transfer, compute]
             .into_iter()
             .flatten()
@@ -313,13 +311,12 @@ impl Device {
         let mut host_image_copy =
             vk::PhysicalDeviceHostImageCopyFeaturesEXT::default().host_image_copy(true);
         let mut mesh_shader = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
-        // For models' textures, which recede from the camera; for passes that render IDs beside
-        // colors, whose targets blend apart, since integers don't blend; for games' cooked
-        // textures, which are compressed as BC7; for compute shaders, which pick their storage
-        // images from the bindless set by an index they're pushed; for shadow maps, whose
-        // casters between the light and the near plane cast from it; for indirect draws whose
-        // instances start where their commands say; and, with mesh shaders, for the fragment
-        // shaders behind them that read their primitives' IDs.
+        // Features, in order, for: models' textures, which recede from the camera; passes that
+        // render IDs beside colors, whose targets blend apart as integers don't blend; games'
+        // cooked textures, compressed as BC7; compute shaders that pick storage images from the
+        // bindless set by a pushed index; shadow maps, whose casters between the light and the
+        // near plane still cast; indirect draws whose instances start where their commands say;
+        // and, with mesh shaders, the fragment shaders behind them that read primitives' IDs.
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
             .independent_blend(true)
@@ -340,11 +337,11 @@ impl Device {
         if mesh_shaders {
             create_info = create_info.push_next(&mut mesh_shader);
         }
-        // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
-        // features but the bindless ones, BC texture compression, depth clamp, host image copy, and
-        // mesh shaders and geometry shaders, which `Candidate::new` checked (Vulkan 1.4 requires
-        // sampler anisotropy, independent blending, indexing storage images dynamically and
-        // indirect draws' first instance, in vk.xml's feature requirements), and the create info's
+        // SAFETY: the physical device came from this instance. Every Vulkan 1.4 device has these
+        // features but the bindless ones, BC texture compression, depth clamp, host image copy,
+        // and mesh and geometry shaders, which `Candidate::new` checked (Vulkan 1.4 requires
+        // sampler anisotropy, independent blending, dynamic indexing of storage images and
+        // indirect draws' first instance, in vk.xml's feature requirements). The create info's
         // pointers outlive the call.
         let raw = unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(
             vk_failed(
@@ -484,11 +481,11 @@ impl Device {
         self.mesh_shader_fn.as_ref()
     }
 
-    /// How much of the GPU's own memory, its device-local heaps', is in use, by this process and
-    /// others, and how much of it the driver gives this process before it starts paging: what the
-    /// driver reports (`VK_EXT_memory_budget`), as of the frame being recorded, or, on a GPU whose
-    /// driver reports none, VMA's estimate, 80% of the heaps and what it allocated itself. An
-    /// allocation that would take usage past the budget may still succeed, slowly.
+    /// How much of the GPU's own memory (its device-local heaps) is in use, by this process and
+    /// others, and how much the driver gives this process before it starts paging. It's what the
+    /// driver reports (`VK_EXT_memory_budget`) as of the frame being recorded, or, for a driver
+    /// that reports none, VMA's estimate: 80% of the heaps and what it allocated itself. An
+    /// allocation that takes usage past the budget may still succeed, slowly.
     pub fn memory_budget(&self) -> MemoryBudget {
         let heaps = self.allocator.heap_budgets();
         let mut total = MemoryBudget::default();
@@ -503,21 +500,21 @@ impl Device {
 
     /// The least a copy to an image moves on the queue that copies textures, as
     /// `minImageTransferGranularity` has it: a copy's offset and size are multiples of it, in
-    /// texels, or in blocks of a compressed image, on each axis but where it reaches the image's
-    /// edge. (1, 1, 1) on most queues, and on the host, which the host image copy path's textures
-    /// take; AMD's transfer queues have 16 by 16 by 8.
+    /// texels or compressed blocks, on each axis but where it reaches the image's edge. (1, 1, 1)
+    /// on most queues and on the host, which the host image copy path's textures take; AMD's
+    /// transfer queues have 16 by 16 by 8.
     pub(crate) fn copy_granularity(&self) -> vk::Extent3D {
         self.copy_granularity
     }
 
-    /// Whether the device can capture its work through RenderDoc: whether RenderDoc's layer is
-    /// active on its GPU, as in an app run through `renderdoccmd capture`.
+    /// Whether the device can capture its work through RenderDoc: its layer is active on the GPU,
+    /// as in an app run through `renderdoccmd capture`.
     pub fn can_capture(&self) -> bool {
         self.renderdoc.is_some()
     }
 
-    /// Starts capturing the device's work through RenderDoc, until the capture ends, which writes
-    /// it to a file, or drops, which discards it. Fails with `gpu.no_renderdoc` unless the device
+    /// Starts capturing the device's work through RenderDoc, until the capture ends (it writes a
+    /// file) or drops (it discards). Fails with `gpu.no_renderdoc` unless the device
     /// [can capture](Device::can_capture), and with `gpu.capture_busy` while another capture is
     /// under way, such as one F12 started.
     pub fn start_capture(&self) -> Result<Capture<'_>> {
@@ -533,10 +530,10 @@ impl Device {
 
     /// Gives the device a pipeline cache, which every pipeline made from then on goes through,
     /// and returns whether it holds `data`: what [`Device::pipeline_cache`] gave on a device of
-    /// the same GPU and driver, whole. Other data starts it empty: logged at debug if it's another
-    /// GPU's, driver's or engine's, and with a `gpu.pipeline_cache` warning if it's damaged, which
-    /// no driver is given, since drivers needn't survive it, or if the driver fails to load it, as
-    /// when it runs out of memory.
+    /// the same GPU and driver, whole. Other data starts it empty, logged at debug if it's another
+    /// GPU's, driver's or engine's, and with a `gpu.pipeline_cache` warning if it's damaged (no
+    /// driver is given damaged data, since drivers needn't survive it) or the driver fails to load
+    /// it, as when out of memory.
     ///
     /// # Panics
     ///
@@ -617,8 +614,8 @@ impl Device {
     }
 
     /// The pipeline cache pipelines are made through: null until one is loaded. Making pipelines
-    /// through it needs no lock, since the device doesn't enable pipeline cache control, without
-    /// which caches are synchronized internally.
+    /// through it needs no lock: the device doesn't enable pipeline cache control, without which
+    /// caches are synchronized internally.
     pub(crate) fn raw_pipeline_cache(&self) -> vk::PipelineCache {
         self.pipeline_cache.get().copied().unwrap_or_default()
     }
@@ -634,9 +631,9 @@ impl Device {
         self.raw.handle()
     }
 
-    /// Checks that an object, which `what` names, is this device's: `made_by` is the handle of
-    /// the device that made it. Vulkan lets an object be used only with the device that made it,
-    /// and drivers check nothing.
+    /// Checks that the object `what` names is this device's: `made_by` is the handle of the
+    /// device that made it. Vulkan lets an object be used only with the device that made it, and
+    /// drivers check nothing.
     ///
     /// # Panics
     ///
@@ -682,8 +679,8 @@ impl Device {
         &self.allocator
     }
 
-    /// Destroys `resource` once the GPU has finished every frame, and every submission of copies
-    /// on the transfer queue, that may use it: at once if none is running.
+    /// Destroys `resource` once the GPU has finished every frame and every submission of copies
+    /// that may use it: at once if none is running.
     pub(crate) fn retire(&self, resource: Retired) {
         let mut retirement = self.lock_retirement();
         if let Some(resource) = retirement.retire(resource) {
@@ -708,8 +705,8 @@ impl Device {
         retirement.claimed = true;
     }
 
-    /// Notes that the [`Frames`](crate::Frames) that claimed the device's frames is gone: one that
-    /// began none, as one whose making failed, numbered none, so another may claim them.
+    /// Notes that the [`Frames`](crate::Frames) that claimed the device's frames is gone. One that
+    /// began none (as one whose making failed) numbered none, so another may claim them.
     pub(crate) fn release_frames(&self) {
         let mut retirement = self.lock_retirement();
         retirement.claimed &= retirement.begun > 0;
@@ -737,7 +734,7 @@ impl Device {
         self.lock_retirement().transfer_recording = transfer;
     }
 
-    /// Notes that submission `transfer` of copies was made, so the resources dropped from now on
+    /// Notes that submission `transfer` of copies was made, so resources dropped from now on
     /// can't be used in it, unless another begins.
     pub(crate) fn transfer_submitted(&self, transfer: u64) {
         let mut retirement = self.lock_retirement();
@@ -813,14 +810,13 @@ impl Device {
         self.graphics.family
     }
 
-    /// How many of the bits of the timestamps the graphics queue writes count; 0 for a queue
-    /// that writes none.
+    /// How many bits of the graphics queue's timestamps count; 0 for a queue that writes none.
     pub(crate) fn timestamp_bits(&self) -> u32 {
         self.timestamp_bits
     }
 
-    /// How many of the bits of the timestamps the compute queue writes count; 0 for a queue
-    /// that writes none, and without a compute queue.
+    /// How many bits of the compute queue's timestamps count; 0 for a queue that writes none, and
+    /// without a compute queue.
     pub(crate) fn compute_timestamp_bits(&self) -> u32 {
         self.compute_timestamp_bits
     }
@@ -840,15 +836,15 @@ impl Device {
         &self.families
     }
 
-    /// What the GPU's clock reads now, in the ticks its timestamps count, read at once through
-    /// `VK_KHR_calibrated_timestamps`: `None` for a device whose driver can't, or without
-    /// gg-core's `tracy` feature, which alone reads it so. Allocates nothing.
+    /// What the GPU's clock reads now, in timestamp ticks, read at once through
+    /// `VK_KHR_calibrated_timestamps`. `None` for a device whose driver can't, or without gg-core's
+    /// `tracy` feature, which alone reads it so. Allocates nothing.
     pub(crate) fn read_clock(&self) -> Option<u64> {
         let calibrated = self.calibrated.as_ref()?;
         let info = vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE);
         let (mut timestamp, mut deviation) = (0, 0);
         // SAFETY: the device is live with the extension enabled, and the device's own time domain
-        // is one its driver calibrates, as choosing it checked; the pointers are to one info and
+        // is one its driver calibrates, as choosing it checked. The pointers are to one info and
         // one timestamp, as the count says. ash's wrapper would allocate.
         let read = unsafe {
             (calibrated.fp().get_calibrated_timestamps_khr)(
@@ -956,8 +952,8 @@ impl Device {
     }
 
     /// Records commands with `record`, runs them on the graphics queue and waits for them to
-    /// finish: for rare work outside of frames, such as reading an image back. The commands, and
-    /// their errors, are named `name`.
+    /// finish, for rare work outside frames, such as reading an image back. The commands and their
+    /// errors are named `name`.
     ///
     /// # Safety
     ///
@@ -1053,7 +1049,7 @@ impl Device {
         let _ = unsafe { debug_utils.set_debug_utils_object_name(&info) };
     }
 
-    /// Names `commands`, just begun, again while the device can capture: RenderDoc forgets a
+    /// Names `commands`, just begun, again while the device can capture, as RenderDoc forgets a
     /// command buffer's name as it's begun.
     ///
     /// # Safety
@@ -1117,10 +1113,10 @@ impl Drop for Device {
 
 /// The SPIR-V capabilities a shader may declare on the devices the engine makes: those Vulkan 1.4
 /// gives without a feature, and those of the features [`Device::new`] enables on every device, as
-/// the Vulkan SDK 1.4.335's vk.xml lists them under `spirvcapabilities`; they change with those
+/// the Vulkan SDK 1.4.335's vk.xml lists them under `spirvcapabilities`. They change with those
 /// features. A shader that declares another needs a feature some device hasn't enabled, which
-/// validation reports in debug builds and a driver may crash on in others: as the engine's own
-/// mesh shaders, and the fragment shaders behind them, need theirs.
+/// validation reports in debug builds and a driver may crash on in others, as with the engine's
+/// own mesh shaders and the fragment shaders behind them.
 pub const SHADER_CAPABILITIES: [u32; 17] = [
     0,    // Matrix
     1,    // Shader
@@ -1169,9 +1165,9 @@ fn has_bindless(features: &vk::PhysicalDeviceVulkan12Features<'_>) -> bool {
     .all(|&feature| feature == vk::TRUE)
 }
 
-/// RenderDoc, if its layer is active on the GPU, as the tools active on it report, which are
-/// logged at debug: the loader lists RenderDoc's layer whether or not it's active, and its library
-/// can be in the process with the layer off.
+/// RenderDoc, if its layer is active on the GPU, as the tools active on it report (logged at
+/// debug): the loader lists RenderDoc's layer whether or not it's active, and its library can be
+/// in the process with the layer off.
 fn renderdoc_on(instance: &Instance, physical: vk::PhysicalDevice) -> Option<&'static RenderDoc> {
     let raw = instance.raw();
     // SAFETY: the physical device came from this instance and supports Vulkan 1.4, which has the
@@ -1224,10 +1220,10 @@ mod tests {
         numbers
     }
 
-    /// A resource dropped while nothing runs goes at once; one dropped while a frame records and
-    /// copies are being recorded, or were made since the GPU last finished some, waits for both
-    /// the frame and the copies, whichever finishes first; one dropped with no copies made since
-    /// the last finished waits for the frame alone.
+    /// A resource dropped while nothing runs goes at once. One dropped while a frame records and
+    /// copies are recording, or were made since the GPU last finished some, waits for both the
+    /// frame and the copies. One dropped with no copies made since the last finished waits for
+    /// the frame alone.
     #[test]
     fn a_resource_retires_until_both_its_frames_and_its_copies_have_finished() {
         let pipeline = |n: u64| Retired::Pipeline(vk::Pipeline::from_raw(n));

@@ -1,16 +1,17 @@
 //! Uploads. A frame copies parts of the meshes and textures being streamed to the GPU by the
-//! device's upload path, as many bytes of each as its caller's budget allows, and takes each for
-//! drawing once its last part is there: at once through the graphics queue or by host image copy,
-//! and through a transfer queue, whose copies go in a submission of their own that no frame waits
-//! for, in the first frame that begins after they've finished.
+//! device's upload path, as many bytes of each as its caller's budget allows. A resource is taken
+//! for drawing once its last part is there: at once through the graphics queue or by host image
+//! copy; through a transfer queue, whose copies go in a submission no frame waits for, in the
+//! first frame that begins after they've finished.
 //!
-//! The SAFETY comments here lean on what the parent module keeps: [`Frames::begin`] begins a slot's
-//! commands, and resets its arena, only once the GPU has finished the slot's last frame, and they
-//! record until the frame is submitted; `Frame::outside_pass` checks that no pass is open, which
-//! only a pass's drop closes; `Frame::send` empties staging, whose buffers then retire with the
-//! frame and with the copies being recorded, and submits the copies, whose command buffer is
-//! reused only once the transfer timeline has passed their submission; and resources retire until
-//! both the frames and the copies that may use them have finished.
+//! The SAFETY comments here lean on what the parent module keeps:
+//! - [`Frames::begin`] begins a slot's commands and resets its arena only once the GPU has finished
+//!   the slot's last frame, and they record until the frame is submitted.
+//! - `Frame::outside_pass` checks that no pass is open; only a pass's drop closes one.
+//! - `Frame::send` empties staging, whose buffers then retire with the frame and with the copies
+//!   being recorded, and submits the copies, whose command buffer is reused only once the transfer
+//!   timeline has passed their submission.
+//! - Resources retire until both the frames and the copies that may use them have finished.
 //!
 //! [`Frames::begin`]: crate::Frames::begin
 
@@ -27,16 +28,16 @@ use crate::texture::{MAX_LEVELS, Part, next_part};
 use crate::vma::Memory;
 use crate::{COLOR_RANGE, Device, GpuBuffer, Texture, UploadPath, color_layers, copy_region};
 
-/// The stages that read textures: fragment shaders sample them, vertex shaders may too, as the
-/// sprite shader queries their sizes, and compute shaders, as a sky's are prefiltered.
+/// The stages that read textures: fragment shaders sample them, vertex shaders may (the sprite
+/// shader queries their sizes), and compute shaders (a sky's are prefiltered).
 const TEXTURE_READERS: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_raw(
     vk::PipelineStageFlags2::VERTEX_SHADER.as_raw()
         | vk::PipelineStageFlags2::FRAGMENT_SHADER.as_raw()
         | vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw(),
 );
 
-/// The stages that read buffers during a frame: shaders, through their addresses, mesh shaders
-/// among them, which every stage before rasterizing takes in, and draws' indices.
+/// The stages that read buffers during a frame: shaders, through addresses (pre-rasterization
+/// stages take in mesh shaders), and draws' indices.
 const BUFFER_READERS: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_raw(
     TEXTURE_READERS.as_raw()
         | vk::PipelineStageFlags2::PRE_RASTERIZATION_SHADERS.as_raw()
@@ -49,18 +50,18 @@ const BUFFER_READS: vk::AccessFlags2 = vk::AccessFlags2::from_raw(
 );
 
 /// The least a part of a buffer takes, and what each part but the last is a multiple of. Vulkan
-/// needs no alignment of a buffer copy's offsets or size, on a queue for transfers alone either
-/// (only a copy into an image needs its buffer offset a multiple of 4 there,
-/// VUID-vkCmdCopyBufferToImage-commandBuffer-07737, which staging's alignment gives); parts are
-/// whole units of the staging arena's alignment so that they pack in it without padding.
+/// needs no alignment of a buffer copy's offsets or size, on a transfer-only queue either (only a
+/// copy into an image needs its buffer offset a multiple of 4 there,
+/// VUID-vkCmdCopyBufferToImage-commandBuffer-07737, which staging's alignment gives). Parts are
+/// whole units of the staging arena's alignment so that they pack without padding.
 const BUFFER_PART: u64 = Arena::ALIGNMENT;
 
 impl<'a> Frame<'a> {
     /// Copies `bytes` into the frame's arena, where the GPU reads them during this frame:
     /// geometry, and data shaders read through its address. The upload borrows the frame's
-    /// [`Frames`], so that no later frame draws from it; its address, pushed to a shader in a
-    /// later frame, reads whatever has replaced it, or memory freed since, as the arena merges its
-    /// buffers into one as it resets, which can fault the device: shaders are trusted with the
+    /// [`Frames`], so that no later frame draws from it. Its address, pushed to a shader in a
+    /// later frame, reads whatever has replaced it or memory freed since (the arena merges its
+    /// buffers into one as it resets), which can fault the device: shaders are trusted with the
     /// addresses they're given, as [`GraphicsDesc::spirv`](crate::GraphicsDesc::spirv) says.
     ///
     /// [`Frames`]: crate::Frames
@@ -68,21 +69,20 @@ impl<'a> Frame<'a> {
         self.frames.arenas[self.slot].upload(&self.frames.device, bytes)
     }
 
-    /// Writes `pixels` into the `size` pixels of `texture`'s own image starting at `origin`: rows
-    /// of RGBA8, in the texture's format and tightly packed, top row first. The image's other
-    /// pixels keep what they had, except on its first write, which leaves them undefined. Shaders
-    /// see the new pixels from this frame's passes on. The pixels go through the frame's arena and
-    /// the graphics queue, which suits small changes the frame uses at once, such as the UI's;
-    /// [`Frame::stream_texture`] fills a whole image by the device's upload path, within a budget.
-    /// Only RGBA8 textures are written: a compressed one is streamed, as its blocks of 4 by 4
-    /// pixels can't be written a pixel at a time.
+    /// Writes `pixels`, tightly packed RGBA8 rows, top row first, into the `size` pixels of
+    /// `texture`'s own image at `origin`. The image's other pixels keep what they had, except on
+    /// its first write, which leaves them undefined. Shaders see them from this frame's passes on.
+    ///
+    /// The pixels go through the frame's arena and the graphics queue, which suits small changes
+    /// used at once, such as the UI's. [`Frame::stream_texture`] fills a whole image within a
+    /// budget, and is the way for compressed textures, whose 4 by 4 blocks can't be written a
+    /// pixel at a time.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
-    /// texture, its slot shows a stand-in rather than an image of its own, it's compressed, it has
-    /// mip levels, whose others a write would leave undefined, the region doesn't fit in it, or
-    /// `pixels` doesn't fill the region exactly.
+    /// If a forgotten pass is open, a pass has begun in the frame, another device made the
+    /// texture, its slot shows a stand-in, it's compressed or has mip levels (a write would leave
+    /// the others undefined), the region doesn't fit in it, or `pixels` doesn't fill the region.
     pub fn write_texture(
         &mut self,
         texture: &mut Texture,
@@ -156,16 +156,16 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Writes `bytes` into `buffer` from byte `offset` on: through the frame's arena and the
-    /// graphics queue, after what earlier frames read of it, which suits small changes to data the
+    /// Writes `bytes` into `buffer` from byte `offset` on, through the frame's arena and the
+    /// graphics queue, after what earlier frames read of it. It suits small changes to data the
     /// frame's draws read at once, such as a material's. The buffer's other bytes keep what they
-    /// had, except on its first write, which leaves them undefined and takes the buffer for drawing,
-    /// as [`Frame::finish_buffer`] takes one streamed. Shaders see the new bytes from this frame's
-    /// passes on.
+    /// had, except on its first write, which leaves them undefined and takes the buffer for
+    /// drawing, as [`Frame::finish_buffer`] does one streamed. Shaders see the new bytes from this
+    /// frame's passes on.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
+    /// If a forgotten pass is open, a pass has begun in the frame, another device made the
     /// buffer, frames are streaming it, or the bytes don't fit in it.
     pub fn write_buffer(
         &mut self,
@@ -178,13 +178,13 @@ impl<'a> Frame<'a> {
     }
 
     /// Writes `bytes`, in pieces of `piece` bytes each, into `buffer`, the `i`th piece from byte
-    /// `offsets[i]` on, as [`write_buffer`](Self::write_buffer) writes them, in one copy: such as
-    /// records scattered through a table, each where its index puts it. Pieces that overlap leave
-    /// the later's bytes, as Vulkan copies them, undefined.
+    /// `offsets[i]` on, in one copy, as [`write_buffer`](Self::write_buffer) writes them. It suits
+    /// records scattered through a table. Overlapping pieces leave the overlap's bytes undefined,
+    /// as in Vulkan's copies.
     ///
     /// # Panics
     ///
-    /// As `write_buffer` does, for any piece; and if `bytes` aren't `offsets` pieces.
+    /// As `write_buffer` does, for any piece, and if `bytes` aren't `offsets` pieces.
     pub fn write_buffer_pieces(
         &mut self,
         buffer: &mut GpuBuffer,
@@ -226,9 +226,9 @@ impl<'a> Frame<'a> {
             dst_offset: offset,
             size: piece,
         }));
-        // Earlier frames on this queue may still read the buffer, after all the compute queue's
-        // passes read of it, which each frame's last batch here waits for, and an earlier write
-        // may still be copying into it; the copy waits for both.
+        // Earlier frames on this queue may still read the buffer (after the compute queue's passes
+        // read of it, which each frame's last batch here waits for), and an earlier write may
+        // still be copying into it: the copy waits for both.
         let (src_stage, src_access) = if written {
             (
                 BUFFER_READERS | vk::PipelineStageFlags2::COPY,
@@ -271,24 +271,27 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Copies the next part of `pixels`, all of the image [`Texture::refill`] made for `texture`,
-    /// each of its mip levels largest first, in its format, tightly packed, after the level before,
-    /// into that image, by the device's upload path, and returns how many bytes it copied: as many
-    /// as fit `budget`, but at least the smallest whole part, so that each frame makes progress.
-    /// A level of RGBA8 is its rows of pixels, top row first; a level of BC7 or BC5 is its rows of
-    /// blocks of 4 by 4 pixels, 16 bytes each, top row first, a side that isn't a multiple of 4
-    /// ending in a whole block ([`crate::TextureFormat::bytes`] says how many bytes that makes). A part is whole
-    /// rows of one level, or the small levels of a mip tail together. The frame keeps nothing of
-    /// `pixels`: the caller gives them again, whole, until the last part is copied. What's staged
-    /// for a copy is freed once the GPU is done with it. Through a transfer queue, the copies go
-    /// in a submission of their own, which no frame waits for. Shaders see the image once
+    /// Copies the next part of `pixels` into the image [`Texture::refill`] made for `texture`, by
+    /// the device's upload path, and returns the bytes copied: as many as fit `budget`, but at
+    /// least the smallest whole part, so that each frame makes progress.
+    ///
+    /// `pixels` hold the whole image: each mip level, largest first, tightly packed. An RGBA8
+    /// level is rows of pixels; a BC7 or BC5 level is rows of 4 by 4 pixel blocks, 16 bytes each,
+    /// a side that isn't a multiple of 4 ending in a whole block
+    /// ([`crate::TextureFormat::bytes`]). Rows go top first. A part is whole rows of one level, or
+    /// a mip tail's small levels together.
+    ///
+    /// The frame keeps nothing of `pixels`: the caller gives them again, whole, until the last
+    /// part is copied. What's staged is freed once the GPU is done with it. Through a transfer
+    /// queue, the copies go in a submission no frame waits for. Shaders see the image once
     /// [`Frame::finish_texture`] has shown it in the texture's slot.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
-    /// texture, no refill has made an image for it, `pixels` doesn't fill the image's levels
-    /// exactly, or every part is copied already.
+    /// - A forgotten pass is open, or a pass has begun in the frame.
+    /// - Another device made the texture, or no refill has made an image for it.
+    /// - `pixels` doesn't fill the image's levels exactly.
+    /// - Every part is copied already.
     pub fn stream_texture(
         &mut self,
         texture: &mut Texture,
@@ -399,20 +402,20 @@ impl<'a> Frame<'a> {
         Ok(part.bytes)
     }
 
-    /// Shows the image streamed into `texture` in its slot, once its last part is there, in place
-    /// of what the slot showed, a stand-in or an image of its own, which retires: at once if the
-    /// last part went through the graphics queue or the host, and through a transfer queue once
-    /// the copies have finished, as they had when this frame began, which this frame then takes
-    /// over from it. Returns whether the texture now shows an image of its own, with none pending:
-    /// so `true` as well for one that has shown its image already. The new image reaches the
-    /// frame's bindless set at once, and each other set as its next frame begins, so frames before
-    /// this one draw what the slot showed.
+    /// Shows the image streamed into `texture` in its slot once its last part is there, replacing
+    /// what the slot showed (a stand-in or an image of its own), which retires. That's at once for
+    /// the graphics queue or the host, and through a transfer queue once the copies have
+    /// finished, as they had when this frame began. Returns whether the texture now shows an
+    /// image of its own, none pending, so `true` also for one that has shown its image already.
+    ///
+    /// The new image reaches the frame's bindless set at once, and each other set as its next
+    /// frame begins, so frames before this one draw what the slot showed.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, another device made the texture, or a pass has begun in
-    /// the frame and the image is to be shown, which every pass recorded before it would sample
-    /// before it's ready: finish streaming before the frame's passes.
+    /// If a forgotten pass is open, another device made the texture, or a pass has begun in the
+    /// frame and the image is to be shown (passes recorded before it would sample it unready):
+    /// finish streaming before the frame's passes.
     pub fn finish_texture(&mut self, texture: &mut Texture) -> Result<bool> {
         self.outside_pass();
         let device = &self.frames.device;
@@ -466,12 +469,11 @@ impl<'a> Frame<'a> {
         Ok(true)
     }
 
-    /// Shows `stand_in`'s image in `texture`'s slot, in place of what it showed: the texture's own
-    /// image, if it had one, retires, and so does any image being streamed into it, with whatever
-    /// was copied. The stand-in reaches the frame's bindless set at once, and each other set as
-    /// its next frame begins, so frames before this one draw what the slot showed. The texture is
-    /// then as [`Texture::placed`] made it, holding the stand-in's image while its slot shows it,
-    /// and can be refilled again.
+    /// Shows `stand_in`'s image in `texture`'s slot, replacing what it showed. The texture's own
+    /// image, if any, retires, and so does any image being streamed into it. The stand-in reaches
+    /// the frame's bindless set at once, and each other set as its next frame begins, so frames
+    /// before this one draw what the slot showed. The texture is then as [`Texture::placed`] made
+    /// it, holding the stand-in's image while its slot shows it, and can be refilled.
     ///
     /// # Panics
     ///
@@ -502,17 +504,18 @@ impl<'a> Frame<'a> {
     }
 
     /// Copies the next part of `bytes`, all of `buffer`'s, into it, by the device's upload path,
-    /// and returns how many bytes it copied: as many as fit `budget`, in multiples of 16 bytes,
-    /// but at least 16, or what's left, so that each frame makes progress. The frame keeps nothing
-    /// of `bytes`: the caller gives them again, whole, until the last part is copied. What's staged
-    /// for a copy is freed once the GPU is done with it. Through a transfer queue, the copies go in
-    /// a submission of their own, which no frame waits for; a device that copies textures from
-    /// the host copies buffers on the graphics queue. Shaders and draws see the buffer once
+    /// and returns the bytes copied: as many as fit `budget`, in multiples of 16, but at least 16
+    /// or what's left, so that each frame makes progress.
+    ///
+    /// The frame keeps nothing of `bytes`: the caller gives them again, whole, until the last part
+    /// is copied. What's staged is freed once the GPU is done with it. Through a transfer queue,
+    /// the copies go in a submission no frame waits for; a device that copies textures from the
+    /// host copies buffers on the graphics queue. Shaders and draws see the buffer once
     /// [`Frame::finish_buffer`] has taken it.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
+    /// If a forgotten pass is open, a pass has begun in the frame, another device made the
     /// buffer, frames have taken it for drawing, `bytes` doesn't fill it exactly, or every part is
     /// copied already.
     pub fn stream_buffer(
@@ -599,15 +602,14 @@ impl<'a> Frame<'a> {
         Ok(part)
     }
 
-    /// Takes `buffer` for drawing, once its last part is there: at once if it went through the
+    /// Takes `buffer` for drawing once its last part is there: at once if it went through the
     /// graphics queue, and through a transfer queue once the copies have finished, as they had
-    /// when this frame began, which this frame then takes it over from. Returns whether draws may
-    /// take it from now on, in this frame's passes and later frames': so `true` as well for one
-    /// taken already.
+    /// when this frame began. Returns whether draws may take it from now on, in this frame's
+    /// passes and later frames', so `true` also for one taken already.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, or another device made the buffer.
+    /// If a forgotten pass is open, or another device made the buffer.
     pub fn finish_buffer(&mut self, buffer: &mut GpuBuffer) -> Result<bool> {
         self.outside_pass();
         let device = &self.frames.device;
@@ -634,25 +636,25 @@ impl<'a> Frame<'a> {
     }
 
     /// How many submissions of copies on the transfer queue the GPU hadn't finished as this frame
-    /// began: 0 on the other paths. What streams holds off while this is high, copying nothing
-    /// in the frame, so that the copies in flight, their staging and their command buffers stay
-    /// bounded when the copy engine falls behind the frames, as over a slow link or under
-    /// contention; a copy engine that keeps up leaves at most the last frame's unfinished.
+    /// began; 0 on the other paths. A stream holds off copying while this is high, so that copies
+    /// in flight, their staging and command buffers stay bounded when the copy engine falls behind
+    /// the frames (a slow link, contention). A copy engine that keeps up leaves at most the last
+    /// frame's unfinished.
     pub fn uploads_behind(&self) -> u64 {
         self.frames.transfers_submitted - self.frames.transfers_finished
     }
 
-    /// Copies `bytes` into staging, where they wait for the copy that fills a resource with them,
-    /// and returns the buffer and offset they're at.
+    /// Copies `bytes` into staging, to wait for the copy into a resource, and returns the buffer
+    /// and offset they're at.
     fn stage(&mut self, bytes: &[u8]) -> Result<(vk::Buffer, u64)> {
         let staged = self.frames.staging.upload(&self.frames.device, bytes)?;
         Ok((staged.buffer, staged.offset))
     }
 
-    /// The commands the frame's copies on the transfer queue record into, begun with the first:
-    /// a command buffer of the ring whose last submission has finished, or another made, so that
-    /// the frame never waits for one. The ring grows only while frames copy with submissions
-    /// unfinished, which [`Frame::uploads_behind`] lets a caller hold off at.
+    /// The commands the frame's copies on the transfer queue record into, begun with the first: a
+    /// command buffer of the ring whose last submission has finished, else a new one, so that the
+    /// frame never waits for one. The ring grows only while frames copy with submissions
+    /// unfinished, which a caller can hold off at by [`Frame::uploads_behind`].
     fn transfer_commands(&mut self) -> Result<vk::CommandBuffer> {
         if let Some(i) = self.transfers {
             return Ok(self.frames.transfers[i].commands);
@@ -693,16 +695,16 @@ impl<'a> Frame<'a> {
     }
 }
 
-/// How many bytes the next part of a buffer of `size` bytes takes, after the first `copied`,
-/// within `budget`: a multiple of [`BUFFER_PART`], at least one, unless it reaches the end.
+/// How many bytes the next part of a buffer of `size` bytes takes after the first `copied`, within
+/// `budget`: a multiple of [`BUFFER_PART`], at least one, unless it reaches the end.
 fn buffer_part(copied: u64, size: u64, budget: u64) -> u64 {
     let left = size - copied;
     let want = budget / BUFFER_PART * BUFFER_PART;
     left.min(want.max(BUFFER_PART))
 }
 
-/// The copies of `part`'s regions from the staged bytes at `staged`, the part's first, into their
-/// levels: the first `part.count` of them.
+/// The copies of `part`'s regions (the first `part.count`) from the staged bytes at `staged`, the
+/// part's first, into their levels.
 fn buffer_regions(part: &Part, staged: u64) -> [vk::BufferImageCopy; MAX_LEVELS] {
     let mut regions = [vk::BufferImageCopy::default(); MAX_LEVELS];
     for (copy, region) in regions.iter_mut().zip(part.regions()) {
@@ -738,10 +740,9 @@ unsafe fn copy_to_image(
     }
 }
 
-/// Writes `part` of `pixels`, which hold all of `image`'s, into it from the CPU, host image copy,
-/// on a device that uploads that way, into the shader-read-only layout, which the image is
-/// transitioned to by the host first, if `first`. The device's next submission makes the writes
-/// visible to it.
+/// Writes `part` of `pixels`, which hold all of `image`'s, into it from the CPU (host image copy)
+/// in the shader-read-only layout, to which the host first transitions it if `first`. The
+/// device's next submission makes the writes visible to it.
 fn host_copy(
     device: &Device,
     image: vk::Image,
@@ -765,9 +766,9 @@ fn host_copy(
         unsafe { functions.transition_image_layout(slice::from_ref(&transition)) }
             .map_err(crate::vk_failed("vkTransitionImageLayoutEXT", texture))?;
     }
-    // A region for each of the part's, each from where its bytes start. A row length and image
-    // height of 0 pack rows tightly, in whole blocks for BC7. A region's extent is its rows',
-    // which needn't be a multiple of a block's sides where it reaches the level's bottom
+    // A region per part region, each from where its bytes start. A row length and image height of
+    // 0 pack rows tightly, in whole blocks for BC7. A region's extent is its rows', which needn't
+    // be a multiple of a block's sides where it reaches the level's bottom
     // (VUID-VkCopyMemoryToImageInfo-dstImage-00207 and -00208).
     let mut regions = [vk::MemoryToImageCopyEXT::default(); MAX_LEVELS];
     for (copy, region) in regions.iter_mut().zip(part.regions()) {
@@ -837,8 +838,8 @@ fn handover_families(device: &Device) -> [u32; 2] {
 /// release, on the transfer queue after the last copy, and the acquire, on the graphics queue
 /// before the passes of the frame that takes it, once the copies have finished. Vulkan requires
 /// them to match but for the stages and accesses each ignores of the other's side, and changes
-/// the layout once, between them. Validation checks the layout they leave only against what next
-/// uses the texture, which sampling through the bindless sets doesn't count as.
+/// the layout once, between them. Validation checks the layout they leave only against the next
+/// use of the texture, which sampling through the bindless sets doesn't count as.
 fn texture_handover(
     [transfer, graphics]: [u32; 2],
     image: vk::Image,
@@ -882,11 +883,13 @@ impl Upload<'_> {
 }
 
 /// Memory the CPU writes during a frame for the GPU to read in it, allocated by bumping an
-/// offset. A frame's own arena holds geometry, data shaders read, and pixels on their way to
-/// textures; it's reset when the frame's slot comes round again, and grows by adding buffers,
-/// which the reset merges into one big enough for them all, so frames stop allocating once they
-/// reach a steady state. Staging holds the parts of meshes and textures a frame streams, and is
-/// emptied as each frame is submitted instead, so that it holds nothing once they stop coming.
+/// offset.
+///
+/// A frame's own arena holds geometry, data shaders read, and pixels on their way to textures. It
+/// resets when the frame's slot comes round again and grows by adding buffers, which the reset
+/// merges into one big enough for them all, so frames stop allocating at a steady state. Staging
+/// holds the parts of meshes and textures a frame streams, and is emptied as each frame is
+/// submitted, so that it holds nothing once they stop coming.
 pub(super) struct Arena {
     usage: vk::BufferUsageFlags,
     memory: Memory,
@@ -905,8 +908,8 @@ pub(super) struct Arena {
 }
 
 impl Arena {
-    /// Every upload starts at a multiple of this, which covers index buffers, texture copies, BC7's
-    /// 16-byte blocks among them, a transfer queue's copies and the data types shaders read.
+    /// Every upload starts at a multiple of this, which covers index buffers, texture copies (BC7's
+    /// 16-byte blocks among them), a transfer queue's copies and the data types shaders read.
     const ALIGNMENT: u64 = 16;
 
     /// The arena of slot `slot`'s frames, whose first buffer holds 1 MiB.
@@ -923,8 +926,8 @@ impl Arena {
         )
     }
 
-    /// Staging, whose buffers hold at least 16 MiB, a frame's budget of parts, so that a frame's
-    /// streaming takes one allocation.
+    /// Staging, whose buffers hold at least 16 MiB, a frame's budget of parts, so that a frame
+    /// streams in one allocation.
     pub(super) fn staging() -> Self {
         let usage = vk::BufferUsageFlags::TRANSFER_SRC;
         Self::new(
@@ -973,7 +976,7 @@ impl Arena {
         self.buffers.iter().map(Buffer::size).sum()
     }
 
-    /// The most the uploads between two of its resets have taken of it, each from a multiple of
+    /// The most the uploads between two resets have taken of it, each from a multiple of
     /// [`ALIGNMENT`](Self::ALIGNMENT): a frame's, for a frame's own arena.
     pub(super) fn peak(&self) -> u64 {
         self.peak

@@ -1,6 +1,6 @@
-//! Storage images: images that compute passes write, a mip level at a time through slots of their
-//! own in the bindless sets, and that shaders then sample whole, as a 2D image or a cube, through a
-//! texture slot. Frames take them as targets, and they keep the layout frames leave them in.
+//! Storage images: images compute passes write a mip level at a time through storage slots in the
+//! bindless sets, and shaders then sample whole, as a 2D image or a cube, through a texture slot.
+//! Frames take them as targets, and they keep the layout frames leave them in.
 
 use std::sync::Arc;
 
@@ -12,16 +12,15 @@ use crate::texture::mip_sizes;
 use crate::vma::{Allocation, Memory};
 use crate::{Device, vk_failed};
 
-/// An image that compute passes write and shaders sample, in GPU memory: 16-bit floats in linear
-/// RGBA, [`StorageImage::FORMAT`], of a 2D image's one layer or a cube's six, with mip levels.
-/// Its contents are undefined until a pass writes them. Dropping it retires it, and its slots,
-/// until the GPU is done with it.
+/// An image that compute passes write and shaders sample, in GPU memory: [`StorageImage::FORMAT`],
+/// one layer for a 2D image or six for a cube, with mip levels. Its contents are undefined until a
+/// pass writes them. Dropping it retires it and its slots until the GPU is done with it.
 pub struct StorageImage {
     device: Arc<Device>,
     raw: vk::Image,
     /// What shaders sample: every level, as a 2D image or a cube.
     view: vk::ImageView,
-    /// Each level's view, of every layer, which compute shaders write and read, and its storage
+    /// Each level's view of every layer, which compute shaders write and read, and its storage
     /// slot.
     levels: Vec<(vk::ImageView, u32)>,
     /// Taken when the image is dropped.
@@ -40,10 +39,9 @@ impl StorageImage {
     /// every device to store to from shaders, and to sample and filter.
     pub const FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
-    /// An image of `size` pixels, with the first `levels` of the mip chain that [`mip_sizes`]
-    /// gives, a cube of six faces of that size if `cube`, and
-    /// otherwise a 2D image, in a free texture slot of the bindless sets past the placed ones, and
-    /// a storage slot for each level, with `name` as its debug name.
+    /// An image of `size` pixels with the first `levels` of the chain [`mip_sizes`] gives: a cube
+    /// of six faces that size if `cube`, else a 2D image. It takes a free texture slot in the
+    /// bindless sets past the placed ones, and a storage slot per level. `name` is its debug name.
     ///
     /// # Panics
     ///
@@ -156,7 +154,7 @@ impl StorageImage {
         Ok(image)
     }
 
-    /// Its width and height in pixels, of its first and largest level, a face's for a cube.
+    /// Its first level's width and height in pixels; a face's for a cube.
     pub fn size(&self) -> [u32; 2] {
         self.size
     }
@@ -166,10 +164,10 @@ impl StorageImage {
         self.levels.len() as u32
     }
 
-    /// Its slot in the bindless sets, for fragment shaders to sample it through in any pass, as a
-    /// `Texture2D` or, for a cube, a `TextureCube`, once the frames submitted have left it in the
-    /// shader-read-only layout, as one whose last pass to use it sampled it does; `None` until
-    /// then, as while its last use wrote it. A pass that declares it gets its slot from the pass.
+    /// Its slot in the bindless sets, for fragment shaders in any pass to sample as a `Texture2D`
+    /// or, for a cube, a `TextureCube`. `Some` once the frames submitted have left it in the
+    /// shader-read-only layout, as a last use that sampled it does; `None` until then, as while
+    /// its last use wrote it. A pass that declares it gets its slot from the pass.
     pub fn sampled(&self) -> Option<u32> {
         (self.layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL).then_some(self.index)
     }
@@ -185,8 +183,8 @@ impl StorageImage {
         range(if self.cube { 6 } else { 1 })
     }
 
-    /// Its texture slot, which shaders may sample only in a pass that samples it, or once a frame
-    /// has left it in the shader-read-only layout.
+    /// Its texture slot: shaders may sample it only in a pass that samples it, or once a frame has
+    /// left it in the shader-read-only layout.
     pub(crate) fn index(&self) -> u32 {
         self.index
     }
@@ -207,7 +205,6 @@ impl StorageImage {
         slot
     }
 
-    /// The handle of the device that made it.
     pub(crate) fn device(&self) -> vk::Device {
         self.device.handle()
     }
@@ -247,8 +244,7 @@ fn range(layers: u32) -> vk::ImageSubresourceRange {
     }
 }
 
-/// A view of `range` of `image`, of [`StorageImage::FORMAT`], shaped as `shape`, which it names
-/// `name`.
+/// A view `name` of `range` of `image`, in [`StorageImage::FORMAT`], shaped as `shape`.
 fn make_view(
     device: &Device,
     image: vk::Image,

@@ -1,7 +1,7 @@
 //! The Vulkan layer, built on `ash`: instance and device setup, memory, buffers and images,
-//! bindless descriptors, graphics and compute pipelines, swapchain, synchronization and queue
-//! submission, the render graph, which places a frame's barriers and makes its own images and
-//! buffers, and frame captures through RenderDoc.
+//! bindless descriptors, pipelines, swapchains, synchronization and submission, RenderDoc
+//! captures, and the render graph, which places a frame's barriers and makes its own images and
+//! buffers.
 //!
 //! `gg-renderer` is its only client; the engine reaches the GPU through the renderer.
 
@@ -13,8 +13,8 @@ mod buffer;
 mod capture;
 mod device;
 mod frame;
-// Public for the GPU tests' mains alone, gg-gpu's and gg-renderer's, as a feature would have to be
-// on for gg-gpu's own tests, which Cargo does only by skipping them while it's off.
+// Public for the GPU tests' mains alone, gg-gpu's and gg-renderer's. A feature would have to be on
+// for gg-gpu's own tests, which Cargo does only by skipping them while it's off.
 #[doc(hidden)]
 pub mod harness;
 mod image;
@@ -71,9 +71,9 @@ const fn color_layers(level: u32) -> vk::ImageSubresourceLayers {
     }
 }
 
-/// The region of a copy of `size` pixels between `offset` in a buffer and mip level `level` of a
-/// color image, at `origin` in it. The buffer's rows are tightly packed, a row length and image
-/// height of 0, in whole blocks for a compressed image.
+/// A copy of `size` pixels between `offset` in a buffer and mip level `level` of a color image, at
+/// `origin`. The buffer's rows are tightly packed (row length and image height 0), in whole blocks
+/// for a compressed image.
 fn copy_region(offset: u64, origin: [u32; 2], size: [u32; 2], level: u32) -> vk::BufferImageCopy {
     vk::BufferImageCopy::default()
         .buffer_offset(offset)
@@ -96,8 +96,8 @@ const DEPTH_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     ..COLOR_RANGE
 };
 
-/// The engine error for a failed Vulkan call made for `subject`: the object it's about, by its
-/// debug name, and what was asked of it. The failures callers react to have codes of their own.
+/// The engine error for a failed Vulkan `call` for `subject`: the object's debug name, and what
+/// was asked of it. Failures callers react to have codes of their own.
 fn vk_error(call: &str, subject: impl fmt::Display, result: vk::Result) -> Error {
     let code = match result {
         vk::Result::ERROR_DEVICE_LOST => "gpu.device_lost",
@@ -113,7 +113,7 @@ fn vk_error(call: &str, subject: impl fmt::Display, result: vk::Result) -> Error
     Error::new(code, message)
 }
 
-/// What `map_err` takes to make [`vk_error`]'s error of a result of `call` for `subject`.
+/// [`vk_error`] of `call` for `subject`, for `map_err`.
 fn vk_failed(call: &str, subject: impl fmt::Display) -> impl FnOnce(vk::Result) -> Error {
     move |result| vk_error(call, subject, result)
 }

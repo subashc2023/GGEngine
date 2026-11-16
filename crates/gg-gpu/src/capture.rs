@@ -1,12 +1,12 @@
-//! Frame captures through RenderDoc's in-application API, which `renderdoc_app.h`, installed
-//! beside RenderDoc, describes. RenderDoc's library exports it once it's in the process: injected
+//! Frame captures through RenderDoc's in-application API, described by `renderdoc_app.h`,
+//! installed beside RenderDoc. RenderDoc's library exports it once it's in the process: injected
 //! into an app run through `renderdoccmd capture` or qrenderdoc, or loaded as RenderDoc's Vulkan
 //! layer as an instance is made, with `ENABLE_VULKAN_RENDERDOC_CAPTURE=1`. The engine only finds
 //! the library loaded, never loads it, and finds none where RenderDoc doesn't run, as on macOS.
 //!
-//! A capture shows every Vulkan object by its debug name, but for the images of a torn-off
+//! A capture shows every Vulkan object by its debug name, except the images of a torn-off
 //! window's swapchain that the frame doesn't render into: RenderDoc records only the captured
-//! window's images and those the frame uses, so these keep RenderDoc's own names.
+//! window's images and those the frame uses, so these keep RenderDoc's names.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem::{offset_of, size_of};
@@ -24,11 +24,11 @@ use crate::Device;
 /// function it calls. RenderDoc may give a later version, whose functions follow these.
 const VERSION: c_int = 10400;
 
-/// A function of RenderDoc's that the engine doesn't call, which keeps the table's layout.
+/// A RenderDoc function the engine doesn't call; it keeps the table's layout.
 type Unused = Option<unsafe extern "C" fn()>;
 
-/// The table of functions `RENDERDOC_GetAPI` gives, laid out as `renderdoc_app.h` lays out
-/// `RENDERDOC_API_1_4_0`'s, up to the last function the engine calls.
+/// The table `RENDERDOC_GetAPI` gives, laid out as `renderdoc_app.h`'s `RENDERDOC_API_1_4_0`, up
+/// to the last function the engine calls.
 #[repr(C)]
 struct Api {
     /// GetAPIVersion to GetCaptureFilePathTemplate.
@@ -55,8 +55,8 @@ type GetCapture = unsafe extern "C" fn(
 /// `EndFrameCapture` and `DiscardFrameCapture`, which return 1 for success.
 type EndCapture = unsafe extern "C" fn(device: *mut c_void, window: *mut c_void) -> u32;
 
-// Where `renderdoc_app.h` puts the functions the engine calls, in pointers: CI never calls
-// RenderDoc, so a slip in the layout shows here.
+// Where `renderdoc_app.h` puts the functions the engine calls, in pointers. CI never calls
+// RenderDoc, so a layout slip shows here.
 const _: () = {
     const SLOT: usize = size_of::<*const c_void>();
     assert!(size_of::<Unused>() == SLOT);
@@ -69,7 +69,7 @@ const _: () = {
     assert!(size_of::<Api>() == 25 * SLOT);
 };
 
-/// RenderDoc's functions that the engine calls, while its library is in the process.
+/// The RenderDoc functions the engine calls, while its library is in the process.
 pub(crate) struct RenderDoc {
     get_num_captures: unsafe extern "C" fn() -> u32,
     get_capture: GetCapture,
@@ -80,14 +80,14 @@ pub(crate) struct RenderDoc {
     /// Whether one of the engine's captures is under way: two that overlap are undefined, even of
     /// different devices.
     capturing: AtomicBool,
-    /// Keeps RenderDoc's library loaded, and so its functions there.
+    /// Keeps the library, and so its functions, loaded.
     _library: libloading::Library,
 }
 
-/// RenderDoc, if its library is in the process. It's looked up the first time this is called,
-/// which must be once an instance is made, as the loader may load it then.
+/// RenderDoc, if its library is in the process. Looked up on the first call, which must come
+/// after an instance is made, as the loader may load it then.
 pub(crate) fn renderdoc() -> Option<&'static RenderDoc> {
-    // Once a process, too, as `RENDERDOC_GetAPI` must be called on one thread at a time.
+    // Once a process, as `RENDERDOC_GetAPI` must be called on one thread at a time.
     static RENDERDOC: OnceLock<Option<RenderDoc>> = OnceLock::new();
     RENDERDOC.get_or_init(RenderDoc::find).as_ref()
 }
@@ -105,13 +105,13 @@ impl RenderDoc {
             }
             .ok()?;
             let mut table = ptr::null_mut();
-            // SAFETY: the function is RenderDoc's, called once a process, as `renderdoc` sees to.
+            // SAFETY: the function is RenderDoc's, called once a process by `renderdoc`.
             let found = unsafe { (*get_api)(VERSION, &raw mut table) };
             (found == 1 && !table.is_null()).then_some(table)?
         };
         // SAFETY: RenderDoc gave a table for version 1.4.0 or a later one, whose functions follow
         // 1.4.0's, so it starts as `Api` is laid out, aligned for pointers; the functions are valid
-        // while the library is loaded, which `_library` keeps it.
+        // while `_library` keeps the library loaded.
         let api = unsafe { table.cast::<Api>().read() };
         Some(Self {
             get_num_captures: api.get_num_captures?,
@@ -126,7 +126,7 @@ impl RenderDoc {
     }
 
     /// Starts capturing what `device` does, until the capture ends or drops. Fails with
-    /// `gpu.capture_busy` while another capture is under way, which one mustn't overlap.
+    /// `gpu.capture_busy` while another capture is under way: captures mustn't overlap.
     pub(crate) fn start<'a>(&'static self, device: &'a Device) -> Result<Capture<'a>> {
         let _zone = gg_core::zone!("start capture");
         let busy = || {
@@ -140,7 +140,7 @@ impl RenderDoc {
         if self.capturing.swap(true, Ordering::Acquire) {
             return Err(busy());
         }
-        // From here on, dropping `capture` lets go of the flag, and discards what it started.
+        // From here on, dropping `capture` clears the flag and discards what it started.
         let mut capture = Capture {
             renderdoc: self,
             device,
@@ -202,8 +202,8 @@ fn dispatch_table(instance: vk::Instance) -> *mut c_void {
     unsafe { object.read() }
 }
 
-/// A capture of what a device does, through RenderDoc, from [`Device::start_capture`] until it
-/// ends. One dropped without ending is discarded.
+/// A RenderDoc capture of what a device does, from [`Device::start_capture`] until it ends.
+/// Dropped without ending, it's discarded.
 #[must_use = "a capture that isn't ended is discarded"]
 pub struct Capture<'a> {
     renderdoc: &'static RenderDoc,
@@ -238,7 +238,7 @@ impl Capture<'_> {
         if !made {
             return Err(failed());
         }
-        // RenderDoc writes the path without a size to keep within, so its length comes first.
+        // The path is written with no size limit, so its length comes first.
         let mut length = 0;
         // SAFETY: given no buffer, GetCapture writes the path's length alone.
         let found = unsafe {
@@ -252,7 +252,7 @@ impl Capture<'_> {
         if found != 1 {
             return Err(failed());
         }
-        // A byte more, zeroed, so that the path ends in a nul whether or not the length counts one.
+        // One zeroed byte more, so the path ends in a nul whether or not the length counts one.
         let mut path = vec![0_u8; length as usize + 1];
         // SAFETY: the buffer holds as many bytes as the path's length, and one more.
         unsafe {
@@ -265,8 +265,8 @@ impl Capture<'_> {
         }
         let path = CStr::from_bytes_until_nul(&path).map_err(|_| failed())?;
         let path = PathBuf::from(path.to_string_lossy().into_owned());
-        // RenderDoc gives it as its template does, which can be relative to the app's working
-        // directory: renderdoccmd's `-d`, or the executable's directory without it.
+        // As its template gives it, possibly relative to the app's working directory:
+        // renderdoccmd's `-d`, or the executable's directory without it.
         Ok(std::path::absolute(&path).unwrap_or(path))
     }
 }

@@ -1,5 +1,5 @@
-//! Offscreen color images, which frames render into as targets, as headless runs do, later passes
-//! of a frame sample and the CPU reads back; and what making an image takes, which a graph's own
+//! Offscreen color images: frames render into them as targets, as headless runs do, later passes
+//! sample them and the CPU reads them back. Also what making an image takes, which a graph's own
 //! images share.
 
 use std::sync::Arc;
@@ -12,9 +12,9 @@ use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
 use crate::{COLOR_RANGE, Device, Format, copy_region, vk_failed};
 
-/// A color image in GPU memory, which frames render into as a target, their later passes sample
-/// through its slot in the bindless set, and the CPU can read back. Dropping it retires it, and its
-/// slot, until the GPU is done with it.
+/// A color image in GPU memory: frames render into it, their later passes sample it through its
+/// bindless slot, and the CPU can read it back. Dropping it retires it and its slot until the GPU
+/// is done with it.
 pub struct ColorImage {
     device: Arc<Device>,
     raw: vk::Image,
@@ -26,19 +26,18 @@ pub struct ColorImage {
     layout: vk::ImageLayout,
     /// Its slot in the bindless set, past the placed ones.
     index: u32,
-    /// Its debug name, which its read-back and their errors are named after.
+    /// Its debug name; its read-backs and their errors are named after it.
     name: String,
 }
 
 impl ColorImage {
-    /// The format of every color image: 8-bit sRGB, as windows usually present, so what's read
-    /// back matches what a window would show. The game's view is one, so games' pipelines are
-    /// made for it.
+    /// The format of every color image: 8-bit sRGB, as windows usually present, so read-backs
+    /// match what a window would show. The game's view is one, so games' pipelines are made for it.
     pub const FORMAT: Format = Format::new(vk::Format::R8G8B8A8_SRGB);
 
-    /// An image of `width` by `height` pixels, in a free slot of the bindless set past the placed
-    /// ones, with `name` as its debug name. Fails with `gpu.image_too_large` if a side is past the
-    /// device's most.
+    /// An image of `width` by `height` pixels, in a free bindless slot past the placed ones, with
+    /// `name` as its debug name. Fails with `gpu.image_too_large` if a side is past the device's
+    /// most.
     ///
     /// # Panics
     ///
@@ -85,8 +84,8 @@ impl ColorImage {
         })
     }
 
-    /// Copies the image to the CPU as rows of RGBA8 pixels, sRGB-encoded and tightly packed, top
-    /// row first. It waits for the GPU to finish everything submitted so far.
+    /// Copies the image to the CPU as tightly packed rows of sRGB RGBA8 pixels, top row first.
+    /// Waits for the GPU to finish everything submitted so far.
     pub fn read_back(&mut self) -> Result<Vec<u8>> {
         let size = u64::from(self.extent.width) * u64::from(self.extent.height) * 4;
         // The buffer and the commands that copy into it.
@@ -148,8 +147,8 @@ impl ColorImage {
         [self.extent.width, self.extent.height]
     }
 
-    /// The image's handle, for code that breaks the safe API's rules on purpose, such as tests
-    /// that check validation catches mistakes.
+    /// The image's handle, for code that breaks the safe API's rules on purpose, such as tests of
+    /// validation catching mistakes.
     pub fn raw(&self) -> vk::Image {
         self.raw
     }
@@ -159,7 +158,6 @@ impl ColorImage {
         (self.raw, self.view, self.extent)
     }
 
-    /// The handle of the device that made it.
     pub(crate) fn device(&self) -> vk::Device {
         self.device.handle()
     }
@@ -189,8 +187,8 @@ impl Drop for ColorImage {
     }
 }
 
-/// Checks that a 2D image of `size` pixels, of one layer, named `name`, fits `device`'s limits,
-/// failing with `gpu.image_too_large` otherwise, before Vulkan is asked to make it
+/// Checks that a one-layer 2D image `name` of `size` pixels fits `device`'s limits, failing with
+/// `gpu.image_too_large` before Vulkan is asked to make it
 /// (VUID-VkImageCreateInfo-extent-02252 and -02253).
 pub(crate) fn check_size(device: &Device, size: [u32; 2], name: &str) -> Result<()> {
     let most = device.limits().max_image_dimension2_d;
@@ -208,8 +206,8 @@ pub(crate) fn check_size(device: &Device, size: [u32; 2], name: &str) -> Result<
     ))
 }
 
-/// How an image of `size` pixels, of `format`, for `usage`, is made: one level and one layer,
-/// sampled once a pixel, in the GPU's own tiling.
+/// An image of `size` pixels, `format` and `usage`: one level, one layer, one sample per pixel,
+/// in the GPU's optimal tiling.
 pub(crate) fn image_info(
     size: [u32; 2],
     format: vk::Format,
@@ -231,8 +229,8 @@ pub(crate) fn image_info(
         .usage(usage)
 }
 
-/// A view of `range` of `image`, shaped as `shape`, of `format`, which it names `name`, as it names
-/// the image.
+/// A view of `range` of `image`, shaped as `shape`, in `format`. It names the view and the image
+/// `name`.
 pub(crate) fn image_view(
     device: &Device,
     image: vk::Image,

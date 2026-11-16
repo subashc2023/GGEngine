@@ -1,9 +1,10 @@
 //! A frame's render graph: the passes a frame runs, in the order they're added, and how each uses
-//! the images it renders into, computes into, samples and copies from, and the buffers its shaders
-//! write and read and its draws take their commands from, which the frame places every barrier and
-//! layout transition from as each pass begins; and the images and buffers that are the graph's own,
-//! which last for a frame, made from what the passes say of them, images in memory that those
-//! whose uses in a frame don't overlap share, as `transients` says.
+//! images (render into, compute into, sample, copy from) and buffers (shaders write and read, draws
+//! take commands from). The frame places every barrier and layout transition from those uses as
+//! each pass begins.
+//!
+//! The graph's own images and buffers last for a frame and are made from what the passes say of
+//! them. Images whose uses don't overlap share memory, as `transients` says.
 
 use std::ops::Range;
 
@@ -31,31 +32,30 @@ pub const MAX_BUFFER_READ: u64 = 256;
 pub const MAX_BUFFER_READS: usize = 4;
 
 /// What a frame runs: its passes, in order, each with the images it uses and how. A frame places
-/// the barriers and layout transitions between passes from those uses, the image's last use before
-/// a pass and the pass's own, so that no pass records one itself. Clear it and add the frame's
-/// passes again every frame; it keeps its memory, so that a frame that adds no more than the last
-/// allocates nothing.
+/// the barriers and layout transitions between passes from the image's last use before a pass and
+/// the pass's own, so no pass records one itself. Clear it and add the frame's passes every frame;
+/// it keeps its memory, so a frame that adds no more than the last allocates nothing.
 ///
-/// Its own images, [`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::motion`],
-/// [`Graph::visibility`], [`Graph::depth`] and [`Graph::scalar`], last for a frame: each is
-/// undefined until a pass of
-/// the frame writes it, so its first use writes it whole, and passes whose uses of two of them
+/// Its own images ([`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::motion`],
+/// [`Graph::visibility`], [`Graph::depth`], [`Graph::scalar`]) last for a frame. Each is undefined
+/// until a pass writes it, so its first use writes it whole, and passes whose uses of two of them
 /// don't overlap may find them in the same memory. The frames keep them for the frames after,
-/// which add them alike, by their names, kinds and sizes.
-/// Its own buffers, [`Graph::buffer`], last from frame to frame: the frames keep each for the
+/// which add them alike, by name, kind and size.
+///
+/// Its own buffers ([`Graph::buffer`]) last from frame to frame: the frames keep each for the
 /// frames after that add one of its name no larger, holding what the last of them left there.
 #[derive(Default)]
 pub struct Graph {
     pub(crate) images: Vec<ImageDecl>,
     pub(crate) buffers: Vec<BufferDecl>,
     pub(crate) passes: Vec<PassDecl>,
-    /// Each pass's uses of images, one after another, in the order they were given.
+    /// Each pass's image uses, one after another, in the order given.
     pub(crate) uses: Vec<(ImageId, Use)>,
-    /// Each pass's uses of buffers, likewise.
+    /// Each pass's buffer uses, likewise.
     pub(crate) buffer_uses: Vec<(BufferId, BufferUse)>,
 }
 
-/// A buffer of a graph's own: its debug name, and its bytes.
+/// A buffer of a graph's own: its debug name and its bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BufferDecl {
     pub(crate) name: &'static str,
@@ -78,37 +78,37 @@ pub(crate) enum ImageDecl {
 /// What a graph's own image holds, as [`Graph::image_named`] tells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageKind {
-    /// Colors, in [`ColorImage::FORMAT`], which passes render into and blend over, later ones
-    /// sample and frames read back.
+    /// Colors in [`ColorImage::FORMAT`]. Passes render into and blend over them, later ones
+    /// sample them and frames read them back.
     Color,
-    /// Colors of high dynamic range, as 16-bit floats in linear RGBA, [`Format::HDR`], which passes
-    /// render into and blend over, past 1 too, and later ones sample. Vulkan requires every device
-    /// to render into the format, blend in it and sample it.
+    /// Colors of high dynamic range, as 16-bit floats in linear RGBA, [`Format::HDR`]. Passes
+    /// render into and blend over them, past 1 too, and later ones sample them. Vulkan requires
+    /// every device to render into the format, blend in it and sample it.
     ///
     /// [`Format::HDR`]: crate::Format::HDR
     Hdr,
-    /// IDs beside a pass's colors, as two 32-bit unsigned integers, the low and high halves of a
-    /// 64-bit one, which passes render, frames read pixels of back and later passes sample, as
+    /// IDs beside a pass's colors: two 32-bit unsigned integers, the low and high halves of a
+    /// 64-bit one. Passes render them, frames read pixels back and later passes sample them as
     /// unsigned integers. Vulkan requires every device to render into the format, copy from it and
     /// sample it.
     Ids,
-    /// Motion beside a pass's colors and IDs, as 16-bit floats in RGBA, the format of [`Hdr`]'s,
-    /// which passes render, the pipelines that write depth writing it, compute passes write as
-    /// storage, and later passes sample.
+    /// Motion beside a pass's colors and IDs, as 16-bit floats in RGBA, the format of [`Hdr`]'s.
+    /// Passes render it, the pipelines that write depth write it, compute passes write it as
+    /// storage, and later passes sample it.
     ///
     /// [`Hdr`]: Self::Hdr
     Motion,
-    /// A visibility buffer: two 32-bit unsigned integers a pixel, which a pass renders as its
-    /// color target, beside its IDs, telling what it drew there, and later passes sample, as
-    /// unsigned integers. The format is the IDs'.
+    /// A visibility buffer: two 32-bit unsigned integers a pixel, in the IDs' format. A pass
+    /// renders it as its color target, beside its IDs, telling what it drew there; later passes
+    /// sample it as unsigned integers.
     Visibility,
-    /// Depth, as 32-bit floats, which draws test and write: from 1 at the near plane to 0 far
-    /// away, as the renderer's cameras project it. Later passes sample it: by comparison, through
-    /// the bindless set's comparison sampler, as a shadow map's is, or a texel at a time, as the
-    /// view's is to build its depth pyramid. Every device the engine opens renders it and samples
-    /// it both ways.
+    /// Depth as 32-bit floats that draws test and write, from 1 at the near plane to 0 far away,
+    /// as the renderer's cameras project it. Later passes sample it by comparison, through the
+    /// bindless set's comparison sampler, as a shadow map's is, or a texel at a time, as the view's
+    /// is to build its depth pyramid. Every device the engine opens renders it and samples it both
+    /// ways.
     Depth,
-    /// A 32-bit float a pixel, which compute passes write as storage and later passes sample, as
+    /// A 32-bit float a pixel that compute passes write as storage and later passes sample, as
     /// the view's ambient occlusion is. Vulkan requires every device to store to the format from
     /// shaders and to sample it.
     Scalar,
@@ -125,7 +125,7 @@ impl ImageKind {
         }
     }
 
-    /// What its images are made for: every use a pass may make of one of its kind.
+    /// What its images are made for: every use a pass may make of its kind.
     pub(crate) fn usage(self) -> vk::ImageUsageFlags {
         match self {
             Self::Color | Self::Ids => {
@@ -133,8 +133,8 @@ impl ImageKind {
                     | vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_SRC
             }
-            // Never read back: what a frame reads back is what it shows. Compute passes write it as
-            // storage, which Vulkan requires every device to support in the format.
+            // Never read back: a frame reads back what it shows. Vulkan requires every device to
+            // support storage in the format, which compute passes write.
             Self::Hdr | Self::Motion => {
                 vk::ImageUsageFlags::COLOR_ATTACHMENT
                     | vk::ImageUsageFlags::SAMPLED
@@ -162,12 +162,12 @@ impl ImageKind {
         }
     }
 
-    /// Whether shaders may sample it, through a slot in the bindless set.
+    /// Whether shaders may sample it, through a bindless slot.
     pub(crate) fn sampled(self) -> bool {
         self.usage().contains(vk::ImageUsageFlags::SAMPLED)
     }
 
-    /// Whether compute shaders may write it, through a storage slot in the bindless set.
+    /// Whether compute shaders may write it, through a bindless storage slot.
     pub(crate) fn storage(self) -> bool {
         self.usage().contains(vk::ImageUsageFlags::STORAGE)
     }
@@ -176,26 +176,26 @@ impl ImageKind {
 /// How a pass uses an image.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Use {
-    /// Its color target, cleared first to this color, in linear RGBA, or, a visibility buffer, to
-    /// 0, which is all it's cleared to; or with `None` drawn over as the image's last use left it.
+    /// Its color target, cleared first to this linear RGBA color (a visibility buffer, to 0, its
+    /// only clear); with `None`, drawn over as the image's last use left it.
     Color(Option<[f32; 4]>),
-    /// The IDs beside its color target, cleared first to 0, for none, unless `kept`, as the image's
-    /// last use left them.
+    /// The IDs beside its color target, cleared first to 0, for none, unless `kept`: as the
+    /// image's last use left them.
     Ids { kept: bool },
-    /// The motion beside its color target and IDs, cleared first to 0, unless `kept`, as the
+    /// The motion beside its color target and IDs, cleared first to 0, unless `kept`: as the
     /// image's last use left it.
     Motion { kept: bool },
     /// The depth its draws test and write, cleared first to 0, as far away as depth goes, unless
-    /// `kept`, as the image's last use left it.
+    /// `kept`: as the image's last use left it.
     Depth { kept: bool },
-    /// Sampled by its fragment shaders, through the image's slot in the bindless set.
+    /// Sampled by its fragment shaders, through the image's bindless slot.
     Sampled,
-    /// Sampled by its compute shaders, through the image's slot in the bindless set.
+    /// Sampled by its compute shaders, through the image's bindless slot.
     ComputeSampled,
     /// Written and read by its compute shaders, a level at a time, through the storage slots of a
-    /// storage image's levels, or of an image of the graph's own of a kind they write, in the
-    /// general layout: as its last use left it, if `kept`, and otherwise discarding that, for
-    /// shaders that write every texel.
+    /// storage image's levels or of a graph image of a kind they write, in the general layout.
+    /// With `kept`, as its last use left it; otherwise that is discarded, for shaders that write
+    /// every texel.
     Storage { kept: bool },
     /// Copied from, as a read back is.
     CopySource,
@@ -257,7 +257,6 @@ impl Use {
         }
     }
 
-    /// Whether it's one of a render pass's attachments.
     fn attaches(self) -> bool {
         matches!(
             self,
@@ -271,11 +270,11 @@ impl Use {
 pub(crate) enum BufferUse {
     /// Read by its compute shaders, through the buffer's address.
     ComputeRead,
-    /// Written and read by its compute shaders, through the buffer's address.
+    /// Written and read by its compute shaders, likewise.
     ComputeWrite,
-    /// Read by its draws' shaders, vertex, mesh or fragment, through the buffer's address.
+    /// Read by its draws' vertex, mesh or fragment shaders, through the buffer's address.
     Read,
-    /// The commands its indirect draws take, which its draws' shaders may read too, through the
+    /// The commands its indirect draws take. Its draws' shaders may read them too, through the
     /// buffer's address, as a draw of meshlets reads those kept after its command.
     Indirect,
     /// Copied from, as a read back is.
@@ -283,7 +282,6 @@ pub(crate) enum BufferUse {
 }
 
 impl BufferUse {
-    /// Whether it writes the buffer.
     pub(crate) fn writes(self) -> bool {
         self == Self::ComputeWrite
     }
@@ -321,8 +319,8 @@ impl BufferUse {
     }
 }
 
-/// What a use does to an image: the stages it's used in, and the reads and writes they make there,
-/// in a layout; and whether it discards what the image held, as a clear does.
+/// What a use does to an image: the stages it's in, the reads and writes they make there, the
+/// layout, and whether it discards what the image held, as a clear does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Access {
     pub(crate) stages: vk::PipelineStageFlags2,
@@ -340,7 +338,7 @@ pub(crate) struct PassDecl {
     pub(crate) queue: Queue,
     /// Its uses, in [`Graph::uses`].
     pub(crate) uses: Range<usize>,
-    /// Its uses of buffers, in [`Graph::buffer_uses`].
+    /// Its buffer uses, in [`Graph::buffer_uses`].
     pub(crate) buffer_uses: Range<usize>,
 }
 
@@ -348,13 +346,12 @@ pub(crate) struct PassDecl {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Queue {
     Graphics,
-    /// The device's queue for compute apart from graphics, where it has one; the graphics queue
-    /// otherwise.
+    /// The device's separate compute queue where it has one; else the graphics queue.
     Compute,
 }
 
 impl Queue {
-    /// Its index among a frame's queues, which lists of them are in.
+    /// Its index among a frame's queues.
     pub(crate) const fn index(self) -> usize {
         match self {
             Self::Graphics => 0,
@@ -405,8 +402,8 @@ impl Graph {
         }
     }
 
-    /// An image of the graph's own of colors, `size` pixels, named `name`: [`ColorImage::FORMAT`],
-    /// as a target's, so that the same pipelines draw into either.
+    /// A graph image of colors, `size` pixels, named `name`, in [`ColorImage::FORMAT`] as a
+    /// target's, so the same pipelines draw into either.
     ///
     /// # Panics
     ///
@@ -415,10 +412,10 @@ impl Graph {
         self.transient(name, ImageKind::Color, size)
     }
 
-    /// An image of the graph's own of colors of high dynamic range, `size` pixels, named `name`:
-    /// [`Format::HDR`](crate::Format::HDR)'s 16-bit floats, which keep what's brighter than 1 for
-    /// a later pass to sample and map into a target's range, as tonemapping does. Passes draw into
-    /// it, and compute passes write it, as storage. Frames don't read it back.
+    /// A graph image of high dynamic range colors, `size` pixels, named `name`, in
+    /// [`Format::HDR`](crate::Format::HDR)'s 16-bit floats. They keep what's brighter than 1 for a
+    /// later pass to sample and map into a target's range, as tonemapping does. Passes draw into
+    /// it and compute passes write it as storage. Frames don't read it back.
     ///
     /// # Panics
     ///
@@ -427,9 +424,9 @@ impl Graph {
         self.transient(name, ImageKind::Hdr, size)
     }
 
-    /// An image of the graph's own of IDs, `size` pixels, named `name`, which a pass renders
-    /// beside its colors, frames read pixels of back ([`Graph::read_ids`]) and later passes may
-    /// sample, as unsigned integers.
+    /// A graph image of IDs, `size` pixels, named `name`. A pass renders it beside its colors,
+    /// frames read pixels back ([`Graph::read_ids`]) and later passes may sample it as unsigned
+    /// integers.
     ///
     /// # Panics
     ///
@@ -438,10 +435,10 @@ impl Graph {
         self.transient(name, ImageKind::Ids, size)
     }
 
-    /// An image of the graph's own of motion, `size` pixels, named `name`, 16-bit floats in RGBA,
-    /// which a pass renders beside its colors and IDs ([`RenderPass::motion`]), the pipelines
-    /// made for a format [`with_motion`](crate::Format::with_motion) that write depth writing it,
-    /// compute passes write as storage, and later passes sample.
+    /// A graph image of motion, `size` pixels, named `name`, 16-bit floats in RGBA. A pass renders
+    /// it beside its colors and IDs ([`RenderPass::motion`]), through pipelines made for a format
+    /// [`with_motion`](crate::Format::with_motion) that write depth. Compute passes write it as
+    /// storage, and later passes sample it.
     ///
     /// # Panics
     ///
@@ -450,11 +447,10 @@ impl Graph {
         self.transient(name, ImageKind::Motion, size)
     }
 
-    /// A visibility buffer of the graph's own, `size` pixels, named `name`: two 32-bit unsigned
-    /// integers a pixel, which a pass draws into as its color target
-    /// ([`RenderPass::visibility`]), beside its IDs, telling what it drew there, through pipelines
-    /// made for [`Format::VISIBILITY`](crate::Format::VISIBILITY); and later passes sample, as
-    /// unsigned integers.
+    /// A graph visibility buffer, `size` pixels, named `name`: two 32-bit unsigned integers a
+    /// pixel. A pass draws into it as its color target ([`RenderPass::visibility`]), beside its
+    /// IDs, through pipelines made for [`Format::VISIBILITY`](crate::Format::VISIBILITY), telling
+    /// what it drew there. Later passes sample it as unsigned integers.
     ///
     /// # Panics
     ///
@@ -463,9 +459,9 @@ impl Graph {
         self.transient(name, ImageKind::Visibility, size)
     }
 
-    /// An image of the graph's own of depth, `size` pixels, named `name`, which a pass's draws
-    /// test and write, and later passes may sample: by comparison, through the bindless set's
-    /// comparison sampler, [`COMPARISON_SAMPLER`], as a shadow map is, or a texel at a time.
+    /// A graph image of depth, `size` pixels, named `name`. A pass's draws test and write it, and
+    /// later passes may sample it by comparison, through the bindless set's comparison sampler
+    /// [`COMPARISON_SAMPLER`], as a shadow map is, or a texel at a time.
     ///
     /// [`COMPARISON_SAMPLER`]: crate::COMPARISON_SAMPLER
     ///
@@ -476,9 +472,9 @@ impl Graph {
         self.transient(name, ImageKind::Depth, size)
     }
 
-    /// An image of the graph's own of a 32-bit float a pixel, `size` pixels, named `name`, which
-    /// compute passes write as storage, through a `RWTexture2DArray<float>` of format `r32f`, and
-    /// later passes sample, as the view's ambient occlusion is.
+    /// A graph image of a 32-bit float a pixel, `size` pixels, named `name`. Compute passes write
+    /// it as storage, through a `RWTexture2DArray<float>` of format `r32f`, and later passes sample
+    /// it, as the view's ambient occlusion is.
     ///
     /// # Panics
     ///
@@ -487,8 +483,8 @@ impl Graph {
         self.transient(name, ImageKind::Scalar, size)
     }
 
-    /// The images of the graph's own added so far, in the order they were, each with its debug
-    /// name, what it holds and its size: what [`Graph::image_named`] finds, the last of a name.
+    /// The graph's own images added so far, in order, each with its debug name, kind and size.
+    /// [`Graph::image_named`] finds the last of a name.
     pub fn images(&self) -> impl Iterator<Item = (&'static str, ImageKind, [u32; 2])> + '_ {
         self.images.iter().filter_map(|image| match *image {
             ImageDecl::Target(_) => None,
@@ -496,8 +492,8 @@ impl Graph {
         })
     }
 
-    /// The last image of the graph's own added so far that's named `name`, and what it holds, if
-    /// one is: so that a pass added after it may sample it, as one that shows it does.
+    /// The last graph image added so far that's named `name`, and its kind, if any: so a pass added
+    /// after it may sample it, as one that shows it does.
     pub fn image_named(&self, name: &str) -> Option<(ImageId, ImageKind)> {
         let found = self.images.iter().rposition(
             |image| matches!(image, ImageDecl::Transient { name: named, .. } if *named == name),
@@ -520,16 +516,16 @@ impl Graph {
         ImageId(self.images.len() as u32 - 1)
     }
 
-    /// A buffer of the graph's own of `size` bytes, named `name`, in the GPU's own memory, which
-    /// compute shaders write through its address, as a pass that writes it says, and later passes'
-    /// shaders read, draws take their commands from, or frames read back. The frames keep it for
-    /// the frames after, by its name, so that a pass that writes it finds there what the last frame
-    /// to add it left, unless that frame added none of its name, or one smaller, when it holds
-    /// nothing defined.
+    /// A graph buffer of `size` bytes, named `name`, in the GPU's own memory. Compute shaders write
+    /// it through its address, as a pass that writes it says; later passes' shaders read it, draws
+    /// take their commands from it, or frames read it back. The frames keep it by name, so a pass
+    /// that writes it finds what the last frame to add it left, unless that frame added none of
+    /// its name, or one smaller: then it holds nothing defined.
     ///
     /// # Panics
     ///
-    /// If `size` is 0, or the graph has a buffer of that name already.
+    /// - `size` is 0.
+    /// - The graph has a buffer of that name already.
     pub fn buffer(&mut self, name: &'static str, size: u64) -> BufferId {
         assert!(
             size > 0,
@@ -543,8 +539,8 @@ impl Graph {
         BufferId(self.buffers.len() as u32 - 1)
     }
 
-    /// A pass that draws, named `label`, whose attachments, the images it samples and the buffers
-    /// it reads the builder it returns takes, before [`RenderPass::add`] adds it.
+    /// A pass that draws, named `label`. The builder takes its attachments, sampled images and
+    /// read buffers before [`RenderPass::add`] adds it.
     pub fn render(&mut self, label: Label) -> RenderPass<'_> {
         let start = (self.uses.len(), self.buffer_uses.len());
         RenderPass {
@@ -554,8 +550,8 @@ impl Graph {
         }
     }
 
-    /// A pass that dispatches compute shaders, named `label`, whose images and buffers the builder
-    /// it returns takes, before [`ComputePass::add`] adds it: on the graphics queue, unless
+    /// A pass that dispatches compute shaders, named `label`. The builder takes its images and
+    /// buffers before [`ComputePass::add`] adds it, to run on the graphics queue unless
     /// [`ComputePass::on_compute_queue`] says otherwise.
     pub fn compute(&mut self, label: Label) -> ComputePass<'_> {
         let start = (self.uses.len(), self.buffer_uses.len());
@@ -567,13 +563,14 @@ impl Graph {
         }
     }
 
-    /// A pass, named `label`, that reads `buffer` back, as an earlier pass left it, as
+    /// A pass, named `label`, that reads `buffer` back as an earlier pass left it, as
     /// [`Frame::read_back`](crate::Frame::read_back) records it.
     ///
     /// # Panics
     ///
-    /// If `buffer` isn't the graph's, holds more than [`MAX_BUFFER_READ`] bytes, or no earlier
-    /// pass wrote it, or the graph reads back [`MAX_BUFFER_READS`] buffers already.
+    /// - `buffer` isn't the graph's, holds more than [`MAX_BUFFER_READ`] bytes, or no earlier pass
+    ///   wrote it.
+    /// - The graph reads back [`MAX_BUFFER_READS`] buffers already.
     pub fn read_back(&mut self, label: Label, buffer: BufferId) -> PassId {
         let reads = (self.passes.iter())
             .filter(|pass| pass.kind == PassKind::ReadBack)
@@ -601,12 +598,12 @@ impl Graph {
         self.add_pass(label, PassKind::ReadBack, Queue::Graphics, start)
     }
 
-    /// A pass, named `label`, that reads pixels of `ids` back, as an earlier pass left them, as
+    /// A pass, named `label`, that reads pixels of `ids` back as an earlier pass left them, as
     /// [`Frame::read_ids`](crate::Frame::read_ids) records it.
     ///
     /// # Panics
     ///
-    /// If `ids` isn't an image of IDs of the graph's own, or no earlier pass wrote it.
+    /// If `ids` isn't a graph image of IDs, or no earlier pass wrote it.
     pub fn read_ids(&mut self, label: Label, ids: ImageId) -> PassId {
         assert!(
             matches!(self.kind(ids), Some(ImageKind::Ids)),
@@ -617,13 +614,12 @@ impl Graph {
         self.read(label, PassKind::ReadIds, ids)
     }
 
-    /// A pass, named `label`, that reads `image` back, as an earlier pass left it, as
-    /// [`Frame::read_image`](crate::Frame::read_image) records it: a target or a color image of
-    /// the graph's own.
+    /// A pass, named `label`, that reads `image`, a target or a graph color image, back as an
+    /// earlier pass left it, as [`Frame::read_image`](crate::Frame::read_image) records it.
     ///
     /// # Panics
     ///
-    /// If `image` is neither, or is one of the graph's own that no earlier pass wrote.
+    /// If `image` is neither, or is a graph image that no earlier pass wrote.
     pub fn read_image(&mut self, label: Label, image: ImageId) -> PassId {
         assert!(
             matches!(self.kind(image), None | Some(ImageKind::Color)),
@@ -639,8 +635,7 @@ impl Graph {
         self.add_pass(label, kind, Queue::Graphics, start)
     }
 
-    /// Adds the pass, on `queue`, whose uses of images and of buffers start at `start`, once
-    /// they're checked.
+    /// Adds the pass on `queue`, whose image and buffer uses start at `start`, once checked.
     fn add_pass(
         &mut self,
         label: Label,
@@ -696,7 +691,7 @@ impl Graph {
         PassId(self.passes.len() as u32 - 1)
     }
 
-    /// The kind of `image` if it's one of the graph's own; `None` for a target.
+    /// The kind of `image` if it's a graph image; `None` for a target.
     pub(crate) fn kind(&self, image: ImageId) -> Option<ImageKind> {
         match self.images.get(image.0 as usize)? {
             ImageDecl::Target(_) => None,
@@ -704,12 +699,10 @@ impl Graph {
         }
     }
 
-    /// `pass`'s uses.
     pub(crate) fn uses(&self, pass: PassId) -> &[(ImageId, Use)] {
         &self.uses[self.passes[pass.0 as usize].uses.clone()]
     }
 
-    /// `pass`'s uses of buffers.
     pub(crate) fn buffer_uses(&self, pass: PassId) -> &[(BufferId, BufferUse)] {
         &self.buffer_uses[self.passes[pass.0 as usize].buffer_uses.clone()]
     }
@@ -730,31 +723,30 @@ impl Graph {
     }
 }
 
-/// A pass that draws, being built: its color target, the IDs and depth beside it, if any, or its
-/// depth alone, as a shadow map's pass draws, the images it samples, and the buffers its shaders
-/// read and its draws take their commands from. [`RenderPass::add`] adds it to its graph.
+/// A pass that draws, being built: its color target and any IDs and depth beside it, or its depth
+/// alone, as a shadow map's pass draws; the images it samples; and the buffers its shaders read and
+/// its draws take their commands from. [`RenderPass::add`] adds it to its graph.
 #[must_use = "a pass is in its graph once it's added"]
 pub struct RenderPass<'g> {
     graph: &'g mut Graph,
     label: Label,
-    /// Where its uses of images and of buffers start in the graph's.
+    /// Where its image and buffer uses start in the graph's.
     start: (usize, usize),
 }
 
 impl RenderPass<'_> {
-    /// Draws into `image`, a target or a color image of the graph's own, of either range, cleared
-    /// first to `color`, in linear RGBA.
+    /// Draws into `image`, a target or a graph color image, of either range, cleared first to
+    /// `color`, in linear RGBA.
     pub fn clear(self, image: ImageId, color: [f32; 4]) -> Self {
         self.with(image, Use::Color(Some(color)))
     }
 
     /// Draws into `image` over what its last use left there, as [`clear`](Self::clear),
     /// [`visibility`](Self::visibility), [`ids`](Self::ids), [`motion`](Self::motion) or
-    /// [`depth`](Self::depth) would draw into it but for the clear: a target or a color image of
-    /// the graph's own, of either range, whose colors its draws blend over, a visibility buffer,
-    /// an image of IDs or of motion, or one of depth, which its draws test against. A target that
-    /// no pass has drawn into since it was made, or since its swapchain's image was acquired,
-    /// holds nothing to draw over.
+    /// [`depth`](Self::depth) would but for the clear. `image` is a target or graph color image of
+    /// either range, whose colors its draws blend over; a visibility buffer; an image of IDs or
+    /// motion; or one of depth, which its draws test against. A target no pass has drawn into
+    /// since it was made, or since its swapchain's image was acquired, holds nothing to draw over.
     pub fn keep(self, image: ImageId) -> Self {
         let use_ = match self.graph.kind(image) {
             Some(ImageKind::Ids) => Use::Ids { kept: true },
@@ -768,49 +760,48 @@ impl RenderPass<'_> {
         self.with(image, use_)
     }
 
-    /// Draws into `visibility`, a visibility buffer of the graph's own, as the color target,
-    /// cleared first to 0.
+    /// Draws into `visibility`, a graph visibility buffer, as the color target, cleared first to
+    /// 0.
     pub fn visibility(self, visibility: ImageId) -> Self {
         self.with(visibility, Use::Color(Some([0.0; 4])))
     }
 
-    /// Draws the draws' IDs into `ids`, an image of IDs of the graph's own, cleared first to 0,
-    /// which pipelines made for a format [`with_ids`](crate::Format::with_ids) write.
+    /// Draws the draws' IDs into `ids`, a graph image of IDs, cleared first to 0. Pipelines made
+    /// for a format [`with_ids`](crate::Format::with_ids) write them.
     pub fn ids(self, ids: ImageId) -> Self {
         self.with(ids, Use::Ids { kept: false })
     }
 
-    /// Draws the draws' motion into `motion`, an image of motion of the graph's own, beside their
-    /// IDs, cleared first to 0, which pipelines made for a format
-    /// [`with_motion`](crate::Format::with_motion) write where they write depth.
+    /// Draws the draws' motion into `motion`, a graph image of motion, beside their IDs, cleared
+    /// first to 0. Pipelines made for a format [`with_motion`](crate::Format::with_motion) write it
+    /// where they write depth.
     pub fn motion(self, motion: ImageId) -> Self {
         self.with(motion, Use::Motion { kept: false })
     }
 
-    /// Tests the draws against `depth`, an image of depth of the graph's own, and writes theirs
-    /// into it as their pipelines say, cleared first to 0, as far away as depth goes.
+    /// Tests the draws against `depth`, a graph image of depth, and writes theirs into it as their
+    /// pipelines say, cleared first to 0, as far away as depth goes.
     pub fn depth(self, depth: ImageId) -> Self {
         self.with(depth, Use::Depth { kept: false })
     }
 
-    /// Samples `image` from the draws' fragment shaders, as an earlier pass left it, through the
-    /// index [`Pass::sampled`](crate::Pass::sampled) gives: a target that's an offscreen image or a
-    /// storage image, or a color image, an image of IDs or one of depth of the graph's own.
+    /// Samples `image` from the draws' fragment shaders as an earlier pass left it, through the
+    /// index [`Pass::sampled`](crate::Pass::sampled) gives. It is an offscreen or storage target,
+    /// or a graph image of colors, IDs or depth.
     pub fn sample(self, image: ImageId) -> Self {
         self.with(image, Use::Sampled)
     }
 
-    /// Reads `buffer` from the draws' shaders, as an earlier pass wrote it, through the address
+    /// Reads `buffer` from the draws' shaders as an earlier pass wrote it, through the address
     /// [`Pass::address`](crate::Pass::address) gives.
     pub fn read_buffer(self, buffer: BufferId) -> Self {
         self.graph.buffer_uses.push((buffer, BufferUse::Read));
         self
     }
 
-    /// Takes the commands of indirect draws from `buffer`, as an earlier pass wrote them, as
-    /// [`Pass::draw_indexed_indirect`](crate::Pass::draw_indexed_indirect) draws them; its draws'
-    /// shaders may read it too, through its address, as [`Pass::address`](crate::Pass::address)
-    /// gives it.
+    /// Takes the commands of indirect draws from `buffer` as an earlier pass wrote them, as
+    /// [`Pass::draw_indexed_indirect`](crate::Pass::draw_indexed_indirect) draws them. Its draws'
+    /// shaders may read it too, through the address [`Pass::address`](crate::Pass::address) gives.
     pub fn indirect(self, buffer: BufferId) -> Self {
         self.graph.buffer_uses.push((buffer, BufferUse::Indirect));
         self
@@ -825,11 +816,12 @@ impl RenderPass<'_> {
     ///
     /// # Panics
     ///
-    /// If it hasn't one color target, beside at most one image of IDs, one of motion beside those,
-    /// and one of depth, or one image of depth alone; if it uses an image twice, as one another
-    /// kind of image, or as images of the graph's own of other sizes; if it clears a visibility
-    /// buffer to anything but 0; if it samples or draws over one of the graph's own images that no
-    /// earlier pass wrote; or if it uses a buffer twice, or one no earlier pass wrote.
+    /// - It hasn't one color target, beside at most one image of IDs, one of motion beside those,
+    ///   and one of depth, or one image of depth alone.
+    /// - It uses an image twice, as another kind of image, or as graph images of different sizes.
+    /// - It clears a visibility buffer to anything but 0.
+    /// - It samples or draws over a graph image no earlier pass wrote.
+    /// - It uses a buffer twice, or one no earlier pass wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
@@ -896,25 +888,26 @@ impl RenderPass<'_> {
     }
 }
 
-/// A pass that dispatches compute shaders, being built: the images it samples and those it writes,
-/// the buffers it reads and writes, and the queue it runs on. [`ComputePass::add`] adds it to its
+/// A pass that dispatches compute shaders, being built: the images it samples and writes, the
+/// buffers it reads and writes, and the queue it runs on. [`ComputePass::add`] adds it to its
 /// graph.
 #[must_use = "a pass is in its graph once it's added"]
 pub struct ComputePass<'g> {
     graph: &'g mut Graph,
     label: Label,
-    /// Where its uses of images and of buffers start in the graph's.
+    /// Where its image and buffer uses start in the graph's.
     start: (usize, usize),
     queue: Queue,
 }
 
 impl ComputePass<'_> {
-    /// Runs the pass on the device's queue for compute apart from graphics, where it has one, as
-    /// the RTX 4090 and AMD's GPUs do, and on the graphics queue otherwise, as on lavapipe; the
-    /// frame records it in its place among the graph's passes either way. A pass that uses a
-    /// buffer a pass on the other queue used last, and must follow it, waits by a semaphore for
-    /// every pass added before it on that queue: so a pass on the compute queue runs beside the
-    /// graphics passes added after the last it waits for and before the first that waits for it.
+    /// Runs the pass on the device's separate compute queue where it has one, as the RTX 4090 and
+    /// AMD's GPUs do, else on the graphics queue, as on lavapipe. The frame records it in its place
+    /// among the graph's passes either way.
+    ///
+    /// A pass that must follow a pass on the other queue that used a buffer last waits by a
+    /// semaphore for every pass added before it on that queue. So a compute-queue pass runs beside
+    /// the graphics passes added after the last it waits for and before the first waiting for it.
     ///
     /// It uses buffers alone: images would need handing over between the queues' families, which
     /// buffers, shared by every queue, don't.
@@ -922,30 +915,28 @@ impl ComputePass<'_> {
         self.queue = Queue::Compute;
         self
     }
-    /// Samples `image` from the compute shaders, as an earlier pass left it, through the index
-    /// [`Compute::sampled`](crate::Compute::sampled) gives: a target that's an offscreen image or
-    /// a storage image, or any image of the graph's own.
+    /// Samples `image` from the compute shaders as an earlier pass left it, through the index
+    /// [`Compute::sampled`](crate::Compute::sampled) gives. It is an offscreen or storage target,
+    /// or any graph image.
     pub fn sample(self, image: ImageId) -> Self {
         self.with(image, Use::ComputeSampled)
     }
 
     /// Writes and reads `image` through its levels' storage slots, which
-    /// [`Compute::storage`](crate::Compute::storage) gives, as its last use left it: a storage
-    /// image among the frame's targets, which is undefined until a pass has written it since it
-    /// was made, or an image of colors of high dynamic range, of motion or of scalars of the
-    /// graph's own, which an earlier pass wrote.
+    /// [`Compute::storage`](crate::Compute::storage) gives, as its last use left it. It is a
+    /// storage target, undefined until a pass has written it since it was made, or a graph image
+    /// of HDR colors, motion or scalars that an earlier pass wrote.
     pub fn write(self, image: ImageId) -> Self {
         self.with(image, Use::Storage { kept: true })
     }
 
-    /// Writes `image`, as [`write`](Self::write) does, but discarding what it held, for shaders
-    /// that write each texel of the level they write: which an image of the graph's own takes as
-    /// its first use.
+    /// Writes `image` as [`write`](Self::write) does but discards what it held, for shaders that
+    /// write each texel of the level they write. A graph image takes it as its first use.
     pub fn overwrite(self, image: ImageId) -> Self {
         self.with(image, Use::Storage { kept: false })
     }
 
-    /// Reads `buffer` from the compute shaders, as an earlier pass wrote it, through the address
+    /// Reads `buffer` from the compute shaders as an earlier pass wrote it, through the address
     /// [`Compute::address`](crate::Compute::address) gives.
     pub fn read_buffer(self, buffer: BufferId) -> Self {
         self.graph
@@ -955,8 +946,8 @@ impl ComputePass<'_> {
     }
 
     /// Writes and reads `buffer` from the compute shaders, through the address
-    /// [`Compute::address`](crate::Compute::address) gives, as an earlier pass left it: what no
-    /// pass of the frame has written is what the frames before left, as [`Graph::buffer`] says.
+    /// [`Compute::address`](crate::Compute::address) gives, as an earlier pass left it. Unwritten
+    /// by the frame, it holds what the frames before left, as [`Graph::buffer`] says.
     pub fn write_buffer(self, buffer: BufferId) -> Self {
         self.graph
             .buffer_uses
@@ -973,10 +964,11 @@ impl ComputePass<'_> {
     ///
     /// # Panics
     ///
-    /// If it uses an image twice, writes one of the graph's own of a kind shaders don't write,
-    /// samples one of a kind shaders don't sample, keeps one or samples one that no earlier pass
-    /// wrote, or runs on the compute queue and uses any; or if it uses a buffer twice, or reads one
-    /// no earlier pass wrote.
+    /// - It uses an image twice.
+    /// - It writes a graph image of a kind shaders don't write, or samples one they don't sample.
+    /// - It keeps or samples a graph image no earlier pass wrote.
+    /// - It runs on the compute queue and uses any image.
+    /// - It uses a buffer twice, or reads one no earlier pass wrote.
     pub fn add(self) -> PassId {
         let Self {
             graph,
@@ -1014,9 +1006,9 @@ impl ComputePass<'_> {
     }
 }
 
-/// What a resource's earlier uses left for a later one to wait for: the last write, or layout
-/// transition, and the reads since that have seen it. A write after them waits for both; a read,
-/// for the write, unless its stages have seen it already.
+/// What a resource's earlier uses left for a later one to wait for: the last write or layout
+/// transition, and the reads since that have seen it. A write waits for both; a read, for the
+/// write, unless its stages have seen it already.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Hazard {
     write_stages: vk::PipelineStageFlags2,
@@ -1024,7 +1016,7 @@ pub(crate) struct Hazard {
     reads: vk::PipelineStageFlags2,
 }
 
-/// A barrier between an image's uses: what it waits for, what it makes wait, and the layout it
+/// A barrier between an image's uses: what it waits for, what it makes wait, and the layouts it
 /// takes the image from and to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Barrier {
@@ -1037,7 +1029,6 @@ pub(crate) struct Barrier {
 }
 
 impl Barrier {
-    /// The barrier on `range` of `image`.
     pub(crate) fn on(
         self,
         image: vk::Image,
@@ -1057,23 +1048,23 @@ impl Barrier {
 
 impl Hazard {
     /// A swapchain's image just acquired: the frame's submission waits for its semaphore at the
-    /// color attachment output stage, which a barrier from that stage then follows.
+    /// color attachment output stage, which a barrier from that stage follows.
     pub(crate) const ACQUIRED: Self = Self {
         write_stages: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
         write_access: vk::AccessFlags2::NONE,
         reads: vk::PipelineStageFlags2::NONE,
     };
 
-    /// An image that anything before the frame may have written, as an offscreen target that a
-    /// frame before rendered or the CPU read back.
+    /// An image anything before the frame may have written, as an offscreen target an earlier
+    /// frame rendered or the CPU read back.
     pub(crate) const ANYTHING: Self = Self {
         write_stages: vk::PipelineStageFlags2::ALL_COMMANDS,
         write_access: vk::AccessFlags2::MEMORY_WRITE,
         reads: vk::PipelineStageFlags2::NONE,
     };
 
-    /// The barrier that lets `access` follow the uses this hazard and `layout` say came before, if
-    /// it needs one, and what it leaves for the uses after, in `self` and `layout`.
+    /// The barrier, if needed, that lets `access` follow the uses this hazard and `layout` say came
+    /// before. Leaves what later uses wait for in `self` and `layout`.
     pub(crate) fn follow(
         &mut self,
         layout: &mut vk::ImageLayout,
@@ -1093,8 +1084,8 @@ impl Hazard {
             self.reads |= access.stages;
             return None;
         }
-        // A write, or a layout transition, which writes too, waits for the reads since the last
-        // write as well as for the write itself; a read waits for the write alone.
+        // A write or layout transition (which writes too) waits for the reads since the last
+        // write and for the write; a read waits for the write alone.
         let src_stages = if writes {
             self.write_stages | self.reads
         } else {
@@ -1110,8 +1101,8 @@ impl Hazard {
         };
         if writes {
             // A transition alone is made visible to the barrier's second scope, whose reads have
-            // seen it, and which the next barrier then waits for; the use's own writes come after
-            // the barrier, which no read has seen, even in the stages that made them.
+            // seen it; the next barrier waits for it. The use's own writes come after the barrier,
+            // which no read has seen, even in the stages that made them.
             let seen = access.writes.is_empty() && !access.reads.is_empty();
             *self = Self {
                 write_stages: access.stages,
@@ -1128,8 +1119,7 @@ impl Hazard {
         Some(barrier)
     }
 
-    /// What this and `other` left together, for a use that follows both: their writes and their
-    /// reads.
+    /// What this and `other` left together, for a use that follows both.
     pub(crate) fn and(self, other: Self) -> Self {
         Self {
             write_stages: self.write_stages | other.write_stages,
@@ -1139,7 +1129,7 @@ impl Hazard {
     }
 
     /// What a barrier after every use so far waits for, as one before a present does: the last
-    /// write and the reads since, with the write's access.
+    /// write's access and stages, and the reads' stages since.
     pub(crate) fn last(&self) -> (vk::PipelineStageFlags2, vk::AccessFlags2) {
         (self.write_stages | self.reads, self.write_access)
     }
@@ -1212,8 +1202,8 @@ mod tests {
 
     #[test]
     fn a_read_in_a_new_stage_waits_for_the_write_and_a_write_after_reads_waits_for_them() {
-        // Two passes drawn over a target, then its read in the same layout from another stage
-        // than any before, which isn't a transition: the write alone; and a draw over it after,
+        // Two passes drawn over a target, then a read in the same layout from a stage no earlier
+        // use had, which isn't a transition and waits for the write alone; then a draw over it,
         // which waits for that read.
         let mut hazard = Hazard::ACQUIRED;
         let mut layout = L::UNDEFINED;
@@ -1337,9 +1327,9 @@ mod tests {
         }));
     }
 
-    /// Depth is drawn alone, as a shadow map's is, or beside a color target and IDs, and later
-    /// passes sample it, by drawing or computing, or draw over it, keeping it as they keep IDs and
-    /// colors, which only what an earlier pass wrote can be kept.
+    /// Depth is drawn alone, as a shadow map's is, or beside a color target and IDs. Later passes
+    /// sample it, by drawing or computing, or draw over it, keeping it as they keep IDs and colors:
+    /// only what an earlier pass wrote can be kept.
     #[test]
     fn depth_draws_alone_or_beside_colors_and_later_passes_sample_or_keep_it() {
         let mut graph = Graph::default();
@@ -1393,10 +1383,9 @@ mod tests {
         );
     }
 
-    /// A graph's own buffers are written by compute passes before passes read them, draws take
-    /// commands from them or frames read them back, each once a pass, and are named apart; and the
-    /// barriers between their uses wait for writes, and a write for the reads since, with no
-    /// layouts.
+    /// A graph's buffers are written by compute passes before passes read them, draws take
+    /// commands from them or frames read them back; they're named apart. Barriers between their
+    /// uses wait for writes, and a write for the reads since, with no layouts.
     #[test]
     fn buffers_are_written_before_theyre_read() {
         let refused = |build: fn(&mut Graph)| {
@@ -1446,8 +1435,7 @@ mod tests {
         let write = BufferUse::ComputeWrite.access();
         let first = hazard.follow(&mut layout, write).expect("a write");
         assert_eq!(first.src_stages, S::NONE, "nothing to wait for");
-        // Read in the stage that wrote it, by a later pass, which the write's own pass doesn't
-        // make wait.
+        // Read in the stage that wrote it, by a later pass; the write's own pass doesn't wait.
         let read = (hazard.follow(&mut layout, BufferUse::ComputeRead.access()))
             .expect("a read of the write in its own stage");
         assert_eq!(
@@ -1468,11 +1456,10 @@ mod tests {
         assert_eq!(again.src_stages, S::COMPUTE_SHADER | draws);
     }
 
-    /// A visibility buffer is a pass's color target beside its IDs and depth, cleared to 0 alone,
-    /// and is drawn over by a later pass and sampled by a compute pass, which writes colors of high
-    /// dynamic range whole, as their first use, for a later pass to draw over, after the compute
-    /// shader's writes; compute passes keep only what an earlier pass wrote, and write no other
-    /// kind of the graph's own.
+    /// A visibility buffer is a pass's color target beside its IDs and depth, cleared to 0 alone.
+    /// A later pass draws over it and a compute pass samples it, writing HDR colors whole as
+    /// their first use, for a later pass to draw over after the compute shader's writes. Compute
+    /// passes keep only what an earlier pass wrote, and write no other kind of graph image.
     #[test]
     fn a_visibility_buffer_is_drawn_then_computed_into_colors() {
         let mut graph = Graph::default();
@@ -1551,9 +1538,9 @@ mod tests {
         }));
     }
 
-    /// An image of scalars is written by compute passes, through a storage view of its own format,
-    /// and sampled by later passes, computing or drawing, but never drawn into, kept as an
-    /// attachment, or read back.
+    /// An image of scalars is written by compute passes through a storage view of its own format
+    /// and sampled by later passes, computing or drawing; never drawn into, kept as an attachment,
+    /// or read back.
     #[test]
     fn scalars_are_computed_then_sampled_but_never_drawn_into() {
         assert_eq!(ImageKind::Scalar.format(), vk::Format::R32_SFLOAT);
@@ -1589,8 +1576,8 @@ mod tests {
         }));
     }
 
-    /// Colors of high dynamic range draw and are drawn over as colors are, beside IDs and depth,
-    /// and are sampled, but not read back.
+    /// HDR colors draw and are drawn over as colors are, beside IDs and depth, and are sampled but
+    /// not read back.
     #[test]
     fn colors_of_high_dynamic_range_draw_and_sample_but_arent_read_back() {
         let mut graph = Graph::default();
@@ -1618,8 +1605,8 @@ mod tests {
         assert!(read.is_err(), "read back");
     }
 
-    /// An image of the graph's own is found by its name, the last of that name added, with what it
-    /// holds; a target, which has no name in the graph, and a name none has, aren't.
+    /// A graph image is found by name, the last of that name added, with its kind; a target, which
+    /// has no name in the graph, and a name none has, aren't.
     #[test]
     fn images_are_found_by_their_names() {
         let mut graph = Graph::default();

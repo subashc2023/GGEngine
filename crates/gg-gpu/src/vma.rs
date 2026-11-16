@@ -1,9 +1,9 @@
 //! GPU memory through VMA, the Vulkan Memory Allocator: `build.rs` compiles its C++ and
 //! `bindings.rs` declares it.
 //!
-//! VMA suballocates resources from large blocks of device memory, and keeps to the device's limit
-//! on how many blocks there can be (4,096 on KosmicKrisp): past three quarters of it, it stops
-//! giving large resources blocks of their own, and it refuses to go beyond it.
+//! VMA suballocates resources from large blocks of device memory. It keeps to the device's block
+//! limit (4,096 on KosmicKrisp): past three quarters of it, large resources get no blocks of
+//! their own, and it refuses to go beyond it.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fmt;
@@ -16,8 +16,7 @@ use tracing::error;
 use crate::vk_error;
 
 // bindgen's output keeps VMA's C names, and the engine calls only part of its API. Clippy's
-// pedantic and nursery groups aren't for generated code: allowed rather than expected, since the
-// gates run neither.
+// pedantic and nursery groups aren't for generated code: allowed, since the gates run neither.
 #[allow(
     non_camel_case_types,
     non_snake_case,
@@ -29,8 +28,8 @@ mod bindings;
 
 use bindings::*;
 
-/// Vulkan's types under the C names the bindings use. C's function pointers can be null, so
-/// they're optional here; the `KHR` ones are the core functions they were promoted to.
+/// Vulkan's types under the C names the bindings use. Function pointers are optional, as C's can
+/// be null; the `KHR` ones are the core functions they were promoted to.
 #[allow(non_camel_case_types)]
 mod vulkan {
     use ash::vk;
@@ -92,13 +91,11 @@ mod vulkan {
 pub(crate) enum Memory {
     /// Only the GPU: render targets, textures, and buffers the GPU fills.
     Gpu,
-    /// The CPU writes it, in order, and the GPU reads it: per-frame data. It stays mapped, and
-    /// lives where VMA finds best for what it's used for, such as GPU memory the CPU can write
-    /// directly.
+    /// The CPU writes it in order, and the GPU reads it: per-frame data. It stays mapped, and
+    /// lives where VMA finds best, such as GPU memory the CPU can write directly.
     Upload,
     /// The CPU writes it once, in order, and the GPU copies from it: staging for uploads. It stays
-    /// mapped, lives in the CPU's memory, and has memory of its own, so that freeing it gives the
-    /// memory back.
+    /// mapped in the CPU's memory, and has memory of its own, so freeing it returns the memory.
     Staging,
     /// The GPU writes it and the CPU reads it back. It stays mapped, and has memory of its own.
     Readback,
@@ -107,8 +104,7 @@ pub(crate) enum Memory {
 /// VMA's allocator for one device.
 pub(crate) struct Allocator {
     raw: VmaAllocator,
-    /// What [`name_memory`] names the memory VMA allocates through, which it borrows until the
-    /// allocator is destroyed.
+    /// What [`name_memory`] names memory through; VMA borrows it until the allocator is destroyed.
     _debug_utils: Option<Box<ext::debug_utils::Device>>,
 }
 
@@ -138,10 +134,10 @@ impl Allocation {
 }
 
 impl Allocator {
-    /// An allocator for the device named `name`, which names each block of memory it allocates
-    /// through `debug_utils`, if given. With `memory_budget`, it reads each heap's budget and
-    /// usage from the driver (`VK_EXT_memory_budget`) as each frame begins; without, it estimates
-    /// them, as 80% of each heap and what it allocated itself.
+    /// An allocator for the device named `name`, which names each block it allocates through
+    /// `debug_utils`, if given. With `memory_budget`, it reads each heap's budget and usage from
+    /// the driver (`VK_EXT_memory_budget`) as each frame begins; without, it estimates them as 80%
+    /// of each heap and what it allocated itself.
     ///
     /// # Safety
     ///
@@ -206,7 +202,7 @@ impl Allocator {
         })
     }
 
-    /// Makes a buffer and binds memory to it, for the buffer named `name`.
+    /// Makes the buffer `name` and binds memory to it.
     pub(crate) fn create_buffer(
         &self,
         info: &vk::BufferCreateInfo<'_>,
@@ -238,7 +234,7 @@ impl Allocator {
         Ok((buffer, allocation(raw, &allocation_info)))
     }
 
-    /// Makes an image and binds memory to it, for the image named `name`.
+    /// Makes the image `name` and binds memory to it.
     pub(crate) fn create_image(
         &self,
         info: &vk::ImageCreateInfo<'_>,
@@ -273,15 +269,15 @@ impl Allocator {
         Ok((image, allocation(raw, &allocation_info)))
     }
 
-    /// Allocates memory of its own, in the GPU's own memory where a type that `requirements`
-    /// allow is, for images that [`Allocator::create_aliasing_image`] makes in it: memory, named
-    /// `name` in its errors, that images used at different times share.
+    /// Allocates memory of its own, in GPU memory where `requirements` allow, for images that
+    /// [`Allocator::create_aliasing_image`] makes in it: memory that images used at different
+    /// times share. `name` names it in errors.
     pub(crate) fn allocate_memory(
         &self,
         requirements: &vk::MemoryRequirements,
         name: &str,
     ) -> Result<Allocation> {
-        // Its own, so that what it holds goes back as it's freed, as the images' sizes change.
+        // Its own, so freeing it gives the memory back as the images' sizes change.
         let info = VmaAllocationCreateInfo {
             flags: VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT.0 as u32,
             usage: VmaMemoryUsage::VMA_MEMORY_USAGE_UNKNOWN,
@@ -311,9 +307,9 @@ impl Allocator {
         Ok(allocation(raw, &allocation_info))
     }
 
-    /// Makes an image from `info` at the start of `allocation`, which
-    /// [`Allocator::allocate_memory`] gave, for the image named `name`. It's destroyed with
-    /// `vkDestroyImage`, before or after the memory is freed.
+    /// Makes the image `name` from `info` at the start of `allocation`, from
+    /// [`Allocator::allocate_memory`]. Destroy it with `vkDestroyImage`, before or after the
+    /// memory is freed.
     ///
     /// # Safety
     ///
@@ -372,8 +368,8 @@ impl Allocator {
         unsafe { vmaDestroyImage(self.raw, image, allocation.raw) };
     }
 
-    /// Makes the CPU's writes to the allocation, of the resource named `name`, visible to the GPU.
-    /// Memory the CPU writes may not be coherent, and then this is needed before the GPU reads it.
+    /// Makes the CPU's writes to the allocation of the resource `name` visible to the GPU, which
+    /// memory that isn't coherent needs before the GPU reads it.
     pub(crate) fn flush(&self, allocation: &Allocation, name: &str) -> Result<()> {
         // SAFETY: the allocator and allocation are live, and the range is the whole allocation:
         // from 0, and to its end for `WHOLE_SIZE`.
@@ -385,8 +381,8 @@ impl Allocator {
         )
     }
 
-    /// Makes the GPU's writes to the allocation, of the resource named `name`, visible to the
-    /// CPU's reads, for memory that isn't coherent.
+    /// Makes the GPU's writes to the allocation of the resource `name` visible to the CPU's
+    /// reads, for memory that isn't coherent.
     pub(crate) fn invalidate(&self, allocation: &Allocation, name: &str) -> Result<()> {
         // SAFETY: as in `flush`.
         let result =
@@ -398,15 +394,15 @@ impl Allocator {
         )
     }
 
-    /// Tells VMA that frame `frame` begins, which has it read the heaps' budgets from the driver
-    /// again, where it reads them.
+    /// Tells VMA frame `frame` begins, so it rereads the heaps' budgets from the driver, where it
+    /// reads them.
     pub(crate) fn set_frame(&self, frame: u32) {
         // SAFETY: the allocator is live.
         unsafe { vmaSetCurrentFrameIndex(self.raw, frame) };
     }
 
-    /// Each memory heap's usage and budget, in bytes, by its index: what the driver reports, where
-    /// it reports them, and VMA's estimate elsewhere.
+    /// Each heap's usage and budget in bytes, by heap index: the driver's, where it reports them,
+    /// else VMA's estimate.
     pub(crate) fn heap_budgets(&self) -> [(u64, u64); vk::MAX_MEMORY_HEAPS] {
         // SAFETY: zero is valid for every field of this plain-data struct, which VMA fills.
         let mut budgets: [VmaBudget; vk::MAX_MEMORY_HEAPS] = unsafe { std::mem::zeroed() };
@@ -436,18 +432,17 @@ fn creation(memory: Memory) -> VmaAllocationCreateInfo {
             VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
                 | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_MAPPED_BIT,
         ),
-        // Dedicated, since VMA keeps an emptied block for later, which would hold on to the
-        // largest upload's memory for good.
+        // Dedicated: VMA keeps an emptied block, which would hold the largest upload's memory
+        // for good.
         Memory::Staging => (
             VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
             VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
                 | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_MAPPED_BIT
                 | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
         ),
-        // Dedicated, as staging is: where read-back has a memory type to itself, a cached one the
-        // GPU's and the uploads' memory don't use, as on an RTX 4090 or AMD's integrated Radeon,
-        // though not on lavapipe, whose one type holds everything, the kibibyte the frames read
-        // IDs back into would otherwise hold a block of VMA's, 32 MiB, for the run.
+        // Dedicated, as staging is. Read-back often has a cached memory type to itself (an RTX
+        // 4090, AMD's integrated Radeon; not lavapipe, whose one type holds everything), so the
+        // kibibyte the frames read IDs into would otherwise hold a 32 MiB VMA block for the run.
         Memory::Readback => (
             VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO,
             VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
@@ -483,9 +478,8 @@ fn check(call: &str, subject: impl fmt::Display, result: vk::Result) -> Result<(
     }
 }
 
-/// Names each block of memory VMA allocates, by its memory type and size, as every Vulkan object
-/// is named, so that captures and validation messages say what it is. VMA calls it after each
-/// `vkAllocateMemory`, with the allocator's user data.
+/// Names each block VMA allocates, by memory type and size, so captures and validation messages
+/// say what it is. VMA calls it after each `vkAllocateMemory`, with the allocator's user data.
 ///
 /// # Safety
 ///
@@ -509,8 +503,8 @@ unsafe extern "C" fn name_memory(
     let info = vk::DebugUtilsObjectNameInfoEXT::default()
         .object_handle(memory)
         .object_name(&name);
-    // SAFETY: the memory was just allocated, so no other thread uses it yet. Names are a debugging
-    // aid, so a failure to set one is ignored.
+    // SAFETY: the memory was just allocated, so no other thread uses it yet. A failed name is
+    // ignored: names only aid debugging.
     let _ = unsafe { debug_utils.set_debug_utils_object_name(&info) };
 }
 
