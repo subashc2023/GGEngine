@@ -1,11 +1,12 @@
-//! The reference player: runs a game's package, which `tools/cook` writes, without the game's code,
-//! its start scene and its Luau scripts, which act at its ticks, its animation, its navigation and
-//! its physics, as the showcase's package runs; and the reference for how a game builds a player of
-//! its own. It runs from the package `--package` names, or else `<executable>.ggpk` beside its
-//! executable, `gg-player.ggpk` as it's built.
+//! The reference player: runs a game's package, which `tools/cook` writes, without the game's code.
+//! The start scene, Luau scripts, animation, navigation and physics run, as the showcase's do. It's
+//! also the reference for a game's own player.
+//!
+//! The package is the one `--package` names, else `<executable>.ggpk` beside the executable
+//! (`gg-player.ggpk` as built).
 
-// Its builds that ship, release and shipping, show no console on Windows; its JSON log still
-// records the run, and output piped to another process still arrives.
+// Release and shipping builds show no console on Windows. The JSON log still records the run, and
+// output piped to another process still arrives.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::process::ExitCode;
@@ -18,14 +19,12 @@ fn main() -> ExitCode {
     gg_engine::run(App::new("Player").from_package().layer(Player::default()))
 }
 
-/// The player's layer: as it loads, a VM loads every Luau script the package holds, in the order of
-/// their paths; as it attaches, the package's start scene loads; and at each tick the scripts run,
-/// then animation steps, then navigation, then physics. It has no panels, nor components of a
-/// game's own: a scene that names a component no script declares doesn't load. Anything that fails
-/// ends the run, with its error, through [`Context::fail`].
+/// The player's layer. Scripts load in path order. It has no panels, nor components of a game's
+/// own: a scene naming a component no script declares doesn't load. A failure ends the run, through
+/// [`Context::fail`].
 #[derive(Default)]
 struct Player {
-    /// The package's scripts, once they've loaded.
+    /// Once loaded.
     scripts: Option<Scripts>,
 }
 
@@ -48,8 +47,8 @@ impl Layer for Player {
     }
 
     fn attach(&mut self, cx: &mut Context) {
-        // A run that ends as it loads, as a script that doesn't load ends it, loads no scene, whose
-        // components the script may have declared.
+        // A run ending as it loads, as a failed script ends it, loads no scene. That script may
+        // have declared the scene's components.
         if cx.exiting() {
             return;
         }
