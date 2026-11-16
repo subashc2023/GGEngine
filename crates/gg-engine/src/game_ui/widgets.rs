@@ -1,8 +1,5 @@
-//! Drawing a game's UI's nodes, each within what clips it, and its widgets apart from their input,
-//! which [`State::event`] takes: what each widget fits to, holds and draws, a slider's track and
-//! thumb, a toggle's switch, a drop-down's choice and its options open over the rest, a text
-//! field's text, caret and selection within its box, and a list's scroll bar; and where a text
-//! field's caret goes between its characters.
+//! Drawing a UI's nodes, each within its clip, and its widgets apart from their input
+//! ([`State::event`]): what each fits to, holds and draws, and where a text field's caret goes.
 
 use gg_core::math::libm::atan2f;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
@@ -18,22 +15,21 @@ use crate::font::Fonts;
 /// How wide a text field's caret is, in the canvas's units.
 pub(super) const CARET: f32 = 3.0;
 
-/// How tall a line of text is, in its ems: Inter's ascent less its descent, about, as a text
-/// field's caret and selection are drawn.
+/// A line of text's height in ems: about Inter's ascent less descent. Sizes a field's caret and
+/// selection.
 const LINE: f32 = 1.2;
 
-/// A toggle's switch's size, in its text's ems, and the room between its text and its switch, and
-/// a drop-down's text and its arrow.
+/// A toggle's switch size in ems, and the gap between a text and its switch or arrow.
 const SWITCH: Vec2 = Vec2::new(1.8, 1.0);
 const BESIDE: f32 = 0.6;
 
-/// How wide a drop-down's arrow is, in its text's ems.
+/// A drop-down arrow's width in ems.
 const ARROW: f32 = 0.5;
 
-/// How wide a text field fits to, in its text's ems.
+/// A text field's fitted width in ems.
 const FIELD: f32 = 10.0;
 
-/// How wide a list's scroll bar is, and how short its thumb gets, in the canvas's units.
+/// A list's scroll bar width, and its thumb's least length, in canvas units.
 const BAR: f32 = 6.0;
 const SHORTEST: f32 = 24.0;
 
@@ -45,9 +41,9 @@ pub(super) fn holds(kind: Kind) -> bool {
     )
 }
 
-/// What widget `node` fits to, its padding round it, its text measured by `fonts`: a slider, 240
-/// units by 48; a toggle, its text beside its switch; a drop-down, its widest option beside its
-/// arrow; and a text field, ten ems of its text by a line.
+/// The size widget `node` fits to, padding included: a slider, 240 by 48; a toggle, its text
+/// beside its switch; a drop-down, its widest option beside its arrow; a text field, ten ems by a
+/// line.
 pub(super) fn fit(node: &Node, fonts: &mut Fonts) -> Vec2 {
     let style = node.style(Vec4::ONE);
     let em = node.text_size;
@@ -71,9 +67,8 @@ pub(super) fn fit(node: &Node, fonts: &mut Fonts) -> Vec2 {
     content + node.padding * 2.0
 }
 
-/// Where slider `node`, laid at `rect`, has its thumb's middle go: along its middle, from its left
-/// less its padding, at its `min`, to its right less its padding, at its `max`; a rectangle of no
-/// height.
+/// Where slider `node`, laid at `rect`, puts its thumb's middle: a zero-height rectangle along its
+/// middle, from `min` at its left less padding to `max` at its right less padding.
 pub(super) fn track(node: &Node, rect: Rect) -> Rect {
     let room = rect.inside(node.padding);
     Rect {
@@ -82,7 +77,7 @@ pub(super) fn track(node: &Node, rect: Rect) -> Rect {
     }
 }
 
-/// What widget `node` holds, `None` for a node that's no widget.
+/// What `node` holds; `None` for a non-widget.
 pub(super) fn value_of(node: &Node) -> Option<UiValue> {
     Some(match &node.widget {
         Widget::Slider { value, .. } => UiValue::Number(*value),
@@ -93,8 +88,8 @@ pub(super) fn value_of(node: &Node) -> Option<UiValue> {
     })
 }
 
-/// Has `widget`, as its file was read again, hold what `old`, of its node's name, held, where it's
-/// of its kind and takes it, a slider's value within its bounds now; and whether it did.
+/// After a reload, has `widget` keep what `old`, the same name's widget, held: if it's of the same
+/// kind and takes it (a slider's value clamped to its new bounds). Whether it did.
 #[cfg(any(feature = "dev", test))]
 pub(super) fn keep_value(widget: &mut Widget, old: &Widget) -> bool {
     match (widget, old) {
@@ -124,8 +119,8 @@ pub(super) fn keep_value(widget: &mut Widget, old: &Widget) -> bool {
     }
 }
 
-/// Has `node` say `text`, a text field its first line, as many characters as it holds; and whether
-/// it said something else.
+/// Sets `node`'s text; a text field takes the first line, cut to its `most` characters. Whether it
+/// changed.
 pub(super) fn put_text(node: &mut Node, text: &str) -> bool {
     let text = match node.widget {
         Widget::Field { most, .. } => {
@@ -146,11 +141,11 @@ pub(super) fn put_text(node: &mut Node, text: &str) -> bool {
     true
 }
 
-/// Has slider, toggle or drop-down `node`, named `name` in UI `ui`, hold `value`, a slider's within
-/// its bounds, as [`GameUi::set_value`](super::GameUi::set_value) says.
+/// Has slider, toggle or drop-down `node` of UI `ui` hold `value`, a slider's clamped to its
+/// bounds. See [`GameUi::set_value`](super::GameUi::set_value).
 ///
-/// Fails with `ui.bad_value` for a value of another widget's, a number that isn't finite or a
-/// choice past its options.
+/// Fails with `ui.bad_value` for another widget's kind of value, a non-finite number or a choice
+/// past its options.
 pub(super) fn put_value(node: &mut Node, ui: &str, value: UiValue) -> Result<()> {
     let refused = |node: &Node, why: &str| {
         let name = node.name.as_deref().unwrap_or_default();
@@ -196,7 +191,7 @@ pub(super) fn put_value(node: &mut Node, ui: &str, value: UiValue) -> Result<()>
     Ok(())
 }
 
-/// The boundary of the character before byte `at` of `text`, a boundary, or its start.
+/// The start of the character before boundary `at` of `text`, or 0.
 pub(super) fn before(text: &str, at: usize) -> usize {
     text[..at]
         .char_indices()
@@ -204,7 +199,7 @@ pub(super) fn before(text: &str, at: usize) -> usize {
         .map_or(0, |(at, _)| at)
 }
 
-/// The boundary of the character after byte `at` of `text`, a boundary, or its end.
+/// The end of the character after boundary `at` of `text`, or `at` at the end.
 pub(super) fn after(text: &str, at: usize) -> usize {
     text[at..]
         .chars()
@@ -212,7 +207,7 @@ pub(super) fn after(text: &str, at: usize) -> usize {
         .map_or(at, |next| at + next.len_utf8())
 }
 
-/// A look of `color` alone, without a texture, as a widget's parts are drawn in.
+/// A textureless look of `color`, for a widget's parts.
 fn plain(color: Vec4) -> Look {
     Look {
         color,
@@ -227,9 +222,9 @@ fn faded(color: Vec4, by: f32) -> Vec4 {
 }
 
 impl State {
-    /// Draws node `i` on `canvas`, from `origin`, the point of the view its top node is anchored
-    /// to, in the canvas's units from the view's top left, within what clips it, and nothing of it
-    /// where it's clipped out whole; rounded corners cut from `disc`.
+    /// Draws node `i` on `canvas` within its clip, nothing if clipped out whole. `origin` is the
+    /// point its top node is anchored to, in canvas units from the view's top left. Rounded corners
+    /// are cut from `disc`.
     pub(super) fn draw_node(
         &self,
         i: usize,
@@ -279,14 +274,14 @@ impl State {
                 boxed(canvas);
                 self.draw_typed(i, canvas, origin, look);
             }
-            // Its scroll bar over its children, once they're drawn, as `draw_bars` draws it.
+            // Its scroll bar comes over its children: `draw_bars`.
             Kind::List => paint(canvas, rect, origin, look, node.radius, None, disc),
             Kind::Row | Kind::Column | Kind::Stack => {}
         }
     }
 
-    /// Draws slider `i`'s track, as far as its value in its accent, and its thumb there, in its
-    /// look's text's color.
+    /// Draws slider `i`'s track, in its accent up to its value, and its thumb there in the look's
+    /// text color.
     fn draw_slider(
         &self,
         i: usize,
@@ -346,8 +341,8 @@ impl State {
         );
     }
 
-    /// Draws toggle `i`'s switch at the end of its room: in its accent, its knob to the right,
-    /// while it's on, and faded, its knob to the left, while it's off.
+    /// Draws toggle `i`'s switch at the end of its room: accent with the knob right when on,
+    /// faded with the knob left when off.
     fn draw_switch(
         &self,
         i: usize,
@@ -403,8 +398,7 @@ impl State {
         );
     }
 
-    /// Draws drop-down `i`'s arrow at the end of its room, pointing down, in its look's text's
-    /// color.
+    /// Draws drop-down `i`'s down arrow at the end of its room, in the look's text color.
     fn draw_arrow(&self, i: usize, canvas: &mut Canvas<'_>, origin: Vec2, look: &Look) {
         let node = &self.nodes[i];
         let room = self.laid.rects[i].inside(node.padding);
@@ -420,9 +414,9 @@ impl State {
         }
     }
 
-    /// Draws text field `i`'s text, scrolled as its caret has it while it's focused, or its hint,
-    /// faded, while it's empty; and while it's focused, its selection behind its text and its
-    /// caret, in its accent; all within its room, less its padding, and what clips it.
+    /// Draws text field `i`'s text, or its faded hint while empty, within its padded room and
+    /// clip. Focused, the text is scrolled to show the caret, and the selection (behind the text)
+    /// and caret are drawn in its accent.
     fn draw_typed(&self, i: usize, canvas: &mut Canvas<'_>, origin: Vec2, look: &Look) {
         let node = &self.nodes[i];
         let Widget::Field { hint, .. } = &node.widget else {
@@ -472,9 +466,9 @@ impl State {
         }
     }
 
-    /// Draws the scroll bar of each list that shows whose nodes end with node `i`, the innermost
-    /// first, over all it holds, as [`draw_bar`](Self::draw_bar) draws it, within what clips the
-    /// list: as a UI draws its nodes in their order, after its last.
+    /// Draws, innermost first, the [scroll bar](Self::draw_bar) of each shown list whose nodes end
+    /// with node `i`, within the list's clip. Called after the list's last node, so bars come
+    /// over what the lists hold.
     pub(super) fn draw_bars(
         &self,
         i: usize,
@@ -493,9 +487,9 @@ impl State {
         }
     }
 
-    /// Draws list `i`'s scroll bar inside its right edge, its thumb as long of its room as its room
-    /// is of what its children reach, and as far down it as it's scrolled, in its accent; and
-    /// nothing while it has nothing to scroll.
+    /// Draws list `i`'s scroll bar inside its right edge, in its accent; nothing if there's nothing
+    /// to scroll. The thumb's length is the room's share of what the children reach, and it sits as
+    /// far down as the list is scrolled.
     fn draw_bar(&self, i: usize, canvas: &mut Canvas<'_>, origin: Vec2, disc: Option<Texture>) {
         let node = &self.nodes[i];
         let most = self.laid.most_scroll(&self.nodes, i);
@@ -523,9 +517,9 @@ impl State {
         );
     }
 
-    /// Draws open drop-down `open`'s options over the rest, unclipped, from `origin`: behind them
-    /// its backing, each in its text's look, the lit one over its accent, the chosen one in its
-    /// focused look's text.
+    /// Draws open drop-down `open`'s options over the rest, unclipped: its backing, then each
+    /// option in its text look, the lit one over its accent, the chosen one in the focused look's
+    /// text.
     pub(super) fn draw_options(
         &self,
         open: Open,
@@ -579,8 +573,7 @@ impl State {
     }
 }
 
-/// Draws a stroke on `canvas` from `from` to `to`, in the canvas's units from the view's top left,
-/// `thick` across, in `color`, from `origin`.
+/// Draws a `thick` stroke from `from` to `to`, in canvas units from the view's top left.
 fn stroke(canvas: &mut Canvas<'_>, from: Vec2, to: Vec2, thick: f32, color: Vec4, origin: Vec2) {
     let (a, b) = (on_canvas(from, origin), on_canvas(to, origin));
     let way = b - a;

@@ -1,5 +1,5 @@
-//! A game's UI's file, `.ui`: a tree of nodes in RON, which [`read`] reads and checks, each refusal
-//! saying where in the text it is and what's wrong, by a stable code.
+//! A UI's `.ui` file, a tree of nodes in RON, which [`read`] reads and checks. Each refusal has a
+//! stable code and says where in the text it is. The format is [the module's](super).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -16,27 +16,26 @@ use super::{Document, Kind, Look, Named, Node, Size, Widget};
 use crate::Align;
 use crate::package::Files;
 
-/// The most bytes a UI's file may have, as it's read whole.
+/// A UI file's most bytes: it's read whole.
 const MOST: u64 = 16 << 20;
 
-/// The most bytes a node's name has.
+/// A node name's most bytes.
 const MOST_NAME: usize = 64;
 
-/// The most nodes a UI may have: so that a file, a few bytes a node, can't take gigabytes as it's
-/// read and as each UI of it copies its nodes, nor a row of its fills long to share its room out.
+/// A UI's most nodes. A few bytes a node would otherwise take gigabytes as it's read and copied
+/// per UI, or make a row of fills long to share out.
 const MOST_NODES: usize = 10_000;
 
-/// The most of the canvas's units a size, a margin, padding, a gap, a radius, a slice's width and a
-/// text's size may be, and a fill's share: far past any view's, so that what thousands of them come
-/// to together stays finite.
+/// The most canvas units a size, margin, padding, gap, radius, slice width or text size may be,
+/// and a fill's share. Far past any view's, so sums of thousands stay finite.
 const MOST_UNITS: f32 = 1e6;
 
-/// The most options a drop-down may have, and the most characters a text field may hold.
+/// A drop-down's most options, and a text field's most characters.
 const MOST_OPTIONS: usize = 256;
 const MOST_TYPED: u32 = 4096;
 
-/// A button's looks where its file gives none: normal, focused, pressed and disabled, in linear
-/// RGBA, alpha not multiplied in.
+/// A button's default looks: normal, focused, pressed, disabled, in linear RGBA, alpha not
+/// premultiplied.
 const BUTTON: [Look; 4] = [
     look([1.0, 1.0, 1.0, 0.08], [1.0, 1.0, 1.0, 0.85]),
     look([0.05, 0.27, 0.95, 1.0], [1.0, 1.0, 1.0, 1.0]),
@@ -44,8 +43,8 @@ const BUTTON: [Look; 4] = [
     look([1.0, 1.0, 1.0, 0.03], [1.0, 1.0, 1.0, 0.3]),
 ];
 
-/// A slider's, a toggle's, a drop-down's and a text field's looks where its file gives none, as a
-/// button's: its box lighter as it's focused, so that what's on in it shows over it in its accent.
+/// The default looks of a slider, toggle, drop-down and text field, like a button's. The box
+/// lightens when focused, so what's on in it shows over it in the accent.
 const WIDGET: [Look; 4] = [
     look([1.0, 1.0, 1.0, 0.08], [1.0, 1.0, 1.0, 0.85]),
     look([1.0, 1.0, 1.0, 0.2], [1.0, 1.0, 1.0, 1.0]),
@@ -53,12 +52,10 @@ const WIDGET: [Look; 4] = [
     look([1.0, 1.0, 1.0, 0.03], [1.0, 1.0, 1.0, 0.3]),
 ];
 
-/// What's on, chosen or typed in a widget where its file gives no `accent`, as a button's focused
-/// look; and what's behind a drop-down's options where it gives no `color`.
+/// The default `accent`, a button's focused color, and a drop-down's default options backing.
 const ACCENT: Vec4 = Vec4::new(0.05, 0.27, 0.95, 1.0);
 const BACKING: Vec4 = Vec4::new(0.02, 0.025, 0.04, 0.96);
 
-/// A look of `color` and `text`, without a texture.
 const fn look(color: [f32; 4], text: [f32; 4]) -> Look {
     Look {
         color: Vec4::from_array(color),
@@ -67,11 +64,10 @@ const fn look(color: [f32; 4], text: [f32; 4]) -> Look {
     }
 }
 
-/// Reads UI `name`'s file at `path` from `files`, the disk or the game's package, and checks it, as
-/// [`parse`] does.
+/// Reads UI `name`'s file at `path` from `files` (the disk or the package) and [`parse`]s it.
 ///
-/// Fails with `engine.bad_ui` if it can't be read, isn't a regular file, is more than 16 MiB or
-/// isn't UTF-8; and as `parse` does, naming the UI and its file.
+/// Fails with `engine.bad_ui` if the file can't be read, isn't a regular file, is over 16 MiB or
+/// isn't UTF-8; and as `parse` does. Every message names the UI and its file.
 pub(crate) fn read(name: &str, path: &Path, files: &Files) -> Result<Document> {
     let _zone = gg_core::zone!();
     let error = |why: String| {
@@ -91,9 +87,8 @@ pub(crate) fn read(name: &str, path: &Path, files: &Files) -> Result<Document> {
     })
 }
 
-/// What a parse knows as it goes, which serde's derives carry no state for: the names its nodes
-/// have taken, and the code of the refusal a node's check raised, as a message serde carries alone.
-/// A parse is on one thread, from its start to its end.
+/// State of a parse, which serde's derives can't carry: names taken, and the code of a node
+/// check's refusal (serde carries only its message). A parse stays on one thread.
 #[derive(Default)]
 struct Parsing {
     names: HashSet<Arc<str>>,
@@ -105,28 +100,25 @@ thread_local! {
     static PARSING: RefCell<Parsing> = RefCell::default();
 }
 
-/// The UI `text` holds, in RON: `(focus: "play", nodes: [...])`, the button that has the focus as
-/// it's added, by its name, if any, and the nodes laid out in the view, each a kind and its fields,
-/// as `Button(name: "play", text: "PLAY")`, a field it leaves out taking its default. A field that
-/// may be left out is written as its value, as `name: "play"`, `Some("play")` reading alike; and
-/// so is a kind's fields, inside its kind's parentheses.
+/// The UI `text` holds, in RON ([the format](super)).
 ///
-/// Fails, saying the line and column where the text is refused, with `ui.syntax` for text that
-/// isn't RON of a UI, as one with a field no node has or of the wrong type; `ui.bad_name` for a
-/// name that isn't 1 to 64 ASCII letters, digits, `_` and `-`; `ui.duplicate_name` for a name
-/// another node has; `ui.bad_field` for a field a node of its kind doesn't take, as a text's
-/// children, an image without its texture or a drop-down without its options;
-/// `ui.unnamed_button` for a button without a name, which its presses are told by, and
-/// `ui.unnamed_widget` for a slider, a toggle, a drop-down or a text field without one, which its
-/// changes are told by; `ui.bad_value` for a size, a margin, padding, a gap, a radius, a slice's
-/// width, a text's size, a fill's share or a slider's step that isn't a number from 0 to
-/// [`MOST_UNITS`], or a slider's bound or value that isn't one from -[`MOST_UNITS`] to it, at the
-/// number, for a text's size or a fill's share of 0, a slice of more than half a texture, a color
-/// that isn't finite, a slider whose `max` isn't above its `min` or whose `value` is outside them,
-/// a drop-down of more than [`MOST_OPTIONS`] options or whose `choice` isn't one of them, or a text
-/// field that holds no character or more than [`MOST_TYPED`], or whose text is longer than it
-/// holds; and `ui.too_many_nodes` past [`MOST_NODES`]; and with `ui.no_node`, after, for a `focus`
-/// no node that takes it has.
+/// Fails at the line and column of the refusal with:
+/// - `ui.syntax`: text that isn't RON of a UI, such as an unknown or mistyped field.
+/// - `ui.bad_name`: a name that isn't 1 to 64 ASCII letters, digits, `_` and `-`.
+/// - `ui.duplicate_name`: a name another node has.
+/// - `ui.bad_field`: a field its kind doesn't take (a text's children), an image without its
+///   texture or a drop-down without its options.
+/// - `ui.unnamed_button`: a button without a name, which its presses are told by.
+/// - `ui.unnamed_widget`: a slider, toggle, drop-down or text field without one, which its
+///   changes are told by.
+/// - `ui.bad_value`, at the number: a size, margin, padding, gap, radius, slice width, text size,
+///   fill share or slider step outside 0 to [`MOST_UNITS`]; a slider bound or value outside
+///   -[`MOST_UNITS`] to it; a text size or fill share of 0; a slice over half a texture; a
+///   non-finite color; a slider whose `max` isn't above its `min` or whose `value` is outside
+///   them; a drop-down with over [`MOST_OPTIONS`] options or a `choice` that isn't one; a text
+///   field that holds no character or over [`MOST_TYPED`], or whose text is longer than it holds.
+/// - `ui.too_many_nodes`: past [`MOST_NODES`].
+/// - `ui.no_node`, after the rest: a `focus` no focusable node has as its name.
 pub(crate) fn parse(text: &str) -> Result<Document> {
     let options = ron::Options::default()
         .with_default_extension(Extensions::IMPLICIT_SOME | Extensions::UNWRAP_VARIANT_NEWTYPES);
@@ -161,7 +153,7 @@ pub(crate) fn parse(text: &str) -> Result<Document> {
     Ok(Document { nodes, focus })
 }
 
-/// What names the asset `name`, by its ID or its path, which loads after the parse.
+/// Names asset `name`, by ID or path; it loads after the parse.
 fn named<T>(name: String) -> Option<Named<T>> {
     Some(Named {
         name: name.into(),
@@ -169,7 +161,7 @@ fn named<T>(name: String) -> Option<Named<T>> {
     })
 }
 
-/// Puts `built` and its descendants at the end of `nodes`, each after its parent, under `parent`.
+/// Appends `built` and its descendants to `nodes`, each after its parent.
 fn flatten(built: Built, parent: Option<u32>, nodes: &mut Vec<Node>) {
     let at = nodes.len();
     let Built { mut node, children } = built;
@@ -181,13 +173,12 @@ fn flatten(built: Built, parent: Option<u32>, nodes: &mut Vec<Node>) {
     nodes[at].end = nodes.len() as u32;
 }
 
-/// A refusal of `code`, saying `message`, as serde carries it: the parse takes its code back.
+/// A refusal of `code`. Serde carries the message; the parse takes the code back.
 fn refuse<E: serde::de::Error>(code: &'static str, message: &str) -> E {
     PARSING.with_borrow_mut(|parsing| parsing.code = Some(code));
     E::custom(message)
 }
 
-/// A UI's file, as it reads.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFile {
@@ -196,7 +187,6 @@ struct RawFile {
     nodes: Vec<Checked>,
 }
 
-/// A node as its file gives it: its kind, and its fields.
 #[derive(Deserialize)]
 enum RawNode {
     Panel(Fields),
@@ -213,7 +203,7 @@ enum RawNode {
     List(Fields),
 }
 
-/// Every field a node may have, each kind taking some, as [`Kind::takes`] says.
+/// Every field a node may have; [`Kind::takes`] says which kinds take which.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Fields {
@@ -249,7 +239,6 @@ struct Fields {
     most: Option<u32>,
 }
 
-/// A button's looks as its file gives them, each one's fields over its default.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawLooks {
@@ -274,8 +263,7 @@ enum RawSize {
     Fill(Units),
 }
 
-/// A number of the canvas's units, or a fill's share, checked as it's read, so that a refusal says
-/// where it is: from 0 to [`MOST_UNITS`].
+/// Canvas units or a fill's share, 0 to [`MOST_UNITS`], checked as read so a refusal says where.
 #[derive(Clone, Copy)]
 struct Units(f32);
 
@@ -293,8 +281,8 @@ impl<'de> Deserialize<'de> for Units {
     }
 }
 
-/// A slider's bound or value, checked as it's read, so that a refusal says where it is: from
-/// -[`MOST_UNITS`] to [`MOST_UNITS`].
+/// A slider's bound or value, -[`MOST_UNITS`] to [`MOST_UNITS`], checked as read so a refusal says
+/// where.
 #[derive(Clone, Copy)]
 struct Number(f32);
 
@@ -329,9 +317,8 @@ impl From<Side> for Align {
     }
 }
 
-/// A node's name, checked as it's read, so that a refusal says where it is: of 1 to
-/// [`MOST_NAME`] ASCII letters, digits, `_` and `-`, which code and tools write plainly, and
-/// unique within its UI.
+/// A node's name, checked as read so a refusal says where: 1 to [`MOST_NAME`] ASCII letters,
+/// digits, `_` and `-` (plain for code and tools to write), unique within its UI.
 struct NodeName(Arc<str>);
 
 impl<'de> Deserialize<'de> for NodeName {
@@ -357,10 +344,10 @@ impl<'de> Deserialize<'de> for NodeName {
     }
 }
 
-/// A node and its descendants, checked as it's read, so that a refusal says where it is.
+/// A node and its descendants, checked as read so a refusal says where.
 struct Checked(Built);
 
-/// A node as its file built it, before it takes its place among its UI's nodes, and its children.
+/// A node and its children, before it takes its place among its UI's nodes.
 struct Built {
     node: Node,
     children: Vec<Built>,
@@ -398,8 +385,8 @@ impl<'de> Deserialize<'de> for Checked {
 }
 
 impl Kind {
-    /// Whether a node of this kind takes the field `field`: every kind its name, visibility, size,
-    /// margin and anchor.
+    /// Whether this kind takes `field`. Every kind takes name, visibility, size, margin and
+    /// anchor.
     fn takes(self, field: &str) -> bool {
         use Kind::{
             Button, Column, Dropdown, Field, Image, List, Panel, Row, Slider, Stack, Text, Toggle,
@@ -427,8 +414,8 @@ impl Kind {
     }
 }
 
-/// The node of `kind` that `fields` give, and its children, each field it leaves out taking its
-/// default; or the code and the message of its refusal, as [`parse`] says.
+/// The node of `kind` that `fields` give, with its children and defaults; or the code and message
+/// of its refusal, as [`parse`] says.
 fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str, String)> {
     let Fields {
         name,
@@ -510,7 +497,7 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
     if kind == Kind::Image && texture.is_none() {
         return Err(("ui.bad_field", format!("{called} names no `texture`")));
     }
-    // A slider is as wide as a menu's buttons and as tall as its thumb by default.
+    // A slider is as wide as a menu's buttons, as tall as its thumb.
     let fit = match kind {
         Kind::Slider => [RawSize::Fixed(Units(400.0)), RawSize::Fixed(Units(48.0))],
         _ => [RawSize::Fit; 2],
@@ -574,7 +561,7 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
     };
     let align = align.map_or(
         match kind {
-            // Their text from their left, and a list's children from its top.
+            // Text from the left; a list's children from the top.
             Kind::Toggle | Kind::Dropdown | Kind::Field => [Align::Start, Align::Center],
             Kind::List => [Align::Center, Align::Start],
             _ => [Align::Center; 2],
@@ -613,13 +600,13 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
     })
 }
 
-/// The refusal of `called`'s `field`, which is `value`, saying `why` (`ui.bad_value`).
+/// The `ui.bad_value` refusal of `called`'s `field` being `value`, saying `why`.
 fn bad(called: &str, field: &str, value: String, why: &str) -> (&'static str, String) {
     let message = format!("{called}'s `{field}` is {value}, and {why}");
     ("ui.bad_value", message)
 }
 
-/// `given`, `called`'s `field`, as a color, refused unless it's finite.
+/// `given` as a color, refused unless finite.
 fn colored(
     called: &str,
     field: &str,
@@ -632,7 +619,7 @@ fn colored(
         .ok_or_else(|| bad(called, field, format!("{given:?}"), "a color is finite"))
 }
 
-/// A button's or a widget's four looks: `looks` over its kind's.
+/// A button's or widget's four looks: `looks` over its kind's defaults.
 fn widget_looks(
     called: &str,
     kind: Kind,
@@ -659,7 +646,7 @@ fn widget_looks(
         }
         look.texture = texture.and_then(named);
     }
-    // Each look shows the normal look's texture unless it gives its own.
+    // Each look takes the normal look's texture unless it gives its own.
     let normal = built[0].texture.clone();
     for look in &mut built[1..] {
         if look.texture.is_none() {
@@ -669,14 +656,14 @@ fn widget_looks(
     Ok(built)
 }
 
-/// The one look of a node that's no button or widget, of `color` and `texture`, in each place.
+/// The one look, of `color` and `texture`, of a node that's no button or widget.
 fn plain_looks(
     called: &str,
     kind: Kind,
     color: Option<(f32, f32, f32, f32)>,
     texture: Option<String>,
 ) -> std::result::Result<[Look; 4], (&'static str, String)> {
-    // A list shows nothing behind its children but the color its file gives it.
+    // A list is clear unless its file gives a color.
     let unseen = if kind == Kind::List {
         Vec4::ZERO
     } else {
@@ -717,7 +704,7 @@ fn slider(
     })
 }
 
-/// A drop-down of `options`, `choice` chosen, `color` behind them as they're open.
+/// A drop-down of `options`, `choice` chosen, `color` behind them when open.
 fn dropdown(
     called: &str,
     options: Option<Vec<String>>,
@@ -749,7 +736,7 @@ fn dropdown(
     })
 }
 
-/// A text field holding `text`, its node's, of at most `most` characters, saying `hint` while empty.
+/// A text field holding `text`, at most `most` characters, showing `hint` while empty.
 fn text_field(
     called: &str,
     text: &str,

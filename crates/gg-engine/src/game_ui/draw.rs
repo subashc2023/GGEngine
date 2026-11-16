@@ -7,8 +7,8 @@ use super::layout::{Rect, share};
 use super::{Look, Node};
 use crate::canvas::Canvas;
 
-/// Where `point`, in the canvas's units from the view's top left, +Y down, is on the canvas from
-/// `origin`, likewise, +Y up.
+/// `point`, in canvas units from the view's top left (+Y down), on the canvas from `origin`,
+/// +Y up.
 pub(super) fn on_canvas(point: Vec2, origin: Vec2) -> Vec3 {
     Vec3::new(point.x - origin.x, origin.y - point.y, 0.0)
 }
@@ -26,9 +26,9 @@ pub(super) fn over(rect: Rect, origin: Vec2) -> Mat4 {
         * Mat4::from_scale(rect.size.extend(1.0))
 }
 
-/// Draws `look` over `rect` on `canvas`, from `origin`: its texture cut into nine as `slice` says,
-/// or else whole, or without a texture, its corners rounded `radius` by quarters of `disc`; and
-/// nothing of a color with no alpha.
+/// Draws `look` over `rect` on `canvas`, from `origin`: its texture cut into nine by `slice`, else
+/// whole; without a texture, corners rounded `radius` by quarters of `disc`. Draws nothing of a
+/// color with no alpha.
 pub(super) fn paint(
     canvas: &mut Canvas<'_>,
     rect: Rect,
@@ -62,9 +62,9 @@ pub(super) fn paint(
     }
 }
 
-/// Draws `sprite`'s texture cut into nine over `rect` on `canvas`, from `origin`: its corners and
-/// edges `fraction` of it in from its sides, drawn `units` wide, or half `rect`'s smaller side if
-/// that's less, and the rest stretched between them.
+/// Draws `sprite`'s texture cut into nine over `rect` on `canvas`, from `origin`: corners and edges
+/// `fraction` of it in from its sides, drawn `units` wide (at most half `rect`'s smaller side),
+/// the rest stretched between.
 fn nine(
     canvas: &mut Canvas<'_>,
     rect: Rect,
@@ -97,8 +97,7 @@ fn nine(
     }
 }
 
-/// Draws `text` of `node`'s style in `color` in `rect` less its padding on `canvas`, from `origin`,
-/// aligned there as the node says.
+/// Draws `text` in `node`'s style and `color` in `rect` less its padding, aligned as the node says.
 pub(super) fn write(
     canvas: &mut Canvas<'_>,
     node: &Node,

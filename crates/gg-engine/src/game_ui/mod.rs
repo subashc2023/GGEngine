@@ -1,13 +1,34 @@
-//! A game's UI from a file: `.ui` files under the asset root, each a tree of named nodes, panels,
-//! texts, images, buttons and widgets, sliders, toggles, drop-downs and text fields, in rows,
-//! columns, stacks and lists that scroll, which a layer adds, getting a handle, and drives each
-//! frame, turning input into what happened, a button by its name pressed, a widget's value changed,
-//! the focus moved or back asked for, and drawing it on the view's canvas, clipped where a list or
-//! a container that clips says, laid out by the engine as its tree, its texts or the view's size
-//! change. Its state, the focus, the widgets' values and what code set of its nodes, is the run's
-//! rather than the world's, so that each lockstep peer has its own and none of it is hashed,
-//! snapshot or recorded; in development builds it's read again as its file changes, each node
-//! keeping what code and input set of it by its name.
+//! A game's UI from a `.ui` file under the asset root: a tree of named nodes.
+//!
+//! # The file
+//!
+//! RON: `(focus: "play", nodes: [...])`. The optional `focus` names the node focused when the UI
+//! is added. Each node is its kind with its fields in the kind's parentheses, as
+//! `Button(name: "play", text: "PLAY")`. A left-out field takes its default. An optional field is
+//! written as its value: `name: "play"` reads like `Some("play")`.
+//!
+//! In [`file`](mod@file), `Fields` lists the fields, [`Kind::takes`] which kinds take each, and
+//! [`parse`](file::parse) the refusals and their `ui.*` codes; its constants are the limits and
+//! defaults.
+//!
+//! # Nodes
+//!
+//! - Leaves: panel, text, image.
+//! - Focusable: button and the widgets (slider, toggle, drop-down, text field).
+//! - Containers: row, column, stack, and list (a column that clips and scrolls).
+//!
+//! # Use
+//!
+//! A layer adds a UI ([`Context::add_ui`]), gets a [`GameUi`], and each frame passes it input
+//! ([`GameUi::event`] gives a [`UiEvent`]) and draws it ([`GameUi::draw`]) on the view's canvas,
+//! clipped where a list or clipping container says. The engine lays it out again when its tree,
+//! texts or the view's size change.
+//!
+//! # State
+//!
+//! The focus, widgets' values and what code set of nodes are the run's, not the world's: each
+//! lockstep peer has its own, and none is hashed, snapshot or recorded. In development builds the
+//! file is read again as it changes; each node keeps, by name, what code and input set of it.
 
 mod draw;
 mod file;
@@ -33,59 +54,56 @@ pub(crate) use file::read;
 use layout::{Laid, share};
 pub(crate) use uis::Uis;
 
-/// A UI that [`Context::add_ui`] added from its file: its index among its context's, through which
-/// a layer drives it each frame, with [`event`](Self::event) as input comes and
-/// [`draw`](Self::draw) as it updates, and sets what its nodes say, whether they show and what its
-/// widgets hold, by their names. What it holds is the run's, as ARCHITECTURE.md's Events and
-/// layers says.
+/// A UI [`Context::add_ui`] added: its index among its context's. A layer drives it each frame with
+/// [`event`](Self::event) and [`draw`](Self::draw), and sets its nodes' text, visibility and
+/// widgets' values by name. Its state is the run's (ARCHITECTURE.md's Events and layers).
 ///
 /// Each method panics if the UI is another context's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GameUi(u32);
 
-/// What input did to a UI, as [`GameUi::event`] gives it: a choice that changes the game queues a
-/// command, as other input does.
+/// What input did to a UI, from [`GameUi::event`]. A choice that changes the game queues a command,
+/// as other input does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiEvent {
-    /// The button of this name was pressed: by a click, released over the button it was pressed
-    /// on; by Enter or Space, or a pad's South, on the button with the focus. A text field is
-    /// pressed by Enter, or a pad's South, as a game takes what's typed in it.
+    /// The button of this name was pressed: a click released over the button it went down on, or
+    /// Enter, Space or a pad's South on the focused button. Enter or South on a text field also
+    /// presses it, so a game takes what's typed.
     Pressed(Arc<str>),
-    /// The focus moved to the button or the widget of this name: by the arrows, a pad's D-pad or
-    /// left stick, Tab or Shift+Tab, the cursor coming over it, or a click on a text field; for the
-    /// sound a game plays as it moves.
+    /// The focus moved to the button or widget of this name: by the arrows, a pad's D-pad or left
+    /// stick, Tab or Shift+Tab, the cursor coming over it, or a click on a text field. For a move
+    /// sound.
     Focused(Arc<str>),
-    /// The widget of this name took this value, by input: a slider stepped or dragged, a toggle
-    /// pressed, a drop-down's choice stepped or chosen from its options, or a text field typed
-    /// into or cut.
+    /// The widget of this name took this value from input: a slider stepped or dragged, a toggle
+    /// pressed, a drop-down's choice stepped or chosen, or a text field typed into or cut.
     Changed(Arc<str>, UiValue),
-    /// Back was asked for, by Escape or a pad's East.
+    /// Back was asked for: Escape or a pad's East.
     Back,
 }
 
-/// What a widget holds, as [`UiEvent::Changed`] gives it, and [`GameUi::value`] and
-/// [`GameUi::set_value`] read and set it.
+/// What a widget holds: [`UiEvent::Changed`] gives it, [`GameUi::value`] and [`GameUi::set_value`]
+/// read and set it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiValue {
     /// A slider's, from its `min` to its `max`.
     Number(f32),
-    /// A toggle's, whether it's on.
+    /// A toggle's: whether it's on.
     On(bool),
-    /// A drop-down's choice, by its place among its options, from 0.
+    /// A drop-down's choice: its place among its options, from 0.
     Choice(usize),
     /// A text field's text.
     Text(String),
 }
 
-/// A UI's file as it read: its nodes, each after its parent, and the node focused as it's added.
+/// A UI's file as read: its nodes, each after its parent, and the node focused when added.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Document {
     pub(crate) nodes: Vec<Node>,
     pub(crate) focus: Option<u32>,
 }
 
-/// A node of a UI, as its file gives it and code and input change it: what [`Kind`] says it is,
-/// and the fields its file gives it, which [`file`](mod@file) says which kinds take.
+/// A node of a UI, as its file gives it and code and input change it. [`file`](mod@file) says
+/// which kinds take which fields.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Node {
     pub(crate) name: Option<Arc<str>>,
@@ -102,31 +120,30 @@ pub(crate) struct Node {
     pub(crate) gap: f32,
     /// Where a container's children go, and a text's lines, across then down.
     pub(crate) align: [Align; 2],
-    /// Where it goes in its parent, in place of its parent's alignment, or in the view.
+    /// Where it goes in its parent, instead of its parent's alignment, or in the view.
     pub(crate) anchor: Option<[Align; 2]>,
-    /// What a text, a button or a toggle says, or what's typed in a text field.
+    /// What a text, button or toggle says, or what's typed in a text field.
     pub(crate) text: String,
     pub(crate) font: Option<Named<Font>>,
-    /// How tall its text's em is, in the canvas's units.
+    /// Its text's em height, in canvas units.
     pub(crate) text_size: f32,
-    /// How far its rounded corners reach, in the canvas's units, over its color without a texture.
+    /// Its rounded corners' reach, in canvas units, over a color without a texture.
     pub(crate) radius: f32,
-    /// Its texture cut into nine, as `(fraction, units)`: its corners and edges `fraction` of the
-    /// texture in, drawn `units` wide, and the rest stretched between them.
+    /// Its texture cut into nine, as `(fraction, units)`: corners and edges `fraction` of the
+    /// texture in, drawn `units` wide, the rest stretched between.
     pub(crate) slice: Option<(f32, f32)>,
-    /// A button's or a widget's, normal, focused, pressed and disabled; the first alone for other
-    /// kinds.
+    /// A button's or widget's: normal, focused, pressed, disabled. Other kinds use the first.
     pub(crate) looks: [Look; 4],
-    /// An image's texture's size, in its pixels, once known.
+    /// An image's texture size in pixels, once known.
     pub(crate) natural: Option<Vec2>,
-    /// What a slider, a toggle, a drop-down or a text field holds.
+    /// What a slider, toggle, drop-down or text field holds.
     pub(crate) widget: Widget,
     /// The color of what's on, chosen or typed in a widget, and of a list's scroll bar.
     pub(crate) accent: Vec4,
     /// Whether it clips what's under it to its rectangle less its padding, as a list does.
     pub(crate) clips: bool,
-    /// How far a list's children are scrolled up, in the canvas's units: the run's, kept by its
-    /// name as its file is read again.
+    /// How far a list's children are scrolled up, in canvas units. The run's: kept by name when
+    /// the file is read again.
     pub(crate) scroll: f32,
 }
 
@@ -142,16 +159,16 @@ impl Node {
     }
 }
 
-/// An asset a UI's file names, by its asset ID or its path from the asset root, and what loaded
-/// of it, once it has.
+/// An asset a UI's file names, by asset ID or path from the asset root, and its handle once
+/// loaded.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Named<T> {
     pub(crate) name: Arc<str>,
     pub(crate) handle: Option<T>,
 }
 
-/// How a panel, an image, a text or one state of a button or a widget draws: its color, which
-/// tints its texture, and the color of its text, in linear RGBA, alpha not multiplied in.
+/// How a panel, image, text or one state of a button or widget draws: its color (tinting its
+/// texture) and its text's, in linear RGBA, alpha not multiplied in.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Look {
     pub(crate) color: Vec4,
@@ -159,8 +176,8 @@ pub(crate) struct Look {
     pub(crate) texture: Option<Named<Texture>>,
 }
 
-/// How large a node is along an axis, in the canvas's units: fixed, fit to what it holds, or
-/// filling its share of its parent.
+/// A node's size along an axis, in canvas units: fixed, fit to its content, or its share of its
+/// parent's room.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Size {
     Fixed(f32),
@@ -168,11 +185,9 @@ pub(crate) enum Size {
     Fill(f32),
 }
 
-/// What a node is: a panel, a background behind the children it stacks; a text; an image; a
-/// button, a panel holding its text, which takes the focus; a widget, which takes the focus too
-/// and holds a value, a slider, a toggle, a drop-down or a text field; or a container laying its
-/// children out in a row, a column, stacked over each other, or in a list, a column that clips
-/// them and scrolls.
+/// What a node is. A panel is a background behind its stacked children. A button is a panel
+/// holding its text. Buttons and widgets (slider, toggle, drop-down, text field) take the focus;
+/// widgets hold a value. A list is a column that clips and scrolls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Panel,
@@ -190,7 +205,7 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    /// What it's called, with its article, as refusals name it.
+    /// Its name with an article, as refusals say it.
     fn called(self) -> &'static str {
         match self {
             Self::Panel => "a panel",
@@ -208,13 +223,12 @@ impl Kind {
         }
     }
 
-    /// Whether it says something, as a text, a button and a toggle do, and a text field, what's
-    /// typed in it.
+    /// Whether it has text: a text, button, toggle, or text field (what's typed).
     fn says(self) -> bool {
         matches!(self, Self::Text | Self::Button | Self::Toggle | Self::Field)
     }
 
-    /// Whether it takes the focus, as a button and each widget do.
+    /// Whether it takes the focus: a button or a widget.
     fn focuses(self) -> bool {
         matches!(
             self,
@@ -223,13 +237,12 @@ impl Kind {
     }
 }
 
-/// What a widget holds, as its file gives it and code and input change it, but a text field's
-/// text, which is its node's.
+/// What a widget holds, except a text field's text, which is its node's.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Widget {
     /// Of a node that isn't a widget.
     None,
-    /// Its value, from `min` to `max`, and the steps it's set to, or 0 for none.
+    /// Its value, from `min` to `max`, and its step, 0 for none.
     Slider {
         min: f32,
         max: f32,
@@ -239,13 +252,13 @@ pub(crate) enum Widget {
     Toggle {
         on: bool,
     },
-    /// Its options, the one chosen, and the color behind its options as they're open.
+    /// Its options, the chosen one, and the color behind the open options.
     Dropdown {
         options: Vec<String>,
         choice: usize,
         backing: Vec4,
     },
-    /// What it says while it's empty, and the most characters it holds.
+    /// What it says while empty, and its most characters.
     Field {
         hint: String,
         most: usize,
@@ -255,8 +268,8 @@ pub(crate) enum Widget {
 /// How many texels across [`disc`] is.
 const DISC: u32 = 64;
 
-/// The texture a rounded panel's or button's corners each show a quarter of: a white disc, [`DISC`]
-/// texels across, its edge smoothed over a texel; its size and its rows of RGBA8, top row first.
+/// The texture each rounded corner shows a quarter of: a white disc [`DISC`] texels across, its
+/// edge smoothed over a texel. Returns its size and RGBA8 rows, top first.
 pub(crate) fn disc() -> ([u32; 2], Vec<u8>) {
     let radius = DISC as f32 / 2.0;
     let mut pixels = Vec::with_capacity((DISC * DISC * 4) as usize);
@@ -270,21 +283,19 @@ pub(crate) fn disc() -> ([u32; 2], Vec<u8>) {
     ([DISC, DISC], pixels)
 }
 
-/// What a context lends its UIs to lay out, draw and take input with, as
-/// [`Context::ui_parts`] lends it.
+/// What [`Context::ui_parts`] lends to lay out, draw and take input with.
 pub(crate) struct Parts<'a> {
     pub(crate) uis: &'a mut Uis,
     pub(crate) fonts: &'a mut Fonts,
     pub(crate) drawn: &'a mut canvas::Drawn,
     pub(crate) shaders: &'a mut Shaders,
-    /// Where the game's view was as the last frame handed it off, while it had an area.
+    /// The game's view as the last frame handed it off, while it had an area.
     pub(crate) view: Option<Viewport>,
     pub(crate) input: &'a Input,
 }
 
-/// How a node is held pressed: by the mouse, which presses a button as it's released over it, and
-/// drags a slider or a text field's selection while it's down; or by a key or a pad's button, which
-/// pressed it as it went down.
+/// How a node is held pressed. The mouse presses a button on release over it and drags a slider or
+/// a text field's selection while down. A key or pad button pressed it as it went down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Press {
     Mouse,
@@ -292,13 +303,12 @@ enum Press {
     Pad,
 }
 
-/// The looks of a button or a widget, by their places among its looks.
+/// Indices into a node's looks.
 const FOCUSED: usize = 1;
 const PRESSED: usize = 2;
 const DISABLED: usize = 3;
 
-/// What of a node code set, which it keeps as its file is read again: a widget's value set by
-/// input too.
+/// What code set of a node, kept when its file is read again; input setting a widget's value too.
 #[derive(Clone, Copy, Debug, Default)]
 struct Set {
     text: bool,
@@ -307,10 +317,9 @@ struct Set {
     value: bool,
 }
 
-/// The focused text field's caret and the end its selection reaches from, as bytes of its text at
-/// its characters' boundaries, the same where nothing's selected; how far its text is scrolled left
-/// so that the caret shows, and where the two are along its text, in the canvas's units, as the UI
-/// last drew.
+/// The focused text field's caret and the other end of its selection, as byte offsets at
+/// character boundaries (equal when nothing is selected); how far its text is scrolled left so the
+/// caret shows; and where the two are along its text, in canvas units, as last drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Caret {
     at: usize,
@@ -319,8 +328,8 @@ struct Caret {
     xs: [f32; 2],
 }
 
-/// The drop-down open over the rest: its node, the option lit, and whether the mouse went down on
-/// an option, which it chooses as it's let go over one.
+/// The open drop-down: its node, the lit option, and whether the mouse went down on an option,
+/// which it chooses on release over one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Open {
     node: usize,
@@ -328,8 +337,8 @@ struct Open {
     held: bool,
 }
 
-/// A UI a layer added: its nodes, as its file gave them and code and input changed them, how they
-/// lie, and its focus and what input holds of it.
+/// A UI a layer added: its nodes as code and input changed them, their layout, its focus and what
+/// input holds.
 #[cfg_attr(
     not(feature = "dev"),
     allow(dead_code, reason = "only development builds reload or list a UI")
@@ -342,26 +351,25 @@ struct State {
     /// What code set of each node.
     set: Vec<Set>,
     laid: Laid,
-    /// How many of the canvas's units across and down the view was as it was laid out, or `None`
-    /// once its tree, its texts, a list's scroll, or a font or a texture it names, reloaded,
-    /// changed since.
+    /// The view's size in canvas units at the last layout. `None` once its tree, texts, a list's
+    /// scroll, or a font or texture it names, changed or reloaded since.
     laid_for: Option<Vec2>,
-    /// The node with the focus, and the one its file names.
+    /// The focused node, and the one its file names.
     focus: Option<usize>,
     file_focus: Option<usize>,
     pressed: Option<(usize, Press)>,
-    /// The node that takes the focus the cursor was over as it last moved, pressed or let go.
+    /// The focusable node under the cursor at its last move, press or release.
     hovered: Option<usize>,
     caret: Caret,
     open: Option<Open>,
     input: bool,
-    /// Whether the left stick was pushed far enough to step, until it comes back near rest, so that
-    /// a push steps once, whichever way it wavers.
+    /// Whether the left stick is pushed far enough to step, until it's back near rest: a push
+    /// steps once, however it wavers.
     pushed: bool,
-    /// The frame that last drew it, by the number of frames handed off before it.
+    /// The frame that last drew it, as the number of frames handed off before it.
     drawn: Option<u64>,
-    /// What a text field's selection copied or cut, as Ctrl+C and Ctrl+X do, for the event that did
-    /// to put on the OS's clipboard, as [`Context::copy`] does.
+    /// What Ctrl+C or Ctrl+X took from a text field, for the event to put on the OS's clipboard
+    /// with [`Context::copy`].
     copied: Option<String>,
 }
 
@@ -389,7 +397,7 @@ impl State {
         state
     }
 
-    /// Puts the caret at the end of the focused text field's text, if a text field has the focus.
+    /// Puts the caret at the end of the focused text field's text, if one has the focus.
     fn reset_caret(&mut self) {
         self.caret = Caret::default();
         if let Some(focus) = self.focus.filter(|&i| self.nodes[i].kind == Kind::Field) {
@@ -398,11 +406,10 @@ impl State {
         }
     }
 
-    /// Takes the nodes of `document`, its file read again: each node keeps what code set of it, its
-    /// text, its visibility or whether it's disabled, and what code or input set a widget's value
-    /// to, where the node of its name had it and it still takes it, and a list its scroll; the
-    /// focus stays on the node of its name, or else goes to the one the file names; and the layout
-    /// waits for the next frame.
+    /// Takes the nodes of `document`, its file read again. A node of the same name keeps, where it
+    /// still takes it: what code set of its text, visibility or disabling; a widget's value set by
+    /// code or input; a list's scroll. The focus stays on the node of its name, else goes to the
+    /// one the file names. The layout waits for the next frame.
     #[cfg(any(feature = "dev", test))]
     fn refit(&mut self, document: &Document) {
         let mut nodes = document.nodes.clone();
@@ -447,16 +454,15 @@ impl State {
         self.reset_caret();
     }
 
-    /// The node named `name`: found by looking at each, a ceiling for a UI of thousands of nodes
-    /// whose code sets many each frame, which a map of the names would lift.
+    /// The node named `name`, by linear scan. Ceiling: a UI of thousands of nodes with many set per
+    /// frame; a name map would lift it.
     fn named(&self, name: &str) -> Option<usize> {
         (self.nodes.iter()).position(|node| node.name.as_deref() == Some(name))
     }
 
-    /// The node named `name`, which `takes` says is of a kind that takes what's set, as `what`
-    /// names it.
+    /// The node named `name`, if `takes` accepts its kind; `what` is the thing set, for messages.
     ///
-    /// Fails with `ui.no_node` for a name no node has, and `ui.wrong_kind` for one of another kind.
+    /// Fails with `ui.no_node` for a name no node has, and `ui.wrong_kind` for another kind.
     fn settable(&self, name: &str, what: &str, takes: impl Fn(Kind) -> bool) -> Result<usize> {
         let ui = &self.name;
         let Some(found) = self.named(name) else {
@@ -474,9 +480,9 @@ impl State {
         Ok(found)
     }
 
-    /// Lays it out for a view `view` units across and down, as [`layout::lay_out`] says, unless it
-    /// lies so already, each list that shows kept within what it has to scroll; one that's hidden,
-    /// laid out as nothing, keeps its scroll for as it shows again.
+    /// Lays it out for a view `view` units across and down ([`layout::lay_out`]), unless it is so
+    /// already. Each shown list's scroll is kept within what it can scroll; a hidden list keeps its
+    /// scroll for when it shows again.
     fn lay_out(&mut self, fonts: &mut Fonts, view: Vec2) {
         if self.laid_for == Some(view) {
             return;
@@ -521,14 +527,14 @@ impl State {
             .filter(|&focus| self.nodes[focus].kind == Kind::Field)
     }
 
-    /// The name of node `i`, which every node that takes the focus has.
+    /// The name of node `i`; every focusable node has one.
     fn name_of(&self, i: usize) -> Arc<str> {
         let name = self.nodes[i].name.clone();
         name.expect("a node that takes the focus has a name, as its file is checked")
     }
 
-    /// Which of node `i`'s looks it shows: a button's or a widget's disabled, pressed, focused or
-    /// normal, a drop-down's pressed while it's open; the first for other kinds.
+    /// Which of node `i`'s looks it shows: disabled, pressed (a drop-down while open), focused or
+    /// normal; the first for non-focusable kinds.
     fn look(&self, i: usize) -> usize {
         let node = &self.nodes[i];
         if !node.kind.focuses() {
@@ -553,8 +559,8 @@ impl State {
     }
 }
 
-/// How many of the canvas's units across and down a view at `view` is: 1,080 down, and across as
-/// its aspect has it; a view of 1,920 by 1,080 without one, as before the first frame's handed off.
+/// A view's size in canvas units: 1,080 down, across by its aspect; 1,920 by 1,080 before the
+/// first frame is handed off.
 fn units(view: Option<Viewport>) -> Vec2 {
     view.map_or(Vec2::new(1920.0, CANVAS_HEIGHT), |view| {
         let [width, height] = view.size.map(|side| side as f32);
@@ -562,8 +568,8 @@ fn units(view: Option<Viewport>) -> Vec2 {
     })
 }
 
-/// Where the cursor at `cursor`, in the main window's pixels, is on a view at `view`: in the
-/// canvas's units from the view's top left, +Y down; `None` outside the view, or without either.
+/// The cursor, given in the main window's pixels, on `view` in canvas units from its top left, +Y
+/// down. `None` outside the view or without either.
 fn cursor_on(view: Option<Viewport>, cursor: Option<[f64; 2]>) -> Option<Vec2> {
     let view = view?;
     let [x, y] = cursor?;
@@ -578,41 +584,44 @@ fn cursor_on(view: Option<Viewport>, cursor: Option<[f64; 2]>) -> Option<Vec2> {
 }
 
 impl GameUi {
-    /// What `event`, which the layer was sent, does to the UI, while it takes input: the arrows, a
-    /// pad's D-pad and its left stick move the focus to the nearest button or widget that takes it
-    /// that way, the stick once a push, the way it leans most as it goes past 0.6, until it comes
-    /// back under 0.3; Tab to the next in the file's order and Shift+Tab to the one before, coming
-    /// round, each scrolling what it focuses into view in the lists it's in; Enter, Space and a
-    /// pad's South press the button with the focus, which shows pressed until they're let go, or
-    /// focus one if none has it; Escape and a pad's East ask for back; the cursor coming over a
-    /// button or a widget focuses it, but while a text field has the focus, and a click presses a
-    /// button, as it's let go over the button it went down on. Left and right, by the arrows, the
-    /// D-pad or the stick, step the focused slider's value to the next point of the grid of its
-    /// steps, or else twentieths of its range, from its `min`, or to its `max` past the grid's
-    /// last, Home and End set it to its ends, and a click or a drag along it sets it at the point
-    /// nearest the cursor, or its `max`, a drag ending as it's hidden or disabled; they step the
-    /// focused drop-down's choice too, and Enter, Space, a South or a click open its options over
-    /// the rest, which take every event until it's closed: the up and down arrows, the D-pad and
-    /// the stick light them, Enter, Space, a South or a click let go over one choose, and Escape,
-    /// an East, a click outside them or Tab close them as they were. Enter, Space, a South or a
-    /// click flip the focused toggle. A text field takes the focus by a click, which puts its caret, and a drag
-    /// selects; it takes what's typed, at its caret, in place of what's selected, as many
-    /// characters as it holds, the arrows moving its caret and Shift selecting, Home, End, Ctrl+A,
-    /// Backspace and Delete, and Enter presses it. The mouse's wheel scrolls the list under the
-    /// cursor. A node that's hidden, under a node that is, or disabled takes neither the focus nor
-    /// a press, and what a list or a container that clips hides takes no click. With the focus on
-    /// none, a move focuses the node the file names, or else the first. Each event does one thing
-    /// at most, which it gives back, `None` for nothing, so that the layer plays a sound, queues a
-    /// command or lets the event go on down the stack.
+    /// What `event` does to the UI while it takes input. Each event does at most one thing, which
+    /// it gives back (`None` for nothing), so the layer can play a sound, queue a command or let
+    /// the event go on down the stack.
     ///
-    /// A UI that takes input and drew in the last frame takes the mouse's buttons, pressed or let
-    /// go, and its wheel, away from the layers below the layer that sent it the event, as that
-    /// layer handling it: those over a button, a widget or a list, as
-    /// [`pointer_over`](Self::pointer_over) says, those anywhere while a drop-down's options are
-    /// open, and a button let go after a press it holds, so that a click on a button isn't a click
-    /// on the world behind it; and, while a text field has the focus, the keys and the text typed,
-    /// so that typing a name doesn't walk the player. A layer that handles the event itself too
-    /// sees it as well, and asks `pointer_over` of its own.
+    /// - Focus: the arrows, a pad's D-pad and left stick go to the nearest button or widget that
+    ///   way; the stick once per push (the way it leans most past 0.6, until back under 0.3). Tab
+    ///   and Shift+Tab go to the next and previous in file order, coming round, scrolling it into
+    ///   view in its lists. The cursor over a button or widget focuses it, except while a text
+    ///   field has the focus. With no focus, a move focuses the node the file names, else the
+    ///   first.
+    /// - A hidden node, one under a hidden node, or a disabled one takes no focus or press; what a
+    ///   list or clipping container hides takes no click.
+    /// - Enter, Space and a pad's South press the focused button (shown pressed until released),
+    ///   or focus one if none is. A click presses a button on release over the one it went down
+    ///   on.
+    /// - Escape and a pad's East are back.
+    /// - Slider: left and right step to the next point of the grid of its steps, else of twentieths
+    ///   of its range from `min`, or to `max` past the grid's last. Home and End set `min` and
+    ///   `max`. A click or drag sets the point nearest the cursor, or `max`; a drag ends if the
+    ///   slider is hidden or disabled.
+    /// - Drop-down: left and right step the choice. Enter, Space, South or a click open its
+    ///   options over the rest, which take every event until closed. Up and down light one; Enter,
+    ///   Space, South or a click released over one chooses it. Escape, East, a click outside or
+    ///   Tab close them as they were.
+    /// - Toggle: Enter, Space, South or a click flip it.
+    /// - Text field: a click focuses it and puts the caret; a drag selects. It takes typing at the
+    ///   caret, replacing the selection, up to the characters it holds. The arrows move the
+    ///   caret, Shift selects, and Home, End, Ctrl+A, Backspace and Delete work. Enter or South
+    ///   presses it.
+    /// - The mouse's wheel scrolls the list under the cursor.
+    ///
+    /// A UI that takes input and drew in the last frame takes from the layers below the layer
+    /// that sent the event, as that layer handling it: the mouse's buttons and wheel over a button,
+    /// widget or list ([`pointer_over`](Self::pointer_over)) or anywhere while a drop-down is
+    /// open, so a click on a button isn't a click on the world behind it; a button's release
+    /// after a press it holds; and, while a text field has the focus, the keys and typed text, so
+    /// typing a name doesn't walk the player. A layer that handles the event itself too sees it,
+    /// and asks `pointer_over` of its own.
     pub fn event(self, cx: &mut Context, event: &Event<'_>) -> Option<UiEvent> {
         let Parts {
             uis,
@@ -638,14 +647,14 @@ impl GameUi {
         done
     }
 
-    /// Whether the cursor is over what the UI draws that a pointer works on, a button, a widget or
-    /// a list that shows, within what clips it, or anywhere while a drop-down's options are open:
-    /// as the mouse's buttons and wheel over it don't reach the layers below, a game keeps its own
-    /// clicks and aiming off it. `false` while the UI takes no input, as
-    /// [`set_input`](Self::set_input) says, or didn't draw in the last frame, or the cursor is
-    /// outside the view; a panel, a text or
-    /// an image isn't, so that a HUD of them doesn't take the game's clicks. As the UI is laid out
-    /// for the view as the last frame handed it off.
+    /// Whether the cursor is over a shown button, widget or list, within what clips it, or
+    /// anywhere while a drop-down's options are open. The layers below don't get the mouse's
+    /// buttons and wheel there, so a game keeps its own clicks and aiming off it.
+    ///
+    /// `false` while the UI takes no input ([`set_input`](Self::set_input)), didn't draw in the
+    /// last frame, or the cursor is outside the view. A panel, text or image isn't pointed at, so
+    /// a HUD of them doesn't take the game's clicks. The UI is laid out for the view as the last
+    /// frame handed it off.
     pub fn pointer_over(self, cx: &mut Context) -> bool {
         let Parts {
             uis,
@@ -666,13 +675,15 @@ impl GameUi {
         state.pointer_over(at)
     }
 
-    /// Draws the UI on the game's view's canvas this frame, as it updates, laid out for the view as
-    /// the last frame handed it off, again only once its tree, its texts, a list's scroll, the
-    /// view's size, or a font or a texture it names, reloaded, changed: each node at the top from
-    /// the point of the view its anchor names, the view's middle by default, so that a resize keeps
-    /// it there in the frame it comes in, and those under it in their order, over what's before
-    /// them, within what clips them, a button or a widget in the look its state shows; and an open
-    /// drop-down's options over it all. It's of no entity, so a pick where it's on top finds none.
+    /// Draws the UI on the game's view's canvas this frame, laid out for the view as the last
+    /// frame handed it off. It lays out again only when its tree, texts, a list's scroll, the
+    /// view's size, or a font or texture it names, changed or reloaded.
+    ///
+    /// Each top node is placed from the point of the view its anchor names (the middle by
+    /// default), so a resize keeps it there in the frame it comes in. Nodes under it draw in order
+    /// over what's before, within what clips them, a button or widget in the look its state shows.
+    /// An open drop-down's options draw over it all. The UI is of no entity, so a pick where it's
+    /// on top finds none.
     pub fn draw(self, cx: &mut Context) {
         let _zone = gg_core::zone!("draw a UI");
         let Parts {
@@ -723,11 +734,10 @@ impl GameUi {
         }
     }
 
-    /// Has the text, the button, the toggle or the text field named `name` say `text` from now on,
-    /// laid out again as the UI's next drawn, if it said something else; kept as the UI's file is
-    /// read again. A text field takes its first line, as many characters as it holds, its caret at
-    /// the end. A string the node says already changes nothing, so that a layer may set it each
-    /// frame.
+    /// Has the text, button, toggle or text field named `name` say `text` from now on, kept when
+    /// the file is read again, and laid out again at the next draw if it changed. A text field
+    /// takes the first line, up to the characters it holds, its caret at the end. Setting what the
+    /// node says already changes nothing, so a layer may set it each frame.
     ///
     /// Fails with `ui.no_node` for a name no node has, and `ui.wrong_kind` for a node that says
     /// nothing.
@@ -745,9 +755,8 @@ impl GameUi {
         Ok(())
     }
 
-    /// Shows or hides the node named `name`, and what's under it, from now on, kept as the UI's
-    /// file is read again: a hidden node takes no room, as if it weren't there, and a button or a
-    /// widget under it neither the focus nor a press.
+    /// Shows or hides the node named `name` and what's under it from now on, kept when the file is
+    /// read again. A hidden node takes no room, and a button or widget under it no focus or press.
     ///
     /// Fails with `ui.no_node` for a name no node has.
     pub fn set_visible(self, cx: &mut Context, name: &str, visible: bool) -> Result<()> {
@@ -761,9 +770,8 @@ impl GameUi {
         Ok(())
     }
 
-    /// Disables or enables the button or the widget named `name` from now on, kept as the UI's file
-    /// is read again: a disabled one shows its disabled look, and takes neither the focus nor a
-    /// press.
+    /// Disables or enables the button or widget named `name` from now on, kept when the file is
+    /// read again. A disabled one shows its disabled look and takes no focus or press.
     ///
     /// Fails with `ui.no_node` for a name no node has, and `ui.wrong_kind` for a node that takes no
     /// focus.
@@ -775,9 +783,9 @@ impl GameUi {
         Ok(())
     }
 
-    /// Has the UI take input or not, as [`event`](Self::event) says: as a game's menu takes none
-    /// while the game plays under it. It takes input as it's added; turned off, it lets go of what
-    /// it held pressed and closes a drop-down's options, and keeps its focus.
+    /// Has the UI take input or not ([`event`](Self::event)), as a menu takes none while the game
+    /// plays under it. It takes input when added. Turned off, it lets go of what it held pressed,
+    /// closes a drop-down's options, and keeps its focus.
     pub fn set_input(self, cx: &mut Context, input: bool) {
         let state = cx.ui_parts().uis.state(self);
         state.input = input;
@@ -787,17 +795,17 @@ impl GameUi {
         }
     }
 
-    /// The name of the button or the widget with the focus, while it takes it: `None` while the
-    /// focus is on none, or on one hidden or disabled since.
+    /// The name of the focused button or widget. `None` with no focus, or if it's since hidden or
+    /// disabled.
     pub fn focused(self, cx: &mut Context) -> Option<Arc<str>> {
         let state = cx.ui_parts().uis.state(self);
         state.focused().map(|focused| state.name_of(focused))
     }
 
-    /// Moves the focus to the button or the widget named `name`, as a game does as it shows a page
-    /// of its menu, scrolling it into view in the lists it's in, as a move by keys does; a text
-    /// field's caret to the end of its text. One hidden or disabled takes it as it shows and is
-    /// enabled again. It gives no [`UiEvent::Focused`], which input alone gives.
+    /// Moves the focus to the button or widget named `name`, as a game does when it shows a page of
+    /// its menu. It scrolls the node into view in its lists, like a move by keys, and puts a text
+    /// field's caret at the end. A hidden or disabled node takes the focus once shown and enabled.
+    /// It gives no [`UiEvent::Focused`]; only input does.
     ///
     /// Fails with `ui.no_node` for a name no node has, and `ui.wrong_kind` for a node that takes no
     /// focus.
@@ -813,8 +821,7 @@ impl GameUi {
         Ok(())
     }
 
-    /// What the widget named `name` holds: a slider's number, a toggle's whether it's on, a
-    /// drop-down's choice or a text field's text.
+    /// What the widget named `name` holds.
     ///
     /// Fails with `ui.no_node` for a name no node has, and `ui.wrong_kind` for a node that's no
     /// widget.
@@ -824,14 +831,14 @@ impl GameUi {
         Ok(widgets::value_of(&state.nodes[found]).expect("a widget holds a value"))
     }
 
-    /// Has the widget named `name` hold `value` from now on, kept as the UI's file is read again: a
-    /// slider's number within its bounds, a toggle's whether it's on, a drop-down's choice, or a
-    /// text field's text, as [`set_text`](Self::set_text) sets it. It gives no
-    /// [`UiEvent::Changed`], which input alone gives, so that a layer may set it each frame.
+    /// Has the widget named `name` hold `value` from now on, kept when the file is read again. A
+    /// slider's number stays within its bounds; a text field's text is set as
+    /// [`set_text`](Self::set_text) does. It gives no [`UiEvent::Changed`]; only input does, so a
+    /// layer may set it each frame.
     ///
     /// Fails with `ui.no_node` for a name no node has, `ui.wrong_kind` for a node that's no widget,
-    /// and `ui.bad_value` for a value of another widget's, a number that isn't finite or a choice
-    /// past its options.
+    /// and `ui.bad_value` for another widget's kind of value, a number that isn't finite or a
+    /// choice past its options.
     pub fn set_value(self, cx: &mut Context, name: &str, value: UiValue) -> Result<()> {
         let state = cx.ui_parts().uis.state(self);
         let found = state.settable(name, "value", widgets::holds)?;

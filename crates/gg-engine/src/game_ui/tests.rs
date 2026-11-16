@@ -8,14 +8,13 @@ use super::*;
 use crate::{Key, MouseButton, PadButton, Stick};
 
 thread_local! {
-    /// The fonts each test's layouts and events measure text with, Inter baked once a thread.
+    /// The fonts tests measure text with, Inter baked once a thread.
     static FONTS: RefCell<Fonts> = RefCell::new(Fonts::new(&mut Textures::default()));
 }
 
 impl State {
-    /// What `event` does to it, the cursor at `cursor` and the keys held as `input` has them, as
-    /// [`State::event`] says, with the thread's fonts, laid out first for a view 1,920 units
-    /// across, as [`GameUi::event`] lays it out.
+    /// [`State::event`] with the thread's fonts, laid out first for a view 1,920 units across, as
+    /// [`GameUi::event`] does.
     fn send(&mut self, event: &Event<'_>, cursor: Option<Vec2>, input: &Input) -> Option<UiEvent> {
         FONTS.with_borrow_mut(|fonts| {
             self.lay_out(fonts, Vec2::new(1920.0, 1080.0));
@@ -23,17 +22,16 @@ impl State {
         })
     }
 
-    /// Lays it out for a view `view` units across and 1,080 down, with the thread's fonts, again
-    /// since it changed.
+    /// Lays it out again for a view `view` units across and 1,080 down.
     fn lay_out_again(&mut self, view: f32) {
         self.laid_for = None;
         FONTS.with_borrow_mut(|fonts| self.lay_out(fonts, Vec2::new(view, 1080.0)));
     }
 }
 
-/// A menu of four buttons, the third disabled, in a column in the view's middle; a row along the
-/// view's top, a button at each end of it and room between them; and a panel in the bottom right
-/// corner, padded round a fixed stack: all of fixed sizes, so that where each goes is known.
+/// Four buttons, the third disabled, in a column in the view's middle; a row along the top with a
+/// button at each end and room between; a panel in the bottom right corner padded round a fixed
+/// stack. All sizes are fixed, so each position is known.
 const MENU: &str = r#"(
     focus: "play",
     nodes: [
@@ -73,7 +71,7 @@ const MENU: &str = r#"(
     ],
 )"#;
 
-/// A UI of `text`, its file's, laid out for a view `view` units across and 1,080 down.
+/// A UI of file `text`, laid out for a view `view` units across and 1,080 down.
 fn laid(text: &str, view: f32) -> State {
     let document = parse(text).unwrap_or_else(|error| panic!("{error:#}"));
     let mut state = State::new(0, "menu", &document);
@@ -90,9 +88,9 @@ fn rect(state: &State, name: &str) -> [f32; 4] {
     [at.x, at.y, size.x, size.y]
 }
 
-/// A UI's file reads as its nodes, each after its parent and with the end of its subtree, each a
-/// field left out taking its kind's default, a field that may be left out written as its value or
-/// as `Some`, and the focus on the button it names.
+/// A file reads as its nodes, each after its parent with its subtree's end; omitted fields take
+/// their kind's defaults; an optional field reads written bare or as `Some`; the focus lands on
+/// the button it names.
 #[test]
 fn a_ui_file_reads_as_its_tree_of_nodes() {
     let document = parse(MENU).unwrap_or_else(|error| panic!("{error:#}"));
@@ -142,9 +140,8 @@ fn a_ui_file_reads_as_its_tree_of_nodes() {
     );
 }
 
-/// A file that isn't a UI's is refused with the code of what's wrong, at the line and column
-/// where the text is refused, which for a node's name is the name, and for a node's fields the
-/// node's end.
+/// A bad file is refused with its code, at the line and column of the refusal: a name's own for a
+/// name, the node's end for its fields.
 #[test]
 fn a_malformed_ui_file_is_refused_with_its_line() {
     for (text, code, at) in [
@@ -183,7 +180,7 @@ fn a_malformed_ui_file_is_refused_with_its_line() {
             "ui.bad_value",
             "2:",
         ),
-        // Past their bounds, refused at the number rather than at the node's end.
+        // Out of bounds: refused at the number, not the node's end.
         ("(nodes: [Text(\n    size: 1e38,\n)])", "ui.bad_value", "2:"),
         (
             "(nodes: [Row(children: [Stack(\n    width: Fixed(3e38),\n)])])",
@@ -206,26 +203,25 @@ fn a_malformed_ui_file_is_refused_with_its_line() {
     let focus = "(focus: \"a\", nodes: [Text(name: \"a\")])";
     let error = parse(focus).expect_err("a text takes no focus");
     assert_eq!(error.code(), "ui.no_node", "{error:#}");
-    // The next parse knows none of the names the one before took.
+    // A parse doesn't see the names of the one before.
     parse("(nodes: [Text(name: \"a\")])").expect("a name of its own");
 }
 
-/// The nodes lie where their sizes, fixed, fit and fill, their padding, gaps, margins, alignment
-/// and anchors put them, in a view of 1,920 units across, and again in one of 1,440, the anchored
-/// ones keeping to their edges.
+/// Nodes lie where their sizes (fixed, fit, fill), padding, gaps, margins, alignment and anchors
+/// put them, in a 1,920-unit view and again in a 1,440 one, anchored ones keeping to their edges.
 #[test]
 fn nodes_lie_where_their_sizes_and_alignment_put_them() {
     let state = laid(MENU, 1920.0);
-    // Four buttons and three gaps, 380 high, in the view's middle.
+    // Four buttons and three gaps, 380 high, centered.
     assert_eq!(rect(&state, "menu"), [760.0, 350.0, 400.0, 380.0]);
     assert_eq!(rect(&state, "play"), [760.0, 350.0, 400.0, 80.0]);
     assert_eq!(rect(&state, "quit"), [760.0, 650.0, 400.0, 80.0]);
-    // Along the top, inside its margin, the room between its buttons filled.
+    // Along the top inside its margin, the room between its buttons filled.
     assert_eq!(rect(&state, "hud"), [40.0, 20.0, 1840.0, 60.0]);
     assert_eq!(rect(&state, "left"), [40.0, 20.0, 100.0, 60.0]);
     assert_eq!(rect(&state, "room"), [140.0, 50.0, 1640.0, 0.0]);
     assert_eq!(rect(&state, "right"), [1780.0, 20.0, 100.0, 60.0]);
-    // In the bottom right corner, its padding round what it holds.
+    // Bottom right, padded round its content.
     assert_eq!(rect(&state, "corner"), [1770.0, 960.0, 120.0, 90.0]);
     assert_eq!(rect(&state, "inside"), [1780.0, 980.0, 100.0, 50.0]);
 
@@ -234,9 +230,8 @@ fn nodes_lie_where_their_sizes_and_alignment_put_them() {
     assert_eq!(rect(&narrower, "right"), [1300.0, 20.0, 100.0, 60.0]);
     assert_eq!(rect(&narrower, "corner"), [1290.0, 960.0, 120.0, 90.0]);
 
-    // Fills share what's left by their shares, but none below its fit; and what's left without a
-    // fill goes where the parent's alignment puts it, its children each placed across by their
-    // own anchor or its alignment.
+    // Fills share what's left by share, none below its fit. Without a fill, the rest goes where
+    // the parent's alignment puts it; children are placed across by their anchor or its alignment.
     let row = r#"(nodes: [
         Row(name: "shared", width: Fixed(600.0), gap: 10.0, anchor: (Start, Start), children: [
             Stack(name: "one", width: Fill(1.0)),
@@ -302,16 +297,15 @@ fn nodes_lie_where_their_sizes_and_alignment_put_them() {
     assert_eq!(rect(&state, "end"), [1810.0, 130.0, 100.0, 50.0]);
     assert_eq!(rect(&state, "start"), [1630.0, 20.0, 20.0, 20.0]);
     assert_eq!(rect(&state, "filled"), [1630.0, 20.0, 280.0, 160.0]);
-    // A fill no less than its fit, across a row and in a panel, overflowing round its anchor.
+    // A fill is at least its fit, across a row and in a panel, overflowing round its anchor.
     assert_eq!(rect(&state, "short"), [0.0, 515.0, 10.0, 50.0]);
     assert_eq!(rect(&state, "tall"), [0.0, 490.0, 10.0, 100.0]);
     assert_eq!(rect(&state, "small"), [940.0, 1040.0, 40.0, 40.0]);
     assert_eq!(rect(&state, "big"), [930.0, 1040.0, 60.0, 40.0]);
 }
 
-/// A file of more nodes than a UI holds is refused as it's read, and one of as many reads; and a
-/// row of many nodes each as large as it may be, its margins, its gaps and its padding too, lays
-/// out finite, as the tool API lists it.
+/// One node over the limit is refused, the limit reads; and a row of many nodes at the largest
+/// sizes, margins, gaps and padding lays out finite, as the tool API lists it.
 #[test]
 fn a_ui_is_bounded_in_its_nodes_and_numbers() {
     let stacks = |count: usize| format!("(nodes: [{}])", "Stack(),".repeat(count));
@@ -329,8 +323,7 @@ fn a_ui_is_bounded_in_its_nodes_and_numbers() {
     assert!(finite, "every rectangle finite");
 }
 
-/// A hidden node takes no room, nor does what's under it, which is of no size where it is, and
-/// shows nothing; shown again, it takes its room again.
+/// A hidden node and what's under it take no room and show nothing; shown again, they do.
 #[test]
 fn a_hidden_node_takes_no_room() {
     let mut state = laid(MENU, 1920.0);
@@ -351,9 +344,9 @@ fn a_hidden_node_takes_no_room() {
     assert!(state.laid.shown[0]);
 }
 
-/// The arrows move the focus to the nearest button that takes it the way they go, past a disabled
-/// one, one level with it first, and no further than the last; Tab goes through them in the file's
-/// order, coming round, Shift+Tab back; and a hidden button takes it no more.
+/// Arrows move the focus to the nearest focusable button their way, past a disabled one, level
+/// ones first, and stop at the last. Tab goes in file order, wrapping; Shift+Tab back. A hidden
+/// button takes it no more.
 #[test]
 fn the_focus_moves_spatially_and_by_tab() {
     let mut state = laid(MENU, 1920.0);
@@ -383,8 +376,8 @@ fn the_focus_moves_spatially_and_by_tab() {
         focused("options")
     );
     assert_eq!(pressed(&mut state, Key::ArrowUp, &input), focused("play"));
-    // As near the row's left button as its right, which comes after it; then the right one,
-    // level with the left, though the menu's top is nearer.
+    // The row's left and right buttons are equally near; the left comes first. Then the right,
+    // level with the left though the menu's top is nearer.
     assert_eq!(pressed(&mut state, Key::ArrowUp, &input), focused("left"));
     assert_eq!(
         pressed(&mut state, Key::ArrowRight, &input),
@@ -405,15 +398,15 @@ fn the_focus_moves_spatially_and_by_tab() {
     let options = state.named("options").expect("a node");
     state.nodes[options].visible = false;
     assert_eq!(state.focused(), None, "hidden");
-    // With the focus on none, a move focuses the file's, here the first that takes it.
+    // With none focused, a move focuses the file's, here the first focusable.
     assert_eq!(pressed(&mut state, Key::ArrowDown, &input), focused("play"));
     assert_eq!(pressed(&mut state, Key::Tab, &input), focused("quit"));
 }
 
-/// A click presses a button as it's let go over the button it went down on, which the cursor
-/// focuses as it comes over it; Enter, Space and a pad's South press the focused button, not as a
-/// key repeats; a disabled button takes neither; Escape and a pad's East ask for back; and a pad's
-/// stick steps once a push, however it wavers, again only once it's come back near rest.
+/// A click presses the button it went down on when let go over it; the cursor focuses a button it
+/// comes over. Enter, Space and pad South press the focused button, not on key repeat. A disabled
+/// button takes neither. Escape and pad East ask for back. A stick steps once per push, however it
+/// wavers, and again only after returning near rest.
 #[test]
 fn a_click_or_a_key_presses_a_button_by_its_name() {
     let mut state = laid(MENU, 1920.0);
@@ -436,10 +429,10 @@ fn a_click_or_a_key_presses_a_button_by_its_name() {
     let event = state.send(&button(false), over, &input);
     assert_eq!(event, Some(UiEvent::Pressed("options".into())));
     assert_eq!(state.look(options), FOCUSED);
-    // Let go over another button, it presses none.
+    // Let go over another button, nothing is pressed.
     state.send(&button(true), over, &input);
     assert_eq!(state.send(&button(false), at(&state, "play"), &input), None);
-    // A disabled button neither takes the focus nor a click.
+    // A disabled button takes neither focus nor click.
     let credits = at(&state, "credits");
     assert_eq!(state.send(&moved, credits, &input), None);
     assert_eq!(state.send(&button(true), credits, &input), None);
@@ -482,7 +475,7 @@ fn a_click_or_a_key_presses_a_button_by_its_name() {
     };
     let up = state.send(&stick(0.0, 0.8), None, &input);
     assert_eq!(up, Some(UiEvent::Focused("options".into())));
-    // Held near the diagonal, wavering either side of it, it steps no more.
+    // Held near the diagonal, wavering across it, it doesn't step again.
     for (x, y) in [(0.45, 0.62), (0.62, 0.45), (0.45, 0.62), (0.7, 0.68)] {
         assert_eq!(
             state.send(&stick(x, y), None, &input),
@@ -499,9 +492,8 @@ fn a_click_or_a_key_presses_a_button_by_its_name() {
     assert_eq!(again, Some(UiEvent::Focused("play".into())));
 }
 
-/// A UI's file read again gives each UI of it its nodes: a node keeps the text code set of it,
-/// where the node of its name still says something, and its visibility; and the focus stays on
-/// the button of its name, wherever it's gone, or else goes to the file's.
+/// On reload, a node keeps the text and visibility code set, where the same-named node still has
+/// text. The focus stays on its button by name wherever it moved, else goes to the file's.
 #[test]
 fn a_reload_keeps_the_focus_and_what_code_set_by_name() {
     let menu = r#"(focus: "play", nodes: [Column(children: [
@@ -527,7 +519,7 @@ fn a_reload_keeps_the_focus_and_what_code_set_by_name() {
     let title = state.named("title").expect("a node");
     state.nodes[title].visible = false;
     state.set[title].visible = true;
-    // Reordered, the score's text and the title's changed, and a button added.
+    // Reordered; score and title texts changed; a button added.
     let edited = r#"(focus: "play", nodes: [Column(children: [
         Text(name: "title", text: "MAIN MENU"),
         Button(name: "play", text: "PLAY"),
@@ -554,8 +546,8 @@ fn a_reload_keeps_the_focus_and_what_code_set_by_name() {
     assert_eq!(uis.state(ui).focus, Some(0));
 }
 
-/// The tool API's `ui` lists each UI's nodes laid out for the view, in the canvas's units and the
-/// view's pixels, with what shows, what each says and each button's state.
+/// The tool API's `ui` lists each UI's nodes laid out, in canvas units and view pixels, with
+/// visibility, text and button state.
 #[cfg(feature = "dev")]
 #[test]
 fn the_tool_api_lists_each_uis_nodes() {
@@ -572,7 +564,7 @@ fn the_tool_api_lists_each_uis_nodes() {
     state.pressed = Some((quit, Press::Key));
     state.focus = Some(quit);
     let mut fonts = Fonts::new(&mut Textures::default());
-    // 720 pixels high, two thirds of a pixel a unit, and as wide as the 1,920 units are.
+    // 720 pixels high: two thirds of a pixel a unit.
     let view = Viewport {
         origin: [10, 20],
         size: [1280, 720],
@@ -611,9 +603,9 @@ fn the_tool_api_lists_each_uis_nodes() {
     assert_eq!(json["uis"][0]["nodes"][1]["kind"], "button");
 }
 
-/// A column of each widget in the view's middle, a slider, a toggle, a drop-down, a text field and
-/// a button, each 400 units wide; and a list of six buttons along the view's right edge, 250 high,
-/// which reach 530 down it: all of fixed sizes, so that where each goes is known.
+/// A centered column of a slider, toggle, drop-down, text field and button, each 400 wide; and a
+/// list of six buttons on the right edge, 250 high, reaching 530 down. All sizes are fixed, so
+/// each position is known.
 const WIDGETS: &str = r#"(
     focus: "volume",
     nodes: [
@@ -658,7 +650,6 @@ const WIDGETS: &str = r#"(
     ],
 )"#;
 
-/// A key's press, not a repeat.
 fn press(key: Key) -> Event<'static> {
     Event::Key {
         key,
@@ -667,7 +658,6 @@ fn press(key: Key) -> Event<'static> {
     }
 }
 
-/// A pad's button going down.
 fn pad(button: PadButton) -> Event<'static> {
     Event::PadButton {
         pad: crate::Pad(0),
@@ -676,7 +666,6 @@ fn pad(button: PadButton) -> Event<'static> {
     }
 }
 
-/// The left mouse button going down or up.
 fn click(pressed: bool) -> Event<'static> {
     Event::MouseButton {
         button: MouseButton::Left,
@@ -684,13 +673,12 @@ fn click(pressed: bool) -> Event<'static> {
     }
 }
 
-/// The point of node `name`'s rectangle `along` its width and halfway down it.
+/// The point `along` node `name`'s width, halfway down it.
 fn on(state: &State, name: &str, along: f32) -> Option<Vec2> {
     let [x, y, width, height] = rect(state, name);
     Some(Vec2::new(x + width * along, y + height / 2.0))
 }
 
-/// The number a slider changed to, as `event` gives it.
 fn number(event: Option<UiEvent>) -> f32 {
     match event {
         Some(UiEvent::Changed(_, UiValue::Number(number))) => number,
@@ -698,15 +686,13 @@ fn number(event: Option<UiEvent>) -> f32 {
     }
 }
 
-/// The change of widget `name` to `value`.
 fn changed(name: &str, value: UiValue) -> Option<UiEvent> {
     Some(UiEvent::Changed(name.into(), value))
 }
 
-/// Widgets read from their file with their kinds' defaults, a list that fills its parent taking the
-/// room it's given, and are refused with the codes of what's wrong with them: a widget without a
-/// name, a field its kind doesn't take, a slider whose bounds or value are wrong, a drop-down
-/// without options or whose choice is none of them, and a text field that holds more than it may.
+/// Widgets read with their kinds' defaults; a list filling its parent takes the room it's given.
+/// Refused with their codes: a widget without a name, a field its kind doesn't take, bad slider
+/// bounds or value, a drop-down without options or with a bad choice, an over-full text field.
 #[test]
 fn widgets_read_from_their_file_and_are_refused_with_their_codes() {
     let state = laid(WIDGETS, 1920.0);
@@ -736,7 +722,7 @@ fn widgets_read_from_their_file_and_are_refused_with_their_codes() {
         "a list clips"
     );
     assert_eq!(state.focused(), state.named("volume"), "the file's focus");
-    // A list that fills its parent down takes the room it's given, however much it holds.
+    // A list filling its parent takes the room given, however much it holds.
     let filled = r#"(nodes: [Column(height: Fixed(300.0), children: [
         Stack(height: Fixed(100.0)),
         List(name: "filled", height: Fill(1.0), children: [
@@ -785,11 +771,10 @@ fn widgets_read_from_their_file_and_are_refused_with_their_codes() {
     parse(focus).expect("a toggle takes the focus");
 }
 
-/// A slider's value steps by its steps by the left and right arrows, as a repeat does, a pad's
-/// D-pad and its stick, once a push, and goes to its ends by Home and End, no further; a click on
-/// its track sets it where the cursor is, at the nearest step, and a drag goes on setting it, the
-/// slider pressed until it's let go; each change gives its new value, and none that changes
-/// nothing; and the up and down arrows move the focus.
+/// A slider steps by its step with the left and right arrows (also on repeat), the D-pad and the
+/// stick (once per push), and goes to its ends with Home and End, no further. A click on its
+/// track sets the nearest step; a drag keeps setting it, the slider pressed until let go. Each
+/// change gives its new value, none if nothing changes. Up and down arrows move the focus.
 #[test]
 fn a_slider_steps_by_keys_and_a_pad_and_follows_the_mouse() {
     let mut state = laid(WIDGETS, 1920.0);
@@ -823,20 +808,20 @@ fn a_slider_steps_by_keys_and_a_pad_and_follows_the_mouse() {
         "its end"
     );
     near(number(state.send(&press(Key::Home), None, &input)), 0.0);
-    // Its track runs from 784 to 1136, inside its padding: 73% along is 0.7, at its step.
+    // The track runs from 784 to 1136, inside its padding: 73% along is 0.7, a step.
     let moved = Event::CursorMoved { x: 0.0, y: 0.0 };
     let at = on(&state, "volume", 0.0).map(|at| at + Vec2::new(24.0 + 352.0 * 0.73, 0.0));
     state.send(&moved, at, &input);
     near(number(state.send(&click(true), at, &input)), 0.7);
     let volume = state.named("volume").expect("a node");
     assert_eq!(state.look(volume), PRESSED, "held as it's dragged");
-    // Dragged past its end, and up off it, it stays at its end.
+    // Dragged past its end and off it vertically, it stays at its end.
     let past = at.map(|at| at + Vec2::new(400.0, -200.0));
     near(number(state.send(&moved, past, &input)), 1.0);
     assert_eq!(state.send(&moved, past, &input), None);
     assert_eq!(state.send(&click(false), past, &input), None);
     assert_eq!(state.look(volume), FOCUSED, "let go");
-    // A drag ends as the slider's hidden or disabled under it, as a menu's page closes.
+    // A drag ends if the slider is hidden or disabled, as when a menu page closes.
     for hide in [true, false] {
         state.send(&click(true), at, &input);
         match hide {
@@ -856,9 +841,8 @@ fn a_slider_steps_by_keys_and_a_pad_and_follows_the_mouse() {
     assert_eq!(event, Some(UiEvent::Focused("sound".into())));
 }
 
-/// A slider whose value is off its steps' grid, from its `min`, steps to the grid's next point
-/// either way, and its `max` past the grid's last is reached by keys and by a drag, as its `min`
-/// is.
+/// A slider off its step grid (from `min`) steps to the next grid point either way. Keys and a
+/// drag reach `max` past the last point, as they reach `min`.
 #[test]
 fn a_slider_steps_to_its_grid_and_reaches_its_ends() {
     let text = r#"(focus: "coarse", nodes: [
@@ -877,8 +861,8 @@ fn a_slider_steps_to_its_grid_and_reaches_its_ends() {
         None,
         "its max"
     );
-    // Its track runs from 784 to 1136: its end is its max, 97% along nearer it than 0.9, and its
-    // start its min.
+    // The track runs from 784 to 1136: its end is `max`, 97% along is nearer it than 0.9, its
+    // start is `min`.
     let moved = Event::CursorMoved { x: 0.0, y: 0.0 };
     let along = |state: &State, share: f32| {
         on(state, "coarse", 0.0).map(|at| at + Vec2::new(24.0 + 352.0 * share, 0.0))
@@ -893,9 +877,8 @@ fn a_slider_steps_to_its_grid_and_reaches_its_ends() {
     near(number(state.send(&moved, along(&state, 1.0), &input)), 1.0);
 }
 
-/// A toggle flips by Enter, Space and a pad's South, held pressed until they're let go, and by a
-/// click let go over it, but not one let go off it; and the left and right arrows move the focus,
-/// as a button's do.
+/// A toggle flips by Enter, Space and pad South, held pressed until let go, and by a click let go
+/// over it, not off it. Left and right arrows move the focus, as a button's do.
 #[test]
 fn a_toggle_flips_by_a_press_or_a_click() {
     let mut state = laid(WIDGETS, 1920.0);
@@ -933,11 +916,10 @@ fn a_toggle_flips_by_a_press_or_a_click() {
     assert_eq!(event, Some(UiEvent::Focused("save_0".into())));
 }
 
-/// A drop-down's choice steps by the left and right arrows within its options; Enter opens its
-/// options over the rest, its choice lit, which take every event: the down arrow and a pad's stick
-/// light the next, and Enter chooses the lit one, closing it, a change; Escape closes it as it was;
-/// a click opens it, and a click on an option chooses it as it's let go; a click outside closes it,
-/// and a pad's East.
+/// Left and right arrows step a drop-down's choice within its options. Enter or a click opens the
+/// options with the choice lit; they take every event. The arrows and the stick light another;
+/// Enter, or letting go of a click over an option, chooses it, closing them with a change. Escape,
+/// pad East or a click outside closes them unchanged.
 #[test]
 fn a_dropdown_steps_and_chooses_from_its_options() {
     let mut state = laid(WIDGETS, 1920.0);
@@ -961,7 +943,7 @@ fn a_dropdown_steps_and_chooses_from_its_options() {
     };
     assert_eq!(state.open, Some(open));
     assert_eq!(state.look(dropdown), PRESSED, "open");
-    // The arrows light its options, and move the focus no more.
+    // The arrows light options and no longer move the focus.
     assert_eq!(state.send(&press(Key::ArrowUp), None, &input), None);
     assert_eq!(state.open.map(|open| open.lit), Some(0));
     let event = state.send(&press(Key::Enter), None, &input);
@@ -977,7 +959,7 @@ fn a_dropdown_steps_and_chooses_from_its_options() {
     assert_eq!(state.open.map(|open| open.lit), Some(1));
     assert_eq!(state.send(&press(Key::Escape), None, &input), None);
     assert_eq!(state.open, None, "closed as it was, without back");
-    // Its options open below it, each as tall as it: HARD is the third.
+    // Options open below, each as tall as it: HARD is the third.
     let over = on(&state, "difficulty", 0.5);
     state.send(&click(true), over, &input);
     assert_eq!(state.send(&click(false), over, &input), None);
@@ -1001,8 +983,8 @@ fn a_dropdown_steps_and_chooses_from_its_options() {
     assert_eq!(state.open, None);
 }
 
-/// A drop-down hidden or disabled while its options are open closes them, the next event going to
-/// the rest as if it had never opened; and its file read again closes them too.
+/// Hiding or disabling a drop-down, or reloading its file, closes its open options; the next
+/// event goes to the rest as if they never opened.
 #[test]
 fn an_open_dropdown_closes_as_its_hidden_disabled_or_read_again() {
     let mut uis = Uis::default();
@@ -1020,7 +1002,7 @@ fn an_open_dropdown_closes_as_its_hidden_disabled_or_read_again() {
     open(state);
     state.nodes[dropdown].visible = false;
     state.laid_for = None;
-    // The down arrow moves the focus, the drop-down's hidden, rather than lighting an option.
+    // Hidden, the down arrow moves the focus instead of lighting an option.
     let event = state.send(&press(Key::ArrowDown), None, &input);
     assert_eq!(
         event,
@@ -1046,12 +1028,11 @@ fn an_open_dropdown_closes_as_its_hidden_disabled_or_read_again() {
     assert_eq!(uis.state(ui).open, None, "read again");
 }
 
-/// A text field takes the focus by a click, not by the cursor coming over it, its caret where it's
-/// clicked; it takes what's typed at its caret, as many characters as it holds, and no control
-/// character; the arrows move its caret and Shift selects, Home and End, Ctrl+A selecting all, and
-/// what's typed or Backspace takes the selection's place; Backspace and Delete cut a character
-/// either side; Space types, pressing nothing, Enter presses it, and the down arrow moves the focus
-/// on.
+/// A text field takes the focus by a click (not hover), caret where clicked. It takes typed text
+/// at the caret, up to its limit, no control characters. Arrows, Home and End move the caret;
+/// Shift selects; Ctrl+A selects all; typing or Backspace replaces the selection. Backspace and
+/// Delete cut a character either side. Space types without pressing; Enter presses; the down
+/// arrow moves the focus on.
 #[test]
 fn a_text_field_takes_typed_text_at_its_caret() {
     let mut state = laid(WIDGETS, 1920.0);
@@ -1069,7 +1050,7 @@ fn a_text_field_takes_typed_text_at_its_caret() {
     state.send(&click(false), over, &input);
     let text = |state: &State| state.nodes[field].text.clone();
     let typed = |text: &str| changed("player", UiValue::Text(text.to_owned()));
-    // The cursor passing over a button leaves the focus on the field, which goes on taking text.
+    // The cursor passing over a button leaves the focus on the field.
     let done = on(&state, "done", 0.5);
     assert_eq!(
         state.send(&moved, done, &input),
@@ -1083,7 +1064,7 @@ fn a_text_field_takes_typed_text_at_its_caret() {
         None,
         "no control character"
     );
-    // Space types as its text follows, pressing nothing.
+    // Space types, as its text event follows; it presses nothing.
     assert_eq!(state.send(&press(Key::Space), None, &input), None);
     assert_eq!(state.send(&Event::Text(" "), None, &input), typed("ab "));
     assert_eq!(
@@ -1107,7 +1088,7 @@ fn a_text_field_takes_typed_text_at_its_caret() {
         None,
         "at its start"
     );
-    // Shift+End selects to its end, and what's typed takes its place.
+    // Shift+End selects to the end; typing replaces it.
     input.record(&press(Key::ShiftLeft));
     state.send(&press(Key::ArrowRight), None, &input);
     state.send(&press(Key::End), None, &input);
@@ -1119,7 +1100,7 @@ fn a_text_field_takes_typed_text_at_its_caret() {
     });
     assert_eq!(state.send(&Event::Text("é"), None, &input), typed("é"));
     assert_eq!(state.caret.at, 2, "after its two bytes");
-    // Ctrl+A selects it all, which Backspace cuts.
+    // Ctrl+A selects all; Backspace cuts it.
     state.send(&Event::Text("xy"), None, &input);
     input.record(&press(Key::ControlLeft));
     state.send(&press(Key::KeyA), None, &input);
@@ -1134,7 +1115,7 @@ fn a_text_field_takes_typed_text_at_its_caret() {
         None,
         "not focused"
     );
-    // A click puts the caret between the characters nearest it.
+    // A click puts the caret at the nearest boundary.
     state.nodes[field].text = "iiiiwwww".to_owned();
     let start = on(&state, "player", 0.0).map(|at| at + Vec2::new(24.0, 0.0));
     state.send(&click(true), start, &input);
@@ -1144,10 +1125,9 @@ fn a_text_field_takes_typed_text_at_its_caret() {
     assert_eq!(state.caret.at, 8, "past its end");
 }
 
-/// A text field takes what's pasted at its caret, in place of what's selected, its first line
-/// without the characters no line holds, as many characters as it holds; Ctrl+C copies what's
-/// selected, and Ctrl+X cuts it too, Cmd for Ctrl on macOS, nothing for a selection that's empty;
-/// and Ctrl+V types nothing itself, as the paste follows it.
+/// A text field takes a paste at the caret over the selection: its first line minus control
+/// characters, up to its limit. Ctrl+C copies the selection and Ctrl+X cuts it (Cmd on macOS),
+/// nothing if empty. Ctrl+V types nothing itself; the paste follows.
 #[test]
 fn a_text_field_pastes_at_its_caret_and_copies_its_selection() {
     let mut state = laid(WIDGETS, 1920.0);
@@ -1161,7 +1141,7 @@ fn a_text_field_pastes_at_its_caret_and_copies_its_selection() {
         state.send(&paste("ab\tc\r\nsecond"), None, &input),
         typed("abc")
     );
-    // Shift+Home selects it all, which the paste takes the place of, 8 at most.
+    // Shift+Home selects it all; the paste replaces it, 8 at most.
     input.record(&press(Key::ShiftLeft));
     state.send(&press(Key::Home), None, &input);
     let let_go = |key| Event::Key {
@@ -1202,8 +1182,8 @@ fn a_text_field_pastes_at_its_caret_and_copies_its_selection() {
     );
 }
 
-/// What a text field copies, through a UI a layer added, goes to the context, for the window to put
-/// on the OS's clipboard, and what's pasted reaches the field.
+/// A copy from a layer's UI goes to the context, for the window to put on the OS clipboard; a
+/// paste reaches the field.
 #[test]
 fn a_ui_s_copies_go_to_the_context() {
     let scratch = crate::dirs::tests::Scratch::new("ui-copies");
@@ -1228,10 +1208,9 @@ fn a_ui_s_copies_go_to_the_context() {
     assert_eq!(cx.copied.as_deref(), Some("code"));
 }
 
-/// A list's children lie down it from its top, clipped to it; the wheel over it scrolls them, no
-/// further than they reach, and laid out again they lie scrolled up; a child scrolled out of it
-/// takes no click; and the focus moving to a child by the keys scrolls it into view, while the
-/// cursor coming over one at its edge doesn't.
+/// A list's children lie down from its top, clipped to it. The wheel scrolls them no further than
+/// they reach, and a relayout keeps the scroll. A child scrolled out takes no click. The focus
+/// moving to a child by keys scrolls it into view; the cursor coming over one at the edge doesn't.
 #[test]
 fn a_list_scrolls_by_the_wheel_and_to_the_focus() {
     let mut state = laid(WIDGETS, 1920.0);
@@ -1253,7 +1232,7 @@ fn a_list_scrolls_by_the_wheel_and_to_the_focus() {
     assert_eq!(rect(&state, "save_0")[1], 415.0 - 120.0, "two lines down");
     state.send(&wheel(-10.0), over, &input);
     state.lay_out_again(1920.0);
-    // Hidden, as a page of a menu is, and shown again, it keeps its scroll.
+    // Hidden, like a menu page, then shown again, it keeps its scroll.
     state.nodes[list].visible = false;
     state.lay_out_again(1920.0);
     state.nodes[list].visible = true;
@@ -1270,19 +1249,19 @@ fn a_list_scrolls_by_the_wheel_and_to_the_focus() {
     state.send(&wheel(20.0), over, &input);
     state.lay_out_again(1920.0);
     assert_eq!(state.nodes[list].scroll, 0.0, "back at its top");
-    // The cursor over save_2, half out of view at its bottom, focuses it without scrolling.
+    // The cursor over save_2, half out of view at the bottom, focuses it without scrolling.
     let edge = Some(Vec2::new(1700.0, 660.0));
     let event = state.send(&Event::CursorMoved { x: 0.0, y: 0.0 }, edge, &input);
     assert_eq!(event, Some(UiEvent::Focused("save_2".into())));
     assert_eq!(state.nodes[list].scroll, 0.0);
-    // Down by the keys, to save_3, scrolls it whole into view at the list's bottom.
+    // Down by keys to save_3 scrolls it whole into view at the bottom.
     let event = state.send(&press(Key::ArrowDown), None, &input);
     assert_eq!(event, Some(UiEvent::Focused("save_3".into())));
     state.lay_out_again(1920.0);
     let [_, y, _, height] = rect(&state, "save_3");
     assert_eq!(y + height, 415.0 + 250.0, "at its bottom");
-    // Tab round, past save_5 to the first widget, then back to save_0, scrolls it back into view
-    // at the list's top.
+    // Tab round past save_5 to the first widget, then Shift+Tab back to save_0, scrolls it into
+    // view at the top.
     for _ in 0..2 {
         state.send(&press(Key::Tab), None, &input);
     }
@@ -1298,10 +1277,10 @@ fn a_list_scrolls_by_the_wheel_and_to_the_focus() {
     assert_eq!(rect(&state, "save_0")[1], 415.0, "at its top");
 }
 
-/// Code reads and sets each widget's value by its name, a slider's within its bounds, refusing a
-/// value of another widget's, and sets the focus by name, scrolling it into view; a value set by
-/// code or input is kept as the UI's file is read again, a slider's within its new bounds, while a
-/// drop-down's choice past its new options is the file's; and a list keeps its scroll.
+/// Code reads and sets widget values by name (a slider's clamped; another widget's kind of value
+/// refused) and sets the focus by name, scrolling it into view. A value set by code or input
+/// survives a reload, a slider's clamped to its new bounds; a drop-down's choice past its new
+/// options reverts to the file's. A list keeps its scroll.
 #[test]
 fn values_are_read_and_set_by_name_and_kept_through_a_reload() {
     let scratch = crate::dirs::tests::Scratch::new("ui-widgets");
@@ -1349,7 +1328,7 @@ fn values_are_read_and_set_by_name_and_kept_through_a_reload() {
     state.lay_out_again(1920.0);
     let list = state.named("saves").expect("a node");
     assert_eq!(state.nodes[list].scroll, 280.0, "scrolled to its last");
-    // Read again, the slider's bounds narrowed and the drop-down's options fewer.
+    // Reloaded with the slider's bounds narrowed and the drop-down's options fewer.
     let edited = WIDGETS
         .replace("step: 0.1, value: 0.5", "max: 0.5")
         .replace("[\"EASY\", \"NORMAL\", \"HARD\"]", "[\"EASY\", \"HARD\"]");
@@ -1376,10 +1355,9 @@ fn values_are_read_and_set_by_name_and_kept_through_a_reload() {
     assert_eq!(state.nodes[list].scroll, 280.0, "kept");
 }
 
-/// What the mouse does over a UI is taken from the layers below, as [`State::takes`] says: its
-/// buttons and wheel over a button, a widget, a disabled one too, or a list, and not over a panel,
-/// a stack or nothing; a button let go after a press it holds, wherever; every button and the
-/// wheel, wherever, while a drop-down's options are open; and nothing while it takes no input.
+/// [`State::takes`] takes mouse buttons and wheel from the layers below over a button, widget
+/// (disabled too) or list, not over a panel, stack or nothing; a release after a press it holds,
+/// anywhere; everything anywhere while options are open; nothing while it takes no input.
 #[test]
 fn the_mouse_over_a_button_a_widget_or_a_list_is_taken_from_the_layers_below() {
     let mut menu = laid(MENU, 1920.0);
@@ -1401,7 +1379,7 @@ fn the_mouse_over_a_button_a_widget_or_a_list_is_taken_from_the_layers_below() {
         !takes(&menu, &click(true), None),
         "a press outside the view"
     );
-    // Held: a button let go away from where it went down, as a slider's drag ends outside it.
+    // Held: a release away from the press, as a slider's drag ends outside it.
     let _ = menu.send(&click(true), on(&menu, "play", 0.5), &Input::default());
     assert!(takes(&menu, &click(false), on(&menu, "room", 0.5)), "held");
     let _ = menu.send(&click(false), on(&menu, "room", 0.5), &Input::default());
@@ -1434,8 +1412,8 @@ fn the_mouse_over_a_button_a_widget_or_a_list_is_taken_from_the_layers_below() {
     assert!(takes(&widgets, &scroll, far), "the wheel");
 }
 
-/// A drop-down's open options take the mouse everywhere only while the drop-down shows and isn't
-/// disabled, as a game that hides or disables it with its options open doesn't lose its clicks.
+/// Open options take the mouse everywhere only while the drop-down shows and isn't disabled, so a
+/// game that hides or disables it with options open doesn't lose its clicks.
 #[test]
 fn options_left_open_under_a_hidden_or_disabled_drop_down_take_nothing() {
     let mut state = laid(WIDGETS, 1920.0);
@@ -1456,8 +1434,8 @@ fn options_left_open_under_a_hidden_or_disabled_drop_down_take_nothing() {
     assert!(!state.pointer_over(Vec2::new(100.0, 100.0)));
 }
 
-/// A UI that didn't draw in the last frame, or takes no input, takes nothing and is over nothing,
-/// as a menu no longer drawn doesn't swallow clicks over its invisible buttons.
+/// A UI that didn't draw in the last frame, or takes no input, takes nothing: a menu no longer
+/// drawn doesn't swallow clicks over its invisible buttons.
 #[test]
 fn a_ui_that_didnt_draw_in_the_last_frame_takes_nothing() {
     let mut state = laid(MENU, 1920.0);
@@ -1469,9 +1447,8 @@ fn a_ui_that_didnt_draw_in_the_last_frame_takes_nothing() {
     assert!(!state.takes(&click(true), at, 5), "not for two frames");
 }
 
-/// While a text field has the focus, the keys and the text typed are taken from the layers below,
-/// so that a name typed doesn't walk the player, and a pad's buttons aren't; without the focus, a
-/// key isn't.
+/// While a text field has the focus, keys and typed text are taken from the layers below, so a
+/// typed name doesn't walk the player; pad buttons aren't. Without the focus, keys aren't.
 #[test]
 fn keys_and_text_are_taken_while_a_text_field_has_the_focus() {
     let mut state = laid(WIDGETS, 1920.0);

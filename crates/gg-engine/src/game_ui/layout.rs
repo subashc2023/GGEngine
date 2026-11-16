@@ -1,7 +1,6 @@
-//! Laying a game's UI out, flexbox-lite, in the canvas's units: each node sized fixed, fit to what
-//! it holds or filling its share of its parent, its children in a row, a column, a list or
-//! stacked, with padding, gaps between them and alignment both ways, a list's scrolled; the nodes
-//! at its top in the view, each from the point of it that its anchor names; and what clips each.
+//! Laying a game's UI out, flexbox-lite, in canvas units: sizes fixed, fit or fill; children in a
+//! row, column, list or stack, with padding, gaps and alignment; top nodes placed in the view from
+//! their anchors; and what clips each.
 
 use gg_core::math::Vec2;
 
@@ -9,8 +8,7 @@ use super::{Kind, Node, Size, widgets};
 use crate::Align;
 use crate::font::Fonts;
 
-/// Where a node is: its top left, from the view's top left, +Y down, and its size, in the canvas's
-/// units.
+/// A node's top left from the view's top left (+Y down), and its size, in canvas units.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Rect {
     pub(crate) at: Vec2,
@@ -18,8 +16,8 @@ pub(crate) struct Rect {
 }
 
 impl Rect {
-    /// Whether `point`, in the same units from the same corner, is in it: on its top or left edge,
-    /// but not on its bottom or right, so that two side by side share no point.
+    /// Whether `point`, in the same units from the same corner, is in it. Its top and left edges
+    /// count, its bottom and right don't, so neighbors share no point.
     pub(crate) fn contains(&self, point: Vec2) -> bool {
         point.cmpge(self.at).all() && point.cmplt(self.at + self.size).all()
     }
@@ -28,7 +26,7 @@ impl Rect {
         self.at + self.size / 2.0
     }
 
-    /// It without `padding` on each side, of no size where the padding takes it all.
+    /// It less `padding` on each side; no size where the padding takes it all.
     pub(crate) fn inside(&self, padding: Vec2) -> Self {
         Self {
             at: self.at + padding,
@@ -36,7 +34,7 @@ impl Rect {
         }
     }
 
-    /// What of it is in `other` too, of no size where none is.
+    /// What of it is in `other` too; no size where none is.
     pub(crate) fn within(&self, other: Rect) -> Self {
         let at = self.at.max(other.at);
         let end = (self.at + self.size).min(other.at + other.size);
@@ -47,8 +45,7 @@ impl Rect {
     }
 }
 
-/// How far along an axis `align` puts what it aligns, of the room there is: none at its start,
-/// half at its middle, all at its end.
+/// The share of the spare room `align` puts before what it aligns: none, half or all.
 pub(crate) fn share(align: Align) -> f32 {
     match align {
         Align::Start => 0.0,
@@ -57,8 +54,7 @@ pub(crate) fn share(align: Align) -> f32 {
     }
 }
 
-/// The children of `nodes`' node `parent`, in order, as their pre-order lays them out: each after
-/// the subtree of the one before.
+/// The children of node `parent`, in order: each follows the subtree of the one before.
 pub(crate) fn children(nodes: &[Node], parent: usize) -> impl Iterator<Item = usize> + '_ {
     let end = nodes[parent].end as usize;
     let first = Some(parent + 1).filter(|&child| child < end);
@@ -67,20 +63,20 @@ pub(crate) fn children(nodes: &[Node], parent: usize) -> impl Iterator<Item = us
     })
 }
 
-/// What a layout finds, kept from one to the next, so that laying out as many nodes again
-/// allocates nothing: each node's size fit to what it holds, the size a fit or a fill takes at
-/// least; where each is; whether each shows, it and each node above it visible; and what each
-/// draws within, the rectangle less its padding of each list and container that clips above it.
+/// What a layout finds, kept between layouts so laying out as many nodes again allocates nothing:
+/// each node's fit (the least a fit or fill takes), its rectangle, whether it shows (it and every
+/// node above visible), and what it draws within (the rectangle less padding of each clipping list
+/// or container above).
 #[derive(Default)]
 pub(crate) struct Laid {
     pub(crate) fit: Vec<Vec2>,
     pub(crate) rects: Vec<Rect>,
     pub(crate) shown: Vec<bool>,
     pub(crate) clips: Vec<Option<Rect>>,
-    /// Which fills a row or a column holds at their fit, as it shares out what room it has.
+    /// Which fills a row or column holds at their fit while sharing out its room.
     held: Vec<bool>,
-    /// How far a row's, a column's or a list's children reach along it, their gaps and margins
-    /// among them, which a list scrolls through.
+    /// How far a row's, column's or list's children reach along it, gaps and margins included;
+    /// a list scrolls through it.
     reach: Vec<f32>,
 }
 
@@ -90,32 +86,39 @@ impl Laid {
         self.clips[i].is_none_or(|clip| clip.contains(point))
     }
 
-    /// How far list `i` of `nodes` scrolls at most: as far as its children reach past its room.
+    /// How far list `i` scrolls at most: its children's reach past its room.
     pub(crate) fn most_scroll(&self, nodes: &[Node], i: usize) -> f32 {
         let room = self.rects[i].inside(nodes[i].padding).size.y;
         (self.reach[i] - room).max(0.0)
     }
 }
 
-/// Lays `nodes`, a UI's in pre-order, out in a view `view` units across and down, its texts
-/// measured by `fonts`, into `laid`: first each node's fit, from its children up, a text's its
-/// text's box, an image's its texture's size, a unit a pixel, and a container's its visible
-/// children's, side by side in a row or a column, `gap` between each two, or the largest for a
-/// stack or a panel, with its padding round them; a fixed size in place of a fit. Then each node's
-/// rectangle, from its parent down, a node at the top in the view, and each child in its parent
-/// less its padding: in a row along the parent's width, in a column along its height, the room
-/// the fixed and fit children and the gaps leave shared among the fills by their shares, none
-/// below its fit, and what's left over, without a fill to take it, put before, around or after
-/// them as the parent's `align` says; across them, and in a stack or a panel both ways, a fill
-/// takes all the room, and a child goes where its `anchor`, or else its parent's `align`, puts it.
-/// A fill is never less than its fit, either way, and a node larger than its parent's room
-/// overflows it. A list lays its children out as a column does, from its top, whatever its
-/// alignment down, scrolled up by its scroll, within what they reach past its room; one that
-/// fills its parent down fits none of them, so that it takes the room it's given, however much it
-/// holds. Each node draws within the rectangle less its padding of each list and container that
-/// clips above it.
-/// A margin is room round a node, outside it. A hidden node, and what's under it, takes no room,
-/// and is of no size at its parent's top left.
+/// Lays `nodes` (a UI's, in pre-order) out in a view `view` units across and down, measuring texts
+/// with `fonts`, into `laid`.
+///
+/// Fit, from the children up:
+/// - A text's is its text's box; an image's is its texture's size, a unit a pixel.
+/// - A container's is its visible children's: side by side in a row or column with `gap`
+///   between, or the largest for a stack or panel; plus its padding.
+/// - A fixed size replaces the fit.
+///
+/// Rectangles, from the parent down:
+/// - A top node goes in the view; a child goes in its parent less its padding.
+/// - Along a row's width or a column's height, the room the fixed and fit children and gaps
+///   leave is shared among the fills by their shares, none below its fit. Room left without a
+///   fill to take it goes before, around or after the children as the parent's `align` says.
+/// - Across a row or column, and both ways in a stack or panel, a fill takes all the room.
+/// - A child goes where its `anchor`, else its parent's `align`, puts it.
+/// - A fill is never less than its fit; a node larger than its parent's room overflows it.
+/// - A margin is room round a node, outside it.
+/// - A hidden node and what's under it take no room and have no size, at its parent's top left.
+///
+/// A list lays its children out as a column does, from its top whatever its alignment down,
+/// scrolled up by its scroll within what they reach past its room. One that fills its parent down
+/// fits none of them, so it takes the room it's given however much it holds.
+///
+/// Each node draws within the rectangle less its padding of each clipping list and container
+/// above it.
 pub(crate) fn lay_out(nodes: &[Node], fonts: &mut Fonts, view: Vec2, laid: &mut Laid) {
     let count = nodes.len();
     laid.fit.clear();
@@ -190,13 +193,13 @@ pub(crate) fn lay_out(nodes: &[Node], fonts: &mut Fonts, view: Vec2, laid: &mut 
     }
 }
 
-/// The size node `i` of `nodes` fits to, its children's already in `fits`, as [`lay_out`] says.
+/// The size node `i` fits to, its children's already in `fits` ([`lay_out`]).
 fn fit(nodes: &[Node], i: usize, fonts: &mut Fonts, fits: &[Vec2]) -> Vec2 {
     let node = &nodes[i];
     if !node.visible {
         return Vec2::ZERO;
     }
-    // Without measuring what it holds, as a text's shaping, which a fixed size takes the place of.
+    // A fixed size skips measuring content, such as a text's shaping.
     if let [Size::Fixed(width), Size::Fixed(height)] = node.size {
         return Vec2::new(width, height);
     }
@@ -209,7 +212,7 @@ fn fit(nodes: &[Node], i: usize, fonts: &mut Fonts, fits: &[Vec2]) -> Vec2 {
         }
         Kind::Image => node.natural.unwrap_or(Vec2::ZERO),
         Kind::Slider | Kind::Toggle | Kind::Dropdown | Kind::Field => widgets::fit(node, fonts),
-        // A list that fills its parent down takes what room it's given, and scrolls the rest.
+        // A list that fills its parent down takes the room it's given and scrolls the rest.
         Kind::List if matches!(node.size[1], Size::Fill(_)) => {
             let across = visible.map(|child| outside(child).x).fold(0.0, f32::max);
             Vec2::new(across, 0.0) + node.padding * 2.0
@@ -239,7 +242,7 @@ fn fit(nodes: &[Node], i: usize, fonts: &mut Fonts, fits: &[Vec2]) -> Vec2 {
             fit[axis] = units;
         }
     }
-    // An image keeps its texture's shape along the axis it fits on, where the other is fixed.
+    // An image fit on one axis keeps its texture's shape from the other, fixed one.
     if let Some(natural) = node
         .natural
         .filter(|natural| natural.cmpgt(Vec2::ZERO).all())
@@ -253,9 +256,9 @@ fn fit(nodes: &[Node], i: usize, fonts: &mut Fonts, fits: &[Vec2]) -> Vec2 {
     fit
 }
 
-/// Where `node`, of fit `fit`, goes in `room`, a stack's or a panel's less its padding, or the
-/// view: a fill takes all of it, less its margin, but none less than its fit, and it goes where its
-/// anchor, or else `align`, puts it, overflowing the room round that point where it's larger.
+/// Where `node`, of fit `fit`, goes in `room` (a stack's or panel's less its padding, or the
+/// view). A fill takes all of it less its margin, but not less than its fit. It goes where its
+/// anchor, else `align`, puts it, overflowing the room round that point where it's larger.
 fn placed(node: &Node, fit: Vec2, room: Rect, align: [Align; 2]) -> Rect {
     let anchor = node.anchor.unwrap_or(align);
     let room = room.inside(node.margin);
@@ -271,7 +274,7 @@ fn placed(node: &Node, fit: Vec2, room: Rect, align: [Align; 2]) -> Rect {
     rect
 }
 
-/// Places the children of stack or panel `i` of `nodes`, as [`lay_out`] says.
+/// Places the children of stack or panel `i` ([`lay_out`]).
 fn stack(nodes: &[Node], i: usize, laid: &mut Laid) {
     let room = laid.rects[i].inside(nodes[i].padding);
     for child in children(nodes, i) {
@@ -285,8 +288,7 @@ fn stack(nodes: &[Node], i: usize, laid: &mut Laid) {
     }
 }
 
-/// Places the children of row or column `i` of `nodes` along `axis`, 0 across and 1 down, as
-/// [`lay_out`] says.
+/// Places the children of row or column `i` along `axis`, 0 across and 1 down ([`lay_out`]).
 fn line(nodes: &[Node], i: usize, axis: usize, laid: &mut Laid) {
     let node = &nodes[i];
     let room = laid.rects[i].inside(node.padding);
@@ -301,8 +303,8 @@ fn line(nodes: &[Node], i: usize, axis: usize, laid: &mut Laid) {
         }
     }
     used += node.gap * count.saturating_sub(1) as f32;
-    // What's left, shared out among the fills, each held at its fit while its share is less, which
-    // shares out the rest again among the others.
+    // Share what's left among the fills; one whose share is below its fit is held at its fit, and
+    // the rest is shared again among the others.
     let mut left = room.size[axis] - used;
     let mut each;
     loop {
@@ -338,7 +340,7 @@ fn line(nodes: &[Node], i: usize, axis: usize, laid: &mut Laid) {
         total += along(child, laid) + nodes[child].margin[axis] * 2.0;
     }
     laid.reach[i] = total;
-    // A list's children start at its top, as it scrolls them.
+    // A list's children start at its top, for scrolling.
     let lead = match node.kind {
         Kind::List => 0.0,
         _ => share(node.align[axis]),

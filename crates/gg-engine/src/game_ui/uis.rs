@@ -21,26 +21,24 @@ use crate::Font;
 use crate::canvas::CANVAS_HEIGHT;
 use crate::font::Fonts;
 
-/// The UIs a context's layers added: each file read once, and each UI, of a file, with what it
-/// holds.
+/// The UIs a context's layers added: each file read once, and each UI with its state.
 #[derive(Default)]
 pub(crate) struct Uis {
     files: Vec<UiFile>,
     /// Each file's index, by the file its path resolves to.
     by_file: HashMap<PathBuf, usize>,
     states: Vec<State>,
-    /// The texture of [`disc`], which rounded corners are cut from, from the first UI added on.
+    /// The texture of [`disc`], which rounded corners are cut from, once a UI is added.
     pub(crate) disc: Option<Texture>,
-    /// How many frames have been handed off, which says whether a UI drew in the last.
+    /// Frames handed off, to tell whether a UI drew in the last.
     pub(super) frames: u64,
-    /// Whether a UI took the event the layer being sent it is handling, as [`GameUi::event`] says,
-    /// which the layer stack reads as the layer handling it.
+    /// Whether a UI took the event ([`GameUi::event`]); the layer stack reads it as the layer
+    /// handling the event.
     pub(super) consumed: bool,
 }
 
-/// A UI's file, as the UIs added from it share it: its name, its asset ID or else its path, as
-/// values name a texture; its path from the asset root, with `/` between its parts; and what it
-/// holds, as last read.
+/// A UI's file, shared by the UIs added from it: its name (asset ID, else path, as for a texture),
+/// its path from the asset root with `/` between parts, and its document as last read.
 #[cfg_attr(
     not(feature = "dev"),
     allow(dead_code, reason = "only development builds reload or list a UI")
@@ -52,10 +50,9 @@ struct UiFile {
 }
 
 impl Uis {
-    /// The file a UI was added from that `asset` names, as a texture is named, if one was: by its
-    /// asset ID, whatever its file has been called since, as by a rename; or else, for one named by
-    /// its path, as one without an ID file is, by `file`, the file its path resolves to, which a
-    /// file named by its ID left behind as it was renamed doesn't name.
+    /// The file a UI was added from that `asset` names, as for a texture, if any. An asset ID
+    /// matches whatever the file was renamed to. A path (a file without an ID file) matches by
+    /// `file`, the file it resolves to, but not a file named by ID that a rename left behind.
     pub(crate) fn file_of(&self, asset: &str, file: Option<&Path>) -> Option<usize> {
         let by_id = crate::assets::is_id(asset).then(|| self.file_named(asset));
         if let Some(found) = by_id.flatten() {
@@ -65,8 +62,8 @@ impl Uis {
         (!crate::assets::is_id(&self.files[found].asset)).then_some(found)
     }
 
-    /// Takes the file at `path`, named `asset`, which reads as `document`, and resolves to `file`,
-    /// if it does; and returns its index.
+    /// Takes the file at `path`, named `asset`, read as `document` and resolving to `file` if it
+    /// does, and returns its index.
     pub(crate) fn add_file(
         &mut self,
         asset: Arc<str>,
@@ -86,8 +83,8 @@ impl Uis {
         index
     }
 
-    /// Adds a UI of file `file`, which its layer named `name`, and hands out its handle: its nodes
-    /// as the file has them, the focus on the node its file names, and taking input.
+    /// Adds a UI of file `file`, which its layer named `name`, with the file's nodes and focus,
+    /// taking input, and hands out its handle.
     pub(crate) fn add(&mut self, file: usize, name: &str) -> GameUi {
         let ui = GameUi(u32::try_from(self.states.len()).expect("fewer than 2^32 UIs"));
         self.states
@@ -107,8 +104,8 @@ impl Uis {
         *self.files[file].document == *document
     }
 
-    /// Has file `file` hold `document`, as it read again, and each UI of it take its nodes, as
-    /// [`State::refit`] says.
+    /// Has file `file` hold `document`, read again, and each UI of it take its nodes
+    /// ([`State::refit`]).
     #[cfg(any(feature = "dev", test))]
     pub(crate) fn reload(&mut self, file: usize, document: Document) {
         let document = Arc::new(document);
@@ -133,8 +130,8 @@ impl Uis {
         self.consumed
     }
 
-    /// Whether the cursor at `cursor`, on a view at `view`, is over what a UI that takes input and
-    /// drew in the last frame draws, as [`GameUi::pointer_over`] says.
+    /// Whether the cursor is over what a UI that takes input and drew in the last frame draws
+    /// ([`GameUi::pointer_over`]).
     pub(crate) fn pointer_over(
         &mut self,
         fonts: &mut Fonts,
@@ -158,8 +155,8 @@ impl Uis {
         self.files.iter().position(|file| *file.asset == *asset)
     }
 
-    /// Has each file named by its asset ID take the path from the asset root that `path_of` gives
-    /// that ID now, as its file renamed or moved has it.
+    /// Has each file named by asset ID take the path `path_of` now gives that ID, after a rename
+    /// or move.
     #[cfg(feature = "dev")]
     pub(crate) fn follow(&mut self, path_of: impl Fn(&str) -> Option<Arc<str>>) {
         for file in &mut self.files {
@@ -169,7 +166,7 @@ impl Uis {
         }
     }
 
-    /// Has each UI that writes in `font`, which baked again, laid out again as it next draws.
+    /// Has each UI that writes in `font`, baked again, lay out again at its next draw.
     #[cfg(feature = "dev")]
     pub(crate) fn font_changed(&mut self, font: Font) {
         for state in &mut self.states {
@@ -180,8 +177,8 @@ impl Uis {
         }
     }
 
-    /// Has each image of `texture` fit `size`, its pixels as it read again, and each UI with one
-    /// laid out again as it next draws.
+    /// Has each image of `texture` fit `size`, its pixels as read again, and each UI with one lay
+    /// out again at its next draw.
     #[cfg(feature = "dev")]
     pub(crate) fn texture_resized(&mut self, texture: Texture, size: Vec2) {
         let shows = |node: &Node| {
@@ -227,8 +224,8 @@ impl Uis {
         }
     }
 
-    /// Each UI, as the tool API's `ui` lists it, laid out for `view`, the view as the last frame
-    /// handed it off, with `fonts`, as [`GameUi::draw`] lays it out.
+    /// Each UI as the tool API's `ui` lists it, laid out for `view` (as the last frame handed it
+    /// off) like [`GameUi::draw`].
     #[cfg(feature = "dev")]
     pub(crate) fn listed(&mut self, fonts: &mut Fonts, view: Option<Viewport>) -> gg_api::UiList {
         let units = units(view);
@@ -244,9 +241,9 @@ impl Uis {
             state.lay_out(fonts, units);
             let file = &files[state.file];
             let nodes = (state.nodes.iter().enumerate()).map(|(i, node)| {
-                // JSON has no number that isn't finite, for a client to read. A file's numbers and
-                // its nodes are bounded so that none comes to one; were one to, the node lists as
-                // nothing at the view's top left rather than breaking the answer.
+                // JSON can't carry a non-finite number. A file's numbers and node count are
+                // bounded so none arises; if one did, the node would list as nothing at the
+                // view's top left rather than break the answer.
                 let finite = |units: f32| if units.is_finite() { units } else { 0.0 };
                 let Rect { at, size } = state.laid.rects[i];
                 let rect = [at.x, at.y, size.x, size.y].map(finite);
