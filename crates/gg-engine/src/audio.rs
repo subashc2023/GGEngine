@@ -1,13 +1,11 @@
-//! Sounds and music: what layers load from audio files. Sounds decode whole as they load; ticks
-//! queue them in the world and layers play them as they update, each panned and faded as the game's
-//! view hears it: by where it shows in a view without perspective, and by its direction and
-//! distance from a camera with perspective. Music decodes as it plays, which layers play one at a
-//! time, looping. What plays follows how the run plays, as the tool API pauses and stops it.
-//! Both mix through volume buses in kira, whose mixer runs on cpal's audio thread, as
-//! ARCHITECTURE.md's Audio says.
+//! Sounds and music that layers load from audio files. Sounds decode whole on load; ticks queue
+//! them and layers play them. Music decodes as it plays, one piece at a time, looping. What plays
+//! follows the run (the tool API pauses and stops it). Both mix through volume buses in kira,
+//! whose mixer runs on cpal's audio thread (ARCHITECTURE.md's Audio).
 //!
-//! The engine pans and fades each play itself, each frame, rather than giving each place a spatial
-//! track of kira's: so a sound starts and follows its entity without a track made or dropped.
+//! The engine pans and fades each play itself, each frame ([`Place`]), instead of giving each
+//! place a kira spatial track: a sound starts and follows its entity without a track made or
+//! dropped.
 
 mod decode;
 
@@ -32,88 +30,83 @@ use crate::{Entity, World};
 
 use decode::Stream;
 
-/// How far toward a side a sound at that edge of the view pans: halfway, so that the other ear
-/// still hears it, as kira pans at constant power, all of it in one ear at a side.
+/// Panning of a sound at a side edge of the view: halfway, so the other ear still hears it (kira
+/// pans at constant power, all in one ear at a side).
 const PAN: f32 = 0.5;
 
-/// How far beyond the view's edges a sound fades out to silence: a view's width or height past
-/// them.
+/// Views' widths or heights beyond the view's edges at which a sound is silent.
 const FADE: f32 = 1.0;
 
-/// How far from a camera with perspective a sound is as loud as it is, and how far it fades to
-/// silence by, in world units, the fade linear in decibels: kira's spatial tracks' defaults
-/// (`SpatialTrackDistances`, with their linear attenuation).
+/// Distances in world units from a camera with perspective: full volume within the first,
+/// silence from the second, linear in decibels between. kira's spatial tracks' defaults
+/// (`SpatialTrackDistances`).
 const HEARD: [f32; 2] = [1.0, 100.0];
 
-/// How far toward a side a sound straight out to that side of a camera with perspective pans: as
-/// far as kira's spatial tracks' default spatialization strength pans one, so that the other ear
-/// still hears it.
+/// Panning of a sound straight out to a side of a camera with perspective: kira's spatial tracks'
+/// default spatialization strength, so the other ear still hears it.
 const SIDE_PAN: f32 = 0.75;
 
-/// The quickest a fade goes: kira's default tween, as a change of volume any quicker clicks.
+/// The quickest fade: kira's default tween, since a quicker volume change clicks.
 const QUICKEST: Duration = Duration::from_millis(10);
 
-/// How long a play of music whose file changed crossfades to what the file holds now, from where it
-/// was.
+/// How long music whose file changed crossfades to the file's new content, from where it was.
 #[cfg(feature = "dev")]
 const RELOAD_FADE: Duration = Duration::from_millis(100);
 
-/// A sound a layer loaded with [`Context::add_sound`], whole in memory, which ticks queue with
-/// [`World::play_sound`] and layers play with [`Context::play_sound`]: as often as they like, many
-/// at once, each from its start. A handle, of the context that loaded it.
+/// A sound loaded with [`Context::add_sound`], whole in memory. Ticks queue it with
+/// [`World::play_sound`], layers play it with [`Context::play_sound`], many at once, each from its
+/// start. A handle of the context that loaded it.
 ///
 /// [`Context::add_sound`]: crate::Context::add_sound
 /// [`Context::play_sound`]: crate::Context::play_sound
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sound(u32);
 
-/// Music a layer loaded with [`Context::add_music`]: its file's bytes, in memory as compressed as
-/// the file is, which a play decodes as it goes, looping. Layers play one at a time, with
-/// [`Context::play_music`]. A handle, of the context that loaded it.
+/// Music loaded with [`Context::add_music`]: its file's bytes, kept compressed, decoded as a play
+/// goes, looping. Layers play one at a time ([`Context::play_music`]). A handle of the context
+/// that loaded it.
 ///
 /// [`Context::add_music`]: crate::Context::add_music
 /// [`Context::play_music`]: crate::Context::play_music
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Music(u32);
 
-/// A bus that what plays mixes through, whose volume layers set with [`Context::set_volume`], as a
-/// game's settings would, or a menu that ducks the music under it.
+/// A bus that what plays mixes through, with a volume layers set ([`Context::set_volume`]).
 ///
 /// [`Context::set_volume`]: crate::Context::set_volume
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Bus {
-    /// All that plays: the music's bus and the sounds'.
+    /// The music's bus and the sounds'.
     Main,
     /// The music.
     Music,
-    /// The sounds: those ticks queue, and those layers play.
+    /// The sounds ticks queue and layers play.
     Sounds,
 }
 
-/// Where a sound plays from, which pans and fades it as the game's view, the listener, hears it.
-/// A view without perspective, as a 2D game's, hears it by where it shows in the view: toward the
-/// side of the view it's on, halfway there at the view's edge, and as loud as it is while it's in
-/// the view, fading out beyond the view's edges to silence a view's width or height past them. A
-/// camera with perspective hears it by its direction and distance, as kira's spatial tracks do:
-/// toward the side it's on, three quarters of the way there straight out to that side, before or
-/// behind; and as loud as it is within a unit of the camera, fading, linearly in decibels, to
-/// silence 100 units away.
+/// Where a sound plays from. The game's view, the listener, pans and fades it.
+///
+/// - A view without perspective (a 2D game's) hears where the sound shows in it: panned toward its
+///   side, halfway at the view's edge; full volume inside the view, fading to silence a view's
+///   width or height past its edges.
+/// - A camera with perspective hears direction and distance, like kira's spatial tracks: panned
+///   toward its side, three quarters of the way straight out to the side, before or behind; full
+///   volume within a unit, fading linearly in decibels to silence 100 units away.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Place {
-    /// Nowhere in the world: in the middle, as loud as it is, wherever the view looks, as a game's
-    /// UI's sounds play.
+    /// Nowhere in the world: centered, full volume wherever the view looks, like a game's UI
+    /// sounds.
     Nowhere,
-    /// At a point in the world, where it stays.
+    /// A point in the world.
     At(DVec3),
-    /// On an entity: where the latest tick left it as each frame is handed off, following it as it
-    /// moves, and once it's despawned, where it was last, until the sound ends. One that's gone as
-    /// the sound is queued or played plays from nowhere. That's up to a tick ahead of where the
-    /// entity draws, too little to hear.
+    /// An entity: where the latest tick left it as each frame is handed off, following it as it
+    /// moves. Once despawned, where it was last, until the sound ends. An entity already gone when
+    /// the sound is queued or played means nowhere. That's up to a tick ahead of where the entity
+    /// draws, too little to hear.
     On(Entity),
 }
 
-/// Where a sound plays from, as the engine follows it: a [`Place`], an entity's with where it was
-/// last.
+/// A [`Place`] as followed: an entity's with where it was last.
 #[derive(Clone, Copy, Debug)]
 enum Spot {
     Nowhere,
@@ -122,7 +115,7 @@ enum Spot {
 }
 
 impl Spot {
-    /// `place` in `world`: where its entity is now, if it's on one, or nowhere if that's gone.
+    /// `place` in `world`: nowhere if its entity is gone.
     fn new(place: Place, world: &World) -> Self {
         match place {
             Place::Nowhere => Self::Nowhere,
@@ -133,8 +126,7 @@ impl Spot {
         }
     }
 
-    /// Where it plays from now, `None` for nowhere: following its entity in `world` while it's
-    /// alive, and once it's gone, where it was last, from then on.
+    /// Where it plays from now, `None` for nowhere. Follows its entity while alive, then stays.
     fn follow(&mut self, world: &World) -> Option<DVec3> {
         match *self {
             Self::Nowhere => None,
@@ -161,27 +153,25 @@ impl Spot {
     }
 }
 
-/// Where `entity` is in `world`, as the latest tick left it, if it's alive.
+/// Where `entity` is in `world`, as the latest tick left it, if alive.
 fn position(world: &World, entity: Entity) -> Option<DVec3> {
-    // Checked first, as a pose of an entity that's gone makes an error, which allocates.
+    // Checked first: a pose of a gone entity makes an error, which allocates.
     let pose = world.contains(entity).then(|| world.pose(entity).ok())??;
     Some(pose.matrix.translation)
 }
 
-/// The sounds a world's ticks queued, which the engine plays once each tick has run, as
-/// [`World::play_sound`] says: a resource, which is empty between ticks, so that no snapshot holds
-/// one, and which no hash, recording or scene reads.
+/// The sounds a world's ticks queued ([`World::play_sound`]). A resource, empty between ticks, so
+/// no snapshot holds one; no hash, recording or scene reads it.
 #[derive(Clone, Default)]
 pub(crate) struct Queue(Vec<(Sound, Spot)>);
 
 impl World {
-    /// Queues `sound` to play from `place` once the tick that queues it has run, in a run that
-    /// plays sound, as [`Context::add_sound`](crate::Context::add_sound) says: what plays follows
-    /// from the world and never feeds it, so the world's hash, a recording and a replay know
-    /// nothing of it, and each lockstep peer plays the sounds its own ticks queue. One on an entity
-    /// follows it from where it is as it's queued, as [`Place::On`] says. A layer plays a sound
-    /// outside its ticks, as its UI's, through [`Context::play_sound`](crate::Context::play_sound).
-    /// Once the world's queue has held as many sounds, it allocates nothing.
+    /// Queues `sound` to play from `place` once the tick has run, in a run that plays sound
+    /// ([`Context::add_sound`](crate::Context::add_sound)). What plays never feeds the world: its
+    /// hash, a recording and a replay know nothing of it, and each lockstep peer plays what its own
+    /// ticks queue. Outside its ticks, a layer plays with
+    /// [`Context::play_sound`](crate::Context::play_sound). Once the queue has held as many sounds,
+    /// it allocates nothing.
     pub fn play_sound(&mut self, sound: Sound, place: Place) {
         let spot = Spot::new(place, self);
         match self.resource_mut::<Queue>() {
@@ -192,9 +182,7 @@ impl World {
         }
     }
 
-    /// The sounds the world's ticks queued since they last played, with where they play from, as
-    /// queued: for tests of a game's ticks, which call them directly, without the engine playing
-    /// what they queue.
+    /// The sounds queued and not yet played: for tests that call a game's ticks directly.
     #[doc(hidden)]
     pub fn sounds_queued(&self) -> impl Iterator<Item = (Sound, Place)> + '_ {
         let queued = self.resource::<Queue>().map_or(&[][..], |queue| &queue.0);
@@ -202,13 +190,16 @@ impl World {
     }
 }
 
-/// A play of music, as kira's handle to it.
 type MusicHandle = StreamingSoundHandle<FromFileError>;
 
-/// How the run plays, which what plays follows: playing; paused, which holds what plays where it
-/// is and starts no sound; or stopped, which stops what plays and starts nothing, the music the
-/// layers last had play starting afresh, from its start, as the run plays again. Only development
-/// builds, whose tool API pauses and stops runs, pause or stop it.
+/// How the run plays, which what plays follows.
+///
+/// - Playing.
+/// - Paused: holds what plays where it is and starts no sound.
+/// - Stopped: stops what plays and starts nothing. The music the layers last had play restarts
+///   from its start when the run plays again.
+///
+/// Only development builds, whose tool API pauses and stops runs, pause or stop it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(
     not(feature = "dev"),
@@ -221,33 +212,26 @@ pub(crate) enum Playback {
     Stopped,
 }
 
-/// The run's sounds and music: those the layers loaded, by their handles, kira's output, which
-/// plays them in a run that plays sound, on cpal's backend but in tests, the sounds playing, and
-/// where those from a place are, which each frame pans and fades as the game's view hears them,
-/// the music playing, the buses' volumes, and how the run plays.
+/// The run's sounds and music, kira's output (cpal's backend, except in tests) and what plays.
 pub(crate) struct Audio<B: Backend = CpalBackend> {
     output: Output<B>,
-    /// Each sound loaded, by its index: its name, and what it holds, which each play shares.
+    /// By index: name and data, which each play shares.
     sounds: Vec<(Box<str>, StaticSoundData)>,
-    /// Each music loaded, by its index: its name, and its file as it was read, which each play
-    /// decodes.
+    /// By index: name and file as read, which each play decodes.
     music: Vec<(Box<str>, Encoded)>,
-    /// The sounds playing, with where from, so that a stop stops them all.
+    /// With where from, so a stop stops them all.
     playing: Vec<(StaticSoundHandle, Spot)>,
-    /// The music layers last had play, if any, with the fade it started with, and its play, while
-    /// the output's open and it started, which it hasn't while the run's stopped.
+    /// The music layers last had play, with its fade and its play, which is `None` while the
+    /// output isn't open or the run is stopped.
     now_playing: Option<(Music, Duration, Option<MusicHandle>)>,
-    /// Each bus's volume as layers last set it, in [`Bus`]'s order, which the output takes as it
-    /// opens.
+    /// As layers last set them, in [`Bus`]'s order; the output takes them as it opens.
     volumes: [f32; 3],
-    /// The view the last frame handed off with one that projects, which hears the sounds; `None`
-    /// before any.
+    /// The latest handed-off view that projects; `None` before any.
     listener: Option<Listener>,
-    /// What a world's queue is swapped with as it's played, so that both keep their memory.
+    /// Swapped with a world's queue as it's played, so both keep their memory.
     queued: Vec<(Sound, Spot)>,
-    /// Whether kira's mixer was full as the last sound started, so that it warns as it fills.
+    /// Whether the mixer was full as the last sound started, so it warns once as it fills.
     full: bool,
-    /// How the run plays, as [`follow`](Self::follow) was last told.
     playback: Playback,
 }
 
@@ -268,10 +252,9 @@ impl<B: Backend> Default for Audio<B> {
     }
 }
 
-/// What hears the sounds, as [`Place`] says, from where it is, in `f64`, which a sound's place is
-/// taken from first, so that what's near is heard as precisely far from the origin as at it: a view
-/// without perspective, by its matrix from there to its clip space; or a camera with perspective,
-/// by its matrix from there to its own space, which looks along its -Z, its right +X.
+/// What hears the sounds ([`Place`]), at an `f64` position that places are taken relative to, so
+/// what's near is as precise far from the origin as at it. `View` holds the matrix to clip space;
+/// `Ears` the matrix to the camera's own space, looking along -Z, right +X.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Listener {
     View(Mat4, DVec3),
@@ -279,8 +262,7 @@ enum Listener {
 }
 
 impl Listener {
-    /// What hears through `viewpoint`, `size` pixels across and down: `None` while it has no area,
-    /// or can't project.
+    /// `None` if `size` has no area or `viewpoint` can't project.
     fn new(viewpoint: &Viewpoint, size: [u32; 2]) -> Option<Self> {
         let [width, height] = size.map(|side| side as f32);
         if !(width > 0.0 && height > 0.0 && viewpoint.projection.projects()) {
@@ -299,19 +281,18 @@ impl Listener {
     }
 }
 
-/// kira's output, which plays a run's sounds and music.
+/// kira's output.
 enum Output<B: Backend> {
-    /// None: the run plays no sound, as headless runs, replays and tests don't, or its output
-    /// couldn't be opened.
+    /// The run plays no sound (headless runs, replays and tests), or the output couldn't open.
     Silent,
-    /// None yet: the run plays sound from its first sound or music loaded, which opens it.
+    /// Not opened yet: the first sound or music loaded opens it.
     Unopened,
     /// Open, its mixer on the backend's audio thread.
     Open(Box<Mixer<B>>),
 }
 
-/// kira's output, open: its manager, and the tracks under its main track that the music and the
-/// sounds play on, the three of them the buses.
+/// An open output: its manager and the music and sounds tracks, which with the main track are the
+/// buses.
 struct Mixer<B: Backend> {
     manager: AudioManager<B>,
     music: TrackHandle,
@@ -319,8 +300,6 @@ struct Mixer<B: Backend> {
 }
 
 impl<B: Backend> Mixer<B> {
-    /// The settings of a manager whose main track, the main bus, is at its volume in `volumes`,
-    /// in [`Bus`]'s order.
     fn settings(volumes: [f32; 3]) -> AudioManagerSettings<B>
     where
         B::Settings: Default,
@@ -331,8 +310,8 @@ impl<B: Backend> Mixer<B> {
         }
     }
 
-    /// The mixer of `manager`, made with [`settings`](Self::settings), with a track under its main
-    /// track for the music and one for the sounds, each bus at its volume in `volumes`.
+    /// `manager` (made with [`settings`](Self::settings)) with the music and sounds tracks added.
+    /// `volumes` are in [`Bus`]'s order.
     fn new(mut manager: AudioManager<B>, volumes: [f32; 3]) -> Self {
         let [_, music, sounds] = volumes.map(decibels);
         let mut track = |volume: Decibels| {
@@ -349,7 +328,7 @@ impl<B: Backend> Mixer<B> {
 }
 
 impl Audio {
-    /// A run's sounds, which play aloud, as a windowed or embedded run's do.
+    /// For a windowed or embedded run, which plays aloud.
     pub(crate) fn aloud() -> Self {
         Self {
             output: Output::Unopened,
@@ -357,21 +336,19 @@ impl Audio {
         }
     }
 
-    /// Opens the output of a run that plays sound, as [`open`] says, if it isn't yet: as the first
-    /// sound or music is added.
+    /// Opens the output ([`open`]) if it isn't yet, as the first sound or music is added.
     pub(crate) fn open(&mut self) {
         if matches!(self.output, Output::Unopened) {
             self.output = open(self.volumes);
         }
     }
 
-    /// Has the sounds playing from a place pan and fade as the view of the frame being handed off
-    /// hears them, seeing from `viewpoint`, `size` pixels across and down, while it has an area,
-    /// following each on an entity of `world` that's alive to where the latest tick left it, as
-    /// [`Place::On`] says; and forgets those that have ended. Warns `audio.output_failed` of what
-    /// went wrong with the output since, which kira opens again on the system's default output
-    /// device, as it does as that changes, and `audio.music_failed` of what went wrong decoding
-    /// the music playing, which stops it. It allocates nothing unless something went wrong.
+    /// Pans and fades the sounds playing from a place as the frame being handed off (`viewpoint`,
+    /// `size` pixels) hears them, following entities in `world`. Forgets sounds that ended.
+    ///
+    /// Warns `audio.output_failed` for output errors since (kira reopens the default device) and
+    /// `audio.music_failed` for music decoding errors, which stop it. Allocates nothing unless
+    /// something went wrong.
     pub(crate) fn hear_from(&mut self, viewpoint: &Viewpoint, size: [u32; 2], world: &World) {
         let Output::Open(mixer) = &mut self.output else {
             return;
@@ -402,7 +379,7 @@ impl Audio {
             }
             if !matches!(spot, Spot::Nowhere) {
                 let (panning, volume) = heard(listener, spot.follow(world));
-                // Over kira's default 10 ms, rather than at once, which would click.
+                // Over kira's default 10 ms: at once would click.
                 handle.set_panning(panning, Tween::default());
                 handle.set_volume(volume, Tween::default());
             }
@@ -412,30 +389,27 @@ impl Audio {
 }
 
 impl<B: Backend> Audio<B> {
-    /// Adds `data`, sound `name`'s.
     pub(crate) fn add(&mut self, name: &str, data: StaticSoundData) -> Sound {
         let index = u32::try_from(self.sounds.len()).expect("fewer than 2³² sounds");
         self.sounds.push((name.into(), data));
         Sound(index)
     }
 
-    /// Adds `encoded`, music `name`'s.
     pub(crate) fn add_music(&mut self, name: &str, encoded: Encoded) -> Music {
         let index = u32::try_from(self.music.len()).expect("fewer than 2³² pieces of music");
         self.music.push((name.into(), encoded));
         Music(index)
     }
 
-    /// Puts `data` in place of what `sound` holds, which its plays take from then on; those playing
-    /// play on as they were.
+    /// Replaces what `sound` holds. Later plays take it; those playing play on unchanged.
     #[cfg(feature = "dev")]
     pub(crate) fn replace(&mut self, sound: Sound, data: StaticSoundData) {
         self.sounds[sound.0 as usize].1 = data;
     }
 
-    /// Puts `encoded` in place of what `music` holds, which its plays take from then on: one
-    /// playing crossfades to it over [`RELOAD_FADE`], from where it was, or as far into its loop;
-    /// while the run's stopped, none plays, and the next play starts it from its start.
+    /// Replaces what `music` holds. Later plays take it; one playing crossfades to it over
+    /// [`RELOAD_FADE`] from where it was, or as far into its loop. While the run's stopped, none
+    /// plays, and the next play starts it from its start.
     #[cfg(feature = "dev")]
     pub(crate) fn replace_music(&mut self, music: Music, encoded: Encoded) {
         self.music[music.0 as usize].1 = encoded;
@@ -455,10 +429,8 @@ impl<B: Backend> Audio<B> {
         self.now_playing = Some((music, fade, handle));
     }
 
-    /// Has what plays follow how the run plays, as `playback` says it now does, as [`Playback`]
-    /// says, at once but for kira's 10 ms against a click: a run paused holds the music and the
-    /// sounds, a run stopped stops them, and a run played after a stop starts the music the layers
-    /// last had play from its start, fading in as it did as they had it play.
+    /// Has what plays follow `playback` ([`Playback`]), within kira's 10 ms. Playing after a stop
+    /// restarts the layers' music from its start, with the fade it had.
     #[cfg_attr(
         not(feature = "dev"),
         allow(dead_code, reason = "only development builds pause and stop")
@@ -482,7 +454,7 @@ impl<B: Backend> Audio<B> {
                 handle.stop(quickest);
             }
         }
-        // Paused, the tracks hold what's on them, and what starts on them, until they resume.
+        // Paused tracks hold what's on them, and what starts on them, until they resume.
         if playback == Playback::Paused {
             mixer.music.pause(quickest);
             mixer.sounds.pause(quickest);
@@ -498,19 +470,17 @@ impl<B: Backend> Audio<B> {
         }
     }
 
-    /// How many frames `sound` holds, at its own rate.
     #[cfg(test)]
     pub(crate) fn frames(&self, sound: Sound) -> usize {
         self.sounds[sound.0 as usize].1.num_frames()
     }
 
-    /// How many frames `music` holds, at its own rate.
     #[cfg(test)]
     pub(crate) fn music_frames(&self, music: Music) -> usize {
         self.music[music.0 as usize].1.frames
     }
 
-    /// Plays `sound` from `place` in `world` now, as [`Context::play_sound`] says.
+    /// Plays `sound` from `place` in `world` now ([`Context::play_sound`]).
     ///
     /// # Panics
     ///
@@ -521,8 +491,8 @@ impl<B: Backend> Audio<B> {
         self.start(sound, Spot::new(place, world), world);
     }
 
-    /// Plays what `world`'s ticks queued since, emptying its queue, as the engine does once each
-    /// tick has run: in a run that plays no sound, it empties the queue alone.
+    /// Plays what `world`'s ticks queued, emptying its queue. In a run that plays no sound, it
+    /// only empties the queue.
     ///
     /// # Panics
     ///
@@ -539,11 +509,9 @@ impl<B: Backend> Audio<B> {
         self.queued = queued;
     }
 
-    /// Plays what `world`'s ticks queued, as [`play_queued`](Self::play_queued) does, as a tick
-    /// that rollback runs again has: but for those of `played`, the sounds the tick's runs before
-    /// played, each once, so that a sound queued again isn't played again; and adds those it plays
-    /// to `played`. Sounds a run before played that this one doesn't queue have played all the
-    /// same.
+    /// Like [`play_queued`](Self::play_queued), for a tick rollback reruns: skips one play per
+    /// sound in `played`, which the tick's earlier runs played, and adds what it plays. Sounds an
+    /// earlier run played that this one doesn't queue have played all the same.
     pub(crate) fn play_queued_again(&mut self, world: &mut World, played: &mut Vec<Sound>) {
         let Some(queue) = world.resource_mut::<Queue>() else {
             return;
@@ -568,10 +536,8 @@ impl<B: Backend> Audio<B> {
         }
     }
 
-    /// Starts `sound` from `spot`, following it in `world`, panned and faded as the listener hears
-    /// it there, if the output's open and the run plays, rather than being paused or stopped: past
-    /// the 128 sounds kira's mixer plays at once, it's left out, warning `audio.full` as the mixer
-    /// fills.
+    /// Starts `sound` from `spot` if the output's open and the run is playing. Past the 128
+    /// sounds kira's mixer plays at once, it's left out, warning `audio.full` as the mixer fills.
     fn start(&mut self, sound: Sound, mut spot: Spot, world: &World) {
         let loaded = self.sounds.len();
         let Some((name, data)) = self.sounds.get(sound.0 as usize) else {
@@ -607,8 +573,8 @@ impl<B: Backend> Audio<B> {
         }
     }
 
-    /// Plays `music`, or none, in place of the music playing, fading over `fade`, as
-    /// [`Context::play_music`] says: while the run's stopped, it starts at the next play.
+    /// Plays `music`, or none, in place of the music playing, fading over `fade`
+    /// ([`Context::play_music`]). While the run's stopped, it starts at the next play.
     ///
     /// # Panics
     ///
@@ -642,14 +608,12 @@ impl<B: Backend> Audio<B> {
         self.now_playing = started;
     }
 
-    /// The music layers last had play, if any.
     pub(crate) fn music_playing(&self) -> Option<Music> {
         self.now_playing.as_ref().map(|&(music, ..)| music)
     }
 
-    /// Starts `music` from `at` seconds into it, or as far into its loop, fading in over `fade`, on
-    /// the music's bus, looping, if the output's open; or, if it can't, warns
-    /// `audio.music_failed`.
+    /// Starts `music` looping on the music's bus from `at` seconds in (or as far into its loop),
+    /// fading in over `fade`, if the output's open. Warns `audio.music_failed` if it can't start.
     fn start_music(&mut self, music: Music, at: f64, fade: Duration) -> Option<MusicHandle> {
         let Output::Open(mixer) = &mut self.output else {
             return None;
@@ -664,7 +628,7 @@ impl<B: Backend> Audio<B> {
             .fade_in_tween(tween(fade));
         match mixer.music.play(data) {
             Ok(handle) => {
-                // Where in it, in seconds, as a reload starts it from where it was.
+                // `at` in seconds: a reload starts from where it was.
                 debug!(music = &**name, at, "Music started");
                 Some(handle)
             }
@@ -680,7 +644,7 @@ impl<B: Backend> Audio<B> {
         }
     }
 
-    /// Has `bus`'s volume go to `volume` over `fade`, as [`Context::set_volume`] says.
+    /// Sets `bus`'s volume to `volume` over `fade` ([`Context::set_volume`]).
     ///
     /// # Panics
     ///
@@ -707,17 +671,14 @@ impl<B: Backend> Audio<B> {
         }
     }
 
-    /// `bus`'s volume, as layers last set it.
     pub(crate) fn volume(&self, bus: Bus) -> f32 {
         self.volumes[bus as usize]
     }
 }
 
-/// Opens kira's output on the system's default output device, its mixer on cpal's audio thread,
-/// with a track under its main track for the music and one for the sounds, each bus at its volume
-/// in `volumes`, in [`Bus`]'s order; or, if it can't, as on a machine without one, warns
-/// `audio.no_output` with why, and the run plays no sound. Opened, it logs `audio.opened`, with how
-/// long that took, at the debug level.
+/// Opens kira's output on the default device, its mixer on cpal's audio thread, each bus at its
+/// volume in `volumes` ([`Bus`]'s order). Logs `audio.opened` (with its duration) at debug level.
+/// If it can't open, warns `audio.no_output` and the run plays no sound.
 fn open(volumes: [f32; 3]) -> Output<CpalBackend> {
     let _zone = gg_core::zone!("open the sound's output");
     let started = std::time::Instant::now();
@@ -741,7 +702,7 @@ fn open(volumes: [f32; 3]) -> Output<CpalBackend> {
     }
 }
 
-/// A tween over `fade`, or over [`QUICKEST`] if that's sooner.
+/// A tween over `fade`, at least [`QUICKEST`].
 fn tween(fade: Duration) -> Tween {
     Tween {
         duration: fade.max(QUICKEST),
@@ -749,8 +710,8 @@ fn tween(fade: Duration) -> Tween {
     }
 }
 
-/// `amplitude` in decibels: 1 as loud as it is, 0.5 half as loud, about -6 dB, down to silence at
-/// 0, or below, where kira's silence, -60 dB, is reached.
+/// `amplitude` in decibels: 1 is 0 dB, 0.5 about -6 dB, floored at kira's silence, -60 dB, which 0
+/// or below is.
 fn decibels(amplitude: f32) -> Decibels {
     if amplitude > 0.0 {
         Decibels((20.0 * log10f(amplitude)).max(Decibels::SILENCE.0))
@@ -759,13 +720,9 @@ fn decibels(amplitude: f32) -> Decibels {
     }
 }
 
-/// How a sound at `at` is heard by `listener`. Through a view without perspective: panned by how
-/// far across the view it shows, [`PAN`] of the way toward a side at its edge, and as loud as it is
-/// inside the view, fading out beyond its edges to silence [`FADE`] views past them. By a camera
-/// with perspective: panned by how far out to a side it is, [`SIDE_PAN`] of the way straight out
-/// to it, and as loud as it is within [`HEARD`]'s nearer distance, fading to silence by its farther
-/// one, linearly in decibels. In the middle and as loud as it is from nowhere, or without a
-/// listener; silent at a point that isn't a number.
+/// How `listener` hears a sound at `at`, by [`Place`]'s rules with [`PAN`], [`FADE`], [`SIDE_PAN`]
+/// and [`HEARD`]. From nowhere, or without a listener: centered, full volume. At a point that
+/// isn't a number: silent.
 fn heard(listener: Option<&Listener>, at: Option<DVec3>) -> (Panning, Decibels) {
     let (Some(listener), Some(at)) = (listener, at) else {
         return (Panning::CENTER, Decibels::IDENTITY);
@@ -778,7 +735,7 @@ fn heard(listener: Option<&Listener>, at: Option<DVec3>) -> (Panning, Decibels) 
             if !(clip.w > 0.0 && x.is_finite() && y.is_finite()) {
                 return silent;
             }
-            // Clip space spans the view from -1 to 1, across and down.
+            // Clip space spans the view from -1 to 1.
             let beyond = (x.abs().max(y.abs()) - 1.0).max(0.0);
             let volume = decibels(1.0 - beyond / (2.0 * FADE));
             (Panning(x.clamp(-1.0, 1.0) * PAN), volume)

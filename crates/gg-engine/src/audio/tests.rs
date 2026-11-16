@@ -25,8 +25,7 @@ pub(crate) fn wav(samples: &[i16]) -> Vec<u8> {
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(36 + data).to_le_bytes());
     bytes.extend_from_slice(b"WAVEfmt ");
-    // The format's length; PCM, of one channel; its frames a second, and its bytes; a frame's
-    // bytes, and a sample's bits.
+    // Format length; PCM, one channel; frames and bytes a second; bytes a frame, bits a sample.
     bytes.extend_from_slice(&16u32.to_le_bytes());
     bytes.extend_from_slice(&[1, 0, 1, 0]);
     bytes.extend_from_slice(&48_000u32.to_le_bytes());
@@ -46,8 +45,8 @@ fn silence(frames: usize) -> StaticSoundData {
     decoded.expect("a WAV decodes")
 }
 
-/// How a 2D game's camera hears a point at `at`: from 10 units above the origin, seeing 10
-/// units from bottom to top of a view twice as wide, 20 across.
+/// How a 2D game's camera hears `at`: 10 units above the origin, seeing 10 units bottom to top of
+/// a view 20 across.
 fn heard_above(at: Vec3) -> (f32, f32) {
     let camera = Viewpoint {
         position: DVec3::Z * 10.0,
@@ -63,7 +62,7 @@ fn heard_above(at: Vec3) -> (f32, f32) {
     (panning.0, volume.0)
 }
 
-/// Whether `(pan, volume)` is `want`'s, to within rounding.
+/// Asserts `(pan, volume)` is `want`'s, to within rounding.
 fn near((pan, volume): (f32, f32), (want_pan, want_volume): (f32, f32)) {
     let close = (pan - want_pan).abs() < 1e-5 && (volume - want_volume).abs() < 1e-3;
     assert!(
@@ -72,10 +71,10 @@ fn near((pan, volume): (f32, f32), (want_pan, want_volume): (f32, f32)) {
     );
 }
 
-/// A sound pans toward the side of a view without perspective it shows on, halfway at its edge
-/// and no further beyond, as loud as it is inside the view, and fades out beyond the view's
-/// edges, across or down, to silence a view past them; from nowhere, or before any view, it's
-/// in the middle, as loud as it is; and at a point that isn't a number, it's silent.
+/// In a view without perspective, a sound pans toward its side, halfway at the edge and no
+/// further beyond; it's full volume inside the view and fades to silence a view past the edges,
+/// across or down. From nowhere or before any view it's centered at full volume; at a point
+/// that isn't a number it's silent.
 #[test]
 fn the_view_pans_and_fades_what_it_hears() {
     near(heard_above(Vec3::ZERO), (0.0, 0.0));
@@ -94,15 +93,13 @@ fn the_view_pans_and_fades_what_it_hears() {
     assert_eq!(heard(Some(&listener), None), middle);
 }
 
-/// A camera with perspective hears a sound by its direction and distance: as loud as it is
-/// within a unit, before or behind, fading linearly in decibels to silence 100 units away and
-/// past; panned three quarters of the way to the side it's straight out to, less as it's more
-/// before or behind, and as much behind as before; turned with the camera; and silent at a
-/// point that isn't a number.
+/// A camera with perspective hears by direction and distance: full volume within a unit, fading
+/// linearly in decibels to silence at 100 units and past. Panning is three quarters of the way
+/// toward the side straight out to it, less as the sound is more before or behind, equal behind
+/// and before, and turns with the camera. A point that isn't a number is silent.
 #[test]
 fn a_camera_with_perspective_hears_by_direction_and_distance() {
-    // At (0, 2, 10), turned a quarter turn to its left, so that it looks along -X, its right
-    // along -Z.
+    // At (0, 2, 10), turned a quarter turn left: it looks along -X, its right along -Z.
     let camera = Viewpoint {
         position: DVec3::new(0.0, 2.0, 10.0),
         rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
@@ -117,20 +114,20 @@ fn a_camera_with_perspective_hears_by_direction_and_distance() {
         (panning.0, volume.0)
     };
     let silence = Decibels::SILENCE.0;
-    // Before it, half a unit, and behind it, as loud as it is, in the middle.
+    // Half a unit before it, and behind it: full volume, centered.
     near(hear(Vec3::new(-0.5, 2.0, 10.0)), (0.0, 0.0));
     near(hear(Vec3::new(1.0, 2.0, 10.0)), (0.0, 0.0));
-    // To its right, 34 units, a third of the way to silence; to its left, 100.
+    // 34 units right, a third of the way to silence; 100 left.
     near(hear(Vec3::new(0.0, 2.0, -24.0)), (SIDE_PAN, silence / 3.0));
     near(hear(Vec3::new(0.0, 2.0, 110.0)), (-SIDE_PAN, silence));
     near(hear(Vec3::new(0.0, 2.0, 500.0)), (-SIDE_PAN, silence));
-    // Half right, before and behind alike: 1/√2 of the way to the side.
+    // Half right, before and behind alike: 1/√2 of the way.
     let half = SIDE_PAN * std::f32::consts::FRAC_1_SQRT_2;
     let fading = |distance: f32| silence * (distance - 1.0) / 99.0;
     let before = hear(Vec3::new(-4.0, 2.0, 6.0));
     near(before, (half, fading(32f32.sqrt())));
     near(hear(Vec3::new(4.0, 2.0, 6.0)), before);
-    // Straight above it: in the middle.
+    // Straight above it: centered.
     near(hear(Vec3::new(0.0, 12.0, 10.0)), (0.0, fading(10.0)));
     let nan = heard(
         Some(&listener),
@@ -139,8 +136,8 @@ fn a_camera_with_perspective_hears_by_direction_and_distance() {
     assert_eq!(nan, (Panning::CENTER, Decibels::SILENCE));
 }
 
-/// 1,000 km from the origin, a view with perspective and one without hear what's near them as
-/// they do at the origin, where `f32` would place each sound to the nearest 6 cm.
+/// 1,000 km from the origin, views with and without perspective hear what's near them as at the
+/// origin, though `f32` would place each sound only to the nearest 6 cm.
 #[test]
 fn far_from_the_origin_what_hears_hears_as_at_it() {
     let far = DVec3::new(1.0e6 + 0.3, -2.0e6, 1.0e6 - 0.3);
@@ -165,8 +162,8 @@ fn far_from_the_origin_what_hears_hears_as_at_it() {
         };
         let listener = |camera| Listener::new(&camera, [160, 90]).expect("it projects");
         let [here, there] = [camera, moved].map(listener);
-        // Apart from the camera by other than whole sixteenths, so that `f32`'s rounding of
-        // each far position wouldn't cancel in their difference.
+        // Not whole sixteenths from the camera, so `f32`'s rounding of each far position
+        // doesn't cancel in their difference.
         for at in [
             DVec3::new(-4.03, 2.0, 6.01),
             DVec3::new(0.27, 2.51, -24.11),
@@ -179,8 +176,8 @@ fn far_from_the_origin_what_hears_hears_as_at_it() {
     }
 }
 
-/// A sound on an entity follows it as it moves, and once it's despawned, plays from where it
-/// was last; one queued on an entity that's gone plays from nowhere.
+/// A sound on an entity follows it, and once it's despawned plays from where it was last. One
+/// queued on a gone entity plays from nowhere.
 #[test]
 fn a_sound_on_an_entity_follows_it_and_plays_out_where_it_was_last() {
     let mut world = World::default();
@@ -200,9 +197,8 @@ fn a_sound_on_an_entity_follows_it_and_plays_out_where_it_was_last() {
     assert_eq!(gone.place(), Place::Nowhere);
 }
 
-/// A world's ticks queue sounds, each with where it plays from, which playing them empties,
-/// though a run that plays no sound plays none of them; the queue and what it's swapped with
-/// keep their memory, so that queuing as many again allocates nothing.
+/// Playing a world's queued sounds empties the queue, even in a run that plays no sound. The
+/// queue and its swap keep their memory, so queuing as many again allocates nothing.
 #[test]
 fn a_worlds_queue_empties_as_its_sounds_play() {
     let mut audio: Audio = Audio::default();
@@ -223,9 +219,8 @@ fn a_worlds_queue_empties_as_its_sounds_play() {
     assert!(queue.0.capacity() >= 2 && audio.queued.capacity() >= 2);
 }
 
-/// A sound decodes to what kira's own decoding of its file does, its frames, its rate, its
-/// settings and its slice alike: the crate's test sounds, of WAV, and Ogg Vorbis, whose first
-/// packet decodes to no frames.
+/// A sound decodes to what kira's own decoding does: frames, rate, settings and slice alike.
+/// Covers the crate's test sounds, WAV and Ogg Vorbis (whose first packet decodes to no frames).
 #[test]
 fn a_sound_decodes_as_kiras_decoding_of_it_does() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audio");
@@ -246,9 +241,9 @@ fn a_sound_decodes_as_kiras_decoding_of_it_does() {
     }
 }
 
-/// A sound that decodes to more frames than a sound holds is refused as it passes them, naming
-/// the sound, which one of as many isn't: a WAV of 2,000 frames, which symphonia reads in
-/// packets of 1,152, so that the second packet passes the most, 1,999.
+/// A sound decoding to more frames than a sound holds is refused, naming it; one of exactly that
+/// many isn't. A WAV of 2,000 frames, which symphonia reads in packets of 1,152, so the second
+/// packet passes the most, 1,999.
 #[test]
 fn a_sound_longer_than_a_sound_holds_is_refused() {
     let path = Path::new("long.wav");
@@ -263,9 +258,8 @@ fn a_sound_longer_than_a_sound_holds_is_refused() {
     assert!(named && message.contains(why), "{message}");
 }
 
-/// Ogg Vorbis that a stream seeks back to the start of, as a loop's end does, decodes as it
-/// did from its start, bit for bit, rather than run on from what it decoded before the seek, a
-/// block out of place.
+/// Ogg Vorbis seeked back to the start, as at a loop's end, decodes bit for bit as it did the
+/// first time, not running on from before the seek a block out of place.
 #[test]
 fn music_decodes_alike_after_seeking_back_as_a_loop_does() {
     let bytes = include_bytes!("../../tests/audio/tone.ogg");
@@ -274,8 +268,8 @@ fn music_decodes_alike_after_seeking_back_as_a_loop_does() {
     let mut passes = Vec::new();
     for _ in 0..2 {
         let start = stream.seek(0).expect("a seek to the start");
-        // A packet may decode to no frames, as Vorbis's first does, so packets are read until
-        // the stream's frames are, as kira reads them.
+        // A packet may decode to no frames (Vorbis's first), so read until the stream's frames
+        // are, as kira does.
         let mut frames = Vec::new();
         for _ in 0..1_000 {
             frames.extend(stream.decode().expect("a packet"));
@@ -290,8 +284,8 @@ fn music_decodes_alike_after_seeking_back_as_a_loop_does() {
     assert!(passes[0] == passes[1], "the second pass decodes otherwise");
 }
 
-/// A codec that decodes as the one it wraps does, counting each packet, but panics at those
-/// past the first, as symphonia's can at a malformed one.
+/// A codec that wraps another and counts packets, but panics past the first, as symphonia's can
+/// on a malformed one.
 struct Panicking(Box<dyn AudioDecoder>, Arc<AtomicU32>);
 
 impl AudioDecoder for Panicking {
@@ -325,9 +319,9 @@ impl AudioDecoder for Panicking {
     }
 }
 
-/// Music whose decoder panics past its first packet, which reading it checked, fails as what
-/// doesn't decode does, on kira's thread, which then stops its play and tells of it, rather than
-/// the panic ending the thread; and from then on fails at once, without decoding again.
+/// Music whose decoder panics past its first packet (which reading checked) fails as a file
+/// that doesn't decode, on kira's thread: the play stops and says so, and the panic doesn't end
+/// the thread. It then fails at once, without decoding again.
 #[test]
 fn music_whose_decoder_panics_as_it_plays_fails() {
     let bytes = include_bytes!("../../tests/audio/tone.ogg");
@@ -346,10 +340,9 @@ fn music_whose_decoder_panics_as_it_plays_fails() {
     assert_eq!(decoded.load(Ordering::Relaxed), 2, "decoded again");
 }
 
-/// The music one layer had play last plays, until another or none: playing it again starts
-/// nothing, so that a layer can say each frame what plays. Each bus starts at its full volume,
-/// keeps what a layer last set it to, a number below 0 silence, and a run that plays no sound
-/// keeps them as well.
+/// The music last played plays until another or none; playing it again starts nothing, so a
+/// layer can say each frame what plays. Each bus starts at full volume and keeps what a layer
+/// last set (below 0 is silence), also in a run that plays no sound.
 #[test]
 fn music_plays_one_at_a_time_and_buses_keep_their_volumes() {
     let mut audio: Audio = Audio::default();
@@ -382,9 +375,8 @@ fn music_plays_one_at_a_time_and_buses_keep_their_volumes() {
     assert_eq!(audio.volume(Bus::Main), 1.0);
 }
 
-/// Audio whose output is kira's mock, which plays only as [`render`] renders it, at 12,800
-/// frames a second, so that each of its renders of 128 frames takes 10 ms, kira's quickest
-/// fade.
+/// Audio on kira's mock output, which plays only as [`render`] renders it, at 12,800 frames a
+/// second: 128 frames take 10 ms, kira's quickest fade.
 fn mocked() -> Audio<MockBackend> {
     let volumes = [1.0; 3];
     let settings = AudioManagerSettings {
@@ -400,8 +392,8 @@ fn mocked() -> Audio<MockBackend> {
     }
 }
 
-/// Renders `audio`'s mock output for 30 ms, as its audio thread would: long enough for what
-/// it was told to take hold, its quickest fades to end and what stopped to go.
+/// Renders `audio`'s mock output for 30 ms, as its audio thread would: long enough for commands
+/// to take hold, quickest fades to end and stopped plays to go.
 fn render(audio: &mut Audio<MockBackend>) {
     let Output::Open(mixer) = &mut audio.output else {
         panic!("a mock output");
@@ -413,8 +405,7 @@ fn render(audio: &mut Audio<MockBackend>) {
     }
 }
 
-/// The plays on the music's track and on the sounds', and whether each track holds them
-/// paused.
+/// Plays on the music's track and the sounds', and whether each track is paused.
 fn tracks(audio: &Audio<MockBackend>) -> [(usize, bool); 2] {
     let Output::Open(mixer) = &audio.output else {
         panic!("a mock output");
@@ -427,10 +418,9 @@ fn tracks(audio: &Audio<MockBackend>) -> [(usize, bool); 2] {
     })
 }
 
-/// What plays follows how the run plays: stopped, nothing starts, though the music the layers
-/// had play is still theirs; played, that music starts, and sounds do; paused, the tracks hold
-/// what plays, and no sound starts; and stopped again, what plays stops, the next play starting
-/// the music again from its start.
+/// What plays follows the run. Stopped, nothing starts, though the layers' music is still theirs.
+/// Playing, that music and sounds start. Paused, the tracks hold what plays and no sound starts.
+/// Stopped again, what plays stops, and the next play restarts the music from its start.
 #[test]
 fn what_plays_follows_the_run_as_it_plays_pauses_and_stops() {
     let mut audio = mocked();
@@ -483,9 +473,8 @@ fn what_plays_follows_the_run_as_it_plays_pauses_and_stops() {
     );
 }
 
-/// A tick that rollback runs again plays only what its runs before didn't: a sound they played,
-/// once for each time, isn't played again, and those it plays besides are added to them; and the
-/// world's queue is emptied either way.
+/// A tick rollback reruns plays only what its earlier runs didn't: each sound they played is
+/// skipped once, and extra plays are added to them. The queue empties either way.
 #[test]
 fn a_tick_run_again_plays_only_the_sounds_its_runs_before_didnt() {
     let scratch = crate::dirs::tests::Scratch::new("sounds-again");
@@ -505,8 +494,8 @@ fn a_tick_run_again_plays_only_the_sounds_its_runs_before_didnt() {
     }
 }
 
-/// A file that's music reads, its frames counted, and one that isn't, holds none, or isn't
-/// there is refused, naming the music and its file.
+/// A music file reads, its frames counted. One that isn't music, holds no audio or is missing is
+/// refused, naming the music and its file.
 #[test]
 fn music_reads_whole_and_refuses_what_isnt_any() {
     let scratch = crate::dirs::tests::Scratch::new("music-read");
