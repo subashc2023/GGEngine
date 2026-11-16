@@ -1,7 +1,6 @@
 //! Assets' ID files, `<file>.meta` beside each texture, model, font, prefab and UI under a game's
-//! asset root: what names an asset beyond its file's name, which a game's development build
-//! writes and reads, as ARCHITECTURE.md's Project state describes; their text, and the scan that
-//! finds them.
+//! asset root, which name an asset beyond its file's name (ARCHITECTURE.md's Project state): their
+//! text, and the scan that finds them.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -24,14 +23,14 @@ use crate::{Failure, UNBUILT};
 pub struct AssetId(NonZeroU64);
 
 impl AssetId {
-    /// An ID drawn at random, from `RandomState`, whose keys std seeds from the OS's randomness, as
-    /// a world's seed is drawn; drawn again until its text holds one of `a`, `b`, `c`, `d` and `f`,
-    /// so that it never reads as a JSON number, whose text may be digits alone and an exponent's
-    /// `e`, as `gg set` reads its value as JSON first.
+    /// An ID drawn at random from `RandomState`, whose keys std seeds from the OS, as a world's
+    /// seed is drawn. It's drawn again until its text holds one of `a`, `b`, `c`, `d` and `f`, so
+    /// that it never reads as a JSON number (digits and an exponent's `e`), as `gg set` reads a
+    /// value as JSON first.
     pub fn draw() -> Self {
         loop {
-            // std steps its hashers' keys for each `RandomState`, so that each draw gets others.
-            // About one draw in 400, (11/16)^16, has none of the letters.
+            // std steps its hashers' keys for each `RandomState`, so each draw differs. About one
+            // draw in 400, (11/16)^16, has none of the letters.
             let drawn = NonZeroU64::new(RandomState::new().hash_one(())).map(Self);
             if let Some(id) = drawn
                 && id.to_string().contains(['a', 'b', 'c', 'd', 'f'])
@@ -41,7 +40,6 @@ impl AssetId {
         }
     }
 
-    /// The number it is.
     pub fn get(self) -> u64 {
         self.0.get()
     }
@@ -59,7 +57,7 @@ impl fmt::Debug for AssetId {
     }
 }
 
-/// Exactly as `Display` writes one, so that each ID has one text: 16 lowercase hex digits, not all
+/// Exactly as `Display` writes one, so each ID has one text: 16 lowercase hex digits, not all
 /// zero, digits alone too.
 ///
 /// Fails with `asset.bad_id` for any other text.
@@ -86,25 +84,24 @@ impl FromStr for AssetId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AssetKind {
-    /// A PNG, a JPEG or a Radiance HDR, `.png`, `.jpg`, `.jpeg` or `.hdr`, as
-    /// `Context::add_texture` loads.
+    /// `.png`, `.jpg`, `.jpeg` or `.hdr`, as `Context::add_texture` loads.
     Texture,
-    /// A glTF, `.gltf` or `.glb`, as `Context::add_model` loads.
+    /// glTF, `.gltf` or `.glb`, as `Context::add_model` loads.
     Model,
-    /// A TrueType or OpenType font, `.ttf` or `.otf`, as `Context::add_font` loads.
+    /// TrueType or OpenType, `.ttf` or `.otf`, as `Context::add_font` loads.
     Font,
-    /// A prefab, `.prefab`, a scene of one subtree, as `Context::add_prefab` loads.
+    /// `.prefab`, a scene of one subtree, as `Context::add_prefab` loads.
     Prefab,
-    /// A game's UI, `.ui`, a tree of named nodes, as `Context::add_ui` loads.
+    /// `.ui`, a tree of named nodes, as `Context::add_ui` loads.
     Ui,
 }
 
-/// The kinds, by the names the API gives them, as `assets`' `kind` takes them.
+/// The kinds by their API names, as `assets`' `kind` takes them.
 pub const KINDS: [&str; 5] = ["texture", "model", "font", "prefab", "ui"];
 
 impl AssetKind {
-    /// The kind of the file at `path`, by its extension, whatever its case; `None` for any other
-    /// file, a shader, a scene and an ID file among them.
+    /// The kind of the file at `path`, by its extension, whatever its case; `None` for any other,
+    /// as a shader, a scene or an ID file.
     pub fn of(path: &Path) -> Option<Self> {
         let extension = path.extension()?.to_str()?.to_ascii_lowercase();
         match extension.as_str() {
@@ -118,13 +115,12 @@ impl AssetKind {
     }
 }
 
-/// An asset's ID file, `<file>.meta` beside it, as it reads: canonical RON, a part to a line, which
-/// [`text`](Self::text) writes, as `(`, `    id: "5f3c9a1e07b2d846",`, `)`. `id` is required; a
-/// part added later, as import settings will be, takes its default where a file leaves it out; a
-/// part it hasn't is refused.
+/// An asset's ID file, `<file>.meta` beside it: canonical RON, a part to a line, as
+/// [`text`](Self::text) writes it: `(`, `    id: "5f3c9a1e07b2d846",`, `)`. `id` is required; a
+/// part added later, as import settings will be, takes its default where a file leaves it out; an
+/// unknown part is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meta {
-    /// Its asset's ID.
     pub id: AssetId,
 }
 
@@ -137,15 +133,14 @@ impl Meta {
         asset.with_added_extension(Self::EXTENSION)
     }
 
-    /// Reads an ID file's text, past a byte-order mark if it starts with one, as some Windows
-    /// editors write.
+    /// Reads an ID file's text, past a byte-order mark, as some Windows editors write.
     ///
-    /// Fails with `asset.bad_meta`, beginning with the line and column where ron stopped for text
-    /// that isn't an ID file's, as one with a part it hasn't or without `id`, or naming `id` for
-    /// one that isn't an ID.
+    /// Fails with `asset.bad_meta`: starting with the line and column where ron stopped, for text
+    /// that isn't an ID file's, as one with an unknown part or no `id`; or naming `id` for one
+    /// that isn't an ID.
     pub fn parse(text: &str) -> Result<Self, Failure> {
-        /// An ID file's parts as ron reads them, before its ID is checked: named as the type it
-        /// reads, which ron's messages name.
+        /// An ID file's parts before its ID is checked, named as the type it reads, which ron's
+        /// messages name.
         #[derive(Deserialize)]
         #[serde(rename = "Meta", deny_unknown_fields)]
         struct Read {
@@ -166,8 +161,8 @@ impl Meta {
 
     /// Reads the ID file at `path`, as [`parse`](Self::parse) does.
     ///
-    /// Fails with `asset.bad_meta` if it can't be read, or as `parse` does; the message says why
-    /// without naming the file, which its caller names by its path from the asset root.
+    /// Fails with `asset.bad_meta` if it can't be read, or as `parse` does. The message doesn't
+    /// name the file, which its caller names by its path from the asset root.
     pub fn read(path: &Path) -> Result<Self, Failure> {
         let text = fs::read_to_string(path).map_err(|error| {
             Failure::new("asset.bad_meta", format!("it can't be read: {error}"))
@@ -175,34 +170,34 @@ impl Meta {
         Self::parse(&text)
     }
 
-    /// Its canonical text, a part to a line, four spaces to a level, a comma after each part, its
-    /// lines ending in `\n`, without a byte-order mark, which reads back as it is.
+    /// Its canonical text, which reads back as it is: a part to a line, four spaces to a level, a
+    /// comma after each part, lines ending in `\n`, no byte-order mark.
     pub fn text(&self) -> String {
         format!("(\n    id: \"{}\",\n)\n", self.id)
     }
 }
 
-/// When a file last changed and its length, as its folder's listing gives them, which show that it
+/// When a file last changed and its length, as its folder's listing gives them, to tell that it
 /// changed.
 pub type Stamp = (SystemTime, u64);
 
-/// What [`scan`] found under an asset root: equal to another scan's while nothing it lists changed
-/// between them.
+/// What [`scan`] found under an asset root, each list in path order: equal to another scan's while
+/// nothing it lists changed between them.
 #[derive(Debug, Default, PartialEq)]
 pub struct Scan {
-    /// The textures, models, fonts, prefabs and UIs, in the order of their paths.
+    /// The textures, models, fonts, prefabs and UIs.
     pub assets: Vec<Scanned>,
-    /// The ID files whose assets aren't there, in the order of their paths.
+    /// The ID files whose assets aren't there.
     pub orphans: Vec<Orphan>,
-    /// What the scan couldn't take, in the order of their paths.
+    /// What the scan couldn't take.
     pub unread: Vec<Unread>,
 }
 
-/// A texture or a model [`scan`] found: its path from the root, with `/` between its parts, such as
-/// `assets/stone.png`; the file, as the scan reached it; its stamp, `None` if its listing gave
-/// none; its kind; and its ID file: `None` if there's none, or what it holds, or why it doesn't:
-/// `asset.bad_meta` for one that doesn't read or isn't a regular file, `asset.meta_case` for one
-/// whose name matches only when case is ignored, whose path from the root `misnamed` gives.
+/// An asset [`scan`] found: its path from the root, `/` between parts, such as `assets/stone.png`;
+/// the file, as the scan reached it; its stamp, `None` if its listing gave none; its kind; and its
+/// ID file: `None` if there's none, or what it holds, or why it doesn't. That's `asset.bad_meta`
+/// for one that doesn't read or isn't a regular file, and `asset.meta_case` for one whose name
+/// matches only ignoring case, whose path from the root `misnamed` gives.
 #[derive(Debug, PartialEq)]
 pub struct Scanned {
     pub path: String,
@@ -213,10 +208,9 @@ pub struct Scanned {
     pub misnamed: Option<String>,
 }
 
-/// An ID file whose asset isn't there, as a regular file of its name, though a link or a folder,
-/// which the scan doesn't take, may be: its own path from the root, such as
-/// `assets/gone.png.meta`; the file, as the scan reached it; the kind of the asset it names; and
-/// what it holds, or why it doesn't read.
+/// An ID file whose asset isn't there as a regular file, though a link or a folder of its name,
+/// which the scan doesn't take, may be: its path from the root, such as `assets/gone.png.meta`; the
+/// file, as the scan reached it; its asset's kind; and what it holds, or why it doesn't read.
 #[derive(Debug, PartialEq)]
 pub struct Orphan {
     pub path: String,
@@ -225,22 +219,19 @@ pub struct Orphan {
     pub meta: Result<Meta, Failure>,
 }
 
-/// What the scan couldn't take: a folder it couldn't list, `.` for the root itself, or an entry
-/// whose name isn't Unicode, or whose type it couldn't tell, which it skips; its path from the
-/// root, and why.
+/// What the scan couldn't take, by its path from the root, and why: a folder it couldn't list, `.`
+/// for the root, or an entry it skips, whose name isn't Unicode or whose type it couldn't tell.
 #[derive(Debug, PartialEq)]
 pub struct Unread {
     pub path: String,
     pub error: String,
 }
 
-/// Scans the asset root `root` for textures, models, fonts, prefabs and UIs and their ID files:
-/// every folder under it but those whose names start with `.`, those named `target`, and at its top
-/// level [`UNBUILT`]'s, which a package's root holds; never through a link, to a folder or to a
-/// file; each asset's ID file by its exact name.
-///
-/// Matching by exact name, rather than asking the file system for the file, gives the same answer
-/// on Windows' and macOS's file systems, which ignore case, as on Linux's.
+/// Scans the asset root `root` for textures, models, fonts, prefabs and UIs and their ID files, in
+/// every folder under it but those starting `.`, those named `target`, and at its top
+/// [`UNBUILT`]'s, which a package's root holds. It never goes through a link, and finds each ID
+/// file by its exact name: asking the file system instead would answer otherwise on Windows' and
+/// macOS's, which ignore case, than on Linux's.
 pub fn scan(root: &Path) -> Scan {
     let mut scan = Scan::default();
     // Each folder still to scan, and its path from the root, `""` for the root itself.
@@ -249,7 +240,7 @@ pub fn scan(root: &Path) -> Scan {
         let Some(entries) = entries(&dir, &at, &mut scan.unread) else {
             continue;
         };
-        // Each ID file, its extension in any case, by its name in lowercase, but those named exactly
+        // Each ID file, its extension in any case, by its lowercase name, but those named exactly
         // for an entry beside them: an asset without its own finds one named for it but for case.
         let mut misnamed = HashMap::new();
         for name in entries.keys() {
@@ -294,8 +285,8 @@ pub fn scan(root: &Path) -> Scan {
             });
         }
         for (name, &entry) in &entries {
-            // As an asset is a regular file alone, an ID file beside a link or a folder of its
-            // asset's name is left without one.
+            // An asset is a regular file, so an ID file beside a link or a folder of its asset's
+            // name is an orphan.
             let orphan = stem(name).filter(|&of| {
                 matches!(entry, Entry::File(_))
                     && !matches!(entries.get(of), Some(Entry::File(_)))
@@ -325,7 +316,7 @@ pub fn scan(root: &Path) -> Scan {
     scan
 }
 
-/// A regular file [`files`] found: its path from the root, with `/` between its parts, such as
+/// A regular file [`files`] found: its path from the root, `/` between parts, such as
 /// `sounds/dash.wav`, and the file, as the walk reached it.
 #[derive(Debug, PartialEq)]
 pub struct Found {
@@ -334,8 +325,8 @@ pub struct Found {
 }
 
 /// Every regular file under the asset root `root`, through the folders [`scan`] goes through, in
-/// the order of their paths, and what the walk couldn't take, as `scan` gives it: what a game's
-/// package is cooked from, as `tools/cook` picks from them.
+/// path order, and what the walk couldn't take, as `scan` gives it: what `tools/cook` picks a
+/// game's package from.
 pub fn files(root: &Path) -> (Vec<Found>, Vec<Unread>) {
     let (mut found, mut unread) = (Vec::new(), Vec::new());
     let mut folders = vec![(root.to_owned(), String::new())];
@@ -361,11 +352,10 @@ pub fn files(root: &Path) -> (Vec<Found>, Vec<Unread>) {
     (found, unread)
 }
 
-/// Whether [`scan`] and [`files`] reach the file at `path` from the asset root, with `/` between
-/// its parts, as far as the names on the way say: none hidden, and no folder one they skip, as
-/// built rather than an asset's; so that a game writing an asset there finds it in the next scan,
-/// and its package holds it. A link on the way, which they never go through, is the caller's to
-/// look for, as a path the disk resolved has none.
+/// Whether [`scan`] and [`files`] reach the file at `path` from the asset root, by the names on the
+/// way: none hidden, and no folder they skip as built, so that an asset a game writes there is in
+/// the next scan and its package. A link on the way, which they never go through, is the caller's
+/// to look for, as a path the disk resolved has none.
 pub fn reached(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
     let (_, folders) = parts.split_last().expect("a split gives a part at least");
@@ -373,37 +363,34 @@ pub fn reached(path: &str) -> bool {
         && !(folders.iter().enumerate()).any(|(at, name)| unbuilt(&parts[..at].join("/"), name))
 }
 
-/// Whether the folder `name`, of the folder at `at` from the root, `""` for the root itself, is
-/// one a scan skips, as built rather than an asset's: every `target`, and at the top [`UNBUILT`]'s.
+/// Whether the folder `name` in the folder at `at` from the root, `""` for the root, is one a scan
+/// skips as built: every `target`, and at the top [`UNBUILT`]'s.
 fn unbuilt(at: &str, name: &str) -> bool {
     name == "target" || (at.is_empty() && UNBUILT.contains(&name))
 }
 
-/// Whether an entry named `name` is hidden, which a scan skips, folder or file: its name starts
-/// with `.`.
+/// Whether an entry, folder or file, is hidden, which a scan skips: its name starts with `.`.
 fn hidden(name: &[u8]) -> bool {
     name.starts_with(b".")
 }
 
-/// What an entry of a folder is, as its listing tells without following links.
+/// What a folder's entry is, as its listing tells without following links.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Entry {
-    /// A regular file, with its stamp, `None` if the listing gave none.
+    /// With its stamp, `None` if the listing gave none.
     File(Option<Stamp>),
     Folder,
-    /// A link, to a folder or to a file, which the scan never goes through: on Windows, a junction
-    /// too.
+    /// To a folder or a file, which the scan never goes through; on Windows, a junction too.
     Link,
     /// Anything else, such as a FIFO or a device, which the scan never opens.
     Other,
 }
 
-/// The entries of folder `dir`, at `at` from the root, `""` for the root itself, by their names, but
-/// those whose names start with `.`; or `None` if it can't be listed. Each entry the scan can't
-/// take, and the folder if it can't be listed, is added to `unread`.
+/// The entries of folder `dir`, at `at` from the root, `""` for the root, by name, but those
+/// starting `.`; `None` if it can't be listed. Each entry the scan can't take, and the folder if it
+/// can't be listed, goes in `unread`.
 fn entries(dir: &Path, at: &str, unread: &mut Vec<Unread>) -> Option<BTreeMap<String, Entry>> {
-    // A listing cut short may leave out an asset's ID file, so a folder is taken whole or not at
-    // all.
+    // A listing cut short may leave out an asset's ID file, so a folder is taken whole or not.
     let listed = fs::read_dir(dir).and_then(|listing| listing.collect::<io::Result<Vec<_>>>());
     let listed = match listed {
         Ok(listed) => listed,
@@ -453,8 +440,8 @@ fn entries(dir: &Path, at: &str, unread: &mut Vec<Unread>) -> Option<BTreeMap<St
     Some(entries)
 }
 
-/// The name of the file whose ID file `name` would be, by its extension, `.meta` whatever its
-/// case: `name` without it; `None` for a name that doesn't end so.
+/// The name of the file whose ID file `name` would be: `name` without its `.meta`, in any case;
+/// `None` for a name that doesn't end so.
 fn stem(name: &str) -> Option<&str> {
     let path = Path::new(name);
     let meta =
@@ -462,8 +449,8 @@ fn stem(name: &str) -> Option<&str> {
     path.file_stem().and_then(OsStr::to_str).filter(|_| meta)
 }
 
-/// The path from the root of entry `name` of the folder at `at` from it, `""` for the root itself:
-/// `/` between its parts.
+/// The path from the root of entry `name` in the folder at `at`, `""` for the root, `/` between
+/// parts.
 fn join(at: &str, name: &str) -> String {
     if at.is_empty() {
         name.to_owned()
@@ -601,10 +588,9 @@ mod tests {
         }
     }
 
-    /// A scan lists each texture, model and font with what its ID file holds, or why it doesn't,
-    /// and the ID files left without their assets; but nothing in hidden folders, in `target`s, or
-    /// in a package's own tests, benches and examples, and never through a link: as `reached` says
-    /// of a path by its names.
+    /// A scan lists each asset with what its ID file holds, or why it doesn't, and the ID files
+    /// left without their assets; but nothing in hidden folders, `target`s, or a package's own
+    /// tests, benches and examples, and never through a link, as `reached` says by a path's names.
     #[test]
     fn a_scan_lists_assets_with_their_id_files_and_skips_what_it_should() {
         let root = std::env::temp_dir().join(format!("gg-api-scan-{}", std::process::id()));

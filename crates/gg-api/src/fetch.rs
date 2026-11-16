@@ -1,7 +1,7 @@
 //! A project's fetch list, `fetch.ron` beside its manifest: the files its game uses that its
-//! repository doesn't hold, as models whose licenses keep them out of it, each from a folder at a
-//! URL pinned to what it holds, as a repository's at a commit, and checked against its SHA-256,
-//! into a folder of the project the repository ignores, as `gg fetch` fetches them.
+//! repository doesn't hold, as models whose licenses keep them out. `gg fetch` fetches each from a
+//! folder at a URL pinned to what it holds, as a repository's at a commit, checks its SHA-256, and
+//! puts it in a project folder the repository ignores.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -13,8 +13,8 @@ use crate::Failure;
 use crate::asset::{AssetId, AssetKind};
 use crate::project::{is_relative, under};
 
-/// A project's fetch list, as its file gives it: a list of [`Source`]s, each fetched from one
-/// folder into one, its files in the order of their paths.
+/// A project's fetch list: [`Source`]s, each fetched from one folder into one, its files in path
+/// order.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(transparent)]
 pub struct Fetch(pub Vec<Source>);
@@ -23,18 +23,18 @@ pub struct Fetch(pub Vec<Source>);
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
-    /// The folder's URL, `https://`, without a `/` at its end: pinned to what it holds, as a
+    /// The folder's `https://` URL, without a `/` at its end, pinned to what it holds, as a
     /// repository's files are at a commit, so that its files never change.
     pub from: String,
-    /// The folder of the project they go into, from the list's directory, `/` between its parts,
-    /// which the repository should ignore.
+    /// The project folder they go into, from the list's directory, `/` between parts, which the
+    /// repository should ignore.
     pub into: String,
-    /// Each file's path from `from` and from `into` alike, `/` between its parts, and its SHA-256,
-    /// in lowercase hex.
+    /// Each file's path from `from` and `into` alike, `/` between parts, and its SHA-256 in
+    /// lowercase hex.
     pub files: BTreeMap<String, String>,
-    /// The asset ID of each texture, model or font of `files` that a scene names by its ID, by its
-    /// path as `files` has it, which `gg fetch` writes in its ID file, so that every checkout gives
-    /// it the ID the scene names; none by default.
+    /// The asset ID of each asset of `files` a scene names by ID, by its path in `files`. `gg
+    /// fetch` writes it in the asset's ID file, so that every checkout gives it the ID the scene
+    /// names. None by default.
     #[serde(default)]
     pub ids: BTreeMap<String, String>,
 }
@@ -42,13 +42,12 @@ pub struct Source {
 /// A file a fetch list names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct File<'a> {
-    /// Where it's fetched from.
     pub url: String,
-    /// Its path from the list's directory, `/` between its parts.
+    /// Its path from the list's directory, `/` between parts.
     pub path: String,
-    /// Its SHA-256, in lowercase hex.
+    /// In lowercase hex.
     pub sha256: &'a str,
-    /// The asset ID the list gives it, if it does.
+    /// The asset ID the list gives it, if any.
     pub id: Option<AssetId>,
 }
 
@@ -65,9 +64,8 @@ impl Fetch {
 
     /// Reads a list's text, and checks it as [`check`](Self::check) does.
     ///
-    /// Fails with `fetch.bad`, beginning with the line and column where ron stopped, for text that
-    /// isn't a fetch list's, as one with a field it hasn't or without one it has; and as `check`
-    /// does.
+    /// Fails with `fetch.bad`, starting with the line and column where ron stopped, for text that
+    /// isn't a fetch list's, as one with an unknown field or missing one; and as `check` does.
     pub fn parse(text: &str) -> Result<Self, Failure> {
         let fetch: Self = ron::from_str(text).map_err(|error| {
             let at = error.span.end;
@@ -81,7 +79,7 @@ impl Fetch {
     /// Reads the list in directory `dir`, as [`parse`](Self::parse) does.
     ///
     /// Fails with `fetch.read` if the file can't be read, naming its path, and as `parse` does,
-    /// the path beginning its message.
+    /// the path starting its message.
     pub fn read(dir: &Path) -> Result<Self, Failure> {
         let path = dir.join(Self::FILE);
         let text = fs::read_to_string(&path).map_err(|error| {
@@ -94,13 +92,15 @@ impl Fetch {
         })
     }
 
-    /// Checks the list: each source's `from` an `https://` URL of printable ASCII, without
-    /// spaces, `"`, `\` or a `/` at its end; its `into` and its files' paths relative, their parts
-    /// named, neither `.` nor `..`, with `/` between them, without `\`, `:` or a control character,
-    /// so that they stay inside the project's directory on every OS; each file's SHA-256 64
-    /// lowercase hex digits; no file's path into the project twice; and each of `ids` an asset ID,
-    /// as gg-api's [`AssetId`] reads one, of a texture, a model, a font, a prefab or a UI of
-    /// `files`, no two the same.
+    /// Checks the list:
+    ///
+    /// - each source's `from`, an `https://` URL of printable ASCII, without spaces, `"`, `\` or a
+    ///   `/` at its end;
+    /// - its `into` and its files' paths relative, their parts named, neither `.` nor `..`, `/`
+    ///   between them, without `\`, `:` or a control character, so that they stay inside the
+    ///   project's directory on every OS;
+    /// - each file's SHA-256, 64 lowercase hex digits; no path into the project twice;
+    /// - each of `ids`, an [`AssetId`] of an asset of `files`, no two the same.
     ///
     /// Fails with `fetch.bad`, naming what's wrong.
     pub fn check(&self) -> Result<(), Failure> {
@@ -162,7 +162,7 @@ impl Fetch {
         Ok(())
     }
 
-    /// The files the list names, source by source, each's in the order of their paths.
+    /// The files the list names, source by source, each's in path order.
     pub fn files(&self) -> impl Iterator<Item = File<'_>> {
         self.0.iter().flat_map(|source| {
             (source.files.iter()).map(|(name, sha256)| File {

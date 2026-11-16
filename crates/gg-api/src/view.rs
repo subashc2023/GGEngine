@@ -1,15 +1,14 @@
-//! A game's view as it renders, shared with a client: memory the client makes and names in a `view`
-//! request, which the game writes each frame's view into and the client reads them from, without
-//! either waiting for the other. The memory holds three slots of pixels, a triple buffer: the one
-//! the game writes, the one the client reads, and the latest the game published, which the game
-//! swaps its own for as it publishes and the client swaps its own for as it takes it, each swap a
-//! single atomic exchange, so that neither ever reads or writes a slot the other has. A header
-//! before them holds what both read: the size the client asks frames to be, how many the game has
-//! published and the client taken, and each slot's frame.
+//! A game's view as it renders, shared with a client: memory the client makes and names in a
+//! `view` request, which the game writes each frame into and the client reads from, neither
+//! waiting for the other. It holds a triple buffer of pixels: the slot the game writes, the one the
+//! client reads, and the latest published. The game swaps its slot for the latest as it publishes,
+//! and the client its own as it takes, each by one atomic exchange, so that neither touches a slot
+//! the other has. A header before them holds what both read: the size the client asks for, the
+//! frames published and taken, and each slot's frame.
 //!
-//! The memory is the OS's: on Windows, a named file mapping backed by the paging file, which goes
-//! with its last handle; elsewhere, a POSIX shared memory object, whose name the client removes
-//! once the game has opened it, so that the memory goes with the last of the two to end.
+//! On Windows the memory is a named file mapping backed by the paging file, which goes with its
+//! last handle. Elsewhere it's a POSIX shared memory object, whose name the client removes once the
+//! game has opened it, so that it goes with the last of the two to end.
 
 use std::io;
 use std::ptr::NonNull;
@@ -28,7 +27,7 @@ const MAGIC: u64 = u64::from_le_bytes(*b"ggview\0\x03");
 /// Where the slots begin, a page in, past the header.
 const SLOTS_AT: usize = 4096;
 
-/// The slots: the one the game writes, the one the client reads, and the latest between them.
+/// The triple buffer's slots.
 const SLOTS: u64 = 3;
 
 /// Set in [`Header::latest`] from the game's publishing a slot until the client takes it.
@@ -60,8 +59,8 @@ struct Header {
     /// Each slot's frame, as [`Frame`] gives it: the game's, written before it publishes the slot.
     slots: [Slot; SLOTS as usize],
     /// 1 while the game's layers want the cursor grabbed, for mouse look, else 0: the game's. Last,
-    /// so that a client or a game of an engine from before it, which reads none, lays the rest out
-    /// alike, and reads it as 0, as the memory starts zeroed.
+    /// so that an older engine's end, which knows none, lays out the rest alike; zeroed memory
+    /// reads as 0.
     grab: AtomicU64,
 }
 
@@ -79,21 +78,21 @@ struct Slot {
 
 const _: () = assert!(size_of::<Header>() <= SLOTS_AT);
 
-/// A frame of the view in the memory: what the game published of it, beside its pixels, rows of
-/// RGBA8, sRGB-encoded and tightly packed, the top row first.
+/// A frame of the view in the memory: what the game published of it beside its pixels, rows of
+/// RGBA8, sRGB-encoded and tightly packed, top row first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
     /// Its width and height in pixels.
     pub size: [u32; 2],
-    /// Its number among the frames the game has published to the memory, from 1.
+    /// Its number among the frames published, from 1.
     pub number: u64,
-    /// The ticks the simulation had run in the frame that rendered it.
+    /// The ticks run in the frame that rendered it.
     pub ticks: u64,
     /// When the frame that rendered it started, and when the game published it, in nanoseconds
     /// since the Unix epoch, by the machine's clock, which both processes read alike.
     pub started: u64,
     pub published: u64,
-    /// The viewpoint the frame that rendered it drew the view from, the look's or the game's own.
+    /// What the rendering frame drew from, the look's viewpoint or the game's own.
     pub viewpoint: Viewpoint,
     /// The revision of the look it drew with, as [`Looked::revision`](crate::Looked::revision)
     /// counts them.
@@ -107,7 +106,7 @@ impl Frame {
     }
 }
 
-/// The client's end: the memory, which it makes, and the frames it takes from it.
+/// The client's end, which makes the memory and takes frames from it.
 pub struct Reader {
     memory: Memory,
     /// The slot it reads.
@@ -117,8 +116,8 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Makes memory for frames of up to `width` by `height` pixels, asking for frames that size,
-    /// and names it, as [`name`](Self::name) gives, for a `view` request.
+    /// Makes memory for frames of up to `width` by `height` pixels, asking for that size, named
+    /// for a `view` request by [`name`](Self::name).
     ///
     /// Fails with `InvalidInput` for a side of 0 or past [`MAX_SIDE`], and as the OS does if it
     /// can't make the memory.
@@ -150,15 +149,15 @@ impl Reader {
         &self.memory.name
     }
 
-    /// Removes the memory's name, once the game has opened it, so that the memory goes with the
-    /// last of the two to end, even if the client never drops this: elsewhere than on Windows,
-    /// where it goes with its last handle anyway. It's removed as this drops, if not before.
+    /// Removes the memory's name once the game has opened it, so that the memory goes with the last
+    /// of the two to end even if this never drops; else it's removed as this drops. Nothing on
+    /// Windows, where the memory goes with its last handle.
     pub fn unlink(&mut self) {
         self.memory.unlink();
     }
 
-    /// Asks the game for frames of `size`, from its next; returns whether they fit in the memory,
-    /// as they must, or it asks for nothing new.
+    /// Asks the game for frames of `size`, from its next, if they fit in the memory; returns
+    /// whether they do.
     pub fn ask(&self, size: [u32; 2]) -> bool {
         let fits = fits_sides(size) && bytes(size) <= self.memory.capacity;
         if fits {
@@ -173,11 +172,10 @@ impl Reader {
         unpack(self.memory.header().asked.load(Ordering::Relaxed))
     }
 
-    /// Takes the latest frame the game has published, if it's published one since the last taken,
-    /// in place of that one, which [`read`](Self::read) then reads: `None` if it hasn't, or if what
-    /// it published doesn't hold together, as a game that wrote over the header wouldn't: a frame
-    /// that doesn't fit in the memory, or whose viewpoint has a kind of projection there's none of
-    /// or a number that isn't finite, as a game's camera at no finite place would give too.
+    /// Takes the latest frame published since the last taken, in its place, for
+    /// [`read`](Self::read). `None` if there's none, or if it doesn't hold together, as from a game
+    /// that wrote over the header: a frame that doesn't fit, or whose viewpoint has an unknown
+    /// projection or a number that isn't finite, as a camera at no finite place gives too.
     ///
     /// An embedded game may start its next frame as soon as this takes the last, so a client sends
     /// what that frame draws with, its `look` and `input`, before it takes; else the frame draws
@@ -219,12 +217,12 @@ impl Reader {
         self.frame
     }
 
-    /// Copies the pixels of the frame taken last into `into`, which holds exactly as many bytes
-    /// as they do ([`Frame::bytes`]); does nothing before a frame's taken.
+    /// Copies the last taken frame's pixels into `into`, of exactly [`Frame::bytes`]; nothing
+    /// before a frame's taken.
     ///
     /// # Panics
     ///
-    /// If `into` doesn't hold exactly the frame's bytes.
+    /// - If `into` doesn't hold exactly the frame's bytes.
     pub fn read(&self, into: &mut [u8]) {
         let Some(frame) = self.frame else {
             return;
@@ -247,15 +245,15 @@ impl Reader {
         self.memory.header().published.load(Ordering::Acquire)
     }
 
-    /// Whether the game's layers want the cursor grabbed, for mouse look, as the game last said
-    /// with [`Writer::set_cursor_grabbed`]: the client grabs its own, while it gives the game its
-    /// input.
+    /// Whether the game's layers want the cursor grabbed, for mouse look, as
+    /// [`Writer::set_cursor_grabbed`] last said; the client grabs its own while it gives the game
+    /// its input.
     pub fn cursor_grabbed(&self) -> bool {
         self.memory.header().grab.load(Ordering::Relaxed) != 0
     }
 }
 
-/// The game's end: the memory a client made, opened by its name, and the frames it publishes to it.
+/// The game's end, which opens a client's memory by name and publishes frames to it.
 pub struct Writer {
     /// Shared with the [`Pacer`]s it gives.
     memory: Arc<Memory>,
@@ -264,16 +262,15 @@ pub struct Writer {
 }
 
 impl Writer {
-    /// Opens the memory a client made and named `name`, as [`Reader::name`] gives it. The slot it
-    /// writes is the one neither the client's nor the latest as it first publishes, rather than as
-    /// it opens, so that it writes neither of theirs though another writer of the memory published
-    /// meanwhile, as a game's frame in flight does after a client asks for the view again, so long
-    /// as that one has published its last by then.
+    /// Opens the memory a client made, named `name` by [`Reader::name`]. It picks the slot it
+    /// writes, neither the client's nor the latest, as it first publishes rather than as it opens:
+    /// so it writes neither of theirs though another writer published meanwhile, as a game's frame
+    /// in flight does after a client asks for the view again, so long as that one has published its
+    /// last by then.
     ///
-    /// Fails with `InvalidInput` for a name that isn't a view's, with `InvalidData` for memory that
-    /// isn't laid out as a view's, or is laid out as another version of a view's, which it names,
-    /// as a client of another engine's lays it out, and as the OS does if it can't open it, as when
-    /// it isn't there.
+    /// Fails with `InvalidInput` for a name that isn't a view's; `InvalidData` for memory not laid
+    /// out as a view's, or laid out as another version of one, which it names, as another engine's
+    /// client lays it out; and as the OS does if it can't open it, as when it isn't there.
     pub fn open(name: &str) -> io::Result<Self> {
         if !is_name(name) {
             let message = format!("{name:?} isn't the name of a view's memory, as gg-view-12-3 is");
@@ -310,8 +307,8 @@ impl Writer {
         })
     }
 
-    /// The size the client asks frames to be: `None` for one that doesn't fit in the memory, which
-    /// [`Reader::ask`] asks for none of, but a client that wrote over the header could.
+    /// The size the client asks for; `None` for one that doesn't fit in the memory, which
+    /// [`Reader::ask`] never asks for, but a client that wrote over the header could.
     pub fn asked(&self) -> Option<[u32; 2]> {
         let size = unpack(self.memory.header().asked.load(Ordering::Relaxed));
         (fits_sides(size) && bytes(size) <= self.memory.capacity).then_some(size)
@@ -332,13 +329,12 @@ impl Writer {
         }
     }
 
-    /// Publishes a frame of `size`, which `fill` fills in, given its pixels' bytes to fill, as rows
-    /// of RGBA8, sRGB-encoded and tightly packed, the top row first, from the frame that started
-    /// at `started` with the simulation having run `ticks` ticks, which drew the view from
-    /// `viewpoint` with the look's revision `look`; returns it.
+    /// Publishes and returns a frame of `size`, whose pixels `fill` fills, rows of RGBA8,
+    /// sRGB-encoded and tightly packed, top row first: from the frame that started at `started`,
+    /// after `ticks` ticks, drawn from `viewpoint` with the look's revision `look`.
     ///
-    /// Fails with `InvalidInput` if it doesn't fit in the memory, and with `InvalidData` if the
-    /// slots don't hold together, as when a client writes over the header.
+    /// Fails with `InvalidInput` if it doesn't fit in the memory, and `InvalidData` if the slots
+    /// don't hold together, as when a client writes over the header.
     pub fn publish(
         &mut self,
         size: [u32; 2],
@@ -401,8 +397,8 @@ impl Writer {
     }
 }
 
-/// The slot neither the latest frame's nor the client's in the memory whose header is `header`:
-/// `None` if those don't hold together, as when a client wrote over them.
+/// The slot that's neither the latest frame's nor the client's; `None` if those don't hold
+/// together, as when a client wrote over them.
 fn spare(header: &Header) -> Option<u64> {
     let slots = || {
         let latest = header.latest.load(Ordering::Acquire) & !NEW;
@@ -423,9 +419,9 @@ fn spare(header: &Header) -> Option<u64> {
     (latest < SLOTS && front < SLOTS && latest != front).then(|| SLOTS - latest - front)
 }
 
-/// What a game reads of the memory to pace its frames by the client's taking them, from a thread
-/// other than its [`Writer`]'s, which publishes them: a frame runs once the client has taken the
-/// last, rather than rendering frames it never takes.
+/// What a game reads, on a thread other than its [`Writer`]'s, to pace its frames by the client's
+/// taking them: a frame runs once the client has taken the last, rather than rendering frames it
+/// never takes.
 #[derive(Clone)]
 pub struct Pacer {
     memory: Arc<Memory>,
@@ -481,8 +477,8 @@ fn pack_viewpoint(viewpoint: &Viewpoint) -> [u32; VIEWPOINT_WORDS] {
     words
 }
 
-/// The viewpoint [`pack_viewpoint`] packed into `words`: `None` for a kind of projection there's
-/// none of, or a number that isn't finite.
+/// The viewpoint [`pack_viewpoint`] packed into `words`; `None` for an unknown projection or a
+/// number that isn't finite.
 fn unpack_viewpoint(words: [u32; VIEWPOINT_WORDS]) -> Option<Viewpoint> {
     let [kind, a, b, c, i, j, k, w, position @ ..] = words;
     let [a, b, c, i, j, k, w] = [a, b, c, i, j, k, w].map(f32::from_bits);

@@ -1,6 +1,5 @@
-//! A game's project manifest, `project.ron`, beside its crate's `Cargo.toml`: which tools find the
-//! game by, from where they run, and which its development build reads its asset root and start
-//! scene from.
+//! A game's project manifest, `project.ron`, beside its crate's `Cargo.toml`: how tools find the
+//! game from where they run, and where its development build reads its asset root and start scene.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -11,37 +10,36 @@ use serde::Deserialize;
 
 use crate::Failure;
 
-/// The directories at a package's root whose files no build of the package reads, which `gg run`'s
-/// watcher and the asset [`scan`](crate::asset::scan) skip there.
+/// The directories at a package's root that no build of it reads, which `gg run`'s watcher and the
+/// asset [`scan`](crate::asset::scan) skip there.
 pub const UNBUILT: [&str; 4] = ["target", "tests", "benches", "examples"];
 
-/// A game's project, as its manifest gives it, as ARCHITECTURE.md's Project state describes. Its
-/// paths are relative to the manifest's directory, with `/` between their parts.
+/// A game's project, as its manifest gives it (ARCHITECTURE.md's Project state). Its paths are
+/// relative to the manifest's directory, `/` between parts.
 ///
-/// Its text is canonical: [`text`](Self::text) writes it a part to a line, and tools never rewrite
-/// it; `gg new` alone writes one. Every string is printable ASCII without `"` or `\`, so that none
-/// needs an escape.
+/// Its text is canonical: [`text`](Self::text) writes it a part to a line, `gg new` alone writes
+/// one, and tools never rewrite it. Every string is printable ASCII without `"` or `\`, so that
+/// none needs an escape.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
     /// The game's package, which `gg run` and `gg check` build inside the project.
     pub game: String,
-    /// The directory the game names the files of its assets from, as `App::root` says: `.` for the
+    /// The directory the game names its assets' files from, as `App::root` says: `.` for the
     /// manifest's own.
     pub assets: String,
-    /// The folders inside `assets` that hold the game's scenes.
+    /// The folders inside `assets` holding the game's scenes.
     pub scenes: Vec<String>,
-    /// The scene the game starts in, a `.ron` file in one of the scenes folders.
+    /// The scene the game starts in, a `.ron` file in a scenes folder.
     pub start: String,
     /// The relay the game's own sessions meet through, `host:port`, as `relay.example.com:7800`,
-    /// which its builds take unless given `--relay`, its package holding it for those without
-    /// `dev`; `None`, left out of the manifest, for a game that names none.
+    /// unless a build is given `--relay`; its package holds it for builds without `dev`. `None`,
+    /// left out of the manifest, for none.
     #[serde(default)]
     pub relay: Option<String>,
-    /// The game's icon, a PNG of 256 by 256 pixels, by its path from the manifest's directory, as
-    /// `icon.png`, which its builds take as the executable's, on Windows, and the window's, as
-    /// gg-api's `build` says, and a macOS bundle as its own; `None`, left out of the manifest, for a
-    /// game without one. Its package doesn't hold it.
+    /// The game's icon, a 256 by 256 PNG, by its path from the manifest's directory, as `icon.png`:
+    /// the Windows executable's, the window's (gg-api's `build`) and a macOS bundle's. `None`, left
+    /// out of the manifest, for none. Its package doesn't hold it.
     #[serde(default)]
     pub icon: Option<String>,
 }
@@ -52,9 +50,8 @@ impl Project {
 
     /// Reads a manifest's text, and checks it as [`check`](Self::check) does.
     ///
-    /// Fails with `project.bad`, beginning with the line and column where ron stopped, for text
-    /// that isn't a project's, as one with a field it hasn't or without one it has; and as `check`
-    /// does.
+    /// Fails with `project.bad`, starting with the line and column where ron stopped, for text that
+    /// isn't a project's, as one with an unknown field or missing one; and as `check` does.
     pub fn parse(text: &str) -> Result<Self, Failure> {
         let project: Self = ron::from_str(text).map_err(|error| {
             let at = error.span.end;
@@ -68,7 +65,7 @@ impl Project {
     /// Reads the manifest in directory `dir`, as [`parse`](Self::parse) does.
     ///
     /// Fails with `project.read` if the file can't be read, naming its path, and as `parse` does,
-    /// the path beginning its message.
+    /// the path starting its message.
     pub fn read(dir: &Path) -> Result<Self, Failure> {
         let path = dir.join(Self::FILE);
         let text = fs::read_to_string(&path).map_err(|error| {
@@ -81,15 +78,20 @@ impl Project {
         })
     }
 
-    /// Checks the project's fields: `game` a package's name as Cargo takes it, ASCII letters,
-    /// digits, `-` and `_`, starting with a letter or `_`, and one a folder may have on every OS,
-    /// not a name Windows keeps for a device, as `gg new` makes the game's folder of that name in
-    /// the workspace, every member of which Cargo reads; each path relative, its parts named,
-    /// neither `.` nor `..`, with `/` between them, but `assets`, which may be `.`; `scenes` at
-    /// least one folder, each once and inside `assets`; `start` a `.ron` file inside one of them;
-    /// `relay`, if there is one, `host:port`, its host letters, digits, `.` and `-`, or an IPv6
-    /// address in brackets, and its port 1 to 65535; `icon`, if there is one, a relative path ending
-    /// in `.png`; and every string printable ASCII without `"` or `\`.
+    /// Checks the project's fields:
+    ///
+    /// - `game`, a package's name as Cargo takes it, ASCII letters, digits, `-` and `_`, starting
+    ///   with a letter or `_`; and one a folder may have on every OS, not a Windows device's, as
+    ///   `gg new` makes the game's folder of that name in the workspace, every member of which
+    ///   Cargo reads;
+    /// - each path relative, its parts named, neither `.` nor `..`, `/` between them; but
+    ///   `assets` may be `.`;
+    /// - `scenes`, at least one folder, each once and inside `assets`; `start`, a `.ron` file in
+    ///   one of them;
+    /// - `relay`, if any, `host:port`: its host letters, digits, `.` and `-`, or an IPv6 address
+    ///   in brackets, and its port 1 to 65535;
+    /// - `icon`, if any, a relative path ending in `.png`;
+    /// - every string printable ASCII without `"` or `\`.
     ///
     /// Fails with `project.bad`, naming the field.
     pub fn check(&self) -> Result<(), Failure> {
@@ -164,18 +166,17 @@ impl Project {
         Ok(())
     }
 
-    /// The game's name as a player sees it: its package's, capitalized, as `Shards`, which a
-    /// shipped folder names its executable, its package and a macOS bundle by.
+    /// The game's name as a player sees it: its package's, capitalized, as `Shards`, which names a
+    /// shipped folder's executable, package and macOS bundle.
     pub fn name(&self) -> String {
         let mut chars = self.game.chars();
         let first = chars.next().map(|first| first.to_ascii_uppercase());
         first.into_iter().chain(chars).collect()
     }
 
-    /// The manifest's canonical text, a part to a line, with four spaces to each level and a
-    /// comma after each part, its lines ending in `\n`, and no line for a relay or an icon it
-    /// hasn't: for a project that
-    /// [`check`](Self::check) passes, which reads back as it is.
+    /// The manifest's canonical text, which reads back as it is for a project
+    /// [`check`](Self::check) passes: a part to a line, four spaces to a level, a comma after each
+    /// part, lines ending in `\n`, and no line for a relay or an icon it hasn't.
     pub fn text(&self) -> String {
         let (game, assets, start) = (&self.game, &self.assets, &self.start);
         let mut text =
@@ -194,40 +195,38 @@ impl Project {
         text
     }
 
-    /// The directory of the project that directory `from` is in: `from` or the nearest of its
-    /// ancestors that holds a manifest and a `Cargo.toml`, the game crate's, so that a stray
-    /// manifest elsewhere isn't taken for one; `None` if none does.
+    /// The directory of the project `from` is in: `from` or its nearest ancestor holding a
+    /// manifest and a `Cargo.toml`, the game crate's, so that a stray manifest isn't taken for one;
+    /// `None` if none does.
     pub fn find(from: &Path) -> Option<PathBuf> {
         let project = (from.ancestors())
             .find(|dir| dir.join(Self::FILE).is_file() && dir.join("Cargo.toml").is_file());
         project.map(Path::to_owned)
     }
 
-    /// The project's asset root, for the project whose manifest is in `dir`: `dir` itself for an
-    /// `assets` of `.`.
+    /// The asset root of the project whose manifest is in `dir`: `dir` itself for `.`.
     pub fn assets_dir(&self, dir: &Path) -> PathBuf {
         under(dir, &self.assets)
     }
 
-    /// The start scene's path, for the project whose manifest is in `dir`.
+    /// The start scene's path, for the manifest in `dir`.
     pub fn start_path(&self, dir: &Path) -> PathBuf {
         under(dir, &self.start)
     }
 
-    /// The scenes folders' paths, for the project whose manifest is in `dir`.
+    /// The scenes folders' paths, for the manifest in `dir`.
     pub fn scene_dirs(&self, dir: &Path) -> Vec<PathBuf> {
         self.scenes.iter().map(|scene| under(dir, scene)).collect()
     }
 
-    /// The icon's path, for the project whose manifest is in `dir`, if it names one.
+    /// The icon's path, if any, for the manifest in `dir`.
     pub fn icon_path(&self, dir: &Path) -> Option<PathBuf> {
         self.icon.as_deref().map(|icon| under(dir, icon))
     }
 }
 
-/// Checks that `path`, field `field`'s, is relative, as [`is_relative`] says.
-///
-/// Fails with `project.bad`, naming the field.
+/// Checks that field `field`'s `path` [`is_relative`], failing with `project.bad`, naming the
+/// field.
 fn relative(field: &str, path: &str) -> Result<(), Failure> {
     if is_relative(path) {
         return Ok(());
@@ -239,11 +238,10 @@ fn relative(field: &str, path: &str) -> Result<(), Failure> {
     Err(Failure::new("project.bad", message))
 }
 
-/// Whether `path` is a path inside a directory, relative to it: its parts named, neither `.` nor
-/// `..`, with `/` between them, each one [`Component::Normal`] as the OS reads it; and without `\`,
-/// `:` or a control character on any OS, since Windows reads `\` as a separator and `:` as a drive's,
-/// so that a path written on one OS, as a fetch list on Linux, stays inside the directory on every
-/// other.
+/// Whether `path` is inside a directory, relative to it: its parts named, neither `.` nor `..`, `/`
+/// between them, each one [`Component::Normal`] as the OS reads it. It has no `\`, `:` or control
+/// character on any OS, as Windows reads `\` as a separator and `:` as a drive's, so that a path
+/// written on one OS, as a fetch list on Linux, stays inside on every other.
 pub(crate) fn is_relative(path: &str) -> bool {
     let named = |part: &str| {
         let mut components = Path::new(part).components();
@@ -256,9 +254,8 @@ pub(crate) fn is_relative(path: &str) -> bool {
     !path.contains(refused) && path.split('/').all(named)
 }
 
-/// Whether `address` is a relay's, as a manifest names it: `host:port`, the host letters, digits,
-/// `.` and `-`, a name or an IPv4 address, or an IPv6 address in brackets, and the port a number
-/// from 1 to 65535 in digits alone.
+/// Whether `address` is a relay's `host:port`: the host letters, digits, `.` and `-`, a name or an
+/// IPv4 address, or an IPv6 address in brackets; the port 1 to 65535 in digits alone.
 fn is_relay(address: &str) -> bool {
     let Some((host, port)) = address.rsplit_once(':') else {
         return false;
@@ -276,8 +273,8 @@ fn is_relay(address: &str) -> bool {
     port && host
 }
 
-/// Whether `name` is one Windows keeps for a device, whatever its case, as `CON` or `com1`, which
-/// names no file or folder there.
+/// Whether `name` is a Windows device's, in any case, as `CON` or `com1`, which no file or folder
+/// there may have.
 fn device(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let numbered = |prefix: &str| {
@@ -292,10 +289,9 @@ fn inside(path: &str, dir: &str) -> bool {
     dir == "." || (path.strip_prefix(dir)).is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// `path`, relative, joined to `dir` a part at a time, so that its separators are the OS's: `dir`
-/// itself for `.`. A path that [`is_relative`] passes, as a manifest's and a fetch list's checks
-/// keep theirs, joins only parts that are each one named component, which no join takes outside
-/// `dir`.
+/// Relative `path` joined to `dir` a part at a time, so its separators are the OS's; `dir` itself
+/// for `.`. A path [`is_relative`] passes, as a manifest's and a fetch list's checks keep theirs,
+/// joins only named parts, which no join takes outside `dir`.
 pub(crate) fn under(dir: &Path, path: &str) -> PathBuf {
     let parts = path.split('/').filter(|&part| part != ".");
     parts.fold(dir.to_owned(), |under, part| under.join(part))
@@ -470,9 +466,8 @@ mod tests {
         assert!(syntax.message.starts_with("2:"), "{syntax:?}");
     }
 
-    /// A path is inside its directory only if each part is one named part on every OS, wherever
-    /// the manifest or fetch list that holds it was written: none of `\`, which Windows reads as a
-    /// separator, a drive, NUL or another control character; and `under` keeps it there.
+    /// Each part must be one named part on every OS, wherever its manifest or fetch list was
+    /// written: no `\`, a drive, NUL or another control character. `under` keeps it inside.
     #[test]
     fn a_relative_path_stays_inside_its_directory_on_every_os() {
         for path in [
