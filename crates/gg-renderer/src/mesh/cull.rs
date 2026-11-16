@@ -16,10 +16,9 @@ use gg_gpu::{
     PassId, RenderPass,
 };
 
+use super::draw::{LodView, Uploaded};
 use super::scene::SceneRun;
-use super::{
-    GpuMesh, GpuShader, Held, LodView, MAX_LEVELS, MeshPass, PlacedMeshlets, Push, Uploaded,
-};
+use super::{GpuMesh, GpuShader, Held, MAX_LEVELS, MeshPass, PlacedMeshlets, Push};
 use crate::shadow::CASCADES;
 use crate::{Draws, MeshDraw, halves};
 
