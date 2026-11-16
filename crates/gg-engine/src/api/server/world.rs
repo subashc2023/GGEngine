@@ -12,8 +12,8 @@ use crate::api::json;
 use crate::bounds;
 use crate::{Context, Entity, EntityId, Pose, PrefabRoot, World};
 
-/// An `assets` waiting for a look at the asset root, as `Context::ask_assets` numbered it, and the
-/// page it asks for.
+/// An `assets` waiting for a look at the asset root (numbered by `Context::ask_assets`), and its
+/// page.
 pub(super) struct Listing {
     pub(super) reply: Reply,
     pub(super) look: u64,
@@ -44,8 +44,8 @@ pub(super) fn list(
 /// The page of the assets under `cx`'s root that `assets` asks for, and the orphaned ID files, as
 /// the asset database holds them.
 ///
-/// Fails with `engine.no_root` for a game that names no asset root, and with `asset.unlisted`,
-/// naming the root, if the root couldn't be listed.
+/// Fails with `engine.no_root` for a game with no asset root, and with `asset.unlisted`, naming
+/// the root, if it couldn't be listed.
 pub(super) fn assets(
     cx: &Context,
     kind: Option<AssetKind>,
@@ -113,8 +113,7 @@ pub(super) fn listed(world: &World, entity: Entity) -> Listed {
     }
 }
 
-/// The entity of ID `id` in `world`, as `entity` answers it, its `bounds` by the extents `meshes`
-/// keeps.
+/// Entity `id` as `entity` answers it, its `bounds` from the extents `meshes` keeps.
 pub(super) fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<String, Failure> {
     let entity = found(world, id)?;
     let about = |error: Error| failure(&error);
@@ -152,7 +151,7 @@ pub(super) fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<Str
         let value = world.get_field(entity, name, "").map_err(about)?;
         json::write(&mut out, &value, world);
     }
-    // Where the space its transform is in sits: its parent's pose.
+    // The space its transform is in: its parent's pose.
     let space = match world.parent(entity).map_err(about)? {
         Some(parent) => world.pose(parent).map_err(about)?,
         None => Pose::IDENTITY,
@@ -169,7 +168,7 @@ pub(super) fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<Str
         json::float32(&mut out, radius as f32);
         out.push('}');
     }
-    // An instance whose prefab's text no longer loads gives none, as its load warned.
+    // An instance whose prefab no longer loads gives none; its load warned.
     if let Some(instanced) = instanced(world, entity) {
         out.push_str(",\"instance\":");
         out.push_str(&serde_json::to_string(&instanced).expect("an instance serializes"));
@@ -178,9 +177,8 @@ pub(super) fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<Str
     Ok(out)
 }
 
-/// What of `entity`, which is alive, differs from its prefab, as `entity` answers it, if it's an
-/// instance's, as [`World::overrides`] finds it; `None` for any other, or one whose prefab's text no
-/// longer loads.
+/// What of the living `entity` differs from its prefab ([`World::overrides`]), as `entity` answers
+/// it; `None` for a non-instance, or one whose prefab no longer loads.
 pub(crate) fn instanced(world: &World, entity: Entity) -> Option<gg_api::Instanced> {
     let overrides = world.overrides(entity).ok()??;
     let assets = world.assets();
@@ -194,8 +192,7 @@ pub(crate) fn instanced(world: &World, entity: Entity) -> Option<gg_api::Instanc
     })
 }
 
-/// The field at `path` of the component `component` of the entity of ID `id` in `world`, as `get`
-/// answers it.
+/// The field at `path` of `component` of entity `id`, as `get` answers it.
 pub(super) fn field(
     world: &World,
     id: EntityId,

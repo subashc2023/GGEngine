@@ -1,4 +1,4 @@
-//! The threads that write captures' PNGs and snapshots, and prune the directories they're named in.
+//! The threads that write captures' PNGs and snapshots, and prune their directories.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,59 +16,59 @@ use crate::render_thread::Shot;
 use crate::scene_files::{Open, SceneFile};
 use crate::snapshot::{self, Run};
 
-/// How many PNGs the `captures` directory beside the executable keeps, the newest, as each capture
-/// without a path is written there: older ones, a long session's and those of runs before, go.
+/// How many of the newest PNGs the `captures` directory beside the executable keeps, as each
+/// capture without a path is written there. Older ones, including earlier runs', go.
 const KEPT_CAPTURES: usize = 32;
 
-/// How many snapshots the `snapshots` directory beside the executable keeps, the newest, as each
-/// snapshot without a path is written there; those `gg run` takes, in a directory of its own
+/// How many of the newest snapshots the `snapshots` directory beside the executable keeps, as each
+/// snapshot without a path is written there. Those `gg run` takes, in a directory of its own
 /// inside it, are its to remove.
 const KEPT_SNAPSHOTS: usize = 8;
 
-/// A snapshot for the thread that writes them: the copy of the world, the ticks the simulation had
-/// run as it was taken, where it goes, and where the answer goes.
+/// A snapshot for the thread that writes them: the copy of the world, the ticks run when it was
+/// taken, where it goes, and where the answer goes.
 pub(super) struct Taken {
     pub(super) world: World,
-    /// The scene files the layers loaded, which the restored run watches, and its open scene.
+    /// The scene files the layers loaded, which the restored run watches.
     pub(super) scenes: Vec<SceneFile>,
     /// The scene files' texts the run keeps for its scene changes.
     pub(super) cached: Vec<SceneFile>,
     pub(super) open: Open,
-    /// The scripts the layers loaded, each a path and its text as last applied, and the mods.
+    /// The scripts the layers loaded, each a path and its text as last applied.
     pub(super) scripts: Vec<(String, String)>,
     pub(super) mods: Vec<crate::luau::ModText>,
-    /// What the run was doing, with a copy of the world as edited it held, if any, which the
-    /// restored run goes on doing.
+    /// What the run was doing, with its copy of the world as edited, if any; the restored run
+    /// goes on doing it.
     pub(super) run: Run,
-    /// Whether the simulation was paused, as the restored run is then.
+    /// Whether the simulation was paused; the restored run then is.
     pub(super) paused: bool,
     pub(super) ticks: u64,
     pub(super) path: PathBuf,
-    /// Whether the engine named the path, the request giving none, which prunes the directory.
+    /// Whether the engine named the path (the request gave none), which prunes the directory.
     pub(super) named: bool,
     pub(super) reply: Reply,
-    /// Told whether the snapshot was written once it's answered, for a snapshot the run waits for.
+    /// Told after the answer whether the snapshot was written, for a snapshot the run waits for.
     pub(super) written: Option<Sender<bool>>,
 }
 
-/// A capture's PNG for the thread that writes them: the view, where it goes, the ticks the frame
-/// that shows it had run, whether textures or meshes were still decoding or streaming in it, and
-/// where the answer goes.
+/// A capture's PNG for the thread that writes them: the view, where it goes, the ticks run by the
+/// frame that shows it, whether textures or meshes were still streaming in, and where the answer
+/// goes.
 pub(super) struct Png {
     pub(super) shot: Arc<Shot>,
     /// Where it goes; `None` for a capture of a pixel alone, which writes nothing.
     pub(super) path: Option<PathBuf>,
     /// The pixel whose bytes the answer gives.
     pub(super) at: Option<[f64; 2]>,
-    /// Whether the engine named the path, the request giving none, which prunes the directory.
+    /// Whether the engine named the path (the request gave none), which prunes the directory.
     pub(super) named: bool,
     pub(super) ticks: u64,
     pub(super) streaming: bool,
     pub(super) reply: Reply,
 }
 
-/// What the thread that writes PNGs writes: a capture's, or a `frames`' every frame, into its
-/// directory, numbered from 1, answered once all are written.
+/// What the PNG thread writes: a capture, or every frame of a `frames` into its directory,
+/// numbered from 1, answered once all are written.
 pub(super) enum Writing {
     Capture(Png),
     Frames {
@@ -78,9 +78,9 @@ pub(super) enum Writing {
     },
 }
 
-/// Writes the captures `pngs` brings, each as a PNG, and each `frames`' frames, as PNGs numbered
-/// from 1, `frame-0001.png` and on, answering each once its PNGs are written, or as the first
-/// fails, until the API drops.
+/// Writes the captures `pngs` brings as PNGs, and each `frames`' frames as PNGs numbered from 1
+/// (`frame-0001.png` and on). Answers each once its PNGs are written, or as the first fails, until
+/// the API drops.
 pub(super) fn write_pngs(pngs: &Receiver<Writing>) {
     for writing in pngs {
         let png = match writing {
@@ -126,12 +126,12 @@ pub(super) fn write_pngs(pngs: &Receiver<Writing>) {
     }
 }
 
-/// The RGBA bytes of the pixel `at` falls in, `[x, y]` from the top left of `shot`'s view, as the
+/// The RGBA bytes of the pixel `at` (`[x, y]` from the top left of `shot`'s view) falls in, as the
 /// PNG has them; `None` outside the view.
 fn pixel_at(shot: &Shot, at: [f64; 2]) -> Option<[u8; 4]> {
     let [width, height] = shot.size;
     let [x, y] = at.map(f64::floor);
-    // Negative and not finite positions were refused with the request; this keeps an index in range.
+    // Negative and non-finite positions were refused with the request; this keeps the index valid.
     if !(0.0..f64::from(width)).contains(&x) || !(0.0..f64::from(height)).contains(&y) {
         return None;
     }
@@ -139,9 +139,9 @@ fn pixel_at(shot: &Shot, at: [f64; 2]) -> Option<[u8; 4]> {
     shot.pixels.as_chunks::<4>().0.get(index).copied()
 }
 
-/// Writes the snapshots `taken` brings, each a file of app `app`'s, whose layers are `layers`, as
-/// [`snapshot::write`] writes one, whole or not at all, making the `snapshots` directory beside the
-/// executable if it goes there; and answers each, until the API drops.
+/// Writes the snapshots `taken` brings, each of app `app` with layers `layers`, as
+/// [`snapshot::write`] does, whole or not at all, making the `snapshots` directory beside the
+/// executable if it goes there. Answers each, until the API drops.
 pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
     let layers: Vec<&str> = layers.iter().map(String::as_str).collect();
     for Taken {
@@ -200,9 +200,8 @@ pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[Stri
 }
 
 /// Writes `shot` as an 8-bit RGB PNG at `path`, whole or not at all, making the `captures`
-/// directory beside the executable if it's there: the view's pixels are sRGB-encoded, as a PNG's
-/// are taken to be without a chunk that says otherwise, and its alpha goes, since the view shows
-/// opaque.
+/// directory beside the executable if it goes there. The view's pixels are sRGB-encoded, as a PNG's
+/// are taken to be absent a chunk saying otherwise; alpha is dropped, as the view shows opaque.
 ///
 /// Fails with `api.capture_file` if it can't.
 fn write_png(path: &Path, shot: &Shot, named: bool) -> Result<()> {
@@ -235,10 +234,9 @@ fn write_png(path: &Path, shot: &Shot, named: bool) -> Result<()> {
     Ok(())
 }
 
-/// Removes the files of directory `dir` that the engine named, as [`engine_named`] tells, whose
-/// extension is `extension`, but the newest `keep`, by when they were last written: those a client
-/// named, and the directories in it, are left alone, and a file that can't be removed, as one a
-/// client reads on Windows, stays, for the next to try again.
+/// Removes the files of `dir` the engine named ([`engine_named`]) with `extension`, except the
+/// newest `keep` by last write. Files a client named and subdirectories are left alone. A file
+/// that can't be removed, as one a client reads on Windows, stays for the next prune.
 pub(super) fn prune(dir: &Path, extension: &str, keep: usize) {
     let entries = fs::read_dir(dir).into_iter().flatten().flatten();
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
@@ -246,16 +244,15 @@ pub(super) fn prune(dir: &Path, extension: &str, keep: usize) {
         .filter(|entry| engine_named(&entry.file_name().to_string_lossy(), extension))
         .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
         .collect();
-    // The newest first, two written at once by their names.
+    // Newest first; names break ties.
     files.sort_by(|a, b| b.cmp(a));
     for (_, path) in files.into_iter().skip(keep) {
         let _ = fs::remove_file(path);
     }
 }
 
-/// Whether a file named `name` is one the engine named for a capture or a snapshot given no path,
-/// whose extension is `extension`: a run's session file's stem, its app and its process, then the
-/// capture's or snapshot's number, as `sandbox-4242-7.png`.
+/// Whether `name` is a file the engine named, with `extension`, for a capture or snapshot given no
+/// path: the session file's stem (app and process), then the number, as `sandbox-4242-7.png`.
 pub(super) fn engine_named(name: &str, extension: &str) -> bool {
     let Some(stem) = name
         .strip_suffix(extension)

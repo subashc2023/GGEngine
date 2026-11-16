@@ -1,7 +1,6 @@
-//! The tool API, which development builds serve, as ARCHITECTURE.md's Agents and tools describes,
-//! through gg-api's protocol: what the main loop calls of it, each a call that does nothing without
-//! `dev`, or without the API, as with `--no-api`; and what frames have paused for, which `ping`
-//! reports.
+//! The tool API development builds serve through gg-api's protocol (ARCHITECTURE.md's Agents and
+//! tools). It holds the calls the main loop makes, each a no-op without `dev` or with `--no-api`,
+//! and what frames have paused for, which `ping` reports.
 
 #[cfg(feature = "dev")]
 pub(crate) mod json;
@@ -23,16 +22,16 @@ pub(crate) use server::{Api, instanced};
 #[cfg(feature = "dev")]
 pub use server::{api_viewpoint, engine_viewpoint};
 
-/// The API, which builds without `dev` have none of.
+/// Builds without `dev` have no API.
 #[cfg(not(feature = "dev"))]
 pub(crate) enum Api {}
 
-/// The look the API's clients set, as a frame draws with it, which [`Api`] sets as it answers:
-/// each part in place of the game's own, where one's set; the revision it's at, which a frame
-/// published gives; whether the frame is bare, as a capture of the game's own view asks, which
-/// leaves the look out, the passes it leaves out among it; what the frame shows in place of the
-/// view's light for a capture that asks, in place of what the look shows; and the viewpoint the
-/// last frame handed off drew from, the look's or the game's own.
+/// The look the API's clients set, which [`Api`] updates as it answers and a frame draws with.
+///
+/// Each part replaces the game's own where set. `revision` is what a published frame reports.
+/// A `bare` frame, as a capture of the game's own view asks, ignores the look, `skip` included.
+/// `captured` is what a capture asks the frame to show instead of the view's light, over what the
+/// look shows. `seen` is the viewpoint the last handed-off frame drew from.
 #[cfg(feature = "dev")]
 #[derive(Default)]
 pub(crate) struct Look {
@@ -51,16 +50,15 @@ pub(crate) struct Look {
 
 #[cfg(feature = "dev")]
 impl Look {
-    /// What the frame being made shows in place of the view's light: what a capture riding with it
-    /// asks, or else what the look shows, unless the frame is bare.
+    /// What the frame shows instead of the view's light: its capture's ask, else the look's, unless
+    /// the frame is bare.
     pub(crate) fn shown(&self) -> Option<Shown> {
         let look = self.show.as_ref().filter(|_| !self.bare);
         self.captured.as_ref().or(look).cloned()
     }
 
-    /// Sets each pass the look leaves out to none in `frame`, as it was extracted from the game's
-    /// environment and lights, unless the frame is bare: each as the game would draw without that
-    /// pass, as [`gg_api::Pass`] says.
+    /// Turns off in `frame`, as extracted from the game's environment and lights, each pass the
+    /// look leaves out, unless the frame is bare. See [`gg_api::Pass`].
     pub(crate) fn leave_out(&self, frame: &mut crate::render_thread::Extracted) {
         use gg_api::Pass;
         if self.bare {
@@ -88,8 +86,7 @@ impl Look {
     }
 }
 
-/// What the view shows in place of its light, as [`gg_renderer::Show`] has it, an image's name held
-/// so that frames take it from the look without allocating.
+/// Like [`gg_renderer::Show`], with an owned image name so frames take it without allocating.
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Shown {
@@ -99,7 +96,7 @@ pub(crate) enum Shown {
 
 #[cfg(feature = "dev")]
 impl Shown {
-    /// What the tool API names `shown`.
+    /// From the tool API's `shown`.
     pub(crate) fn of(shown: &gg_api::Shown) -> Self {
         use gg_api::Shown as Api;
         use gg_renderer::Channel;
@@ -131,13 +128,14 @@ impl Shown {
     }
 }
 
-/// Starts serving the tool API for app `app`, whose layers are `layers`, from the bottom up, whose
-/// JSON log is at `log`, if it has one, its last events kept in gg-core's `log::EVENTS`, which
-/// plays `player` in a lockstep session, if it's a peer of one, and whose project's manifest is at
-/// `project`, if it's a project's game, unless `serve` says not to: `None` then, and without `dev`.
+/// Starts serving the tool API for `app`, or returns `None` if `serve` is false or `dev` is off.
 ///
-/// Fails, with `api.start`, if it can't start, as when its port can't be bound or its session file
-/// written: the run goes on without it, warning so, but for an embedded one, which ends.
+/// `layers` are bottom up. `log` is the JSON log's path, if any; its last events are in gg-core's
+/// `log::EVENTS`. `player` is the peer's number in a lockstep session. `project` is the project
+/// manifest's path.
+///
+/// Fails with `api.start` if it can't start, as when its port can't be bound or its session file
+/// written. The run goes on without it, warning so, but an embedded run ends.
 pub(crate) fn start(
     app: &str,
     layers: &[&str],
@@ -154,8 +152,7 @@ pub(crate) fn start(
     Ok(None)
 }
 
-/// Has the API's debugger debug the scripts of `cx`'s run, as `luau::Hosts::debug` says, before the
-/// layers load them.
+/// Has the API's debugger debug `cx`'s scripts (`luau::Hosts::debug`), before the layers load them.
 pub(crate) fn debug(api: &Option<Api>, cx: &mut Context) {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
@@ -164,14 +161,11 @@ pub(crate) fn debug(api: &Option<Api>, cx: &mut Context) {
     let _ = (api, cx);
 }
 
-/// As a frame starts, before its ticks, in a development build, takes the asset database as the
-/// thread that watches the root last sent it, as `Context::take_assets` says, and the shaders,
-/// textures, models, fonts, sounds and music read again as their files changed, as
-/// `Context::take_reloaded` says,
-/// applies the scene files saved since, as [`scene_files::look`] says, and the scripts, as
-/// `luau::look` says, places the scripts' breakpoints again if they've changed, and answers the
-/// requests that have come, from `cx`, whose layers are `stack`'s and whose simulation `stepper`
-/// steps, as [`Api::serve`] says; returns whether one asked the run to end.
+/// As a frame starts, before its ticks, in a development build: takes the asset database
+/// (`Context::take_assets`) and the assets read again (`Context::take_reloaded`), applies the
+/// scene files ([`scene_files::look`]) and scripts (`luau::look`) saved since, places the scripts'
+/// breakpoints again if they changed, and answers the waiting requests ([`Api::serve`]). Returns
+/// whether one asked the run to end.
 ///
 /// [`scene_files::look`]: crate::scene_files
 pub(crate) fn serve(
@@ -199,9 +193,8 @@ pub(crate) fn serve(
     false
 }
 
-/// Between frames, while they pause, takes the asset database and the assets read again, applies
-/// the scene files and the scripts saved since and answers the requests that need no frames, as [`serve`] does as
-/// a frame starts; returns whether one asked the run to end.
+/// Like [`serve`], between frames while they pause. Requests that need frames fail with
+/// `api.paused`.
 pub(crate) fn serve_paused(
     api: &mut Option<Api>,
     cx: &mut Context,
@@ -227,9 +220,8 @@ pub(crate) fn serve_paused(
     false
 }
 
-/// As frames pause, as the window is minimized, answers each `assets` waiting for a look at the
-/// asset root from the database as the thread that watches it last sent it, as one that comes while
-/// they pause is answered, since a look the thread takes then would wait for the next request.
+/// As frames pause, as when the window is minimized, answers each waiting `assets` from the
+/// database the watching thread last sent. A fresh look would wait for the next request.
 pub(crate) fn frames_paused(api: &mut Option<Api>, cx: &mut Context) {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
@@ -239,10 +231,9 @@ pub(crate) fn frames_paused(api: &mut Option<Api>, cx: &mut Context) {
     let _ = (api, cx);
 }
 
-/// With the renderer back from a frame, takes the view it read back, if it rode with captures and
-/// rendered, answers the picks whose answers came back into `cx`, and has the next frame handed
-/// off, which `cx` made and shows the world after `ticks` ticks, read its view back if captures
-/// wait or a client has it published, as [`Api::frame_back`] says.
+/// With the renderer back from a frame: takes the view it read back, answers the picks whose
+/// answers came back, and has the next frame, showing the world after `ticks` ticks, read its view
+/// back if captures wait or a client has it published ([`Api::frame_back`]).
 pub(crate) fn frame_back<R: Render>(
     api: &mut Option<Api>,
     render: &mut RenderThread<R>,
@@ -256,9 +247,8 @@ pub(crate) fn frame_back<R: Render>(
     let _ = (api, render, cx, ticks);
 }
 
-/// The size the client the view is published to asks frames to be, while it's published, as an
-/// embedded run renders them, if it fits in the client's memory; with the renderer back from a
-/// frame.
+/// The size the view's client asks frames to be while it's published, if it fits in the client's
+/// memory. An embedded run renders at it. Call with the renderer back from a frame.
 pub(crate) fn asked<R: Render>(render: &RenderThread<R>) -> Option<[u32; 2]> {
     #[cfg(feature = "dev")]
     if let Some(publish) = &render.frame().publish {
@@ -268,14 +258,14 @@ pub(crate) fn asked<R: Render>(render: &RenderThread<R>) -> Option<[u32; 2]> {
     None
 }
 
-/// How long an embedded run waits for its client to take a frame, before it runs the next anyway:
-/// its ticks go on in time while the client takes none, as when its window is minimized.
+/// How long an embedded run waits for its client to take a frame before running on: ticks keep
+/// time while the client takes none, as when its window is minimized.
 #[cfg(feature = "dev")]
 const PACED: Duration = Duration::from_millis(100);
 
-/// Before the frame's handed off, while the view is published, the number of the frame, as the
-/// client will take it, which [`pace`] then waits for; `None` for a frame that isn't published, as
-/// a capture of the game's own view's isn't.
+/// Before the frame's handed off while the view is published: its number as the client will take
+/// it, which [`pace`] waits for. `None` for an unpublished frame, as a capture of the game's own
+/// view is.
 pub(crate) fn handing(api: &Option<Api>) -> Option<u64> {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
@@ -285,8 +275,8 @@ pub(crate) fn handing(api: &Option<Api>) -> Option<u64> {
     None
 }
 
-/// Once the frame's handed off, waits until the client has taken it, as [`handing`] numbered it,
-/// for at most [`PACED`], so that an embedded run renders no frame its client doesn't take.
+/// Once the frame's handed off, waits up to [`PACED`] for the client to take frame `handed`
+/// ([`handing`]), so an embedded run renders no frame its client doesn't take.
 pub(crate) fn pace(api: &Option<Api>, handed: u64) {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
@@ -296,8 +286,7 @@ pub(crate) fn pace(api: &Option<Api>, handed: u64) {
 }
 
 /// While the simulation is paused or stopped with nothing asked of the frames, waits for a request
-/// for at most a tick's time, so that a headless run, whose frames would otherwise go as fast as
-/// the GPU renders them, doesn't spin.
+/// for at most a tick's time, so a headless run doesn't spin at the GPU's speed.
 pub(crate) fn idle(api: &mut Option<Api>, stepper: &Stepper) {
     #[cfg(feature = "dev")]
     if let Some(api) = api
@@ -308,8 +297,7 @@ pub(crate) fn idle(api: &mut Option<Api>, stepper: &Stepper) {
     let _ = (api, stepper);
 }
 
-/// Has `wake` wake the main loop as each request comes, so that it answers them while frames
-/// pause.
+/// Has `wake` wake the main loop as each request comes, so it answers them while frames pause.
 pub(crate) fn set_waker(api: &mut Option<Api>, wake: impl Fn() + Send + 'static) {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
@@ -319,9 +307,8 @@ pub(crate) fn set_waker(api: &mut Option<Api>, wake: impl Fn() + Send + 'static)
     let _ = (api, wake);
 }
 
-/// What frames have paused for, which `ping` reports from the connections' threads, while the main
-/// thread waits: 0 for nothing, else a [`Waiting`]. A process runs one app at a time, whose main
-/// thread is the one that waits.
+/// What frames have paused for, which `ping` reads from the connections' threads while the main
+/// thread waits: 0 for nothing, else a [`Waiting`]. A process runs one app at a time.
 static WAITING: AtomicU8 = AtomicU8::new(0);
 
 /// What frames pause for that's the user's doing, rather than a hang.
@@ -329,17 +316,16 @@ static WAITING: AtomicU8 = AtomicU8::new(0);
 pub(crate) enum Waiting {
     /// The main window has no area.
     Minimized = 1,
-    /// A file dialog is open, which development builds alone show.
+    /// A file dialog is open (development builds only).
     #[cfg(feature = "dev")]
     Dialog = 2,
-    /// The window menu Windows runs, in a loop of its own, is open, as the UI's title bar opens
-    /// it in development builds alone.
+    /// The window menu Windows runs in its own loop is open, as the UI's title bar opens it
+    /// (development builds only).
     #[cfg(feature = "dev")]
     Menu = 3,
 }
 
 impl Waiting {
-    /// What frames have paused for now.
     #[cfg(feature = "dev")]
     fn now() -> Option<Self> {
         match WAITING.load(Ordering::Relaxed) {
@@ -350,7 +336,7 @@ impl Waiting {
         }
     }
 
-    /// Its name, as `ping` gives it.
+    /// The name `ping` gives.
     #[cfg(feature = "dev")]
     fn name(self) -> &'static str {
         match self {
@@ -361,13 +347,12 @@ impl Waiting {
     }
 }
 
-/// Says that frames have paused for `waiting` until what it returns drops, which says again what
-/// they waited for before.
+/// Says frames have paused for `waiting` until the result drops, which restores the previous value.
 pub(crate) fn waiting(waiting: Waiting) -> Waited {
     Waited(WAITING.swap(waiting as u8, Ordering::Relaxed))
 }
 
-/// What [`waiting`] returns.
+/// [`waiting`]'s guard.
 pub(crate) struct Waited(u8);
 
 impl Drop for Waited {

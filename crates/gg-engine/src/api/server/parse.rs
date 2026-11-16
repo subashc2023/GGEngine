@@ -70,18 +70,18 @@ pub(super) enum Call {
     Play,
     Stop,
     Step(u64),
-    /// What to do to the open scene, with the path to open or save it as, as given, checked to be
-    /// a `.ron` file's, and whether to discard its unsaved edits.
+    /// What to do to the open scene, with the path to open or save it as (checked to be a `.ron`
+    /// file's) and whether to discard its unsaved edits.
     Scene(Scene),
     Capture {
         path: Option<PathBuf>,
-        /// A pixel of the view to answer the bytes of, checked finite and not negative.
+        /// A pixel of the view to answer the bytes of; finite and not negative.
         at: Option<[f64; 2]>,
         own: bool,
         show: Option<gg_api::Shown>,
     },
-    /// Frames in a row: the directory their PNGs go in, how many, their viewpoints, each checked,
-    /// its rotation normalized, the part of each kept, of some area, and what they show.
+    /// Frames in a row: the directory for their PNGs, how many, their viewpoints (each checked,
+    /// its rotation normalized), the part of each kept (of some area), and what they show.
     Frames {
         dir: PathBuf,
         count: u32,
@@ -91,11 +91,11 @@ pub(super) enum Call {
     },
     /// The name of the memory to publish the view to, or `None` to stop.
     View(Option<String>),
-    /// Events to hand the layers, each of which names a key that's a key's.
+    /// Events to hand the layers; each key event names a real key.
     Input(Vec<InputEvent>),
-    /// The parts of the look to set, each checked, its viewpoint's rotation normalized.
+    /// The parts of the look to set, each checked, the viewpoint's rotation normalized.
     Look(gg_api::Look),
-    /// The pixel of the view to pick at, and the entity whose model it picks within, if any.
+    /// The pixel of the view to pick at, and the entity whose model to pick within, if any.
     Pick([f64; 2], Option<EntityId>),
     Images,
     Entities {
@@ -118,7 +118,7 @@ pub(super) enum Call {
         take: usize,
     },
     Ui,
-    /// A snapshot, at the path given, if one is, and whether the run ends once it's written.
+    /// A snapshot at the path, if given, and whether the run ends once it's written.
     Snapshot {
         path: Option<PathBuf>,
         quit: bool,
@@ -126,13 +126,13 @@ pub(super) enum Call {
     Patch(JumpTable),
     /// An edit's operations, and the gesture it's part of, if it's sets of one field.
     Apply(Vec<gg_api::Operation>, Option<u64>),
-    /// The entity to save as a prefab and link to it, and the path of the prefab's file, as given,
-    /// checked to be a `.prefab` file's.
+    /// The entity to save as a prefab and link to it, and the prefab file's path (checked to be a
+    /// `.prefab` file's).
     SavePrefab {
         id: EntityId,
         path: Option<PathBuf>,
     },
-    /// An undo, or a redo, of the edits of the author named, or else of the client's own.
+    /// An undo or redo of the named author's edits, else the client's own.
     Undo {
         author: Option<String>,
         redo: bool,
@@ -143,13 +143,16 @@ pub(super) enum Call {
 
 /// The call `request` makes of the main loop.
 ///
-/// Fails with `api.unknown_method` for a method there's none of, `api.bad_params` for parameters
-/// it doesn't take, a `look` that can't be, as [`look`] says, a `scene` whose path is missing,
-/// given where it's none, or not a `.ron` file's, or whose `discard` is given to `save`, a
-/// `save_prefab` whose path isn't a `.prefab` file's, or a `frames` whose `dir` isn't an absolute
-/// path to a directory, whose `count` is 0 or past [`gg_api::MOST_FRAMES`], or whose viewpoints, or
-/// `rect` of no area, can't be; `api.bad_request` for a `hello` after the first, and `ecs.bad_id`
-/// for an ID that isn't one.
+/// Fails with:
+///
+/// - `api.unknown_method`: an unknown method.
+/// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); a `scene`
+///   whose path is missing, given where none is taken, or not a `.ron` file's, or whose `discard`
+///   is given to `save`; a `save_prefab` whose path isn't a `.prefab` file's; a `frames` whose
+///   `dir` isn't an absolute path to a directory, whose `count` is 0 or past
+///   [`gg_api::MOST_FRAMES`], or whose viewpoints or `rect` (of no area) are invalid.
+/// - `api.bad_request`: a `hello` after the first.
+/// - `ecs.bad_id`: an invalid ID.
 pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
     let method = request.method.as_str();
     let params = &request.params;
@@ -305,7 +308,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
                             the tool's";
                 return Err(bad_params(method, what));
             }
-            // Before the frames are captured, rather than as their PNGs fail to be written.
+            // Checked before capture, not as the PNGs fail to write.
             if !dir.is_dir() {
                 let what = format!(
                     "takes a `dir` that's a directory, as {} isn't",
@@ -414,7 +417,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
     Ok(call)
 }
 
-/// Method `method`'s parameters, `params`, as a `T`, whose defaults stand for what isn't given.
+/// Method `method`'s parameters, `params`, as a `T`; its defaults stand for what isn't given.
 pub(super) fn take<T: DeserializeOwned>(method: &str, params: &Value) -> Result<T, Failure> {
     let params = match params {
         Value::Null => Value::Object(serde_json::Map::new()),
@@ -423,8 +426,7 @@ pub(super) fn take<T: DeserializeOwned>(method: &str, params: &Value) -> Result<
     serde_json::from_value(params).map_err(|error| bad_params(method, format!("takes {error}")))
 }
 
-/// Checks that method `method`, which takes nothing, is given nothing: no parameters, `null` or an
-/// empty object.
+/// Checks that `method`, which takes nothing, is given nothing: no parameters, `null` or `{}`.
 fn none(method: &str, params: &Value) -> Result<(), Failure> {
     match params {
         Value::Null => Ok(()),

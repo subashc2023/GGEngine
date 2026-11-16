@@ -1,19 +1,23 @@
-//! The API's server: it listens on the machine's loopback, at a port the OS picks, which the session
-//! file in the `sessions` directory beside the executable gives with a token. A thread accepts
-//! connections, and each has a thread that reads its requests, at most [`gg_api::MOST_IN_FLIGHT`]
-//! ahead of the answers written, answering `hello`, `ping`, `logs` and `note` itself, `logs` from
-//! the events the log keeps, passing the rest on to the main loop, and, once its `hello` is granted,
-//! one that writes its answers. The main loop answers those that came before a frame started as it
-//! starts, before its ticks, so that a `patch` applies between ticks, a `play`, a `stop` or a
-//! `scene` holds from the frame's ticks, and a `look` reaches the frame; a `step` once its ticks
-//! have run; a `capture` once a frame that rendered brings its view back, whose PNG a thread of its
-//! own writes; a `pick` once the frame that read it brings its answer back; and a `snapshot` once a
-//! thread of its own has written the copy of the world the main thread took.
+//! The API's server. It listens on the loopback at a port the OS picks; the session file in the
+//! `sessions` directory beside the executable gives the port and a token.
 //!
-//! A capture of the game's own view rides with a bare frame, which draws without the look, as the
-//! game would on its own; isn't published to a view's memory; and leaves the picks to the next
-//! frame that isn't bare, so that no pick reads a view a client isn't shown. A windowed game shows
-//! its bare frames in its own window, for a frame or two.
+//! A thread accepts connections. Each has a thread that reads its requests, at most
+//! [`gg_api::MOST_IN_FLIGHT`] ahead of the answers written, and answers `hello`, `ping`, `logs` and
+//! `note` itself; once its `hello` is granted, a second thread writes its answers. The rest go to
+//! the main loop.
+//!
+//! The main loop answers the requests that came before a frame started as it starts, before its
+//! ticks, so a `patch` applies between ticks, a `play`, `stop` or `scene` holds from the frame's
+//! ticks, and a `look` reaches the frame. Later:
+//!
+//! - `step`: once its ticks have run.
+//! - `capture`: once a frame that rendered brings its view back; a thread writes the PNG.
+//! - `pick`: once the frame that read it brings its answer back.
+//! - `snapshot`: once a thread has written the copy of the world the main thread took.
+//!
+//! A capture of the game's own view rides with a bare frame: drawn without the look, not published
+//! to a view's memory, and leaving the picks to the next non-bare frame, so no pick reads a view a
+//! client isn't shown. A windowed game shows bare frames in its window for a frame or two.
 
 mod connection;
 mod edits;
@@ -61,83 +65,74 @@ use parse::{Call, bad_params};
 use view::{Capturing, Filming, Picking, input_event};
 use world::{Listing, assets, entity, field, list};
 
-/// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the
-/// clients leave the game's layers the rest.
+/// The most of the clients' picks a frame asks: half what a frame reads back, leaving the game's
+/// layers the rest.
 const MOST_PICKS: usize = MAX_PICKS / 2;
 
-/// The longest a run that ends once it has answered a `snapshot` with `quit` waits for the answer
-/// to be written to its connection, which takes as long as a client that doesn't read holds it.
+/// The longest a run that ends after answering a `snapshot` with `quit` waits for the answer to be
+/// written to its connection. A client that doesn't read holds it that long.
 const ANSWERING: Duration = Duration::from_secs(5);
 
-/// The tool API, from when it starts until the run ends, as it drops, which removes its session
-/// file.
+/// The tool API, from its start until the run ends; dropping it removes the session file.
 pub(crate) struct Api {
-    /// The session file.
     session: PathBuf,
     /// Where captures without a path go, and how their names start.
     captures: PathBuf,
     stem: String,
-    /// The requests the connections' threads pass on, for the main loop to answer, and how many it
-    /// has received.
+    /// The requests the connections' threads pass on, and how many the main loop has received.
     incoming: Receiver<Incoming>,
     received: u64,
-    /// A request taken while waiting for one, answered first at the next turn.
+    /// A request taken while waiting, answered first at the next turn.
     held: Option<Incoming>,
     shared: Arc<Shared>,
-    /// `step`s waiting for the simulation to have run as many ticks as each says.
+    /// `step`s waiting for the simulation to have run their ticks.
     steps: Vec<(Reply, u64)>,
-    /// `assets` waiting for the thread that watches the asset root to have looked since each came.
+    /// `assets` waiting for the asset root's watcher thread to have looked since each came.
     listing: Vec<Listing>,
-    /// `capture`s waiting for a frame handed off of their kind, bare or not, in the order they
-    /// came.
+    /// `capture`s waiting for a frame handed off of their kind, bare or not, in order of arrival.
     asked: Vec<Capturing>,
     /// `capture`s riding with the frame handed off last, all of its kind, which shows the world
     /// after `riding_ticks` ticks, until a frame that rendered brings its view back.
     riding: Vec<Capturing>,
     riding_ticks: u64,
-    /// `frames` in the order they came, the first capturing its frames, the rest waiting for it;
-    /// whether the frame being made is the first's, of its kind and drawn from its viewpoint, if it
-    /// gives them; and whether the frame made last drew from a film's viewpoint in place of the
-    /// look's.
+    /// `frames` in order of arrival: the first captures, the rest wait. `film_frame`: the frame
+    /// being made is the first's, drawn from its viewpoint if it gives them. `film_viewpoint`: the
+    /// last frame drew from a film's viewpoint, not the look's.
     films: Vec<Filming>,
     film_frame: bool,
     film_viewpoint: bool,
-    /// Whether the frame being made is bare, and what it shows in place of the view's light, as
-    /// the film capturing frames, or else the oldest capture waiting, decided as the frame started:
-    /// a frame of either is apart, not published.
+    /// Whether the frame being made is bare, and what it shows in place of the view's light, from
+    /// the film capturing, else the oldest capture waiting, decided as the frame started. Such a
+    /// frame is apart, not published.
     bare: bool,
     shown: Option<Shown>,
-    /// The look as the clients set it, each part `None` where it's the game's own, and the run's
-    /// number; its `seen` is filled in as it's answered.
+    /// The look as clients set it, each part `None` where it's the game's own; `seen` is filled in
+    /// as it's answered.
     look: Looked,
-    /// `pick`s waiting for their answers.
     picks: Vec<Picking>,
-    /// `images` waiting for a frame handed off, and those riding with the frames handed off since
-    /// they came, until one that rendered brings its images back.
+    /// `images` waiting for a frame handed off, and those riding with frames handed off since,
+    /// until one that rendered brings its images back.
     images_asked: Vec<Reply>,
     images_riding: Vec<Reply>,
     /// The captures written without a path, which number their files.
     numbered: u64,
-    /// The memory a `view` asked for the view to be published to, or `None` to stop, until the
-    /// next frame back takes it to the render thread; and the name of the memory published to, or
-    /// asked for, which a `view` naming it again leaves as it is.
+    /// The memory a `view` asked to publish to, or `None` to stop, until the next frame back takes
+    /// it to the render thread.
     viewing: Option<Option<Writer>>,
+    /// The memory published to or asked for; a `view` naming it again changes nothing.
     memory: Option<String>,
-    /// What paces frames by the client's taking them, while the view is published.
+    /// Paces frames by the client's taking them, while the view is published.
     pacer: Option<Pacer>,
-    /// Whether a frame that wasn't published has been warned of, since the view was asked for.
+    /// Whether an unpublished frame has been warned of since the view was asked for.
     view_warned: bool,
-    /// To the thread that writes captures' PNGs.
     pngs: Sender<Writing>,
     /// Where snapshots without a path go, and how many have, which number their files.
     snapshots: PathBuf,
     snapshotted: u64,
-    /// To the thread that writes snapshots.
     taken: Sender<Taken>,
     /// Edits and patches offered to a lockstep session, waiting for the tick they apply before.
     offered: Vec<(Reply, Ticket, Offer)>,
-    /// The session file as written, which is written again as the run's player changes, as a
-    /// session the game hosts or joins starts or ends.
+    /// The session file as written; rewritten as the run's player changes.
     written: Session,
 }
 
@@ -145,21 +140,20 @@ pub(crate) struct Api {
 struct Shared {
     /// The frames that have started, which `ping` answers.
     frames: AtomicU64,
-    /// The requests the connections' threads have passed on to the main loop, each counted once
-    /// it's sent, which a frame answers those of that came before it started.
+    /// The requests passed on to the main loop, each counted once sent. A frame answers those
+    /// that came before it started.
     passed: AtomicU64,
-    /// What wakes the main loop as a request comes, so that it answers while frames pause.
+    /// Wakes the main loop as a request comes, so it answers while frames pause.
     waker: Mutex<Option<Box<dyn Fn() + Send>>>,
-    /// The events of the run's log that `logs` reads, and the number drawn at random that tells
-    /// its cursors from another run's.
+    /// The log's events that `logs` reads, and a random number telling its cursors from another
+    /// run's.
     events: &'static Events,
     run: u64,
-    /// The debugger of the run's scripts, which `debug` asks.
     debugger: Arc<Debugger>,
 }
 
-/// A request for the main loop to answer, the client of its connection, whether that's granted
-/// `read` of `Name`, which a `pick` answers, and where its answer goes.
+/// A request for the main loop: its client, whether that client may `read` `Name` (which a `pick`
+/// answers), and where the answer goes.
 struct Incoming {
     call: Call,
     client: Arc<str>,
@@ -168,13 +162,15 @@ struct Incoming {
 }
 
 impl Api {
-    /// Starts serving app `app`'s run, whose layers are `layers`, from the bottom up, whose JSON
-    /// log is at `log`, if it has one, and keeps its last events in `events`, which plays `player`
-    /// in a lockstep session, if it's a peer of one, and whose project's manifest is at `project`,
-    /// if it's a project's game: listens on the loopback, starts its threads and writes the session
-    /// file, which only the user the game runs as can read, from before it holds the token, as
-    /// `dirs::write_private` writes it: the token is all that keeps another process from `patch`,
-    /// which loads a library into the game, and from the writes of `capture` and `snapshot`.
+    /// Starts serving `app`'s run: listens on the loopback, starts its threads and writes the
+    /// session file.
+    ///
+    /// `layers` are bottom up; `log` is the JSON log, if any; `player` is the run's player in a
+    /// lockstep session, if a peer; `project` is the project's manifest, if a project's game.
+    ///
+    /// The file is readable only by the game's user, from before it holds the token (see
+    /// `dirs::write_private`). The token alone keeps another process from `patch`, which loads a
+    /// library into the game, and from the writes of `capture` and `snapshot`.
     ///
     /// Fails with `api.start` if it can't.
     pub(crate) fn start(
@@ -192,12 +188,12 @@ impl Api {
             .local_addr()
             .map_err(failed("can't tell where it listens".to_owned()))?;
         let pid = std::process::id();
-        // std seeds its hashers' keys from the OS's randomness, and SipHash's output under them
-        // tells nothing of them.
+        // std seeds its hashers' keys from the OS's randomness; SipHash's output reveals nothing of
+        // them.
         let random = RandomState::new();
         let token = format!("{:016x}{:016x}", random.hash_one(1), random.hash_one(2));
-        // Under 2^53, so that JSON's readers that take every number for a double, as JavaScript's
-        // do, which agents' MCP clients may be written in, read it whole.
+        // Under 2^53, so JSON readers that take every number for a double (JavaScript's, which MCP
+        // clients may use) read it whole.
         let run = random.hash_one(3) & ((1 << 53) - 1);
         let session = Session {
             app: app.to_owned(),
@@ -312,9 +308,9 @@ impl Api {
         })
     }
 
-    /// Writes the session file again with `player`, if that's not the player it names, as a
-    /// session the game hosts or joins starts or ends, so that tools reach a session's peers as
-    /// they do those its flags started; warns where it can't (`api.session`).
+    /// Writes the session file again if `player` differs from the one it names, as a session the
+    /// game hosts or joins starts or ends, so tools reach its peers as they do flag-started ones.
+    /// Warns where it can't (`api.session`).
     fn follow_player(&mut self, player: Option<u8>) {
         if self.written.player == player {
             return;
@@ -330,7 +326,6 @@ impl Api {
         }
     }
 
-    /// Has `wake` wake the main loop as each request comes.
     pub(crate) fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) {
         *self
             .shared
@@ -339,24 +334,24 @@ impl Api {
             .expect("no thread panics holding it") = Some(wake);
     }
 
-    /// The debugger of the run's scripts, which `debug` asks.
     pub(crate) fn debugger(&self) -> Arc<Debugger> {
         self.shared.debugger.clone()
     }
 
-    /// As a frame starts, before its ticks, answers the requests that had come as it started, from
-    /// `cx`, whose layers are `stack`'s and whose simulation `stepper` steps, so that clients that
-    /// keep sending them can't keep the frame from going on: first the `step`s whose ticks have
-    /// run, then the rest in the order they came, `look`s setting the look the frame draws with,
-    /// `capture`s and `pick`s once a frame has rendered the view, as
-    /// [`frame_back`](Self::frame_back) says, and `snapshot`s once their files are written, but
-    /// refused before the first tick of a run playing from its start. Then makes the frame of the
-    /// kind of the oldest capture riding, whose frame may not render, or else of the film that has
-    /// frames to capture, or else of the oldest capture asked: bare if it's of the game's own view,
-    /// and showing what it shows in place of the view's light; a film's frame drawn from its
-    /// viewpoint, if it gives them, as [`Filming::viewpoint`] says, in place of the look's, which
-    /// the next frame not of a film's gets back. Unless the frame's bare, which reads no picks, has
-    /// it ask the picks waiting, as many as [`MOST_PICKS`], the rest waiting for the frames after.
+    /// As a frame starts, before its ticks, answers the requests that had come by then, so clients
+    /// that keep sending can't hold the frame back: first the `step`s whose ticks have run, then
+    /// the rest in order of arrival. `look`s set the look the frame draws with; `capture`s and
+    /// `pick`s wait for a frame that rendered the view ([`frame_back`](Self::frame_back));
+    /// `snapshot`s wait for their files, and are refused before the first tick of a run playing
+    /// from its start.
+    ///
+    /// Then makes the frame of the kind of the oldest capture riding (its frame may not render),
+    /// else of the film with frames to capture, else of the oldest capture asked. A frame of the
+    /// game's own view is bare. A film's frame draws from its viewpoint, if it gives them
+    /// ([`Filming::viewpoint`]); the next frame not a film's gets the look back. Unless the frame
+    /// is bare, which reads no picks, it asks the waiting picks, at most [`MOST_PICKS`]; the rest
+    /// wait.
+    ///
     /// Returns whether a request asked the run to end.
     pub(crate) fn serve(
         &mut self,
@@ -401,9 +396,9 @@ impl Api {
         quit
     }
 
-    /// As [`serve`](Self::serve), between frames while they pause for a minimized window, without
-    /// counting a frame: a `capture`, a `pick`, an `images` or a `step`, which need frames, fail
-    /// with `api.paused`.
+    /// Like [`serve`](Self::serve), between frames while a minimized window pauses them, counting
+    /// no frame. `capture`, `frames`, `pick`, `images` and `step` need frames and fail with
+    /// `api.paused`.
     pub(crate) fn serve_paused(
         &mut self,
         cx: &mut Context,
@@ -413,8 +408,7 @@ impl Api {
         self.answer(cx, stack, stepper, true)
     }
 
-    /// As frames pause, answers each `assets` waiting for a look from `cx`'s database as it is, as
-    /// `api::frames_paused` says.
+    /// As frames pause, answers each `assets` waiting for a look from `cx`'s database as it is.
     pub(crate) fn frames_paused(&mut self, cx: &Context) {
         for listing in self.listing.drain(..) {
             let Listing {
@@ -428,8 +422,6 @@ impl Api {
         }
     }
 
-    /// Answers the requests that have come, as [`serve`](Self::serve) says, `paused` if frames
-    /// have paused.
     fn answer(
         &mut self,
         cx: &mut Context,
@@ -476,7 +468,7 @@ impl Api {
         {
             match call {
                 // What a quit leaves would go with the run, and a snapshot that quits is what a
-                // run started again goes on from: so nothing past either applies, nor says so.
+                // restarted run continues from: nothing past either applies.
                 _ if quit => {
                     let message = "the game is quitting, as a request before this one asked, and \
                                    took nothing of it; a run `gg run` starts again takes requests \
@@ -528,8 +520,7 @@ impl Api {
         quit
     }
 
-    /// Answers `call`, which controls the run: `status`, `pause`, `resume`, `play`, `stop`,
-    /// `scene`, `step` or `quit`; returns whether it asked the run to end.
+    /// Answers `call`, a control of the run; returns whether it asked the run to end.
     fn answer_control(
         &mut self,
         cx: &mut Context,
@@ -594,8 +585,7 @@ impl Api {
         quit
     }
 
-    /// Answers `call`, of the view: `capture`, `frames`, `view`, `input`, `look`, `pick` or
-    /// `images`, from `client`, whose picks answer names if `names`.
+    /// A pick answers names if `names`.
     fn answer_view(
         &mut self,
         cx: &mut Context,
@@ -626,7 +616,7 @@ impl Api {
                 rect,
                 show,
             } => {
-                // A view of no area, or none, fails as the frames come back without one.
+                // A view of no area, or none, fails when the frames come back.
                 let size = (rect.map(|[_, _, width, height]| [width, height]))
                     .or(cx.view().map(|view| view.size));
                 let held = size.map_or(0, |[width, height]| {
@@ -689,8 +679,7 @@ impl Api {
             Call::Look(given) => {
                 self.set_look(cx, given, client);
                 let seen = cx.dev.look.seen.as_ref().map(api_viewpoint);
-                // The game's own camera may be placed by numbers that aren't finite, which JSON
-                // has none for, and a client couldn't read back.
+                // The game's own camera may use non-finite numbers, which JSON can't carry.
                 self.look.seen = seen.filter(gg_api::Viewpoint::is_finite);
                 reply.result(&self.look);
             }
@@ -706,8 +695,6 @@ impl Api {
         }
     }
 
-    /// Answers `call`, a read: `entities`, `entity`, `get`, `types`, `hash`, `assets`, `ui`,
-    /// `cells` or `edits`.
     fn answer_read(
         &mut self,
         cx: &mut Context,
@@ -737,9 +724,9 @@ impl Api {
                 });
             }
             Call::Assets { kind, skip, take } => {
-                // While frames pause, a look the thread takes would wait for the next request
-                // to be answered, so the database as the thread last sent it answers; and a run
-                // that no thread watches the root for scans it here.
+                // While frames pause, a look the thread takes would wait for the next request,
+                // so the database as the thread last sent it answers. A run with no thread
+                // watching the root scans here.
                 let look = if paused { None } else { cx.ask_assets() };
                 match look {
                     Some(look) => self.listing.push(Listing {
@@ -776,7 +763,7 @@ impl Api {
     }
 
     /// Answers `call`, a `snapshot`; returns whether the run ends, as one that quits does once
-    /// it's written.
+    /// written.
     fn answer_snapshot(
         &mut self,
         cx: &Context,
@@ -786,11 +773,10 @@ impl Api {
     ) -> bool {
         let mut quit = false;
         match call {
-            // A run stopped, or playing a copy, is snapshotted before its first tick too, so
-            // that a restart keeps the world as edited; what the layers queued as they attached
-            // goes, as it does at a `stop` that brings that world back. One restored from a
-            // snapshot, whose layers attached nothing, is too, as one restored paused may not
-            // tick for a while.
+            // A run stopped, or playing a copy, is snapshotted before its first tick too, so a
+            // restart keeps the world as edited; what the layers queued as they attached goes,
+            // as at a `stop` that brings that world back. So is one restored from a snapshot
+            // (its layers attached nothing), which may not tick for a while if restored paused.
             Call::Snapshot { .. }
                 if stepper.fresh() && !stepper.stopped() && cx.dev.edited.is_none() =>
             {
@@ -834,18 +820,17 @@ impl Api {
                     written: None,
                 };
                 if quits {
-                    // Written before the run ends, which ends the thread with it: the main
-                    // thread waits for it, as the run would only end anyway, and the snapshots
-                    // asked before it are written first.
+                    // Written before the run ends, which ends the thread too: the main thread
+                    // waits, and the snapshots asked earlier are written first.
                     let (written, done) = mpsc::channel();
                     let taken = Taken {
                         written: Some(written),
                         ..taken
                     };
-                    // One that fails leaves the run going, as one that isn't taken does.
+                    // A failed one leaves the run going, as an untaken one does.
                     quit = self.taken.send(taken).is_ok() && done.recv().unwrap_or(false);
-                    // Its answer goes out before the run ends, which would end the thread that
-                    // writes it, and a client would take the snapshot for one that failed.
+                    // The answer goes out before the run ends the thread that writes it, or a
+                    // client would take the snapshot for a failure.
                     if quit && let Some(landing) = landing {
                         let _ = landing.recv_timeout(ANSWERING);
                     }
@@ -859,8 +844,6 @@ impl Api {
         quit
     }
 
-    /// Answers `call`, an edit, as client `client`: `patch`, `apply`, `save_prefab`, `undo` or
-    /// `redo`.
     fn answer_edit(
         &mut self,
         cx: &mut Context,
@@ -880,7 +863,7 @@ impl Api {
                 }
             },
             Call::Apply(given, gesture) => {
-                // What its values name that isn't loaded is loaded first, as a scene's is.
+                // Assets its values name are loaded first, as a scene's are.
                 let named = assets_named(cx.world(), &given);
                 cx.load_named(named, false);
                 match operations(cx.world(), cx.world(), given) {
@@ -903,7 +886,7 @@ impl Api {
             Call::SavePrefab { id, path } => match save_prefab(cx, stack, id, path) {
                 Ok(saved) => {
                     let name = cx.world().assets().prefab_name(saved.prefab).to_owned();
-                    // Checked as the save wrote the file, in this world as it is: it applies.
+                    // Checked as the save wrote the file, against this world: it applies.
                     let link = Operation::Link {
                         entity: id,
                         prefab: saved.prefab,
@@ -937,9 +920,9 @@ impl Api {
         }
     }
 
-    /// Stops the game, which plays, as `stop` asks of a run that can stop: brings back the world as
-    /// edited, if a copy of it plays, at its ticks, as [`Stack::stop`] says; runs no ticks from
-    /// then on; and fails the `step`s waiting with `api.stopped`.
+    /// Stops the playing game, as `stop` asks of a run that can stop: brings back the world as
+    /// edited, if a copy plays, at its ticks ([`Stack::stop`]); runs no ticks from then on; fails
+    /// the waiting `step`s with `api.stopped`.
     fn stop(&mut self, cx: &mut Context, stack: &mut Stack, stepper: &mut Stepper) {
         if let Some(ticks) = stack.stop(cx) {
             stepper.jump_to(ticks);
@@ -951,17 +934,20 @@ impl Api {
         }
     }
 
-    /// Does to the open scene what `scene` asks, as gg-api's docs say: in a project's game, with
-    /// its path resolved, as [`scene_files::resolve`] does, saves the open scene of the world as
-    /// edited, as [`scene_files::save`] does; or, once [`scene_files::check_open`] or
-    /// [`scene_files::check_unsaved`] passes, stops a copy that plays, as `stop` does, and opens a
-    /// scene file in its place or empties it, as [`scene_files::open`] and [`scene_files::new`] do.
+    /// Does to the open scene what `scene` asks, as gg-api's docs say, in a project's game, with
+    /// its path resolved ([`scene_files::resolve`]): saves the world as edited
+    /// ([`scene_files::save`]); or, once [`scene_files::check_open`] or
+    /// [`scene_files::check_unsaved`] passes, stops a copy that plays, as `stop` does, then opens a
+    /// scene file ([`scene_files::open`]) or empties the scene ([`scene_files::new`]).
     ///
-    /// Fails with `engine.no_project` in a game that isn't a project's; with `api.no_scene` in a
-    /// game that runs from its package, which has no scene files, for a save in a lockstep peer,
-    /// whose scene files the other's must stay as, and for an open or a
-    /// new in a run that can't stop, as [`Stack::refuses_stop`] says, since neither the history
-    /// they restart nor a copy's stopping is recorded or sent to a peer; and as those calls do.
+    /// # Errors
+    ///
+    /// - `engine.no_project`: the game isn't a project's.
+    /// - `api.no_scene`: the game runs from its package, which has no scene files; a save in a
+    ///   lockstep peer, whose scene files must match the others'; an open or new in a run that
+    ///   can't stop ([`Stack::refuses_stop`]), since neither the history they restart nor a copy's
+    ///   stopping is recorded or sent to a peer.
+    /// - Those of the calls above.
     fn scene(
         &mut self,
         cx: &mut Context,
@@ -1016,8 +1002,8 @@ impl Api {
         }
     }
 
-    /// The game as the frame that answers starts, among it the open scene of the world as edited
-    /// and whether it's unsaved, as [`scene_files::unsaved`] finds it.
+    /// The game as the answering frame starts, with the open scene of the world as edited and
+    /// whether it's unsaved ([`scene_files::unsaved`]).
     fn status(&self, cx: &mut Context, stepper: &Stepper) -> Status {
         let unsaved = scene_files::unsaved(cx, stepper.ticks);
         let entities = cx.world().entities(None);
@@ -1030,7 +1016,7 @@ impl Api {
             view: cx.view().map(|view| view.size),
             scene: scene_files::title(cx).map(str::to_owned),
             unsaved,
-            // The world as edited's, as `unsaved` is.
+            // The world as edited's, like `unsaved`.
             edited: cx
                 .dev
                 .edited
@@ -1040,8 +1026,8 @@ impl Api {
         }
     }
 
-    /// Whether the simulation is paused or stopped with nothing asked of the frames: no ticks to
-    /// step, no capture, `frames`, pick or `images` waiting and no request held.
+    /// Whether the simulation is paused or stopped and nothing asks for frames: no ticks to step,
+    /// no capture, `frames`, pick or `images` waiting, no request held.
     pub(crate) fn is_idle(&self, stepper: &Stepper) -> bool {
         (stepper.paused() || stepper.stopped())
             && stepper.steps() == 0
@@ -1062,13 +1048,13 @@ impl Api {
         }
     }
 
-    /// The next request to answer: the one held, if any, then those of the first `came` the
-    /// connections' threads passed on that haven't been received; `None` once they have.
+    /// The next request to answer: the one held, then those of the first `came` passed on that
+    /// aren't yet received; `None` once all are.
     fn next(&mut self, came: u64) -> Option<Incoming> {
         if let Some(held) = self.held.take() {
             return Some(held);
         }
-        // Each counted is sent before it's counted, so it's there to receive.
+        // Each is sent before it's counted, so it's there to receive.
         if self.received >= came {
             return None;
         }
@@ -1079,8 +1065,8 @@ impl Api {
 }
 
 impl Drop for Api {
-    /// Removes the session file, so that tools don't find the run once it has ended: a crash or a
-    /// kill leaves it, naming an address that refuses connections.
+    /// Removes the session file, so tools don't find an ended run. A crash or kill leaves it,
+    /// naming an address that refuses connections.
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.session);
     }

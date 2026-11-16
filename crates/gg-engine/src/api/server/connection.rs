@@ -19,18 +19,17 @@ use super::{Incoming, Shared, failure};
 use crate::api::Waiting;
 use crate::grant::{Capability, Grant};
 
-/// The client a connection whose `hello` names none is, the author of its edits.
+/// The edit author of a connection whose `hello` names no client.
 const UNNAMED: &str = "api";
 
-/// How long a connection has to say hello, its whole `hello` come, before it's dropped.
+/// How long a connection has to deliver its whole `hello` before it's dropped.
 pub(super) const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The most connections saying hello at once, past which more are refused as they come: any local
-/// process may open connections that never say it, each holding a thread until it's dropped.
+/// The most connections saying hello at once; more are refused. Any local process may open
+/// connections that never say it, each holding a thread until dropped.
 pub(super) const MOST_SAYING_HELLO: usize = 8;
 
-/// The longest a `logs` waits for an event to come, or a `debug` for a script to stop, in
-/// milliseconds.
+/// The longest, in milliseconds, a `logs` waits for an event or a `debug` for a script to stop.
 const MOST_WAIT_MS: u64 = 10_000;
 
 /// The levels of `tracing`, in the order [`gg_api::LEVELS`] names them.
@@ -42,16 +41,15 @@ const LEVELS: [Level; 5] = [
     Level::TRACE,
 ];
 
-/// Where a request's answer goes: its connection's writer, which drops it once the connection has
-/// gone; and the request's place among those its connection has in flight.
+/// Where a request's answer goes: the connection's writer, which drops it once the connection is
+/// gone.
 pub(super) struct Reply {
     pub(super) id: u64,
     pub(super) to: Sender<Answer>,
     pub(super) flight: Flight,
 }
 
-/// An answer's line, for its connection's writer, with its request's place among those in flight,
-/// which goes once the line is written.
+/// An answer line; its [`Flight`] is given up once the line is written.
 pub(super) type Answer = (String, Flight);
 
 impl Reply {
@@ -66,8 +64,8 @@ impl Reply {
         ));
     }
 
-    /// What's told once its answer is written to its connection, or can't be, the connection
-    /// gone: so that a run that ends once it has answered ends after the client has its answer.
+    /// Told once the answer is written, or can't be (connection gone), so a run that ends after
+    /// answering ends after the client has it.
     pub(super) fn landing(&mut self) -> Receiver<()> {
         let (landed, landing) = mpsc::channel();
         self.flight.1 = Some(landed);
@@ -75,9 +73,9 @@ impl Reply {
     }
 }
 
-/// Accepts connections on `listener`, serving each on threads of its own, as [`connection`] does,
-/// until the process ends; but while [`MOST_SAYING_HELLO`] are saying hello, it closes each that
-/// comes, warning `api.too_many_hellos` as it starts to, once until one is served again.
+/// Serves each connection on `listener` on its own threads ([`connection`]) until the process
+/// ends. While [`MOST_SAYING_HELLO`] are saying hello, closes new ones, warning
+/// `api.too_many_hellos` once until one is served again.
 pub(super) fn accept(
     listener: &TcpListener,
     token: &str,
@@ -92,12 +90,12 @@ pub(super) fn accept(
             Ok(stream) => stream,
             Err(error) => {
                 debug!(code = "api.accept", "Can't accept a connection: {error}");
-                // An error that comes again, such as running out of handles, mustn't spin.
+                // A recurring error, such as out of handles, mustn't spin.
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
         };
-        // This thread alone adds to the count, so it can't pass the most between the two.
+        // Only this thread adds to the count, so the check can't race past the most.
         if saying_hello.load(Ordering::Relaxed) >= MOST_SAYING_HELLO {
             if !mem::replace(&mut refusing, true) {
                 warn!(
@@ -123,8 +121,7 @@ pub(super) fn accept(
     }
 }
 
-/// A connection's place among those saying hello, which [`MOST_SAYING_HELLO`] caps, given up as it
-/// drops.
+/// A place among those saying hello ([`MOST_SAYING_HELLO`]), given up on drop.
 struct SayingHello(Arc<AtomicUsize>);
 
 impl Drop for SayingHello {
@@ -133,17 +130,17 @@ impl Drop for SayingHello {
     }
 }
 
-/// How many requests a connection has in flight, read and not yet answered on the wire, which
-/// [`gg_api::MOST_IN_FLIGHT`] caps.
+/// A connection's requests in flight (read, not yet answered on the wire), capped at
+/// [`gg_api::MOST_IN_FLIGHT`].
 #[derive(Default)]
 pub(super) struct InFlight {
     count: Mutex<usize>,
-    /// Notified as a request lands, its place given up.
+    /// Notified as a request lands.
     landed: Condvar,
 }
 
 impl InFlight {
-    /// A place among those in flight, once one is free.
+    /// A place in flight, once one is free.
     pub(super) fn take(self: &Arc<Self>) -> Flight {
         let mut count = self.count.lock().expect("no thread panics holding it");
         while *count >= gg_api::MOST_IN_FLIGHT {
@@ -154,9 +151,8 @@ impl InFlight {
     }
 }
 
-/// A request's place among those its connection has in flight, given up as it drops: once its
-/// answer is written, or as it goes unanswered, as when the connection has gone; and what's told
-/// then, if anything waits for it, as [`Reply::landing`] has it.
+/// A request's place in flight, given up on drop (answer written, or unanswered because the
+/// connection is gone). Then it tells [`Reply::landing`]'s receiver.
 pub(super) struct Flight(Arc<InFlight>, Option<Sender<()>>);
 
 impl Drop for Flight {
@@ -169,14 +165,17 @@ impl Drop for Flight {
     }
 }
 
-/// Serves connection `stream`, which holds `place` among those saying hello until it has: its first
-/// request must be `hello` with `token`, as [`hello`] reads it within [`HELLO_TIMEOUT`], which it
-/// answers with `welcome`; then it answers `ping`, `logs`, `note` and `debug` itself, and passes the
-/// rest on to the main loop through `to_main`, waking it, each answer going back through a thread
-/// that writes them as they come, which starts once the `hello` has been granted. It reads a request
-/// only while fewer than [`gg_api::MOST_IN_FLIGHT`] are in flight, so that a client that sends
-/// faster than it reads, or than the game answers, is held back by the connection, rather than its
-/// requests and answers growing without bound in the game. A line that isn't a request ends it.
+/// Serves connection `stream`, which holds `place` among those saying hello until it has.
+///
+/// - The first request must be `hello` with `token` ([`hello`], within [`HELLO_TIMEOUT`]); it's
+///   answered with `welcome`.
+/// - `ping`, `logs`, `note` and `debug` are answered here; the rest go to the main loop through
+///   `to_main`, waking it.
+/// - A thread started once the `hello` is granted writes the answers as they come.
+///
+/// A request is read only while fewer than [`gg_api::MOST_IN_FLIGHT`] are in flight, so a client
+/// sending faster than it reads, or than the game answers, is held back, not buffered without
+/// bound. A line that isn't a request ends the connection.
 fn connection(
     stream: TcpStream,
     token: &str,
@@ -232,8 +231,8 @@ fn connection(
             continue;
         }
         if request.method == "ping" {
-            // A script stopped first, which holds the main thread even while the window's
-            // minimized, between whose frames it answers otherwise.
+            // A stopped script comes first: it holds the main thread even while the window's
+            // minimized, when it otherwise answers between frames.
             let stopped = shared.debugger.stopped().then_some("breakpoint");
             let waiting = || Waiting::now().map(Waiting::name);
             let pulse = Pulse {
@@ -290,9 +289,8 @@ fn connection(
     }
 }
 
-/// What `call` needs of its connection's grant: of the world, `read` or `write` of the type it
-/// names alone, or else of the whole world; or the tool API's own capability its method needs,
-/// with `files` for a path to write at.
+/// The capabilities `call` needs: `read` or `write` of the type it names, else of the whole
+/// world; or its method's tool API capability, plus `files` for a path to write at.
 pub(super) fn needs(call: &Call) -> Vec<Capability> {
     use Capability::{Files, Input, Patch, Play, Quit, Read, Scene, Snapshot, View, Write};
 
@@ -343,7 +341,7 @@ pub(super) fn needs(call: &Call) -> Vec<Capability> {
     }
 }
 
-/// Whether `grant`, a connection's, covers each of `needs`, what a request of `method` needs.
+/// Checks `grant` covers each of `needs` for a request of `method`.
 ///
 /// Fails with `api.ungranted`, naming the first it doesn't.
 pub(super) fn granted(grant: &Grant, method: &str, needs: &[Capability]) -> Result<(), Failure> {
@@ -359,10 +357,9 @@ pub(super) fn granted(grant: &Grant, method: &str, needs: &[Capability]) -> Resu
     }
 }
 
-/// Whether `given` is `token`, compared in a time that doesn't depend on where they first differ,
-/// so that a client can't find the token a byte at a time by timing its refusals: only their
-/// lengths tell early, and the token's, 32, is no secret. `black_box` keeps the compiler from
-/// ending the loop at the first difference, as far as std's best effort goes.
+/// Whether `given` is `token`, in time independent of where they first differ, so refusal timing
+/// can't leak the token. Only a length mismatch returns early; the length, 32, is no secret.
+/// `black_box` keeps the compiler from ending the loop early, as far as std's best effort goes.
 pub(super) fn same_token(given: &str, token: &str) -> bool {
     let (given, token) = (given.as_bytes(), token.as_bytes());
     given.len() == token.len()
@@ -371,11 +368,11 @@ pub(super) fn same_token(given: &str, token: &str) -> bool {
             == 0
 }
 
-/// What `logs`, given `params`, answers, from the events `shared` keeps, as gg-api's docs say: read
-/// on the connection's own thread, which a wait holds.
+/// Answers `logs` (see gg-api's docs) from `shared`'s events, on the connection's thread, which a
+/// wait holds.
 ///
-/// Fails with `api.bad_params` for parameters it doesn't take, a `level` that isn't one, or a wait
-/// of more than [`MOST_WAIT_MS`].
+/// Fails with `api.bad_params` for untaken parameters, an unknown `level`, or a wait over
+/// [`MOST_WAIT_MS`].
 fn logs(params: &Value, shared: &Shared) -> Result<String, Failure> {
     let method = "logs";
     let gg_api::Logs {
@@ -402,14 +399,14 @@ fn logs(params: &Value, shared: &Shared) -> Result<String, Failure> {
         let what = format!("waits at most {MOST_WAIT_MS} ms, not {wait_ms}");
         return Err(bad_params(method, what));
     }
-    // Another run's cursor numbers another run's events, so all of this run's are new to it.
+    // Another run's cursor numbers its own events, so all of this run's are new to it.
     let from = match (from, run) {
         (Some(_), Some(run)) if run != shared.run => Some(0),
         (from, _) => from,
     };
     let wait = Duration::from_millis(wait_ms);
     let read = (shared.events).read(from, last, min, wait, gg_api::MAX_LINE / 2);
-    // Each line is an object of JSON already, as the log wrote it.
+    // Each line is already a JSON object, as the log wrote it.
     let mut answer = format!(
         r#"{{"run":{},"next":{},"end":{},"missed":{},"events":["#,
         shared.run, read.next, read.end, read.missed
@@ -424,15 +421,16 @@ fn logs(params: &Value, shared: &Shared) -> Result<String, Failure> {
     Ok(answer)
 }
 
-/// What `note`, given `params` by client `client`, answers, having logged the event it gives, as
-/// gg-api's docs say: at its level, with its code, its message, `client`, and its fields as one
-/// field of JSON text, `fields`, since an event's fields are flat. It's answered on the
-/// connection's own thread, so that a note comes through while frames pause.
+/// Answers `note` (see gg-api's docs) by logging its event at its level with its code, message,
+/// `client`, and its fields as one JSON text field, `fields` (an event's fields are flat). Runs on
+/// the connection's thread, so a note comes through while frames pause.
 ///
-/// Fails with `api.bad_params` for parameters it doesn't take, as a level that isn't `info` or
-/// `warn`; a code that isn't a stable code's shape, as [`is_code`] says, or is longer than
-/// [`gg_api::MOST_NOTE_CODE`] bytes; an empty message; or a message or fields longer than
-/// [`gg_api::MOST_NOTE`] bytes.
+/// Fails with `api.bad_params` for:
+///
+/// - untaken parameters, or a level other than `info` or `warn`;
+/// - a code that isn't a stable code's shape ([`is_code`]) or exceeds [`gg_api::MOST_NOTE_CODE`]
+///   bytes;
+/// - an empty message, or a message or fields over [`gg_api::MOST_NOTE`] bytes.
 pub(super) fn note(params: &Value, client: &str) -> Result<String, Failure> {
     let method = "note";
     let gg_api::Note {
@@ -479,14 +477,15 @@ pub(super) fn note(params: &Value, client: &str) -> Result<String, Failure> {
     Ok("{}".to_owned())
 }
 
-/// What `debug`, given `params`, answers, as gg-api's docs say: from `shared`'s debugger, on the
-/// connection's own thread, so that it answers while a script has stopped and the main thread waits
-/// there, and which a wait holds. Breakpoints and a pause wake the main loop, which places them, or
-/// steps to the pause, as a frame starts.
+/// Answers `debug` (see gg-api's docs) from `shared`'s debugger, on the connection's thread, so it
+/// answers while a stopped script holds the main thread; a wait holds it. Breakpoints and a pause
+/// wake the main loop, which places them, or steps to the pause, as a frame starts.
 ///
-/// Fails with `api.bad_params` for parameters it doesn't take, a script's path that's empty, a line
-/// of 0 or a wait of more than [`MOST_WAIT_MS`]; and with `script.not_stopped` for a continue or a
-/// step while no script has stopped.
+/// Fails with:
+///
+/// - `api.bad_params`: untaken parameters, an empty script path, a line of 0, or a wait over
+///   [`MOST_WAIT_MS`].
+/// - `script.not_stopped`: a continue or step while no script has stopped.
 fn debug(params: &Value, shared: &Shared) -> Result<String, Failure> {
     let method = "debug";
     let gg_api::Debug {
@@ -530,8 +529,8 @@ fn debug(params: &Value, shared: &Shared) -> Result<String, Failure> {
     Ok(serde_json::to_string(&answer).expect("an answer serializes"))
 }
 
-/// Whether `code` has a stable code's shape: two or more names, joined by dots, each of lowercase
-/// ASCII letters, digits and `_`, starting with a letter, as `gg.patch_failed`.
+/// Whether `code` has a stable code's shape: two or more dot-joined names of lowercase ASCII
+/// letters, digits and `_`, each starting with a letter, as `gg.patch_failed`.
 fn is_code(code: &str) -> bool {
     let name = |name: &str| {
         name.starts_with(|c: char| c.is_ascii_lowercase())
@@ -540,10 +539,9 @@ fn is_code(code: &str) -> bool {
     code.contains('.') && code.split('.').all(name)
 }
 
-/// The ID, the client and the grant of the `hello` that `reader`, a new connection's, reads by
-/// `deadline`, as [`read_hello`] does, if it gives `token`. A first request that isn't such a
-/// `hello`, or one whose grant names a capability there's none of, is answered with the failure,
-/// and `None` returned.
+/// The ID, client and grant of the `hello` read from `reader` by `deadline` ([`read_hello`]), if it
+/// gives `token`. Otherwise (not a `hello`, or a grant naming an unknown capability) answers the
+/// failure and returns `None`.
 fn hello(
     reader: &mut BufReader<TcpStream>,
     token: &str,
@@ -567,11 +565,10 @@ fn hello(
     match granted {
         Ok((client, grant)) => Some((hello.id, client.as_deref().unwrap_or(UNNAMED).into(), grant)),
         Err(failure) => {
-            // Here, as no thread writes the connection's answers until its `hello` is granted. It's
-            // the first line, which the hello's bound keeps to tens of KiB even escaped, within
-            // what the loopback's buffers take, so it's written without the client reading; and
-            // within a timeout, should they not take it, so that a client that never reads can't
-            // keep its place among those saying hello.
+            // Written here: no writer thread exists until the `hello` is granted. The line is
+            // short (the hello's bound keeps it to tens of KiB even escaped), so loopback buffers
+            // take it without the client reading; the timeout covers buffers that don't, so a
+            // client that never reads can't keep its place among those saying hello.
             let line = gg_api::answer_line(hello.id, Err(&failure));
             let _ = reader.get_ref().set_write_timeout(Some(HELLO_TIMEOUT));
             let _ = reader.get_ref().write_all(line.as_bytes());
@@ -580,15 +577,16 @@ fn hello(
     }
 }
 
-/// The `hello` that `reader`, a new connection's, reads: its first line, of at most
-/// [`gg_api::MAX_HELLO`] bytes, its line break aside, whole by `deadline`, each read waiting only
-/// for the time left, so that a client sending a byte at a time can't hold the connection longer.
-/// `None` if it doesn't come so, the connection ends or breaks first, or it isn't a request; a line
-/// too long is refused once it's seen to be, the rest unread.
+/// The `hello`: `reader`'s first line, at most [`gg_api::MAX_HELLO`] bytes (line break aside),
+/// whole by `deadline`. Each read waits only for the time left, so a byte-at-a-time client can't
+/// hold the connection longer.
+///
+/// `None` if it doesn't arrive so, the connection ends or breaks first, or it isn't a request. An
+/// overlong line is refused once seen to be, the rest unread.
 pub(super) fn read_hello(reader: &mut BufReader<TcpStream>, deadline: Instant) -> Option<Request> {
     let mut line = Vec::new();
     loop {
-        // A timeout of zero is refused, as it would wait for good.
+        // A zero timeout is refused: it would wait forever.
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return None;
@@ -622,14 +620,13 @@ pub(super) fn read_hello(reader: &mut BufReader<TcpStream>, deadline: Instant) -
     }
 }
 
-/// The next request `reader` reads: `None` once the connection ends or breaks, or at a line that
-/// isn't a request.
+/// The next request; `None` once the connection ends or breaks, or at a non-request line.
 fn next_request(reader: &mut BufReader<TcpStream>) -> Option<Request> {
     let line = gg_api::read_line(reader).ok()??;
     request(line.as_bytes())
 }
 
-/// The request `line` is, which may end in its line break; `None` if it isn't one.
+/// The request `line` is, which may end in a line break; `None` if it isn't one.
 fn request(line: &[u8]) -> Option<Request> {
     serde_json::from_slice(line)
         .inspect_err(|error| {
@@ -641,8 +638,8 @@ fn request(line: &[u8]) -> Option<Request> {
         .ok()
 }
 
-/// Writes the lines `answers` brings to `stream`, each request's place in flight going once its
-/// line is written, until the connection breaks or nothing more can come.
+/// Writes `answers`' lines to `stream` until the connection breaks or no more come; each place in
+/// flight goes once its line is written.
 fn write_answers(mut stream: TcpStream, answers: &Receiver<Answer>) {
     for (line, _flight) in answers {
         if stream.write_all(line.as_bytes()).is_err() {

@@ -1,10 +1,9 @@
-//! Reflection's values as the tool API writes and reads them, as gg-api's docs describe: JSON
-//! written by hand, so that a struct's fields keep their order, with the entities they hold by
-//! their IDs and the textures by their names, their IDs or else their paths; and read by the type
-//! of the field it goes in, as reflection describes it, a texture by its name or a path to its
-//! file. A game reads and writes them with its world's entities and textures; a client, as the
-//! editor's Inspector is, with another process's, which it keeps by their IDs and names, as
-//! [`Remote`] says; and reflection's descriptions of types go to and come back from
+//! Reflection's values as the tool API writes and reads them (gg-api's docs).
+//!
+//! JSON is written by hand so a struct's fields keep their order: entities by ID, textures by
+//! name, ID or else path. It's read by the type of the field it goes in, a texture by name or file
+//! path. A game uses its world's entities and textures; a client, as the editor's Inspector is,
+//! uses another process's ([`Remote`]). Reflection's type descriptions go to and come back from
 //! gg-api's, as `types` answers them.
 
 use std::borrow::Cow;
@@ -18,8 +17,8 @@ use crate::ecs::MAX_DEPTH;
 use crate::reflect::{self, Bound, Field, Ident, Meta, Shape, Show, Type, Types, Value, Variant};
 use crate::{Entity, EntityId, Font, Model, Prefab, Texture, World};
 
-/// What finds the entities and textures values hold as JSON names them, by their IDs and names,
-/// and names them back: a game's [`World`], or a client's [`Remote`].
+/// Finds the entities and assets JSON names, by ID or name, and names them back: a game's
+/// [`World`] or a client's [`Remote`].
 pub(crate) trait Names {
     /// The types values are read by.
     fn types(&self) -> &Types;
@@ -27,29 +26,29 @@ pub(crate) trait Names {
     fn id(&self, entity: Entity) -> Option<EntityId>;
     /// The name of `texture`, its ID or else its path, if it has one.
     fn name(&self, texture: Texture) -> Option<&str>;
-    /// The value of the entity of ID `id`.
+    /// The entity of ID `id`.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
     fn entity(&self, id: EntityId) -> Result<Value>;
-    /// The value of the texture `name` names, by its name or a path to its file.
+    /// The texture called `name`, by name or file path.
     ///
     /// Fails with `api.no_texture` if none is.
     fn texture(&self, name: &str) -> Result<Value>;
     /// The name of `model`, as a texture's.
     fn model_name(&self, model: Model) -> Option<&str>;
-    /// The value of the model `name` names, by its name or a path to its file.
+    /// The model called `name`, by name or file path.
     ///
     /// Fails with `api.no_model` if none is.
     fn model(&self, name: &str) -> Result<Value>;
     /// The name of `font`, as a texture's.
     fn font_name(&self, font: Font) -> Option<&str>;
-    /// The value of the font `name` names, by its name or a path to its file.
+    /// The font called `name`, by name or file path.
     ///
     /// Fails with `api.no_font` if none is.
     fn font(&self, name: &str) -> Result<Value>;
     /// The name of `prefab`, as a texture's.
     fn prefab_name(&self, prefab: Prefab) -> Option<&str>;
-    /// The value of the prefab `name` names, by its name or a path to its file.
+    /// The prefab called `name`, by name or file path.
     ///
     /// Fails with `api.no_prefab` if none is.
     fn prefab(&self, name: &str) -> Result<Value>;
@@ -119,10 +118,10 @@ impl Names for World {
     }
 }
 
-/// Another process's values, as a client of its API keeps them, by the types it described: an
-/// entity by its ID, as [`Value::String`], or [`Entity::DEAD`] for one that isn't alive, as JSON's
-/// `null` gives it; and a texture by its name, as [`Value::String`]. Written back, they're the JSON
-/// they were read from, which the game reads by its own world.
+/// Another process's values as its API's client keeps them, by the types it described. An entity
+/// is its ID as a [`Value::String`], or [`Entity::DEAD`] for JSON's `null`; an asset is its name as
+/// a [`Value::String`]. Written back, they're the JSON they were read from, which the game reads
+/// by its own world.
 pub(crate) struct Remote<'a>(pub(crate) &'a Types);
 
 impl Names for Remote<'_> {
@@ -171,8 +170,8 @@ impl Names for Remote<'_> {
     }
 }
 
-/// Writes `value` as JSON, with the entities it holds by their IDs, as `names` names them, `null`
-/// for one that isn't alive, and the textures by their names, `null` for one without.
+/// Writes `value` as JSON. Entities are IDs and textures names, as `names` has them; `null` for a
+/// dead entity or an unnamed texture.
 pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
     match value {
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -231,24 +230,25 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
     }
 }
 
-/// The value `json` gives a field of type `ty`, as gg-api's docs describe: with the entities it
-/// names by their IDs, alive as `names` finds them, or `null` for a dead one, as one that isn't
-/// alive writes, and the textures, models, fonts and prefabs by their names or paths to their
-/// files, as `names` finds them; a struct, or a variant's fields, missing a field takes its
-/// default, or is opaque, which keeps or makes it as its type's own is; and a whole number an `Int`
-/// for a signed field, as reflection reads one, and a `UInt` for an unsigned one, if it can be.
+/// The value `json` gives a field of type `ty` (gg-api's docs).
 ///
-/// Fails, saying where in the value, with `reflect.wrong_kind` for JSON of another kind than the
-/// type's, `reflect.no_variant` and `reflect.no_field` for a variant or a field the type hasn't,
-/// `ecs.bad_id` and `ecs.no_entity` for an ID that isn't one or names no living entity,
-/// `api.no_texture`, `api.no_model`, `api.no_font` or `api.no_prefab` for a name or path no
-/// texture, model, font or prefab has, and `api.too_deep` for a value nested more than a scene's
-/// values may be.
+/// Entities are IDs that `names` finds alive, or `null` for a dead one. Textures, models, fonts and
+/// prefabs are names or file paths. A struct or variant missing a field takes its default, or is
+/// opaque if it is. A whole number is an `Int` for a signed field, a `UInt` for an unsigned one if
+/// it fits.
+///
+/// Fails, saying where in the value, with:
+/// - `reflect.wrong_kind` for JSON of another kind than the type's.
+/// - `reflect.no_variant` or `reflect.no_field` for a variant or field the type hasn't.
+/// - `ecs.bad_id` for an ID that isn't one, `ecs.no_entity` for one with no living entity.
+/// - `api.no_texture`, `api.no_model`, `api.no_font` or `api.no_prefab` for a name or path none
+///   has.
+/// - `api.too_deep` for a value nested deeper than a scene's may be.
 pub(crate) fn read(json: &JsonValue, ty: &Type, names: &dyn Names) -> Result<Value> {
     read_at(json, ty, names, 1)
 }
 
-/// As [`read`], for a value `depth` levels deep, the first being a component's.
+/// [`read`] for a value `depth` levels deep, a component's being the first.
 fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result<Value> {
     if depth > MAX_DEPTH {
         let message =
@@ -301,7 +301,7 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
             _ => return Err(wrong("a boolean")),
         },
         &Type::Int { signed, .. } => match json {
-            // The other, for a number outside its kind, which reflection refuses, saying so.
+            // The other kind for a number outside this one's; reflection refuses it.
             JsonValue::Number(n) => match (signed, n.as_i64(), n.as_u64()) {
                 (true, Some(n), _) | (false, Some(n), None) => Value::Int(n),
                 (_, _, Some(n)) => Value::UInt(n),
@@ -322,7 +322,7 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
         Type::Quat => Value::Quat(Quat::from_slice(&floats(4)?)),
         Type::Entity => match json {
             JsonValue::String(text) => names.entity(text.parse()?)?,
-            // As a reference to one that isn't alive writes.
+            // As a dead reference writes.
             JsonValue::Null => Value::Entity(Entity::DEAD),
             _ => return Err(wrong("an entity's ID, a string, or null for none alive")),
         },
@@ -410,8 +410,8 @@ fn list(items: &[JsonValue], ty: &Type, names: &dyn Names, depth: u32) -> Result
     items.collect()
 }
 
-/// The fields `fields` describes, of a struct or a variant a level above them, each from `given`'s
-/// key of its name, or its default without one, or opaque if it's opaque.
+/// The fields `fields` describes, of a struct or variant a level above them, each from `given`'s
+/// key of its name, else its default, else opaque if it is.
 ///
 /// Fails with `reflect.no_field` for a key that isn't a field's.
 fn object_fields(
@@ -444,7 +444,7 @@ fn object_fields(
     fields.collect()
 }
 
-/// What's opaque, which only `(opaque)` gives: kept as it is, or made as its type's own is.
+/// What's opaque: only `(opaque)` gives it, kept or made as its type's own is.
 fn opaque(json: &JsonValue, wrong: &dyn Fn(&str) -> Error) -> Result<Value> {
     match json {
         JsonValue::String(text) if text == "(opaque)" => Ok(Value::Opaque),
@@ -471,7 +471,7 @@ fn object(out: &mut String, fields: &[(Ident, Value)], names: &dyn Names) {
     out.push('}');
 }
 
-/// Writes `xs` as an array of numbers, as a vector's are, those that aren't finite as strings.
+/// Writes `xs` as an array of numbers, non-finite ones as strings.
 pub(crate) fn floats(out: &mut String, xs: &[f32]) {
     out.push('[');
     for (i, &x) in xs.iter().enumerate() {
@@ -483,7 +483,7 @@ pub(crate) fn floats(out: &mut String, xs: &[f32]) {
     out.push(']');
 }
 
-/// Writes `xs` as an array of numbers, as [`floats`] does, each as [`float64`] writes it.
+/// Like [`floats`], each written by [`float64`].
 pub(crate) fn float64s(out: &mut String, xs: &[f64]) {
     out.push('[');
     for (i, &x) in xs.iter().enumerate() {
@@ -505,8 +505,8 @@ pub(crate) fn float64(out: &mut String, x: f64) {
     }
 }
 
-/// Writes `x` as the shortest number that reads back to its bits as an `f32`, as `0.1` for 0.1,
-/// rather than as the `f64` it widens to.
+/// Writes `x` as the shortest number that reads back to its `f32` bits: `0.1` for 0.1, not its
+/// widened `f64`.
 pub(crate) fn float32(out: &mut String, x: f32) {
     if x.is_finite() {
         let text = serde_json::to_string(&x).expect("a finite float is a number");
@@ -516,8 +516,7 @@ pub(crate) fn float32(out: &mut String, x: f32) {
     }
 }
 
-/// Writes a float that isn't finite, which JSON has no number for: `NaN`, `inf` or `-inf`, as a
-/// string.
+/// Writes a non-finite float, which JSON has no number for, as the string `NaN`, `inf` or `-inf`.
 fn not_finite(out: &mut String, nan: bool, positive: bool) {
     out.push_str(match (nan, positive) {
         (true, _) => "\"NaN\"",
@@ -526,7 +525,7 @@ fn not_finite(out: &mut String, nan: bool, positive: bool) {
     });
 }
 
-/// `value` as JSON, as [`write()`] writes it.
+/// `value` as [`write()`] writes it.
 fn json(value: &Value, names: &dyn Names) -> JsonValue {
     let mut out = String::new();
     write(&mut out, value, names);
@@ -560,7 +559,7 @@ pub(super) fn describe(world: &World) -> gg_api::Types {
                 Show::Color => gg_api::Show::Color,
             },
             doc: field.meta.doc.to_string(),
-            // No default holds a living entity, nor a texture, which have none.
+            // No default holds a living entity or a texture.
             default: field.default.as_ref().map(|default| json(default, world)),
         };
         fields.iter().map(field).collect()
@@ -631,18 +630,18 @@ fn api_bound(bound: Bound) -> gg_api::Bound {
     }
 }
 
-/// The types another process described, as its `types` answered them, by which a client reads,
-/// draws and writes its values, as [`Remote`] keeps them; and its component types, in the order
-/// they registered, each with the value an add without one gives it, or why there's none.
+/// The types another process's `types` described, by which a client reads, draws and writes its
+/// values ([`Remote`]), and its component types in registration order, each with the value an add
+/// without one gives it, or why there's none.
 pub(crate) struct Described {
     pub(crate) types: Types,
     pub(crate) components: Vec<(String, std::result::Result<Value, String>)>,
 }
 
-/// The types `given` describes, as [`Described`] says.
+/// The types `given` describes.
 ///
-/// Fails with `api.protocol` for a description that isn't one: two types of one name, a type it
-/// names but doesn't describe, or a default that isn't its field's.
+/// Fails with `api.protocol` for a description that isn't one: two types of one name, a type named
+/// but not described, or a default that isn't its field's.
 pub(crate) fn described(given: &gg_api::Types) -> Result<Described> {
     let protocol = |what: String| Error::new("api.protocol", format!("`types` answered {what}"));
     let names = given.types.iter().map(|info| {
@@ -653,7 +652,7 @@ pub(crate) fn described(given: &gg_api::Types) -> Result<Described> {
     if types.iter().len() != given.types.len() {
         return Err(protocol("two types of one name".to_owned()));
     }
-    // Their shapes first, which their fields' defaults are read by.
+    // Shapes first: they read the fields' defaults.
     let fields = |types: &Types, given: &[gg_api::FieldInfo]| -> Result<Vec<Field>> {
         let field = |field: &gg_api::FieldInfo| {
             Ok(Field {
@@ -700,7 +699,7 @@ pub(crate) fn described(given: &gg_api::Types) -> Result<Described> {
         let index = types.find(&info.name).expect("each named");
         types.info_mut(index).shape = shape;
     }
-    // Then the defaults, each read by its field's type, and set once all are.
+    // Then the defaults, set once all are read.
     let mut defaults = Vec::new();
     for info in &given.types {
         let given = match &info.shape {
@@ -753,7 +752,7 @@ pub(crate) fn described(given: &gg_api::Types) -> Result<Described> {
 
 /// The type `ty` names, among `types`.
 ///
-/// Fails, saying so, for a named type that isn't among them.
+/// Fails for a named type that isn't among them.
 fn own_type(types: &Types, ty: &gg_api::Type) -> std::result::Result<Type, String> {
     use gg_api::Type as Api;
 
@@ -846,8 +845,8 @@ mod tests {
         assert_eq!(parsed["at"][2].as_f64().map(|x| x as f32), Some(1e-7));
     }
 
-    /// A position far from the origin writes as the shortest JSON that reads back to its `f64`s,
-    /// and reads back to their bits, where `f32` would round 1,000,000.1 to 1,000,000.125.
+    /// A far position writes as the shortest JSON that reads back to its `f64` bits; `f32` would
+    /// round 1,000,000.1 to 1,000,000.125.
     #[test]
     fn a_far_position_keeps_its_f64s_through_json() {
         let world = World::seeded(3);
@@ -864,8 +863,8 @@ mod tests {
         assert_eq!(bits(back), bits(far));
     }
 
-    /// A component's value written as JSON reads back by its type to a value that sets it as it
-    /// was; fields left out take their defaults, and JSON of the wrong kind is refused where it is.
+    /// A component's JSON reads back by its type to a value that sets it as it was. Missing fields
+    /// take defaults; JSON of the wrong kind is refused where it is.
     #[test]
     fn values_read_from_json_by_their_types() {
         let mut world = World::seeded(2);
@@ -886,7 +885,7 @@ mod tests {
             .set_field(holder, "Everything", "", &read)
             .expect("set");
         assert_eq!(world.dump(), before, "set as it was");
-        // Left out, a field takes its default; what's opaque, its own.
+        // Missing: a field's default; an opaque field's own.
         let some = read_json(&world, &ty, r#"{"count": 3, "form": {"Circle": {}}}"#).expect("read");
         let Value::Struct(fields) = &some else {
             panic!("{some:?}");
@@ -957,29 +956,29 @@ mod tests {
             assert_eq!(error.code(), code, "{json}: {error}");
             assert!(error.to_string().starts_with(starts), "{json}: {error}");
         }
-        // `null`, as a dead entity writes, reads back as one.
+        // `null` reads back as a dead entity.
         let none = super::read(&JsonValue::Null, &Type::Entity, &world).expect("read");
         assert_eq!(none, Value::Entity(Entity::DEAD));
-        // A texture by a path a layer added it from, which none here has.
+        // A texture by a path no layer here added it from.
         world.register::<crate::Sprite>().expect("registered");
         let sprite = Type::Named(world.types().find("Sprite").expect("registered"));
         let error =
             read_json(&world, &sprite, r#"{"texture": "assets/none.png"}"#).expect_err("none");
         assert_eq!(error.code(), "api.no_texture", "{error}");
-        // And a text's font, as a texture.
+        // A font, likewise.
         world.register::<crate::Text>().expect("registered");
         let text = Type::Named(world.types().find("Text").expect("registered"));
         let error = read_json(&world, &text, r#"{"font": "fonts/none.ttf"}"#).expect_err("none");
         assert_eq!(error.code(), "api.no_font", "{error}");
-        // And a root's prefab, as a texture.
+        // A prefab, likewise.
         world.register::<crate::PrefabRoot>().expect("registered");
         let root = Type::Named(world.types().find("PrefabRoot").expect("registered"));
         let error = read_json(&world, &root, r#"{"0": "prefabs/none.prefab"}"#).expect_err("none");
         assert_eq!(error.code(), "api.no_prefab", "{error}");
     }
 
-    /// A whole number reads as reflection reads its field's: an `Int` for a signed one, and a
-    /// `UInt` for an unsigned one, but for a number outside its kind, which a set then refuses.
+    /// A whole number reads as an `Int` for a signed field, a `UInt` for an unsigned one, except
+    /// outside its kind, which a set then refuses.
     #[test]
     fn whole_numbers_read_by_their_fields_sign() {
         let types = Types::default();
@@ -992,9 +991,8 @@ mod tests {
         assert_eq!(read(json!(u64::MAX), &int(true)), Value::UInt(u64::MAX));
     }
 
-    /// Another process's description of its types is refused for what it can't mean: two types of
-    /// one name, a type it names but doesn't describe, a component's default of a type undescribed,
-    /// and a default that isn't its field's.
+    /// A description that can't mean anything is refused: two types of one name, an undescribed
+    /// named type, a default for an undescribed component type, a default that isn't its field's.
     #[test]
     fn a_description_that_isnt_one_is_refused() {
         let field = |ty: gg_api::Type, default| gg_api::FieldInfo {

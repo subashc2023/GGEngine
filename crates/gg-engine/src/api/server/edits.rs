@@ -1,4 +1,4 @@
-//! Clients' edits: the operations they ask for, read by the world's types, and what each answers.
+//! Clients' edits: the operations they ask for, read by the world's types, and their answers.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -16,15 +16,14 @@ use crate::layer::{Offered, Stack};
 use crate::reflect::{self, Ident, Type};
 use crate::{Context, Entity, EntityId, Font, Model, Operation, Prefab, Texture, World};
 
-/// What an edit or a patch offered to a lockstep session was asked as, which its answer reads as.
+/// What an edit or patch offered to a lockstep session was asked as; its answer reads it.
 pub(super) enum Offer {
     Apply,
     Step {
         author: String,
     },
     Patch,
-    /// A save as a prefab's link, of the prefab whose file's path from the asset root and name
-    /// these are.
+    /// A save as a prefab's link, of the prefab with this file path from the asset root and name.
     Prefab {
         path: String,
         name: String,
@@ -32,8 +31,8 @@ pub(super) enum Offer {
 }
 
 impl Api {
-    /// Answers `reply`, asked as `offer`, with what an edit did, if it applied now, the next tick
-    /// to run being `ticks`; or keeps it until the tick it applies before in a lockstep session.
+    /// Answers `reply` with what the edit did if it applied now, `ticks` being the next tick to
+    /// run; else keeps it until the tick it applies before in a lockstep session.
     pub(super) fn answer_offered(
         &mut self,
         reply: Reply,
@@ -48,7 +47,7 @@ impl Api {
     }
 }
 
-/// Answers `reply`, asked as `offer`, with what its edit or patch did, `done`, before tick `ticks`.
+/// Answers `reply` with what its edit or patch did, `done`, before tick `ticks`.
 pub(super) fn answer_done(reply: Reply, offer: &Offer, ticks: u64, done: Result<Done>) {
     match (offer, done) {
         (_, Err(error)) => reply.send(Err(failure(&error))),
@@ -76,13 +75,17 @@ pub(super) fn answer_done(reply: Reply, offer: &Offer, ticks: u64, done: Result<
     }
 }
 
-/// Saves the entity of ID `id` and its descendants as a prefab at `path`, as `save_prefab` asks,
-/// as [`Context::save_prefab`] does, for its link to be offered.
+/// Saves entity `id` and its descendants as a prefab at `path`, as `save_prefab` asks
+/// ([`Context::save_prefab`]), for its link to be offered.
 ///
-/// Fails with `api.no_scene` in a game that runs from its package, which reads no file under its
-/// root, and in a networked one, whose files would part from the session's others', as `scene`'s
-/// `save` does; while a copy of the world as edited plays, whose entities would be saved and
-/// linked, though `stop` takes the copy away; and as `Context::save_prefab` does.
+/// Fails with `api.no_scene`:
+///
+/// - in a game that runs from its package, which reads no file under its root;
+/// - in a networked game, whose files would part from the session's others', as `scene`'s `save`;
+/// - while a copy of the world as edited plays: its entities would be saved and linked, though
+///   `stop` takes the copy away.
+///
+/// It also fails as `Context::save_prefab` does.
 pub(super) fn save_prefab(
     cx: &mut Context,
     stack: &Stack,
@@ -108,10 +111,8 @@ pub(super) fn save_prefab(
     cx.save_prefab(id, path.as_deref())
 }
 
-/// The textures, models, fonts and prefabs that the values of the operations `given` asks for name
-/// that
-/// none loaded has, as [`operations`] reads them in `world`: which a client's edit names, to load
-/// before it's read.
+/// The textures, models, fonts and prefabs that the values of the operations `given` name and none
+/// loaded has, as [`operations`] reads them in `world`: to load before the edit is read.
 pub(super) fn assets_named(world: &World, given: &[gg_api::Operation]) -> Vec<Asset<String>> {
     let gathering = Gathering {
         world,
@@ -121,16 +122,15 @@ pub(super) fn assets_named(world: &World, given: &[gg_api::Operation]) -> Vec<As
     gathering.missing.into_inner()
 }
 
-/// What reads values as a world does, `world`, but for a texture, a model, a font or a prefab that
-/// none loaded has, which it keeps the name of, reading on as though it were the engine's white
-/// texture, or the first model, font or prefab.
+/// Reads values as `world` does, but keeps the name of a texture, model, font or prefab none loaded
+/// has, and reads on as if it were the white texture, or the first model, font or prefab.
 struct Gathering<'w> {
     world: &'w World,
     missing: RefCell<Vec<Asset<String>>>,
 }
 
 impl Gathering<'_> {
-    /// Keeps `asset`, which none loaded has, unless it's kept.
+    /// Keeps `asset`, which none loaded has, once.
     fn missed(&self, asset: Asset<&str>) {
         let mut missing = self.missing.borrow_mut();
         if !missing.iter().any(|missed| missed.as_deref() == asset) {
@@ -202,11 +202,11 @@ impl json::Names for Gathering<'_> {
 }
 
 /// The engine's operations `given` asks for, their values read by the types of `world`'s components
-/// and the fields they go in, as [`json::read`] reads them with `names`.
+/// and the fields they go in ([`json::read`] with `names`).
 ///
-/// Fails, naming the operation, with `ecs.bad_id` for an ID that isn't one, `reflect.unknown_type`
-/// for a component type that isn't registered, as a path to a field it hasn't fails, and as
-/// `json::read` fails for a value.
+/// Fails, naming the operation, with `ecs.bad_id` for an invalid ID, `reflect.unknown_type` for an
+/// unregistered component type, as a path to a missing field fails, and as `json::read` fails for
+/// a value.
 pub(super) fn operations(
     world: &World,
     names: &dyn json::Names,
@@ -238,14 +238,14 @@ pub(super) fn operations(
 }
 
 /// The operations a `reparent` `in_place` of entity `id` under `parent` asks for, as
-/// [`World::reparent_in_place`] finds them in `world` as the request comes, which an edit applies
-/// at once, outside a lockstep session.
+/// [`World::reparent_in_place`] finds them in `world` as the request comes; outside a lockstep
+/// session the edit applies at once.
 fn reparent_in_place(world: &World, id: &str, parent: Option<&str>) -> Result<Vec<Operation>> {
     let parent = parent.map(str::parse).transpose()?;
     Ok(world.reparent_in_place(id.parse()?, parent))
 }
 
-/// The engine's operation `given` asks for, as [`operations`] reads it.
+/// The engine's operation `given` asks for.
 fn operation_of(
     world: &World,
     names: &dyn json::Names,
@@ -255,7 +255,7 @@ fn operation_of(
 
     let id = |text: &str| text.parse::<EntityId>();
     let maybe = |text: Option<String>| text.as_deref().map(id).transpose();
-    // The type of `component`'s field at `path`, as its description gives it.
+    // The type of `component`'s field at `path`.
     let field = |component: &str, path: &str| -> Result<Type> {
         let types = world.types();
         let index = types.find(component).ok_or_else(|| {
@@ -329,7 +329,7 @@ fn operation_of(
             component,
             path,
         } => {
-            // Refused as a set of the path is, for a type or a field there's none of.
+            // Refused as a set of the path is, for a missing type or field.
             field(&component, &path)?;
             Operation::Revert {
                 entity: id(&of)?,

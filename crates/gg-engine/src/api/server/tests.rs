@@ -39,8 +39,8 @@ use crate::{
     Viewport,
 };
 
-/// A directory of captures or snapshots keeps the newest of those the engine named alone,
-/// and whatever else is in it: files a client named, others' kinds and directories.
+/// Pruning keeps only the newest engine-named files; client-named files, other kinds and
+/// directories stay.
 #[test]
 fn the_newest_captures_alone_are_kept() {
     let dir = std::env::temp_dir().join(format!("gg-prune-{}", std::process::id()));
@@ -89,15 +89,14 @@ fn the_newest_captures_alone_are_kept() {
     }
 }
 
-/// How long a test waits for what should come at once, past which it fails rather than hangs.
+/// How long a test waits before failing instead of hanging.
 const DEADLINE: Duration = Duration::from_secs(20);
 
-/// The manifest of the project whose game [`started`] starts the API for.
+/// Manifest of the project [`started`]'s game belongs to.
 const PROJECT: &str = "games/tested/project.ron";
 
-/// Starts the API for app `app`, a name of the test's own, so that tests running at once write
-/// session files of their own, a game of the project [`PROJECT`] names, which keeps no events;
-/// and returns it, with the session its file gives.
+/// Starts the API for app `app` (unique per test, so concurrent tests write their own session
+/// files), for a game of [`PROJECT`] keeping no events.
 fn started(app: &str) -> (Api, Session) {
     started_keeping(app, Box::leak(Box::default()))
 }
@@ -112,8 +111,7 @@ fn started_keeping(app: &str, events: &'static Events) -> (Api, Session) {
     (api, serde_json::from_slice(&text).expect("a session"))
 }
 
-/// Where the answer to request `id` goes: `to`, whose other end the test reads, with a place in
-/// flight of a connection of its own.
+/// Where request `id`'s answer goes: `to`, read by the test, with an in-flight place of its own.
 fn reply(id: u64, to: &Sender<Answer>) -> Reply {
     Reply {
         id,
@@ -122,7 +120,7 @@ fn reply(id: u64, to: &Sender<Answer>) -> Reply {
     }
 }
 
-/// A connection to `session`'s API, written and read as raw lines, once it has said hello.
+/// A connection to `session`'s API, past hello, as raw lines.
 fn said_hello(session: &Session) -> (TcpStream, BufReader<TcpStream>) {
     let stream = TcpStream::connect(session.address).expect("it connects");
     stream.set_read_timeout(Some(DEADLINE)).expect("a timeout");
@@ -136,10 +134,8 @@ fn said_hello(session: &Session) -> (TcpStream, BufReader<TcpStream>) {
     (stream, reader)
 }
 
-/// Runs `client` on a thread of its own, connected to `session`'s API, while this thread serves
-/// `api` from `cx`, whose layers are `stack`'s, as frames would, each a tick's time, looking at
-/// the scene files first, as a frame does, then stepping `stepper` and doing `frame`; returns
-/// what `client` returns.
+/// Runs `client` against `session`'s API on its own thread while this one serves `api` as frames
+/// would (a tick each), then returns `client`'s result.
 fn serving<T: Send + 'static>(
     api: &mut Api,
     cx: &mut Context,
@@ -181,10 +177,8 @@ struct Read {
     refused: Vec<String>,
 }
 
-/// A client pauses the simulation, steps it, and reads the world: its status, pages of its
-/// entities, an entity whole, the space a root's and a child's transforms are in among it, a
-/// field, its types, whose description describes them again as they are, and the hash; and is
-/// refused, with a code, what's wrong.
+/// A client pauses, steps and reads the world: status, entity pages, an entity, a field, types
+/// (described by themselves) and the hash. Wrong requests get a code.
 #[test]
 fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
     let (mut api, session) = started("Api Reads");
@@ -274,7 +268,7 @@ fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
     assert_eq!(read.entity["children"], json!([kid]));
     let translation = &read.entity["components"]["Transform"]["translation"];
     assert_eq!(*translation, json!([1.0, 2.0, 3.0]));
-    // A root's transform is in the world's space; the kid's in the hero's, as it's placed.
+    // Root: world space; kid: the hero's space.
     let space = |translation: [f32; 3]| {
         let matrix = Mat4::from_translation(Vec3::from_array(translation));
         json!({"matrix": matrix.to_cols_array(), "rotation": [0.0, 0.0, 0.0, 1.0]})
@@ -282,8 +276,7 @@ fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
     assert_eq!(read.entity["space"], space([0.0; 3]));
     assert_eq!(read.kid["space"], space([1.0, 2.0, 3.0]));
     assert_eq!(read.field, 2.0);
-    // What draws has `bounds`, in the world; what doesn't, and has nothing under it that does,
-    // hasn't.
+    // `bounds` (world space) only where something draws, here or below.
     let bounds = &read.sprite["bounds"];
     assert_eq!(bounds["center"], json!([1.0, 2.0, 3.0]));
     let radius = bounds["radius"].as_f64().expect("a radius") as f32;
@@ -328,8 +321,8 @@ fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
     assert_eq!(read.refused, codes);
 }
 
-/// A connection's first request is `hello` with the token, and `ping` is answered by the
-/// connection's own thread while no frame serves, with what frames wait for.
+/// The first request is `hello` with the token; the connection's thread answers `ping` while no
+/// frame serves.
 #[test]
 fn a_connection_says_hello_with_the_token_and_pings_without_frames() {
     let (_api, session) = started("Api Hello");
@@ -355,9 +348,8 @@ fn a_connection_says_hello_with_the_token_and_pings_without_frames() {
     drop(waiting);
 }
 
-/// A connection is kept to what its `hello` grants: a request beyond it is refused, with
-/// `api.ungranted`, by the connection's own thread, and a capability there's none of refuses
-/// the `hello`, with `grant.unknown`.
+/// `hello` grants a connection its capabilities: its thread refuses requests beyond them with
+/// `api.ungranted`, and an unknown capability with `grant.unknown`.
 #[test]
 fn a_connection_is_kept_to_what_its_hello_grants() {
     let (_api, session) = started("Api Grants");
@@ -385,9 +377,8 @@ fn a_connection_is_kept_to_what_its_hello_grants() {
     assert_eq!(pulse.frames, 0);
 }
 
-/// Whether `stream`'s connection has been closed by the game, rather than waiting for more:
-/// its read ends, or is reset, well before the game would drop a connection that never says
-/// hello.
+/// Whether the game closed `stream`: its read ends or resets, well before it would drop a silent
+/// connection.
 fn closed(stream: &mut TcpStream) -> bool {
     stream
         .set_read_timeout(Some(HELLO_TIMEOUT / 2))
@@ -401,8 +392,8 @@ fn closed(stream: &mut TcpStream) -> bool {
     }
 }
 
-/// A `hello` as long as [`gg_api::MAX_HELLO`] is welcomed, and one longer is refused once it's
-/// past it, without the game waiting for the rest.
+/// A `hello` of [`gg_api::MAX_HELLO`] bytes is welcomed; a longer one is refused at once, not after
+/// the rest arrives.
 #[test]
 fn a_hello_longer_than_its_bound_is_refused_unread() {
     let (_api, session) = started("Api Long Hello");
@@ -427,8 +418,8 @@ fn a_hello_longer_than_its_bound_is_refused_unread() {
     assert!(closed(&mut stream), "the game waited for the rest");
 }
 
-/// A `hello` that comes a byte at a time is cut off at its deadline, though each byte comes well
-/// within the time left, rather than read for as long as bytes keep coming.
+/// A `hello` trickling in a byte at a time is cut off at its deadline, though each byte comes in
+/// time.
 #[test]
 fn a_hello_dripped_a_byte_at_a_time_is_cut_off_at_its_deadline() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("it listens");
@@ -438,7 +429,7 @@ fn a_hello_dripped_a_byte_at_a_time_is_cut_off_at_its_deadline() {
     let (served, _) = listener.accept().expect("accepted");
     let token = "0".repeat(32);
     let hello = format!("{{\"id\":0,\"method\":\"hello\",\"params\":{{\"token\":\"{token}\"}}}}\n");
-    // 80 bytes, which take 1.6 s to come whole.
+    // 80 bytes take 1.6 s.
     let dripping = thread::spawn(move || {
         for byte in hello.bytes() {
             if client.write_all(&[byte]).is_err() {
@@ -452,7 +443,7 @@ fn a_hello_dripped_a_byte_at_a_time_is_cut_off_at_its_deadline() {
     let start = Instant::now();
     let read = read_hello(&mut reader, start + deadline);
     let took = start.elapsed();
-    // Which ends the client's writes.
+    // Ends the client's writes.
     drop(reader);
     dripping.join().expect("the client didn't panic");
     assert_eq!(read, None);
@@ -462,8 +453,8 @@ fn a_hello_dripped_a_byte_at_a_time_is_cut_off_at_its_deadline() {
     );
 }
 
-/// While [`MOST_SAYING_HELLO`] connections are saying hello, the game closes the next unread, a
-/// client's too, until one of them has gone.
+/// At [`MOST_SAYING_HELLO`] unfinished hellos, the game closes the next unread connection until one
+/// has gone.
 #[test]
 fn connections_past_the_most_saying_hello_are_refused() {
     let (_api, session) = started("Api Hellos");
@@ -476,7 +467,7 @@ fn connections_past_the_most_saying_hello_are_refused() {
     let refused = Client::connect(&session, "test", DEADLINE).err();
     assert!(refused.is_some(), "a client past the most was welcomed");
     drop(saying.pop());
-    // Once the game has seen that one go.
+    // After the game sees it go.
     let start = Instant::now();
     let client = loop {
         if let Ok(client) = Client::connect(&session, "test", DEADLINE) {
@@ -488,10 +479,9 @@ fn connections_past_the_most_saying_hello_are_refused() {
     assert_eq!(client.welcome().app, "Api Hellos");
 }
 
-/// A client that sends requests faster than they're answered, here with no frame to answer
-/// them, is held back by its connection once it has [`gg_api::MOST_IN_FLIGHT`] in flight: the
-/// game reads no more, and the client's writes stop once the loopback's buffers are full,
-/// rather than the game reading on, holding what it reads.
+/// A client sending faster than requests are answered (no frame here) is held back at
+/// [`gg_api::MOST_IN_FLIGHT`]: the game stops reading, so the client's writes block once the
+/// loopback's buffers fill.
 #[test]
 fn a_client_that_sends_faster_than_its_answers_go_is_held_back() {
     let (_api, session) = started("Api In Flight");
@@ -499,8 +489,7 @@ fn a_client_that_sends_faster_than_its_answers_go_is_held_back() {
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
         .expect("a timeout");
-    // 64 MiB of them, far more than the loopback's buffers hold, a chunk at a time, so that each
-    // write waits only for the game to read on.
+    // 64 MiB, far beyond the loopback's buffers, in chunks, so each write waits only for the game.
     let status = "{\"id\":1,\"method\":\"status\"}\n";
     let chunk = status.repeat((64 << 10) / status.len());
     let mut sent = 0;
@@ -521,8 +510,8 @@ fn a_client_that_sends_faster_than_its_answers_go_is_held_back() {
     );
 }
 
-/// Hands each event it gets to `events`, and until it has had `most`, has its client send
-/// another `input`, waiting for the game to pass it on to the main loop, as `wakes` says.
+/// Hands events to `events`; until `most` came, has its client send another `input` once the game
+/// has passed it to the main loop (`wakes`).
 struct Sending {
     stream: TcpStream,
     wakes: Receiver<()>,
@@ -544,8 +533,8 @@ impl crate::Layer for Sending {
     }
 }
 
-/// A frame answers the requests that came before it started, and those that come as it does
-/// wait for the next, so that a client that keeps sending can't keep the frame from going on.
+/// A frame answers requests that came before it started; later ones wait for the next, so a client
+/// that keeps sending can't stall it.
 #[test]
 fn a_frame_answers_the_requests_that_came_before_it_started() {
     let (mut api, session) = started("Api Frames Go On");
@@ -581,8 +570,7 @@ fn a_frame_answers_the_requests_that_came_before_it_started() {
     }
 }
 
-/// Each request needs its own capability, or `read` or `write` of the world, of the one type it
-/// names alone, as gg-api's docs say.
+/// Requests need their own capability, or `read` or `write` of the one type named (see gg-api).
 #[test]
 fn a_request_needs_what_its_method_and_the_types_it_names_need() {
     let grant = Grant::parse(["read:Transform", "view", "write:Sprite"]).expect("a grant");
@@ -646,10 +634,8 @@ struct Debugged {
     refused: Vec<String>,
 }
 
-/// A client sets a breakpoint in a script and waits for the game to stop there, which `ping`
-/// says it waits at, answered on the connection's own thread while the main thread waits in the
-/// tick; steps over a line; clears it and has the game go on; and is refused, with a code,
-/// what's wrong.
+/// A client sets a script breakpoint, waits for the game to stop there (`ping` says so while the
+/// main thread waits in the tick), steps a line, clears it and resumes. Wrong requests get a code.
 #[test]
 fn a_client_debugs_a_script_while_the_game_waits_at_its_stop() {
     let (mut api, session) = started("Api Debug");
@@ -748,8 +734,8 @@ fn a_client_debugs_a_script_while_the_game_waits_at_its_stop() {
     );
 }
 
-/// A token given is the token only if every byte is: not if its first or last differs, nor if
-/// it's the token cut short, the token with more after, or nothing.
+/// A token matches only if every byte does: not with a differing first or last byte, a prefix,
+/// extra bytes or nothing.
 #[test]
 fn a_token_given_is_the_token_only_if_every_byte_is() {
     let token = "0123456789abcdef0123456789abcdef";
@@ -766,7 +752,7 @@ fn a_token_given_is_the_token_only_if_every_byte_is() {
     }
 }
 
-/// The numbers of the events `read` read, each event's `n`.
+/// The `n` of each event `read` read.
 fn numbers(read: &LogEvents) -> Vec<u64> {
     let events = read.events.iter().map(|event| {
         let event: Value = serde_json::from_str(event.get()).expect("an object");
@@ -775,9 +761,9 @@ fn numbers(read: &LogEvents) -> Vec<u64> {
     events.collect()
 }
 
-/// A client follows the run's logs while no frame serves: the events kept, at a level and more
-/// severe, from the oldest or the last of them, and those that come as it waits; a cursor of
-/// another run's reads from the oldest kept; and what's wrong is refused, with a code.
+/// Following logs while no frame serves: events at a level and above, from the oldest or last few,
+/// plus new ones as they arrive. Another run's cursor reads from the oldest. Wrong requests get a
+/// code.
 #[test]
 fn a_client_follows_the_logs_without_frames() {
     let events: &'static Events = Box::leak(Box::default());
@@ -825,9 +811,8 @@ fn a_client_follows_the_logs_without_frames() {
     }
 }
 
-/// A note is answered by the connection's own thread while no frame serves; and one that isn't
-/// a note, as one at an error's level, of a code of another shape, without a message, or too
-/// long, is refused, with a code.
+/// A note is answered by the connection's thread while no frame serves. Non-notes get a code: an
+/// error's level, another code shape, no message, or too long.
 #[test]
 fn a_client_notes_an_event_without_frames_or_is_refused() {
     let (_api, session) = started("Api Notes");
@@ -875,7 +860,7 @@ fn a_client_notes_an_event_without_frames_or_is_refused() {
     }
 }
 
-/// What a JSON layer writes, its events' lines, as the run's log has them.
+/// A JSON layer's event lines, as the run's log has them.
 #[derive(Clone, Default)]
 struct Written(Arc<Mutex<Vec<u8>>>);
 
@@ -891,15 +876,15 @@ impl std::io::Write for Written {
     }
 }
 
-/// A note is logged as the run's JSON log writes events: at its level, with its code and its
-/// message, the client that gave it, and its fields, if any, as one field of JSON text.
+/// A note is logged like any event: level, code, message, the client, and its fields (if any) as
+/// one JSON text field.
 #[test]
 fn a_note_is_logged_at_its_level_as_its_clients() {
     use tracing_subscriber::layer::SubscriberExt;
 
     let written = Written::default();
     let writer = written.clone();
-    // Two dispatchers, as `testing::logged` keeps for the reason it gives.
+    // Two dispatchers, for the reason `testing::logged` gives.
     let _other = tracing::subscriber::set_default(tracing_subscriber::registry());
     let json = tracing_subscriber::fmt::layer()
         .json()
@@ -940,8 +925,8 @@ fn a_note_is_logged_at_its_level_as_its_clients() {
     assert_eq!(field(&lines[1], "fields"), Value::Null, "none given");
 }
 
-/// A client's sets of one field in one gesture undo as one edit, of one entity or several, and
-/// a gesture's apply is of sets of one field, no two of one entity.
+/// One gesture's sets of one field undo as one edit, of one or several entities; a gesture holds
+/// sets of one field, never two of one entity.
 #[test]
 fn a_gestures_sets_undo_as_one_edit() {
     let (mut api, session) = started("Api Gestures");
@@ -959,7 +944,7 @@ fn a_gestures_sets_undo_as_one_edit() {
         }
         let history: History = client.call_as("edits", ()).expect("the edits");
         let undone: Option<gg_api::Edit> = client.call_as("undo", ()).expect("undone");
-        // Two entities' sets, twice, in a gesture of their own.
+        // Two entities' sets, twice, as one gesture.
         for x in [4, 5] {
             let sets = [
                 set(&hero_id, "translation.x", x),
@@ -1026,9 +1011,8 @@ fn a_gestures_sets_undo_as_one_edit() {
     assert_eq!([x(hero), x(foe)], [0.0, 0.0], "both gestures undone whole");
 }
 
-/// A client's edit that names a texture none loaded, by its ID, has it loaded from its file
-/// under the root before the edit's read; one naming a texture that can't be loaded is
-/// refused, saying why.
+/// An edit naming a texture no layer loaded has it loaded from its file under the root before the
+/// edit's read; one that can't load is refused with why.
 #[test]
 fn an_edit_loads_the_textures_it_names() {
     let (mut api, session) = started("Api Textures");
@@ -1093,9 +1077,8 @@ struct Edited {
     nothing: Option<gg_api::Edit>,
 }
 
-/// A client applies edits, while the simulation's paused, read by the types of the fields they
-/// set, all of each or none; another undoes only its own, but for an author it names; and undo
-/// and redo step through an edit's operations together.
+/// Edits apply while paused, each all or nothing. Another client undoes only its own, except for an
+/// author it names. Undo and redo step through an edit's operations together.
 #[test]
 fn clients_apply_edits_and_each_undoes_its_own() {
     let (mut api, session) = started("Api Edits");
@@ -1125,7 +1108,7 @@ fn clients_apply_edits_and_each_undoes_its_own() {
         }}}]);
         let created = apply(&mut client, create).expect("created");
         let refused = [
-            // The first is fine, so the second's refusal undoes it.
+            // The second's refusal undoes the first.
             json!([
                 {"set": {"id": hero, "component": "Transform", "path": "translation.y", "value": 5}},
                 {"delete": {"id": "0000000000000001"}},
@@ -1206,7 +1189,7 @@ fn clients_apply_edits_and_each_undoes_its_own() {
     assert_eq!(edited.redone.as_ref(), Some(&create));
     assert_eq!(edited.undone_for_them.as_ref(), Some(&create));
     assert_eq!(edited.nothing, None);
-    // Every edit undone, and the refused ones never applied.
+    // Every edit undone; the refused ones never applied.
     let world = cx.world();
     assert_eq!(world.entities(None).expect("all").len(), 1);
     assert_eq!(world.get::<Transform>(hero), Some(&Transform::IDENTITY));
@@ -1237,10 +1220,8 @@ fn quit_is_answered_and_ends_the_run() {
     assert_eq!(client.join().expect("no panic").as_deref(), Ok("{}"));
 }
 
-/// `snapshot` writes the world whole where it's asked, once a thread of its own has, and answers
-/// where, at how many ticks, of how many entities and bytes: a file a run restores the world
-/// from, at those ticks. A path that isn't absolute is refused, and so is a snapshot before the
-/// run's first tick.
+/// `snapshot` writes the whole world from its own thread, answering path, ticks, entities and
+/// bytes; a run restores from it. A relative path or a snapshot before the first tick is refused.
 #[test]
 fn a_snapshot_is_written_where_its_asked() {
     let (mut api, session) = started("Api Snapshots");
@@ -1249,7 +1230,7 @@ fn a_snapshot_is_written_where_its_asked() {
         cx.world_mut()
             .spawn((Transform::IDENTITY, Sprite::default()));
     }
-    // Paused, so that no tick runs before the client asks.
+    // Paused, so no tick runs before the client asks.
     let mut stepper = Stepper::default();
     stepper.pause();
     let dir = Scratch::new("api-snapshot");
@@ -1288,10 +1269,9 @@ fn a_snapshot_is_written_where_its_asked() {
     assert_eq!(restored.world().hash(), cx.world().hash());
 }
 
-/// A `snapshot` with `quit` is written, and answered, before the frame that took it ends the
-/// run, and what came after it in that frame is refused, applying nothing, so that a run
-/// started again from it loses no edit it answered; it keeps the pause, which the run started
-/// from it takes again.
+/// A `snapshot` with `quit` is written and answered before the frame ends the run; what follows it
+/// in that frame is refused, applying nothing, so a restart loses no answered edit. It takes the
+/// pause again.
 #[test]
 fn a_snapshot_that_quits_is_written_first_and_nothing_after_it_applies() {
     let (mut api, session) = started("Api Snapshot Quits");
@@ -1346,8 +1326,8 @@ fn a_snapshot_that_quits_is_written_first_and_nothing_after_it_applies() {
     .expect("restored");
     assert!(restored.paused() && !restored.stopped());
     assert_eq!(restored.ticks, 1);
-    // Restored paused, it runs no tick, and is snapshotted all the same, as it attached
-    // nothing that its first tick would apply.
+    // Restored paused, it runs no tick yet is snapshotted, as it attached nothing its first tick
+    // would apply.
     drop(api);
     let (mut api, session) = started("Api Snapshot Quits Again");
     let again_path = dir.0.join("again.snapshot");
@@ -1382,19 +1362,17 @@ struct Stopped {
     undone: Option<gg_api::Edit>,
 }
 
-/// `stop` stops the game, whose frames then run no ticks, paused or not, which a snapshot may
-/// be taken of before any, and which refuses `step`; `play` has a copy of the world as edited
-/// play in its place, whose edits go at the next `stop`, which fails the `step`s waiting,
-/// leaving the game paused as they did, and brings back the world as edited at its ticks, as it
-/// hashed, with its edits, which `undo` takes back; and every answer says whether the game is
-/// stopped.
+/// `stop` halts ticks (paused or not), refuses `step` and allows a snapshot. `play` runs a copy of
+/// the world as edited; its edits go at the next `stop`, which fails waiting `step`s, leaves the
+/// game paused and restores the world as edited (same ticks, hash and edits, which `undo` takes
+/// back). Every answer says whether the game is stopped.
 #[test]
 fn stop_brings_back_the_world_as_edited_that_play_copied() {
     let (mut api, session) = started("Api Play And Stop");
     let mut cx = Context::seeded(8);
     let hero = cx.world_mut().spawn(Transform::IDENTITY);
     let hero_id = cx.world().id(hero).expect("alive").to_string();
-    // Paused, so that no tick runs before the client asks.
+    // Paused, so no tick runs before the client asks.
     let mut stepper = Stepper::default();
     stepper.pause();
     let dir = Scratch::new("api-stop");
@@ -1490,10 +1468,9 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
     assert!(cx.dev.edited.is_none());
 }
 
-/// A client saves the open scene, which the watch's next look applies nothing of, then saves it
-/// as another file, opens one in its place, unsaved edits discarded once refused, the textures
-/// it names loaded, and empties it, each answered with the status, which names the open scene
-/// and says whether it's unsaved; and is refused, with a code, what can't be.
+/// A client saves the open scene (the watch's next look applies nothing), saves it elsewhere, opens
+/// one in its place (unsaved edits discarded once refused, named textures loaded) and empties it.
+/// Each answers with the status: open scene, unsaved or not. What can't be done gets a code.
 #[test]
 fn a_client_saves_opens_and_empties_the_open_scene() {
     let logged = crate::testing::logged();
@@ -1505,7 +1482,7 @@ fn a_client_saves_opens_and_empties_the_open_scene() {
     let png =
         crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
     fs::write(dir.0.join("assets/stone.png"), png).expect("a PNG");
-    // Of a sprite of a texture no layer adds, which opening it loads.
+    // A sprite of a texture no layer adds; opening it loads it.
     let level2 =
         "(entities: {\"00000000000a5001\": (Sprite: (texture: Some(\"assets/stone.png\")))})\n";
     scenes::save(&scenes_dir.join("level2.ron"), level2, 0);
@@ -1590,9 +1567,9 @@ fn a_client_saves_opens_and_empties_the_open_scene() {
     assert!(scenes_dir.join("copy.ron").is_file());
 }
 
-/// `cells` reads a world's cells, those whose files the folder holds, those in and the streamed
-/// roots in each, and its viewers, the look's viewpoint among them while the game is stopped,
-/// which cells come in around then; and a world without `Cells` as none.
+/// `cells` reads a world's cells: those whose files the folder holds, those in, their streamed
+/// roots, and the viewers (the look's viewpoint among them while stopped). A world without `Cells`
+/// has none.
 #[test]
 fn a_client_reads_the_worlds_cells() {
     let (mut api, session) = started("Api Cells");
@@ -1692,9 +1669,8 @@ fn a_client_reads_the_worlds_cells() {
     assert_eq!(all.viewers, [viewer, looked]);
 }
 
-/// `scene` is refused with `api.no_scene` where it can't be: `open` and `new` in a recorded
-/// run, which saves, and all of it in a lockstep peer; and with `engine.no_project` in a game
-/// that isn't a project's.
+/// `scene` is refused with `api.no_scene` where it can't work: `open` and `new` in a recorded run
+/// (they save), everything in a lockstep peer; with `engine.no_project` outside a project's game.
 #[test]
 fn scenes_are_refused_where_the_run_cant_have_them() {
     let (mut api, session) = started("Api No Scenes");
@@ -1766,12 +1742,11 @@ struct Prefabbed {
     again: SavedPrefab,
 }
 
-/// A client saves an entity and its descendants as a prefab, which the game writes with its
-/// ID file in its `prefabs` folder, named after the entity, and links the entity to, under the
-/// IDs its subtree has, as an edit `undo` unlinks; `entity` answers what of an instance's
-/// entities differs from its prefab, which `revert` sets back; and a save is refused, with a
-/// code, for an instance's entity or root, a file that's there, a path outside the root or not a
-/// prefab's, while one of the same name is numbered.
+/// A client saves an entity's subtree as a prefab, written with its ID file in `prefabs` and named
+/// after the entity. The entity links to it under the subtree's IDs, as an edit `undo` unlinks.
+/// `entity` answers how an instance differs from its prefab; `revert` sets it back. Refused with a
+/// code: an instance's entity or root, an existing file, a path outside the root or not a prefab's.
+/// A taken name is numbered.
 #[test]
 fn a_client_saves_an_entity_as_a_prefab_linked_in_its_place() {
     let (mut api, session) = started("Api Prefabs");
@@ -1888,7 +1863,7 @@ fn a_client_saves_an_entity_as_a_prefab_linked_in_its_place() {
     ];
     assert_eq!(got.refused, expected);
     assert_eq!(got.again.path, "prefabs/big_lamp-2.prefab");
-    // Linked again, under the IDs the subtree has, the prefab's root at its origin.
+    // Linked again under the subtree's IDs; the prefab's root at its origin.
     let world = cx.world();
     let [root, bulb] = [root, bulb].map(|id| world.entity(id.parse().unwrap()).unwrap());
     assert!(world.get::<PrefabRoot>(root).is_some());
@@ -1898,8 +1873,8 @@ fn a_client_saves_an_entity_as_a_prefab_linked_in_its_place() {
     assert!(text.contains("Name: (\"bulb\")"), "{text}");
 }
 
-/// A prefab isn't saved while a copy of the world as edited plays, whose entities `stop` takes
-/// away with their link: nothing is written.
+/// No prefab is saved while a copy plays: `stop` would remove its entities with their link. Nothing
+/// is written.
 #[test]
 fn a_prefab_isnt_saved_while_a_copy_plays() {
     let dir = Scratch::new("api-prefab-playing");
@@ -1915,10 +1890,9 @@ fn a_prefab_isnt_saved_while_a_copy_plays() {
     assert!(!dir.0.join("prefabs").exists(), "nothing written");
 }
 
-/// A client lists the assets under the game's root, a page of them, of a kind or all, each with
-/// its ID, which the game writes where its ID file is missing, as it scans first, and whether a
-/// layer added it; and the ID files whose assets aren't there. It's refused, with a code, in a
-/// game without a root, or whose root isn't there.
+/// A client lists the assets under the root: a page of a kind or all, each with its ID (written
+/// where missing, as it scans first) and whether a layer added it; plus ID files whose assets are
+/// missing. Refused with a code without a root or where it's missing.
 #[test]
 fn a_client_lists_the_assets_under_the_root_with_their_ids() {
     use gg_api::asset::{AssetId, Meta};
@@ -2009,9 +1983,8 @@ fn a_client_lists_the_assets_under_the_root_with_their_ids() {
     );
     assert_eq!(again, all, "the same IDs");
 
-    // With a thread watching the root, each answers once it has looked since it came: an
-    // asset renamed without its ID file is listed at its new path with its ID, still loaded,
-    // and one that came with the ID written it.
+    // With a thread watching the root, each answers once it has looked since it came: a renamed
+    // asset is listed at its new path with its ID, still loaded; a new one has its ID written.
     cx.start_assets(true, true);
     assert!(cx.watches_assets());
     let [b, c, d] = ["b", "c", "d"].map(|name| dir.0.join(format!("assets/{name}.png")));
@@ -2071,8 +2044,7 @@ fn a_client_lists_the_assets_under_the_root_with_their_ids() {
     }
 }
 
-/// An `assets` waiting for a look at the asset root is answered as frames pause, from the
-/// database as it is, rather than waiting for a frame or the next request.
+/// An `assets` waiting for a look at the root is answered as frames pause, from the database as is.
 #[test]
 fn an_assets_waiting_for_a_look_is_answered_as_frames_pause() {
     let (mut api, _) = started("Api Paused Assets");
@@ -2094,10 +2066,9 @@ fn an_assets_waiting_for_a_look_is_answered_as_frames_pause() {
     assert!(api.listing.is_empty());
 }
 
-/// A patch that can't apply is answered with `api.patch`: here, one whose table's reference is
-/// past where any process's `main` is, which a test's build refuses whether its executable
-/// exports `main` or not, as `patch`'s own tests say. In a recorded run, the recording holds
-/// no patch that didn't apply, which changed nothing.
+/// A patch that can't apply is answered with `api.patch`: here, a table reference past any `main`,
+/// refused by a test's build either way, as `patch`'s tests say. A recording holds no patch that
+/// didn't apply.
 #[test]
 fn a_patch_that_cant_apply_is_refused() {
     let (mut api, session) = started("Api Patches");
@@ -2137,8 +2108,8 @@ fn a_patch_that_cant_apply_is_refused() {
     );
 }
 
-/// A capture rides with the frames handed off until one that rendered brings the view back: an
-/// error, which it answers, or the view, whose PNG it writes where it's asked and answers.
+/// A capture rides with handed-off frames until one that rendered brings the view back: an error,
+/// or the view, written as a PNG.
 #[test]
 fn a_capture_rides_with_frames_until_one_brings_the_view_back() {
     let (mut api, session) = started("Api Captures");
@@ -2164,8 +2135,8 @@ fn a_capture_rides_with_frames_until_one_brings_the_view_back() {
         session,
         client,
         |api, cx, stepper| {
-            // The frame that rode with a capture comes back: the first two that rode with each
-            // had nothing to render into.
+            // The frame that rode with a capture comes back; the first two rode with each had
+            // nothing to render into.
             if frame.capture {
                 rides += 1;
                 frame.captured = match rides {
@@ -2204,7 +2175,7 @@ fn png_rgb(path: &Path) -> (Vec<u8>, [u32; 2]) {
     (pixels, [info.width, info.height])
 }
 
-/// A viewpoint at `z` on the Z axis, looking down -Z, as the tool API gives one.
+/// A viewpoint at `z`, looking down -Z, as the tool API gives one.
 fn at_z(z: f32) -> gg_api::Viewpoint {
     gg_api::Viewpoint {
         position: [0.0, 0.0, f64::from(z)],
@@ -2216,10 +2187,10 @@ fn at_z(z: f32) -> gg_api::Viewpoint {
     }
 }
 
-/// Frames in a row: refused as their docs say; drawn from the first viewpoint while what's on
-/// its way keeps them from starting, then each read back in turn, none skipped, from the next
-/// viewpoint, the last held, each cropped to the rect and written as a PNG numbered in order,
-/// answered once all are; and the look's viewpoint drawn again after them.
+/// A film: refused as its docs say. Frames draw from the first viewpoint while what's on its way
+/// delays them, then are read back in turn, none skipped, from the next viewpoint (the last held),
+/// cropped to the rect and written as numbered PNGs. The answer waits for all; the look's viewpoint
+/// draws again after.
 #[test]
 fn frames_are_captured_in_a_row_from_their_viewpoints() {
     let (mut api, session) = started("Api Frames");
@@ -2251,7 +2222,7 @@ fn frames_are_captured_in_a_row_from_their_viewpoints() {
         (refused, framed)
     };
     let mut frame = Extracted::default();
-    // The frames handed off as the film's while it waited, and how many have rendered.
+    // Frames handed off for the film while it waited, and how many rendered.
     let (mut waiting, mut rendered) = (Vec::new(), 0u8);
     let mut drawn_from = Viewpoint::default();
     let (refused, framed) = serving(
@@ -2262,8 +2233,8 @@ fn frames_are_captured_in_a_row_from_their_viewpoints() {
         session,
         client,
         |api, cx, stepper| {
-            // The frame handed off last comes back, drawn from the look's viewpoint as it was
-            // made, each pixel its place and the frame's number.
+            // The last frame comes back, drawn from the look's viewpoint as made; each pixel is its
+            // place and the frame's number.
             frame.viewpoint = drawn_from;
             if frame.capture {
                 rendered += 1;
@@ -2360,8 +2331,8 @@ fn frames_fail_at_a_frame_back_without_its_view() {
     assert!(!fs::exists(dir.0.join("frame-0001.png")).expect("a look"));
 }
 
-/// A client's input reaches the layers as the window's would, the cursor over the view taken
-/// to the window's pixels, in order.
+/// A client's input reaches the layers as the window's would, in order, with the cursor over the
+/// view taken to window pixels.
 #[test]
 fn input_reaches_the_layers_as_the_windows_would() {
     let (mut api, session) = started("Api Input");
@@ -2400,9 +2371,9 @@ fn input_reaches_the_layers_as_the_windows_would() {
     assert_eq!(input.cursor(), Some([13.0, 24.5]));
 }
 
-/// A client has the view published to the memory it made, which the next frame back takes to
-/// the render thread, with what paces frames by it; a name that opens no memory is refused, and
-/// leaves the view published as it was; and `null` stops publishing it.
+/// Publishing the view to memory the client made: the next frame back takes it to the render thread
+/// with what paces frames by it. A name that opens no memory is refused, leaving publishing as it
+/// was; `null` stops it.
 #[test]
 fn the_view_is_published_to_the_memory_a_client_names() {
     let (mut api, session) = started("Api View");
@@ -2415,7 +2386,7 @@ fn the_view_is_published_to_the_memory_a_client_names() {
         client
             .call("view", memory.clone())
             .expect("the view published");
-        // Again, which leaves it as it is, rather than opening a second writer of the memory.
+        // Again: no change, not a second writer.
         client
             .call("view", memory)
             .expect("the view published still");
@@ -2475,9 +2446,9 @@ struct Looks {
     run: u64,
 }
 
-/// Clients set the look part by part, each kept until a client sets it again, the last setter
-/// winning, and `null` gives a part back to the game; a `look` that changes no part's value or
-/// setter counts no revision; and the frames get the look as it's answered.
+/// Clients set the look part by part. A part stays until a client sets it again (last setter wins);
+/// `null` gives it back to the game. A `look` changing no value or setter counts no revision.
+/// Frames get the look as answered.
 #[test]
 fn clients_set_the_look_part_by_part_the_last_setter_winning() {
     let (mut api, session) = started("Api Looks");
@@ -2570,9 +2541,9 @@ fn clients_set_the_look_part_by_part_the_last_setter_winning() {
     assert_eq!(look.revision, 3);
 }
 
-/// The passes a look leaves out are a set: named in any order, or twice, they're answered in
-/// [`gg_api::Pass::ALL`]'s order, each once, and the same set again is no revision; an empty
-/// list gives the part back, as `null` does; and the frames get the set as it's answered.
+/// A look's left-out passes are a set: any order or repeats answer once each in
+/// [`gg_api::Pass::ALL`]'s order, and the same set again is no revision. An empty list gives the
+/// part back, as `null` does. Frames get the set as answered.
 #[test]
 fn the_passes_a_look_leaves_out_are_a_set() {
     use gg_api::Pass;
@@ -2616,13 +2587,13 @@ fn the_passes_a_look_leaves_out_are_a_set() {
     );
 }
 
-/// The look draws as a layer that set it would: its viewpoint and outline in place of a
-/// layer's, its colliders' outlines in place of the game's, and its grid before the world,
-/// which the layers' own calls go on saying they set; and a bare frame draws as the layers set.
+/// The look draws as a layer that set it would: its viewpoint and outline replace a layer's, its
+/// colliders' outlines the game's, and its grid draws before the world. Layers' own calls still say
+/// they set; a bare frame draws as the layers set.
 #[test]
 fn the_look_draws_over_what_the_layers_set_but_in_a_bare_frame() {
     let (mut api, session) = started("Api Look Draws");
-    // A sprite with a collider, to draw over the grid, and the colliders' outlines over it.
+    // A sprite with a collider: over the grid, under the colliders' outlines.
     let world = |seed| {
         let mut cx = Context::seeded(seed);
         let shown = (
@@ -2698,11 +2669,11 @@ fn the_look_draws_over_what_the_layers_set_but_in_a_bare_frame() {
     );
     assert_eq!((frame.look, cx.dev.look.seen), (1, Some(viewpoint)));
     assert!(!cx.colliders_shown(), "as the layers set");
-    // Seen from the look's viewpoint, whose exposure adapts apart, as the layer's own isn't.
+    // From the look's viewpoint, whose exposure adapts separately.
     assert!(frame.looked && !expected.looked);
     let depth = Shown::Image("view depth".into());
     assert_eq!(frame.show, Some(depth.clone()), "what the look shows");
-    // What a capture riding with the frame shows, in place of the look's.
+    // What a riding capture shows instead of the look.
     let rough = Shown::Shading(gg_renderer::Channel::Roughness);
     cx.dev.look.captured = Some(rough.clone());
     set(&mut cx);
@@ -2730,9 +2701,8 @@ fn the_look_draws_over_what_the_layers_set_but_in_a_bare_frame() {
     assert_eq!(drawn(&mut cx).show, Some(rough), "what the capture shows");
 }
 
-/// A look's outline of several entities' IDs draws the frame's outline over each one's subtree
-/// once, sorted; an ID that isn't an entity's among them is refused, leaving the look as it
-/// was; and no IDs outline nothing.
+/// A look's outline of several entity IDs draws the frame's outline over each subtree once, sorted.
+/// A non-entity ID is refused, leaving the look. No IDs outline nothing.
 #[test]
 fn the_looks_outline_covers_the_subtree_of_each_entity() {
     let (mut api, session) = started("Api Look Outlines");
@@ -2784,11 +2754,10 @@ fn the_looks_outline_covers_the_subtree_of_each_entity() {
     assert_eq!(drawn(&mut cx), (Some((red, 2.0)), vec![]));
 }
 
-/// A capture of the game's own view rides with a bare frame, which isn't published nor paced
-/// for, nor asks a client's pick; a capture of the view as it's shown with one that isn't; one
-/// that shows a part of shading with a frame that shows it, which isn't published nor paced for
-/// either; and of those asked together, the oldest goes first, each other with a frame of its
-/// kind after.
+/// Captures of the game's own view ride with a bare frame (not published, paced for, or asking a
+/// client's pick); of the view as shown, with a non-bare one; of a part of shading, with a frame
+/// showing it (also not published or paced for). Captures asked together go oldest first, each with
+/// a frame of its kind.
 #[test]
 fn captures_ride_with_frames_of_their_kind_and_bare_ones_go_unpublished() {
     let (mut api, session) = started("Api Bare Captures");
@@ -2834,8 +2803,8 @@ fn captures_ride_with_frames_of_their_kind_and_bare_ones_go_unpublished() {
         named: true,
         reply: reply(4, &to),
     });
-    // Each frame: whether it's bare, shows a part of shading, rides with captures, is
-    // published, is paced for and has asked the pick.
+    // Each frame: bare, shows a part of shading, rides with captures, published, paced for, asked
+    // the pick.
     let mut frames = Vec::new();
     for _ in 0..7 {
         api.serve(&mut cx, &mut Stack::default(), &mut stepper);
@@ -2845,8 +2814,8 @@ fn captures_ride_with_frames_of_their_kind_and_bare_ones_go_unpublished() {
         let skip = frame.publish.as_ref().expect("published").skip;
         let paced = api.handing().is_some();
         frames.push((bare, shows, frame.capture, !skip, paced, asked));
-        // As the renderer reads back the view of a frame that rides with captures, a bare one
-        // 1 pixel wide, one that shows a part of shading 3, another 2.
+        // As the renderer reads back a frame riding with captures: a bare one is 1 pixel wide, one
+        // showing a part of shading 3, another 2.
         frame.captured = frame.capture.then(|| {
             let width = if bare {
                 1
@@ -2864,7 +2833,7 @@ fn captures_ride_with_frames_of_their_kind_and_bare_ones_go_unpublished() {
     }
     let expected = [
         (true, false, true, false, false, false),
-        // Bare too, as the capture riding decides, its frame not known to have rendered.
+        // Bare too, as the riding capture decides, before its frame is known rendered.
         (true, false, false, false, false, false),
         (false, false, true, true, true, true),
         (false, false, false, true, true, true),
@@ -2890,10 +2859,9 @@ fn captures_ride_with_frames_of_their_kind_and_bare_ones_go_unpublished() {
     drop(reader);
 }
 
-/// A capture rides on with frame after frame that shows a texture still decoding, or meshes
-/// and textures still streaming, until one shows everything, which it takes, saying nothing
-/// was on its way; one that has waited past its bound takes the next frame that brings the view
-/// back all the same, saying something was.
+/// A capture rides on with frames showing a texture still decoding or meshes or textures streaming,
+/// until one shows everything, saying nothing was on its way. One that has waited past its bound
+/// takes the next frame that brings the view back, saying something was.
 #[test]
 fn a_capture_waits_within_its_bound_for_assets_to_stream() {
     let (mut api, _) = started("Api Streaming Captures");
@@ -2917,16 +2885,15 @@ fn a_capture_waits_within_its_bound_for_assets_to_stream() {
             since,
         });
     }
-    // The answer that comes next: its capture's ID, and whether it says what it shows was
-    // still on its way.
+    // The next answer: its capture's ID, and whether it says what it shows was still on its way.
     let answer = |timeout| {
         let (line, _) = answers.recv_timeout(timeout).ok()?;
         let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
         let id = answer["id"].as_u64().expect("its ID");
         Some((id, answer["result"]["streaming"].as_bool()))
     };
-    // As the renderer reads back the view of each frame that rides with captures: three with a
-    // texture decoding or meshes streaming, then one with nothing on its way.
+    // As the renderer reads back each frame riding with captures: three with a texture decoding or
+    // meshes streaming, then one with nothing on its way.
     for (loading, streaming) in [(1, 0), (0, 2), (1, 2), (0, 0)] {
         api.serve(&mut cx, &mut Stack::default(), &mut stepper);
         api.frame_back(&mut frame, &cx, stepper.ticks);
@@ -2952,9 +2919,8 @@ fn a_capture_waits_within_its_bound_for_assets_to_stream() {
     assert!(!frame.capture, "nothing rides once both are answered");
 }
 
-/// An `images` has frame after frame list their images, riding with a frame that didn't render
-/// on to the next, until one brings its images back, which answer it as the API names them;
-/// then no frame lists.
+/// An `images` has frames list their images, riding on past a frame that didn't render until one
+/// brings its images back and answers it as the API names them. Then no frame lists.
 #[test]
 fn images_ride_with_frames_until_one_brings_them_back() {
     let (mut api, _) = started("Api Images");
@@ -2988,8 +2954,8 @@ fn images_ride_with_frames_until_one_brings_them_back() {
     assert!(api.is_idle(&stepper), "nothing waits");
 }
 
-/// A capture with `at` and no path answers the shot's bytes at that pixel, `None` outside the
-/// view, and writes no PNG, numbering none of the engine's own; one with a path writes it too.
+/// A capture with `at` and no path answers the shot's bytes at that pixel (`None` outside the
+/// view), writing no PNG and numbering no engine one. With a path it writes it too.
 #[test]
 fn a_capture_with_a_pixel_answers_its_bytes_and_writes_nothing() {
     let (mut api, _) = started("Api Probes");
@@ -3019,7 +2985,7 @@ fn a_capture_with_a_pixel_answers_its_bytes_and_writes_nothing() {
     api.serve(&mut cx, &mut Stack::default(), &mut stepper);
     api.frame_back(&mut frame, &cx, stepper.ticks);
     assert!(frame.capture, "the captures ride with the frame");
-    // A view of 2 by 2 pixels: its top row, then its bottom.
+    // A 2 by 2 view: top row, then bottom.
     frame.captured = Some(Ok(Shot {
         size: [2, 2],
         pixels: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
@@ -3045,10 +3011,9 @@ fn a_capture_with_a_pixel_answers_its_bytes_and_writes_nothing() {
     assert!(written.is_file(), "a path asked for is written");
 }
 
-/// A client's pick is answered with the entity drawn at its pixel of the view, about as the
-/// frames that read it come back, named as it's answered; none where nothing is, or outside
-/// the view; and an entity gone by the answer by its ID alone, as is any to a client granted
-/// `view` without `read` of `Name`.
+/// A pick answers the entity drawn at its pixel, named; none where nothing is or outside the view.
+/// An entity gone by the answer, or any for a client with `view` but not `read` of `Name`, is given
+/// by ID alone.
 #[test]
 fn a_pick_is_answered_with_the_entity_drawn_there() {
     let (mut api, session) = started("Api Picks");
@@ -3082,8 +3047,8 @@ fn a_pick_is_answered_with_the_entity_drawn_there() {
         });
         (picked, names)
     };
-    // As the renderer answers: the hero is drawn at the view's columns up to 50, the ghost's
-    // pixels from 70, and nothing between.
+    // As the renderer answers: the hero draws at columns up to 50, the ghost's pixels from 70,
+    // nothing between.
     let mut answers = Vec::new();
     let back = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
         cx.take_answers(&answers);
@@ -3124,15 +3089,14 @@ fn a_pick_is_answered_with_the_entity_drawn_there() {
     assert!(api.picks.is_empty());
 }
 
-/// A pick of a model's node is answered with the model's root, but within the model, as a pick
-/// within its root or one of its nodes is, with the node drawn there, however deep, called by
-/// its name in the model, as `entities` and `entity` call it; within another entity, or one
-/// gone, with the root still, and an entity no model's within any as itself.
+/// A pick of a model's node is answered with the model's root, but within the model: the node drawn
+/// there, however deep, named as `entities` and `entity` name it. Within another entity or one
+/// gone, it gives the root still; an entity in no model gives itself.
 #[test]
 fn a_pick_within_a_model_is_answered_with_its_node_drawn_there() {
     let (mut api, session) = started("Api Picks Within");
     let mut cx = Context::seeded(12);
-    // Its nodes: part 0, holding parts 1, named, and 2, each drawing; and part 3, drawing.
+    // Nodes: part 0 holds 1 (named) and 2, each drawing; part 3 draws.
     let mut imported = crate::model::tests::imported();
     imported.parts[1].name = Some(std::sync::Arc::from("seat"));
     let (model, _) = crate::model::tests::added(&mut cx, "m", imported);
@@ -3192,8 +3156,8 @@ fn a_pick_within_a_model_is_answered_with_its_node_drawn_there() {
             (picked.id, picked.name)
         })
     };
-    // As the renderer answers: the seat is drawn at the view's columns up to 30, the back's
-    // up to 60, and the other entity's from there.
+    // As the renderer answers: the seat draws at columns up to 30, the back's up to 60, the other
+    // entity's from there.
     let mut answers = Vec::new();
     let back_frame = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
         cx.take_answers(&answers);
@@ -3219,7 +3183,7 @@ fn a_pick_within_a_model_is_answered_with_its_node_drawn_there() {
         back_frame,
     );
     let answer = |id: EntityId, name: Option<&str>| (Some(id.to_string()), name.map(str::to_owned));
-    // The seat by its name in the model, and the back, which it leaves unnamed, by none.
+    // The seat by its model name; the back, unnamed, by none.
     let expected = [
         answer(root, Some("Model")),
         answer(seat, Some("seat")),
@@ -3259,8 +3223,7 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
     assert_eq!(parse(&request("assets", given)), Ok(assets));
     assert_eq!(parse(&request("ui", Value::Null)), Ok(Call::Ui));
     assert_eq!(parse(&request("cells", json!({}))), Ok(Call::Cells));
-    // As `dx tools hotpatch` prints it, the map's keys as strings, its library a path from the
-    // root.
+    // As `dx tools hotpatch` prints it: string keys, the library a path from the root.
     let lib = std::env::temp_dir().join("patch.dll");
     let table = json!({
         "lib": lib,
@@ -3435,9 +3398,8 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
             "api.bad_params",
         ),
         ("view", json!({"memory": 3}), "api.bad_params"),
-        // A viewpoint whose rotation has no length, whose position isn't three numbers, or that
-        // can't project; an outline of no entity's ID, of a color that isn't finite, or of no
-        // width.
+        // A viewpoint with a zero-length rotation, a position that isn't three numbers, or that
+        // can't project; an outline of no ID, a non-finite color, or no width.
         (
             "look",
             json!({"viewpoint": viewpoint([0.0; 4], orthographic.clone())}),
@@ -3499,16 +3461,15 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
     }
 }
 
-/// `METHODS`, which `api.unknown_method` lists, matches the methods there are: none it holds is
-/// unknown to a connection, and it holds each one the parser matches or the connection answers
-/// itself, as their sources name them.
+/// `METHODS`, which `api.unknown_method` lists, matches the methods there are: none is unknown to a
+/// connection, and it holds each one the parser matches or the connection answers itself.
 #[test]
 fn each_method_is_listed_and_each_one_listed_is_answered() {
     let (_api, session) = started("Api Methods");
     let (mut stream, mut answers) = said_hello(&session);
     for (id, method) in (1..).zip(METHODS) {
-        // Parameters no method takes: the parser refuses each it reads, rather than passing it on
-        // to the main loop, which no frame serves here.
+        // Parameters no method takes: the parser refuses each rather than passing it to the main
+        // loop, which no frame serves here.
         let request = json!({"id": id, "method": method, "params": "none"});
         stream
             .write_all(format!("{request}\n").as_bytes())
@@ -3518,8 +3479,8 @@ fn each_method_is_listed_and_each_one_listed_is_answered() {
         let code = answer.error.map(|failure| failure.code);
         assert_ne!(code.as_deref(), Some("api.unknown_method"), "{method}");
     }
-    // The parser's arms, as `"step" =>` or `"undo" | "redo" =>`, and the methods the connection
-    // answers itself, as `request.method == "ping"`.
+    // The parser's arms (`"step" =>`, `"undo" | "redo" =>`) and the connection's own
+    // (`request.method == "ping"`).
     let parser = include_str!("parse.rs").split("fn parse(").nth(1);
     let arms = parser.expect("the parser").lines().filter_map(|line| {
         let (patterns, _) = line.trim_start().split_once(" =>")?;
