@@ -2,6 +2,8 @@
 // to 1, by a tonemapper: each pixel of the view's colors onto the image's, which the target encodes
 // as sRGB; and, tonemapped by any but none, dithered against banding in the image's 8 bits.
 
+#include "common.slang"
+
 [[vk::binding(0, 0)]] Texture2D textures[];
 
 struct Push {
@@ -16,18 +18,6 @@ static const uint PBR_NEUTRAL = 0;
 static const uint ACES = 1;
 static const uint AGX = 2;
 static const uint NONE = 3;
-
-// The largest a half float holds, short of infinity, which the view's colors are.
-static const float BRIGHTEST = 65504.0;
-
-// `color`, as the view's colors hold it, as light: none where it's no number or below 0, as what
-// blends can leave it, and the largest a half float holds where it's more, which there is
-// infinite, as taa.slang's `finite` says, and which the tonemappers would make no number. Told by
-// its bits, as that says why.
-float3 finite(float3 color) {
-    bool3 nan = (asuint(color) & 0x7FFFFFFF) > 0x7F800000;
-    return clamp(select(nan, float3(0.0), color), 0.0, BRIGHTEST);
-}
 
 // A triangle over the whole viewport, from three vertices and no buffer: (-1, -1), (3, -1) and
 // (-1, 3) in clip space.
@@ -158,6 +148,7 @@ float4 fragment_main(float4 position: SV_Position) : SV_Target {
     // A pixel's position is its center, so its whole part is the pixel's.
     int2 pixel = int2(position.xy);
     float4 drawn = textures[push.image].Load(int3(pixel, 0));
+    // As what blends can leave below 0, and as the tonemappers would make infinity no number.
     float3 color = finite(drawn.rgb);
     switch (push.tonemapper) {
     case PBR_NEUTRAL:

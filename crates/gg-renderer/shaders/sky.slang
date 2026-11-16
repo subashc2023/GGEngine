@@ -3,6 +3,7 @@
 // as far as depth goes, writing no ID. `Push` in src/sky.rs, which `Push` here matches field for
 // field.
 
+#include "common.slang"
 #include "equirect.slang"
 
 [[vk::binding(0, 0)]] Texture2D textures[];
@@ -19,9 +20,6 @@ struct Push {
     float scale;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
-
-// The largest a half float holds, short of infinity, which the view's colors are.
-static const float BRIGHTEST = 65504.0;
 
 struct Varyings {
     float4 position : SV_Position;

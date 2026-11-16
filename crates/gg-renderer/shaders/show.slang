@@ -9,6 +9,8 @@
 //
 // `Push` matches `ShowPush` in src/show.rs field for field.
 
+#include "common.slang"
+
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(0, 0)]] Texture2D<float> floats[];
 [[vk::binding(0, 0)]] Texture2D<uint2> pairs[];
@@ -37,9 +39,6 @@ struct Push {
     uint unused;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
-
-// The largest a half float holds, short of infinity, which the view's colors are.
-static const float BRIGHTEST = 65504.0;
 
 // `value`, each channel from 0 to 1, as the view's colors hold it so that the view's sRGB image
 // stores it as its byte over 255, as shading.slang's `stored_as` says.
@@ -96,7 +95,7 @@ void show_main(uint3 pixel: SV_DispatchThreadID) {
         if (push.kind == MOTION) {
             shown = stored_as(value * 0.5 + 0.5);
         } else {
-            // No number shows as none, as tonemap.slang's `finite` takes it.
+            // No number shows as none, as common.slang's `finite` takes it.
             bool3 nan = (asuint(value) & 0x7FFFFFFF) > 0x7F800000;
             shown = clamp(select(nan, float3(0.0), value), 0.0, BRIGHTEST);
         }

@@ -27,6 +27,8 @@
 //
 // `Push` matches `SmaaPush` in src/smaa.rs field for field.
 
+#include "common.slang"
+
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(1, 0)]] SamplerState samplers[];
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
@@ -73,17 +75,6 @@ struct Push {
     float4 curve;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
-
-// The largest a half float holds, short of infinity, which the view's colors are.
-static const float BRIGHTEST = 65504.0;
-
-// `color`, as the view's colors hold it, as light: none where it's no number, and the largest a
-// half float holds where it's more, as taa.slang's `finite` says. Told by its bits, as that says
-// why.
-float3 finite(float3 color) {
-    bool3 nan = (asuint(color) & 0x7FFFFFFF) > 0x7F800000;
-    return clamp(select(nan, float3(0.0), color), 0.0, BRIGHTEST);
-}
 
 // Light as SMAA sees it, as `seen` makes it: `shown`, from 0 to 1, and how far each channel of that
 // is below 1, `below`, which keeps the precision `shown` loses as it nears 1, as it does for light

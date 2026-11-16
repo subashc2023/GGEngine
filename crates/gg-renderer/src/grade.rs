@@ -167,7 +167,7 @@ impl GradeData {
 }
 
 /// The largest a half float holds, short of infinity, which the view's colors are: `BRIGHTEST` in
-/// `shaders/grade.slang`.
+/// `shaders/common.slang`.
 const BRIGHTEST: f32 = 65504.0;
 
 const MID_GRAY: f32 = 0.18;

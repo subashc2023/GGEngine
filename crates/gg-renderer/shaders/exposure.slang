@@ -12,6 +12,7 @@
 //
 // `Push` matches `ExposurePush` in src/exposure.rs field for field.
 
+#include "common.slang"
 #include "grade.slang"
 
 [[vk::binding(0, 0)]] Texture2D textures[];
@@ -44,14 +45,6 @@ struct Push {
     float high;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
-
-// `color`, as the view's colors hold it, as light: none where it's no number or below 0, and the
-// largest a half float holds where it's more, which there is infinite, as tonemap.slang's `finite`
-// says. Told by its bits, as that says why.
-float3 finite(float3 color) {
-    bool3 nan = (asuint(color) & 0x7FFFFFFF) > 0x7F800000;
-    return clamp(select(nan, float3(0.0), color), 0.0, BRIGHTEST);
-}
 
 [shader("compute")]
 [numthreads(BINS, 1, 1)]

@@ -15,6 +15,7 @@
 // and the sun's disk through the transmittance. `Push` and `Atmosphere` in src/atmosphere.rs,
 // which `Push` and `Atmosphere` here match field for field.
 
+#include "common.slang"
 #include "equirect.slang"
 
 [[vk::binding(0, 0)]] Texture2D textures[];
@@ -89,8 +90,6 @@ static const float SLICE_KM = 4.0;
 static const uint TRANSMITTANCE_STEPS = 40;
 static const float MULTIPLE_STEPS = 20.0;
 static const float2 SKY_STEPS = float2(4.0, 14.0);
-// The largest a half float holds, short of infinity, which the view's colors are.
-static const float BRIGHTEST = 65504.0;
 
 // What scatters and what takes light away at a point `radius` from the planet's center.
 struct Medium {

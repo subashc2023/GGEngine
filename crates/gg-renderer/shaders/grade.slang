@@ -5,6 +5,8 @@
 //
 // `Grade` matches `GradeData` in src/grade.rs field for field.
 
+#include "common.slang"
+
 struct Grade {
     // The white balance's rows, in linear sRGB, and in their fourth components the contrast and
     // the saturation.
@@ -14,9 +16,6 @@ struct Grade {
     float4 offset;
     float4 power;
 };
-
-// The largest a half float holds, short of infinity, which the view's colors are.
-static const float BRIGHTEST = 65504.0;
 
 static const float MID_GRAY = 0.18;
 

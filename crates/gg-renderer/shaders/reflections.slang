@@ -37,6 +37,8 @@
 // what it reads through functions of its own, as pyramid.slang says why. `Push` and `Trace` match
 // `Push` and `Trace` in src/reflections.rs field for field.
 
+#include "common.slang"
+
 [[vk::binding(0, 0)]] Texture2D<float> depths[];
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(1, 0)]] SamplerState samplers[];
@@ -121,8 +123,6 @@ static const float NUDGE = 0.005;
 // FidelityFX's; and the share of its reach over which it fades toward its end.
 static const float EDGE_FADE = 0.05;
 static const float DISTANCE_FADE = 0.25;
-// The largest a half float holds, short of infinity, which the view's colors are.
-static const float BRIGHTEST = 65504.0;
 // `Sampler::LinearClamp`'s index in the bindless set.
 static const uint LINEAR_CLAMP = 0;
 
@@ -279,13 +279,6 @@ bool march(Trace trace, float3 origin, float3 way, out float t) {
         level = skipped ? min(level + 1, top) : level - 1;
     }
     return level < 0 && t <= 1.0;
-}
-
-// `color`, as the view's colors hold it, as light: none where it's no number, and the largest a half
-// float holds where it's more, as taa.slang's `finite` takes it.
-float3 finite(float3 color) {
-    bool3 nan = (asuint(color) & 0x7FFFFFFF) > 0x7F800000;
-    return clamp(select(nan, float3(0.0), color), 0.0, BRIGHTEST);
 }
 
 // Whether every component of `v` is a finite number, told by its bits, as `finite` tells NaN.
