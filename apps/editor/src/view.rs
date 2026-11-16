@@ -15,6 +15,7 @@ use gg_engine::{Context, Event, Input, InspectorLink, Key, Ui, Viewpoint, Viewpo
 use crate::camera::{Move, OrbitCamera, Screen, Side, Tool};
 use crate::handles::{Aim, Along, Handles, Picked, Reading, Reply, Sight};
 use crate::overlay::{self, Toolbar};
+use crate::shortcuts::{Does, SHORTCUTS, Shortcut};
 
 /// The color of the outline round what's picked, in linear RGBA: an orange, as other editors
 /// outline what's selected in.
@@ -149,10 +150,11 @@ impl<T, F> ViewTools<T, F> {
     }
 
     /// Has Q, W, E or R pick its tool, Select, Move, Rotate or Scale, and X flip the space of
-    /// Move's and Rotate's axes between the entity's own and the world's, for `event`, a press of
-    /// it, not a repeat; but not one with `command` held, Ctrl, or Cmd on macOS, which is a
-    /// shortcut's; nor while the view sees through the game's camera, which shows no handles; nor
-    /// while the editor's camera flies, as its keys steer it; nor during a drag of the handles.
+    /// Move's and Rotate's axes between the entity's own and the world's, as [`SHORTCUTS`] has
+    /// them, for `event`, a press of it, not a repeat; but not one with `command` held, Ctrl, or Cmd
+    /// on macOS, which is a shortcut's; nor while the view sees through the game's camera, which
+    /// shows no handles; nor while the editor's camera flies, as its keys steer it; nor during a
+    /// drag of the handles.
     pub fn choose_tool(&mut self, event: &Event<'_>, command: bool) {
         let Event::Key {
             key,
@@ -166,12 +168,12 @@ impl<T, F> ViewTools<T, F> {
         if command || busy {
             return;
         }
-        match key {
-            Key::KeyQ => self.toolbar.tool = Tool::Select,
-            Key::KeyW => self.toolbar.tool = Tool::Move,
-            Key::KeyE => self.toolbar.tool = Tool::Rotate,
-            Key::KeyR => self.toolbar.tool = Tool::Scale,
-            Key::KeyX => self.toolbar.space = self.toolbar.space.flipped(),
+        let view = SHORTCUTS
+            .iter()
+            .find(|shortcut| shortcut.key == key && !shortcut.command);
+        match view.map(|shortcut| shortcut.does) {
+            Some(Does::Tool(tool)) => self.toolbar.tool = tool,
+            Some(Does::FlipSpace) => self.toolbar.space = self.toolbar.space.flipped(),
             _ => {}
         }
     }
@@ -335,18 +337,19 @@ fn enclosing(a: (DVec3, f32), b: (DVec3, f32)) -> (DVec3, f32) {
     (a + (b - a) * ((radius - r) / apart), radius as f32)
 }
 
-/// Whether `event` is a press of F, not a repeat, without `command` held, which a shortcut's would
-/// have: as other editors frame what's selected.
+/// Whether `event` is a press of F, as [`SHORTCUTS`] has it, not a repeat, without `command` held,
+/// which a shortcut's would have: as other editors frame what's selected.
 fn frames(event: &Event<'_>, command: bool) -> bool {
-    let press = matches!(
-        *event,
-        Event::Key {
-            key: Key::KeyF,
-            pressed: true,
-            repeat: false,
-        }
-    );
-    press && !command
+    let Event::Key {
+        key,
+        pressed: true,
+        repeat: false,
+    } = *event
+    else {
+        return false;
+    };
+    let frame = |shortcut: &Shortcut| shortcut.does == Does::Frame && shortcut.key == key;
+    SHORTCUTS.iter().any(frame) && !command
 }
 
 /// Whether `input` has Alt held, by either of its keys.

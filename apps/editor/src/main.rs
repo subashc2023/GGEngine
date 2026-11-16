@@ -13,6 +13,7 @@ mod look;
 mod overlay;
 mod rates;
 mod scenes;
+mod shortcuts;
 mod view;
 
 use std::ffi::OsString;

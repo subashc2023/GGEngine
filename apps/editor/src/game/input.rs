@@ -7,6 +7,7 @@ use gg_api::InputEvent;
 use gg_engine::{Event, Key, MouseButton, Scroll, Viewport};
 
 use crate::handles::Reading;
+use crate::shortcuts::{Does, SHORTCUTS, Shortcut};
 
 use super::{Game, Probing, along, picked};
 
@@ -124,20 +125,19 @@ impl Game {
     }
 }
 
-/// Whether `event` is a press, or a repeat, of a key of the File menu's shortcuts, the key at N, O
-/// or S's position, whatever the layout calls it, as the menu matches it, with `command` held,
-/// Ctrl, or Cmd on macOS, which the menu takes from egui: neither the game nor the view's tools
-/// get it. Its release does, which changes nothing without its press.
+/// Whether `event` is a press, or a repeat, of a key of the File menu's shortcuts in
+/// [`SHORTCUTS`], the key at N, O or S's position, whatever the layout calls it, as the menu matches
+/// it, with `command` held, Ctrl, or Cmd on macOS, which the menu takes from egui: neither the game
+/// nor the view's tools get it. Its release does, which changes nothing without its press.
 fn shortcuts_key(event: &Event<'_>, command: bool) -> bool {
-    let key = matches!(
-        *event,
-        Event::Key {
-            key: Key::KeyN | Key::KeyO | Key::KeyS,
-            pressed: true,
-            ..
-        }
-    );
-    command && key
+    let Event::Key {
+        key, pressed: true, ..
+    } = *event
+    else {
+        return false;
+    };
+    let file = |shortcut: &Shortcut| matches!(shortcut.does, Does::File(_)) && shortcut.key == key;
+    command && SHORTCUTS.iter().any(file)
 }
 
 /// Whether `event` lets go of what's held: a key's or a button's release, or the loss of the

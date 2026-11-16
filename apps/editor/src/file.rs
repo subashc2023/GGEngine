@@ -2,7 +2,9 @@
 //! UI: the prompt that asks whether to save the open scene's unsaved edits first, and a message
 //! that says why a scene couldn't be opened or saved.
 
-use gg_engine::egui::{self, Button, Id, KeyboardShortcut, Modal, Modifiers};
+use gg_engine::egui::{self, Button, Id, KeyboardShortcut, Modal};
+
+use crate::shortcuts::{Does, SHORTCUTS};
 
 /// The widest the prompt and a message get, in points, so that a long error wraps.
 const WIDTH: f32 = 400.0;
@@ -35,15 +37,13 @@ impl Item {
     }
 
     /// The keys that choose it, as the menu names them: N, O or S with Ctrl, or Cmd on macOS, and
-    /// for Save As, S with Shift too; each the key at that position, as [`shortcut`] says.
+    /// for Save As, S with Shift too; each the key at that position, as [`shortcut`] says, and as
+    /// [`SHORTCUTS`] has them.
     pub fn shortcut(self) -> KeyboardShortcut {
-        let (modifiers, key) = match self {
-            Self::New => (Modifiers::COMMAND, egui::Key::N),
-            Self::Open => (Modifiers::COMMAND, egui::Key::O),
-            Self::Save => (Modifiers::COMMAND, egui::Key::S),
-            Self::SaveAs => (Modifiers::COMMAND.plus(Modifiers::SHIFT), egui::Key::S),
-        };
-        KeyboardShortcut::new(modifiers, key)
+        let shortcut = SHORTCUTS
+            .iter()
+            .find(|shortcut| shortcut.does == Does::File(self));
+        shortcut.expect("each item has a shortcut").egui()
     }
 }
 
@@ -53,8 +53,12 @@ impl Item {
 /// the same keys of what the game gets. Takes out the shortcuts' presses and their repeats, which
 /// choose nothing, so that one held down saves, or shows a dialog, once.
 pub fn shortcut(events: &mut Vec<egui::Event>) -> Option<Item> {
-    // Save As's first, since a shortcut matches with Shift held as well.
-    let shortcuts = [Item::SaveAs, Item::Save, Item::New, Item::Open];
+    // In the table's order, Save As's before Save's, since a shortcut matches with Shift held as
+    // well.
+    let shortcuts = SHORTCUTS.iter().filter_map(|shortcut| match shortcut.does {
+        Does::File(item) => Some(item),
+        _ => None,
+    });
     let mut chosen = None;
     events.retain(|event| {
         let &egui::Event::Key {
@@ -69,7 +73,7 @@ pub fn shortcut(events: &mut Vec<egui::Event>) -> Option<Item> {
         };
         // egui-winit gives the position, unless egui has no key for it.
         let key = physical_key.unwrap_or(key);
-        let matched = shortcuts.into_iter().find(|item| {
+        let matched = shortcuts.clone().find(|item| {
             let shortcut = item.shortcut();
             key == shortcut.logical_key && modifiers.matches_logically(shortcut.modifiers)
         });
@@ -147,6 +151,8 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+    use gg_engine::egui::Modifiers;
+
     use super::*;
 
     /// `key` pressed with `modifiers`, as egui gets it, or repeating as it's held, if `repeat`.
