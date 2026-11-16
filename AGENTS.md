@@ -24,7 +24,7 @@ crates/           libraries
 apps/             executables
   sandbox/        the engine's own app: a swarm of up to 100,000 sprites and a grid's scene file
   editor/         the editor: a project's game, embedded, in a panel among dockable panels
-  player/         reference player, with no layers; runs cooked scenes without game code (to come)
+  player/         reference player: runs a game's package, its scenes and Luau scripts, without its code
   relay/          `gg-relay`, the relay's executable, which games don't run
 games/shards/     the first demo, a project: two players, alone, as peers or as a server's clients
 games/showcase/   a project of a scene for each feature: add one as a feature lands
@@ -179,17 +179,19 @@ need a Vulkan 1.4 driver and the Khronos validation layer. Without a GPU, lavapi
 or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later) and `vulkan-validationlayers`. When a test's
 image differs from its reference, the test says where it wrote its own; after an intended change,
 `GG_UPDATE_REFERENCES=1` rewrites the references, which you look at before committing them. The
-sandbox's and the demo's world hashes, at each tick of a seeded run, are references too, which CI
-checks on every platform: a change to their simulations, to what the hash reads, or to glam, libm,
-rapier or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p sandbox -p shards` rewrites
-them and the demo's live recording's alone. gg-engine's `physics/` holds five more, its
-`animation/` three and its `navigation/` one, edited by hand. A difference on some platforms alone
-is a bug. Some changes need a new recording, as the demo's AGENTS.md says.
+sandbox's and the demo's world hashes, at each tick of a seeded run, and the showcase's crossing's,
+are references too, which CI checks on every platform: a change to their simulations, to what the
+hash reads, or to glam, libm, rapier or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo test
+-p sandbox -p shards -p showcase` rewrites them and the demo's live recording's alone. gg-engine's
+`physics/` holds five more, its `animation/` three and its `navigation/` one, edited by hand. A
+difference on some platforms alone is a bug. Some changes need a new recording, as the demo's
+AGENTS.md says.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push of more than docs, on Windows
 and Linux, x86-64 and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the
 doc gate, the GPU tests, on lavapipe, the apps and the demo's peers headless, grepping their logs,
-and the demo and the player run as they ship on Linux x86-64 alone; and the layering check. Hosted
+the demo and the player run as they ship, and the games `gg new` makes, outside the workspace and
+in it, built and checked, on Linux x86-64 alone; and the layering check. Hosted
 runners have no GPU, so the other jobs set `GG_SKIP_GPU_TESTS`. lavapipe has no transfer queue,
 so CI never uploads through one: after changing uploads, run the GPU tests on a GPU with one, as
 NVIDIA's. Minutes are billed, a macOS one at ten Linux ones: push a branch to probe CI only for

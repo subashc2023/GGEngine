@@ -115,8 +115,8 @@ Build and run:
       Rust release.
   ship [PACKAGE]
       Build PACKAGE, the project's game without one, as it ships, without `dev` in the shipping
-      profile, cook its project into its package beside its executable, with the workspace's
-      cooker, and lay the two out in `ship/PACKAGE` in the target directory, emptied first, named
+      profile, cook its project into its package beside its executable, with the cooker of
+      the engine it builds with, and lay the two out in `ship/PACKAGE` in the target directory, emptied first, named
       after the game, PACKAGE capitalized, as `Shards.exe` and `Shards.ggpk`, with NOTICES.txt:
       the project's CREDITS.txt and the licenses of the crates it's built from, which cargo-about
       0.9.2 writes with the workspace's about.toml (`gg.notices`). Side by side on Windows, with the

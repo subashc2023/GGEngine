@@ -180,12 +180,13 @@ name, and a generic name can match one.
    which gets a small crate of its own.
 
 Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies, for every crate but
-`gg-macros`, which depends on no `gg-*` crate, so that depending on it closes no cycle. Nor can it
+`gg-macros` and `gg-api`, which depend on no `gg-*` crate, so that depending on them closes no
+cycle. Nor can it
 see a skip-level edge such as `gg-engine` → `gg-gpu`, which closes none either. So
 [deny.toml](deny.toml) names the only crates that may depend directly on each `gg-*` crate but
-`gg-core` and `gg-engine`, and on each library one crate owns, such as `ash`, `winit` or
-`rapier2d`, and CI checks it with cargo-deny. Rule 4, and what a crate does with the dependencies
-it may have, are left to review.
+`gg-core`, `gg-engine` and `gg-api`, and on each library one crate owns, such as `ash`, `winit` or
+`rapier2d`, and CI checks it with cargo-deny. Rule 4, rule 2's ban on `gg-core` depending on `gg-api`, and what a
+crate does with the dependencies it may have, are left to review.
 
 ### Builds
 
@@ -269,7 +270,7 @@ before:
 
 Game code is Rust, as fast and as unrestricted as the engine's own. Each game is a crate that
 depends on `gg-engine` and builds its own player, statically linked and optimized for shipping, and
-a [project](#project-state), which `gg new` makes. Game crates forbid `unsafe`, so a bug in game
+a [project](#project-state), which `gg new` makes. Game crates deny `unsafe`, so a bug in game
 code panics rather than corrupting memory. The engine's demos and test beds live in `games/` in this
 workspace, among its members, so one change can span engine and game; the engine's code and tests
 depend on none of them, a test's files being its crate's own, as CI's layering job checks. A game
@@ -448,8 +449,8 @@ in the editor is out of an agent's reach.
   connection rather than filling the game's memory, and answers its pings itself,
   from the frames the main loop counts, so that a tool tells a hung game from a busy one, and from
   one whose frames have paused for the user, as for a minimized window or a file dialog; and its
-  reads of the log, from the events the run keeps in memory as it logs them, its last 10,000, each
-  numbered, which `logs` serves as they come, waiting for one if none has, so that a client follows
+  reads of the log, from the events the run keeps in memory as it logs them, its last 10,000, fewer where
+  those would hold more than 8 MiB of lines, each numbered, which `logs` serves as they come, waiting for one if none has, so that a client follows
   them from the number it left off at, and, by the run's own number, which a restart changes, misses
   none across a restart that the new run kept; its notes, so that one comes through while frames
   pause; and its requests to debug scripts, through what the debugger shares with the main thread,
@@ -554,7 +555,7 @@ in the editor is out of an agent's reach.
   session files name its manifest; `gg mcp` gives agents that speak MCP the same reach over stdio, a
   tool for each of gg's commands that talk to a game but `quit` and `call`, telling them, as gg's
   usage does, that the game, but a lockstep session's joiner, whose host does, writes each
-  texture's and model's ID file, to commit with it and move with it, connecting at each call to the
+  asset's ID file, to commit with it and move with it, connecting at each call to the
   game it chooses, so that a restarted game is the one it reaches, as the agent, by its MCP client's
   name; the editor is one more client, with no ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
@@ -600,13 +601,13 @@ A project's state is text that people and agents edit, diff and merge with ordin
   as `Context::package_files` lists them, and its start scene. It holds the files under the asset
   root that runs load, by their paths from the root, found through the folders the scan of ID files
   below goes through: a font baked into its field and a shader compiled to SPIR-V, which are what
-  the engine makes of them as they load, so that a shipping run needs no slangc; a texture compressed to BC7, of the one level
+  the engine makes of them as they load, so that a shipping run needs no slangc; a texture compressed to BC7, or a Radiance HDR's to BC6H, of the one level
   a layer's texture has, in KTX2, supercompressed by zstd; a model as the engine reads it, with
   the files it names, each primitive's triangles optimized by meshoptimizer for the GPU's vertex
   cache, overdraw and fetches, but those of a material that blends, which cover each other in
   their order and keep it, with levels of detail it simplified, each about half the triangles
   of the one before, its vertices packed as a run packs them, and each level cut by meshoptimizer
-  into meshlets but where its material blends, as [Rendering](#rendering) says, and each image
+  into meshlets but where its material blends or it's skinned, as [Rendering](#rendering) says, and each image
   compressed as what its materials sample it as, BC7 of colors
   or of a map's values, or BC5 of a normal map's X and Y, with the full chain of mip levels a run
   makes for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels, but
@@ -617,8 +618,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   its extension, a
   model's buffers among them, which its model holds. Which of
   the rest a game's code loads the cooker can't know, but it refuses a project whose package
-  wouldn't hold its start scene (`cook.no_start`), and, as it takes every PNG and JPEG under the
-  root for a texture, one of them that doesn't load as a texture (`engine.bad_texture`), and every
+  wouldn't hold its start scene (`cook.no_start`), and, as it takes every PNG, JPEG and Radiance HDR under
+  the root for a texture, one of them that doesn't load as a texture (`engine.bad_texture`), and every
   `.ui` file for a UI, one a run would refuse, with its code, as one naming a font or a texture the
   package doesn't hold where a run from it would look (`asset.no_font`, `asset.no_texture`). It
   gives each asset the ID its ID file holds, and the cooker refuses a project whose ID files a
@@ -729,8 +730,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
   and as a scene of the subtree is, as one that refers outside it (`scene.outside`); and in a run
   from a package or a networked one, or while a copy of the world as edited plays, which `stop`
   takes away with the link (`api.no_scene`).
-  In a development run that serves the tool API, neither recorded
-  nor in a lockstep session, as the prefab's file is saved, every instance takes what changed, in
+  In a development run that serves the tool API, neither recorded,
+  nor in a lockstep session, nor going as another run went, as a replay or a server's client
+  does, as the prefab's file is saved, every instance takes what changed, in
   the world and the world as edited alike: each field it had as the prefab did takes what the
   prefab has now, and each that differed is kept; a component the prefab gives now is given, and
   one it gives no more taken away where it was the prefab's; an entity the prefab gives now
@@ -838,8 +840,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   runs never give one asset two IDs, warning of one it can't write (`asset.unwritten`); each ID drawn
   until it holds a letter but `e`, so that its text never reads as a JSON number. Another
   development run reads them and warns of each asset that has none (`asset.no_id`), as `gg check`
-  reports; builds without `dev` and replays read none; and tools never write one: gg-api writes
-  none, and the editor's own app names no root. The scan goes through every folder under the root
+  reports; builds without `dev` and replays read none; and of tools only `gg fetch` writes one,
+  as it fetches an asset: gg-api writes none, and the editor's own app names no root. The scan goes through every folder under the root
   but those whose names start with `.`, every `target`, and at its top `tests`, `benches` and
   `examples`, as a package's root holds them, never through a link; it skips hidden files too, and
   warns of what it can't take (`asset.unlisted`), such as a name that isn't Unicode or a folder it
@@ -993,8 +995,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
     author's log, and the Inspector's, starts afresh, as after a restore.
   - The open scene is unsaved when its entities, as Save would write them, differ from its file. A
     snapshot keeps which scene is open and what edits made into it.
-  - Recorded runs and lockstep peers refuse New and Open, and lockstep peers refuse Save too
-    (`api.no_scene`): neither a replay nor the other peer could follow them.
+  - Recorded runs and networked ones refuse New and Open, and networked ones refuse Save too
+    (`api.no_scene`): neither a replay nor the session's others could follow them.
 - **Scene changes.** A game changes its scene as it plays, from its menu to a level, from a level
   to the next or to its own start again, from a tick: `World::change_scene` names a scene file by
   its path from the asset root, `/` between its parts, as `scenes/level2.ron`, and as the tick of
@@ -1081,7 +1083,7 @@ A project's state is text that people and agents edit, diff and merge with ordin
     a server's session nothing; a made cell's text it makes again each time, keeping none. It
     looks for the cells with files among those listed, and for made ones among those within each
     viewer's reach, in a box of at most 32,768 cells round it, which holds the 4,096 nearest; at
-    most 4,096 cells are in at once, the nearest first (`cells.full`). The cells within a radius and a cell more are prepared ahead, on threads
+    most 4,096 cells are in at once, the nearest first (`cells.full`). The cells within a radius and a cell and a half are prepared ahead, on threads
     of their own, `gg-cells`: each file read or made, what it and what the cell keeps name that
     isn't loaded found, those models' files read, and the texts parsed in a scratch world of the
     world's types and assets; the main thread adds the models read, loads the rest, and, as the
@@ -1546,7 +1548,8 @@ starts none, as a recording holds a run alone or a session from its start.
   commands, each tick's tagged with the tick; the server applies them in their order, each tick's
   at the first tick it runs that's theirs or past it, its own layers' first and then each client's
   by its player. After every second tick, 32 times a second, which halves a client's download
-  against every tick's (0.77 Mbit/s for that 3D game's), it sends each client its state: the text of
+  against every tick's (0.77 Mbit/s for a 3D game's of two skinned characters and a ball),
+  it sends each client its state: the text of
   what it sees of the world, as a snapshot writes the world, but with what hasn't changed since
   the latest state the client has said it has named as kept, a line in place of each run of
   tables kept, the children and each resource whose text is the same; compressed by zstd against
@@ -1555,7 +1558,7 @@ starts none, as a recording holds a run alone or a session from its start.
   kept as the ECS's change marks say nothing joined it or changed in it since that state, and it
   has as many rows: the server's world moves its change tick on as each tick ends, as a run that
   draws does as each tick starts. A thread of the server's own writes the states, from a copy of
-  the world the main thread takes as the tick ends (44 µs a tick for that 3D game's, in a release
+  the world the main thread takes as the tick ends (44 µs a tick for such a game's, in a release
   build), so that the main thread's time doesn't grow with the clients or the world; a tick that
   ends while it's still writing sends none, which `net.served` counts. The client rebuilds each
   state's text whole from the state it's against, which it keeps, as the server does.
@@ -1798,7 +1801,9 @@ that sent the UI the event, so that a click on a button isn't a click on the wor
 game that reads the mouse itself. A focused text field takes what's
 typed (`Event::Text`, winit's text, not keys' positions) at its caret, as many characters as it
 holds, its caret moved by the arrows, Home and End, Shift selecting and Ctrl+A selecting it all, and
-Backspace and Delete cutting; the OS's composition of what's typed, IME, doesn't reach it. A hidden
+Backspace and Delete cutting; Ctrl+C copies the selection to the OS's clipboard, Ctrl+X cuts it
+there, and Ctrl+V pastes the clipboard's first line, Cmd for Ctrl on macOS, in a windowed run; the
+OS's composition of what's typed, IME, doesn't reach it. A hidden
 or disabled button or widget takes neither the focus nor a press. Code sets a node's text, whether
 it shows, a button's or a widget's whether it's disabled, a widget's value and the focus, and reads
 a widget's value, by its name, kept as the file reloads, and turns the UI's input off while the game
@@ -2374,8 +2379,9 @@ its shadow distance, 100 units by default, fading out over the last tenth: of a 
 cast them, the brightest, the first of those as bright, as one light's shadows are drawn. Point and
 spot lights cast none yet. The shadows are in four cascades, each a shadow map of 2,048 texels a
 side, of 32-bit depth, the graph's own images, drawn before the view, which samples them. The
-view's depth, from its near plane to the shadows' reach, splits into four slices, the nearest the
-shortest, by the practical split scheme, three quarters logarithmic; each cascade is the box, seen
+view's depth, from its near plane to the shadows' reach, splits into four slices: under a perspective, the
+nearest the shortest, by the practical split scheme, three quarters logarithmic, and under an
+orthographic projection of one length, as each gets as many texels a pixel; each cascade is the box, seen
 from the light, round the smallest sphere that holds its slice, so that its size changes only with
 the view's projection, and its center moves only by whole texels of its map in the light's space,
 so that its texels stay put in the world as the view turns and moves, and shadows' edges don't
@@ -2602,7 +2608,8 @@ it: a block of a power of two slots, at least as many as the emitter has alive a
 times its longest lifetime and a burst, given by a buddy allocator, a block let go of free from the
 next frame on. The pool doubles as rings need more room, a frame that grows it copying the old into
 the new in a compute pass before the rest, the two taking the pool's two names by turns, up to 2^20
-particles, 32 MiB, past which an emitter that doesn't fit draws nothing, warned of once
+particles, 32 MiB, past which an emitter of more particles draws the newest that fit, a ring the pool has no room
+to grow keeps the room it had, and one it has no room for draws nothing, each warned of once
 (`renderer.particles_full`). A ring made or grown is written whole, the particles of the ring it had
 first, so that drawing never reads a slot no frame wrote. A compute pass on the graphics queue,
 before the culling, writes each frame's births, a thread a birth, from a few numbers an emitter:
@@ -2661,12 +2668,12 @@ breaks it, naming each way (`renderer.shader_mismatch`). It reads the SPIR-V bec
 reflection names what a pointer points at but none of its fields.
 
 In a development run that serves the tool API, a thread of its own, `gg-watch`, watches the files
-each game's shader, texture, model, font, prefab and UI read as it was loaded, a shader's own and
+each game's shader, texture, model, font, prefab, UI, sound and music read as it was loaded, a shader's own and
 those it includes as slangc lists them, a texture's image, a model's glTF file and the buffers and
-images it names, a font's file, a prefab's and a UI's, by their times and lengths every tenth of a
+images it names, a font's file, a prefab's, a UI's, a sound's and a music's, by their times and lengths every tenth of a
 second, and reads the asset again as they change and then hold for a look, off the main thread:
 compiles the shader, decodes the image, reads the model, bakes the font, reads the prefab's text,
-reads and checks the UI's tree. As the next
+reads and checks the UI's tree, decodes the sound, reads the music. As the next
 frame starts, the main thread puts what it read
 in place of the asset, under the same handle: a shader draws with its new pipeline from that frame,
 the old retiring until the GPU is done with it, and a mesh's or a texture's new bytes stream as any
@@ -2678,7 +2685,8 @@ vertices and indices and each image, which its entities draw at once, and its no
 which its roots' nodes take, as [Models in scenes](#project-state) says, and other numbers of
 primitives and images, those past what it had added, or given back the meshes and textures of
 their places, which those it has no more keep for them; but in a run
-that's recorded or in a lockstep session, whose world changes only as the run it goes with changed
+that's recorded, in a lockstep session or going as another went, as a replay or a server's
+client does, whose world changes only as the run it goes with changed
 it, a model takes its vertices, indices and images alone: its nodes and materials stay as they were
 until the run starts again (`asset.model_changed`), and a model of other numbers of primitives or
 images takes nothing. In any run, a model whose image holds something else now, as colors where it
@@ -2686,9 +2694,9 @@ held a normal map, takes nothing (`asset.model_changed`), as a texture keeps wha
 the run starts again. The engine adds its model shader for every alpha mode with a run's first
 model, so that a material read again adds none. A font takes what it baked, its field's texels at
 any size, which its text is laid out by from that frame. A prefab takes its text, which its
-instances take, as [Prefabs](#project-state) says, but in a run that's recorded or in a lockstep
-session, which keeps it until the run starts again (`asset.prefab_changed`). A UI takes its tree,
-as [UIs](#project-state) says, in any run, as it's the run's alone. A texture's or a font's
+instances take, as [Prefabs](#project-state) says, but in such a run, which keeps it until the run starts again (`asset.prefab_changed`). A UI takes its tree,
+as [UIs](#project-state) says, in any run, as it's the run's alone. A sound's next play plays what it decoded, and a music
+playing crossfades to what it read over a tenth of a second, from where it was. A texture's or a font's
 stand-in takes its
 file's once the file comes, or the file of the asset whose ID it stands for, once one has it, but
 never a file outside the asset root (`asset.outside_root`); and a texture, a model, a font, a
@@ -2727,7 +2735,7 @@ starts, which shows its stand-in until then. Pixels
 that don't decode warn (`engine.bad_texture`), and the texture keeps its stand-in until its file,
 still watched, reads again; the cooker refuses them, so a package holds none. A test's context and a
 replay's decode on the main thread as they add, as nothing draws them, failures warning alike, so
-that a replay goes as its run did. The engine reads a texture, a model, a
+that a replay goes as its run did. The engine reads an asset, a
 scene, a layout or the pipeline cache only from a regular file, so that a FIFO or a device can
 neither hang the read nor fill memory; `--replay` alone reads its recording from whatever it's
 given, so that it can come through a pipe. A texture's handle is its index in the bindless set,
@@ -3291,7 +3299,7 @@ though the camera stood still after one that didn't, or where the view is cut to
 from elsewhere, half of it times the shutter's share of the frame, a half by default, how far the
 pixel moves either way while it's open, within a tile's side,
 a 36th of the view's height, 20 pixels at 720; each tile's largest velocity and their neighbors'
-largest; and 15 samples along that either way, jittered by noise of the pixel's that stays from frame
+largest; and 15 samples along that, the pixel's own and 7 either way, jittered by noise of the pixel's that stays from frame
 to frame, weighed by whether each is in front of the pixel or behind it, within a hundredth of the
 nearer's depth, and how far each moves. A headless frame draws a tick, so its motion is a tick's.
 The engine says a frame is cut to its viewpoint where it comes from elsewhere than the frame
@@ -3363,7 +3371,7 @@ by its direction and distance, before or behind it, as kira's spatial tracks wou
 defaults: three quarters of the way toward the side it's straight out to, and as loud as it is
 within a unit, fading linearly in decibels to silence 100 units away. The engine pans and fades
 each play itself, as a frame goes, rather than giving each place a spatial track of kira's, so that
-a sound starts and follows its entity without a track made or dropped, allocating nothing. One on
+a sound starts and follows its entity without a track made or dropped. One on
 an entity follows it, each frame, to where the latest
 tick left it, up to a tick ahead of where it draws, too little to hear; once the entity is
 despawned, it plays to its end from where the entity was last, as an impact's does when what made
@@ -3457,7 +3465,7 @@ thread, and threads that can't start leave the main thread to decode, warning (`
 | Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`, MikkTSpace's tangents made for it through `bevy_mikktspace`; PNGs and JPEGs that `png` and `zune-jpeg` decode as development runs add them, and Radiance HDRs that `image`'s decoder of them decodes, to 16-bit floats through `half`; textures cooked in KTX2, its levels supercompressed by zstd, through `ctt`: colors and maps' values to BC7 by bc7enc_rdo, perceptual for colors alone, and normal maps to BC5 and colors of high dynamic range to BC6H by Intel's ISPC Texture Compressor; read by runs through `ktx2` and `zstd`; meshoptimizer, through `meshopt`, for the cooker's meshes and their levels of detail, and for meshlets |
 | Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as development builds load fonts and as the cooker cooks them; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
 | Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia` through decoders of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
-| Networking | Our own, over std's TCP and UDP sockets; a server's states compressed by `zstd` against the latest a client has; Ctrl+C taken through the OS's own handler, by `windows-sys` and `libc` |
+| Networking | Our own, over std's TCP and UDP sockets, secured by the Noise Protocol Framework's `NNpsk0` through `snow`; a server's states compressed by `zstd` against the latest a client has; Ctrl+C taken through the OS's own handler, by `windows-sys` and `libc` |
 | License | `MIT OR Apache-2.0`, at the user's choice, as most of Rust's crates are, [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE), contributions under the same terms; a file beside a license of its own keeps it, as the fonts' OFL and the fox's CC BY 4.0. A game links the engine into its own executable, so a copyleft license, as the GPL's, would bind every game made with it, those for consoles too, whose SDKs can't be opened |
 
 Areas not listed here are undecided.

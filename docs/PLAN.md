@@ -173,6 +173,8 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The engine reads no game's folder** (2026-11-14)
 - **A game of its own, outside the workspace** (2026-11-15)
 - **Foxball deleted** (2026-11-15)
+- **The sweep** (2026-11-15)
+- **Phase 22, games of their own, and a sweep** (2026-11-15)
 
 ## Now
 
@@ -180,9 +182,6 @@ Phase 21 closes once two people on other networks, one of them on a phone's hots
 of a game's shipped builds through the rented relay, its numbers read from both ends' logs and the
 relay's and what they call for fixed, as Next has it; which game, now that the 3D demo is deleted,
 is an open question.
-
-Phase 22 is under way, in its last milestone, the sweep: the backlog is triaged; left, any fixes
-chosen and the docs checked against the code.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -208,7 +207,7 @@ Each phase ends in something you can run and check.
     and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
     workflow run on demand, and on an Apple Silicon Mac by hand.
 
-Phases 11 to 20 are done, as Done has it, but for what Deferred holds.
+Phases 11 to 20, and 22, are done, as Done has it, but for what Deferred holds.
 
 21. **A game shipped to players**, as `gg ship` lays it out, played by two people on different
     networks. *Done when* each downloads the shipped build; one hosts from the game's
@@ -223,18 +222,6 @@ Phases 11 to 20 are done, as Done has it, but for what Deferred holds.
     version, its notices, its symbols, an older glibc on Linux, the game shipped in CI, and its
     options kept between runs; and measured over the real internet, two machines on other
     networks, a phone's among them, and what the numbers call for fixed.
-22. **Games of their own, and a sweep.** The engine reads no game's folder; a game in a repository
-    of its own builds, runs, reloads, ships and joins sessions as one in `games/` does, with the
-    same determinism, build digest and `gg` commands; the 3D demo is deleted, gg-engine's tests
-    covering what it alone did, while Shards and the showcase stay as the engine's demo and test
-    bed; and the backlog is triaged. *Done when* a game `gg new --engine` makes builds and tests
-    against the engine, as CI checks at each push, and each of Deferred's rows and DEFECTS.md's
-    defects has been kept, rewritten, deleted or fixed. Its milestones, in order: the engine
-    reading no game's folder; a game outside the workspace, which `gg new` makes, whose build gets
-    the engine's settings and whose digest reads the engine it builds against, with Luau's flags
-    checked as gg-engine builds and `gg ship` cooking with that engine's cooker; the 3D demo
-    deleted; and the sweep, Deferred and DEFECTS.md triaged, the fixes chosen made, and the docs
-    checked against the code.
 
 Later: upscalers (DLSS, FSR, XeSS); and ray-traced effects where the driver exposes ray tracing
 (no macOS driver does today).
