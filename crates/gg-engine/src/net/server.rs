@@ -649,10 +649,15 @@ impl Remote {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
+    use gg_core::math::{DVec3, Vec3};
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::super::client::{LATE, LEAD};
@@ -661,10 +666,18 @@ mod tests {
     use super::*;
     use crate::Context;
     use crate::args::Net;
+    use crate::dirs::tests::Scratch;
     use crate::layer::Stack;
     use crate::main_loop::Stepper;
     use crate::reflect::Reflect;
     use crate::testing::Codes;
+    use crate::{
+        AnimationParam, AnimationState, AnimationStates, BlendPoint, BodyType, BoxCollider3D,
+        CapsuleCollider3D, CharacterController3D, Entity, Model, NavAgent, NavMeshVolume, Owner,
+        ParamCondition, ParamTest, ParamValue, Parent, ParticleEmitter, Playback, RigidBody3D,
+        SphereCollider3D, StateMotion, StateTransition, Tick, Transform, WorldHash, step_animation,
+        step_navigation, step_physics,
+    };
 
     /// A server's or a client's run over a slow link, [`SLOW`]: its stack, of a [`Game`], its
     /// context, and what steps its ticks in real time, as its frames do.
@@ -1469,6 +1482,371 @@ mod tests {
         );
         let codes: Vec<String> = logged.codes.try_iter().collect();
         let parted = ["net.desync", "net.bad_state", "net.lost", "test.gate"];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
+    }
+
+    /// A command of [`Arena`]'s: player `player`'s fox walks across at `x` and `z` units a second.
+    #[derive(Reflect)]
+    struct Walk {
+        player: u8,
+        x: f32,
+        z: f32,
+    }
+
+    /// A 3D world as a networked game's: on a floor, each player's fox a character its player's
+    /// [`Walk`]s walk, and a third steered over the navmesh toward a ball, which they push about;
+    /// each fox's skinned model played by a state machine, standing or walking blended with running
+    /// by how fast its character goes; and an emitter, burst every half second.
+    struct Arena {
+        root: PathBuf,
+        fox: Option<Model>,
+        walks: Vec<Walk>,
+        /// The world's hash after each tick, as the tick's latest run left it.
+        hashes: Hashes,
+    }
+
+    type Hashes = Rc<RefCell<BTreeMap<u64, WorldHash>>>;
+
+    impl Arena {
+        /// An arena of the Fox's files in `root`, as [`fox_files`] lays them out, keeping its
+        /// ticks' hashes in `hashes`.
+        fn new(root: &Path, hashes: Hashes) -> Self {
+            let (root, fox, walks) = (root.to_owned(), None, Vec::new());
+            Self {
+                root,
+                fox,
+                walks,
+                hashes,
+            }
+        }
+    }
+
+    impl crate::Layer for Arena {
+        fn load(&mut self, cx: &mut Context) {
+            let fox = cx.add_model("fox", self.root.join("Fox.gltf"));
+            self.fox = Some(fox.expect("the Fox reads"));
+        }
+
+        fn attach(&mut self, cx: &mut Context) {
+            let fox = self.fox.expect("loaded");
+            let world = cx.world_mut();
+            let floor = Transform {
+                translation: DVec3::new(0.0, -0.5, 0.0),
+                scale: Vec3::new(16.0, 1.0, 16.0),
+                ..Transform::IDENTITY
+            };
+            let fixed = RigidBody3D {
+                body_type: BodyType::Static,
+                ..RigidBody3D::default()
+            };
+            world.spawn((floor, fixed, BoxCollider3D::default()));
+            let volume = NavMeshVolume {
+                size: Vec3::new(16.0, 4.0, 16.0),
+                ..NavMeshVolume::default()
+            };
+            world.spawn((Transform::IDENTITY, volume));
+            let ball = SphereCollider3D {
+                radius: 0.4,
+                ..SphereCollider3D::default()
+            };
+            world.spawn((at(0.0, 0.4, 0.0), RigidBody3D::default(), ball));
+            for (i, x) in [0.0, 3.0, -3.0].into_iter().enumerate() {
+                let capsule = CapsuleCollider3D {
+                    height: 1.0,
+                    radius: 0.35,
+                    friction: 0.0,
+                    ..CapsuleCollider3D::default()
+                };
+                let character = CharacterController3D::default();
+                let body = world.spawn((at(x, 0.5, -3.0), capsule, character));
+                let steered = if i < 2 {
+                    world.insert(body, Owner { player: i as u8 })
+                } else {
+                    let agent = NavAgent {
+                        speed: 3.0,
+                        radius: 0.35,
+                        ..NavAgent::default()
+                    };
+                    world.insert(body, agent)
+                };
+                // The model's units centimeters, its feet at the capsule's foot.
+                let feet = Transform {
+                    translation: DVec3::new(0.0, -0.5, 0.0),
+                    scale: Vec3::splat(0.02),
+                    ..Transform::IDENTITY
+                };
+                let model = fox.spawn(world, feet);
+                let driven = steered.and_then(|()| world.insert(model, fox_states()));
+                driven
+                    .and_then(|()| world.set_parent(model, Some(body)))
+                    .expect("just spawned");
+            }
+            let emitter = ParticleEmitter {
+                rate: 0.0,
+                burst: 8,
+                ..ParticleEmitter::default()
+            };
+            world.spawn((Transform::IDENTITY, emitter));
+        }
+
+        fn tick(&mut self, world: &mut World, tick: Tick) {
+            for walk in self.walks.drain(..) {
+                let foxes = world.query_mut::<(&Owner, &mut CharacterController3D)>();
+                for (owner, character) in foxes {
+                    if owner.player == walk.player {
+                        (character.velocity.x, character.velocity.z) = (walk.x, walk.z);
+                    }
+                }
+            }
+            if tick.number.is_multiple_of(15) {
+                let ball = ball_at(world);
+                for agent in world.query_mut::<&mut NavAgent>() {
+                    agent.destination = Some(ball);
+                }
+            }
+            if tick.number.is_multiple_of(30) {
+                for emitter in world.query_mut::<&mut ParticleEmitter>() {
+                    emitter.bursts += 1;
+                }
+            }
+            step_navigation(world);
+            let speeds: Vec<(Entity, f32)> = (world.query::<(Entity, &CharacterController3D)>())
+                .map(|(body, character)| (body, character.velocity.with_y(0.0).length()))
+                .collect();
+            for (&Parent(body), machine) in world.query_mut::<(&Parent, &mut AnimationStates)>() {
+                let speed = speeds.iter().find(|&&(fox, _)| fox == body);
+                let speed = speed.map_or(0.0, |&(_, speed)| speed);
+                machine.set_param("speed", speed).expect("a float");
+            }
+            step_animation(world);
+            step_physics(world);
+            self.hashes.borrow_mut().insert(tick.number, world.hash());
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.walks)
+        }
+    }
+
+    /// A fox's state machine: Survey standing, and Walk blended with Run by its `speed`.
+    fn fox_states() -> AnimationStates {
+        let state = |name: &str, motion| AnimationState {
+            name: name.to_owned(),
+            motion,
+            speed: 1.0,
+            playback: Playback::Loop,
+        };
+        let point = |clip: &str, at| BlendPoint {
+            clip: clip.to_owned(),
+            at,
+        };
+        let moving = StateMotion::Blend {
+            param: "speed".to_owned(),
+            points: vec![point("Walk", 1.6), point("Run", 5.0)],
+        };
+        let transition = |from: &str, to: &str, test| StateTransition {
+            from: Some(from.to_owned()),
+            to: to.to_owned(),
+            conditions: vec![ParamCondition {
+                param: "speed".to_owned(),
+                test,
+            }],
+            exit_time: None,
+            fade: 0.25,
+        };
+        AnimationStates {
+            params: vec![AnimationParam {
+                name: "speed".to_owned(),
+                value: ParamValue::Float(0.0),
+            }],
+            states: vec![
+                state("Idle", StateMotion::Clip("Survey".to_owned())),
+                state("Move", moving),
+            ],
+            transitions: vec![
+                transition("Idle", "Move", ParamTest::Above(0.2)),
+                transition("Move", "Idle", ParamTest::Below(0.2)),
+            ],
+            ..AnimationStates::default()
+        }
+    }
+
+    /// The Fox's files, without its ID file, under a root of their own, for an [`Arena`].
+    fn fox_files(name: &str) -> Scratch {
+        let scratch = Scratch::new(name);
+        fs::create_dir_all(&scratch.0).expect("a directory");
+        let files = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox");
+        for file in ["Fox.gltf", "Fox.bin", "Texture.png"] {
+            fs::copy(files.join(file), scratch.0.join(file)).expect("copied");
+        }
+        scratch
+    }
+
+    fn at(x: f64, y: f64, z: f64) -> Transform {
+        Transform {
+            translation: DVec3::new(x, y, z),
+            ..Transform::IDENTITY
+        }
+    }
+
+    fn ball_at(world: &World) -> Vec3 {
+        let mut balls = world.query::<(&SphereCollider3D, &Transform)>();
+        balls.next().expect("a ball").1.translation.as_vec3()
+    }
+
+    /// Queues `walk`, a command of the [`Arena`] `node` runs.
+    fn walk(node: &mut Node, walk: Walk) {
+        let queue = node.stack.commands_of(0).expect("the arena queues walks");
+        queue.push(&walk.to_value()).expect("the arena takes walks");
+    }
+
+    /// An [`Arena`]'s ticks, each run again on a copy of the world as it started, as a SyncTest
+    /// runs them, leave the copy as they leave the world, as rollback needs, while its foxes walk,
+    /// push the ball and stand again, one steered over the navmesh, and its emitter bursts.
+    #[test]
+    fn a_3d_world_s_ticks_run_again_alike_as_a_sync_test() {
+        let scratch = fox_files("sync-test-3d");
+        let mut cx = Context::seeded(1).root(scratch.0.clone());
+        let mut stack = Stack::default();
+        stack.push_layer(Arena::new(&scratch.0, Hashes::default()));
+        stack.sync_test();
+        stack.attach(&mut cx);
+        let (ball, agent) = (ball_at(cx.world()), Vec3::new(-3.0, 0.5, -3.0));
+        // Player 0's fox walks into the ball, player 1's about, and both stand from tick 120.
+        let walks = [(0, 0, 0.0, 3.0), (1, 1, -2.0, 1.0), (60, 1, 2.0, 1.0)];
+        let stand = [(120, 0, 0.0, 0.0), (120, 1, 0.0, 0.0)];
+        let mut moved = [false; 3];
+        for number in 0..240 {
+            let due = walks.iter().chain(&stand).filter(|walk| walk.0 == number);
+            for &(_, player, x, z) in due {
+                let queue = stack.commands_of(0).expect("the arena queues walks");
+                queue
+                    .push(&Walk { player, x, z }.to_value())
+                    .expect("queued");
+            }
+            assert!(stack.tick(&mut cx, Tick { number }));
+            assert!(!cx.exiting(), "tick {number}");
+            let machines = cx.world().query::<&AnimationStates>();
+            for (moved, machine) in moved.iter_mut().zip(machines) {
+                *moved |= machine.state == "Move";
+            }
+        }
+        assert_eq!(stack.sync_test_mut().map(|sync| sync.matched()), Some(240));
+        let world = cx.world();
+        assert!(ball_at(world).distance(ball) > 0.5, "the ball pushed");
+        let mut agents = world.query::<(&NavAgent, &Transform)>();
+        let (_, steered) = agents.next().expect("an agent");
+        assert!(
+            steered.translation.as_vec3().distance(agent) > 1.0,
+            "the agent walked"
+        );
+        assert_eq!(moved, [true; 3], "each fox walked");
+        let mut emitters = world.query::<&ParticleEmitter>();
+        assert_eq!(emitters.next().expect("an emitter").bursts, 8);
+        stack.detach(&mut cx);
+        assert!(!stack.failed());
+    }
+
+    /// A server's [`Arena`] and two clients over a slow link: each client walks its fox, predicting
+    /// the other's and correcting toward the server's states, which read into its world hashing as
+    /// the server's did; and once both foxes stand, so that its predictions are right, each
+    /// client's runs of two seconds' ticks hash as the server's did, its foxes still walking and the
+    /// ball rolling, as a 3D world read from a state steps as the server's does, navmesh and all;
+    /// though it catches up past some, as a debug build's client may, reading each state whole.
+    #[test]
+    fn a_server_s_clients_come_to_its_3d_world() {
+        let logged = crate::testing::logged();
+        let scratch = fox_files("server-3d");
+        // The server's ticks' hashes, then each client's, by its seed.
+        let hashes: [Hashes; 3] = Default::default();
+        let node = |net: &Net, seed: u64| {
+            let cx = Context::seeded(seed).root(scratch.0.clone());
+            let kept = Rc::clone(&hashes[seed as usize - 1]);
+            Node::of(net, cx, Arena::new(&scratch.0, kept))
+        };
+        let mut server = node(&Net::Serve(crate::args::Listen::at("127.0.0.1:0")), 1);
+        let address = match server.stack.session_mut() {
+            Some(Session::Server(server)) => server.listening.expect("listening").to_string(),
+            _ => panic!("a server"),
+        };
+        let connect = Net::Connect(crate::args::Toward::Address(address));
+        let mut clients = [node(&connect, 2), node(&connect, 3)];
+        until(&mut server, &mut clients, |_, clients| {
+            clients.iter().all(Node::joined)
+        });
+        let ball = ball_at(server.cx.world());
+        // For a second and a half, player 0's fox walks into the ball, and player 1's turns about
+        // every quarter second, which the other client can't predict.
+        let start = Instant::now();
+        let mut next = 0;
+        until(&mut server, &mut clients, |_, clients| {
+            let turn = start.elapsed().as_millis() / 250;
+            if turn >= next {
+                for client in clients.iter_mut() {
+                    let player = client.cx.player().expect("a player");
+                    let x = if turn.is_multiple_of(2) { 2.0 } else { -2.0 };
+                    let (x, z) = if player == 0 { (0.0, 3.0) } else { (x, 1.0) };
+                    walk(client, Walk { player, x, z });
+                }
+                next = turn + 1;
+            }
+            start.elapsed() >= Duration::from_millis(1500)
+        });
+        for client in &mut clients {
+            let player = client.cx.player().expect("a player");
+            walk(
+                client,
+                Walk {
+                    player,
+                    x: 0.0,
+                    z: 0.0,
+                },
+            );
+        }
+        until(&mut server, &mut clients, |server, _| {
+            let mut foxes = server
+                .cx
+                .world()
+                .query::<(&Owner, &CharacterController3D)>();
+            foxes.all(|(_, fox)| fox.velocity.x == 0.0 && fox.velocity.z == 0.0)
+        });
+        // From half a second after both stand on the server, past which each client knows it; at
+        // least a quarter of them run, a client on a loaded runner catching up past many.
+        let from = server.stepper.ticks + 30;
+        let to = from + 120;
+        until(&mut server, &mut clients, |server, clients| {
+            let past = |node: &Node| node.stepper.ticks > to;
+            past(server) && clients.iter().all(past)
+        });
+        let served = hashes[0].borrow();
+        for (client, hashes) in clients.iter_mut().zip(&hashes[1..]) {
+            let player = client.cx.player();
+            let hashes = hashes.borrow();
+            let ran: Vec<u64> = (from..to)
+                .filter(|tick| hashes.contains_key(tick))
+                .collect();
+            assert!(
+                ran.len() >= 30,
+                "player {player:?}'s ran {} ticks",
+                ran.len()
+            );
+            let parted: Vec<&u64> = ran.iter().filter(|&t| hashes[t] != served[t]).collect();
+            assert!(
+                parted.is_empty(),
+                "player {player:?}'s parted at {parted:?}"
+            );
+            let [corrections, ..] = client.client().corrected;
+            assert!(corrections > 0, "player {player:?}'s never corrected");
+        }
+        assert!(
+            ball_at(server.cx.world()).distance(ball) > 0.5,
+            "the ball pushed"
+        );
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        let parted = ["net.desync", "net.bad_command", "net.bad_state", "net.lost"];
         assert!(
             !codes.iter().any(|code| parted.contains(&code.as_str())),
             "{codes:?}"

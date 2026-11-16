@@ -2,8 +2,9 @@
 //! allocate nothing, on any thread: frames
 //! of what games draw, sprites flat, textured and of a sprite sheet's cells, circles filled and
 //! rings, games' meshes with parameters, opaque and blended, a glTF model and a mirrored copy of
-//! it, a turning hierarchy and drifters that wrap, whose ticks despawn and spawn entities, with
-//! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
+//! it, Khronos's skinned Fox running, its joints posed at each tick, a turning hierarchy and
+//! drifters that wrap, whose ticks despawn and spawn entities, with colliders, whose outlines draw
+//! over the rest, as a layer's own lines and square's outline do,
 //! text, written and shaped again each frame, a sprite and that text on the view's canvas, a UI
 //! from its file, its widgets among it and a list it clips, laid out again each frame as code
 //! changes its text, drawn on the canvas, its focused text field's caret too, and fed input that
@@ -55,11 +56,12 @@ use std::time::Duration;
 
 use gg_engine::math::{self, DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, Adaptation, Align, Antialiasing, App, Atmosphere, Binding, Blend, BoxCollider2D,
-    Camera, Change, Circle, CircleCollider2D, Component, Context, DepthOfField, Entity,
-    Environment, Event, Fog, Font, GameUi, Grade, Key, Layer, Lens, Light, Mesh, MeshDraw, Model,
-    MotionBlur, MouseButton, ParticleBlend, ParticleEmitter, Pick, Projection, Reflections, Shader,
-    Sky, Source, Sprite, SpriteSheet, Text, TextStyle, Texture, Tick, Transform, World,
+    Actions, Adaptation, Align, Animator, Antialiasing, App, Atmosphere, Binding, Blend,
+    BoxCollider2D, Camera, Change, Circle, CircleCollider2D, Component, Context, DepthOfField,
+    Entity, Environment, Event, Fog, Font, GameUi, Grade, Key, Layer, Lens, Light, Mesh, MeshDraw,
+    Model, MotionBlur, MouseButton, ParticleBlend, ParticleEmitter, Pick, Play, Projection,
+    Reflections, Shader, Sky, Source, Sprite, SpriteSheet, Text, TextStyle, Texture, Tick,
+    Transform, World, step_animation,
 };
 use serde_json::json;
 
@@ -283,6 +285,8 @@ impl Layer for Scene {
         let sheet = cx.add_sprite_sheet("cells", self.dir.join("cells.png"), [8, 8]);
         let pair = cx.add_model("pair", self.dir.join("pair.gltf"));
         let plain = cx.add_model("plain", self.dir.join("plain.gltf"));
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox/Fox.gltf");
+        let fox = cx.add_model("fox", fox);
         let inter =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Inter/Inter-Regular.ttf");
         let font = cx.add_font("inter", inter);
@@ -318,6 +322,7 @@ impl Layer for Scene {
             open,
         };
         let pair = pair.expect("the pair loads");
+        let fox = fox.expect("the Fox loads");
 
         let world = cx.world_mut();
         for i in 0..DRIFTERS {
@@ -433,6 +438,14 @@ impl Layer for Scene {
             ..at(4.0, 0.0, 2.0)
         };
         pair.spawn(world, mirrored);
+        // The Fox, its units centimeters, running on the spot below the pair.
+        let below = Transform {
+            scale: Vec3::splat(0.04),
+            ..at(-4.0, -3.0, 2.0)
+        };
+        let fox = fox.spawn(world, below);
+        let running = Animator(vec![Play::new("Run")]);
+        world.insert(fox, running).expect("just spawned");
         self.assets = Some(assets);
         for slot in 0..SUBTREES {
             self.spawn_subtree(world, slot);
@@ -496,6 +509,7 @@ impl Layer for Scene {
             let environment = world.get_mut::<Environment>(environment).expect("alive");
             environment.antialiasing = Antialiasing::Smaa;
         }
+        step_animation(world);
     }
 
     fn update(&mut self, cx: &mut Context, _: Duration) {
