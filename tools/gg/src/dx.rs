@@ -1,7 +1,5 @@
-//! Dioxus's `dx`, for `gg run`'s patches: checking that the machine's is the release of the
-//! subsecond a game's build uses, building the game's development build so that it can take
-//! patches, printing where the build has come to, and building patches of it, reading what dx says
-//! as it builds, and mending the thunks of those it builds for Windows on x86-64.
+//! Dioxus's `dx`, for `gg run`'s patches: checking its release, building the game to take patches,
+//! printing progress, building patches, and mending their thunks on Windows on x86-64.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -17,13 +15,10 @@ use serde_json::{Value, json};
 use crate::build::{self, Package};
 use crate::run::{event, millis};
 
-/// How often a build prints how far through its crates it has come, at most: each stage it comes
-/// to prints as it does.
+/// The most often a build prints crate progress; a new stage prints at once.
 const PROGRESS: Duration = Duration::from_secs(5);
 
-/// How dx builds a game's package: from the workspace's root, as its binary, with dx's session
-/// cache in a directory of gg's for the package, which patches are built from beside the build's
-/// record.
+/// How dx builds a game's package, with a session cache per package, which patches build from.
 #[derive(Clone)]
 pub(crate) struct Dx {
     package: String,
@@ -32,11 +27,10 @@ pub(crate) struct Dx {
     cache: PathBuf,
 }
 
-/// A build of a game that patches are built against: its executable, and the record of the build
-/// dx printed, its `BuildsFinished` record's `client`, as JSON, which `dx tools hotpatch` reads.
-/// The record holds the environment the build ran in, which may hold secrets, such as API keys, so
-/// it's kept in memory and handed to dx alone, never printed, logged or written, and this has no
-/// `Debug`; dx writes it into its session cache too as it builds, which [`Dx::build`] removes.
+/// A build patches are built against: its executable, and `BuildsFinished`'s `client` as JSON,
+/// which `dx tools hotpatch` reads. It holds the build's environment, which may hold secrets (API
+/// keys): kept in memory, given to dx alone, never printed, logged or written; no `Debug`. dx also
+/// writes it into its session cache; [`Dx::build`] removes that.
 #[derive(Clone)]
 pub(crate) struct Fat {
     pub(crate) exe: PathBuf,
@@ -44,7 +38,7 @@ pub(crate) struct Fat {
 }
 
 impl Fat {
-    /// A build that patches can't be built against, as cargo makes: its executable alone.
+    /// A build without patches, as cargo makes: its executable alone.
     pub(crate) fn unpatchable(exe: PathBuf) -> Self {
         Self {
             exe,
@@ -54,7 +48,7 @@ impl Fat {
 }
 
 impl Dx {
-    /// How dx builds package `name`, which cargo says is `package`.
+    /// dx's build of package `name`.
     pub(crate) fn new(name: &str, package: &Package) -> Self {
         Self {
             package: name.to_owned(),
@@ -64,13 +58,11 @@ impl Dx {
         }
     }
 
-    /// Builds the package's development build with `dx build --fat-binary`, which patches can be
-    /// built against, printing `building` as it goes, as [`Progress`] says, and removes the
-    /// environment dx wrote as it built, as [`forget`](Self::forget) says, whether the build
-    /// succeeded or not.
+    /// Builds with `dx build --fat-binary`, printing `building` as [`Progress`] says, and
+    /// [`forget`](Self::forget)s the environment dx wrote, success or not.
     ///
-    /// Fails with `gg.build` if dx can't run, the build fails, with rustc's errors, or it leaves no
-    /// executable, as when dx's own link of it fails, with what dx said of that.
+    /// Fails with `gg.build` if dx can't run, the build fails, or no executable results (dx's own
+    /// link failed).
     pub(crate) fn build(&self) -> Result<Fat, Failure> {
         // dx makes it too, but says less if it can't.
         let _ = fs::create_dir_all(&self.cache);
@@ -89,9 +81,8 @@ impl Dx {
             Some(fat) if status.success() => fat,
             _ => return Err(self.failed(&args, status, said.errors)),
         };
-        // dx's linker writes an empty object file where the executable goes, which dx's own link of
-        // the build replaces; when that link fails, dx logs why and says the build finished all the
-        // same, leaving the object file, which the system refuses to run.
+        // dx's linker writes an empty object file where the executable goes, which dx's own link
+        // replaces. If that fails, dx logs why, says the build finished and leaves the object file.
         let mut head = Vec::new();
         let read = File::open(&fat.exe).and_then(|file| file.take(18).read_to_end(&mut head));
         let why = match read {
@@ -113,23 +104,21 @@ impl Dx {
         Err(Failure::new("gg.build", message))
     }
 
-    /// Removes what dx's rustc wrapper writes into the session cache as a build runs, in a directory
-    /// for each kind of bundle, as `windows`: each rustc's arguments and its whole environment, which
-    /// may hold secrets, such as API keys. dx reads it within the build alone, and a patch's build
-    /// takes the build's record from its stdin.
+    /// Removes the session cache's rustc wrapper files: each rustc's arguments and environment,
+    /// which may hold secrets (API keys). dx reads them within the build alone; a patch takes the
+    /// build's record on stdin.
     fn forget(&self) {
         for dir in fs::read_dir(&self.cache).into_iter().flatten().flatten() {
             let _ = fs::remove_file(dir.path().join("rustc_wrapper_args.txt"));
         }
     }
 
-    /// Builds a patch of the package's modules, as they are now, for a process of build `fat` whose
-    /// `main` is at `aslr_reference`, with `dx tools hotpatch`, and returns its jump table, as dx
-    /// printed it, having mended its thunks on Windows on x86-64, as [`keep_rax`] says. A patch
+    /// Builds a patch of the modules as they are now, for a process of build `fat` whose `main` is
+    /// at `aslr_reference`; returns dx's jump table, thunks mended as [`keep_rax`] says. A patch
     /// carries every edit since the build.
     ///
-    /// Fails with `gg.build` if dx can't run, the patch doesn't build, with rustc's errors, or its
-    /// thunks can't be mended.
+    /// Fails with `gg.build` if dx can't run, the patch doesn't build, or its thunks can't be
+    /// mended.
     pub(crate) fn hotpatch(&self, fat: &Fat, aslr_reference: u64) -> Result<Value, Failure> {
         let decimal = aslr_reference.to_string();
         let args = ["tools", "hotpatch", "--aslr-reference", &decimal];
@@ -138,12 +127,12 @@ impl Dx {
         let mut stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let said = thread::scope(|scope| {
-            // The build's record, written as dx's output is read, so that neither waits on the
-            // other's full pipe; dropping it then closes dx's stdin, which dx reads to its end.
+            // Written as dx's output is read, so neither waits on a full pipe; dx reads stdin to
+            // its end, so dropping it closes it.
             scope.spawn(move || {
                 let _ = stdin.write_all(fat.client.as_bytes());
             });
-            // A patch builds the game's crate alone, and `patched` says how long it took.
+            // A patch builds one crate: no stages to print.
             said(stdout, |_| {})
         });
         let status = child.wait().map_err(cant)?;
@@ -162,8 +151,7 @@ impl Dx {
         Ok(table)
     }
 
-    /// dx with `args` for the package, run from the workspace's root, its stdout piped, where it
-    /// prints a line of JSON for each thing it says.
+    /// dx with `args`, run from the workspace's root, stdout piped: a JSON line per thing it says.
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new("dx");
         command
@@ -172,15 +160,13 @@ impl Dx {
             .arg("--session-cache-dir")
             .arg(&self.cache)
             .arg("--json-output")
-            // Rather than reading each build and patch for the assets Dioxus's `asset!` declares,
-            // which games declare none of: 0.6 s or more a build of the showcase.
+            // Games use no `asset!`; scanning costs 0.6 s or more a build of the showcase.
             .arg("--skip-assets");
-        // A console, as the game's cargo build has, which dx leaves out of a desktop app otherwise.
+        // A console, as cargo's build has; dx omits it otherwise.
         if cfg!(windows) {
             command.args(["--windows-subsystem", "CONSOLE"]);
         }
-        // Its stderr isn't shown, as what it says there, as when it panics, could hold the
-        // environment the build ran in.
+        // Not shown: a panic could print the build's environment.
         command
             .current_dir(&self.root)
             .stdin(Stdio::null())
@@ -189,7 +175,6 @@ impl Dx {
         command
     }
 
-    /// The failure of dx with `args`, which ended with `status`, having said `errors`.
     fn failed(&self, args: &[&str], status: ExitStatus, errors: Vec<String>) -> Failure {
         let (args, package, bin) = (args.join(" "), &self.package, &self.bin);
         let what = format!("dx {args} -p {package} --bin {bin}");
@@ -206,8 +191,7 @@ fn cant(error: std::io::Error) -> Failure {
     Failure::new("gg.build", format!("can't run dx: {error}"))
 }
 
-/// Checks that dx is on the PATH, and is release `release` of Dioxus, the release of the subsecond
-/// the game's build uses, as patches need.
+/// Checks that dx on the PATH is release `release`, the game's subsecond release.
 ///
 /// Fails with `gg.no_dx` if dx doesn't run, and `gg.dx_version` if it's another release.
 pub(crate) fn check(release: &str) -> Result<(), Failure> {
@@ -233,7 +217,7 @@ pub(crate) fn check(release: &str) -> Result<(), Failure> {
     }
 }
 
-/// The release `dx --version` names, as `0.7.2` in `dioxus 0.7.2 (35351eb)`.
+/// `0.7.2` in `dioxus 0.7.2 (35351eb)`.
 fn version(said: &str) -> Option<&str> {
     let mut words = said.split_whitespace();
     if words.next()? != "dioxus" {
@@ -242,11 +226,10 @@ fn version(said: &str) -> Option<&str> {
     words.next()
 }
 
-/// Whether `head`, a file's first 18 bytes or fewer, begins an executable rather than an object
-/// file, such as the one dx's linker writes where the executable goes: a PE image, whose DOS header
-/// starts `MZ`, where an object file starts with its machine; or an ELF or 64-bit Mach-O file whose
-/// type, little-endian, as on every machine gg runs on, is an executable's, `e_type` 2, or 3 for a
-/// position-independent one, or `filetype` 2, where an object file's is 1.
+/// Whether `head`, a file's first 18 bytes or fewer, begins an executable, not an object file:
+/// PE (`MZ`; an object file starts with its machine), or little-endian (as on every machine gg
+/// runs on) ELF or 64-bit Mach-O of executable type: `e_type` 2 (3 if position-independent) or
+/// `filetype` 2; an object file's is 1.
 fn executable(head: &[u8]) -> bool {
     let elf = head.starts_with(b"\x7FELF") && matches!(head.get(16..18), Some([2 | 3, 0]));
     let mach_o = head.starts_with(&0xFEED_FACFu32.to_le_bytes())
@@ -254,8 +237,6 @@ fn executable(head: &[u8]) -> bool {
     head.starts_with(b"MZ") || elf || mach_o
 }
 
-/// What dx said on its stdout, until it ended: the build's record, the patch's table, and its
-/// errors, each once.
 #[derive(Default)]
 struct Said {
     fat: Option<Fat>,
@@ -263,8 +244,6 @@ struct Said {
     errors: Vec<String>,
 }
 
-/// What dx says on `stdout`, read to its end, giving `stage` each stage the build comes to, as
-/// [`Record::Stage`] holds it, as dx says it.
 fn said(stdout: impl Read, mut stage: impl FnMut(Value)) -> Said {
     let mut said = Said::default();
     for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
@@ -281,26 +260,19 @@ fn said(stdout: impl Read, mut stage: impl FnMut(Value)) -> Said {
     said
 }
 
-/// What a line dx printed with `--json-output` says, of what gg reads.
+/// What a `--json-output` line says, of what gg reads.
 enum Record {
-    /// A build finished.
     Built(Fat),
-    /// A patch was built: its jump table.
     Patch(Value),
-    /// The build came to a stage, as `building`'s fields give it: its name, `stage`, in snake
-    /// case, as `linking`; as it starts, how many crates dx counts on its compiling, `crates`; and
-    /// as each is compiled, how many have been, fresh ones among them, `compiled`, of `crates`, and
-    /// the last one's name, `crate`.
+    /// A stage, with `building`'s fields: `stage`, snake case; at the start, `crates`, dx's count;
+    /// after each crate, `compiled` of `crates` (fresh ones included) and the last's name, `crate`.
     Stage(Value),
-    /// An error, rustc's, as rustc renders it, or dx's own, as plain text: one it ends on, or one it
-    /// logs and carries on past, as when its own link of the build fails.
+    /// rustc's error as rendered, or dx's as plain text; one dx ends on, or logs and carries on
+    /// past, as when its own link fails.
     Error(String),
-    /// Anything else, such as a warning.
     Other,
 }
 
-/// What a build prints of where it has come to, as [`Dx::build`] says: when it started, and the
-/// stage it last printed, and when.
 struct Progress {
     started: Instant,
     printed: Option<(String, Instant)>,
@@ -314,10 +286,8 @@ impl Progress {
         }
     }
 
-    /// The `building` event to print at `now` for `stage`, a [`Record::Stage`]'s fields, with the
-    /// time since the build started, `ms`, if one's due: at each stage the build comes to, and
-    /// while it stays at one, as it compiles crate after crate, every [`PROGRESS`] at most; so the
-    /// event after a long wait names a crate that took that long.
+    /// The `building` event for `stage` at `now`, if due: at each new stage, and within one every
+    /// [`PROGRESS`], so the event after a long wait names the crate that took that long.
     fn take(&mut self, mut stage: Value, now: Instant) -> Option<Value> {
         let name = stage["stage"].as_str().unwrap_or_default().to_owned();
         let due = (self.printed.as_ref())
@@ -332,9 +302,9 @@ impl Progress {
     }
 }
 
-/// What `line` says: it's an object whose `json`, if it has one, is one of dx's records, as a
-/// string of JSON, such as `{"BuildUpdate":{"stage":"Linking"}}`; one without is a line of dx's
-/// log, whose errors, at `level` `ERROR`, say in `message` what failed.
+/// What `line` says: an object whose `json` is one of dx's records as a JSON string, such as
+/// `{"BuildUpdate":{"stage":"Linking"}}`; without it, a log line whose `ERROR` `message` says what
+/// failed.
 fn record(line: &str) -> Record {
     let Ok(line) = serde_json::from_str::<Value>(line) else {
         return Record::Other;
@@ -354,7 +324,7 @@ fn record(line: &str) -> Record {
             client: client.to_string(),
         });
     }
-    // Its `artifacts` beside, which hold the environment again, are dropped here.
+    // Its `artifacts` hold the environment again: dropped.
     if let Some(table) = record.pointer("/Hotpatch/jump_table") {
         return Record::Patch(table.clone());
     }
@@ -373,9 +343,9 @@ fn record(line: &str) -> Record {
     }
 }
 
-/// The fields of a [`Record::Stage`] for `variant`, of dx's `BuildStage`: one without fields, as
-/// `"Linking"`, or one with, as `{"Compiling":{"current":3,"total":9,"krate":"gg_core"}}`, whose
-/// fields go but starting's and compiling's; `None` if it's neither.
+/// The [`Record::Stage`] for dx's `BuildStage` `variant`, `"Linking"` or
+/// `{"Compiling":{"current":3,"total":9,"krate":"gg_core"}}`; only starting's and compiling's
+/// fields are kept. `None` if it's neither.
 fn stage(variant: &Value) -> Option<Value> {
     let (name, fields) = match variant {
         Value::String(name) => (name, &Value::Null),
@@ -402,7 +372,6 @@ fn stage(variant: &Value) -> Option<Value> {
     Some(stage)
 }
 
-/// `text` without the ANSI escape sequences that color it, and without the whitespace that ends it.
 pub(crate) fn plain(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut chars = text.chars();
@@ -411,8 +380,7 @@ pub(crate) fn plain(text: &str) -> String {
             plain.push(c);
             continue;
         }
-        // `ESC [`, parameters, and a final character from `@` to `~`; other escapes are one
-        // character long.
+        // `ESC [`, parameters, a final character `@` to `~`; other escapes are 1 character.
         if chars.next() == Some('[') {
             for c in chars.by_ref() {
                 if ('@'..='~').contains(&c) {
@@ -425,17 +393,15 @@ pub(crate) fn plain(text: &str) -> String {
     plain
 }
 
-/// Mends the patch library at `lib`, which dx built for Windows on x86-64 for a process whose
-/// `main` is at `aslr_reference`, returning how many thunks it mended. The library reaches the
-/// executable's functions through thunks that dx writes as `movabs rax, imm64; jmp rax`, 12 bytes
-/// in a slot of 16, which loses what RAX held; but `__chkstk`, which every function whose frame is
-/// past a page calls as it starts, takes the frame's size in RAX, so through its thunk it probes as
-/// far as the address instead, and the game overflows its stack at the first such call. Each thunk
-/// becomes `jmp [rip+0]` and the address, 14 bytes, which loses nothing, as dx writes them for
-/// x86-64 elsewhere.
+/// Mends patch library `lib`, which dx built for Windows on x86-64 for a process whose `main` is at
+/// `aslr_reference`; returns how many thunks. dx's thunks to the executable's functions,
+/// `movabs rax, imm64; jmp rax` (12 bytes in a slot of 16), lose RAX, but `__chkstk`, called by
+/// every function with a frame past a page, takes the frame size in RAX: through a thunk it probes
+/// up to the address and the game overflows its stack. Each becomes `jmp [rip+0]` and the address
+/// (14 bytes), as dx writes them elsewhere.
 ///
 /// dx's `create_undefined_symbol_stub`, in packages/cli/src/build/patch.rs, writes them so in 0.7.2,
-/// as in 0.7.10 and on main at 0.8.0-alpha.3; once its thunks keep RAX, this goes.
+/// 0.7.10 and main at 0.8.0-alpha.3; once its thunks keep RAX, this goes.
 fn keep_rax(lib: &Path, aslr_reference: u64) -> io::Result<usize> {
     let mut image = fs::read(lib)?;
     let mended = mend(&mut image, aslr_reference).ok_or_else(|| {
@@ -447,10 +413,10 @@ fn keep_rax(lib: &Path, aslr_reference: u64) -> io::Result<usize> {
     Ok(mended)
 }
 
-/// Mends the thunks in PE image `image`, as [`keep_rax`] says, returning how many; `None` if it
-/// isn't an image for x86-64. A thunk is dx's 12 bytes at a slot 8 bytes aligned in a code section,
-/// whose address is within 4 GiB of `aslr_reference`, as one in the executable is, and whose next 2
-/// bytes, which the mended thunk takes, are padding: zeros or `int3`s.
+/// Mends the thunks in PE image `image`; returns how many, or `None` if it isn't for x86-64. A
+/// thunk is dx's 12 bytes at an 8-aligned slot in a code section, targeting within 4 GiB of
+/// `aslr_reference`, and followed by 2 padding bytes (zeros or `int3`s), which the mended thunk
+/// takes.
 fn mend(image: &mut [u8], aslr_reference: u64) -> Option<usize> {
     let mut mended = 0;
     for code in code_sections(image)? {
@@ -471,13 +437,11 @@ fn mend(image: &mut [u8], aslr_reference: u64) -> Option<usize> {
     Some(mended)
 }
 
-/// Where in PE image `image` its code sections' bytes are; `None` if it isn't an image for x86-64.
 fn code_sections(image: &[u8]) -> Option<Vec<Range<usize>>> {
     let bytes = |at: usize, len: usize| image.get(at..at.checked_add(len)?);
     let u16_at = |at: usize| Some(u16::from_le_bytes(bytes(at, 2)?.try_into().ok()?));
     let u32_at = |at: usize| Some(u32::from_le_bytes(bytes(at, 4)?.try_into().ok()?) as usize);
-    // The PE header, where the DOS header's last field says, names the machine, counts the
-    // sections and sizes the optional header, after which the sections' headers come.
+    // The DOS header's last field gives the PE header, then the section headers follow.
     let pe = u32_at(0x3C)?;
     if bytes(pe, 4)? != b"PE\0\0" || u16_at(pe + 4)? != 0x8664 {
         return None;
@@ -485,8 +449,7 @@ fn code_sections(image: &[u8]) -> Option<Vec<Range<usize>>> {
     let headers = pe + 24 + usize::from(u16_at(pe + 20)?);
     let mut sections = Vec::new();
     for header in (0..u16_at(pe + 6)?).map(|n| headers + 40 * usize::from(n)) {
-        // A section that holds code, as its characteristics' IMAGE_SCN_CNT_CODE says: where its
-        // raw data is, and how long.
+        // IMAGE_SCN_CNT_CODE.
         if u32_at(header + 36)? & 0x20 != 0 {
             let start = u32_at(header + 20)?;
             let end = start.saturating_add(u32_at(header + 16)?).min(image.len());
@@ -516,7 +479,7 @@ mod tests {
 
     #[test]
     fn the_lines_dx_prints_give_the_build_the_patch_and_the_errors() {
-        // A build's record, kept as JSON for the patches; its environment is a stand-in here.
+        // A build's record; its environment is a stand-in.
         let client = json!({
             "path": "C:\\dev\\GGEngine\\target\\dx\\gg-sandbox\\debug\\windows\\app",
             "exe": "C:\\dev\\GGEngine\\target\\x86_64-pc-windows-msvc\\desktop-dev\\gg-sandbox.exe",
@@ -534,7 +497,7 @@ mod tests {
         let kept: Value = serde_json::from_str(&fat.client).expect("JSON");
         assert_eq!(kept, client);
 
-        // A patch's table, its addresses exact however large, without the artifacts beside it.
+        // A patch's table, addresses exact however large, without its artifacts.
         let patched = line(
             r#"{"Hotpatch":{"jump_table":{"lib":"C:\\t\\libgg-sandbox-patch-1.dll",
             "map":{"23552":23552,"140737488355328":18446744073709551615},"aslr_reference":26064,
@@ -548,7 +511,7 @@ mod tests {
         assert_eq!(table["lib"], "C:\\t\\libgg-sandbox-patch-1.dll");
         assert_eq!(table.get("artifacts"), None);
 
-        // rustc's errors, as it renders them but for their colors, and not its warnings.
+        // rustc's errors, not its warnings.
         let rustc = |level: &str, rendered: &str| {
             let message = json!({"message": "mismatched types", "code": {"code": "E0308"},
                 "level": level, "spans": [], "children": [], "rendered": rendered});
@@ -577,7 +540,7 @@ mod tests {
             "ERROR dx tools: Cargo build failed - no output location."
         );
 
-        // And its log's errors, which it carries on past, as when its own link of the build fails.
+        // Its log's errors, which it carries on past, as when its link fails.
         let lld = "rust-lld: error: could not open 'kernel32.lib': no such file or directory";
         let logged = json!({"timestamp": "  10.212s", "level": "ERROR",
             "message": format!("Failed to generate fat binary: {lld}\n{lld}\n"),
@@ -590,7 +553,7 @@ mod tests {
             format!("Failed to generate fat binary: {lld}\n{lld}")
         );
 
-        // The stages the build comes to, with the crates it counts on and has compiled.
+        // Stages, with crate counts.
         let stages = [
             (
                 r#"{"Starting":{"patch":false,"crate_count":530}}"#,
@@ -625,14 +588,14 @@ mod tests {
 
     #[test]
     fn an_executable_is_told_from_the_object_file_dx_leaves_where_its_link_failed() {
-        // What dx left on Windows on x86-64 as its link failed: an empty COFF object file.
+        // What dx left on Windows on x86-64 when its link failed: an empty COFF object file.
         let coff = [
             0x64, 0x86, 0, 0, 0, 0, 0, 0, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
         ];
         assert!(!executable(&coff[..18]));
         let pe = b"MZ\x90\0\x03\0\0\0\x04\0\0\0\xFF\xFF\0\0\xB8\0";
         assert!(executable(pe));
-        // ELF files of each type: an object file, an executable and a position-independent one.
+        // ELF: object, executable, position-independent.
         let elf = |e_type: u8| {
             let mut head = [0; 18];
             head[..7].copy_from_slice(b"\x7FELF\x02\x01\x01");
@@ -642,7 +605,7 @@ mod tests {
         assert!(!executable(&elf(1)));
         assert!(executable(&elf(2)));
         assert!(executable(&elf(3)));
-        // Mach-O files for ARM64: an object file and an executable.
+        // Mach-O for ARM64: object, executable.
         let mach_o = |filetype: u32| {
             let mut head = [0; 18];
             head[..4].copy_from_slice(&0xFEED_FACFu32.to_le_bytes());
@@ -666,7 +629,7 @@ mod tests {
         let printed: Vec<_> = [
             (json!({"stage": "starting", "crates": 9}), at(0)),
             (compiled(1), at(100)),
-            // Within PROGRESS of the last printed, at 100.
+            // Within PROGRESS of the one at 100.
             (compiled(2), at(200)),
             (compiled(3), at(5_099)),
             (compiled(4), at(5_100)),
@@ -721,14 +684,14 @@ mod tests {
         assert_eq!(left, ["link_args.json"]);
     }
 
-    /// A PE image for x86-64 with a code section holding `code` and a data section holding `data`.
+    /// A PE image for x86-64 with a code section of `code` and a data section of `data`.
     fn image(code: &[u8], data: &[u8]) -> Vec<u8> {
         let mut image = vec![0; 0x200];
         image[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
         image[0x40..0x44].copy_from_slice(b"PE\0\0");
         image[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
         image[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
-        // With no optional header, the sections' headers start at 0x58.
+        // With no optional header, section headers start at 0x58.
         let sections = [
             (0x200u32, code, 0x6000_0020u32),
             (0x200 + code.len() as u32, data, 0xC000_0040),
@@ -745,7 +708,7 @@ mod tests {
     #[test]
     fn dxs_thunks_are_mended_to_keep_rax() {
         let main = 0x7FF7_6100_1000u64;
-        // A slot of 16 bytes as dx writes it, and as it's mended.
+        // A 16-byte slot as dx writes it, and as mended.
         let thunk = |to: u64| {
             [
                 &[0x48, 0xB8][..],
@@ -755,8 +718,8 @@ mod tests {
             .concat()
         };
         let mended = |to: u64| [&[0xFF, 0x25, 0, 0, 0, 0][..], &to.to_le_bytes(), &[0, 0]].concat();
-        // Two thunks into the executable, the second padded with `int3`s; one far from it, as none
-        // of dx's is; and one with no padding past it, as no slot of dx's is.
+        // Two thunks into the executable, the second padded with `int3`s; one far from it; one
+        // with no padding.
         let mut padded = thunk(main - 0x100);
         padded[12..].fill(0xCC);
         let mut tight = thunk(main + 8);
@@ -770,7 +733,7 @@ mod tests {
         padded[14..].fill(0xCC);
         let want = [mended(main + 0x29D0), padded, thunk(0x1234), tight, data].concat();
         assert_eq!(patched[0x200..], want);
-        // An image for another machine, and what isn't an image.
+        // Another machine's image, and a non-image.
         let mut arm = image(&code, &[]);
         arm[0x44..0x46].copy_from_slice(&0xAA64u16.to_le_bytes());
         assert_eq!(mend(&mut arm, main), None);
