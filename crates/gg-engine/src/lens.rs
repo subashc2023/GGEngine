@@ -1,21 +1,19 @@
-//! The camera's effects that a world's [`Environment`](crate::Environment) sets beyond its light:
-//! depth of field, from a focus and an aperture; motion blur, from a shutter; and a lens's
-//! vignette, chromatic aberration and film grain.
+//! The camera effects a world's [`Environment`](crate::Environment) sets beyond its light: depth of
+//! field, motion blur, and a lens's vignette, chromatic aberration and film grain.
 
 use crate::Reflect;
 
-/// Depth of field: what's nearer or farther than the focus blurred, as through a camera's lens, a
-/// thin lens's of the focal length that the view's field of view takes on a full-frame camera's
-/// sensor, 24 mm high, so that a wider aperture, a nearer focus or a narrower field of view blurs
-/// more, as a camera's do. The world's units are taken as meters. Under a perspective alone, as
-/// without one there's no lens.
+/// Depth of field: what's nearer or farther than the focus blurs, as through a thin lens whose
+/// focal length is what the field of view gives on a 24 mm-high full-frame sensor. A wider
+/// aperture, nearer focus or narrower field of view blurs more. World units are meters.
+/// Perspective views only.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct DepthOfField {
-    /// How far ahead of the view what's in focus is: 3 by default.
+    /// Distance ahead of the view that's in focus, in meters: 3 by default.
     #[reflect(min = 0.0, default = gg_renderer::DepthOfField::default().focus_distance)]
     pub focus_distance: f32,
-    /// The lens's focal length over its aperture's diameter: 1.4 by default, a fast lens's widest;
-    /// each stop up, by √2, halves the aperture's area and narrows the blur by √2.
+    /// Focal length over aperture diameter: 1.4 by default, a fast lens's widest. Each stop up, by
+    /// √2, halves the aperture's area and narrows the blur by √2.
     #[reflect(min = 0.5, default = gg_renderer::DepthOfField::default().f_number)]
     pub f_number: f32,
 }
@@ -47,14 +45,13 @@ impl DepthOfField {
     }
 }
 
-/// Motion blur: what the view shows blurred along how far it moved across the view while the
-/// shutter was open, as a film camera's is: the world's models by their own motion, and what draws
-/// none of its own, as particles and a layer's own draws, by the camera's alone, and a skinned
-/// model by its parts' transforms, not its joints'.
+/// Motion blur along how far things moved while the shutter was open. Models blur by their own
+/// motion; particles and a layer's own draws by the camera's alone; a skinned model by its parts'
+/// transforms, not its joints'.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct MotionBlur {
-    /// The share of the frame the shutter is open: a half by default, a 180° shutter's, film's; 0
-    /// blurs nothing.
+    /// The share of the frame the shutter is open: 0.5 by default, film's 180° shutter; 0 blurs
+    /// nothing.
     #[reflect(min = 0.0, max = 1.0, default = gg_renderer::MotionBlur::default().shutter)]
     pub shutter: f32,
 }
@@ -75,27 +72,26 @@ impl MotionBlur {
     }
 }
 
-/// What a camera's lens and film do to the view, each from 0, for none, which [`Lens::NONE`], the
-/// default, has of each, and costs nothing.
+/// What a camera's lens and film do to the view. Each is 0 for none; [`Lens::NONE`], the default,
+/// sets all to 0 and costs nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Reflect)]
 pub struct Lens {
-    /// How much the view darkens toward its corners, as a lens's light falls off away from its
-    /// axis: 1 leaves its corners a quarter as bright, 0.5 about two thirds.
+    /// How much the view darkens toward its corners: 1 leaves them a quarter as bright, 0.5 about
+    /// two thirds.
     #[reflect(min = 0.0)]
     pub vignette: f32,
-    /// How far red and blue part toward the view's edges, red outward and blue inward, as a lens
-    /// bends each color its own way: 1 parts them by a hundredth of the way from the view's middle.
+    /// How far red and blue part toward the view's edges, red outward and blue inward: 1 parts them
+    /// by a hundredth of the way from the view's middle.
     #[reflect(min = 0.0)]
     pub chromatic_aberration: f32,
-    /// How much film grain scales each pixel's light by, either way, as a share, at most, noise
-    /// that changes each frame, so that two captures of a paused game differ where there's grain:
-    /// 0.1 is subtle.
+    /// The most film grain scales each pixel's light up or down, as a share. The noise changes each
+    /// frame, so two captures of a paused game differ where there's grain. 0.1 is subtle.
     #[reflect(min = 0.0, max = 1.0)]
     pub grain: f32,
 }
 
 impl Lens {
-    /// None of it.
+    /// No effect.
     pub const NONE: Self = Self {
         vignette: 0.0,
         chromatic_aberration: 0.0,

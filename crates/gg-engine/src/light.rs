@@ -1,5 +1,5 @@
-//! Lights: the component that lights a world's models, and the lights a frame's lit shading takes
-//! from the world as it draws.
+//! Lights: the component that lights a world's models, and the lights a frame's shading takes from
+//! the world.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
@@ -13,25 +13,22 @@ use crate::{Component, Parent, Reflect, Transform, World};
 /// How a [`Light`] shines.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum LightKind {
-    /// From far away, all one way, as the sun's: along its entity's -Z, its intensity in lux, what
-    /// reaches a surface that faces it, wherever it is.
+    /// Like the sun: all one way, along the entity's -Z. Lux, what reaches a surface facing it,
+    /// wherever it is.
     #[default]
     Directional,
-    /// From its entity, every way alike: its intensity in candela, falling off with the square of
-    /// the distance.
+    /// From the entity, every way alike. Candela, falling with the square of distance.
     Point,
-    /// From its entity, in a cone round its -Z: wholly within its inner cone's angle of it, fading
-    /// to nothing at its outer's, its intensity in candela, as a point light's.
+    /// From the entity in a cone round -Z: full inside the inner angle, fading to nothing at the
+    /// outer. Candela, as for a point light.
     Spot,
 }
 
-/// A light, as KHR_lights_punctual describes them, which lights the models of its entity's world
-/// from where the entity draws, ancestors carrying it, as a camera sees from where its entity
-/// draws, and the way it faces: models' materials shade as glTF's metallic-roughness model says,
-/// by every light, each frame, the environment's exposure scaling their light. A world without
-/// lights draws its models unlit, their base colors alone. An entity with a light and no
-/// [`Transform`] lights nothing. Scenes save it, and the Inspector and tools edit it, as any
-/// component; a model's nodes have the lights its file gives them.
+/// A KHR_lights_punctual light. It lights the world's models from where its entity draws
+/// (ancestors carry it), facing as the entity does. Materials shade by every light each frame, as
+/// glTF's metallic-roughness model says, scaled by the environment's exposure. Without lights,
+/// models draw unlit in base colors. An entity with a light but no [`Transform`] lights nothing.
+/// A model's nodes have the lights its file gives them.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Light {
     /// How it shines: directional, from a point, or as a spot.
@@ -39,37 +36,36 @@ pub struct Light {
     /// Its color, in linear RGB.
     #[reflect(color, default = Vec3::ONE)]
     pub color: Vec3,
-    /// How bright it is: in lux for a directional light, and in candela for the rest. 100,000 by
-    /// default, a directional light's for a sunny day, which an [`Environment`]'s default exposure
-    /// suits.
+    /// Lux for a directional light, candela for the rest. 100,000 by default: a sunny day, which
+    /// an [`Environment`]'s default exposure suits.
     ///
     /// [`Environment`]: crate::Environment
     #[reflect(min = 0.0, default = 100_000.0)]
     pub intensity: f32,
-    /// How far a point or spot light reaches, past which it lights nothing, its falloff easing to
-    /// nothing there; `None` for as far as its falloff takes it.
+    /// Reach of a point or spot light in world units; its falloff eases to zero there. `None`
+    /// is as far as the falloff goes.
     pub range: Option<f32>,
-    /// The angle from its -Z within which a spot lights wholly, from 0 to its outer cone's: one
-    /// past it is taken as its outer cone's.
+    /// Angle from -Z within which a spot is at full strength, up to the outer cone's (larger
+    /// counts as that).
     #[reflect(degrees, min = 0.0, default = 0.0)]
     pub inner_cone: f32,
-    /// The angle from its -Z at which a spot's light fades to nothing, up to a quarter turn: one
-    /// past it is taken as a quarter turn.
+    /// Angle from -Z where a spot fades to nothing, at most a quarter turn (larger counts as
+    /// that).
     #[reflect(degrees, min = 0.0, default = FRAC_PI_4)]
     pub outer_cone: f32,
-    /// Whether it casts shadows, which a directional light does, the brightest of a world's that
-    /// does: what's opaque between it and a model shades the model from its light, as far ahead of
-    /// the camera as its shadow distance. Point and spot lights cast none yet.
+    /// Whether it casts shadows. Only a world's brightest directional light does; point and spot
+    /// lights cast none yet. Opaque things between it and a model shade the model, out to the
+    /// shadow distance.
     #[reflect(default = true)]
     pub shadows: bool,
-    /// How far ahead of the camera its shadows reach, in world units, fading out over the last
-    /// tenth: the farther, the less sharp they are, as their shadow maps spread over more.
+    /// Shadow reach ahead of the camera in world units, fading over the last tenth. Farther is
+    /// less sharp: the shadow maps spread wider.
     #[reflect(min = 0.0, default = 100.0)]
     pub shadow_distance: f32,
 }
 
 impl Default for Light {
-    /// A directional light of white, as bright as a sunny day's sun, casting shadows 100 units
+    /// A white directional light as bright as the sun on a sunny day, casting shadows 100 units
     /// ahead of the camera.
     fn default() -> Self {
         Self {
@@ -86,11 +82,10 @@ impl Default for Light {
 }
 
 impl Light {
-    /// It as the renderer shades with it, from `position`, from the frame's origin, shining along
-    /// `direction`.
+    /// It as the renderer shades with it, at `position` from the frame's origin, along `direction`.
     fn lit(&self, position: Vec3, direction: Vec3) -> gg_renderer::Light {
         // KHR_lights_punctual keeps a spot's angles to 0 <= inner < outer <= a quarter turn; the
-        // renderer keeps them apart, past an inner that's caught up with its outer.
+        // renderer also keeps them apart once inner reaches outer.
         let outer = self.outer_cone.clamp(0.0, FRAC_PI_2);
         let kind = match self.kind {
             LightKind::Directional => gg_renderer::LightKind::Directional,
@@ -111,29 +106,28 @@ impl Light {
     }
 }
 
-/// The lights of a world as frames draw it, kept from frame to frame, and found again only as what
-/// they're found from changes, so that a frame whose lights didn't change costs nothing of them.
+/// The world's lights as frames draw them, kept between frames and found again only when their
+/// inputs change, so a frame with unchanged lights costs nothing.
 #[derive(Default)]
 pub(crate) struct Lit {
     lights: Vec<gg_renderer::Light>,
-    /// The world they were found in, by its serial, and its version and change tick then, and the
-    /// frame's origin they're from.
+    /// The world they were found in by serial, its version and change tick then, and the frame's
+    /// origin.
     seen: Option<(u64, u64, u64, DVec3)>,
-    /// Whether one was on its way between ticks then, which the next frame finds again.
+    /// Whether a light was moving between ticks then; the next frame finds them again.
     moving: bool,
 }
 
 impl Lit {
-    /// The lights, as they were last found.
+    /// The lights as last found.
     pub(crate) fn lights(&self) -> &[gg_renderer::Light] {
         &self.lights
     }
 
-    /// Finds the lights of `world` as it draws `alpha` of the way on from `past`, the latest tick
-    /// having started at change tick `started`, placed as `placed` has it, as [`lights`] does:
-    /// again, if it's another world, or the same with rows changed, a light, a light's transform
-    /// or its parent changed, `placed` placed one again, one is on its way between ticks, or was
-    /// last frame, or the frame's origin, `origin`, moved; or else as they were.
+    /// Finds the lights of `world` as [`lights`] does, for `alpha`, `past`, `placed` and `origin`;
+    /// `started` is the latest tick's change tick. It finds them again if the world is another or
+    /// has changed rows, a light, its transform or its parent changed, `placed` placed one again,
+    /// one is moving between ticks or was last frame, or `origin` moved. Else they stay.
     pub(crate) fn find(
         &mut self,
         world: &World,
@@ -181,9 +175,9 @@ impl Lit {
     }
 }
 
-/// Puts in `lit`, in place of what it held, the lights of `world` as it draws `alpha` of the way on
-/// from `past`, placed as `placed` has it: each from where its entity draws, from `origin`, the
-/// frame's, shining along the entity's -Z as it faces then.
+/// Replaces `lit` with the lights of `world` drawn `alpha` of the way on from `past`, placed as
+/// `placed` has it. Each is where its entity draws, from the frame's `origin`, shining along the
+/// entity's -Z as it then faces.
 pub(crate) fn lights(
     world: &World,
     past: &Past,
@@ -220,8 +214,8 @@ mod tests {
     use crate::Entity;
 
     /// A light shines along its entity's -Z from where the entity draws, its parent carrying it,
-    /// its color times its intensity; one without a transform lights nothing; and a spot's angles
-    /// stay within a quarter turn, its inner within its outer.
+    /// at color times intensity. One without a transform lights nothing. A spot's angles stay
+    /// within a quarter turn, inner within outer.
     #[test]
     fn lights_shine_from_where_their_entities_draw() {
         let mut world = World::default();
@@ -288,9 +282,8 @@ mod tests {
         assert_eq!(lit(shadowless), None);
     }
 
-    /// Lights kept from frame to frame are those found afresh each frame, through frames that
-    /// change nothing, move what carries one, change one, move one between ticks and after, and
-    /// take one away.
+    /// Kept lights equal those found afresh, across frames that change nothing, move a carrier,
+    /// change a light, move one between ticks and after, and remove one.
     #[test]
     fn kept_lights_are_found_again_as_they_change() {
         let mut world = World::default();

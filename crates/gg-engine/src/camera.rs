@@ -1,7 +1,6 @@
-//! Cameras: the component the game's view sees the world through, from where its entity draws, and
-//! which of the world's cameras it sees through; and the camera controllers, which steer a layer's
-//! own viewpoint from the keyboard, the mouse and gamepads, an orthographic one as 2D games do, and
-//! one that flies, as 3D tools do.
+//! Cameras: the component the game's view sees the world through, and which of the world's cameras
+//! it uses; and the camera controllers, which steer a layer's own viewpoint from the keyboard,
+//! mouse and gamepads: an orthographic one for 2D games, and a flying one for 3D.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 use std::fmt::Display;
@@ -23,21 +22,18 @@ use crate::{
     Transform, Trigger, World, Writable,
 };
 
-/// What the game's view sees the world through, from where its entity is, which has a
-/// [`Transform`] too, while it's [`primary`](Self::primary), in frames no layer sets a viewpoint
-/// of its own, through [`Context::set_viewpoint`]. It sees from where its entity draws, between
-/// ticks too, carried by its ancestors: from its place in the world, facing as its rotation and
-/// theirs turn it, their scales aside. Where it sees from is drawing's alone: no hash, scene or
-/// recording holds it, only the component.
+/// The game's view, while [`primary`](Self::primary) and no layer sets a viewpoint with
+/// [`Context::set_viewpoint`]. Its entity needs a [`Transform`]. It sees from where the entity
+/// draws, between ticks too: ancestors carry and turn it, their scales don't count. That
+/// position is drawing's alone: no hash, scene or recording holds it, only the component.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Camera {
     /// How it projects what's in front of it onto the view, fitted to the view's aspect ratio.
     pub projection: Projection,
-    /// Whether the view sees through it. Making a camera primary, as the Inspector's checkbox
-    /// or another operation does, makes every other not, and undoing it makes them primary again;
-    /// of several made primary otherwise, by code or a scene, the view sees through the one of
-    /// the lowest ID, with a warning (`engine.camera_tie`), since scenes keep no order cameras came
-    /// in; and without one, from the default viewpoint.
+    /// Whether the view uses it. Making one primary (Inspector checkbox, other operations)
+    /// unmakes the rest; undo restores them. If code or a scene makes several primary, the lowest
+    /// ID wins with a warning (`engine.camera_tie`), as scenes keep no order. None primary: the
+    /// default viewpoint.
     pub primary: bool,
 }
 
@@ -50,11 +46,10 @@ impl Component for Camera {
 
 impl Writable for Camera {}
 
-/// An enum of `Orthographic { height, near, far }` and `Perspective { fov, near }`, its field of
-/// view shown in degrees, set whole. It refuses one that can't project (`engine.bad_projection`),
-/// on which rendering would panic, so that nothing reflection makes, as scenes, operations and
-/// the Inspector do, panics the render thread. Its fields' defaults, which project, are Hazel's
-/// scene camera's: 10 units high, from 1 behind to 1 in front; and 45°, from 0.01 in front.
+/// An enum of `Orthographic { height, near, far }` and `Perspective { fov, near }`, field of view
+/// in degrees, set whole. It refuses a projection that can't project (`engine.bad_projection`),
+/// so scenes, operations and the Inspector can't panic the render thread. Defaults are Hazel's
+/// scene camera's: 10 units high, 1 behind to 1 in front; 45°, from 0.01.
 impl Reflect for Projection {
     fn describe(types: &mut Types) -> Result<Type> {
         let field = |name: &'static str, show, default: f32, doc: &'static str| Field {
@@ -220,18 +215,17 @@ impl Reflect for Projection {
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// Cameras primary at once, of which the view sees through the one of the lowest ID.
+/// Several primary cameras; the view uses the lowest ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Tie {
-    /// The camera the view sees through.
     seen: EntityId,
     /// How many are primary.
     tied: usize,
 }
 
 impl Tie {
-    /// Whether `now`, the tie this frame if there's one, is news: a tie other than `warned`, the
-    /// last warned of while they've tied since, which then holds `now`.
+    /// Whether `now`, this frame's tie if any, differs from `warned`, the last one warned of.
+    /// `warned` then holds `now`.
     fn news(now: Option<Self>, warned: &mut Option<Self>) -> bool {
         let news = now.is_some() && now != *warned;
         *warned = now;
@@ -239,15 +233,13 @@ impl Tie {
     }
 }
 
-/// What [`checked`] remembers of the view's projection, of the source of the viewpoint it saw
-/// last, `S`: a camera, a layer or the look, each its own.
+/// What [`checked`] remembers of the last viewpoint's source `S`: a camera, a layer or the look.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Projected<S> {
-    /// The source of the last viewpoint checked.
     source: Option<S>,
-    /// The projection of the last frame's viewpoint from that source that could project.
+    /// The last projection from that source that could project.
     good: Option<Projection>,
-    /// Whether the frames since that one that couldn't have warned of it.
+    /// Whether the frames since that couldn't project have warned.
     warned: bool,
 }
 
@@ -261,12 +253,11 @@ impl<S> Default for Projected<S> {
     }
 }
 
-/// `viewpoint`, which `source` gave, as a frame draws it: itself if its projection can project,
-/// as the renderer panics on one that can't, which code can set whole, where reflection refuses
-/// it; else it from where it is, through the last projection of `source` that could, or the
-/// default's, warning (`engine.bad_projection`) once, until one can again. What `projected`
-/// remembers is of one source: another's forgets it, so that one's projection isn't another's,
-/// and each warns.
+/// `viewpoint` from `source`, as drawn. Code can set a projection that can't project (reflection
+/// refuses it) and the renderer panics on it, so such a viewpoint keeps its place but takes
+/// `source`'s last good projection, else the default's, and warns once (`engine.bad_projection`)
+/// until one projects. `projected` holds one source; another resets it, so projections don't cross
+/// sources and each warns.
 pub(crate) fn checked<S: Display + PartialEq + Copy>(
     viewpoint: Viewpoint,
     source: S,
@@ -299,11 +290,9 @@ pub(crate) fn checked<S: Display + PartialEq + Copy>(
     }
 }
 
-/// What the game's view sees through in frames no layer sets a viewpoint, as `world` draws `alpha`
-/// of the way on from `past`, placed as `placed` has it: its primary camera, by its ID, from where
-/// it draws, and of several, the one of the lowest ID; `None` without one. Several warn
-/// (`engine.camera_tie`) as they come to be and as they change, which `warned` keeps track of,
-/// rather than every frame.
+/// The primary camera's ID and viewpoint, as `world` draws `alpha` on from `past` with `placed`,
+/// when no layer sets one; the lowest ID of several, `None` without. Ties warn
+/// (`engine.camera_tie`) when they arise or change, not every frame; `warned` tracks it.
 pub(crate) fn seen(
     world: &World,
     past: &Past,
@@ -342,8 +331,7 @@ pub(crate) fn seen(
     Some((id, viewpoint))
 }
 
-/// Each of `world`'s cameras, its entities with a [`Camera`] and a [`Transform`]: its table, its
-/// row there, its ID and its camera.
+/// `world`'s cameras, its entities with a [`Camera`] and a [`Transform`]: table, row, ID, camera.
 fn cameras(world: &World) -> impl Iterator<Item = (usize, usize, EntityId, &Camera)> {
     let ids = world.component::<Camera>();
     let ids = ids.zip(world.component::<Transform>());
@@ -361,63 +349,56 @@ fn cameras(world: &World) -> impl Iterator<Item = (usize, usize, EntityId, &Came
     })
 }
 
-/// How fast the camera moves, in the view's heights a second.
+/// Movement, in the view's heights a second.
 const SPEED: f32 = 0.5;
-/// How fast it turns, in radians a second: a quarter turn.
+/// Turn rate in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
-/// How much a line of the mouse wheel zooms.
+/// Zoom per mouse wheel line.
 const ZOOM: f32 = 1.1;
-/// How fast the fly camera moves at first, in world units a second.
+/// The fly camera's initial speed, in world units a second.
 const FLY_SPEED: f32 = 2.0;
-/// How fast it looks about from a stick at full tilt, in radians a second: half a turn.
+/// Look rate at full stick tilt, in radians a second: half a turn.
 const LOOK_SPEED: f32 = PI;
-/// How far it looks about for a point the mouse is dragged, in radians.
+/// Look per point of mouse drag, in radians.
 const DRAG_LOOK: f32 = 0.003;
-/// How far up or down it looks at most: 89°, short of straight up or down, where which way it
-/// faces about the world's up would be lost.
+/// The most it looks up or down: 89°; at 90° its heading is lost.
 const MAX_PITCH: f32 = 89.0 * PI / 180.0;
 
-/// What the camera controller does, which its [`actions`](OrthographicCameraController::actions)
-/// bind to keys, buttons and gamepads.
+/// What the camera controller does; [`actions`](OrthographicCameraController::actions) binds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraAction {
-    /// A pair of axes: along the camera's own, to its right and up the view.
+    /// A pair of axes along the camera's own: right and up the view.
     Move,
-    /// An axis: counterclockwise, as the camera sees it, while positive.
+    /// An axis: counterclockwise as the camera sees it while positive.
     Turn,
 }
 
-/// Steers an orthographic viewpoint from the keyboard, the mouse wheel and gamepads, as 2D games
-/// and tools do. W, A, S and D, or a gamepad's right stick, move it along its own axes, half the
-/// view's height a second, so that it crosses the screen as fast however far it's zoomed; Q and E,
-/// or the left and right triggers, turn it left and right, a quarter turn a second, if
-/// [`rotation`](Self::rotation) is set; and the mouse wheel zooms about the view's center, 1.1
-/// times a line, between a hundredth and a hundred times the height it started at.
-/// [`actions`](Self::actions) binds moving and turning to other keys and buttons.
+/// Steers an orthographic viewpoint from the keyboard, mouse wheel and gamepads. W, A, S and D, or
+/// a gamepad's right stick, move it half the view's height a second along its own axes, so it
+/// crosses the screen as fast at any zoom. With [`rotation`](Self::rotation) set, Q and E, or the
+/// triggers, turn it a quarter turn a second. The wheel zooms about the view's center, 1.1 times a
+/// line, between a hundredth and a hundred times the starting height.
 ///
-/// A layer keeps one, and calls [`update`](Self::update) from its own update and
-/// [`event`](Self::event) from its own event handler, as `self.camera.event(cx, event)?`, which is
-/// how the keys reach it.
+/// A layer keeps one, and calls [`update`](Self::update) and [`event`](Self::event) from its own,
+/// as `self.camera.event(cx, event)?`.
 pub struct OrthographicCameraController {
-    /// The viewpoint it steers, which the layer can place, turn or zoom itself too.
+    /// The viewpoint it steers; the layer can place, turn or zoom it too.
     pub viewpoint: Viewpoint,
-    /// Whether turning turns the camera; at first it doesn't.
+    /// Whether turning turns the camera. Off at first.
     pub rotation: bool,
-    /// What moves and turns it: at first W, A, S and D and the right stick, and Q and E and the
-    /// triggers.
+    /// What moves and turns it; rebind it here. At first W, A, S and D and the right stick; Q and
+    /// E and the triggers.
     pub actions: Actions<CameraAction>,
-    /// The least and most of the world the view's height zooms between.
     heights: [f32; 2],
 }
 
 impl OrthographicCameraController {
-    /// A controller that steers `viewpoint`, zooming between a hundredth and a hundred times the
-    /// height it sees now.
+    /// A controller that steers `viewpoint`, zooming between a hundredth and a hundred times its
+    /// height.
     ///
     /// # Panics
     ///
-    /// If the viewpoint isn't orthographic, or its height isn't a positive normal number, as
-    /// rendering requires.
+    /// If the viewpoint isn't orthographic, or its height isn't a positive normal number.
     pub fn new(mut viewpoint: Viewpoint) -> Self {
         let height = *height(&mut viewpoint.projection);
         assert!(
@@ -459,8 +440,8 @@ impl OrthographicCameraController {
         }
     }
 
-    /// Moves and turns the viewpoint by its actions, for `dt`, and has the game's view see from it
-    /// this frame.
+    /// Moves and turns the viewpoint by its actions for `dt`, and sets it as the game's view this
+    /// frame.
     ///
     /// # Panics
     ///
@@ -469,13 +450,13 @@ impl OrthographicCameraController {
         let seconds = dt.as_secs_f32();
         if self.rotation {
             let turn = self.actions.axis(CameraAction::Turn);
-            // About the axis it looks along, counterclockwise as it sees it; normalized, so that
-            // rounding doesn't build up frame after frame.
+            // About its look axis, counterclockwise as it sees it; normalized so rounding doesn't
+            // build up.
             let by = Quat::from_rotation_z(turn * TURN_SPEED * seconds);
             self.viewpoint.rotation = (self.viewpoint.rotation * by).normalize();
         }
-        // Along the camera's own axes, so that W moves up the screen however it's turned; as fast
-        // diagonally as straight, since a pair of axes goes no further than 1.
+        // Along its own axes, so W moves up the screen however it's turned; a pair of axes goes no
+        // further than 1, so diagonals are no faster.
         let along = self.actions.axis2(CameraAction::Move).extend(0.0);
         let height = *height(&mut self.viewpoint.projection);
         let by = self.viewpoint.rotation * along * height * SPEED * seconds;
@@ -483,9 +464,8 @@ impl OrthographicCameraController {
         cx.set_viewpoint(self.viewpoint);
     }
 
-    /// Feeds its actions `event`, and zooms the viewpoint for a scroll of the mouse wheel or a
-    /// touchpad, having the game's view see from it. `Break` when it zoomed, so that the layers
-    /// below don't act on the same scroll.
+    /// Feeds its actions `event`, and zooms on a wheel or touchpad scroll, setting the viewpoint
+    /// as the game's view. `Break` when it zoomed, so layers below skip the scroll.
     ///
     /// # Panics
     ///
@@ -497,7 +477,7 @@ impl OrthographicCameraController {
             return ControlFlow::Continue(());
         };
         let lines = scroll.lines(cx.scale());
-        // Nor does a scroll of NaN zoom, which would leave a height that can't project.
+        // NaN doesn't zoom: it would leave a height that can't project.
         if lines == 0.0 || lines.is_nan() {
             return ControlFlow::Continue(());
         }
@@ -524,46 +504,42 @@ fn height(projection: &mut Projection) -> &mut f32 {
     }
 }
 
-/// What the fly camera controller does, which its [`actions`](FlyCameraController::actions) bind
-/// to keys, buttons and gamepads.
+/// What the fly camera controller does; [`actions`](FlyCameraController::actions) binds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlyAction {
-    /// A pair of axes: to the camera's right, and forward, where it looks.
+    /// A pair of axes: right, and forward where it looks.
     Move,
     /// An axis: up along the world's +Y while positive.
     Rise,
-    /// A pair of axes: to the camera's right, and up.
+    /// A pair of axes: right, and up.
     Look,
-    /// A button: while it's held, moving the mouse looks about.
+    /// A button: while held, moving the mouse looks about.
     Drag,
 }
 
-/// Steers a viewpoint that flies, as 3D tools' and games' free cameras do, under either
-/// projection. W, A, S and D, or a gamepad's left stick, move it forward, where it looks, and to
-/// its sides, 2 units a second at first; E and Q, or the right and left triggers, raise and lower
-/// it along the world's up; and the right stick, or the mouse moved with its right button held,
-/// looks about, half a turn a second at full tilt, or 0.003 radians a point. Looking keeps it
-/// level, its right along the world's horizon, and looks no further up or down than 89°.
-/// [`actions`](Self::actions) binds them to other keys and buttons.
+/// Steers a flying viewpoint, under either projection. W, A, S and D, or a gamepad's left stick,
+/// move it forward, where it looks, and sideways, 2 units a second at first. E and Q, or the
+/// triggers, raise and lower it along the world's up. The right stick, or the mouse moved with
+/// its right button held, looks about: half a turn a second at full tilt, or 0.003 radians a
+/// point. Looking keeps it level, its right along the horizon, and no more than 89° up or down.
 ///
-/// A layer keeps one, and calls [`update`](Self::update) from its own update and
-/// [`event`](Self::event) from its own event handler, as the orthographic camera controller is.
-/// It keeps nothing of the viewpoint but [`viewpoint`](Self::viewpoint), which the layer can place
-/// and turn itself: a viewpoint turned about where it looks levels as it next looks about.
+/// A layer keeps one and calls [`update`](Self::update) and [`event`](Self::event) as for the
+/// orthographic controller. It keeps nothing of the viewpoint but [`viewpoint`](Self::viewpoint),
+/// which the layer can place and turn; a viewpoint rolled about its look axis levels at the next
+/// look.
 pub struct FlyCameraController {
-    /// The viewpoint it steers.
     pub viewpoint: Viewpoint,
     /// How fast it moves, in world units a second.
     pub speed: f32,
-    /// What moves it and looks about: at first W, A, S and D and the left stick, E and Q and the
-    /// triggers, the right stick, and the right mouse button.
+    /// What moves it and looks about; rebind it here. At first W, A, S and D and the left stick;
+    /// E and Q and the triggers; the right stick; the right mouse button.
     pub actions: Actions<FlyAction>,
-    /// Where the cursor last was in the window, in physical pixels, which a drag looks from.
+    /// Where the cursor last was in the window, in physical pixels; a drag looks from it.
     cursor: Option<[f64; 2]>,
 }
 
 impl FlyCameraController {
-    /// A controller that steers `viewpoint`, at 2 units a second, with the bindings the type names.
+    /// A controller that steers `viewpoint` at 2 units a second, with the bindings the type names.
     pub fn new(viewpoint: Viewpoint) -> Self {
         let key = Source::Key;
         let mut actions = Actions::default();
@@ -597,15 +573,15 @@ impl FlyCameraController {
         }
     }
 
-    /// Looks about and moves the viewpoint by its actions, for `dt`, and has the game's view see
-    /// from it this frame.
+    /// Looks about and moves the viewpoint by its actions for `dt`, and sets it as the game's view
+    /// this frame.
     pub fn update(&mut self, cx: &mut Context, dt: Duration) {
         let seconds = dt.as_secs_f32();
         let look = self.actions.axis2(FlyAction::Look);
         if look != Vec2::ZERO {
             self.look(look * LOOK_SPEED * seconds);
         }
-        // Forward is where it looks, up or down too; as fast every way, rising too.
+        // Forward is where it looks, up or down too; no faster in any direction.
         let along = self.actions.axis2(FlyAction::Move);
         let rise = self.actions.axis(FlyAction::Rise);
         let way = self.viewpoint.rotation * Vec3::new(along.x, 0.0, -along.y) + Vec3::Y * rise;
@@ -613,11 +589,10 @@ impl FlyCameraController {
         cx.set_viewpoint(self.viewpoint);
     }
 
-    /// Feeds its actions `event`, and looks about for a move of the cursor while
-    /// [`FlyAction::Drag`] is held, having the game's view see from the viewpoint. It handles
-    /// nothing for the layers below: `Continue`, always.
+    /// Feeds its actions `event`, and looks about on a cursor move while [`FlyAction::Drag`] is
+    /// held, setting the viewpoint as the game's view. Always `Continue`.
     pub fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-        // Polled as it updates, but for the drag, which is held before the move is read.
+        // Polled in update, except the drag, which must be held before the move is read.
         self.actions.event(event, |_| {});
         match *event {
             Event::CursorMoved { x, y } => {
@@ -639,9 +614,8 @@ impl FlyCameraController {
         ControlFlow::Continue(())
     }
 
-    /// Turns the viewpoint `by` radians: to its right about the world's up by `x`, and up about
-    /// its own right by `y`, no further than [`MAX_PITCH`]; level, without a turn about where it
-    /// looks.
+    /// Turns the viewpoint `by` radians: right about the world's up by `x`, up about its own right
+    /// by `y`, to at most [`MAX_PITCH`]. The result is level, with no roll.
     fn look(&mut self, by: Vec2) {
         let forward = self.viewpoint.rotation * Vec3::NEG_Z;
         // Facing -Z unturned, so a turn to its left is positive about +Y.
@@ -665,7 +639,7 @@ mod tests {
     use crate::font::Fonts;
     use crate::{Entity, Log, Name, Operation, Scroll};
 
-    /// Without perspective, `height` tall, from 1 behind it to 1 in front.
+    /// `height` tall, from 1 behind to 1 in front.
     fn orthographic(height: f32) -> Projection {
         Projection::Orthographic {
             height,
@@ -687,7 +661,7 @@ mod tests {
         world.spawn((at, camera))
     }
 
-    /// What the view sees through in a frame of `world` as it is, with nothing to draw on from.
+    /// What the view sees through in a frame of `world` as it is.
     fn seen_now(world: &World) -> Option<Viewpoint> {
         seen(
             world,
@@ -699,14 +673,13 @@ mod tests {
         .map(|(_, viewpoint)| viewpoint)
     }
 
-    /// The view sees through the primary camera; without one, through none, though the world has
-    /// others.
+    /// The view sees through the primary camera; without one, through none.
     #[test]
     fn the_view_sees_through_the_primary_camera() {
         let mut world = World::seeded(1);
         let other = camera_at(&mut world, 1.0, false);
         let primary = camera_at(&mut world, 2.0, true);
-        // Primary too, without a transform, it isn't a camera.
+        // Without a transform it isn't a camera.
         world.spawn(Camera {
             projection: orthographic(9.0),
             primary: true,
@@ -743,7 +716,7 @@ mod tests {
             tied: 2,
         };
         assert_eq!(warned, Some(tie));
-        // That one no longer primary, the view sees through the other, and nothing ties.
+        // Demoted, the view uses the other, and nothing ties.
         let camera = world.get_mut::<Camera>(tied[lowest]).expect("alive");
         camera.primary = false;
         let seen = super::seen(
@@ -759,9 +732,8 @@ mod tests {
         assert_eq!(warned, None);
     }
 
-    /// Made primary by an operation, as the Inspector's checkbox makes it, a camera is the one the
-    /// view sees through, and the one before isn't primary; undone, the one before is again, and
-    /// the view sees through it.
+    /// Making a camera primary by an operation, as the Inspector's checkbox does, unmakes the
+    /// previous one; undoing it restores that one.
     #[test]
     fn a_camera_made_primary_by_an_operation_is_the_only_one() {
         let mut world = World::seeded(1);
@@ -811,9 +783,9 @@ mod tests {
         assert_eq!(news, [false, true, false, true, true, false, true]);
     }
 
-    /// A camera that's a child sees from where a sprite beside it, of the same parent and
-    /// transform, draws, bit for bit: halfway on its way between ticks, and in a headless frame,
-    /// at alpha 1, where the tick left it; facing as its own rotation and its parent's turn it.
+    /// A child camera sees, bit for bit, from where a sprite with the same parent and transform
+    /// draws: halfway between ticks, and in a headless frame (alpha 1) where the tick left it. It
+    /// faces by its rotation and its parent's.
     #[test]
     fn a_camera_sees_from_where_it_draws_between_ticks() {
         let mut world = World::seeded(1);
@@ -840,12 +812,12 @@ mod tests {
         }
         let mut past = Past::default();
         past.capture(&mut world);
-        // The tick moves the parent 2 along X.
+        // The tick moves the parent to x = 2.
         let moved = world.get_mut::<Transform>(parent).expect("alive");
         moved.translation.x = 2.0;
         past.resolve(&world);
 
-        // Where the parent at `x` along X carries its children.
+        // Where the parent at `x` carries its children.
         let carried = |x| {
             let parent = Transform {
                 translation: DVec3::new(x, 0.0, 0.0),
@@ -919,9 +891,8 @@ mod tests {
         assert_eq!(tick(&mut world, 9.0, true), 9.0);
     }
 
-    /// A camera sees as though unscaled: scaled, it sees from its translation, turned by its
-    /// rotation; and under a parent scaled and mirrored, from where the parent carries it, facing as
-    /// their rotations turn it.
+    /// A camera sees as though unscaled: from its translation, turned by its rotation; under a
+    /// scaled and mirrored parent, from where the parent carries it, facing by their rotations.
     #[test]
     fn a_camera_sees_as_though_unscaled() {
         let mut world = World::seeded(1);
@@ -1003,9 +974,8 @@ mod tests {
         }
     }
 
-    /// A camera's default, which an add makes, is orthographic, 10 units high, and projects; and
-    /// it isn't primary, so that adding one changes no view. Switched to perspective by default,
-    /// it's 45° from 0.01 in front, and projects too.
+    /// An added camera's default is orthographic, 10 units high, and projects. It isn't primary,
+    /// so adding one changes no view. The perspective default is 45° from 0.01, and projects too.
     #[test]
     fn a_cameras_default_projects_and_isnt_primary() {
         let mut world = World::default();
@@ -1039,8 +1009,8 @@ mod tests {
         assert_eq!(perspective, expected);
     }
 
-    /// A named camera saves as its fields, its name as `Name: ("Camera")`, and what a load of it
-    /// saves is byte for byte what was loaded.
+    /// A named camera saves as its fields, its name as `Name: ("Camera")`; saving what a load
+    /// made gives the same bytes.
     #[test]
     fn a_named_camera_saves_and_loads_as_it_was() {
         let mut world = World::seeded(1);
@@ -1069,7 +1039,7 @@ mod tests {
         assert_eq!(loaded, Some(&camera));
     }
 
-    /// What can't project, as rendering's own test has it, and with a far that isn't finite.
+    /// What can't project, as rendering's own test has it, plus a non-finite far.
     const UNPROJECTABLE: [Projection; 14] = [
         Projection::Orthographic {
             height: -2.0,
@@ -1132,14 +1102,14 @@ mod tests {
         },
     ];
 
-    /// The code of the error `result` holds, if it holds one.
+    /// The error code of `result`, if it failed.
     fn code<T>(result: Result<T>) -> Option<String> {
         result.err().map(|error| error.code().to_owned())
     }
 
     /// A projection that can't project is refused however reflection would make it: from a value,
-    /// set by name, created or added by an operation, saved, and loaded from a scene; and the
-    /// camera set keeps its projection.
+    /// set by name, created or added by an operation, saved, loaded from a scene. The camera set
+    /// keeps its projection.
     #[test]
     fn a_projection_that_cant_project_is_refused_however_it_comes() {
         let refused = Some("engine.bad_projection".to_owned());
@@ -1210,7 +1180,7 @@ mod tests {
         *super::height(&mut viewpoint.projection)
     }
 
-    /// Holds `keys` down, as the window's events would, sent on by the controller's layer.
+    /// Presses `keys` through the controller's event handler.
     fn hold(controller: &mut OrthographicCameraController, cx: &mut Context, keys: &[Key]) {
         for &key in keys {
             let press = Event::Key {
@@ -1224,8 +1194,7 @@ mod tests {
 
     #[test]
     fn it_moves_half_the_views_height_a_second_along_the_cameras_own_axes() {
-        // A quarter turn counterclockwise, so its up is the world's -X and its right the world's
-        // +Y.
+        // A quarter turn counterclockwise: its up is world -X, its right +Y.
         let turned = Viewpoint {
             rotation: Quat::from_rotation_z(FRAC_PI_2),
             ..viewpoint()
@@ -1233,7 +1202,7 @@ mod tests {
         let diagonal = Vec3::new(-1.0, 1.0, 0.0).normalize();
         for (keys, expected) in [
             (&[Key::KeyW][..], Vec3::new(-1.0, 0.0, 0.0)),
-            // As far diagonally as straight.
+            // No farther diagonally.
             (&[Key::KeyW, Key::KeyD], diagonal),
         ] {
             let mut cx = Context::new(None);
@@ -1294,7 +1263,7 @@ mod tests {
         let mut send = |controller: &mut OrthographicCameraController, event| {
             assert_eq!(controller.event(&mut cx, &event), ControlFlow::Continue(()));
         };
-        // Half of the way up for a second.
+        // Half up for a second.
         let stick = |value| Event::PadStick {
             pad,
             stick: Stick::Right,
@@ -1304,7 +1273,7 @@ mod tests {
         controller.update(&mut Context::new(None), Duration::from_secs(1));
         let moved = controller.viewpoint.position;
         assert!(moved.abs_diff_eq(DVec3::Y, 1e-6), "{moved}");
-        // The left trigger half of the way for a second.
+        // The left trigger half down for a second.
         send(&mut controller, stick(Vec2::ZERO));
         controller.rotation = true;
         let trigger = |trigger, value| Event::PadTrigger {
@@ -1317,14 +1286,14 @@ mod tests {
         let eighth = Quat::from_rotation_z(FRAC_PI_2 / 2.0);
         let turned = controller.viewpoint.rotation;
         assert!(turned.abs_diff_eq(eighth, 1e-6), "{turned}");
-        // Both triggers as far cancel.
+        // Both triggers cancel.
         send(&mut controller, trigger(Trigger::Right, 0.5));
         controller.update(&mut Context::new(None), Duration::from_secs(1));
         let turned = controller.viewpoint.rotation;
         assert!(turned.abs_diff_eq(eighth, 1e-6), "{turned}");
     }
 
-    /// Scrolls, which the controller should handle, and returns the height it zoomed to.
+    /// Scrolls, expecting a zoom, and returns the new height.
     fn scroll(controller: &mut OrthographicCameraController, cx: &mut Context, by: Scroll) -> f32 {
         let handled = controller.event(cx, &Event::Scroll(by));
         assert_eq!(handled, ControlFlow::Break(()), "{by:?}");
@@ -1336,8 +1305,7 @@ mod tests {
     fn the_wheel_zooms_between_a_hundredth_and_a_hundred_times_the_starting_height() {
         let mut cx = Context::new(None);
         let mut controller = OrthographicCameraController::new(viewpoint());
-        // A line up zooms in, and 40 pixels down, a line from a touchpad on a display without
-        // scaling, zooms back out.
+        // A line up zooms in; 40 pixels down, a touchpad line without display scaling, zooms out.
         let zoomed_in = scroll(&mut controller, &mut cx, Scroll::Lines { x: 0.0, y: 1.0 });
         assert!((zoomed_in - 4.0 / 1.1).abs() < 1e-5, "{zoomed_in}");
         let touchpad = Scroll::Pixels { x: 0.0, y: -40.0 };
@@ -1374,9 +1342,9 @@ mod tests {
         OrthographicCameraController::new(perspective);
     }
 
-    /// A camera whose height can't project, as one upside down, is refused; and the wheel zooms any
-    /// height that projects to one that does, however near either end of the floats it is and
-    /// however far it scrolls, while a scroll of NaN passes by.
+    /// A height that can't project, such as an upside-down one, is refused. The wheel zooms any
+    /// projecting height to one that projects, near either float extreme and however far it
+    /// scrolls; a NaN scroll passes by.
     #[test]
     fn the_orthographic_controller_zooms_only_heights_that_project() {
         let seeing = |height| Viewpoint {
@@ -1414,7 +1382,7 @@ mod tests {
         }
     }
 
-    /// At the origin, unturned, looking down -Z with perspective.
+    /// At the origin, unturned, looking down -Z, perspective.
     fn flying() -> FlyCameraController {
         FlyCameraController::new(Viewpoint {
             projection: Projection::Perspective {
@@ -1425,7 +1393,7 @@ mod tests {
         })
     }
 
-    /// Sends `events` to the fly camera controller, which passes each on.
+    /// Sends `events`, each of which the controller passes on.
     fn send(controller: &mut FlyCameraController, cx: &mut Context, events: &[Event<'_>]) {
         for event in events {
             assert_eq!(controller.event(cx, event), ControlFlow::Continue(()));
@@ -1462,7 +1430,7 @@ mod tests {
         controller.update(&mut cx, half);
         let moved = controller.viewpoint.position;
         assert!(moved.abs_diff_eq(DVec3::NEG_X, 1e-6), "{moved}");
-        // Looking down an eighth of a turn, E raises it straight up, as fast as W moves it.
+        // Looking down an eighth of a turn, E raises it straight up, as fast as W moves.
         send(&mut controller, &mut cx, &[key(Key::KeyW, false)]);
         send(&mut controller, &mut cx, &[key(Key::KeyE, true)]);
         controller.viewpoint.position = DVec3::ZERO;
@@ -1494,7 +1462,7 @@ mod tests {
         controller.update(&mut cx, Duration::from_secs(1));
         let (forward, _) = facing(&controller);
         assert!(forward.abs_diff_eq(Vec3::X, 1e-5), "{forward}");
-        // Full up for a second, which would look past straight up, stops at 89°.
+        // Full up for a second would pass straight up; it stops at 89°.
         send(&mut controller, &mut cx, &[stick(Vec2::Y)]);
         controller.update(&mut cx, Duration::from_secs(1));
         let (forward, right) = facing(&controller);
@@ -1523,8 +1491,8 @@ mod tests {
             button: MouseButton::Right,
             pressed,
         };
-        // Without the button, nothing; with it, from where the cursor last was, 0.003 radians a
-        // point, which a window without scaling, or none, makes a pixel.
+        // Without the button, nothing; with it, from the last cursor position, 0.003 radians a
+        // point (a pixel without window scaling).
         send(
             &mut controller,
             &mut cx,
@@ -1541,7 +1509,7 @@ mod tests {
         let (forward, _) = facing(&controller);
         let pitch = math::libm::asinf(forward.y);
         assert!((pitch + 0.3).abs() < 1e-5, "{pitch}");
-        // Back into the window elsewhere, it looks from there, not from where it left.
+        // Re-entering elsewhere looks from there, not from where it left.
         let left = controller.viewpoint.rotation;
         send(&mut controller, &mut cx, &[Event::CursorLeft, at(0.0, 0.0)]);
         assert_eq!(controller.viewpoint.rotation, left);

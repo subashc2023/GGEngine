@@ -1,7 +1,7 @@
-//! Particles: emitters, components of the world, and their particles, which are the frames'. Each
-//! frame emits what the world's time as it draws owes each emitter since the frame before, which
-//! `gg-renderer` writes and draws, so that no hash, snapshot, scene, recording or rollback holds a
-//! particle, as none holds the frames' copies of where the world's entities were.
+//! Particles: emitters, which are components of the world, and their particles, which belong to the
+//! frames. Each frame emits what the world's time owes each emitter since the frame before;
+//! `gg-renderer` writes and draws it. So no hash, snapshot, scene, recording or rollback holds a
+//! particle, as none holds the frames' copies of where entities were.
 
 use std::collections::HashMap;
 
@@ -10,19 +10,18 @@ use gg_renderer::{Births, Bursts, Emission, MAX_PARTICLES, ParticleShape, Partic
 
 use crate::{Component, EntityId, Reflect, Texture, Tick};
 
-/// Where an emitter's particles are born, in its entity's space, so that they turn and scale with
-/// it, and which way they go: an emitter without a rotation sends them up, along its +Y, as a
-/// fountain and a fire do.
+/// Where an emitter's particles are born, in its entity's space, so they turn and scale with it,
+/// and which way they go. Without a rotation they go up, along +Y, like a fountain or fire.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub enum EmitterShape {
     /// At its entity's origin, any way.
     Point,
     /// Anywhere within `radius` of its origin, away from it.
     Sphere { radius: f32 },
-    /// Anywhere in the box of `half_extents` round its origin, along its +Y.
+    /// Anywhere in the box of `half_extents` round its origin, along +Y.
     Box { half_extents: Vec3 },
-    /// On the disc of `radius` round its origin, in its XZ plane, any way within `angle` of its
-    /// +Y: the cone's half angle, in radians.
+    /// On the disc of `radius` round its origin, in its XZ plane, any way within `angle` of +Y:
+    /// the cone's half angle, in radians.
     Cone {
         #[reflect(degrees)]
         angle: f32,
@@ -31,7 +30,7 @@ pub enum EmitterShape {
 }
 
 impl Default for EmitterShape {
-    /// A cone 15° about its +Y, from a disc a tenth of a unit across.
+    /// A cone 15° about +Y, from a disc a tenth of a unit across.
     fn default() -> Self {
         Self::Cone {
             angle: gg_core::math::to_radians(15.0),
@@ -43,80 +42,76 @@ impl Default for EmitterShape {
 /// How an emitter's particles go over what's behind them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum ParticleBlend {
-    /// By their alpha, as smoke, dust and water do.
+    /// By their alpha, like smoke, dust and water.
     #[default]
     Alpha,
-    /// Adding their light, by their alpha, as fire, sparks and glows do: a color past 1 is
-    /// brighter.
+    /// Adding their light, by their alpha, like fire, sparks and glows: a color past 1 is brighter.
     Additive,
 }
 
-/// Particles, born where its entity draws, ancestors carrying it, which the frames own: the
-/// world holds the emitter alone, which scenes save, the Inspector and tools edit, and the world's
-/// hash reads, as any component. `rate` particles a second are born evenly, particle `n` at
-/// `n / rate` seconds of the world's time after the emitter first draws, each where the emitter was
-/// then, between where the frames around its birth drew it; and a burst of `burst` at once each
-/// time a tick raises `bursts`. Each particle's motion is a closed form of its age, its velocity
-/// at birth carried on under `acceleration` and `drag`, and its size, color, turn and cell by its
-/// age over its lifetime, so that it draws alike whatever the frames between its birth and now:
-/// the world's time stops while the simulation is paused or stopped, and so do its particles, and
-/// headless frames draw the same particles every run. Each particle's randomness is a hash of its
-/// emitter's ID and its number. A frame that doesn't draw the emitter, as one after its entity
-/// goes, lets go of its particles; and so does the world's time going back more than a tick, as
-/// the tool API's `stop` takes it, which starts its births again.
+/// Emits particles from where its entity draws (ancestors carry it). Only the emitter is in the
+/// world, as an ordinary component: saved in scenes, editable, read by the world hash. The frames
+/// own the particles.
+///
+/// - Births: `rate` a second, evenly. Particle `n` is born `n / rate` seconds of world time after
+///   the emitter first draws, at its position then, interpolated between the frames around it.
+/// - Bursts: `burst` particles at once each time a tick raises `bursts`.
+/// - Motion is a closed form of age, so frames between birth and now don't matter: birth velocity
+///   under `acceleration` and `drag`, and size, color, turn and cell by age over lifetime.
+/// - World time stops while the simulation is paused or stopped, and so do particles. Headless
+///   frames draw the same particles every run.
+/// - Each particle's randomness hashes its emitter's ID and its number.
+///
+/// A frame that doesn't draw the emitter (its entity is gone) lets go of its particles. So does
+/// world time going back more than a tick, as the tool API's `stop` does; births then restart.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct ParticleEmitter {
-    /// Particles born a second, evenly: 0 for none but its bursts.
+    /// Particles born a second: 0 for bursts alone.
     #[reflect(min = 0.0, default = 20.0)]
     pub rate: f32,
-    /// The particles each of its bursts gives, at most [`MAX_PARTICLES`].
+    /// Particles per burst, at most [`MAX_PARTICLES`].
     pub burst: u32,
-    /// How many times it has burst, which a game raises at a tick to burst: each frame bursts once
-    /// for each it went up by since the frame before, every burst born where the latest tick left
-    /// the emitter, as that tick ends. So a rollback or a server's correction that runs the tick
-    /// again bursts once, and one that takes it back down bursts no more; and an emitter spawned
-    /// with its count raised bursts as it first draws.
+    /// How many times it has burst. A game raises it in a tick to burst: each frame bursts once
+    /// per increase, born where the latest tick left the emitter, at its end. A rollback or
+    /// correction that reruns the tick bursts once; one that lowers the count bursts none. A
+    /// spawned emitter with a raised count bursts on its first draw.
     pub bursts: u32,
-    /// The least and the most seconds a particle lives, each a share between them at random.
+    /// Least and most lifetime in seconds; each particle gets a random value between.
     #[reflect(min = 0.0, default = LIFETIME)]
     pub lifetime: [f32; 2],
-    /// The least and the most speed a particle is born with, along the way its shape gives it, in
-    /// the world's units a second, whatever its entity's scale.
+    /// Least and most birth speed along the shape's direction, in world units a second, whatever
+    /// the entity's scale.
     #[reflect(default = SPEED)]
     pub speed: [f32; 2],
     /// Where particles are born and which way they go.
     pub shape: EmitterShape,
-    /// What every particle accelerates by, in the world's units a second squared: gravity's
-    /// (0, -9.81, 0), or a fire's rising.
+    /// Acceleration in world units a second squared: gravity is (0, -9.81, 0); fire rises.
     pub acceleration: Vec3,
-    /// The share of its velocity a particle loses a second, by linear drag: 0 for none.
+    /// The share of velocity lost a second, by linear drag: 0 for none.
     #[reflect(min = 0.0)]
     pub drag: f32,
-    /// A particle's size across, in the world, at its birth and at its death, as it goes from one
-    /// to the other over its life.
+    /// Size across, in world units, at birth and at death, changing over its life.
     #[reflect(min = 0.0, default = SIZE)]
     pub size: [f32; 2],
-    /// A particle's color at its birth and at its death, in linear RGBA, alpha not multiplied in, as
-    /// it goes from one to the other over its life: past 1 for light, as fire's.
+    /// Linear RGBA at birth and at death, alpha not multiplied in, changing over its life. Past 1
+    /// is light, like fire.
     #[reflect(color, default = COLOR)]
     pub color: [Vec4; 2],
-    /// The least and the most a particle turns a second, counterclockwise as seen, each a share
-    /// between them at random, from a turn at random.
+    /// Least and most turn a second, counterclockwise as seen; each particle gets a random value
+    /// between, from a random starting turn.
     #[reflect(degrees)]
     pub spin: [f32; 2],
-    /// What a particle shows, tinted by its color, by its path: none for a soft disc, brightest at
-    /// its middle.
+    /// What a particle shows, tinted by its color. None is a soft disc, brightest at its middle.
     pub texture: Option<Texture>,
-    /// The cells across and down its texture is cut into, evenly, which a particle plays through,
-    /// row by row from the top left, over its life: `[1, 1]` for the whole texture.
+    /// Cells across and down the texture, cut evenly. A particle plays through them over its
+    /// life, row by row from the top left. `[1, 1]` is the whole texture.
     #[reflect(min = 1, default = CELLS)]
     pub cells: [u32; 2],
     /// Whether particles go over what's behind them by their alpha, or add their light.
     pub blend: ParticleBlend,
 }
 
-/// The default emitter's lifetimes, speeds, sizes, colors and cells, which its description gives
-/// as its fields' defaults too.
+/// The default emitter's lifetimes, speeds, sizes, colors and cells; the fields' defaults too.
 const LIFETIME: [f32; 2] = [1.0, 2.0];
 const SPEED: [f32; 2] = [1.0, 2.0];
 const SIZE: [f32; 2] = [0.2, 0.05];
@@ -124,8 +119,8 @@ const COLOR: [Vec4; 2] = [Vec4::ONE, Vec4::new(1.0, 1.0, 1.0, 0.0)];
 const CELLS: [u32; 2] = [1, 1];
 
 impl Default for ParticleEmitter {
-    /// 20 particles a second, white discs fading out as they shrink, up from a small cone, living a
-    /// second or two.
+    /// 20 particles a second: white discs fading out as they shrink, up from a small cone, living
+    /// a second or two.
     fn default() -> Self {
         Self {
             rate: 20.0,
@@ -171,9 +166,9 @@ impl ParticleEmitter {
     }
 }
 
-/// The world's time as a frame draws it: the ticks it has run, the latest's end, where a burst and
-/// an emitter's first birth are born; and how far the frame draws the world, in ticks, `alpha` of
-/// the way through the latest, as `Stepper::time` has it in seconds.
+/// The world's time for a frame. `ticked` is ticks run; the latest's end is where bursts and an
+/// emitter's first birth are born. `drawn` is the frame's time in ticks, `alpha` through the
+/// latest.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Clock {
     pub(crate) ticked: u64,
@@ -181,8 +176,7 @@ pub(crate) struct Clock {
 }
 
 impl Clock {
-    /// The time a frame `alpha` of the way through the latest of `ticks` ticks draws at: 0 before
-    /// any tick.
+    /// The time at `alpha` through the latest of `ticks` ticks; 0 before any.
     pub(crate) fn new(ticks: u64, alpha: f32) -> Self {
         Self {
             ticked: ticks,
@@ -191,40 +185,38 @@ impl Clock {
     }
 }
 
-/// The frames' state of the world's emitters, by their entities' IDs, kept from frame to frame
-/// outside the world, as the frames' copies of where entities were are: what each frame emits
-/// from. An emitter's is let go of the frame after one that doesn't draw it.
+/// The frames' state of emitters by entity ID, outside the world. Dropped the frame after one that
+/// doesn't draw the emitter.
 #[derive(Default)]
 pub(crate) struct Emitters {
     by_id: HashMap<EntityId, Emitting>,
-    /// How many frames have begun, which each emitter's `seen` is the number of one of.
+    /// Frames begun; each emitter's `seen` is one's number.
     frame: u64,
-    /// The origin of the frame begun last, which each emitter's `from` is relative to.
+    /// The last frame's origin; each `from` is relative to it.
     origin: DVec3,
 }
 
 /// What a frame emits an emitter's particles from.
 #[derive(Clone, Copy, Debug)]
 struct Emitting {
-    /// The last frame that drew it.
     seen: u64,
-    /// When its births at its rate started, in the world's ticks, and the number of the first
-    /// born then: birth `n`, from `base` on, is born at `start + (n - base) * every(rate)`.
+    /// Births at `rate` started at `start` world ticks, numbered from `base`: birth `n` is at
+    /// `start + (n - base) * every(rate)`.
     start: f64,
     base: u64,
     rate: f32,
-    /// How many births it has had: the next's number.
+    /// Births so far: the next's number.
     emitted: u64,
-    /// Its count of bursts as the frame before saw it, 0 before any frame drew it.
+    /// Bursts count the frame before saw; 0 before any frame drew it.
     bursts: u32,
-    /// Where the frame before drew it, and the world's time it drew at, in ticks.
+    /// Where the frame before drew it, and its world time in ticks.
     from: Mat4,
     then: f64,
 }
 
 impl Emitters {
-    /// Begins a frame's emitting, whose draws are relative to `origin`: lets go of what the frame
-    /// before didn't draw, and takes where the frame before drew the rest into `origin`'s space.
+    /// Begins a frame relative to `origin`: drops emitters the last frame didn't draw and moves
+    /// the rest's last positions into `origin`'s space.
     pub(crate) fn begin(&mut self, origin: DVec3) {
         let last = self.frame;
         self.by_id.retain(|_, emitting| emitting.seen == last);
@@ -239,12 +231,10 @@ impl Emitters {
         }
     }
 
-    /// The particles of `emitter`, of entity `id`, this frame, which draws it where `drawn` places
-    /// it, its transform as the latest tick left it `ticked`, at the world's time `clock` says, as
-    /// [`ParticleEmitter`] says: its births since the frame before drew it, due by the frame's
-    /// time, each where the emitter was between where the frame before drew it and where this one
-    /// does, those past the most it has alive at once dropped, the oldest; and its bursts, as many
-    /// as its count went up by since, born as the latest tick ends, where it left the emitter.
+    /// This frame's particles of `emitter` (entity `id`), per [`ParticleEmitter`]. `drawn` is its
+    /// draw position, `ticked` where the latest tick left it. Births due by `clock` since the
+    /// last frame, placed between the two draws; the oldest drop past the most alive at once.
+    /// Bursts, one per rise of its count, born at the latest tick's end.
     pub(crate) fn emit(
         &mut self,
         id: EntityId,
@@ -254,7 +244,7 @@ impl Emitters {
         clock: Clock,
     ) -> Particles {
         let (now, latest) = (clock.drawn, clock.ticked as f64);
-        // What isn't a number, or is less than 0, is none.
+        // NaN and less than 0 count as none.
         let rate = if emitter.rate > 0.0 && emitter.rate.is_finite() {
             emitter.rate
         } else {
@@ -263,7 +253,7 @@ impl Emitters {
         let size = emitter.burst.min(MAX_PARTICLES);
         let lifetime = emitter.lifetime[0].max(emitter.lifetime[1]).max(0.0);
         let alive = (f64::from(rate) * f64::from(lifetime)).ceil();
-        // A saturating cast, which takes the infinite past any count.
+        // Saturating: infinity exceeds any count.
         let most = (alive as u32).saturating_add(size);
         let started = Emitting {
             seen: self.frame,
@@ -281,8 +271,7 @@ impl Emitters {
             started
         });
         // The world's time went back further than the tick a pause's end draws back by, as the
-        // tool API's `stop` takes it: its births start again, as though it had just come, its
-        // count of bursts kept.
+        // tool API's `stop` does: births start again as if new; the bursts count is kept.
         if !fresh && now < emitting.then - 1.0 {
             fresh = true;
             *emitting = Emitting {
@@ -291,8 +280,8 @@ impl Emitters {
             };
         }
         emitting.seen = self.frame;
-        // A rate changed: births go on at the new from where the next was due at the old, or, from
-        // none, from the latest tick's end.
+        // A rate changed: births go on at the new rate from where the next was due at the old, or
+        // from the latest tick's end if the old was none.
         if rate.to_bits() != emitting.rate.to_bits() {
             let old = emitting.rate;
             let since = (emitting.emitted - emitting.base) as f64;
@@ -322,21 +311,20 @@ impl Emitters {
     }
 }
 
-/// The ticks between births at `rate`, births a second, of more than 0.
+/// The ticks between births at `rate` births a second, more than 0.
 fn every(rate: f32) -> f64 {
     1.0 / (f64::from(rate) * Tick::DT.as_secs_f64())
 }
 
-/// `emitting`'s births due by `now`, of the world's time, since those before, as the frame before
-/// left them: each born where the emitter was between where that frame drew it and `drawn`, of
-/// those past `limit`, the oldest dropped.
+/// `emitting`'s births due by world time `now`, placed between the last frame's draw and `drawn`.
+/// Births past `limit` drop, oldest first.
 fn births(emitting: &mut Emitting, now: f64, drawn: Mat4, limit: u32) -> Births {
     let none = Births::none(drawn);
     if emitting.rate == 0.0 || now < emitting.start {
         return none;
     }
     let every = every(emitting.rate);
-    // Births from `base` on whose times are at or before now; a saturating cast.
+    // Births from `base` on due at or before now; saturating cast.
     let due = ((now - emitting.start) / every).floor() + 1.0;
     let end = emitting.base.saturating_add(due as u64);
     if end <= emitting.emitted {
@@ -345,7 +333,7 @@ fn births(emitting: &mut Emitting, now: f64, drawn: Mat4, limit: u32) -> Births 
     let first = emitting.emitted.max(end - u64::from(limit).min(end));
     emitting.emitted = end;
     let time = emitting.start + (first - emitting.base) as f64 * every;
-    // How far between the frames each is born.
+    // Where between the frames each is born.
     let span = now - emitting.then;
     let (along, step) = match span > 0.0 {
         true => (
@@ -366,9 +354,8 @@ fn births(emitting: &mut Emitting, now: f64, drawn: Mat4, limit: u32) -> Births 
     }
 }
 
-/// `emitting`'s bursts of `size` each, as many as its count went up by to `counter` since the frame
-/// before saw it, born at `latest`, the latest tick's end, where `ticked` places the emitter, the
-/// first of those past `limit` dropped. A count taken down bursts nothing.
+/// One burst of `size` per rise of the count to `counter`, born at `latest` (the latest tick's
+/// end) at `ticked`. The first particles past `limit` drop. A lowered count bursts nothing.
 fn bursts(
     emitting: &mut Emitting,
     counter: u32,
@@ -416,8 +403,7 @@ mod tests {
         }
     }
 
-    /// Each birth's number and time, in ticks, of every frame of `emitter` drawn at each of
-    /// `drawn`, the world's times, at `ticked` ticks run each, as `Emitters::emit` gives them.
+    /// Each birth's number and tick time from `Emitters::emit` over `frames` (ticks run, time).
     fn born(emitter: &ParticleEmitter, frames: &[(u64, f64)]) -> Vec<(u64, f64)> {
         let mut emitters = Emitters::default();
         let id = EntityId::new(7).expect("not 0");
@@ -436,10 +422,9 @@ mod tests {
         born
     }
 
-    /// At 16 a second, a birth every 4 ticks of 64 a second: birth `n` is born at the latest tick's
-    /// end as the emitter first drew, plus `4n` ticks, in the first frame whose time reaches it,
-    /// whichever frames draw and however many ticks each runs; and those past the most it has
-    /// alive at once, a long frame's oldest, are dropped.
+    /// At 16 a second (a birth every 4 of 64 ticks a second), birth `n` is born `4n` ticks after
+    /// the latest tick's end at first draw, in the first frame reaching it, whatever the frames.
+    /// Births past the most alive at once drop, a long frame's oldest.
     #[test]
     fn births_are_due_by_the_frames_time_whatever_the_frames() {
         let emitter = at_rate(16.0);
@@ -464,9 +449,8 @@ mod tests {
         assert_eq!(late[1..], newest);
     }
 
-    /// A rate that changes goes on from where the next birth was due at the old one; and the
-    /// world's time going back a tick, as a pause's end draws it, holds births back until it's
-    /// past them, where going back further starts the births again.
+    /// A changed rate continues from the next birth's old due time. Time going back a tick, as a
+    /// pause's end draws it, holds births until it passes them; further back restarts them.
     #[test]
     fn rates_go_on_and_time_back_holds_them() {
         let mut emitters = Emitters::default();
@@ -496,10 +480,8 @@ mod tests {
         assert_eq!(at(&at_rate(32.0), 5, 5.0).births.first, 0);
     }
 
-    /// An emitter standing still while the frame's origin moves on gives the frame after the move
-    /// births between where the frame before drew it and where this one does, both from the new
-    /// origin: the same place, so they're born where it stands rather than along a line from
-    /// where it stood from the old one.
+    /// A still emitter when the origin moves births between two draws that are both relative to
+    /// the new origin, so at its place, not along a line from its old-origin position.
     #[test]
     fn births_come_from_where_the_emitter_was_as_the_origin_moves() {
         let mut emitters = Emitters::default();
@@ -522,7 +504,7 @@ mod tests {
         assert_eq!(moved.from, moved.to);
     }
 
-    /// What `world`'s emitters give the frame drawn after `ticks` ticks, its draws' particles.
+    /// The particles `world`'s emitters give the frame drawn after `ticks` ticks.
     fn drawn(world: &World, ticks: u64, scratch: &mut Scratch) -> Vec<Particles> {
         let mut draws = Draws::default();
         let past = Past::default();
@@ -540,11 +522,10 @@ mod tests {
         draws.particles().to_vec()
     }
 
-    /// A tick that raises an emitter's count of bursts bursts it once in the frame after, born as
-    /// the tick ends where it left the emitter; a rollback that restores the world from before the
-    /// tick and runs it again bursts no more, nor does a correction that takes the count back
-    /// down, after which raising it again bursts again. An emitter spawned with its count raised
-    /// bursts as it's first drawn, of as many bursts as fit beside its births, the newest.
+    /// Raising `bursts` in a tick bursts once in the next frame, at the tick's end where it left
+    /// the emitter. A rollback rerunning the tick, or a correction lowering the count, bursts no
+    /// more; raising it again does. A spawned emitter with a raised count bursts on first draw:
+    /// the newest bursts that fit beside its births.
     #[test]
     fn a_burst_is_born_once_however_often_its_tick_runs() {
         let mut world = World::default();
@@ -591,8 +572,7 @@ mod tests {
         assert_eq!(bursts(&drawn(&world, 4, &mut scratch)), (0, 0, 0));
         tick(&mut world);
         assert_eq!(bursts(&drawn(&world, 5, &mut scratch)), (0, 1, 12));
-        // Spawned with two bursts counted, of which it holds the newest alone, as it has room for
-        // a burst beside its births.
+        // Spawned with two bursts counted; room for one beside its births, so the newest.
         let counted = ParticleEmitter {
             bursts: 2,
             ..emitter
@@ -604,8 +584,8 @@ mod tests {
         assert_eq!(bursts(std::slice::from_ref(spawned)), (1, 1, 12));
     }
 
-    /// A paused world's frames, drawn at its time, which stands still, bear no particles and draw
-    /// those it has at their ages, as the time each frame gives says; a step bears a tick's.
+    /// A paused world's time stands still: its frames bear no new particles and draw existing ones
+    /// at their ages by that time. A step bears a tick's.
     #[test]
     fn a_paused_world_freezes_its_particles() {
         let mut world = World::default();

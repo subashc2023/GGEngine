@@ -1,90 +1,71 @@
-//! Environments: the component that says how the game's view shows its world's light, and the sky
-//! around it, whatever viewpoint it sees from, and which of a world's environments the view renders
-//! with.
+//! Environments: the component that says how the game's view shows its world's light and sky,
+//! whatever viewpoint it sees from, and which of a world's environments the view renders with.
 
 use gg_renderer::{AmbientOcclusion, Antialiasing, Fog, Grade, Reflections, Tonemapper};
 use tracing::warn;
 
 use crate::{Component, DepthOfField, Entity, EntityId, Lens, MotionBlur, Reflect, Sky, World};
 
-/// How the game's view shows its world's light, whatever viewpoint it sees from, the editor's and
-/// the tool API's looks' too, so that they show what the game does: its exposure, the tonemapper
-/// that maps the view's colors, drawn in high dynamic range, into the range it shows, how it's
-/// antialiased, the sky it shows behind the world and lights it by, how much it blooms, how it's
-/// graded, how what's near a point hides that light from it, the fog it's in, how what's opaque
-/// reflects what the view shows, and the camera's depth of field, motion blur and lens. A world has
-/// one, on an entity of its own; of several, the view renders with the one of the lowest ID, warning
-/// (`engine.environment_tie`). A world without one isn't tonemapped, antialiased, bloomed or
-/// graded, so that what's in the range a view shows, as a 2D game's sprites, shows as it's drawn,
-/// each pixel what's at its center, and lit shading exposes its light as the default environment's
-/// exposure does.
+/// How the game's view shows its world's light, from any viewpoint; the editor's and the tool
+/// API's looks use it too. A world has one, on an entity of its own; of several, the view uses
+/// the lowest ID and warns (`engine.environment_tie`). Without one, a world isn't tonemapped,
+/// antialiased, bloomed or graded, so in-range content like 2D sprites shows as drawn, each pixel
+/// what's at its center, and lit shading exposes as the default environment does.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Environment {
-    /// How much light the view takes in, as a camera's exposure value at ISO 100, EV100: lit
-    /// shading multiplies light, in lux and candela, by 1 / (1.2 × 2^EV100), so that each step up
-    /// halves what shows. 15, the default, suits a sunny day; an overcast one about 12, and a lit
-    /// room about 7. What isn't lit, as sprites, text and unlit materials, shows its colors at any.
+    /// Exposure value at ISO 100 (EV100). Lit shading scales light (lux, candela) by
+    /// 1 / (1.2 × 2^EV100): each step up halves what shows. 15 (default) suits a sunny day, about
+    /// 12 overcast, about 7 a lit room. Unlit content (sprites, text, unlit materials) is
+    /// unaffected.
     #[reflect(default = 15.0)]
     pub exposure: f32,
-    /// How the exposure adapts to what the view sees, as eyes adapt between sunlight and shade, if
-    /// it does, as [`Adaptation`] says: from `exposure` until the view's light is first metered,
-    /// then toward what the meter calls for. `None`, the default, keeps `exposure`.
+    /// How exposure adapts to the view's light, as eyes do ([`Adaptation`]): `exposure` until
+    /// first metered, then toward the meter. `None` (default) keeps `exposure`.
     pub adaptation: Option<Adaptation>,
-    /// How the view's colors, drawn in high dynamic range, map into the range it shows: Khronos PBR
-    /// Neutral by default.
+    /// Maps the view's HDR colors into the shown range. Khronos PBR Neutral by default.
     pub tonemapper: Tonemapper,
-    /// How the view is antialiased: temporal antialiasing by default, each frame drawn a fraction
-    /// of a pixel off and resolved against those before it, before it's tonemapped, which a game's
-    /// canvas is drawn after; SMAA, each frame alone, at the same point, sharper and without ghosts;
-    /// or none.
+    /// Temporal (default): each frame is drawn a fraction of a pixel off and resolved against
+    /// earlier ones, before tonemapping; a game's canvas is drawn after. SMAA: each frame alone,
+    /// sharper, no ghosts. Or none.
     pub antialiasing: Antialiasing,
-    /// The sky, which the view shows behind the world, in place of the clear color, and lights its
-    /// models by from all around: an image of the world around, or an atmosphere made from its
-    /// sun, as [`Sky`] says. None, the default, for none.
+    /// What shows behind the world in place of the clear color and lights models from all
+    /// around ([`Sky`]). Default: none.
     pub sky: Sky,
-    /// The luminance, in candela per square meter, that a texel of an image sky's of 1 stands for,
-    /// which its colors are multiplied by, before the exposure, as light is: 30,000 by default,
-    /// Filament's default for an environment's intensity, which suits a sunny day's exposure. An
-    /// atmosphere's is its sun's.
+    /// Candela per square meter that 1 in an image sky's texels stands for; colors are scaled by
+    /// it before exposure, as light is. 30,000 by default, Filament's default, suiting a sunny
+    /// day's exposure. An atmosphere uses its sun's.
     #[reflect(default = 30_000.0)]
     pub sky_luminance: f32,
-    /// How much the view blooms, light spreading round what's bright in it as through a camera's
-    /// lens, from 0, for none, to 1: its colors, before they're tonemapped and before a game's
-    /// canvas, lerped by this toward a weighted mean of them blurred further and further, which
-    /// spreads light without adding any. 0.04, the default, is subtle: a glow round what's far
-    /// brighter than white.
+    /// Bloom, from 0 for none to 1. Before tonemapping and a game's canvas, colors are lerped by
+    /// this toward a weighted mean of progressively blurrier copies: light spreads, none is
+    /// added. 0.04 (default) is a subtle glow round what's far brighter than white.
     #[reflect(min = 0.0, max = 1.0, default = 0.04)]
     pub bloom: f32,
-    /// How the view's light is graded, before a game's canvas, which isn't graded, and before it's
-    /// tonemapped: white balance, contrast, saturation and ASC CDL's slope, offset and power. The
-    /// default, the identity, leaves it as it is.
+    /// Grading before tonemapping (a game's canvas isn't graded): white balance, contrast,
+    /// saturation, ASC CDL slope, offset and power. The default, identity, changes nothing.
     pub grade: Grade,
-    /// How what's near each point the view shows darkens the light that reaches it from all
-    /// around, the sky's, never the lights', as XeGTAO's ground-truth ambient occlusion finds it
-    /// from the view's depth: on by default, with XeGTAO's radius of half a unit; `None` for none.
-    /// Under a perspective with a sky alone, as without one there's no such light.
+    /// How nearby geometry darkens the sky's light (never the lights') at each point, by
+    /// XeGTAO's ambient occlusion from the view's depth. On by default, at XeGTAO's radius of
+    /// half a unit; `None` for none. Perspective views with a sky only.
     #[reflect(default = Some(AmbientOcclusion::default()))]
     pub ambient_occlusion: Option<AmbientOcclusion>,
-    /// The height fog the view is in, densest low down and thinning with height, lit by the sky
-    /// from all around, or without one by a luminance of its own, and by the sun, the brightest
-    /// directional light, as [`Fog`] says: `None`, the default, for none. Fog with a number that
-    /// isn't finite, a NaN or an infinity, is drawn as none, with a warning (`engine.bad_fog`).
+    /// Height fog, densest low and thinning upward, lit by the sky (without one, its own
+    /// luminance) and the sun, the brightest directional light ([`Fog`]). `None` (default) for
+    /// none. Fog with a non-finite number is drawn as none, with a warning (`engine.bad_fog`).
     pub fog: Option<Fog>,
-    /// How what's opaque reflects what the view shows: each point seen in its mirror, by a ray
-    /// traced through the view's depth, in place of the sky's specular light where it finds
-    /// something, blurred as the point's roughness spreads it, as [`Reflections`] says. Under a
-    /// perspective with a sky alone, as without one there's no specular light from all around for
-    /// it to take the place of. `None`, the default, for none: it costs a trace of every pixel and
-    /// two images of the view's size, which only a glossy surface makes worth it.
+    /// Opaque surfaces reflect the view: a ray traced through the depth replaces the sky's
+    /// specular light where it hits, blurred by roughness ([`Reflections`]). Perspective views
+    /// with a sky only. `None` (default) for none: it costs a trace per pixel and two view-sized
+    /// images, worth it for glossy surfaces.
     pub reflections: Option<Reflections>,
-    /// How what's nearer or farther than a focus blurs, as through a camera's lens, before a
-    /// game's canvas, which isn't blurred, as [`DepthOfField`] says: `None`, the default, for none.
+    /// Blur by distance from a focus, before a game's canvas ([`DepthOfField`]). `None`
+    /// (default) for none.
     pub depth_of_field: Option<DepthOfField>,
-    /// How what moves across the view blurs along its way while the shutter's open, before a
-    /// game's canvas, which isn't blurred, as [`MotionBlur`] says: `None`, the default, for none.
+    /// Blur along motion while the shutter's open, before a game's canvas ([`MotionBlur`]).
+    /// `None` (default) for none.
     pub motion_blur: Option<MotionBlur>,
-    /// What a camera's lens and film do to the view, before a game's canvas, which shows none of it:
-    /// a vignette, chromatic aberration and film grain, none of them by default.
+    /// Lens and film effects, before a game's canvas: vignette, chromatic aberration, film grain;
+    /// none by default.
     pub lens: Lens,
 }
 
@@ -110,8 +91,8 @@ impl Default for Environment {
 }
 
 impl Environment {
-    /// What lit shading multiplies light by at its exposure, as [`gg_renderer::light_scale`] has
-    /// it: 1 over 1.2 × 2^EV100. An exposure that adapts starts from it.
+    /// What lit shading multiplies light by at its exposure, per [`gg_renderer::light_scale`]:
+    /// 1 / (1.2 × 2^EV100). An adapting exposure starts from it.
     pub fn light_scale(&self) -> f32 {
         gg_renderer::light_scale(self.exposure)
     }
@@ -136,47 +117,51 @@ impl Environment {
     }
 }
 
-/// The renderer's default adaptation, which the fields' defaults are.
+/// The renderer's default adaptation; the fields' defaults.
 fn adapted() -> gg_renderer::Adaptation {
     gg_renderer::Adaptation::default()
 }
 
-/// How an [`Environment`]'s exposure adapts to what the view sees, as eyes adapt between sunlight
-/// and shade. Each frame meters the view's light, before it blooms and before a game's canvas, from
-/// a histogram of its luminance, as Unreal's histogram exposure does: the mean log2 of the luminance
-/// of its pixels between two percentiles of it, from 2^-12 candela per square meter, darker than
-/// starlight, to 2^20, in eighths of a stop, what's darker, as a black sky, left out. The exposure
-/// it calls for, log2(luminance × 100 / 12.5) as a reflected-light meter's at ISO 100, less the
-/// compensation and kept between the bounds, is what the exposure moves toward, at speeds of its
-/// own, by the simulation's time, so that a paused game's holds. The first frames, until a
-/// metering comes back two frames later, shade at the environment's `exposure`, and that metering
-/// is taken at once rather than moved toward. A change to the bounds, the compensation or the speeds
-/// shows in the frame it's made, as a script easing the compensation each tick wants, the exposure
-/// adapting on; one to the percentiles waits for a metering by them, taken at once. The tool API's
-/// look adapts apart from the game's own view, so that a look round a dark room exposes neither
-/// the game's view nor a capture of it for the room. What isn't lit, as sprites, text and unlit
-/// materials, still shows its colors at any exposure, and is metered as though it were lit,
-/// brighter the darker the exposure, so a view of little else runs to one bound or the other.
+/// How an [`Environment`]'s exposure adapts to what the view sees, as eyes do between sunlight and
+/// shade.
+///
+/// Each frame meters the view's light, before bloom and a game's canvas, from a luminance
+/// histogram, as Unreal's histogram exposure does: the mean log2 luminance of pixels between two
+/// percentiles, over 2^-12 (darker than starlight) to 2^20 candela per square meter in eighths of
+/// a stop; darker pixels, like a black sky, are left out. The exposure moves toward
+/// log2(luminance × 100 / 12.5), a reflected-light meter's at ISO 100, less the compensation,
+/// kept between the bounds. It moves at its own speeds by the simulation's time, so a paused
+/// game's holds.
+///
+/// Until a metering returns, two frames later, frames shade at `exposure`; that first metering is
+/// taken at once. A change to the bounds, compensation or speeds shows in the frame it's made, so
+/// a script can ease the compensation each tick. A change to the percentiles waits for a
+/// metering by them, taken at once. The tool API's look adapts apart from the game's view, so
+/// looking round a dark room exposes neither the view nor a capture of it for the room.
+///
+/// What isn't lit (sprites, text, unlit materials) shows its colors at any exposure but is
+/// metered as though lit, brighter at darker exposures, so a view of little else runs to a bound.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Adaptation {
-    /// The lowest exposure value, EV100, it adapts to, at which what calls for a lower one shows
-    /// darker: 0, about a street at night, so that a moonlit world shows as dark as it is.
+    /// The lowest exposure value, EV100, it adapts to; a scene calling for lower shows darker. 0,
+    /// about a street at night, so a moonlit world shows as dark as it is.
     #[reflect(default = adapted().min)]
     pub min: f32,
-    /// The highest, at which what calls for a higher one shows brighter: 18, past snow in sunlight.
+    /// The highest; a scene calling for higher shows brighter. 18, past snow in sunlight.
     #[reflect(default = adapted().max)]
     pub max: f32,
-    /// How many stops brighter than the meter calls for the view is exposed, as a camera's exposure
-    /// compensation: 1 brightens it twice over, and -1 darkens it by half.
+    /// How many stops brighter than the meter calls for the view is exposed, as a camera's
+    /// exposure compensation: 1 doubles the brightness, -1 halves it.
     pub compensation: f32,
     /// How fast the exposure rises toward a brighter view's, in stops a second: 3, as Unreal's.
     #[reflect(min = 0.0, default = adapted().speed_up)]
     pub speed_up: f32,
-    /// How fast it falls toward a darker view's: 1, slower, as eyes adapt to the dark.
+    /// How fast it falls toward a darker view's, in stops a second: 1, slower, as eyes adapt to
+    /// the dark.
     #[reflect(min = 0.0, default = adapted().speed_down)]
     pub speed_down: f32,
-    /// The percentile of the view's pixels by their luminance, as a fraction, below which they
-    /// aren't metered: 0.1, leaving out the darkest tenth.
+    /// The luminance percentile, as a fraction, below which pixels aren't metered: 0.1, leaving
+    /// out the darkest tenth.
     #[reflect(min = 0.0, max = 1.0, default = adapted().low_percentile)]
     pub low_percentile: f32,
     /// The percentile above which they aren't: 0.9, leaving out the brightest tenth.
@@ -231,13 +216,13 @@ impl Adaptation {
     }
 }
 
-/// Environments that several entities have at once: the one the view renders with, of the lowest
-/// ID, and how many there are.
+/// Several entities' environments: the lowest ID, which the view renders with, and how many there
+/// are.
 pub(crate) type Tie = (EntityId, usize);
 
-/// The environment the view renders `world` with: that of the lowest ID among its entities with an
-/// [`Environment`], if any. Several warn (`engine.environment_tie`) as they come to be and as they
-/// change, which `warned` keeps track of, rather than every frame.
+/// The environment the view renders `world` with: the lowest ID's [`Environment`], if any. Several
+/// warn (`engine.environment_tie`) when they arise and change, not every frame: `warned` tracks
+/// it.
 pub(crate) fn seen(world: &World, warned: &mut Option<Tie>) -> Option<Environment> {
     let mut lowest: Option<(EntityId, Environment)> = None;
     let mut count = 0;
@@ -276,15 +261,15 @@ mod tests {
         };
         assert_eq!(at(0.0).light_scale(), 1.0 / 1.2);
         assert_eq!(at(15.0).light_scale() * 2.0, at(14.0).light_scale());
-        // The sun's 100,000 lux on a white surface, which reflects 1/π of it a steradian, comes
-        // to about 0.8 on a sunny day's exposure.
+        // The sun's 100,000 lux on a white surface, reflecting 1/π of it per steradian, comes to
+        // about 0.8 at a sunny day's exposure.
         let white = 100_000.0 / std::f32::consts::PI * at(15.0).light_scale();
         assert!((0.8..0.82).contains(&white), "{white}");
     }
 
-    /// Fog, none by default, reflects whole: its description's default is the default fog, which an
-    /// environment's fog switched on takes, and an environment in fog comes back from its value as
-    /// it was, every field of its fog's among it.
+    /// Fog reflects whole: its description's default is the default fog, which switching an
+    /// environment's fog on takes, and a foggy environment round-trips through its value, every
+    /// fog field included.
     #[test]
     fn fog_reflects_whole() {
         use gg_core::math::Vec3;
@@ -315,9 +300,9 @@ mod tests {
         assert_eq!(clear.expect("made").fog, None);
     }
 
-    /// Reflections, none by default, reflect whole: their description's default is the default
-    /// reflections, which an environment's reflections switched on take, and an environment that
-    /// reflects comes back from its value as it was, every field of its reflections' among it.
+    /// Reflections reflect whole: their description's default is the default reflections, which
+    /// switching them on takes, and a reflecting environment round-trips through its value, every
+    /// field included.
     #[test]
     fn reflections_reflect_whole() {
         use crate::reflect::{Meta, Reflect, Types};
@@ -341,9 +326,9 @@ mod tests {
         assert_eq!(plain.expect("made").reflections, None);
     }
 
-    /// An adaptation, none by default, reflects whole: its description's default is the renderer's
-    /// default, which an environment's adaptation switched on takes, and an environment that adapts
-    /// comes back from its value as it was, handing the renderer each field as it has it.
+    /// An adaptation reflects whole: its description's default is the renderer's default, which
+    /// switching it on takes, and an adapting environment round-trips through its value, handing
+    /// the renderer each field unchanged.
     #[test]
     fn adaptation_reflects_whole() {
         use crate::reflect::{Meta, Reflect, Types};
@@ -382,9 +367,8 @@ mod tests {
         assert_eq!(Environment::default().adaptation, None);
     }
 
-    /// The camera's effects, none by default, reflect whole: their descriptions' defaults are their
-    /// defaults, which an environment's switched on take, and an environment with all of them comes
-    /// back from its value as it was, every field among it.
+    /// The camera's effects reflect whole: their descriptions' defaults are their defaults, which
+    /// switching them on takes, and an environment with all of them round-trips through its value.
     #[test]
     fn the_cameras_effects_reflect_whole() {
         use crate::reflect::{Meta, Reflect, Types};
@@ -422,8 +406,8 @@ mod tests {
         assert_eq!(filmed.lens.rendered().grain, 0.1);
     }
 
-    /// An environment hands the renderer its image sky, at its luminance, or its atmosphere as it
-    /// has it, never both, and neither without a sky.
+    /// An environment hands the renderer its image sky at its luminance, or its atmosphere; never
+    /// both, and neither without a sky.
     #[test]
     fn an_environment_hands_the_renderer_its_image_sky_or_its_atmosphere() {
         let with = |sky| Environment {
@@ -453,8 +437,8 @@ mod tests {
         assert_eq!((clear.sky(), clear.atmosphere()), (None, None));
     }
 
-    /// Of several environments the view renders with the one of the lowest ID, which a tie keeps
-    /// warned of; with none, there's none.
+    /// Of several environments the view renders with the lowest ID, and a tie is warned of; with
+    /// none, there's none.
     #[test]
     fn the_lowest_ids_environment_is_seen() {
         let mut world = World::default();
