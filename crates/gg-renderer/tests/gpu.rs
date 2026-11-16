@@ -1,10 +1,8 @@
-//! GPU tests of rendering, against reference images. They run on whatever GPU the loader offers,
-//! which in Linux CI is lavapipe.
+//! GPU tests against reference images, on the loader's GPU (lavapipe in Linux CI).
 //!
-//! They run in one process with a main of their own, which turns off the Vulkan loader's
-//! implicit layers before any thread exists, then runs the tests one after another: those whose
-//! names contain an argument that isn't a flag, as libtest picks them, or all of them without one.
-//! `GG_UPDATE_REFERENCES=1` writes each test's output as its new reference instead of comparing.
+//! Their main turns off the loader's implicit layers before any thread exists, then runs the
+//! tests whose names contain a non-flag argument, or all. `GG_UPDATE_REFERENCES=1` writes each
+//! output as its new reference.
 
 // For setting the environment; see the SAFETY comment.
 #![allow(unsafe_code)]
@@ -33,8 +31,7 @@ use gg_renderer::{
     Workflow, Wrap,
 };
 
-/// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
-/// each the way of uploading named, as its name says.
+/// Runs each test by name; `uploading by` passes and names the upload path.
 macro_rules! run {
     ($tests:ident $(, $test:ident)+ $(,)?) => {
         $($tests.run(stringify!($test), $test);)+
@@ -154,9 +151,8 @@ fn main() -> ExitCode {
         smaa_blends_along_diagonals_by_how_much_they_cover,
         smaa_blends_light_up_to_a_half_floats_brightest,
     );
-    // The tests of models' shading again, their models cut into meshlets, which the view draws
-    // into its visibility buffer and shades from it, against the references they made drawn by
-    // their indices and shaded as they draw.
+    // Models' shading again, by meshlets through the visibility buffer, against the same
+    // references.
     CUT_MESHLETS.store(true, Ordering::Relaxed);
     run!(
         tests by meshlets,
@@ -191,7 +187,7 @@ fn main() -> ExitCode {
         the_scene_draws_as_draws_do,
     );
     CUT_MESHLETS.store(false, Ordering::Relaxed);
-    // Through mesh shaders, where the GPU has them, and through vertex shaders, as every GPU can.
+    // Through mesh shaders where the GPU has them, and through vertex shaders.
     for mesh_shaders in [true, false] {
         let settings = Settings {
             mesh_shaders: Some(mesh_shaders),
@@ -206,7 +202,7 @@ fn main() -> ExitCode {
         let name = format!("meshlets_draw_as_their_indices_do through {through} shaders");
         tests.run(&name, || meshlets_draw_as_their_indices_do(mesh_shaders));
     }
-    // Once for each way of uploading that the GPU has.
+    // Once per upload path the GPU has.
     for path in UploadPath::ALL {
         if let Err(error) = Renderer::headless(&settings(Some(path)), 1, 1) {
             assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
@@ -229,14 +225,13 @@ fn main() -> ExitCode {
     tests.finish()
 }
 
-/// What the tests clear to, in linear RGBA.
+/// The tests' clear color, linear RGBA.
 const CLEAR: [f32; 4] = [0.02, 0.03, 0.05, 1.0];
 
-/// A budget of bytes a frame copies that a test's larger assets take several frames of.
+/// Bytes a frame: a test's larger assets take several frames.
 const SMALL_BUDGET: u64 = 64 << 10;
 
-/// How the tests' renderers are set up: under validation, uploading by `uploads`, if given, rather
-/// than by the GPU's best way, within the default budget.
+/// Validating, uploading by `uploads` if given, else the GPU's best way.
 fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
     Settings {
         app_name: "renderer gpu tests",
@@ -252,17 +247,17 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
     }
 }
 
-/// A headless renderer of `width` by `height` pixels, under validation.
+/// A headless renderer, validating.
 fn renderer(width: u32, height: u32) -> Renderer {
     renderer_uploading(width, height, None)
 }
 
-/// A renderer like [`renderer`]'s, that uploads by `uploads`, if given.
+/// [`renderer`], uploading by `uploads` if given.
 fn renderer_uploading(width: u32, height: u32, uploads: Option<UploadPath>) -> Renderer {
     renderer_within(width, height, uploads, DEFAULT_UPLOAD_BUDGET)
 }
 
-/// A renderer like [`renderer_uploading`]'s, whose frames copy at most `budget` bytes each.
+/// [`renderer_uploading`], copying at most `budget` bytes a frame.
 fn renderer_within(width: u32, height: u32, uploads: Option<UploadPath>, budget: u64) -> Renderer {
     let settings = Settings {
         upload_budget: budget,
@@ -287,9 +282,7 @@ fn shader(file: &str) -> PathBuf {
         .join(file)
 }
 
-/// What a test adds meshes, shaders, textures and materials to, and the uploads that take them to
-/// its renderer; the lights, the sky and the ambient occlusion its frames shade with; and no draws,
-/// for a frame's canvas.
+/// A test's assets, their uploads, what its frames shade with, and no draws, for the canvas.
 #[derive(Default)]
 struct Stores {
     meshes: Meshes,
@@ -307,11 +300,8 @@ struct Stores {
 }
 
 impl Stores {
-    /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
-    /// draws nothing on its canvas, picks and outlines nothing and isn't antialiased, bloomed,
-    /// graded or tonemapped, at time 0 with an exposure of 1 that doesn't adapt and the stores'
-    /// lights, sky and ambient occlusion, with the uploads of what's been added, and what's changed
-    /// in the scene, since the last frame's.
+    /// A frame cleared to [`CLEAR`], with the stores' lighting and the uploads since the last.
+    /// No canvas, picks, outline or post-processing; time 0, a fixed exposure of 1.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -371,10 +361,8 @@ impl Stores {
     }
 }
 
-/// Renders a frame of `draws` into `viewport`, as `viewpoint` sees them, with the uploads taken
-/// since the last, and then frames until every mesh and texture added is drawable, which through
-/// a transfer queue takes frames after the one that takes them: so that what's compared or read
-/// back after shows them all.
+/// Renders until every mesh and texture added is drawable, which through a transfer queue takes
+/// more than a frame.
 fn settle(
     renderer: &mut Renderer,
     stores: &mut Stores,
@@ -402,13 +390,13 @@ fn filling(size: [u32; 2]) -> Viewport {
     }
 }
 
-/// The pixel at (`x`, `y`) of `frame`, `width` pixels wide: RGBA8.
+/// An RGBA8 pixel of `frame`.
 fn pixel_at(frame: &[u8], width: u32, [x, y]: [u32; 2]) -> [u8; 4] {
     let at = ((y * width + x) * 4) as usize;
     <[u8; 4]>::try_from(&frame[at..at + 4]).expect("a pixel")
 }
 
-/// Whether `pixel` is `color`, each channel within 1, which sRGB's encoding may round by.
+/// Within 1 a channel, as sRGB encoding may round.
 fn close(pixel: [u8; 4], color: [u8; 4]) -> bool {
     pixel.iter().zip(color).all(|(&a, b)| a.abs_diff(b) <= 1)
 }
@@ -416,7 +404,7 @@ fn close(pixel: [u8; 4], color: [u8; 4]) -> bool {
 /// `CLEAR`, sRGB-encoded, as a frame reads back.
 const CLEARED: [u8; 4] = [39, 48, 63, 255];
 
-/// The 8-bit sRGB of a linear channel, as a frame's target encodes what shaders write.
+/// A linear channel in 8-bit sRGB, as the frame's target encodes it.
 fn encoded(linear: f32) -> u8 {
     let encoded = if linear <= 0.003_130_8 {
         linear * 12.92
@@ -426,7 +414,7 @@ fn encoded(linear: f32) -> u8 {
     (encoded * 255.0).round() as u8
 }
 
-/// A unit square around the origin, of positions alone, as `flat_color.slang` takes them.
+/// A unit square of positions, as `flat_color.slang` takes them.
 fn square(meshes: &mut Meshes) -> Mesh<[f32; 3]> {
     let corners = [
         [-0.5, -0.5, 0.0],
@@ -439,7 +427,6 @@ fn square(meshes: &mut Meshes) -> Mesh<[f32; 3]> {
         .expect("a mesh")
 }
 
-/// A metallic-roughness material's workflow.
 fn metallic(metallic: f32, roughness: f32) -> Workflow {
     Workflow::MetallicRoughness {
         metallic,
@@ -447,9 +434,7 @@ fn metallic(metallic: f32, roughness: f32) -> Workflow {
     }
 }
 
-/// A unit square around the origin, a model's, counterclockwise seen from +Z, which it faces, its
-/// texture's top left at its top left, its tangent along +X.
-/// A model's mesh of `vertices` and `indices`, packed, of one level, all of them.
+/// A model's mesh of one level.
 fn add_model(
     meshes: &mut Meshes,
     name: &str,
@@ -464,11 +449,11 @@ fn add_model(
     meshes.add_model(name, &packed).expect("a mesh")
 }
 
-/// Whether [`add_model`] cuts each model's mesh into meshlets, as a game's package holds them,
-/// which views draw into their visibility buffers and shade from them: as `main` runs the tests of
-/// models' shading again, against the same references. The tests run one after another.
+/// Whether [`add_model`] cuts meshlets, for `main`'s second run of the shading tests. A global, as
+/// the tests run in turn.
 static CUT_MESHLETS: AtomicBool = AtomicBool::new(false);
 
+/// A model's unit square facing +Z, counterclockwise, its texture upright, its tangent +X.
 fn model_square(meshes: &mut Meshes) -> Mesh<PackedVertex> {
     let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
         position: Vec3::new(x, y, 0.0),
@@ -486,7 +471,7 @@ fn model_square(meshes: &mut Meshes) -> Mesh<PackedVertex> {
     add_model(meshes, "model square", &corners, &[0, 1, 2, 2, 3, 0])
 }
 
-/// Draws a window of egui widgets offscreen, and compares it with its reference image.
+/// A window of egui widgets against its reference.
 fn ui_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
@@ -495,11 +480,10 @@ fn ui_matches_its_reference() {
     let draws = Draws::default();
 
     let egui = egui::Context::default();
-    // Without animation, the first frames show the window as it stays.
+    // No animation, so the first frames show the window as it stays.
     egui.global_style_mut(|style| style.animation_time = 0.0);
     let mut value = 0.25;
-    // egui sizes a new window from what it drew in the frame before, so the second frame is
-    // the first that's settled.
+    // egui sizes a new window from the frame before: the second is the first settled.
     for _ in 0..2 {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -533,26 +517,21 @@ fn ui_matches_its_reference() {
     check(renderer, "ui", WIDTH, HEIGHT);
 }
 
-/// Draws two squares in the colors their draws give, then a triangle in red, green and blue over
-/// the first, each mesh with its own vertex type and shader and placed by a transform of its own,
-/// into part of an offscreen image, as a camera away from the origin sees them, and compares it
-/// with its reference image. The first square is turned and scaled, and the triangle moved and
-/// scaled to cover much of it, so that a matrix pushed transposed or multiplied in the wrong
-/// order, or the meshes drawn out of order, change thousands of pixels; the second square is
-/// clear of them, so that a draw given another's parameters changes a thousand; it's drawn through
-/// a `MeshDraw`, which holds its mesh, shader and parameters without their types, as an entity's
-/// does, and joins the first square's instanced draw. The triangle is added in the last of the
-/// frames, which outnumber those in flight, and the frames go on until it's drawable, so that the
-/// image shows a mesh streamed later beside those that earlier frames streamed to the GPU. The
-/// view renders into an image of its own, which the frame shows at the view's place, so that one
-/// shown elsewhere changes thousands of pixels.
+/// Two squares and a vertex-colored triangle, each of its own vertex type, shader and transform,
+/// in part of the image, against its reference. Pixels that differ:
+/// - matrices transposed or misordered, or meshes out of order: thousands (the first square,
+///   turned and scaled, under the triangle);
+/// - a draw given another's parameters: a thousand (the second, a `MeshDraw` joining the first's
+///   instanced draw);
+/// - the view's image shown off its place: thousands.
+///
+/// The triangle comes in the last of more frames than are in flight, streamed after the rest.
 fn meshes_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
     let mut stores = Stores::default();
-    // 4 units from the view's bottom to its top, which is 160 pixels, so 40 pixels a unit both
-    // ways; the view's center is (1, 0.5).
+    // 40 pixels a unit.
     let viewpoint = Viewpoint {
         position: DVec3::new(1.0, 0.5, 0.0),
         projection: Projection::Orthographic {
@@ -569,7 +548,7 @@ fn meshes_match_their_reference(path: UploadPath) {
             Vec3::new(x, y, 0.0),
         )
     };
-    // Positions, and a color for each draw.
+    // Positions, and a color a draw.
     let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
@@ -580,7 +559,7 @@ fn meshes_match_their_reference(path: UploadPath) {
     let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
     let second = MeshDraw::new(square, flat, orange);
     draws.push_draw(transform(0.8, 0.0, [3.2, 1.8]), &second, 0);
-    // Off the image's corner, so that the image shows where the view is.
+    // Off the corner, to show where the view is.
     let viewport = Viewport {
         origin: [40, 20],
         size: [240, 160],
@@ -618,23 +597,22 @@ struct Sampling {
     sampler: u32,
 }
 
-/// Draws a checkerboard texture repeated across a square, then a texture with alpha over part of
-/// it and part of the clear color, into an offscreen image, and compares it with its reference
-/// image. Each draw's parameters give its texture and sampler. The checkerboard repeats twice each
-/// way, sharp, so that a sampler ignored would clamp it and blur it, and its top left is a third
-/// color, so that an image flipped moves it. The engine's white texture, never drawn here, takes
-/// slot 0, so that textures put in the wrong slots, or sampled through the wrong ones, show it or
-/// each other; the one with alpha is added in the last frame, after which the frames go on until
-/// it's drawable, so that the image shows a texture streamed later beside one streamed earlier.
-/// Its texels are opaque, half, a quarter and wholly transparent, so that a shader blended as
-/// opaque, or as though its alpha were multiplied in, changes thousands of pixels; and the textures
-/// are sRGB, so that colors sampled without decoding come out brighter.
+/// A checkerboard tiled on a square, then a texture with alpha over it and the clear color, each
+/// draw naming its texture and sampler, against its reference. What shows a fault:
+/// - sharp tiles, twice each way: a sampler ignored clamps and blurs;
+/// - a third color at the top left: a flip moves it;
+/// - the white texture in slot 0, never drawn: wrong slots show it or each other;
+/// - texels opaque, half, a quarter and wholly transparent: blending as opaque or premultiplied
+///   changes thousands of pixels;
+/// - sRGB: sampled undecoded, colors come out brighter.
+///
+/// The one with alpha comes in the last frame, streamed after the other.
 fn textures_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
     let mut stores = Stores::default();
-    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    // 40 pixels a unit, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
@@ -647,8 +625,7 @@ fn textures_match_their_reference(path: UploadPath) {
     let textured = (stores.shaders)
         .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Alpha)
         .expect("a shader");
-    // A unit square, its texture's top left at its top left, over texture coordinates 0 to
-    // `extent`.
+    // A unit square, its texture upright, over texture coordinates 0 to `extent`.
     let mut square = |name, extent: f32| {
         let corners = [
             [-0.5, -0.5, 0.0, 0.0, extent],
@@ -666,7 +643,7 @@ fn textures_match_their_reference(path: UploadPath) {
     let place =
         |x| Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(2.0));
 
-    // 4 by 4 texels, sRGB-encoded: a checkerboard of red and blue, with yellow at the top left.
+    // sRGB: red and blue, yellow at the top left.
     let checkerboard: Vec<u8> = (0..16)
         .flat_map(|i| match (i % 4, i / 4) {
             (0, 0) => [250, 220, 60, 255],
@@ -678,7 +655,7 @@ fn textures_match_their_reference(path: UploadPath) {
         .add("checkerboard", [4, 4], &checkerboard, Mipmaps::None)
         .expect("a texture");
     let mut draws = Draws::default();
-    // x from -2 to 0, pixels 40 to 120, each texel 10 pixels across.
+    // Pixels 40 to 120, 10 a texel.
     let sampling = Sampling {
         texture: checkerboard,
         sampler: Sampler::NearestRepeat.index(),
@@ -686,8 +663,7 @@ fn textures_match_their_reference(path: UploadPath) {
     draws.push(tiled, textured, place(-1.0), sampling);
     for frame in 0..3 {
         if frame == 2 {
-            // White, opaque and half transparent along the top; red a quarter opaque, then
-            // nothing, along the bottom.
+            // White opaque and half; red a quarter opaque, and nothing.
             let pixels = [
                 [255, 255, 255, 255],
                 [255, 255, 255, 128],
@@ -697,8 +673,7 @@ fn textures_match_their_reference(path: UploadPath) {
             let translucent = (stores.textures)
                 .add("translucent", [2, 2], pixels.as_flattened(), Mipmaps::None)
                 .expect("a texture");
-            // x from -1 to 1, over the checkerboard's right half and the clear color, each texel
-            // 40 pixels across.
+            // Over the checkerboard's right half and the clear color, 40 pixels a texel.
             let sampling = Sampling {
                 texture: translucent,
                 sampler: Sampler::NearestClamp.index(),
@@ -718,21 +693,17 @@ fn textures_match_their_reference(path: UploadPath) {
     check(renderer, "textures", WIDTH, HEIGHT);
 }
 
-/// Draws sprites into an offscreen image and compares it with its reference image: along the top,
-/// a sheet of 4 by 4 texels whole, its top right quarter, and the whole sheet flipped left to
-/// right; along the bottom, the sheet repeated three times across and twice down, a sprite of only
-/// a color, and the sheet tinted and half transparent over part of that sprite and part of the
-/// clear color. Each of the sheet's texels has a color of its own, so that texture coordinates
-/// flipped, turned or taken from the wrong part of the rectangle change hundreds of pixels; and its
-/// bottom left quarter is half transparent, so that a sprite shader that drops the texture's alpha,
-/// or draws opaque, changes hundreds more. The sprite of only a color shows the engine's white
-/// texture tinted, so that a tint dropped, or a default texture other than white, changes it all.
+/// Sprites of a 4 by 4 sheet against their reference: whole, a quarter, flipped, tiled 3 by 2,
+/// tinted half transparent, and one of a color alone. What shows a fault:
+/// - a color per texel: coordinates flipped, turned or misplaced change hundreds of pixels;
+/// - a half transparent quarter: alpha dropped changes hundreds more;
+/// - the color-only sprite, the white texture tinted: a tint dropped, or another default, shows.
 fn sprites_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    // 40 pixels a unit, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
@@ -741,8 +712,7 @@ fn sprites_match_their_reference() {
         },
         ..Viewpoint::default()
     };
-    // 4 by 4 texels, sRGB-encoded, red growing to the right and green downward; the bottom left
-    // quarter is half transparent.
+    // sRGB, red growing rightward, green downward; the bottom left quarter half transparent.
     let sheet: Vec<u8> = (0..16)
         .flat_map(|i| {
             let (x, y) = (i % 4, i / 4);
@@ -752,7 +722,7 @@ fn sprites_match_their_reference() {
         .collect();
     let sheet = stores.textures.add("sheet", [4, 4], &sheet, Mipmaps::None);
     let sheet = sheet.expect("a texture");
-    // `width` by `height` units, centered at (`x`, `y`). Every sprite's edges fall between pixels.
+    // Every sprite's edges fall between pixels.
     let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
         Mat4::from_translation(Vec3::new(x, y, 0.0))
             * Mat4::from_scale(Vec3::new(width, height, 1.0))
@@ -763,8 +733,7 @@ fn sprites_match_their_reference() {
         ..Sprite::default()
     };
     let mut draws = Draws::default();
-    // Along the top, each 60 pixels across: the whole sheet, 15 pixels a texel; its top right
-    // quarter, 30 pixels a texel; and the whole sheet flipped.
+    // Along the top, 60 pixels across: 15 pixels a texel whole, 30 the quarter.
     draws.push_sprite(place([-2.0, 1.0], [1.5, 1.5]), whole);
     let quarter = Sprite {
         rect: [Vec2::new(0.5, 0.0), Vec2::new(1.0, 0.5)],
@@ -776,8 +745,8 @@ fn sprites_match_their_reference() {
         ..whole
     };
     draws.push_sprite(place([2.0, 1.0], [1.5, 1.5]), flipped);
-    // Along the bottom: the sheet tiled, 8 pixels a texel, so that no pixel's center is on a
-    // texel's edge; orange; and the sheet tinted, over the orange sprite's right third, 20 pixels.
+    // Tiled 8 pixels a texel, so no pixel's center is on a texel's edge; the tinted one over the
+    // orange's right third, 20 pixels.
     let tiled = Sprite {
         rect: [Vec2::ZERO, Vec2::new(3.0, 2.0)],
         sampler: Sampler::NearestRepeat,
@@ -809,19 +778,15 @@ fn sprites_match_their_reference() {
     check(renderer, "sprites", WIDTH, HEIGHT);
 }
 
-/// Draws circles into an offscreen image and compares it with its reference image: along the top,
-/// a white disc, an orange ring a fifth of its radius thick and a cyan disc faded over half its
-/// radius; along the bottom, a green ellipse, scaled unevenly, a purple disc half transparent over
-/// an orange sprite's corner and the clear color, and white discs 8 and 3 pixels across, their
-/// edges smoothed as much as the rest's. Each circle's quad shows what's behind it outside the
-/// circle, so that a shader that draws its whole quad, or drops its alpha, changes hundreds of
-/// pixels.
+/// Circles against their reference: a disc, a ring a fifth of its radius thick, a disc faded over
+/// half its radius, an ellipse, a half transparent disc over a sprite's corner, and discs 8 and 3
+/// pixels across, as smooth. Drawing the whole quad, or dropping alpha, changes hundreds of pixels.
 fn circles_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    // 40 pixels a unit, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
@@ -830,7 +795,6 @@ fn circles_match_their_reference() {
         },
         ..Viewpoint::default()
     };
-    // `width` by `height` units, centered at (`x`, `y`).
     let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
         Mat4::from_translation(Vec3::new(x, y, 0.0))
             * Mat4::from_scale(Vec3::new(width, height, 1.0))
@@ -840,7 +804,7 @@ fn circles_match_their_reference() {
         ..Circle::default()
     };
     let mut draws = Draws::default();
-    // First, for the purple disc to go over.
+    // First, under the purple disc.
     let orange = Sprite {
         color: Vec4::new(0.9, 0.4, 0.1, 1.0),
         ..Sprite::default()
@@ -880,12 +844,10 @@ fn circles_match_their_reference() {
     check(renderer, "circles", WIDTH, HEIGHT);
 }
 
-/// Draws glyphs from a field of data whose distances this test computes, a ring's and a square's,
-/// as a font's field holds a glyph's in each channel, and compares them with their reference image:
-/// along the top, rings on quads from 8 to 120 pixels across, from a quarter of a pixel a texel of
-/// the field to nearly four, each smoothed over a pixel; along the bottom, squares, one turned, one
-/// half transparent over an orange sprite, their corners square, and a small white one. What's
-/// fully transparent draws nothing, so a shader that draws its whole quad changes hundreds of pixels.
+/// Glyphs of a distance field this test computes, a ring and a square, against their reference:
+/// rings 8 to 120 pixels across, a quarter of a pixel a texel to nearly four, each smoothed over a
+/// pixel; and squares with square corners, turned, half transparent and small. Drawing the whole
+/// quad would change hundreds of pixels.
 fn text_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 160;
@@ -894,8 +856,7 @@ fn text_matches_its_reference() {
     const RANGE: f32 = 8.0;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // The ring's and the square's signed distances from their edges, inward, in texels, from each
-    // texel's middle: two cells side by side.
+    // Signed distances inward from the edges, in texels, at each texel's middle.
     let ring = |x: f32, y: f32| {
         let from = Vec2::new(x, y).length();
         (12.0 - from).min(from - 6.0)
@@ -930,7 +891,7 @@ fn text_matches_its_reference() {
         rect: [Vec2::new(cell / 2.0, 0.0), Vec2::new(cell / 2.0 + 0.5, 1.0)],
         range: RANGE,
     };
-    // 4 units from the view's bottom to its top, 40 pixels a unit, and 8 across, around the origin.
+    // 40 pixels a unit, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
@@ -939,7 +900,6 @@ fn text_matches_its_reference() {
         },
         ..Viewpoint::default()
     };
-    // `size` units across and up, centered at (`x`, `y`), turned by `angle`.
     let place = |[x, y]: [f32; 2], size: f32, angle: f32| {
         Mat4::from_scale_rotation_translation(
             Vec3::new(size, size, 1.0),
@@ -948,7 +908,7 @@ fn text_matches_its_reference() {
         )
     };
     let mut draws = Draws::default();
-    // First, for the half transparent square to go over.
+    // First, under the half transparent square.
     let orange = Sprite {
         color: Vec4::new(0.9, 0.4, 0.1, 1.0),
         ..Sprite::default()
@@ -999,13 +959,9 @@ fn text_matches_its_reference() {
     check(renderer, "text", WIDTH, HEIGHT);
 }
 
-/// Draws on the canvas of a view in part of a frame, over the world, and compares it with its
-/// reference image: squares 16 pixels across in the view's corners, red at its bottom left, green
-/// at its bottom right, blue at its top left and yellow at its top right, a white bar half
-/// transparent across its middle and an orange disc above its left, all over an opaque gray square
-/// near a camera with perspective, which covers the view but its right edge, and a cyan sprite
-/// nearer still, which the bar goes over too. Canvas draws at the far plane, which the square would
-/// hide, make 3,360 pixels differ.
+/// A view's canvas over its world, against its reference: squares in its corners, a half
+/// transparent bar and a disc, over a near opaque square and a nearer sprite. Canvas drawn at the
+/// far plane, under the square, makes 3,360 pixels differ.
 fn the_canvas_matches_its_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
@@ -1028,7 +984,7 @@ fn the_canvas_matches_its_reference() {
         .expect("a shader");
     let square = square(&mut stores.meshes);
     let mut draws = Draws::default();
-    // 0.7 in front of the camera, where its view is about 0.81 high and 1.08 across, shifted left.
+    // 0.7 ahead, where the view is about 0.81 by 1.08: all but its right edge.
     let near = Mat4::from_scale_rotation_translation(
         Vec3::new(1.0, 0.85, 1.0),
         Quat::IDENTITY,
@@ -1039,14 +995,14 @@ fn the_canvas_matches_its_reference() {
         color: Vec4::new(0.1, 0.8, 0.9, 1.0),
         ..Sprite::default()
     };
-    // 0.55 in front of the camera, about 15 pixels across.
+    // 0.55 ahead, about 15 pixels across.
     let in_front = Mat4::from_scale_rotation_translation(
         Vec3::new(0.08, 0.08, 1.0),
         Quat::IDENTITY,
         Vec3::new(0.04, 0.0, 3.45),
     );
     draws.push_sprite(in_front, cyan);
-    // `size` pixels across and up, centered at (`x`, `y`) from the view's bottom left.
+    // In pixels from the view's bottom left.
     let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
         Mat4::from_translation(Vec3::new(x, y, 0.0))
             * Mat4::from_scale(Vec3::new(width, height, 1.0))
@@ -1092,22 +1048,18 @@ fn the_canvas_matches_its_reference() {
     check(renderer, "canvas", WIDTH, HEIGHT);
 }
 
-/// Outlines what the view shows of the IDs 3 and 7, 3 pixels wide, and compares it with its
-/// reference image: a disc and a square of ID 7, which it goes round alike; the square's corner
-/// under a square of ID 3, which it goes round together with the square, as one shape, and the
-/// square's bottom past the view's, where it stops; and beside them a square of no entity and one
-/// of ID 5, which it leaves alone. The band, the glow and where they end are read off the disc's
-/// row. First, outlines of no IDs, and 0, NaN and negative pixels wide, change no pixel of a frame
-/// without one; and the
-/// frames that outline read picks back first, which synchronization validation sees the outline's
-/// reads of the IDs wait for. The outline is drawn into the view, so the view read back shows it
-/// as the frame does.
+/// Outlines of IDs 3 and 7, 3 pixels wide, against their reference: round a disc and a square of
+/// 7; round 7's corner and a square of 3 over it as one shape; stopping at the view's edge; and
+/// not round squares of no entity and of 5. The band and glow are read off the disc's row.
+/// - Outlines of no IDs, or 0, NaN and negative widths, change no pixel.
+/// - Picks are read back first: synchronization validation sees the outline's ID reads wait.
+/// - The view read back shows the outline as the frame does.
 fn outlines_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    // 40 pixels a unit, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
@@ -1116,7 +1068,6 @@ fn outlines_match_their_reference() {
         },
         ..Viewpoint::default()
     };
-    // `width` by `height` units, centered at (`x`, `y`).
     let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
         Mat4::from_translation(Vec3::new(x, y, 0.0))
             * Mat4::from_scale(Vec3::new(width, height, 1.0))
@@ -1154,8 +1105,7 @@ fn outlines_match_their_reference() {
         color: orange,
         width,
     };
-    // Each pixel as a frame without an outline has it, once everything is drawable: an outline of
-    // the square and the disc's ID, wider than 0, would go round them.
+    // A frame without an outline, everything drawable.
     settle(
         &mut renderer,
         &mut stores,
@@ -1205,11 +1155,9 @@ fn outlines_match_their_reference() {
     let read = view_read(&renderer);
     let pixels = frame_pixels(&mut renderer);
     assert_eq!(read, Some(([WIDTH, HEIGHT], pixels.clone())));
-    // Out from the disc's left edge along its middle row: its ID's first pixel is x = 30, so a
-    // pixel `away` to the left of it is that far from the nearest. Red goes from the clear color's
-    // 39 to the outline's 255 as its alpha rises, blended as light: the band solid to 3 pixels,
-    // smoothed over the next, whose alpha is 0 there; then the glow, half the band's alpha at the
-    // band's inner edge and falling by the square of the way left to twice the width, 6 pixels.
+    // Left of the disc (first pixel x = 30) along its middle row, red blended as light from 39 to
+    // 255 by alpha: the band solid to 3 pixels, smoothed over the next; then the glow, half the
+    // band's alpha at its inner edge, falling by the square to 0 at twice the width.
     let linear = |c: f32| {
         let c = c / 255.0;
         if c <= 0.04045 {
@@ -1247,12 +1195,9 @@ fn outlines_match_their_reference() {
     compare("outlines", WIDTH, HEIGHT, &pixels);
 }
 
-/// Draws grids, each a frame of its own, and compares each with its reference image: on the ground
-/// as a camera with perspective sees it from above, its lines anti-aliased, each power of ten's
-/// fading out into the next's farther off, and all of them toward the horizon, the X axis red and
-/// the Z axis blue; and in XY, facing it orthographically, its lines crisp, a pixel each, a unit
-/// apart, the X axis red, the Y axis green, and the line ten units along X brighter. Each grid's
-/// square and parameters are those the engine's grid gives its camera.
+/// Grids against their references, set up as the engine's grid sets them for its camera. On the
+/// ground in perspective: antialiased, each power of ten fading into the next, all toward the
+/// horizon. In XY, orthographic: crisp, a pixel wide, the line at x = 10 brighter.
 fn grids_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
@@ -1261,8 +1206,7 @@ fn grids_match_their_reference() {
     let red = Vec3::new(0.8, 0.1, 0.1);
     let green = Vec3::new(0.1, 0.7, 0.1);
     let blue = Vec3::new(0.1, 0.3, 0.9);
-    // 2 over the ground, looking 22.5° down, seeing a sixth of a turn from the view's bottom to its
-    // top, which shows the horizon; on a square around its foot a thousand times that across.
+    // Showing the horizon; the square a thousand times the eye's height.
     let above = Viewpoint {
         position: DVec3::new(0.3, 2.0, 3.0),
         rotation: Quat::from_rotation_x(-PI / 8.0),
@@ -1287,8 +1231,7 @@ fn grids_match_their_reference() {
         normal: Vec3::Y,
         lines: GridLines::Perspective,
     };
-    // 10 units from the view's bottom to its top, 16 pixels a unit, over (5, 1.5); on a square
-    // twice the view's width across and its height up.
+    // 16 pixels a unit; the square twice the view's width.
     let facing = Viewpoint {
         position: DVec3::new(5.0, 1.5, 0.0),
         projection: Projection::Orthographic {
@@ -1337,20 +1280,17 @@ fn grids_match_their_reference() {
     shut_down(renderer);
 }
 
-/// Draws lines into an offscreen image, as a camera with perspective sees them, and compares it with
-/// its reference image: across the top, lines 1, 2, 4 and 8 pixels wide, and one half a pixel wide,
-/// which draws a pixel wide and half as bright; a square's outline, turned, whose sides meet at its
-/// corners; a line from near the camera to far away, as wide all along it; a line on to behind the
-/// camera, cut where it crosses the near plane, without which it would show mirrored through the
-/// view's middle; a line behind an opaque square, which hides its middle, and another in front of
-/// the square; and a line 10 pixels wide, half transparent, over a sprite.
+/// Lines in perspective against their reference: 1, 2, 4 and 8 pixels wide, and half a pixel,
+/// drawn a pixel wide at half brightness; a turned square's outline, meeting at its corners; one
+/// receding, as wide all along; one to behind the camera, cut at the near plane, else mirrored
+/// through the view's middle; one behind an opaque square and one in front; and a wide half
+/// transparent one over a sprite.
 fn lines_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
-    // 0, about 4.6 units, 34.6 pixels a unit.
+    // At z = 0, 34.6 pixels a unit.
     let viewpoint = Viewpoint {
         position: DVec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
@@ -1430,7 +1370,6 @@ fn lines_match_their_reference() {
         [0.2, 0.4, 1.0, 0.5],
         10.0,
     );
-    // A square 1.2 across, turned 30°.
     let turned = Mat4::from_scale_rotation_translation(
         Vec3::splat(1.2),
         Quat::from_rotation_z(PI / 6.0),
@@ -1453,27 +1392,20 @@ fn lines_match_their_reference() {
     check(renderer, "lines", WIDTH, HEIGHT);
 }
 
-/// Draws three runs into an offscreen image, each one instanced draw, which `Renderer::drawn`
-/// counts, and compares it with its reference image: six sprites along the top; a band, a mesh with
-/// a shader of its own; and sprites along the bottom, over the band's lower edge. The sprites cycle
-/// through the engine's white texture, tinted, and two textures of their own, in tints of their
-/// own, scaled unevenly and turned, each 32 by 24 pixels, so that a sprite drawn with its
-/// neighbor's transform or parameters, or not at all, changes more pixels than the comparison
-/// allows; the bottom row's are the top's in reverse, so that one run read as another changes them
-/// too. The last run has 20,000 sprites: its first three and last three along the bottom, and the
-/// rest out of the view, in a look of their own. Only the last frame draws it, in the slot of the
-/// first. A frame's arena merges the buffers it grew into once its slot comes round again, so only
-/// a frame that needs more than its slot has held grows it: the last frame's first run fills a
-/// little of the slot's one buffer, and the big run's transforms and parameters, more than a
-/// megabyte, land in a buffer grown in the middle of the frame.
+/// Three runs, each one instanced draw, against their reference: sprites, a mesh band, and sprites
+/// in reverse over it, so one run read as another shows.
+/// - Each sprite's texture, tint, scale and turn differ from its neighbors': one drawn with a
+///   neighbor's transform or parameters, or not at all, fails the comparison.
+/// - The last run has 20,000 sprites, all but six out of view, drawn by the last frame alone, in
+///   the first's slot. An arena merges what it grew into once its slot comes round, so the big
+///   run's megabyte lands in a buffer grown mid-frame.
 fn batches_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
-    /// The last run's sprites.
     const BIG: usize = 20_000;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    // 40 pixels a unit, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
@@ -1482,8 +1414,7 @@ fn batches_match_their_reference() {
         },
         ..Viewpoint::default()
     };
-    // 2 by 2 texels, sRGB-encoded: red and yellow over green and blue; and a checkerboard of light
-    // and dark.
+    // sRGB.
     let quadrants = [
         [220, 50, 40, 255],
         [240, 200, 40, 255],
@@ -1499,8 +1430,6 @@ fn batches_match_their_reference() {
         .add("checker", [2, 2], checker.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let white = Sprite::default().texture;
-    // Orange, the quadrants as they are, the checker in cyan, violet, the quadrants half
-    // transparent, and the checker in yellow.
     let looks = [
         (white, Vec4::new(0.9, 0.4, 0.1, 1.0)),
         (Some(quadrants), Vec4::ONE),
@@ -1509,8 +1438,7 @@ fn batches_match_their_reference() {
         (Some(quadrants), Vec4::new(1.0, 1.0, 1.0, 0.5)),
         (Some(checker), Vec4::new(1.0, 0.9, 0.3, 1.0)),
     ];
-    // The sprite at `place` of six along a row at height `y`, from x = -2.5 to 2.5, in `look`,
-    // turned 25 degrees more than the one before it, and wider or taller by turns.
+    // Each turned 25° more than the one before, wider or taller by turns.
     let sprite = |place: usize, y: f32, look: usize| {
         let (texture, color) = looks[look];
         let size = if place.is_multiple_of(2) {
@@ -1531,12 +1459,11 @@ fn batches_match_their_reference() {
         };
         (transform, sprite)
     };
-    // Positions, and a color for each draw.
+    // Positions, and a color a draw.
     let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
     let square = square(&mut stores.meshes);
-    // Across the middle, from y = -0.45 to 0.45, in slate.
     let band = Mat4::from_scale(Vec3::new(5.8, 0.9, 1.0));
     let slate = Vec4::new(0.25, 0.3, 0.4, 1.0);
     let away = Mat4::from_translation(Vec3::new(100.0, 100.0, 0.0));
@@ -1556,7 +1483,7 @@ fn batches_match_their_reference() {
         draws.push(square, flat, band, slate);
         if frame == 2 {
             for i in 0..BIG {
-                // The first three and the last three are seen, at the bottom's six places.
+                // The first and last three are seen.
                 let place = match i {
                     0..3 => i,
                     _ if i >= BIG - 3 => i + 6 - BIG,
@@ -1590,26 +1517,21 @@ fn batches_match_their_reference() {
     check(renderer, "batches", WIDTH, HEIGHT);
 }
 
-/// Draws a sprite sheet's cells, packed edge to edge, into an offscreen image, magnified, and
-/// compares it with its reference image. Each cell is 2 by 2 texels in a hue unlike those of the
-/// cells beside it, so that a sample of a neighbor's texel shows. In four rows: filtered linearly,
-/// two cells, two side by side, which blend into each other across their seam, and one flipped; by
-/// the nearest texel, the same, the first two turned a quarter and a half; a rectangle of pixels
-/// across cells, filtered linearly, and a rectangle that cuts texels 0.3 of a texel from its edges,
-/// by the nearest texel and linearly, whose slivers of those texels still show; and filtered
-/// linearly, a cell of a sheet 46 texels across, whose edges' texture coordinates times 46 round
-/// to just past them, the sheet tiled past its edge by a repeating sampler, whose outermost texels
-/// don't blend with those they'd wrap to, and a rectangle of no width, which shows the texel to its
-/// right. Every edge, and every texel's edge, falls between pixels: whether a nearest sampler takes
-/// a neighbor's texel where an edge lies on a pixel's center depends on how a GPU rounds, so the
-/// linear sprites check the bounds the shader keeps to, which are the same for both. The sheets'
-/// odd sizes, 8 by 4 and 46 by 2, check that each way of uploading copies their rows whole.
+/// A sprite sheet's cells, packed edge to edge, magnified, against their reference. Each cell's
+/// hue differs from its neighbors', so sampling past a cell's edge shows. Linear and nearest:
+/// cells, turned or flipped, side by side, a rectangle across cells, and one cutting texels 0.3
+/// in. Linear: a cell of a sheet whose edges' coordinates round to just past them; the sheet tiled
+/// past its edge, its edge texels not blending with those they'd wrap to; a rectangle of no width.
+///
+/// Every edge falls between pixels: on a pixel's center, a nearest sampler takes the neighbor or
+/// not as the GPU rounds. So the linear sprites check the shader's bounds, the same for both. The
+/// odd sizes, 8 by 4 and 46 by 2, check that each upload path copies rows whole.
 fn sheets_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
     let mut stores = Stores::default();
-    // 5 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    // 40 pixels a unit, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 5.0,
@@ -1618,8 +1540,7 @@ fn sheets_match_their_reference(path: UploadPath) {
         },
         ..Viewpoint::default()
     };
-    // 4 by 2 cells, sRGB-encoded: red, cyan, yellow and blue over green, magenta, slate and orange,
-    // each lightest at its top left and darkest at its bottom right.
+    // 4 by 2 cells, sRGB, each lightest at its top left and darkest at its bottom right.
     let hues: [[u8; 3]; 8] = [
         [220, 40, 40],
         [40, 200, 220],
@@ -1643,8 +1564,8 @@ fn sheets_match_their_reference(path: UploadPath) {
         size: [8, 4],
         cell: [2, 2],
     };
-    // 23 cells of 2 by 2 texels, yellow and blue by turns, sRGB-encoded. Cell 14's edges are
-    // texels 28 and 30, whose texture coordinates times 46 come to 27.999998 and 30.000002.
+    // 23 cells, yellow and blue by turns. Cell 14's edges, texels 28 and 30, have coordinates
+    // that times 46 come to 27.999998 and 30.000002.
     let strip: Vec<u8> = (0..92_usize)
         .flat_map(|i| {
             if i % 46 / 2 % 2 == 0 {
@@ -1659,7 +1580,6 @@ fn sheets_match_their_reference(path: UploadPath) {
         size: [46, 2],
         cell: [2, 2],
     };
-    // `width` by `height` units, turned `turn` counterclockwise, centered at (`x`, `y`).
     let place = |[x, y]: [f32; 2], [width, height]: [f32; 2], turn: f32| {
         Mat4::from_scale_rotation_translation(
             Vec3::new(width, height, 1.0),
@@ -1674,7 +1594,7 @@ fn sheets_match_their_reference(path: UploadPath) {
         Vec2::new(top_left.x, bottom_right.y),
     ];
     let mut draws = Draws::default();
-    // Each cell 0.8 units, 32 pixels, across: 16 pixels a texel.
+    // 16 pixels a texel.
     for (y, sampler, turns) in [
         (1.8, Sampler::LinearClamp, [0.0, 0.0]),
         (0.6, Sampler::NearestClamp, [FRAC_PI_2, PI]),
@@ -1699,15 +1619,14 @@ fn sheets_match_their_reference(path: UploadPath) {
             draws.push_sprite(place(at, size, turn), Sprite { sampler, ..sprite });
         }
     }
-    // Texels 1 to 5 across and 1 to 3 down, 16 pixels a texel.
+    // Texels 1 to 5 across, 1 to 3 down.
     let pixel_cells = SpriteSheet {
         cell: [1, 1],
         ..sheet
     };
     let across = pixel_cells.sprite([1, 1], [4, 2]);
     draws.push_sprite(place([-1.8, -0.6], [1.6, 0.8], 0.0), across);
-    // Texels 1.7 to 3.3 across and 0.7 to 2.3 down, 20 pixels a texel, so that 6 pixels of each
-    // edge show the texel the edge cuts.
+    // 20 pixels a texel: 6 pixels of each edge show the texel it cuts.
     let cut = Sprite {
         texture: Some(sheet.texture),
         rect: [
@@ -1719,11 +1638,9 @@ fn sheets_match_their_reference(path: UploadPath) {
     for (x, sampler) in [(0.0, Sampler::NearestClamp), (1.6, Sampler::LinearClamp)] {
         draws.push_sprite(place([x, -0.6], [0.8, 0.8], 0.0), Sprite { sampler, ..cut });
     }
-    // 24 pixels a texel across.
     let between = strip.sprite([14, 0], [1, 1]);
     draws.push_sprite(place([-2.0, -1.8], [1.2, 0.8], 0.0), between);
-    // Texels 6 to 10 across, past the sheet's right edge, and all 4 down: 12 pixels a texel across
-    // and 8 down.
+    // Texels 6 to 10 across, past the sheet's right edge.
     let tiled = Sprite {
         texture: Some(sheet.texture),
         rect: [Vec2::new(0.75, 0.0), Vec2::new(1.25, 1.0)],
@@ -1731,7 +1648,7 @@ fn sheets_match_their_reference(path: UploadPath) {
         ..Sprite::default()
     };
     draws.push_sprite(place([-0.4, -1.8], [1.2, 0.8], 0.0), tiled);
-    // On the edge between texels 3 and 4, down the whole sheet.
+    // On the edge between texels 3 and 4.
     let line = Sprite {
         texture: Some(sheet.texture),
         rect: [Vec2::new(0.5, 0.0), Vec2::new(0.5, 1.0)],
@@ -1753,26 +1670,22 @@ fn sheets_match_their_reference(path: UploadPath) {
     check(renderer, "sheets", WIDTH, HEIGHT);
 }
 
-/// Draws the `meshes` test's squares and triangle, then along the bottom of the last view a band
-/// one texel a pixel, into a view that changes size from frame to frame, and compares the view as
-/// it shows in the frame with its reference image. The view is the whole image, then shut, which
-/// draws nothing and leaves the frame its clear color alone, then 160 by 180 pixels, then 160 by
-/// 160 at [100, 20], 40 pixels a unit, as the reference shows it from the frame that gives it that
-/// size; then 200 by 140, 200 by 160, and 160 by 160 again for three frames, which must show it as
-/// before. Each side changes alone somewhere, so that an image made again only when one side
-/// changes shows too. Against the reference, an image left the size it first had makes 15,217
-/// pixels differ, an aspect ratio taken from the whole image's shape 8,917, the view shown at the
-/// image's corner 22,662, shown past its place 38,400, and its image made again a frame late, or
-/// only for a new width, 8,523; shown a pixel off, across, down or both, the band's texels, of
-/// four colors, change its 3,200 pixels. The fourth frame makes the view's image again while the
-/// third may still draw with the one before, which validation sees destroyed only once the GPU is
-/// done with it.
+/// The `meshes` scene and a band of a texel a pixel, in a view resized each frame: whole, shut
+/// (the clear color alone), then sizes where each side changes alone. The 160 by 160 frame is the
+/// reference, and the same size again must match it. Pixels that differ:
+/// - the image left its first size: 15,217;
+/// - the aspect ratio from the whole image: 8,917;
+/// - the view at the image's corner: 22,662; past its place: 38,400;
+/// - the image remade a frame late, or for a new width alone: 8,523;
+/// - shown a pixel off: the band's 3,200.
+///
+/// The fourth frame remakes the image the third may still use: validation sees it destroyed only
+/// once the GPU is done.
 fn views_match_their_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 units from the view's bottom to its top; the view's center is (1, 0.5).
     let viewpoint = Viewpoint {
         position: DVec3::new(1.0, 0.5, 0.0),
         projection: Projection::Orthographic {
@@ -1805,8 +1718,7 @@ fn views_match_their_reference() {
     let triangle = (stores.meshes)
         .add("triangle", &vertices, &[0, 1, 2])
         .expect("a mesh");
-    // White, red, blue and black, each unlike the others, so that a texel shifted to its neighbor's
-    // place, across, down or both, shows another color.
+    // Shifted a texel any way, each shows another color.
     let tile = [
         [255, 255, 255, 255],
         [255, 0, 0, 255],
@@ -1822,8 +1734,7 @@ fn views_match_their_reference() {
     let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
     draws.push(square, flat, transform(0.8, 0.0, [3.2, 1.8]), orange);
     draws.push(triangle, colored, transform(2.0, 0.0, [1.0, 0.5]), ());
-    // Across the last view's bottom, 4 units by half a unit: 160 by 20 pixels, the tile repeated
-    // to a texel each, whose centers are the pixels' centers.
+    // Along the last view's bottom, a texel a pixel, centers on centers.
     let band = Sprite {
         texture: Some(tile),
         rect: [Vec2::ZERO, Vec2::new(80.0, 10.0)],
@@ -1851,7 +1762,7 @@ fn views_match_their_reference() {
             .expect("the frame's pixels")
             .expect("a headless renderer's frame can be read back")
     };
-    // Everything drawable first, in the view the frames start with.
+    // Everything drawable first.
     settle(&mut renderer, &mut stores, views[0], viewpoint, &draws);
     let mut shown = None;
     for (frame, viewport) in views.into_iter().enumerate() {
@@ -1868,7 +1779,7 @@ fn views_match_their_reference() {
                 }
             }
             3 => {
-                // What the shut view drew, nothing, which comes back two frames later.
+                // The shut view's nothing, two frames later.
                 assert_eq!(renderer.drawn(), DrawCounts::default());
                 let pixels = read_back(&mut renderer);
                 compare("views", WIDTH, HEIGHT, &pixels);
@@ -1891,23 +1802,16 @@ fn views_match_their_reference() {
     check(renderer, "views", WIDTH, HEIGHT);
 }
 
-/// Draws squares and sprites into an offscreen image, as a camera with perspective sees them, and
-/// compares it with its reference image: two opaque squares that cross, each hiding the half of
-/// the other behind it; a nearer opaque square drawn before a farther one, which it hides; two
-/// opaque squares in one plane facing the camera, the later over the earlier, as draws at one z
-/// stack in 2D; a translucent sprite drawn after an opaque square in front of it, which hides the
-/// middle of it; and two translucent sprites, the nearer drawn first, which the farther goes over,
-/// since what blends tests depth without writing it. In the first frame alone, an opaque square
-/// nearer than the rest covers most of them, which the later frames, their depth cleared, don't
-/// remember. Against the reference, opaque squares that don't write depth make 2,957 pixels
-/// differ, sprites that write it 1,118, and sprites that don't test it 1,444.
+/// Depth against its reference: opaque squares crossing, hiding one drawn later, and stacking in
+/// draw order at one z as in 2D; a sprite hidden by an opaque square in front; and translucent
+/// sprites, which test depth without writing it. The first frame's near square covers most; later
+/// frames, their depth cleared, don't remember it. Pixels that differ if opaque squares don't write
+/// depth: 2,957; if sprites write it: 1,118; if they don't test it: 1,444.
 fn depth_matches_its_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
-    // 0, about 4.6 units.
     let viewpoint = Viewpoint {
         position: DVec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
@@ -1920,7 +1824,6 @@ fn depth_matches_its_reference() {
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
     let square = square(&mut stores.meshes);
-    // `size` across at `at`, turned `turn` degrees about Y.
     let placed = |size: f32, turn: f32, at: [f32; 3]| {
         Mat4::from_scale_rotation_translation(
             Vec3::splat(size),
@@ -1976,24 +1879,19 @@ fn depth_matches_its_reference() {
     check(renderer, "depth", WIDTH, HEIGHT);
 }
 
-/// Draws ten instances of a square with two levels of detail, as a camera with perspective sees
-/// them, and compares it with its reference image. The square is 2 across: level 0 is its two
-/// triangles, and level 1 one other triangle on its own, the lower left half, whose error spans a
-/// pixel where its sphere's nearest point is 5 away, 6.4 from the camera. Along the top, five
-/// instances through an opaque shader, 4 to 12 away, in the order near, far, near, far, far, so
-/// that drawing them by level takes two draws, not four; along the bottom, five through a shader
-/// that blends, far, near, near, far, near, which draw in that order, so that the same takes four.
-/// Each is a color of its own, and an ID, which picks read back. The near ones show whole squares,
-/// and the far ones the lower left halves of theirs; the draws and triangles counted are the
-/// levels' (6 draws, 10 instances, 15 triangles), where the first level alone makes 20 triangles
-/// and 2 draws, and the second 10 and 2.
+/// Ten instances of a square with two levels of detail, against their reference: level 0 its two
+/// triangles; level 1 another, its lower left half, whose error spans a pixel 6.4 from the camera.
+/// Near ones show whole squares, far ones halves; picks read each one's ID back.
+/// - Five opaque, near and far mixed: drawn by level, two draws, not four.
+/// - Five blended, drawn in order: four draws.
+/// - Counted: 6 draws, 10 instances, 15 triangles; level 0 alone would make 20 triangles, level 1
+///   10, in 2 draws each.
 fn levels_of_detail_match_their_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // A quarter turn from the view's bottom to its top, over 200 pixels, and as far across over
-    // 320: 100 pixels a unit where the distance ahead is 1, and 100 / distance where it is more.
+    // 100 / distance pixels a unit.
     let viewpoint = Viewpoint {
         projection: Projection::Perspective {
             fov: FRAC_PI_2,
@@ -2014,8 +1912,7 @@ fn levels_of_detail_match_their_reference() {
         [1.0, 1.0, 0.0],
         [-1.0, 1.0, 0.0],
     ];
-    // Counterclockwise: level 0's two halves, the lower right and the upper left, then level 1's
-    // lower left half, which neither of them is, so that the wrong start shows.
+    // Level 1's half is neither of level 0's, so a wrong start shows.
     let indices = [0, 1, 2, 2, 3, 0, 3, 0, 1];
     let lods = Lods {
         levels: vec![
@@ -2036,8 +1933,8 @@ fn levels_of_detail_match_their_reference() {
     let square = (stores.meshes)
         .add_lods("square", &corners, &indices, lods)
         .expect("a mesh");
-    // Each instance's center in the view's pixels, its distance ahead, color and level. The
-    // second level's error spans 0.05 * 100 / (distance - 1.41) pixels: 1.6 at 4.5, 0.66 at 9.
+    // Center in pixels, distance, color, level. Level 1's error spans 0.05 * 100 / (distance -
+    // 1.41) pixels: 1.6 at 4.5, 0.66 at 9.
     let blue = Vec4::new(0.1, 0.2, 0.8, 1.0);
     let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
     let green = Vec4::new(0.1, 0.7, 0.2, 1.0);
@@ -2062,13 +1959,10 @@ fn levels_of_detail_match_their_reference() {
     let instances = (rows.into_iter()).flat_map(|(shader, row)| row.map(|row| (shader, row)));
     let mut draws = Draws::default();
     let mut picks = Vec::new();
-    // What each instance shows, by its ID, its draw's number from 1: its pixels at (-0.7, -0.2) in
-    // the square's own space, inside level 1's triangle, and at (0.2, 0.7), outside it, both off
-    // the diagonal that level 0's halves meet at, by 3 pixels or more at a distance of 12; its
-    // color; and its level.
+    // ID; pixels inside and outside level 1's triangle, 3 or more off level 0's diagonal at 12;
+    // color; level.
     let mut shows = Vec::new();
     for (id, (shader, ([x, y], depth, color, level))) in (1..).zip(instances) {
-        // The world point that shows at the center, `depth` ahead.
         let at = Vec3::new(
             (x - 160.0) * depth / 100.0,
             (100.0 - y) * depth / 100.0,
@@ -2087,8 +1981,7 @@ fn levels_of_detail_match_their_reference() {
         });
         shows.push((id, inside, outside, color, level));
     }
-    // Everything drawable first; then three frames, more than the picks of the first need to be
-    // answered.
+    // Everything drawable first; then three frames, more than the first's picks need.
     settle(
         &mut renderer,
         &mut stores,
@@ -2125,13 +2018,12 @@ fn levels_of_detail_match_their_reference() {
     };
     let clear = pixel([2, 2]);
     for (id, inside, outside, color, level) in shows {
-        // Its color over the clear color, as the target blends them, in linear space.
+        // Blended over the clear color in linear space.
         let over = |channel: usize| color[channel] * color.w + CLEAR[channel] * (1.0 - color.w);
         let expected = [0, 1, 2].map(over).map(encoded);
         let shown = pixel(inside);
         let close = (shown.iter().zip(expected)).all(|(&got, want)| got.abs_diff(want) <= 3);
         assert!(close, "instance {id} shows {shown:?}, not {expected:?}");
-        // Level 0 draws the square's other half, and level 1 leaves it clear.
         let other = pixel(outside);
         match level {
             0 => assert_eq!(other, shown, "instance {id}'s other half"),
@@ -2141,10 +2033,8 @@ fn levels_of_detail_match_their_reference() {
     compare("levels", WIDTH, HEIGHT, &frame);
 }
 
-/// Fills the view with a texture of 4,096 by 4,096 texels of one color, 64 MiB, which the default
-/// budget streams over four frames, and checks that every pixel shows that color once it's
-/// drawable: every texel the view samples must have been copied, over the frames, each part a
-/// whole number of rows.
+/// A 64 MiB texture of one color, streamed over four frames: once drawable, every pixel shows it,
+/// so each part copied whole rows.
 fn a_large_texture_draws_once_streamed(path: UploadPath) {
     const SIDE: u32 = 32;
     const TEXELS: u32 = 4096;
@@ -2156,7 +2046,7 @@ fn a_large_texture_draws_once_streamed(path: UploadPath) {
     let textured = (stores.shaders)
         .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
         .expect("a shader");
-    // The whole view, which is 2 units high and as wide.
+    // The whole view, 2 units square.
     let corners = [
         [-1.0, -1.0, 0.0, 0.0, 1.0],
         [1.0, -1.0, 0.0, 1.0, 1.0],
@@ -2186,7 +2076,7 @@ fn a_large_texture_draws_once_streamed(path: UploadPath) {
     };
     let data = stores.data(filling([SIDE, SIDE]), viewpoint, &draws);
     render_without_ui(&mut renderer, data);
-    // The texture streams on, with whatever else of the first frame's isn't drawable yet.
+    // Still streaming, with whatever else isn't drawable yet.
     let streaming = renderer.streaming();
     assert!(
         streaming.assets >= 1 && streaming.bytes < 64 << 20 && streaming.bytes >= 48 << 20,
@@ -2209,9 +2099,8 @@ fn a_large_texture_draws_once_streamed(path: UploadPath) {
     }
 }
 
-/// What a frame shows at a pixel of [`large_assets_stream_over_frames_within_the_budget`]: the
-/// clear color, where its mesh isn't drawable; the stand-in's white or zeros, where its mesh draws
-/// a texture that isn't; or the asset's own color.
+/// A pixel of [`large_assets_stream_over_frames_within_the_budget`]: the clear color while its
+/// mesh isn't drawable, the stand-in while its texture isn't, then its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shows {
     Clear,
@@ -2219,16 +2108,14 @@ enum Shows {
     Own,
 }
 
-/// Streams assets larger than a budget of 64 KiB a frame over several frames, by `path`: a square
-/// textured with a 256 by 256 texture of colors, 256 KiB; another with a 192 by 128 texture of
-/// data, 96 KiB, which shaders read as stored and the frame's target then encodes; and a mesh of
-/// 9,216 vertices and 54,150 indices, 324 KiB, in a flat color. Each frame reads back a pixel of
-/// each: the square of colors shows the stand-in, white, until the frame that shows its texture,
-/// having shown the clear color before its mesh was drawable, if at all; the square of data shows
-/// the clear color until its texture is there, since its stand-in's zeros are fully transparent,
-/// which the shader discards, as text does, where white would show; the large mesh shows the clear
-/// color until it's drawable; and each shows its own color exactly from then on. What's streaming
-/// counts down, and nothing that isn't drawable is counted drawn.
+/// Streams a texture of colors, 256 KiB, one of data, 96 KiB, and a mesh, 324 KiB, at 64 KiB a
+/// frame, reading back a pixel of each every frame. In order:
+/// - colors: the clear color while its mesh isn't drawable, the stand-in's white, then its own;
+/// - data: the clear color until its own, as its stand-in's zeros are transparent, which shaders
+///   discard, as text does;
+/// - the mesh: the clear color, then its own.
+///
+/// What's streaming counts down, and nothing undrawable is counted drawn.
 fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
     const SIDE: u32 = 64;
     const GRID: u32 = 96;
@@ -2239,11 +2126,10 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
     let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
-    // Positions, then texture coordinates; opaque, so that the zeros of data show as black.
+    // Opaque, so data's zeros show black.
     let textured = (stores.shaders)
         .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
         .expect("a shader");
-    // A unit square, its texture over it.
     let corners = [
         [-0.5, -0.5, 0.0, 0.0, 1.0],
         [0.5, -0.5, 0.0, 1.0, 1.0],
@@ -2253,7 +2139,6 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
     let square = (stores.meshes)
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
-    // A grid of GRID by GRID vertices over the unit square, two triangles a cell.
     let vertices: Vec<[f32; 3]> = (0..GRID * GRID)
         .map(|i| {
             let (x, y) = (i % GRID, i / GRID);
@@ -2289,7 +2174,6 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
         },
         ..Viewpoint::default()
     };
-    // The textured squares in the top quadrants, the dense mesh across the bottom half.
     let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
         Mat4::from_translation(Vec3::new(x, y, 0.0))
             * Mat4::from_scale(Vec3::new(width, height, 1.0))
@@ -2314,7 +2198,6 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
     );
     let gray = Vec4::new(0.5, 0.5, 0.5, 1.0);
     draws.push(dense, flat, place([0.0, -0.5], [2.0, 1.0]), gray);
-    // What each pixel shows frame by frame, and what the frames count drawn and streaming.
     let mut shown: [Vec<Shows>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut streaming = Vec::new();
     let mut instances = Vec::new();
@@ -2325,7 +2208,7 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
         instances.push(renderer.drawn().instances);
         let frame = frame_pixels(&mut renderer);
         let zeros = [0, 0, 0, 0];
-        // Alpha isn't read where the zeros draw, as the view's pass leaves it.
+        // Alpha isn't read: where the zeros draw, it's the view pass's.
         let rgb = |pixel: [u8; 4]| [pixel[0], pixel[1], pixel[2], 255];
         let shows = |at: [u32; 2], own: [u8; 4], stand_in: [u8; 4]| {
             let pixel = rgb(pixel_at(&frame, SIDE, at));
@@ -2360,8 +2243,7 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
         frames >= (total / SMALL_BUDGET) as usize && frames < 200,
         "by {path}: {frames} frames for {total} bytes"
     );
-    // Each pixel goes through its phases in order, the white stand-in's for at least a frame, and
-    // ends on its own color.
+    // Each pixel's phases in order, the white stand-in's for at least a frame.
     for (i, shown) in shown.iter().enumerate() {
         let phases: Vec<Shows> = shown.chunk_by(|a, b| a == b).map(|run| run[0]).collect();
         let expected: &[Shows] = match (i, phases.first()) {
@@ -2376,8 +2258,7 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
         "by {path}: the texture never showed its stand-in: {:?}",
         shown[0]
     );
-    // The bytes still to copy fall from under the total, by at most the budget's worth of whole
-    // parts a frame, to 0, as the assets go.
+    // Bytes left fall from under the total to 0.
     assert!(streaming[0].bytes < total, "by {path}: {:?}", streaming[0]);
     for pair in streaming.windows(2) {
         assert!(
@@ -2387,16 +2268,13 @@ fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
     }
     let last = streaming.last().expect("a frame");
     assert_eq!((last.assets, last.bytes), (0, 0), "by {path}");
-    // Until the dense mesh is drawable, its instance isn't counted.
+    // The dense mesh isn't counted until drawable.
     assert_eq!(*instances.last().expect("a frame"), 3, "by {path}");
     assert!(instances[0] < 3, "by {path}: {instances:?}");
 }
 
-/// Replaces a texture and a mesh with larger ones, 256 KiB and 324 KiB, which a budget of 64 KiB
-/// streams over several frames, by `path`, and reads back a pixel of each every frame: the square
-/// shows the old texture, red, never white, until the frame that shows the new, green; and the
-/// mesh, a square that covers the view, keeps covering its right half until the frame that takes
-/// the new, which covers the left half alone.
+/// Replaces a texture and a mesh with larger ones, streamed over frames: each frame draws the old,
+/// never the stand-in, until the new is drawable. The new mesh covers the left half alone.
 fn a_reload_draws_the_old_until_the_new_is_drawable(path: UploadPath) {
     const SIDE: u32 = 16;
     const GRID: u32 = 96;
@@ -2405,7 +2283,7 @@ fn a_reload_draws_the_old_until_the_new_is_drawable(path: UploadPath) {
     let textured = (stores.shaders)
         .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
         .expect("a shader");
-    // The whole view, which is 2 units high and as wide: positions, then texture coordinates.
+    // The whole view, 2 units square: positions, then texture coordinates.
     let whole = [
         [-1.0, -1.0, 0.0, 0.0, 1.0],
         [1.0, -1.0, 0.0, 1.0, 1.0],
@@ -2445,7 +2323,7 @@ fn a_reload_draws_the_old_until_the_new_is_drawable(path: UploadPath) {
         [[SIDE / 4, SIDE / 2], [SIDE * 3 / 4, SIDE / 2]].map(|at| pixel_at(&frame, SIDE, at))
     };
     assert_eq!(left_and_right(&mut renderer), [red, red], "by {path}");
-    // The left half, as a grid of GRID by GRID vertices, two triangles a cell.
+    // The left half.
     let vertices: Vec<[f32; 5]> = (0..GRID * GRID)
         .map(|i| {
             let (x, y) = (i % GRID, i / GRID);
@@ -2512,11 +2390,9 @@ fn a_reload_draws_the_old_until_the_new_is_drawable(path: UploadPath) {
     shut_down(renderer);
 }
 
-/// A BC7 block of 4 by 4 texels all of one sRGB-encoded `color`, whose channels are odd: mode 6,
-/// whose endpoints are 7 bits a channel and a bit shared by them all, the low one, with both
-/// endpoints `color` and every texel's index 0. Its 128 bits go least significant first: the mode,
-/// its 7th bit set; then each channel's two endpoints, red, green, blue and alpha; then the shared
-/// bits, then the indices.
+/// A BC7 block of one sRGB `color` of odd channels: mode 6, both endpoints `color` (7 bits a
+/// channel plus a shared low bit), every index 0. Bits from the least: the mode, bit 6 set; each
+/// channel's two endpoints, RGBA; the shared bits; the indices.
 fn bc7_block(color: [u8; 4]) -> [u8; 16] {
     assert!(color.iter().all(|channel| channel % 2 == 1), "{color:?}");
     let mut bits = 1u128 << 6;
@@ -2529,12 +2405,9 @@ fn bc7_block(color: [u8; 4]) -> [u8; 16] {
     bits.to_le_bytes()
 }
 
-/// A square of BC7 textures, sampled as their blocks decode, on the way of uploading `path`: one of
-/// a level, 13 by 5 texels, whose blocks cover its edges, filling a view of `SIDE` pixels a side at
-/// its nearest texels; then one of a full chain, 64 texels a side, whose first level is one color
-/// and the rest another, filling it trilinearly, so that it samples its third level; then the
-/// first replaced by RGBA8, and that by BC7 of a chain, each sampled once the frames have streamed
-/// it.
+/// BC7 textures sample as their blocks decode: one level of 13 by 5 texels, whose blocks cover
+/// its edges; a chain, sampled trilinearly at its third level; then RGBA8 in place of the first,
+/// and BC7 in place of that.
 fn bc7_textures_sample_as_their_blocks(path: UploadPath) {
     const SIDE: u32 = 16;
     const COLORS: [[u8; 4]; 4] = [
@@ -2548,7 +2421,7 @@ fn bc7_textures_sample_as_their_blocks(path: UploadPath) {
     let textured = (stores.shaders)
         .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
         .expect("a shader");
-    // The whole view, which is 2 units high and as wide: positions, then texture coordinates.
+    // The whole view, 2 units square: positions, then texture coordinates.
     let corners = [
         [-1.0, -1.0, 0.0, 0.0, 1.0],
         [1.0, -1.0, 0.0, 1.0, 1.0],
@@ -2565,7 +2438,7 @@ fn bc7_textures_sample_as_their_blocks(path: UploadPath) {
     let level = (stores.textures)
         .add("level", [13, 5], blocks(8, COLORS[0]), one)
         .expect("a texture");
-    // Its first level 16x16 blocks, then 8x8, 4x4, 2x2 and three of a block each.
+    // 16x16 blocks, 8x8, 4x4, 2x2, then three of one; the first a color, the rest another.
     let rest = [64, 16, 4, 1, 1, 1]
         .map(|count| blocks(count, COLORS[2]))
         .concat();
@@ -2638,11 +2511,8 @@ fn bc7_textures_sample_as_their_blocks(path: UploadPath) {
     shut_down(renderer);
 }
 
-/// A textured square that covers a view of `SIZE` pixels a side, red, whose mesh and texture are
-/// replaced while the frames before may still draw them, over more frames than are in flight: the
-/// mesh by one that covers the view's left half, the texture by a green one of another size, with
-/// mip levels. The frames draw them once they're there, and validation, synchronization's among
-/// it, sees the old ones go only once the GPU is done with them.
+/// A mesh and texture replaced while earlier frames may still draw them: the new draw once there,
+/// and validation, synchronization's too, sees the old go only once the GPU is done.
 fn replaced_meshes_and_textures_draw_once_they_are_there(path: UploadPath) {
     const SIZE: u32 = 16;
     let mut renderer = renderer_uploading(SIZE, SIZE, Some(path));
@@ -2651,7 +2521,7 @@ fn replaced_meshes_and_textures_draw_once_they_are_there(path: UploadPath) {
     let textured = (stores.shaders)
         .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
         .expect("a shader");
-    // The whole view, which is 2 units high and as wide.
+    // The whole view, 2 units square.
     let whole = [
         [-1.0, -1.0, 0.0, 0.0, 1.0],
         [1.0, -1.0, 0.0, 1.0, 1.0],
@@ -2680,7 +2550,6 @@ fn replaced_meshes_and_textures_draw_once_they_are_there(path: UploadPath) {
         },
         ..Viewpoint::default()
     };
-    // The pixels a quarter of the way across and three quarters of the way, halfway down.
     let left_and_right = |renderer: &mut Renderer| {
         let pixels = (renderer.read_back())
             .expect("the frame's pixels")
@@ -2705,8 +2574,7 @@ fn replaced_meshes_and_textures_draw_once_they_are_there(path: UploadPath) {
         }
         let data = stores.data(filling([SIZE, SIZE]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
-        // Reading back waits for the GPU, so not between the frames before the replacements and
-        // the frame that takes them.
+        // Reading back waits for the GPU, so not just before the replacements.
         match frame {
             0 => {
                 settle(
@@ -2736,13 +2604,9 @@ fn replaced_meshes_and_textures_draw_once_they_are_there(path: UploadPath) {
     shut_down(renderer);
 }
 
-/// Removes a texture, a mesh and a shader, each drawn by a square of its own, and checks what the
-/// next frame shows: the square of the texture removed shows its stand-in, white, and those of the
-/// mesh and the shader removed show nothing, the clear color, which the frame counts no draw for.
-/// Removing each again does nothing; an image or vertices for one removed are dropped, as a
-/// shader compiled again for one would be; a texture removed while it streams, within a budget of
-/// 64 KiB, shows the stand-in at once, with nothing left streaming; and one replaced while it
-/// streams drops what was streaming for its replacement, which streams from the start.
+/// Removed, a texture shows its stand-in, and a mesh or shader draws nothing and counts no draw.
+/// Removing again does nothing; an image or vertices for one removed are dropped. Removed while it
+/// streams, a texture shows the stand-in at once; replaced, the replacement streams from the start.
 fn removed_assets_draw_nothing_or_their_stand_in() {
     const SIDE: u32 = 64;
     let mut renderer = renderer_within(SIDE, SIDE, None, SMALL_BUDGET);
@@ -2779,7 +2643,7 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         },
         ..Viewpoint::default()
     };
-    // Four quadrants: the textured square, the two flat ones, and one for a texture that streams.
+    // A quadrant each, the last for a texture that streams.
     let place = |[x, y]: [f32; 2]| Mat4::from_translation(Vec3::new(x, y, 0.0));
     let sampling = |texture| Sampling {
         texture,
@@ -2901,8 +2765,7 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
     );
     shows(&mut renderer, removed, "dropped");
 
-    // A texture of 256 KiB, removed after the first frame streams a part of it: its stand-in
-    // shows at once, and nothing of it streams on.
+    // Removed after a frame streams part of it.
     let green = [0, 255, 0, 255];
     let streamed = (stores.textures)
         .add(
@@ -2941,8 +2804,7 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
         assert_eq!(shown(&mut renderer)[3], white, "removed while it streamed");
     }
 
-    // A texture replaced after the first frame streams a part of it: the replacement alone
-    // streams, from the start, and shows once it's there.
+    // Replaced after a frame streams part of it.
     let blue = [0, 0, 255, 255];
     let replaced = (stores.textures)
         .add(
@@ -2998,23 +2860,16 @@ fn removed_assets_draw_nothing_or_their_stand_in() {
     shut_down(renderer);
 }
 
-/// Draws models' meshes with materials into an offscreen image, as a camera with perspective sees
-/// them, and compares it with its reference image. Along the top, single-sided squares whose
-/// corners wind counterclockwise seen from in front, as glTF's fronts do: one facing the camera,
-/// drawn; one turned away, culled; one mirrored by a negative scale, whose fronts then wind
-/// clockwise, drawn; one mirrored and turned away, culled; and a double-sided one turned away,
-/// drawn. Along the bottom: a masked square, mirrored, drawn after the mirrored ones by another
-/// pipeline, which leaves the faces set as they were, showing only its texture's texels at least
-/// half opaque; a blended square half over an opaque one behind it; and a square whose corners'
-/// colors its material's color multiplies. Each run of one mesh with one shader that draws the
-/// same faces is one draw, which `DrawCounts` counts with its triangles.
+/// Models with materials against their reference: squares wound as glTF's fronts, facing the
+/// camera, turned away, mirrored (so clockwise), both, and double-sided, each culled or drawn as
+/// that says; a masked square, mirrored, after the mirrored ones on another pipeline that keeps
+/// their faces; a blended square over an opaque one; and corner colors times the material's.
+/// Each run of one mesh and shader drawing the same faces is one draw.
 fn models_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
-    // 0, about 4.6 units.
     let viewpoint = Viewpoint {
         position: DVec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
@@ -3023,8 +2878,7 @@ fn models_match_their_reference() {
         },
         ..Viewpoint::default()
     };
-    // A unit square, counterclockwise seen from +Z, its texture's top left at its top left, in
-    // `colors` from its bottom left counterclockwise.
+    // As `model_square`, `colors` counterclockwise from its bottom left.
     let mut square = |name, colors: [Vec4; 4]| {
         let corner = |[x, y]: [f32; 2], uv: [f32; 2], color| ModelVertex {
             position: Vec3::new(x, y, 0.0),
@@ -3046,7 +2900,7 @@ fn models_match_their_reference() {
     let blue_corner = Vec4::new(0.0, 0.0, 1.0, 1.0);
     let corners = [red_corner, green_corner, blue_corner, Vec4::ONE];
     let colored = square("colored square", corners);
-    // Red and blue at least half opaque on the left, green and yellow less so on the right.
+    // The left column at least half opaque, the right less.
     let cutout = [
         [255, 64, 64, 255],
         [64, 255, 64, 40],
@@ -3062,8 +2916,6 @@ fn models_match_their_reference() {
         double_sided,
         ..Material::default()
     };
-    // 0.9 across at (x, y, z), turned a half turn about Y if `turned`, and mirrored left to right
-    // if `mirrored`.
     let placed = |[x, y, z]: [f32; 3], turned: bool, mirrored: bool| {
         let turn = if turned { PI } else { 0.0 };
         let scale = Vec3::new(if mirrored { -0.9 } else { 0.9 }, 0.9, 0.9);
@@ -3125,8 +2977,7 @@ fn models_match_their_reference() {
         viewpoint,
         &draws,
     );
-    // Red and green facing one way, blue and yellow mirrored, then one each: cut into meshlets,
-    // green's and yellow's, turned away, aren't drawn, as their cones cull them.
+    // Cut into meshlets, the two turned away single-sided squares are culled by their cones.
     let turned_away = if CUT_MESHLETS.load(Ordering::Relaxed) {
         4
     } else {
@@ -3138,21 +2989,16 @@ fn models_match_their_reference() {
         triangles: 18 - turned_away,
     };
     let viewport = filling([WIDTH, HEIGHT]);
-    // Past the frame the meshes came to be drawable in, which planned no room for their meshlets
-    // and drew them by their indices.
+    // Past the frame they became drawable in, which drew meshlets by their indices.
     render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
     let drew = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     assert_eq!(drew, drawn);
     check(renderer, "models", WIDTH, HEIGHT);
 }
 
-/// Draws three copies of a skinned strip, unlit, in a column of quads up from a joint at its foot,
-/// the rest moved by a joint at its middle, as an orthographic view sees them, and compares them
-/// with their reference image: on the left, its upper half turned an eighth about its middle; in
-/// the middle, slid half a unit right; and on the right, given no skin this frame, as it was bound,
-/// straight up. Its lower half moves with the joint at its foot alone, which stays put, and a row
-/// of vertices at its middle half with each. Each copy is a mesh of its own, posed apart, as each
-/// instance of a skinned model is.
+/// A skinned strip of two joints, at its foot and middle, against its reference: its top turned,
+/// slid, and given no skin this frame, straight up as bound. Each copy is its own mesh, posed
+/// apart, as each skinned model's instance is.
 fn skinned_meshes_move_with_their_joints() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -3167,9 +3013,7 @@ fn skinned_meshes_move_with_their_joints() {
         },
         ..Viewpoint::default()
     };
-    // Rows from y = -1 to 1, half a unit apart, each of two corners, a quarter of a unit either
-    // side of x = 0: the lowest two moved by joint 0 alone, the middle half by each, the rest by
-    // joint 1.
+    // The lowest two rows by joint 0, the middle half by each, the rest by joint 1.
     let rows = [-1.0, -0.5, 0.0, 0.5, 1.0];
     let mut vertices = Vec::new();
     let mut skin = Vec::new();
@@ -3233,15 +3077,10 @@ fn skinned_meshes_move_with_their_joints() {
     check(renderer, "skinned", WIDTH, HEIGHT);
 }
 
-/// Emitters' particles over frames, as a camera with perspective sees them over a dark square and
-/// under a square in front of the fire's base, against their reference image: on the left, a
-/// fountain of discs that go over what's behind them by their alpha, thrown up a cone and pulled
-/// down; in the middle, a fire of glowing discs that add their light, past 1, rising from a sphere
-/// against drag; and on the right, a burst of sparks, spinning squares of a texture's cells. The
-/// first frame bears most of the fountain's and the fire's, the second the rest, the fountain having
-/// moved right between them, along which its births between them are born, and the burst; so the
-/// second shows the first's births as their ages alone carry them on. A third frame at the same time,
-/// without births, as a paused world's are, draws the same.
+/// Particles against their reference, between squares: a fountain blended by alpha, a fire adding
+/// light past 1 against drag, and a burst of spinning sparks of a texture's cells. The second
+/// frame's births lie along the fountain's move; the first's are carried on by their ages alone.
+/// A third frame at the same time without births, as a paused world's, draws the same.
 fn particles_match_their_reference() {
     const WIDTH: u32 = 160;
     const HEIGHT: u32 = 96;
@@ -3320,7 +3159,6 @@ fn particles_match_their_reference() {
         additive: true,
         ..disc
     };
-    // Each emitter's particles at `now`, of `births`, `bursts` and the most it has alive.
     let drawn =
         |id: u64, now: f64, most: u32, births: Births, bursts: Bursts, emission| Particles {
             id,
@@ -3332,8 +3170,7 @@ fn particles_match_their_reference() {
             bursts,
             emission,
         };
-    // `count` births from `first`, every `every` ticks from `time`, each where the emitter was
-    // between `from`, as a frame at `then` drew it, and `to`, as a frame at `now` does.
+    // Births every `every` ticks from `time`, placed between `from`, at `then`, and `to`, at `now`.
     let births = |first, count, (time, every), (from, to), (then, now): (f64, f64)| Births {
         first,
         count,
@@ -3354,7 +3191,6 @@ fn particles_match_their_reference() {
         time: 40.0,
         at: sparks_at,
     };
-    // The first frame, at 32 ticks; the second, at 48; and the third, at 48 again, without births.
     let frames = [
         (
             32.0,
@@ -3398,19 +3234,12 @@ fn particles_match_their_reference() {
     check(renderer, "particles", WIDTH, HEIGHT);
 }
 
-/// Draws a run of sprites across the top half of an offscreen image, then a run of models' squares
-/// across the bottom half, each 4 pixels across, abutting in rows, and compares it with its
-/// reference image. Each run is one instanced draw, whose instances alternate in a checkerboard
-/// between two textures, the first sampled at its nearest texels and the second filtered linearly.
-/// An instance is four of the blocks of 2 by 2 pixels that GPUs shade together, half of what a
-/// subgroup of 32 holds, so a run's subgroups mix instances, with both textures and both samplers:
-/// a GPU that sampled one instance's texture or sampler for a whole subgroup, as one may where the
-/// sample isn't decorated as non-uniform, changes thousands of pixels. Against the reference,
-/// shaders that index without `NonUniformResourceIndex` make 3,844 differ on AMD's driver.
+/// A run of sprites and a run of model squares, 4 pixels each, alternating two textures and
+/// samplers, against their reference. An instance is half a subgroup of 32, so subgroups mix
+/// textures: indexing without `NonUniformResourceIndex` makes 3,844 pixels differ on AMD's driver.
 fn mixed_textures_match_their_reference() {
     const WIDTH: u32 = 128;
     const HEIGHT: u32 = 64;
-    /// A sprite's and a square's side, in pixels.
     const SIDE: u32 = 4;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
@@ -3423,8 +3252,7 @@ fn mixed_textures_match_their_reference() {
         },
         ..Viewpoint::default()
     };
-    // 2 by 2 texels, sRGB-encoded: red and yellow over green and blue; and a checkerboard of light
-    // and dark, which a linear filter blends between its texels.
+    // sRGB; the checker blends under a linear filter.
     let quadrants = [
         [220, 50, 40, 255],
         [240, 200, 40, 255],
@@ -3472,7 +3300,6 @@ fn mixed_textures_match_their_reference() {
         MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders)
     });
     let (columns, rows) = (WIDTH / SIDE, HEIGHT / 2 / SIDE);
-    // At `column` and `row` of the half whose top edge is at `top`, from the half's top left.
     let place = |column: u32, row: u32, top: f32| {
         let side = SIDE as f32;
         let x = (column as f32 + 0.5) * side - WIDTH as f32 / 2.0;
@@ -3511,21 +3338,14 @@ fn mixed_textures_match_their_reference() {
     check(renderer, "mixed_textures", WIDTH, HEIGHT);
 }
 
-/// Draws a scene of IDs into a view off the frame's corner in six frames, each draw's ID its kind
-/// in its high half and its frame's number in its low, so that an ID from another frame shows; two
-/// sprites that overlap trade places each frame, the later on top. Frames 1, 2 and 4 pick the same
-/// pixels, and each pick is answered as the frame two after the one that asked it begins, with
-/// what drew on top there in its own frame: the later sprite where they overlap, and the other
-/// alone; a game's mesh; the mesh through a sprite's wholly transparent texel, and the sprite
-/// through its opaque one; a half transparent sprite over the mesh; a model; a circle in its middle,
-/// and the clear at its quad's corner, outside it; a line of its own ID; 0 for a layer's sprite over
-/// the mesh, beside the line, and for the clear, where a sprite of the odd frames alone drew in the
-/// frame before. Picks outside the view are answered 0 in the frame that asks them. Frame 3 picks
-/// nothing, so frame 5 answers nothing.
+/// Picks answer, two frames on, what drew on top in their own frame: IDs hold a kind and the
+/// frame, and two overlapping sprites swap each frame. Through transparent texels, past a circle's
+/// edge, on a layer's sprite of no entity and on the clear, they answer what's behind, or 0.
+/// Picks outside the view are answered 0 at once; two frames after one without picks, none are.
 fn picks_answer_what_their_frame_drew() {
     const WIDTH: u32 = 96;
     const HEIGHT: u32 = 64;
-    // What draws, each its ID's high half; and the pair's top, whichever is later.
+    // IDs' high halves; `TOP`, the pair's later.
     const MESH: u64 = 1;
     const MODEL: u64 = 2;
     const FIRST: u64 = 3;
@@ -3538,7 +3358,7 @@ fn picks_answer_what_their_frame_drew() {
     const LINE: u64 = 10;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // A unit a pixel, around the origin, of the view's 64 by 48 pixels.
+    // A unit a pixel.
     let viewport = Viewport {
         origin: [16, 8],
         size: [64, 48],
@@ -3551,7 +3371,7 @@ fn picks_answer_what_their_frame_drew() {
         },
         ..Viewpoint::default()
     };
-    // Over the view's pixels from `[x0, y0]` to `[x1, y1]`, from its top left.
+    // In view pixels from its top left.
     let over = |[x0, y0]: [f32; 2], [x1, y1]: [f32; 2]| {
         let center = Vec3::new((x0 + x1) / 2.0 - 32.0, 24.0 - (y0 + y1) / 2.0, 0.0);
         Mat4::from_translation(center) * Mat4::from_scale(Vec3::new(x1 - x0, y1 - y0, 1.0))
@@ -3595,7 +3415,6 @@ fn picks_answer_what_their_frame_drew() {
         };
         let circle = (over([2.0, 28.0], [18.0, 44.0]), circle, id(CIRCLE, frame));
         draws.extend_circles(shaders, [circle].into_iter());
-        // In view pixels from (42, 30) to (62, 30), 3 wide.
         let line = Line {
             from: Vec3::new(10.0, -6.0, 0.0),
             to: Vec3::new(30.0, -6.0, 0.0),
@@ -3632,7 +3451,7 @@ fn picks_answer_what_their_frame_drew() {
         }
         draws
     };
-    // The pixels each frame that picks picks, and what draws on top there, or 0.
+    // Each pick's pixel and what's on top there, or 0.
     let pixels = [
         ([8, 8], TOP),
         ([3, 3], FIRST),
@@ -3651,7 +3470,6 @@ fn picks_answer_what_their_frame_drew() {
         ([10, 48], 0),
     ];
     let tag = |frame: u64, i: usize| frame * 100 + i as u64;
-    // The answers to the picks of frame `frame` inside the view, or outside it.
     let answers = |frame: u64, inside: bool| -> Vec<(u64, u64)> {
         let top = if frame.is_multiple_of(2) {
             FIRST
@@ -3704,10 +3522,9 @@ fn picks_answer_what_their_frame_drew() {
     shut_down(renderer);
 }
 
-/// Six frames of a square that fills the view, its ID its frame's number. Frame 1 picks inside
-/// the view; frame 2 inside and outside it, reading no picks, nor does frame 3, which still answers
-/// frame 1's; frame 4 reads frame 2's, answering the one outside at once, and frame 6 answers the
-/// other with what frame 4 drew.
+/// A frame that reads no picks still answers earlier ones. Picks it asks wait for a frame that
+/// reads them, which answers the one outside the view at once, and the other two frames later
+/// with what it drew.
 fn picks_wait_through_frames_that_read_none() {
     let mut renderer = renderer(8, 8);
     let mut stores = Stores::default();
@@ -3756,10 +3573,8 @@ fn picks_wait_through_frames_that_read_none() {
     shut_down(renderer);
 }
 
-/// Draws a square that fills the view and the engine's grid over it, facing it orthographically, a
-/// pixel a unit, its X axis across the view's middle at the square's depth, where the grid draws
-/// over what's at its depth: picks along the axis, on the two rows it may take, answer the square,
-/// as the grid, which is for seeing by, leaves the IDs of what's under it.
+/// Picks along the grid's X axis, drawn over a square at its depth, answer the square: the grid,
+/// for seeing by, leaves the IDs under it.
 fn picks_see_through_the_grid() {
     const SIZE: u32 = 32;
     const SQUARE: u64 = 7;
@@ -3814,13 +3629,13 @@ fn picks_see_through_the_grid() {
     };
     render_without_ui(&mut renderer, data);
     let frame = frame_pixels(&mut renderer);
-    // The axis shows over the square on one of its rows, away from the lines ten units apart.
+    // The axis shows on one of its two rows, away from the major lines.
     let plain = pixel_at(&frame, SIZE, [8, 8]);
     assert!(
         (rows.iter()).any(|&y| !close(pixel_at(&frame, SIZE, [8, y]), plain)),
         "the grid's X axis draws over the square"
     );
-    // Answered once the frame that drew them is done, frames in flight later.
+    // Answered once their frame is done.
     let mut answered = renderer.picked().to_vec();
     for _ in 0..3 {
         render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
@@ -3840,15 +3655,11 @@ struct Level {
     level: f32,
 }
 
-/// Draws every mip level of two textures, uploaded by `path`, side by side into an offscreen image,
-/// each at its nearest texels over a square of 64 by 64 pixels, and compares it with its reference
-/// image. The first is 64 by 64 texels, alpha-weighted, in quadrants checkered in squares 1, 2, 4
-/// and 8 texels across, so that each of its first five levels, made by averaging the level before,
-/// evens out one more quadrant; one quadrant's squares are green and clear, which its levels blend
-/// to half-transparent green rather than taking in the clear squares' color. The second is 5 by 3
-/// texels, averaged, of odd sides, whose levels take three texels' parts each. Validation can't see
-/// a level left unfilled, which the bindless set samples unchecked, nor one filled from the wrong
-/// bytes, which both show here.
+/// Every mip level of two textures against their reference. The first, alpha-weighted, has
+/// quadrants checkered at 1, 2, 4 and 8 texels, each level evening out one more; its green and
+/// clear quadrant blends to half-transparent green, none of the clear's color. The second, 5 by 3,
+/// has odd sides, so its levels take parts of three texels. Validation can't see a level unfilled,
+/// as the bindless set samples unchecked, or filled from the wrong bytes; both show here.
 fn mipmaps_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 64;
@@ -3875,8 +3686,7 @@ fn mipmaps_match_their_reference(path: UploadPath) {
     let square = (stores.meshes)
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
-    // Checkered in squares 1 texel across at the top left, 2 at the top right, 4 at the bottom
-    // left and 8 at the bottom right, each of two colors, sRGB-encoded.
+    // sRGB.
     let checkers: Vec<u8> = (0..64 * 64)
         .flat_map(|i| {
             let (x, y) = (i % 64, i / 64);
@@ -3892,7 +3702,6 @@ fn mipmaps_match_their_reference(path: UploadPath) {
     let checkers = (stores.textures)
         .add("checkers", [64, 64], &checkers, Mipmaps::AlphaWeighted)
         .expect("a texture");
-    // A color for each texel.
     let odd: Vec<u8> = (0..15u32)
         .flat_map(|i| [i * 17, 255 - i * 13, i * 71 % 256, 255].map(|c| c as u8))
         .collect();
@@ -3927,20 +3736,14 @@ fn mipmaps_match_their_reference(path: UploadPath) {
     check(renderer, "mipmaps", WIDTH, HEIGHT);
 }
 
-/// Draws a view where the UI paints a `ViewCallback`, among the UI's shapes rather than under them
-/// all, and compares the frame with its reference image: a red rect under the view, which shows
-/// where the callback's clip rect cuts the view's edges, and a green one over it. The view is a
-/// blue square that fills it, under a triangle in red, green and blue, and a yellow square of ID 7
-/// across the clip's right edge, outlined, its outline cut there too. The callback is off
-/// `data.viewport`'s origin, the frame's corner, where the frame shows the view without one, so
-/// that the view shown there too, unclipped, or over the green rect, changes thousands of pixels.
-/// A frame whose view has no area draws the UI alone.
+/// A view painted by a `ViewCallback` between two of the UI's rects, against its reference. Its
+/// clip cuts the view and its outline. Shown at `data.viewport`'s origin too, unclipped, or over
+/// the later rect, thousands of pixels change. A view of no area draws the UI alone.
 fn a_view_in_the_ui_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
-    // 4 units from the view's bottom to its top, which is 160 pixels: 40 pixels a unit.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
@@ -3969,7 +3772,7 @@ fn a_view_in_the_ui_matches_its_reference() {
     let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
     draws.push(square, flat, Mat4::from_scale(Vec3::splat(10.0)), blue);
     draws.push(triangle, colored, Mat4::from_scale(Vec3::splat(3.0)), ());
-    // From (220, 60) to (260, 100) in the frame, across the clip's right edge.
+    // Across the clip's right edge.
     let yellow = Sprite {
         color: Vec4::new(0.9, 0.8, 0.2, 1.0),
         ..Sprite::default()
@@ -3994,7 +3797,7 @@ fn a_view_in_the_ui_matches_its_reference() {
         let painter = ui.painter();
         let red = egui::Color32::from_rgb(200, 60, 60);
         painter.rect_filled(rect([8.0, 8.0], [208.0, 128.0]), 0.0, red);
-        // 240 by 160 points, a pixel each, clipped by 10 points top and bottom and 40 on the right.
+        // A point a pixel.
         let clipped = painter.with_clip_rect(rect([40.0, 30.0], [240.0, 170.0]));
         clipped.add(egui::PaintCallback {
             rect: rect([40.0, 20.0], [280.0, 180.0]),
@@ -4004,7 +3807,7 @@ fn a_view_in_the_ui_matches_its_reference() {
         painter.rect_filled(rect([120.0, 80.0], [180.0, 120.0]), 4.0, green);
     });
     let primitives = egui.tessellate(output.shapes, output.pixels_per_point);
-    // Everything drawable first, without the UI, whose texture changes come once.
+    // Without the UI, whose texture changes come once.
     settle(
         &mut renderer,
         &mut stores,
@@ -4030,8 +3833,7 @@ fn a_view_in_the_ui_matches_its_reference() {
             .expect("the frame's pixels")
             .expect("a headless renderer's frame can be read back");
         if size == [0, 0] {
-            // In the callback's clip, clear of the rects, the clear color, encoded; in the red
-            // rect, red.
+            // The clear color in the callback's clip; red in the red rect.
             let pixel = |x: u32, y: u32| {
                 let at = ((y * WIDTH + x) * 4) as usize;
                 [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
@@ -4048,10 +3850,8 @@ fn a_view_in_the_ui_matches_its_reference() {
     shut_down(renderer);
 }
 
-/// Squares of gray, above, and of orange, below, each brighter than the one to its left, from
-/// 0.05 to 16 times as bright as white, mapped by each tonemapper in turn, from the top, compared
-/// with their reference image: a row of the view for each. Gray at 0.5 and 2, past the 1 that an
-/// 8-bit image clamps to, comes out as each formula gives it, but AgX's, which the reference keeps.
+/// Gray and orange from 0.05 to 16 times white through each tonemapper, against their reference.
+/// Gray at 0.5 and 2 maps as each formula says; AgX's is left to the reference.
 fn tonemappers_match_their_reference() {
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 64;
@@ -4062,7 +3862,6 @@ fn tonemappers_match_their_reference() {
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
     let square = square(&mut stores.meshes);
-    // 2 units from the view's bottom to its top, and 8 across: a unit is 32 pixels both ways.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 2.0,
@@ -4081,7 +3880,7 @@ fn tonemappers_match_their_reference() {
     }
     let viewport = filling([WIDTH, HEIGHT]);
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-    // Gray at 0.5 and at 2, the middle of the third and fifth squares above.
+    // Gray at 0.5 and at 2.
     let grays = [[80, 16], [144, 16]];
     // Stephen Hill's fit of ACES's transforms, whose matrices keep gray gray.
     let aces = |v: f32| {
@@ -4121,16 +3920,11 @@ fn tonemappers_match_their_reference() {
     compare("tonemappers", WIDTH, HEIGHT * 4, &rows);
 }
 
-/// Squares of a game's shader past the most a half float holds: red, which the view's colors hold
-/// as that most or as infinite, as the GPU rounds it; and red, and white, infinite, as a shader's
-/// floats can be; and one of no number. Mapped by PBR Neutral, which rolls a color that bright off
-/// to white, the first three show white, and the last as none, black, without antialiasing, with
-/// TAA and with SMAA, frame after frame, rather than as no number, black, or cyan where red alone
-/// is infinite; and no pixel but those of the square of no number and next to it, which blend with
-/// its black, shows darker than the clear color, as one that blends with no number would: darker in
-/// a channel, and brighter in none. A pixel beside the red is redder, as TAA's filter spreads a
-/// little of its light, and darker in green and blue, as PBR Neutral takes more off a color whose
-/// least channel is greater.
+/// Colors past a half float's most (red, which may round to infinite; infinite red and white) show
+/// as white through PBR Neutral, and NaN as black, under each antialiasing, frame after frame. No
+/// pixel but at the NaN square is darker than the clear color in a channel and brighter in none,
+/// as one blended with NaN would be. Beside the red, TAA's filter spreads some of its light:
+/// redder, and darker in green and blue, which PBR Neutral takes more off.
 fn colors_past_a_half_float_show_as_its_brightest() {
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 16;
@@ -4140,7 +3934,6 @@ fn colors_past_a_half_float_show_as_its_brightest() {
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
     let square = square(&mut stores.meshes);
-    // 2 units from the view's bottom to its top, and 8 across: a unit is 8 pixels both ways.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 2.0,
@@ -4179,8 +3972,7 @@ fn colors_past_a_half_float_show_as_its_brightest() {
                     "{antialiasing:?}, frame {frame}: {got:?} at {middle:?}, not {color:?}"
                 );
             }
-            // Left of the square of no number, from 52 to 60 across, and the pixel next to it,
-            // against the clear color as the corner shows it, mapped.
+            // Left of the NaN square and its neighbor, against the corner's clear color.
             let clear = pixel_at(&pixels, WIDTH, [0, 0]);
             let dark = (0..HEIGHT)
                 .flat_map(|y| (0..51).map(move |x| [x, y]))
@@ -4198,20 +3990,15 @@ fn colors_past_a_half_float_show_as_its_brightest() {
     }
     shut_down(renderer);
 }
-/// A square of 2 by 2 pixels 64 times as bright as white in the world, left, and the same on the
-/// canvas, right, in a view of 256 by 128, whose bloom has three levels. Without antialiasing, the
-/// world's spreads its light round it, the same each way, less the further, while the canvas's,
-/// after the bloom, doesn't spread at all; and no light goes further than the levels reach: each
-/// downsample into level k reaches 2^(k + 1) pixels further, as its 13 taps read 2 texels of the
-/// level before past the texel's own, and each upsample from level i + 1, and the blend into the
-/// view from level 1, 3.5 × 2^i pixels, as its tent's bilinear taps read texels within 2 of its
-/// own of the level below: 52.5 pixels in all, past which the view is its clear color, as bloom
-/// adds no light. Without bloom, nothing spreads; with antialiasing, the world's light spreads and
-/// the canvas's doesn't alike. Compared, with bloom and without antialiasing, with its reference.
+/// A bright square in the world blooms evenly, fading, and one on the canvas, after the bloom, not
+/// at all, with or without TAA; without bloom, nothing spreads. No light passes the three levels'
+/// reach: each downsample into level k adds 2^(k + 1) pixels (13 taps, 2 texels out), each
+/// upsample from level i + 1 and the final blend 3.5 × 2^i (a bilinear tent 2 texels out), 52.5
+/// in all.
 fn bloom_spreads_light_round_what_is_bright_and_no_further() {
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 128;
-    // How far, in pixels, light can go from the square's edges, as above.
+    // Pixels from the square's edges.
     const REACH: f32 = 52.5;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
@@ -4219,7 +4006,6 @@ fn bloom_spreads_light_round_what_is_bright_and_no_further() {
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
     let square = square(&mut stores.meshes);
-    // A unit to a pixel, from the view's middle.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: HEIGHT as f32,
@@ -4252,7 +4038,7 @@ fn bloom_spreads_light_round_what_is_bright_and_no_further() {
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     let render = |renderer: &mut Renderer, stores: &mut Stores, bloom, antialiasing| {
         let mut pixels = Vec::new();
-        // Antialiased, enough frames for the history to settle.
+        // Enough frames for TAA's history to settle.
         for _ in 0..16 {
             let data = RenderData {
                 bloom,
@@ -4268,7 +4054,7 @@ fn bloom_spreads_light_round_what_is_bright_and_no_further() {
     let background = [CLEAR[0], CLEAR[1], CLEAR[2]].map(encoded);
     let background = [background[0], background[1], background[2], 255];
     let red = |pixels: &[u8], at: [u32; 2]| pixel_at(pixels, WIDTH, at)[0];
-    // The square's light, `d` pixels right of it, left, below and above, in red.
+    // Red `d` pixels right, left, below and above the square.
     let around = |pixels: &[u8], d: u32| {
         [
             red(pixels, [64 + d, 64]),
@@ -4301,7 +4087,7 @@ fn bloom_spreads_light_round_what_is_bright_and_no_further() {
         );
         nearer = light[0];
     }
-    // Whether pixel `at` overlaps the reach round the square, which spans pixels 63 and 64 each way.
+    // Whether pixel `at` overlaps the reach round the square, on pixels 63 and 64.
     let reached = |at: u32| (at + 1) as f32 > 63.0 - REACH && (at as f32) < 65.0 + REACH;
     for y in 0..HEIGHT {
         for x in 0..WIDTH * 5 / 8 {
@@ -4334,12 +4120,9 @@ fn bloom_spreads_light_round_what_is_bright_and_no_further() {
     compare("bloom", WIDTH, HEIGHT, &bloomed);
 }
 
-/// A lone pixel as bright as a half float holds, 65,504, in the middle of a view of 128 by 128,
-/// blooms far less than a square of 4 by 4 pixels there holding the same light, a 16th of it each,
-/// as Karis's average weighs each box of the first downsample by 1 over 1 plus its luminance, so
-/// that a pixel far brighter than those round it, a firefly, doesn't bloom into a blot: the light
-/// round each, from 6 pixels out to 24, past the square, less the clear color's, the lone pixel's
-/// under half the square's. Without the average, the two would spread their light alike.
+/// A lone pixel of 65,504 blooms under half as much, 6 to 24 pixels out, as a 4 by 4 square of the
+/// same light: Karis's average weighs the first downsample's boxes by 1 / (1 + luminance), so a
+/// firefly doesn't bloom into a blot.
 fn a_lone_bright_pixel_blooms_less_than_a_square_of_its_light() {
     const SIZE: u32 = 128;
     let mut renderer = renderer(SIZE, SIZE);
@@ -4402,15 +4185,9 @@ fn a_lone_bright_pixel_blooms_less_than_a_square_of_its_light() {
     );
 }
 
-/// Squares of grays and colors, saturated and dark ones among them, graded each way in turn,
-/// without a tonemapper, so that what's graded shows as the grade makes it, each channel within a
-/// step of what `Grade::graded` makes of it on the CPU: saturation 0, which makes them grays of
-/// their luminance, and 2, which keeps grays and takes some colors' channels to none; a slope of a
-/// half; contrast of 1.5; ASC CDL's slope, offset and power, each a channel's; the showcase's
-/// golden hour; the white balance at its coolest and greenest, and warmer; the CPU's own checks
-/// (`grade.rs`) say those are what each should make. The identity, and a grade a hair from it,
-/// leave them as they were. A square on the canvas isn't graded. The rows, graded each way, are
-/// compared with their reference.
+/// Grades without a tonemapper, each channel within a step of `Grade::graded`, which `grade.rs`
+/// checks. The identity and a grade a hair off change nothing; the canvas isn't graded. Against
+/// their reference.
 fn grades_transform_as_they_say() {
     const WIDTH: u32 = 128;
     const HEIGHT: u32 = 8;
@@ -4456,7 +4233,7 @@ fn grades_transform_as_they_say() {
         );
         draws.push(square, flat, at, color.extend(1.0));
     }
-    // Red, over the top left 4 by 4 of the first square, which leaves its middle.
+    // Red over the first square's top left 4 by 4, clear of its middle.
     let red = Vec4::new(0.8, 0.1, 0.05, 1.0);
     let mut canvas = Draws::default();
     let corner = Mat4::from_translation(Vec3::new(2.0, 6.0, 0.0))
@@ -4486,7 +4263,7 @@ fn grades_transform_as_they_say() {
             .map(|i| pixel_at(pixels, WIDTH, [i * 8 + 4, 4]))
             .collect()
     };
-    // Each square shows what `grade` makes of its color on the CPU, each channel within a step.
+    // Each square within a step of what `grade` makes of it on the CPU.
     let shows = |pixels: &[u8], what: &str, grade: Grade| {
         for (got, color) in middles(pixels).into_iter().zip(COLORS) {
             let want = grade.graded(color).to_array().map(encoded);
@@ -4614,12 +4391,9 @@ fn grades_transform_as_they_say() {
     compare("grades", WIDTH, HEIGHT * rows.len() as u32, &rows.concat());
 }
 
-/// A gradient of gray across a view of 256 by 64, a column of pixels a shade, from 0.2 to 0.21,
-/// which PBR Neutral takes 0.04 off, about 2.3 steps of the view's 8 bits from end to end. Dithered,
-/// as PBR Neutral's view is, each row changes from pixel to pixel many times over, rather than at
-/// the 2 edges of the bands rounding leaves, as without a tonemapper, which doesn't dither;
-/// and the mean of each 16 columns is the gradient's within a tenth of a step, as rounding's
-/// isn't. Black and white stay exactly as they are, the noise kept from reaching past them.
+/// PBR Neutral's dither breaks a gradient of 2.3 steps of 8 bits into many changes a row, not
+/// rounding's 2 band edges, and keeps each 16 columns' mean within a tenth of a step. Black and
+/// white stay exact.
 fn dithering_keeps_a_gradients_mean_and_breaks_its_bands() {
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 64;
@@ -4639,7 +4413,7 @@ fn dithering_keeps_a_gradients_mean_and_breaks_its_bands() {
         ..Viewpoint::default()
     };
     let shade = |x: u32| 0.2 + 0.01 * (x as f32 + 0.5) / WIDTH as f32;
-    // What PBR Neutral makes of the gradient, or what's drawn without a tonemapper for the same.
+    // The gradient, or, 0.04 less, what PBR Neutral makes of it.
     let gradient = |less: f32| {
         let mut draws = Draws::default();
         for x in 0..WIDTH {
@@ -4663,8 +4437,7 @@ fn dithering_keeps_a_gradients_mean_and_breaks_its_bands() {
     let dithered = frame_pixels(&mut renderer);
     render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &mapped));
     let rounded = frame_pixels(&mut renderer);
-    // Black, left, and as bright as a half float holds, right, which PBR Neutral rolls off to
-    // within a millionth of white.
+    // Black, and 65,504, which PBR Neutral rolls off to within a millionth of white.
     let mut ends = Draws::default();
     for (x, gray) in [(-0.25, 0.0), (0.25, 65_504.0)] {
         let at = Mat4::from_scale_rotation_translation(
@@ -4688,7 +4461,7 @@ fn dithering_keeps_a_gradients_mean_and_breaks_its_bands() {
             assert_eq!(got, [want, want, want, 255], "dithered at ({x}, {y})");
         }
     }
-    // How many times each row's gray changes from one pixel to the next.
+    // How often each row's gray changes.
     let changes = |pixels: &[u8]| -> Vec<usize> {
         let gray = |x, y| pixel_at(pixels, WIDTH, [x, y])[1];
         let row = |y| (1..WIDTH).filter(|&x| gray(x, y) != gray(x - 1, y)).count();
@@ -4699,7 +4472,7 @@ fn dithering_keeps_a_gradients_mean_and_breaks_its_bands() {
     assert!(banded <= 6, "rounded, a row changes {banded} times");
     let least = changes(&dithered).into_iter().min().expect("rows");
     assert!(least > 64, "dithered, a row changes only {least} times");
-    // The gradient, in steps of the view's 8 bits, encoded as the view is.
+    // The gradient in 8-bit steps, sRGB-encoded.
     let exact = |x: u32| {
         let linear = shade(x) - 0.04;
         255.0 * (1.055 * math::libm::powf(linear, 1.0 / 2.4) - 0.055)
@@ -4728,17 +4501,10 @@ fn dithering_keeps_a_gradients_mean_and_breaks_its_bands() {
     );
 }
 
-/// A view of a uniform sky alone, whose exposure adapts, frame by frame a tenth of a second apart:
-/// its first two frames, before a metering comes back, at the exposure given, within the bounds;
-/// the third at what the first's metering called for, at once: the sky's luminance, in the middle of
-/// one of the meter's bins, 3 stops on. The sky 8 stops darker, two more frames at that, whose
-/// meterings were of the bright sky, then down at its speed, 2 stops a second, until it holds at
-/// what the dark sky calls for; then back up at 4, faster. A change of compensation shows in the
-/// frame it's made, a stop brighter; a change of percentiles, whose meter finds the same of a uniform
-/// sky, takes the compensation back at once too; and turned off, the exposure is the one given.
-/// Each frame's exposure is within a thousandth of a
-/// stop of what that makes it, and its sky shows the sky's luminance times it, as lit shading would
-/// multiply light by it.
+/// A uniform sky's exposure adapting, frames 0.1 s apart: the exposure given until the first
+/// metering returns in frame 3, 3 stops past the luminance's log2; down 2 stops a second, up 4;
+/// compensation in its own frame; off, the exposure given. Each frame's sky shows its luminance
+/// times the exposure.
 fn exposure_adapts_frame_by_frame_from_a_bright_view_to_a_dark_one() {
     const SIZE: u32 = 32;
     const DT: f32 = 0.1;
@@ -4770,8 +4536,7 @@ fn exposure_adapts_frame_by_frame_from_a_bright_view_to_a_dark_one() {
     };
     let given = gg_renderer::light_scale(10.0);
     let mut time = 0.0;
-    // A frame's exposure value, checked against `expected`, and its sky against the luminance it
-    // shows, its log2 `shown`, times its exposure.
+    // Checks a frame's exposure value against `expected`, and its sky against 2^`shown` times it.
     let mut frame = |stores: &mut Stores, adaptation, shown: f32, expected: f32| {
         time += DT;
         let data = RenderData {
@@ -4840,14 +4605,9 @@ fn exposure_adapts_frame_by_frame_from_a_bright_view_to_a_dark_one() {
     shut_down(renderer);
 }
 
-/// A view half a bright sky above the horizon and half a dark one below, each of luminances in the
-/// middle of one of the meter's bins, 8 stops apart, whose exposure adapts as fast as can be: it
-/// takes the mean of the two, between its tenth and ninetieth percentiles, each half 40% of the
-/// pixels; the bright half alone between its sixtieth and its ninetieth; the dark alone below its
-/// fortieth. A canvas of white over the whole view, which draws after the meter, changes nothing
-/// of it. Antialiased, temporally or by SMAA, whose colors the meter reads in place of the view's
-/// as drawn, it meters the halves alike, as without. Over a sky black above the horizon, the dark
-/// half alone, as what's darker than the meter's bins isn't metered.
+/// A sky 8 stops brighter above the horizon than below, adapting at once, meters the halves' mean,
+/// the bright or the dark as its percentiles say. A white canvas, drawn after the meter, and TAA
+/// and SMAA, whose colors it reads, change nothing. What's darker than the bins isn't metered.
 fn exposure_meters_between_its_percentiles() {
     const SIZE: u32 = 32;
     // The middles of two of the meter's bins, 8 stops apart.
@@ -4892,9 +4652,7 @@ fn exposure_meters_between_its_percentiles() {
     };
     let mut time = 0.0;
     let none = Draws::default();
-    // The exposure value of the third frame of `adaptation`, with `canvas` over the view,
-    // antialiased as `antialiasing` says, which the first's metering sets, and that frame's middle
-    // pixel.
+    // The third frame's exposure value, which the first's metering sets, and its middle pixel.
     let mut metered =
         |stores: &mut Stores, adaptation: Adaptation, canvas: &Draws, antialiasing| {
             for _ in 0..3 {
@@ -4930,7 +4688,7 @@ fn exposure_meters_between_its_percentiles() {
             mean + 3.0
         );
     }
-    // A canvas of white over the whole view, which draws after the meter, meters nothing.
+    // A white canvas over the view, drawn after the meter, isn't metered.
     let mut canvas = Draws::default();
     let whole = Mat4::from_scale_rotation_translation(
         Vec3::new(SIZE as f32, SIZE as f32, 1.0),
@@ -4970,11 +4728,9 @@ fn exposure_meters_between_its_percentiles() {
     shut_down(renderer);
 }
 
-/// The game's own view of a bright sky and a tool's look of a dark one, as the tool API's look
-/// round a dark room while the game's camera is outdoors, each exposure adapting as fast as can
-/// be: each settles at what its own sky calls for; a frame of the game's own view while the look
-/// stays, as a capture of it is, shows the bright sky at the game's own exposure; and what that
-/// frame metered, back two frames later, leaves the look's exposure where it was.
+/// The game's view of a bright sky and a tool's look at a dark one, adapting at once: each settles
+/// at its own sky's. A frame of the game's view during the look, as a capture is, takes the game's
+/// exposure; its metering, two frames later, leaves the look's alone.
 fn a_looks_exposure_adapts_apart_from_the_games_own() {
     const SIZE: u32 = 32;
     // The middles of two of the meter's bins, 8 stops apart.
@@ -5007,8 +4763,7 @@ fn a_looks_exposure_adapts_apart_from_the_games_own() {
         ..Adaptation::default()
     };
     let mut time = 0.0;
-    // The exposure value of a frame of the game's own view of the bright sky, or of the look's of
-    // the dark one, and its sky's pixel.
+    // A frame's exposure value and sky pixel, the look's if `looked`.
     let mut frame = |stores: &mut Stores, looked: bool| {
         time += 0.1;
         lit(stores, if looked { DARK } else { BRIGHT });
@@ -5057,13 +4812,10 @@ fn a_looks_exposure_adapts_apart_from_the_games_own() {
     shut_down(renderer);
 }
 
-/// A sky of fine checkers, one a hundredth as bright as the other, under temporal antialiasing,
-/// whose clipping lets much of the history through where what's round a pixel differs that much:
-/// settled at the exposure it
-/// adapts to; then settled at a quarter of that, without adapting; then adapting again, whose third
-/// frame takes the first metering at once, 4 times brighter. That frame shows what the view settled
-/// at before, as near as one settled frame is to the one before it, as the resolve scales its
-/// history by the change of exposure, rather than a blend of mostly the dimmer history, a ghost.
+/// Fine sky checkers a hundredfold apart under TAA, whose clip passes much history at such
+/// contrast. Held at a quarter of its settled exposure, then adapting, the third frame jumps 4
+/// times brighter, yet lands as near the settled view as settled frames do: the resolve scales its
+/// history by the change, or it ghosts.
 fn an_exposure_jump_under_antialiasing_leaves_no_ghost() {
     const SIZE: u32 = 32;
     let mut renderer = renderer(SIZE, SIZE);
@@ -5130,14 +4882,10 @@ fn an_exposure_jump_under_antialiasing_leaves_no_ghost() {
     shut_down(renderer);
 }
 
-/// A white floor, three spheres on it, white, red and blue, and an unlit square of orange over
-/// them, under a sun and a sky, whose exposure adapts, against its reference of four frames side by
-/// side: settled under a sun of 100,000 lux and a sky of 4,000 candela per square meter; the first
-/// with both 8 stops darker, its lit pixels dark and its unlit square as bright as ever; a second
-/// later, coming down at its speed, 4 stops a second; and settled. Everything lit 8 stops darker,
-/// its meter's mean is 8 stops lower, so that it settles 8 stops lower, showing what it showed:
-/// within a step of 8 bits of the first. And a frame drawn at the exposure it settled at, without
-/// adapting, shows the same.
+/// A lit scene and an unlit square, adapting as the lights drop 8 stops, against a reference of
+/// four frames: settled; the drop; a second later, at 4 stops a second; settled again, within a
+/// step of 8 bits of the first. The unlit square never changes; a frame at the settled exposure,
+/// not adapting, matches.
 fn adapted_frames_match_their_reference() {
     const SIZE: u32 = 64;
     const DT: f32 = 0.1;
@@ -5269,9 +5017,8 @@ fn adapted_frames_match_their_reference() {
     compare("adapted", SIZE * 4, SIZE, &frames);
 }
 
-/// What `frame` renders of `stores` once the exposure it gives, after its pixels, moves less than a
-/// ten-thousandth of a stop over three frames, as an adapting exposure that has settled does, whose
-/// meterings come back two frames later: within 100 frames.
+/// What `frame` renders once its exposure moves under a ten-thousandth of a stop over three frames,
+/// as a settled one does, its meterings two frames late. Panics past 100 frames.
 fn settled(
     stores: &mut Stores,
     frame: &mut impl FnMut(&mut Stores) -> (Vec<u8>, f32),
@@ -5293,26 +5040,21 @@ fn settled(
     panic!("the exposure still moves after 100 frames: {last}");
 }
 
-/// What the depth of field's tests see: squares of flat colors at 2, 4 and 8 ahead of a camera
-/// whose field of view is 20° from bottom to top, a 68 mm lens's on a full-frame camera's sensor,
-/// over stripes 12 ahead; and where each of the squares' middles shows.
+/// The depth of field tests' scene: squares at 2, 4 and 8 over stripes at 12, through 20°
+/// vertically (a 68 mm lens on full frame); and each square's middle.
 struct FocusScene {
     draws: Draws,
     viewpoint: Viewpoint,
     near: Vec3,
     focused: Vec3,
     far: Vec3,
-    /// Another scene of the same view: a red square 0.1 across at 2 ahead, and beside it, just past
-    /// the focus, a yellow one at `past`, whose circle at f/1.4 is 2.5 pixels, 20 pixels a side,
-    /// within the tiles the red square's circle reaches, over white 200 ahead.
+    /// The same view: a red square at 2, and beside it a yellow one at `past`, just past the focus
+    /// (a 2.5-pixel circle), within the tiles the red one's circle reaches, over white at 200.
     beside: Draws,
     past: Vec3,
 }
 
-/// The depth of field's tests' scene, in `stores`: a red square 0.2 across at 2 ahead, its right
-/// edge over a green one's left edge, the green 0.5 across at 4 ahead, its right edge over a blue
-/// one's left edge, the blue 0.8 across at 8 ahead, and stripes of light and dark gray a tenth of a
-/// unit wide 12 ahead, filling the view behind them.
+/// `FocusScene`: red, green and blue squares, each over the next one's left edge.
 fn focus_scene(stores: &mut Stores) -> FocusScene {
     let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
@@ -5387,21 +5129,10 @@ fn focus_scene(stores: &mut Stores) -> FocusScene {
     }
 }
 
-/// [`focus_scene`] in focus at 4, through f/1.4, without antialiasing, in a view of 640 by 360, whose
-/// circles of confusion's radius is at most 7.2 pixels: 6.3 pixels for what's infinitely far, 3.2 at
-/// 8, 4.2 at 12, and past the most at 2. The green square, in focus, is as it is without depth of
-/// field, every pixel within 2 of it, its edges too, the blue square's blur behind its right edge not
-/// spreading over it; the red square, before the focus, spreads over what's round it, over the green
-/// square's edge too, and fades in from its own edge; the blue square's right edge and the stripes
-/// behind blur, the stripes' contrast falling, but the stripes, of a larger circle, don't spread
-/// into the blue square past its own circle; nor does white far behind a square just past the
-/// focus beside a red one before it, whose circle widens what's gathered there. Antialiased, the
-/// square in focus's edges shimmer over the offsets' cycle no more than docs/DEFECTS.md says; by
-/// SMAA, the square in focus stays as sharp and the red one spreads alike. A
-/// focus that blurs nothing, at f/1000, and depth of
-/// field under an orthographic projection, which has no lens, change no pixel; nor does what's on
-/// the canvas, drawn after it, blur. With antialiasing, the green square stays as sharp. Compared,
-/// without antialiasing, with its reference.
+/// [`focus_scene`] focused at 4 through f/1.4, circles up to 7.2 pixels (6.3 at infinity): in
+/// focus stays sharp, nearer spreads and fades in from its edge, farther blurs, and a larger circle
+/// behind never spreads past a nearer one's. Alike under TAA and SMAA, TAA's edges shimmering no
+/// more than docs/DEFECTS.md says. f/1000, an orthographic projection and the canvas blur nothing.
 fn depth_of_field_blurs_what_is_off_its_focus() {
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 360;
@@ -5409,7 +5140,7 @@ fn depth_of_field_blurs_what_is_off_its_focus() {
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut stores = Stores::default();
     let scene = focus_scene(&mut stores);
-    // A white square on the canvas, 16 pixels a side, 8 from the bottom left.
+    // A white canvas square, 8 pixels from the bottom left.
     let mut canvas = Draws::default();
     let placed = Mat4::from_translation(Vec3::new(16.0, 16.0, 0.0))
         * Mat4::from_scale(Vec3::new(16.0, 16.0, 1.0));
@@ -5427,8 +5158,7 @@ fn depth_of_field_blurs_what_is_off_its_focus() {
         focus_distance: 4.0,
         f_number: 1.4,
     };
-    // Each frame of the view, of one frame, or antialiased, of enough for the history to settle and
-    // a cycle of the offsets after.
+    // Every frame drawn: one, or under TAA, enough to settle and a cycle of the offsets after.
     let mut frames = |depth_of_field, viewpoint, antialiasing| {
         let count = if antialiasing == Antialiasing::Taa {
             24
@@ -5485,21 +5215,17 @@ fn depth_of_field_blurs_what_is_off_its_focus() {
     render_without_ui(&mut renderer, data);
     let beside = frame_pixels(&mut renderer);
     shut_down(renderer);
-    // The yellow square just past the focus, 5 pixels in from its right edge, twice its own
-    // circle, is as yellow as it is, its blue none, though the red square's circle widens what each
-    // texel there gathers to 3.6 texels: the white behind, of a circle of 6.2 pixels, doesn't
-    // spread over it past its own circle, where it would reach 5 pixels in.
+    // 5 pixels into the yellow square, twice its circle, no blue: the white behind (a 6.2-pixel
+    // circle) stops at its own, though the red's widens the gather there to 3.6 texels.
     let [x, y] = pixel_of(viewpoint, size, scene.past + Vec3::new(0.065, 0.0, 0.0));
     let inside = pixel_at(&beside, WIDTH, [x - 5, y]);
     assert!(
         inside[2] <= 8,
         "the white behind the square just past the focus spreads 5 pixels into it: {inside:?}"
     );
-    // Antialiased, across the square in focus's edges over the stripes and the blue square, each
-    // pixel's channels move no more than 16 further over a cycle of the offsets, the last 8 frames,
-    // than they do without depth of field: the edge's own pixels, whose depth the offsets move the
-    // edge across, take the circle of what's behind them in some frames, as docs/DEFECTS.md says,
-    // about 10 further, and no others shimmer.
+    // Under TAA, on the focused square's edges, no channel moves over 16 further across the
+    // offsets' cycle than without depth of field. The edge's own pixels take the circle behind in
+    // some frames, about 10 further, as docs/DEFECTS.md says.
     let [gx, gy] = pixel_of(viewpoint, size, scene.focused);
     let spread = |drawn: &[Vec<u8>], p: [u32; 2]| {
         let cycle = drawn[drawn.len() - 8..]
@@ -5529,8 +5255,8 @@ fn depth_of_field_blurs_what_is_off_its_focus() {
     let at = |pixels: &[u8], [x, y]: [u32; 2]| pixel_at(pixels, WIDTH, [x, y]);
     let differs =
         |a: [u8; 4], b: [u8; 4], by: u8| a.iter().zip(b).any(|(&a, b)| a.abs_diff(b) > by);
-    // The green square spans 128 pixels each way round its middle: within it, but where the red
-    // square's blur reaches, as sharp as it is without depth of field.
+    // The green square, 128 pixels round its middle, as sharp as without depth of field but where
+    // the red's blur reaches.
     let [gx, gy] = pixel_of(viewpoint, size, scene.focused);
     for y in gy - 62..gy + 62 {
         for x in gx - 34..gx + 63 {
@@ -5551,10 +5277,8 @@ fn depth_of_field_blurs_what_is_off_its_focus() {
             );
         }
     }
-    // The red square spans 102 pixels each way round its middle: 2 pixels out from its left edge
-    // and its top edge, its light, as more red than green; 2 pixels in, less, as the background
-    // shows through its blurred edge; and 4 pixels into the green square from the red's right edge,
-    // its light.
+    // The red square, 102 pixels round its middle: its light 2 pixels out from its left and top
+    // edges, less 2 in, and 4 pixels into the green.
     let [rx, ry] = pixel_of(viewpoint, size, scene.near);
     let redness = |pixels: &[u8], p| {
         let [r, g, ..] = at(pixels, p);
@@ -5589,8 +5313,7 @@ fn depth_of_field_blurs_what_is_off_its_focus() {
         at(&blurred, over),
         at(&sharp, over)
     );
-    // The blue square spans 102 pixels each way round its middle: its last pixel and the second
-    // past its right edge, between its blue and the stripes', as it blurs.
+    // The blue square, 102 pixels round its middle: its last pixel and the second past it blur.
     let [bx, by] = pixel_of(viewpoint, size, scene.far);
     for p in [[bx + 51, by], [bx + 53, by]] {
         assert!(
@@ -5599,15 +5322,15 @@ fn depth_of_field_blurs_what_is_off_its_focus() {
             at(&blurred, p)
         );
     }
-    // 4 pixels in from its right edge, past its own circle, it stays blue, as the stripes behind
-    // it, of a larger circle, don't spread over it.
+    // 4 pixels in from its right edge, past its own circle, it stays blue: the stripes' larger
+    // circle doesn't spread over it.
     let inside = [bx + 47, by];
     assert!(
         !differs(at(&blurred, inside), at(&sharp, inside), 8),
         "the stripes behind the blue square spread over it to {inside:?}: {:?}",
         at(&blurred, inside)
     );
-    // The stripes, along a row below the squares: their least and most, nearer each other.
+    // Along a row below the squares, the stripes' least and most come nearer.
     let contrast = |pixels: &[u8]| {
         let row = (0..WIDTH).map(|x| at(pixels, [x, HEIGHT - 40])[1]);
         let (least, most) = row.fold((u8::MAX, 0), |(l, m), v| (l.min(v), m.max(v)));
@@ -5624,21 +5347,10 @@ fn depth_of_field_blurs_what_is_off_its_focus() {
     compare("depth_of_field", WIDTH, HEIGHT, &blurred);
 }
 
-/// A plate of the scene, unlit, 1 across, at 4 ahead of a camera whose field of view is 45° from
-/// bottom to top, in a view of 384 by 216, whose tiles' side, the farthest it blurs a pixel either
-/// way, is 6 pixels, over stripes of flat colors 10 ahead, light and dark, 0.2 wide, without
-/// antialiasing; through a shutter open half the frame. The plate moving 0.3 to the right each
-/// frame, about 20 pixels, its left and right edges blur out over the stripes, up to 5 pixels, as
-/// the filter keeps what moves alike at a depth alike, the plate's own pixels, mostly as they are;
-/// its top and bottom edges and the stripes, still, staying as they are without motion blur; standing
-/// still, as the frames before it, no pixel changes. The camera turning 4° about its up each frame,
-/// about 18 pixels at the middle, everything blurs across, the stripes' contrast falling, while
-/// the plate's top edge stays sharp; but cut to, as from a tool's look, the turn is a jump, which
-/// blurs nothing, the view as it is without motion blur, while the moving plate still blurs by its
-/// own motion. What's on the canvas, drawn after it, doesn't blur. Antialiased, temporally or by
-/// SMAA, the moving plate blurs too, and by SMAA, which draws no offset, what stands still far from
-/// it is as it was. Compared, the moving plate's frame and the turning camera's side by side, with
-/// their reference.
+/// An unlit plate over stripes, the shutter open half the frame, tiles of 6 pixels capping the
+/// blur. A moving plate blurs at its side edges alone; a turning camera blurs all but its top edge;
+/// a cut, as from a tool's look, blurs only the plate's own motion. The canvas never blurs; TAA and
+/// SMAA blur alike. The moving and turning frames, against their reference.
 fn motion_blur_smears_what_moves_and_the_turning_camera() {
     const WIDTH: u32 = 384;
     const HEIGHT: u32 = 216;
@@ -5665,7 +5377,7 @@ fn motion_blur_smears_what_moves_and_the_turning_camera() {
         let shade = if stripe % 2 == 0 { 0.5 } else { 0.05 };
         draws.push(square, flat, at, Vec4::new(shade, shade, shade * 1.2, 1.0));
     }
-    // A white square on the canvas, 16 pixels a side, 8 from the bottom left.
+    // A white canvas square, 8 pixels from the bottom left.
     let mut canvas = Draws::default();
     let placed = Mat4::from_translation(Vec3::new(16.0, 16.0, 0.0))
         * Mat4::from_scale(Vec3::new(16.0, 16.0, 1.0));
@@ -5683,8 +5395,7 @@ fn motion_blur_smears_what_moves_and_the_turning_camera() {
     stores.scene.set(0, at(0.0), &draw, 1);
     settle(&mut renderer, &mut stores, viewport, seen(0.0), &draws);
     let blur = MotionBlur { shutter: 0.5 };
-    // The last of 4 frames of the plate at `x(frame)` and the camera turned `turn(frame)`, the
-    // last cut to, if `cut`.
+    // The last of 4 frames, cut to if `cut`.
     let mut render =
         |x: &dyn Fn(f32) -> f32, turn: &dyn Fn(f32) -> f32, motion_blur, antialiasing, cut| {
             let mut pixels = Vec::new();
@@ -5715,8 +5426,7 @@ fn motion_blur_smears_what_moves_and_the_turning_camera() {
     let turned_sharp = render(&still, &turning, None, none, false);
     let turned = render(&still, &turning, Some(blur), none, false);
     let unturned = render(&still, &facing, Some(blur), none, false);
-    // Cut to, the camera's turn since the frame before is a jump, which blurs nothing; the plate's
-    // own motion still blurs it.
+    // Cut to, the turn is a jump and blurs nothing; the plate's own motion still blurs it.
     let jumped = render(&still, &turning, Some(blur), none, true);
     let moved_jumped = render(&moving, &turning, Some(blur), none, true);
     let moved_turned_sharp = render(&moving, &turning, None, none, false);
@@ -5732,10 +5442,9 @@ fn motion_blur_smears_what_moves_and_the_turning_camera() {
     let pixel = |pixels: &[u8], [x, y]: [u32; 2]| pixel_at(pixels, WIDTH, [x, y]);
     let differs =
         |a: [u8; 4], b: [u8; 4], by: u8| a.iter().zip(b).any(|(&a, b)| a.abs_diff(b) > by);
-    // The plate, 0.45 right of the middle in the last frame, spans 65 pixels each way: a pixel out
-    // from its left and right edges, along the 40 rows round its middle, its color, as it blurs over
-    // the stripes, apart from theirs by a tenth on average in linear light, past the noise that
-    // jitters the filter's samples from pixel to pixel.
+    // The plate, 0.45 right of the middle at the last frame, spans 65 pixels each way. A pixel past
+    // its side edges, over 40 rows, it differs from sharp by a tenth on average in linear light,
+    // past the filter's jitter.
     let [px, py] = pixel_of(seen(0.0), size, Vec3::new(0.45, 0.0, -4.0));
     let apart = |a: &[u8], b: &[u8], x: u32| {
         let rows = py - 20..py + 20;
@@ -5783,8 +5492,7 @@ fn motion_blur_smears_what_moves_and_the_turning_camera() {
         corner(&smaa) == corner(&smaa_sharp),
         "by SMAA, what stands still far from the moving plate blurs"
     );
-    // Cut to as the camera turns, the moving plate's edges blur by its own motion, a pixel out
-    // from each, and the stripes far from it are as they were.
+    // Cut to while turning, the moving plate still blurs by its own motion; the far stripes don't.
     let edge = |x: f32| pixel_of(seen(6.0), size, Vec3::new(x, 0.0, -4.0))[0];
     for x in [edge(-0.05) - 1, edge(0.95) + 1] {
         let blurs = apart(&moved_jumped, &moved_turned_sharp, x);
@@ -5802,9 +5510,7 @@ fn motion_blur_smears_what_moves_and_the_turning_camera() {
         on_canvas(&blurred) == on_canvas(&sharp) && on_canvas(&turned) == on_canvas(&sharp),
         "the canvas blurs"
     );
-    // The stripes, along a row above the plate, right of where the clear color shows past their
-    // end, their least and most nearer each other as the camera turns, and as they were where it
-    // stops turning.
+    // The stripes' contrast along a row above the plate, right of where they end.
     let contrast = |pixels: &[u8]| {
         let row = (WIDTH / 4..WIDTH).map(|x| pixel(pixels, [x, 20])[1]);
         let (least, most) = row.fold((u8::MAX, 0), |(l, m), v| (l.min(v), m.max(v)));
@@ -5820,8 +5526,7 @@ fn motion_blur_smears_what_moves_and_the_turning_camera() {
         contrast(&unturned) == contrast(&turned_sharp),
         "the stripes blur where the camera stands still"
     );
-    // 3 pixels below the plate's top edge, its color as it is, and 3 above, none of it, whose red is
-    // much more than its blue, where the stripes' is less.
+    // 3 pixels inside the plate's top edge, unchanged; 3 above, none of its red.
     let top = pixel_of(seen(6.0), size, Vec3::new(0.45, 0.5, -4.0));
     let (inside, above) = ([top[0], top[1] + 3], [top[0], top[1] - 3]);
     assert!(
@@ -5841,19 +5546,10 @@ fn motion_blur_smears_what_moves_and_the_turning_camera() {
     );
 }
 
-/// A lens over a view of 256 by 144, a unit to a pixel, without a tonemapper, so that what it does
-/// shows as it makes it. Its vignette of 1 over a uniform gray darkens each pixel by the cos⁴ law,
-/// `(1 + (r / R)²)⁻²` of its distance from the middle over the corners', within a step of that,
-/// a quarter at the corners. Its chromatic aberration of 4, over a white rectangle on black left
-/// of the middle, parts red out from the middle by 4% of each pixel's way from it and blue in: red
-/// alone 3 pixels out from its left edge, blue alone just out from its right one, nearer the
-/// middle, white within. Its grain of 0.2 over the gray scales each pixel's light by at most a fifth
-/// either way, its mean within half a percent of the gray's, its standard deviation within a tenth
-/// of the triangular law's, every frame's noise its own, and the
-/// same of a frame's number from one renderer to another. A white square on the canvas, after it,
-/// shows as it's drawn through all three, and over grain of 1 on light at a half float's
-/// brightest, 65,504, which the grain keeps within it. The three together, over gray with white squares round
-/// the view, are compared with their reference.
+/// A lens without a tonemapper: the vignette by the cos⁴ law, `(1 + (r / R)²)⁻²`, R the corners'
+/// distance; chromatic aberration, red out and blue in by 4% of the distance from the middle;
+/// grain of at most a fifth, its deviation within a tenth of the triangular law's, each frame's own
+/// and alike across renderers. The canvas shows as drawn, also over grain 1 on light of 65,504.
 fn lenses_vignette_fringe_and_grain_the_view() {
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 144;
@@ -5879,15 +5575,13 @@ fn lenses_vignette_fringe_and_grain_the_view() {
         Mat4::from_scale_rotation_translation(side, Quat::IDENTITY, at)
     };
     let white = Vec4::ONE;
-    // A white square on the canvas, 16 pixels a side, 8 from the bottom left.
+    // A white canvas square, 8 pixels from the bottom left.
     let mut canvas = Draws::default();
     let placed = Mat4::from_translation(Vec3::new(16.0, 16.0, 0.0))
         * Mat4::from_scale(Vec3::new(16.0, 16.0, 1.0));
     canvas.push_sprite(placed, Sprite::default());
-    // `frames` frames of a renderer of its own, of `draws` over `clear` through `lens`, antialiased
-    // as `antialiasing` says. It uploads through the graphics queue, whose copies are drawable in
-    // the frame that makes them, so that its frames are of the same numbers each run, as the grain
-    // is: through a transfer queue, it settles in as many frames as the copies take to finish.
+    // `frames` frames from a renderer of its own, uploading through the graphics queue, whose
+    // copies are drawable at once: frame numbers, and so the grain, match each run.
     let render_as =
         |draw: &dyn Fn(&mut Stores) -> Draws, clear: f32, lens, frames: usize, antialiasing| {
             let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(UploadPath::GraphicsQueue));
@@ -6016,10 +5710,9 @@ fn lenses_vignette_fringe_and_grain_the_view() {
         strays <= canvas_pixels,
         "{strays} pixels stray past a fifth of the gray's light"
     );
-    // The grain's spread, of the pixels but the canvas's: within a tenth of the triangular law's
-    // standard deviation, √(1/6), times the most it scales the gray's light by, 0.5 × 0.2, which
-    // the 8 bits' rounding, about a hundredth of it, can't cross either way, and grain of half or
-    // twice as much would.
+    // Off the canvas: the triangular law's deviation, √(1/6), times the grain's most, 0.5 × 0.2.
+    // Rounding to 8 bits, about a hundredth of it, can't cross the bound; half or twice the grain
+    // would.
     let gray: Vec<f32> = (light.iter().enumerate())
         .filter(|&(i, _)| {
             let (x, y) = (i as u32 % WIDTH, i as u32 / WIDTH);
@@ -6040,9 +5733,8 @@ fn lenses_vignette_fringe_and_grain_the_view() {
         on_canvas(&grain[1]) == canvas_white,
         "the canvas is grained"
     );
-    // Over light as bright as a half float holds, grain that would scale it past that keeps it
-    // there, as the canvas, blending over it, would otherwise blend over infinities into no number,
-    // which shows black.
+    // Over light of a half float's most, grain keeps it there: the canvas would otherwise blend
+    // over infinities into NaN, which shows black.
     let brightest = Lens {
         grain: 1.0,
         ..Lens::NONE
@@ -6075,8 +5767,7 @@ fn lenses_vignette_fringe_and_grain_the_view() {
     compare("lens", WIDTH, HEIGHT, &together);
 }
 
-/// `frames`, each read back `width` by `height` pixels, side by side, as a reference holds frames
-/// in a row.
+/// `frames`, each `width` by `height`, side by side in a row, as a reference holds them.
 fn side_by_side_of(frames: &[&[u8]], width: u32, height: u32) -> Vec<u8> {
     let row = (width * 4) as usize;
     (0..height as usize)
@@ -6089,9 +5780,8 @@ fn side_by_side_of(frames: &[&[u8]], width: u32, height: u32) -> Vec<u8> {
         .collect()
 }
 
-/// A square that covers a view, with a shader that shows the frame's data as colors: where the
-/// camera is, left of it, and the time and the exposure, right of it. Its exposure adapting, from
-/// the same, the shader shows what the first frame's metering, back two frames later, calls for.
+/// A shader shows the frame's data: the camera's position left, time and exposure right. Adapting,
+/// the exposure is the first frame's metering, two frames later.
 fn shaders_read_the_frames_data() {
     const SIZE: u32 = 16;
     let mut renderer = renderer(SIZE, SIZE);
@@ -6146,20 +5836,11 @@ fn shaders_read_the_frames_data() {
     shut_down(renderer);
 }
 
-/// A row of squares, each a model's, lit head-on, seen without perspective, so that the way to
-/// the eye is the light's way back at every pixel; each pixel at a square's middle checked against
-/// what glTF's BRDF gives, worked out by hand. Lit by `E` = π lux, a surface whose normal is `cos`
-/// from the light's way, rough 1, so that the GGX lobe is 1/π and the visibility 1/(4 cos), shows
-/// `(1 - f0) c cos + f0 / 4`, `f0` 0.04 for a dielectric: 0.49 for gray of 0.5 facing the light.
-/// The squares: a dielectric; one unlit, its color alone; one black and metallic, which reflects
-/// nothing, emitting 0.25; one normal-mapped toward +X, by RGBA8, by BC5, and by a map never
-/// filled, which stands in flat; and one whose factor is metallic, its surface map taking that to
-/// a dielectric's by its blue of 0, by RGBA8, by BC7, and by a map never filled, which stands in
-/// white, leaving a metal of 0.5, whose `f0` is 0.5, showing 0.125; and one normal-mapped toward
-/// +X by BC7, of X, Y and Z, as a model's DDS image holds a normal map. Then a point light of 4π
-/// candela 2 units over the first square lights it as the directional light did; with a range of
-/// 2.5, by the window KHR_lights_punctual recommends, `1 - (2 / 2.5)^4`; and a spot over it
-/// lights it alike within its inner cone, and nothing outside its outer.
+/// Model squares lit head-on, each middle against glTF's BRDF by hand: under `E` = π lux and
+/// roughness 1 (GGX lobe 1/π, visibility 1/(4 cos)), a surface shows `(1 - f0) c cos + f0 / 4`.
+/// They cover unlit, emission, normal and surface maps in each format, and maps never filled. A
+/// point of 4π candela 2 above lights the first as the sun did, also with a range, by
+/// KHR_lights_punctual's window; a spot, alike inside its inner cone, not at all outside its outer.
 fn lights_shade_as_gltf_defines() {
     const SIDE: u32 = 16;
     const SQUARES: u32 = 10;
@@ -6197,8 +5878,7 @@ fn lights_shade_as_gltf_defines() {
     };
     let compressed_normals = textures.add("bc5 normals", [4, 4], &bc5[..], normal_map);
     let compressed_normals = Sampled::of(compressed_normals.expect("a BC5 map"));
-    // BC7's mode 6 holds odd channels exactly: X and Y tilted toward +X, nearly as `tilted`, and
-    // Z, which the shader ignores.
+    // BC7's mode 6 holds odd channels exactly; nearly `tilted`. The shader ignores Z.
     let bc7_tilted: [u8; 4] = [239, 129, 255, 255];
     let bc7_normal_map = Texels::CompressedMap {
         map: Map::Normal,
@@ -6384,12 +6064,9 @@ fn lights_shade_as_gltf_defines() {
     shut_down(renderer);
 }
 
-/// Five squares, each a model's, normal-mapped, seen without perspective and lit from above and in
-/// front, the first four of a double-sided material: the back of one turned a half turn about Y,
-/// its map tilted toward its texture's +Y, shows as the front of one whose map tilts as far toward
-/// -Y, as glTF flips a back face's whole tangent space, its bitangent too; and not as the front of
-/// one whose map tilts toward +Y, which faces the light more. The front of one mirrored across X,
-/// whose corners wind the other way as seen, shows as it does unmirrored, double-sided or not.
+/// Normal-mapped squares lit from above and in front. A back face whose map tilts toward +Y shows
+/// as a front tilted toward -Y, as glTF flips a back face's whole tangent space, bitangent too. A
+/// front mirrored across X, winding the other way, shows as unmirrored, double-sided or not.
 fn back_faces_flip_their_normal_maps() {
     const SIDE: u32 = 16;
     const WIDTH: u32 = 5 * SIDE;
@@ -6447,8 +6124,7 @@ fn back_faces_flip_their_normal_maps() {
     }];
     let viewport = filling([WIDTH, SIDE]);
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-    // Past the frame the mesh came to be drawable in, which planned no room for its meshlets and
-    // drew it by its indices.
+    // Past the frame the mesh became drawable in, which drew it by its indices.
     render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
     let frame = frame_pixels(&mut renderer);
     let [down, back, up, mirrored, mirrored_one_side] =
@@ -6470,8 +6146,8 @@ fn back_faces_flip_their_normal_maps() {
     shut_down(renderer);
 }
 
-/// A sphere of `radius` about the origin, a model's, of `rings` rings from pole to pole and
-/// `segments` around, its normals out and its tangents along its lines of latitude, eastward.
+/// A model's sphere of `radius` about the origin, `rings` from pole to pole and `segments` around;
+/// normals out, tangents eastward along latitude.
 fn sphere(meshes: &mut Meshes, radius: f32, rings: u32, segments: u32) -> Mesh<PackedVertex> {
     let (vertices, indices) = sphere_of(radius, rings, segments);
     add_model(meshes, "sphere", &vertices, &indices)
@@ -6511,9 +6187,8 @@ fn sphere_of(radius: f32, rings: u32, segments: u32) -> (Vec<ModelVertex>, Vec<u
     (vertices, indices)
 }
 
-/// Spheres of one color, opaque and rough 0 to 1 from left to right, metallic 0 to 1 from top to
-/// bottom, lit by a light from the upper left, in front, as a camera with perspective sees them,
-/// tonemapped by PBR Neutral, against their reference image.
+/// Opaque spheres of one color, rough 0 to 1 left to right and metallic 0 to 1 top to bottom, lit
+/// from the upper left front, in perspective, through PBR Neutral, against their reference.
 fn lit_spheres_match_their_reference() {
     const SIZE: u32 = 200;
     const STEPS: u32 = 5;
@@ -6563,11 +6238,9 @@ fn lit_spheres_match_their_reference() {
     check(renderer, "lit_spheres", SIZE, SIZE);
 }
 
-/// A floor and spheres under many lights: 81 points of six colors, each 0.8 over the floor and
-/// reaching 2.2, in a grid 1.5 apart that runs past what the views see, so that some shine into
-/// them from outside; four white spots, high over the floor, shining down; a point without a
-/// range, far off; and a sun among them, casting shadows. Seen with perspective, then without,
-/// against their reference images, which every light shading each fragment drew.
+/// A floor and spheres under 81 points in a grid past the views' edges (some shine in from
+/// outside), four spots, a far point without a range and a shadowing sun. In perspective and
+/// orthographically, against references drawn with every light shading every fragment.
 fn many_lights_match_their_reference() {
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 144;
@@ -6691,13 +6364,10 @@ fn sky_pixels(size: [u32; 2], texel: impl Fn(u32, u32) -> [f32; 3]) -> Vec<u8> {
     pixels
 }
 
-/// Squares, each a model's, seen head-on without perspective under a sky of 0.5 every way, with
-/// no lights, prefiltered from the frame after its texture shows: as Fdez-Agüera's scattering many
-/// times over keeps what a white surface reflects whole, every white one shows the sky's 0.5,
-/// dielectric or metal, smooth or rough; a smooth metal of another color its color of it, as the
-/// split sum's scale and bias give; one whose occlusion map holds a half, a half of it; and an
-/// unlit one its color alone. The sky shows behind them, at its luminance times the exposure. Its
-/// texture given another image, of half the light, the frame after that shows prefilters it again.
+/// Squares under a uniform sky of 0.5, no lights. Fdez-Agüera's multiple scattering keeps a white
+/// surface's reflection whole, so every white one shows 0.5; a smooth colored metal, its color of
+/// it; a half occlusion map, half; unlit, its color. A new sky image prefilters again once it
+/// shows.
 fn a_uniform_sky_lights_white_as_itself() {
     const SIDE: u32 = 16;
     const SQUARES: u32 = 7;
@@ -6713,8 +6383,7 @@ fn a_uniform_sky_lights_white_as_itself() {
         },
         ..Viewpoint::default()
     };
-    // 2 times its luminance, 0.25: 0.5, which shows as it is, unlike 1, which a brighter value
-    // would clamp to.
+    // 2 times its luminance, 0.25: 0.5, below where brighter values clamp.
     let sky = sky_texture(&mut stores.textures, [128, 64], |_, _| [2.0; 3]);
     stores.sky = Some(Sky {
         texture: sky,
@@ -6819,11 +6488,9 @@ fn a_uniform_sky_lights_white_as_itself() {
     shut_down(renderer);
 }
 
-/// A sky of a color a way, seen through a narrow perspective each way in turn: each of the four
-/// ways between the axes round the horizon, each its column's color in the image's middle row, as
-/// the image's center column faces +X, a quarter of the way across -Z; straight up its top row's,
-/// and straight down its bottom row's; at its luminance times the exposure. Its texture given a
-/// BC6H block of one color instead, the sky shows that color as the GPU decodes it.
+/// A sky of a color each way, through a narrow view: each diagonal round the horizon shows its
+/// middle-row column (the center faces +X, a quarter across -Z); up and down, the top and bottom
+/// rows; at luminance times exposure. A BC6H block of one color shows as the GPU decodes it.
 fn the_sky_shows_each_way_behind_the_world() {
     const SIZE: u32 = 3;
     let mut renderer = renderer(SIZE, SIZE);
@@ -6885,10 +6552,9 @@ fn the_sky_shows_each_way_behind_the_world() {
             "looking {way}, {got:?}, not {color:?} times 4 encoded"
         );
     }
-    // A block of BC6H's mode 11, its bits from the lowest: the mode, 3, in 5 bits; both endpoints,
-    // the same, each red, green and blue in 10 bits; and every texel's index, 0, picking the first.
-    // Unsigned, an endpoint of 10 bits that's neither 0 nor 1023 decodes to the 16-bit float of
-    // bits 31 times it plus 15: about 0.125, 0.0625 and 0.03125.
+    // BC6H mode 11, bits from the lowest: the mode, 3, in 5 bits; two equal endpoints, red, green
+    // and blue in 10 bits each; every index 0. Unsigned, a 10-bit endpoint other than 0 and 1023
+    // decodes to the half float of bits 31 times it plus 15: about 0.125, 0.0625 and 0.03125.
     let [r, g, b] = [396_u128, 363, 330];
     let block = (3 | r << 5 | g << 15 | b << 25 | r << 35 | g << 45 | b << 55).to_le_bytes();
     let replaced = (stores.textures).replace("sky", sky, [4, 4], &block[..], Texels::Bc6h);
@@ -6916,10 +6582,9 @@ fn the_sky_shows_each_way_behind_the_world() {
     shut_down(renderer);
 }
 
-/// Spheres of one color, opaque and rough 0 to 1 from left to right, metallic 0 to 1 from top to
-/// bottom, lit by a sky alone, a gradient from a blue zenith to a pale horizon over dark ground,
-/// with a bright patch where a sun would be, high to the upper left, which shows behind them, as a
-/// camera with perspective sees them, tonemapped by PBR Neutral, against their reference image.
+/// `lit_spheres_match_their_reference`'s spheres lit by a sky alone, which shows behind them: a
+/// blue zenith to a pale horizon over dark ground, a bright sun patch high to the upper left.
+/// Through PBR Neutral, against their reference.
 fn sky_lit_spheres_match_their_reference() {
     const SIZE: u32 = 200;
     const STEPS: u32 = 5;
@@ -6980,17 +6645,9 @@ fn sky_lit_spheres_match_their_reference() {
     check(renderer, "sky_lit_spheres", SIZE, SIZE);
 }
 
-/// The scene the tests of ambient occlusion see, under the stores' sky and lights, as `viewpoint`
-/// sees it, a camera with perspective in front of it and above: a floor, a model's, 6 units across
-/// and white; a wall on its left, a model's too, facing +X at -1.5; a wall at its back, of a game's
-/// shader of one color, facing +Z at -1, which a view beside a visibility buffer draws otherwise;
-/// a sphere of 0.5 on the floor, of ID [`BALL`], and one of 0.3 near the left wall; a masked panel
-/// 0.8 across, facing up 0.3 over the floor, cut out in its middle half each way; and a skinned
-/// strip, standing, which its joints carry a unit along -Z from where it was bound, of a skinned
-/// mesh, which a view beside a visibility buffer draws otherwise too. And the world's points where
-/// the floor meets the large sphere, the corner of the walls and the back wall alone, out in the
-/// open, up the back wall, the middle of the panel's hole, and where the floor meets the strip, as
-/// it's posed and as it was bound.
+/// The ambient occlusion tests' scene: a floor, walls, spheres ([`BALL`] the large one), a masked
+/// panel and a skinned strip, posed a unit along -Z from where it was bound. A view beside a
+/// visibility buffer draws the back wall, a game's shader's, and the strip otherwise.
 struct OcclusionScene {
     draws: Draws,
     viewpoint: Viewpoint,
@@ -7133,16 +6790,11 @@ fn pixel_of(viewpoint: Viewpoint, size: [u32; 2], at: Vec3) -> [u32; 2] {
     [pixel.x as u32, pixel.y as u32]
 }
 
-/// [`occlusion_scene`] lit by a sky alone, of 0.5 every way, with ambient occlusion and without:
-/// where the floor meets the large sphere, and in the corner of the walls, the sky's light is
-/// darkened, and where the floor meets the back wall, a game's shader's, and the skinned strip as
-/// it's posed, whose depth occludes too, as a view beside a visibility buffer draws them
-/// otherwise; through the panel's hole, the floor under it, as the depth of a masked material is
-/// cut out as it is; out in the open, and where the strip was bound, it's as it is without; and the
-/// back wall, which reads none, shows its color either way. Against its reference image, without
-/// antialiasing and antialiased alike. In a still view, the occlusion takes 8 frames' noise in
-/// turn, which its history averages: once it settles, each frame draws the view as the frame 8
-/// before it did, as temporal antialiasing's resolve asks of a still pixel it keeps unclipped.
+/// [`occlusion_scene`] with ambient occlusion and without: it darkens the sky's light near what
+/// hides it, the back wall's, the posed strip's and the panel's cut-out depths included, and
+/// hardly elsewhere; the back wall reads none. Against its reference, with and without TAA.
+/// Settled in a still view, each frame matches the one 8 before, as TAA's resolve asks of a still
+/// pixel it keeps unclipped.
 fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -7157,8 +6809,7 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
     let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
     let viewport = filling([WIDTH, HEIGHT]);
     settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
-    // Past the frame the meshes came to be drawable in, which planned no room for their meshlets
-    // and drew them by their indices.
+    // Past the frame the meshes became drawable in, which drew them by their indices.
     render_without_ui(&mut renderer, stores.data(viewport, viewpoint, draws));
     let without = frame_pixels(&mut renderer);
     let on = Some(AmbientOcclusion::default());
@@ -7217,9 +6868,8 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
         };
         render_without_ui(renderer, data);
     };
-    // Settled, the frame 8 after one draws it again: the noise and the history have both come
-    // round, as noise that changed other than with its 8 frames, or a history that hadn't settled,
-    // wouldn't.
+    // Settled, the frame 8 on draws it again, as noise off an 8-frame cycle, or an unsettled
+    // history, wouldn't.
     for _ in 0..128 {
         frame(&mut renderer, &mut stores, Antialiasing::None);
     }
@@ -7239,11 +6889,9 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
     check(renderer, "ambient_occlusion", WIDTH, HEIGHT);
 }
 
-/// [`occlusion_scene`] under a sky of 0.5 every way, with ambient occlusion, seen first looking up,
-/// so that the culling finds the floor, the spheres, the panel and the strip outside the view, and
-/// then as the other tests see it: that frame draws them in the view's second pass, their depth
-/// alone too, and darkens where the floor meets the large sphere as a frame without ambient
-/// occlusion doesn't; and a pick of the large sphere there, in that frame, finds it.
+/// [`occlusion_scene`] seen first looking up, so culling finds most of it outside the view, then as
+/// the other tests see it: that frame draws them in the second pass, depth too, and darkens where
+/// the floor meets the large sphere. A pick of the sphere in that frame finds it.
 fn ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -7291,17 +6939,11 @@ fn ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass() {
     shut_down(renderer);
 }
 
-/// [`occlusion_scene`] under a sky of 0.5 every way, with ambient occlusion, in a still view: its
-/// history averages each frame's noise with the frames' before, antialiased temporally or not,
-/// rather than keep one noise every frame, which would stay where it is on the screen, a grain over
-/// what's occluded. Grain is measured where the floor is darkened, away from its edges, as what's
-/// left of the mean of the 3 by 3 pixels round each once the 9 by 9's is taken from it. Settled,
-/// without antialiasing and antialiased, a frame keeps at most 0.8 of the grain of the first frame
-/// with ambient occlusion, whose history holds nothing, and at least 0.4 of that grain is the first
-/// frame's alone, left once the settled frame is taken from it. Before the history, one noise every
-/// frame without antialiasing kept all of it and left none, and antialiased, each offset's own kept
-/// 0.69 and left 0.63; the history keeps 0.68 and 0.61 and leaves 0.56 and 0.61, on an RTX 4090.
-/// The floor is darkened as much either way, within a tenth.
+/// [`occlusion_scene`] in a still view: the occlusion's history averages each frame's noise, with
+/// TAA or without, rather than fixing grain on the screen. Settled, a frame keeps at most 0.8 of
+/// the first frame's grain, at least 0.4 of which is the first frame's alone. On an RTX 4090,
+/// without TAA and with: kept 0.68 and 0.61, left 0.56 and 0.61; a fixed noise, 1 and 0.69, 0 and
+/// 0.63.
 fn ambient_occlusion_averages_its_noise_away() {
     const WIDTH: u32 = 768;
     const HEIGHT: u32 = 512;
@@ -7333,8 +6975,7 @@ fn ambient_occlusion_averages_its_noise_away() {
     // The first frame since frames without ambient occlusion, whose history holds nothing.
     let still = render(on, Antialiasing::None, 1);
     let settled = render(on, Antialiasing::None, 64);
-    // Three cycles of the offsets for each to draw each pixel alike, and more for the resolve to
-    // settle on their mean, as 400 frames do no further.
+    // Enough for the resolve to settle on the offsets' mean: 400 frames settle no further.
     let antialiased = render(on, Antialiasing::Taa, 128);
     let [width, height] = [WIDTH as usize, HEIGHT as usize];
     let greens = |frame: &[u8]| -> Vec<f64> {
@@ -7342,8 +6983,7 @@ fn ambient_occlusion_averages_its_noise_away() {
             .map(|pixel| f64::from(pixel[1]))
             .collect()
     };
-    // Each pixel's sum of `values` up and left of it, past a row and a column of 0s, so that a
-    // box's sum is of its four corners.
+    // A summed-area table, past a row and a column of 0s.
     let summed = |values: &[f64]| {
         let row = width + 1;
         let mut sums = vec![0.0; row * (height + 1)];
@@ -7365,9 +7005,8 @@ fn ambient_occlusion_averages_its_noise_away() {
             + sums[top * row + left])
             / (side * side)
     };
-    // The grain is what's left of the 3 by 3 pixels' mean round each once the 9 by 9's is taken
-    // from it: of the noise's blotches a few pixels across, without the pixels' own rounding to a
-    // byte, which the smaller box averages, or how the occlusion falls off, which both follow.
+    // Grain: the 3 by 3 mean less the 9 by 9's. The small box averages away rounding to a byte;
+    // both follow the occlusion's falloff.
     const NEAR: usize = 1;
     const FAR: usize = 4;
     let lit = greens(&lit);
@@ -7378,8 +7017,8 @@ fn ambient_occlusion_averages_its_noise_away() {
         .collect();
     let off_floor = summed(&off_floor);
     let (still, settled, antialiased) = (greens(&still), greens(&settled), greens(&antialiased));
-    // The floor's pixels whose 9 by 9 is the floor's, and 2 more round it, as the resolve's 3 by 3
-    // and its offsets blend what's beside an edge in; of those, where the occlusion darkens it.
+    // Darkened floor pixels whose 9 by 9, widened by 2, is all floor, as the resolve blends in
+    // what's beside an edge.
     let margin = FAR + 2;
     let darkened: Vec<[usize; 2]> = (margin..height - margin)
         .flat_map(|y| (margin..width - margin).map(move |x| [x, y]))
@@ -7429,13 +7068,10 @@ fn ambient_occlusion_averages_its_noise_away() {
     shut_down(renderer);
 }
 
-/// [`floor_and_ball`]'s floor, and its sphere rolling across it under a still view from
-/// [`FLOOR_ABOVE`] straight down, 1 and 3 pixels a frame for 48 frames: its last frame, without
-/// antialiasing, against a view of the sphere resting where it ends up, once settled. Behind the
-/// sphere, at most 400 pixels of the floor differ by more than 2 levels: the occlusion's history,
-/// which follows the camera alone, is bounded by what each frame's own terms round each pixel range
-/// over. Unbounded, 1,843 and 2,791 did on an RTX 4090, and bounded, 265 and 289; ahead of the
-/// sphere, where the occlusion it brings comes a few frames late, 448 and 546, by at most 8 levels.
+/// [`floor_and_ball`]'s sphere rolling 1 and 3 pixels a frame, against it settled where it ends:
+/// at most 400 floor pixels behind it differ by over 2 levels, as the history is bounded by each
+/// frame's own range round each pixel. On an RTX 4090: 1,843 and 2,791 unbounded, 265 and 289
+/// bounded; ahead, where the occlusion comes a few frames late, 448 and 546, by at most 8 levels.
 fn ambient_occlusion_leaves_no_trail_behind_what_moves() {
     const WIDTH: u32 = 384;
     const HEIGHT: u32 = 256;
@@ -7444,14 +7080,13 @@ fn ambient_occlusion_leaves_no_trail_behind_what_moves() {
     let [width, height] = [WIDTH as usize, HEIGHT as usize];
     let unit = HEIGHT as f32 / (2.0 * FLOOR_ABOVE * math::libm::tanf(FLOOR_FOV / 2.0));
     let viewpoint = floor_seen(0, 1, SIZE);
-    // Where the sphere is at each frame rolling `speed` pixels a frame: ending in the middle of the
-    // view, at frame `FRAMES`, whatever its speed.
+    // Where the sphere is at `frame`, rolling `speed` pixels a frame to the view's middle at
+    // `FRAMES`.
     let at = |speed: f32, frame: usize| {
         let x = (frame as f32 - FRAMES as f32) * speed / unit;
         Vec3::new(x, FLOOR_BALL, 0.0)
     };
-    // The last of the frames from `first` to `last`, the sphere at `at` of each, but no further than
-    // where it ends up.
+    // The last of frames `first` to `last`, the sphere stopping where it ends up.
     let run = |speed: f32, first: usize, last: usize| {
         let mut renderer = renderer(WIDTH, HEIGHT);
         let mut stores = Stores {
@@ -7482,8 +7117,7 @@ fn ambient_occlusion_leaves_no_trail_behind_what_moves() {
     let rested = run(1.0, FRAMES, FRAMES + 64);
     for speed in [1.0, 3.0] {
         let rolled = run(speed, 0, FRAMES);
-        // Of the floor behind the sphere, the half of the view it came from, 4 pixels or more from
-        // it, the pixels that differ by more than 2 levels.
+        // Floor pixels behind the sphere, 4 or more off it, differing by more than 2 levels.
         let ball = floor_balls_shown(viewpoint, SIZE, [at(speed, FRAMES)].into_iter(), 4);
         let behind = (0..height)
             .flat_map(|y| (0..width / 2).map(move |x| y * width + x))
@@ -7505,8 +7139,8 @@ const FLOOR_FOV: f32 = PI / 3.0;
 const FLOOR_BALL: f32 = 0.25;
 const FLOOR_BALLS_APART: f32 = 0.8;
 
-/// What draws a floor of a gray of 0.8 and a sphere of [`FLOOR_BALL`] of it, under a sky of 0.5
-/// every way, which the stores light by.
+/// What draws a floor of gray 0.8 and a sphere of [`FLOOR_BALL`] of it, under a sky of 0.5 every
+/// way, set in the stores.
 fn floor_and_ball(stores: &mut Stores) -> (MeshDraw, MeshDraw) {
     let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [0.5; 3]);
     stores.sky = Some(Sky {
@@ -7552,16 +7186,14 @@ fn floor_balls() -> impl Iterator<Item = Vec3> + Clone {
     })
 }
 
-/// [`floor_and_ball`]'s floor, with its spheres standing on it [`FLOOR_BALLS_APART`] apart, in rows
-/// along X and Z, each darkening the floor round it.
+/// [`floor_and_ball`]'s floor, its spheres in rows [`FLOOR_BALLS_APART`] apart.
 fn occlusion_floor(stores: &mut Stores) -> Draws {
     let (floor, round) = floor_and_ball(stores);
     floor_with_balls(&floor, &round, floor_balls())
 }
 
-/// [`occlusion_floor`] seen from [`FLOOR_ABOVE`] straight down, panning along X so that the floor
-/// moves a pixel to the left every `over` frames in a view `size` pixels: where frame `frame` sees
-/// from.
+/// Where frame `frame` sees [`occlusion_floor`] from: [`FLOOR_ABOVE`], straight down, panning along
+/// X so the floor moves a pixel left every `over` frames in a view of `size`.
 fn floor_seen(frame: usize, over: usize, size: [u32; 2]) -> Viewpoint {
     let unit = size[1] as f32 / (2.0 * FLOOR_ABOVE * math::libm::tanf(FLOOR_FOV / 2.0));
     Viewpoint {
@@ -7574,9 +7206,8 @@ fn floor_seen(frame: usize, over: usize, size: [u32; 2]) -> Viewpoint {
     }
 }
 
-/// Which pixels of a view `size` pixels that `viewpoint`, [`floor_seen`]'s, sees from show a sphere
-/// of [`FLOOR_BALL`] centered at one of `centers`, or come within `margin` pixels of one, row after
-/// row.
+/// Which pixels, row after row, of a view of `size` from `viewpoint`, a [`floor_seen`], show a
+/// sphere of [`FLOOR_BALL`] at one of `centers`, or come within `margin` pixels of one.
 fn floor_balls_shown(
     viewpoint: Viewpoint,
     size: [u32; 2],
@@ -7614,26 +7245,20 @@ fn floor_balls_shown(
         .collect()
 }
 
-/// [`occlusion_floor`] as [`floor_seen`] pans across it, antialiased temporally and not, a pixel a
-/// frame and a pixel every 8: between frames 8 pixels of panning apart, at the same offset of
-/// antialiasing's 8, the points of the floor that ambient occlusion darkens, where each shows in
-/// each, change by at most 0.35 of a level on average, as only noise that doesn't move with the
-/// floor changes them: without ambient occlusion, they're the same. Noise that stayed on the screen
-/// as the view moved under it, the same every frame without antialiasing and each offset's own
-/// under it, as before the occlusion had a history, changed them by 1.11 and 1.07 without
-/// antialiasing and 0.50 and 0.55 antialiased, panning a pixel a frame and every 8, on an RTX 4090;
-/// the history leaves 0.24 and 0.27, and 0.21 and 0.24.
+/// [`occlusion_floor`] panning a pixel a frame and every 8, with TAA and without: between frames 8
+/// pixels apart, at the same TAA offset, darkened floor points change by 0.35 of a level at most on
+/// average.
+/// On an RTX 4090, noise fixed on the screen gave 1.11 and 1.07 without TAA, 0.50 and 0.55 with;
+/// the history, 0.24 and 0.27, and 0.21 and 0.24.
 fn ambient_occlusion_holds_to_the_world_as_the_view_pans() {
     const WIDTH: u32 = 384;
     const HEIGHT: u32 = 256;
     const SIZE: [u32; 2] = [WIDTH, HEIGHT];
     // The pixels a point moves between the frames compared.
     const MOVED: usize = 8;
-    // How far the occlusion reaches round a point of the floor, in pixels: its default radius times
-    // XeGTAO's 1.457, 0.73 of the world's units, 54 pixels in this view. XeGTAO takes what's past
-    // the view's edges as the edges' own pixels, so that what occludes a point within its reach of
-    // one changes as the view pans: in a slow pan, by 4 to 10 levels on average within 32 pixels of
-    // the view's sides, against a few tenths away from them, with the history or without.
+    // The occlusion's reach, 54 pixels here: its default radius times XeGTAO's 1.457. XeGTAO
+    // repeats the view's edge pixels past it, so points within reach of an edge change as it pans,
+    // by 4 to 10 levels on average.
     const REACH: usize = 56;
     let [width, height] = [WIDTH as usize, HEIGHT as usize];
     let greens = |frame: &[u8]| -> Vec<f64> {
@@ -7683,9 +7308,8 @@ fn ambient_occlusion_holds_to_the_world_as_the_view_pans() {
             shut_down(renderer);
             let (mut points, mut changed, mut lit_changed) = (0usize, 0.0, 0usize);
             for &first in &firsts {
-                // Clear of the spheres by 6 pixels, so that their edges, and how the offsets draw
-                // them, don't count; past the occlusion's reach of the view's edges in both
-                // frames; shown for 48 frames, entering from the right; and darkened.
+                // Darkened, 6 pixels clear of the spheres' edges, out of reach of the view's in
+                // both frames, and shown for 48 frames, entering from the right.
                 let viewpoint = floor_seen(first, over, SIZE);
                 let ball = floor_balls_shown(viewpoint, SIZE, floor_balls(), 6);
                 let right = (width - REACH).min(width - 2 - 48 / over);
@@ -7724,10 +7348,10 @@ fn ambient_occlusion_holds_to_the_world_as_the_view_pans() {
     }
 }
 
-/// [`occlusion_scene`] lit by a sun alone, casting shadows, under a sky that's black every way,
-/// renders the same with ambient occlusion as without: it darkens the sky's light alone, and never
-/// the lights'. And none of its passes run, nor take any memory, in a frame without a sky, under
-/// an orthographic projection, or with a strength of 0, but with a sky, under perspective, they do.
+/// [`occlusion_scene`] under a black sky and a shadowing sun renders alike with ambient occlusion
+/// and without: it darkens the sky's light alone, never the lights'. Its passes neither run nor
+/// take memory without a sky, under an orthographic projection, or at strength 0; with a sky,
+/// under perspective, they do.
 fn ambient_occlusion_leaves_the_lights_alone() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -7794,14 +7418,9 @@ fn ambient_occlusion_leaves_the_lights_alone() {
     shut_down(renderer);
 }
 
-/// The scene the tests of reflections see, under a sky of a gradient from a blue zenith to a pale
-/// horizon over dark ground, of a luminance of 1, as `viewpoint` sees it, a camera with perspective
-/// low in front of it: a floor, models' squares, of a metal of 0.9 gray, in three strips along Z
-/// 2.4 units across each, from -3.6 along X, rough `roughness` each, from Z of 3 to -5; a red sphere
-/// of 0.5 on the first, a green one on the second and a blue panel a unit across and 1.6 high
-/// standing on the third, facing the camera; the strips normal-mapped by `normals`, if given. And
-/// the world's points where the red sphere's middle is, mirrored in the floor, and a point of the
-/// first strip whose mirror shows the sky alone.
+/// The reflection tests' scene: three metal floor strips, rough as `roughness` says, normal-mapped
+/// by `normals` if given, under a red sphere, a green one and a blue panel. `mirrored` is the red
+/// sphere's middle in the floor's mirror; `open`, a point whose mirror sees sky alone.
 struct ReflectionScene {
     draws: Draws,
     viewpoint: Viewpoint,
@@ -7888,14 +7507,10 @@ fn reflection_scene(
     }
 }
 
-/// [`reflection_scene`], its floor's strips mirror-smooth, glossy and less so, under its sky alone,
-/// with reflections and without. A frame with reflections after one without has no colors kept to
-/// trace against, and renders as one without; the frame after shows, where the red sphere's middle
-/// is mirrored in the floor, the red sphere, where a frame without shows the sky's light; and where
-/// the floor's mirror shows the sky alone, the sky's light as a frame without does. Against its
-/// reference image, without antialiasing; and antialiased, temporally and by SMAA, whose blended
-/// colors the frames keep in place of the resolve's, the frames after still mirror the sphere, as
-/// they do once the camera moves past what SMAA's last frame kept.
+/// [`reflection_scene`] with reflections: the first frame, with no colors kept, renders as without;
+/// the next mirrors the red sphere, and the sky where the mirror sees sky alone. Against its
+/// reference. TAA and SMAA, whose blended colors are kept, still mirror the sphere, also after the
+/// camera moves past what SMAA's last frame kept.
 fn reflections_mirror_what_the_view_shows() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -7961,8 +7576,8 @@ fn reflections_mirror_what_the_view_shows() {
         r > g + 40 && r > b + 40,
         "antialiased by SMAA, the mirrored sphere shows [{r}, {g}, {b}], not red"
     );
-    // The camera moved since the frame before, farther than the sphere is wide on screen: what a
-    // ray finds is taken from where it showed then.
+    // The camera moved farther than the sphere is wide: what a ray finds comes from where it
+    // showed the frame before.
     let moved = Viewpoint {
         position: viewpoint.position + DVec3::new(0.6, 0.0, 0.0),
         ..viewpoint
@@ -7979,8 +7594,8 @@ fn reflections_mirror_what_the_view_shows() {
         r > g + 40 && r > b + 40,
         "the camera moved, the mirrored sphere shows [{r}, {g}, {b}], not red"
     );
-    // The sky twice as bright and the exposure an eighth: the view's light a quarter of what it
-    // was, the mirrored sphere's too, as reflections take the colors kept, exposed, as they are.
+    // The sky twice as bright, the exposure an eighth: the mirrored sphere too a quarter as
+    // bright, as reflections take the kept colors, exposed, as they are.
     let sky = stores.sky.expect("the scene's sky");
     stores.sky = Some(Sky {
         luminance: 2.0,
@@ -8011,11 +7626,9 @@ fn reflections_mirror_what_the_view_shows() {
     shut_down(renderer);
 }
 
-/// [`reflection_scene`] reflecting what it shows, its exposure adapting as fast as can be from 1,
-/// at which the frames before it were drawn and their colors kept: its third frame takes the first
-/// metering at once, about 2 stops darker, and shows the mirrored sphere as the frames settled after
-/// it do, the colors the frame before kept scaled by the exposure's change, rather than as bright
-/// as the frame before kept it.
+/// [`reflection_scene`] adapting at once from the exposure its kept colors were drawn at: the third
+/// frame, about 2 stops darker, mirrors the sphere as the settled frames do, the kept colors scaled
+/// by the exposure's change.
 fn reflections_follow_an_exposures_jump() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -8064,10 +7677,9 @@ fn reflections_follow_an_exposures_jump() {
     shut_down(renderer);
 }
 
-/// [`reflection_scene`] under a sky of a luminance of 0, as an atmosphere's is once its sun has set,
-/// lit by a sun alone, exposed at a half: the floor's mirror shows the red sphere, lit, though the
-/// sky's specular light that reflections take the place of is none, where a frame without
-/// reflections shows next to nothing.
+/// [`reflection_scene`] under a sky of luminance 0, as an atmosphere's after sunset, lit by a sun
+/// alone, exposed at a half. The mirror shows the lit red sphere, though the sky's specular light
+/// that reflections replace is none; without reflections, next to nothing.
 fn reflections_mirror_what_lights_light_under_a_dark_sky() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
@@ -8114,10 +7726,11 @@ fn reflections_mirror_what_lights_light_under_a_dark_sky() {
     shut_down(renderer);
 }
 
-/// [`reflection_scene`] reflecting what it shows renders as it does without reflections: every
-/// surface of it rougher than reflections' roughness, its floor's strips 0.8 and its shapes 0.4
-/// and 0.5 against 0.3, which take the sky's light alone; under an orthographic projection, which
-/// reflections don't take; and without a sky, whose specular light they'd take the place of.
+/// [`reflection_scene`] renders alike with reflections and without:
+/// - every surface rougher than their roughness (strips 0.8, shapes 0.4 and 0.5, against 0.3),
+///   which take the sky's light alone;
+/// - under an orthographic projection, which they don't take;
+/// - without a sky, whose specular light they'd replace.
 fn reflections_leave_what_they_dont_take_as_it_is() {
     const WIDTH: u32 = 96;
     const HEIGHT: u32 = 64;
@@ -8160,14 +7773,10 @@ fn reflections_leave_what_they_dont_take_as_it_is() {
     shut_down(renderer);
 }
 
-/// [`reflection_scene`], its floor's strips mirror-smooth and normal-mapped to face about 12°
-/// toward the camera, each way the view draws them: in the run by meshlets, by their meshlets, into
-/// the view's visibility buffer, their normals found from it; and otherwise by their indices, their
-/// normals drawn after their depth alone, alone and again beside a ball cut into meshlets, which the
-/// visibility buffer takes. Where the mirror of the map's normal shows the red sphere's middle, the
-/// floor shows the red sphere, which it doesn't without reflections; and where a flat mirror would
-/// show it, it doesn't, as the rays are traced about the shading's normal, its normal map's among
-/// it, and not about the depth's, which is the flat floor's.
+/// [`reflection_scene`]'s smooth strips, normal-mapped about 12° toward the camera, drawn each way
+/// the view draws: by meshlets into the visibility buffer, and by indices, alone and beside a ball
+/// cut into meshlets. The floor mirrors the red sphere where the mapped normal says, not where a
+/// flat mirror would: rays trace about the shading normal, not the depth's.
 fn reflections_mirror_about_the_shading_normal() {
     mirror_about_the_shading_normal(false);
     if !CUT_MESHLETS.load(Ordering::Relaxed) {
@@ -8217,13 +7826,13 @@ fn mirror_about_the_shading_normal(beside_cut: bool) {
     // The first frame keeps the colors the second traces against.
     frame(Some(Reflections::default()));
     let with = frame(Some(Reflections::default()));
-    // The map's normal in the world, as shading.slang's `shading_normal` bends the floor's, +Y, along
-    // its tangent, +X, and its bitangent, the square's +Y, -Z.
+    // The map's normal in the world, as shading.slang's `shading_normal` bends the floor's (+Y)
+    // along its tangent (+X) and bitangent (the square's +Y, -Z).
     let mapped = Vec2::new(128.0, 100.0) / 255.0 * 2.0 - 1.0;
     let up = (1.0 - mapped.length_squared()).sqrt();
     let tilted = (Vec3::X * mapped.x - Vec3::Z * mapped.y + Vec3::Y * up).normalize();
-    // The point of the first strip whose mirror, facing `normal`, shows the red sphere's middle:
-    // whose ray from the camera, mirrored, passes nearest it.
+    // The point of the first strip whose camera ray, mirrored about `normal`, passes nearest the
+    // red sphere's middle.
     let middle = Vec3::new(-2.4, 0.5, -1.0);
     let mirror = |normal: Vec3| {
         let mut nearest = (f32::INFINITY, Vec3::ZERO);
@@ -8260,15 +7869,10 @@ fn mirror_about_the_shading_normal(beside_cut: bool) {
     shut_down(renderer);
 }
 
-/// Squares of a white metal, smooth, and of a white dielectric, rough, whose occlusion maps hold a
-/// half, under a sky of 0.5 every way, without perspective: the sky's diffuse light darkened by the
-/// map's half, and its specular light by Lagarde and de Rousiers' specular occlusion of it, of the
-/// way to the eye and the roughness. The rough one, whose lobe gathers from all around as the
-/// diffuse does, shows the sky's light darkened by a half; the smooth metal, head-on, less
-/// darkened, and turned to face the view at a grazing angle, more. And a smooth white dielectric
-/// whose map holds a half, head-on, shows its diffuse light darkened by the half and its specular
-/// light by the specular occlusion, each by its share: the share it reflects, `f`, which a smooth
-/// black dielectric without a map shows, diffusing nothing, as `f` of the sky's light.
+/// Squares under a sky of 0.5, occlusion maps of a half: diffuse darkened by the half, specular by
+/// Lagarde and de Rousiers' specular occlusion, of the way to the eye and the roughness. A rough
+/// dielectric darkens by a half; a smooth metal head-on, less; grazing, more. A smooth dielectric
+/// mixes the two by its reflected share, `f`, which a black one without a map shows.
 fn specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye() {
     const SIDE: u32 = 16;
     const SQUARES: u32 = 5;
@@ -8338,8 +7942,8 @@ fn specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye() {
         (math::libm::pow(n_dot_v + occlusion, power) - 1.0 + occlusion).clamp(0.0, 1.0)
     };
     let pixel = |i: u32| pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]);
-    // What a dielectric reflects head-on of the sky's light, which the black square shows of its
-    // 0.5: a few hundredths, Fresnel's 0.04 and its scattering many times over.
+    // What a dielectric reflects head-on, as the black square shows: Fresnel's 0.04 and multiple
+    // scattering.
     let f = f64::from(decoded(pixel(3)[0])) / 0.5;
     assert!(
         (0.03..0.06).contains(&f),
@@ -8369,13 +7973,10 @@ fn specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye() {
     shut_down(renderer);
 }
 
-/// Squares lit by a sky and a light, each showing in place of its light a part of what shading
-/// takes, as its material holds it, its values as their bytes over 255, through a frame that would
-/// otherwise antialias, bloom and vignette them; or an image the frame makes, black where nothing
-/// drew, and wholly black for an image it doesn't make. The sky doesn't show behind them. A frame
-/// of their light, after, shows as one before, each channel within 1: it's drawn at antialiasing's
-/// next offset, as the frames that showed parts resolved none, and where meshlets draw, lavapipe
-/// rounds some pixels otherwise at another offset.
+/// Squares through a frame that would otherwise antialias, bloom and vignette, each showing a part
+/// of shading, as bytes over 255, or an image the frame makes, black where nothing drew and for an
+/// image it doesn't make. A frame of light after matches one before within 1: it's at TAA's next
+/// offset, as showing frames resolve none, and lavapipe rounds some meshlet pixels otherwise there.
 fn views_show_parts_of_shading_and_images_in_place_of_light() {
     const SIDE: u32 = 16;
     const SQUARES: u32 = 3;
@@ -8518,8 +8119,7 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
         "the IDs show as {colors:?}"
     );
     assert_eq!(above(&ids), [0, 0, 0, 255], "where no ID drew");
-    // Images the passes after the view's make, from a frame drawn as the game's is but for its
-    // antialiasing: bloom's first level, and the colors through the lens, at the middle square,
+    // Images of the passes after the view's, drawn without antialiasing, at the middle square,
     // which the vignette leaves bright.
     for name in ["bloom 1", "view lensed"] {
         let shown = frame(Some(Show::Image(name)));
@@ -8529,8 +8129,7 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
             "{name} shows the middle square as {got:?}"
         );
     }
-    // And the sky behind what's drawn, in the colors as drawn: its gray, of a luminance of 0.25,
-    // rather than the clear color.
+    // And the sky behind, in the colors as drawn: its gray of luminance 0.25, not the clear color.
     let colors = frame(Some(Show::Image("view colors")));
     let [r, g, b, _] = above(&colors);
     assert!(
@@ -8552,10 +8151,8 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
             "the light shows again at {at:?} as {got:?}, not {was:?}"
         );
     }
-    // The images a frame asked to list them makes that a show finds, each name once: as the game's
-    // frame makes them while the view shows an image, bloom's and the lens's among them, but not
-    // the show's own; and while it shows a part of shading, nothing after the view's passes; and
-    // while it shows its light, antialiased, not the antialiasing's, which a show doesn't make.
+    // The images a show finds, each name once: showing an image, the game's frame's but the show's
+    // own; showing shading, none after the view's passes; antialiased, none of antialiasing's.
     let mut listed = |show, antialiasing| {
         let data = RenderData {
             show,
@@ -8635,8 +8232,7 @@ fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
         texture: sky,
         luminance: 0.25,
     });
-    // From the viewpoint, so that each square's highlight faces it, and its specular light is as
-    // much as a smooth surface's can be.
+    // From the viewpoint, so each highlight faces it.
     stores.lights = vec![Light {
         kind: LightKind::Directional,
         position: Vec3::ZERO,
@@ -8645,7 +8241,7 @@ fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
         range: None,
         shadow_distance: None,
     }];
-    // A dielectric, a metal, which diffuses nothing, and what's unlit, which takes no light.
+    // A dielectric, a metal and an unlit square.
     let squares = [
         Material {
             color: Vec4::new(0.5, 0.5, 0.5, 1.0),
@@ -8674,7 +8270,7 @@ fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
     }
     let viewport = filling([WIDTH, HEIGHT]);
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-    // Each square's linear light, as the view shows `channel`, through no tonemapper.
+    // Each square's linear light in `channel`, untonemapped.
     let mut light = |channel| {
         let data = RenderData {
             show: Some(Show::Shading(channel)),
@@ -8712,7 +8308,7 @@ fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
             );
         }
     }
-    // The dielectric's highlight, about 0.05 of the light, besides the sky's, about 0.01.
+    // The dielectric's highlight, about 0.05, plus the sky's 0.01.
     assert!(
         specular[0].iter().all(|&c| c > 0.04),
         "the dielectric reflects {:?}",
@@ -8732,13 +8328,9 @@ fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
     shut_down(renderer);
 }
 
-/// Spheres of KHR_materials_pbrSpecularGlossiness's materials, lit by a sky, a directional light and
-/// a point light, each showing as its metallic-roughness equal does: a dielectric, which reflects
-/// 0.04 head-on and diffuses its base color, as one that diffuses that over 0.96, as much as its
-/// specular color's strongest channel takes off; a metal as one that diffuses nothing and reflects
-/// its color; each as rough as 1 less its glossiness. Then one whose specular color and glossiness
-/// come from its map, of colors, its specular color sRGB-encoded and its glossiness in alpha as
-/// stored, as one whose factors are those.
+/// KHR_materials_pbrSpecularGlossiness shades as its metallic-roughness equal: diffuse times 1 less
+/// the specular's strongest channel, roughness 1 less glossiness, a map's sRGB specular and alpha
+/// glossiness as factors.
 fn specular_glossiness_shades_as_its_metallic_roughness_equal() {
     const SIDE: u32 = 40;
     const SPHERES: u32 = 5;
@@ -8782,7 +8374,7 @@ fn specular_glossiness_shades_as_its_metallic_roughness_equal() {
         ..sun
     };
     stores.lights = vec![sun, point];
-    // A specular color of about 0.5, sRGB-encoded, and a glossiness of 0.6, as a map holds them.
+    // Specular about 0.5 (sRGB) and glossiness 0.6, as a map holds them.
     let [specular_byte, glossiness_byte] = [188, 153];
     let specular = math::libm::powf((f32::from(specular_byte) / 255.0 + 0.055) / 1.055, 2.4);
     let glossiness = f32::from(glossiness_byte) / 255.0;
@@ -8862,11 +8454,9 @@ fn specular_glossiness_shades_as_its_metallic_roughness_equal() {
     shut_down(renderer);
 }
 
-/// A white floor seen from above under a sky of 10⁵ candela per square meter with a sun in it, a
-/// texel past 10⁷, as a sun's disk is, 45° up: lit by a directional light from the sun too, it
-/// shows as under the sky without its sun and the light, the sky's light leaving the sun out; lit
-/// by the sky alone, its sun lights it through the sky's light, the floor much brighter than under
-/// the sky without it. The sky's light is prefiltered again as the light comes and goes.
+/// A sky's sun texel past 10⁷ lights a floor through the sky's light alone; with a light for the
+/// sun, the sky's light leaves it out, the floor as under the sunless sky. Prefiltered again as the
+/// light comes and goes.
 fn a_skys_sun_lights_once() {
     const SIZE: u32 = 8;
     const SKY: [u32; 2] = [512, 256];
@@ -8882,9 +8472,8 @@ fn a_skys_sun_lights_once() {
             far: 10.0,
         },
     };
-    // The texel's 6,260 of 10⁶ each, about 1.07 × 10⁻⁴ steradians, light the floor about as much
-    // as the sky's 0.1 does; each of the texels past 10⁷ that the sky's light keeps to it, some
-    // 10⁻⁴ of that.
+    // The texel's 6,260 of 10⁶ each, over about 1.07 × 10⁻⁴ sr, light the floor about as much as
+    // the sky's 0.1; each texel past 10⁷ the sky's light keeps to it, some 10⁻⁴ of that.
     let texel = |sun: bool| {
         move |x, y| {
             if sun && [x, y] == SUN {
@@ -8962,10 +8551,9 @@ fn a_skys_sun_lights_once() {
     shut_down(renderer);
 }
 
-/// The share of the light from `distance` along `way` from `origin`, or from infinitely far for
-/// `None`, that `fog` lets through: e to the minus the integral of its density along the way, past
-/// its start, by the midpoint rule over 100,000 steps, in doubles; upward to where its density is
-/// e^-40 of what it is at its start, and downward without end; and at least what its opacity leaves.
+/// The share of light `fog` lets through from `distance` along `way` (`None`: infinitely far), by
+/// 100,000 midpoints in doubles: an unbounded way up ends at e^-40 of the start's density, one down
+/// never. At least what its opacity leaves.
 fn fog_through(fog: &Fog, origin: Vec3, way: Vec3, distance: Option<f32>) -> f32 {
     let (falloff, start) = (f64::from(fog.falloff), f64::from(fog.start));
     let least = 1.0 - fog.opacity;
@@ -8989,16 +8577,14 @@ fn fog_through(fog: &Fog, origin: Vec3, way: Vec3, distance: Option<f32>) -> f32
     (math::libm::exp(-depth) as f32).max(least)
 }
 
-/// What Henyey-Greenstein's phase function of `g` gives a cosine of `cos` between the way light
-/// goes and the way it's scattered, per steradian.
+/// Henyey-Greenstein's phase function of `g` at cosine `cos`, per steradian.
 fn henyey_greenstein(g: f32, cos: f32) -> f32 {
     let spread = 1.0 + g * g - 2.0 * g * cos;
     (1.0 - g * g) / (4.0 * PI * spread * math::libm::sqrtf(spread))
 }
 
-/// A rectangle of one color, as it's drawn, in linear RGB and alpha, which it blends by, facing
-/// along an axis, at `at` along it, from `least` to `most` along the other two, in order, which a
-/// pixel's way meets or misses.
+/// A rectangle of one linear color, blended by alpha, facing along `axis` at `at`, from `least` to
+/// `most` on the other two axes in order.
 #[derive(Clone, Copy, Debug)]
 struct Patch {
     /// 1 for one facing along Y, 2 for one facing along Z.
@@ -9036,13 +8622,9 @@ impl Patch {
     }
 }
 
-/// Asserts that each of `pixels` of `frame`, a view `size` pixels across and down that `viewpoint`
-/// sees, in `fog`, lit by `sun`, a directional light's illuminance and the way toward it, if one
-/// shines, shows what the pixel's way meets of `patches`, each by its alpha over what's behind it,
-/// over the clear color, as far as can be: each as much of it as the fog lets through, as
-/// [`fog_through`] integrates it, and the fog's color of the light that reaches it, its luminance
-/// and the sun's by Henyey-Greenstein's lobe, by as much as the fog takes out; each channel within
-/// 2 of that, sRGB-encoded.
+/// Asserts each of `pixels` shows the `patches` its way meets over the clear color, fogged by
+/// [`fog_through`] and lit by the fog's luminance and `sun`'s Henyey-Greenstein lobe, within 2 a
+/// channel. `sun`: illuminance and the way toward it.
 fn assert_fogged(
     frame: &[u8],
     size: [u32; 2],
@@ -9058,7 +8640,7 @@ fn assert_fogged(
     for &[x, y] in pixels {
         let clip = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) / Vec2::new(width, height) * 2.0 - 1.0;
         let near = world_from_clip.project_point3(clip.extend(1.0));
-        // From the camera, or without perspective, the one way it looks, from its plane.
+        // From the camera, or orthographic, from its plane.
         let (origin, way) = match viewpoint.projection {
             Projection::Perspective { .. } => {
                 let eye = viewpoint.position.as_vec3();
@@ -9104,8 +8686,7 @@ fn assert_fogged(
     }
 }
 
-/// Renders a frame of `draws` and `canvas` into a view `size` pixels across and down, as
-/// `viewpoint` sees them, in `fog`, antialiased as `antialiasing` says: its pixels.
+/// A frame of `draws` and `canvas` in `fog`: its pixels.
 #[expect(clippy::too_many_arguments, reason = "a frame's every part apart")]
 fn fogged_frame(
     renderer: &mut Renderer,
@@ -9127,18 +8708,10 @@ fn fogged_frame(
     frame_pixels(renderer)
 }
 
-/// In height fog lit by a luminance of its own, and then by a sun too, in a lobe round it, each
-/// pixel shows what's behind it as much as the fog lets through, and the fog's light, its color of
-/// what reaches it, by as much as it takes out, as an integral of the fog's density along the
-/// pixel's way finds them, numerically: through a camera with perspective, a black wall, unlit, 10
-/// units ahead and left of it, the clear color right of it, as far as can be, and, unlit, each of
-/// a color of its own, a sprite before the wall, and a circle, a glyph and a particle past it, which
-/// fog themselves at their quads' corners. Past the fog's start alone, so that the wall nearer than
-/// it shows black; upward out of the fog, to the sky; and looking down, where the fog has no end,
-/// all of the clear color but what its opacity lets through. Through a camera without perspective,
-/// looking a little up; in a view of nothing opaque, all of what it draws blending, which draws its
-/// canvas unfogged; antialiased; and from 100 units above the fog's height, looking down on a floor
-/// at it, where the fog's density at the camera is e^-100 of the floor's.
+/// Height fog, lit by its luminance and a sun's lobe, dims and lights each pixel as a numeric
+/// integral says: quads before and past a black wall; fog starting past it; looking up and down;
+/// orthographic; nothing opaque, the canvas unfogged; antialiased; and from 100 units above, at
+/// e^-100 of the floor's density.
 fn fog_dims_and_lights_as_its_integral_says() {
     const SIZE: [u32; 2] = [64, 48];
     /// What's drawn on the engine's quad, across.
@@ -9173,7 +8746,7 @@ fn fog_dims_and_lights_as_its_integral_says() {
         most: Vec2::splat(200.0),
         color: Vec4::new(0.0, 0.0, 0.0, 1.0),
     };
-    // A field whose every texel is inside a glyph's edges, so that a glyph fills its quad.
+    // Every texel inside a glyph's edges, so a glyph fills its quad.
     let field = stores
         .textures
         .add("field", [4, 4], vec![255; 64], Texels::Data);
@@ -9184,7 +8757,7 @@ fn fog_dims_and_lights_as_its_integral_says() {
         Vec3::new(3.5, 1.0, -14.0),
         Vec3::new(1.5, 0.6, -16.0),
     ];
-    // The circle half transparent, so that what it's over shows how many times it's fogged.
+    // The circle half transparent, so what's behind it shows how many times it's fogged.
     let colors = [
         Vec4::new(0.9, 0.2, 0.1, 1.0),
         Vec4::new(0.2, 0.8, 0.3, 0.5),
@@ -9194,8 +8767,8 @@ fn fog_dims_and_lights_as_its_integral_says() {
     let patches: Vec<Patch> = (quads.iter().zip(colors))
         .map(|(&at, color)| Patch::facing(at, SIDE, color))
         .collect();
-    // The models placed by `models`, then the sprite, the circle and the glyph, and the particle,
-    // if `particle`, born in each frame alike, so that a frame after one without it draws it too.
+    // `models`, the quads and, if `particle`, a particle born alike each frame, so it draws after a
+    // frame without it.
     let drawn = |stores: &mut Stores, models: &[Mat4], particle: bool| {
         let mut draws = Draws::default();
         for &placed in models {
@@ -9324,7 +8897,7 @@ fn fog_dims_and_lights_as_its_integral_says() {
         );
         assert_fogged(&frame, SIZE, &looking, &fog, sun, &walled, &pixels);
     }
-    // Antialiased, each pixel resolved from frames drawn a fraction of a pixel off, away from edges.
+    // Antialiased, at pixels away from edges.
     let flat = [[8, 10], [8, 40], [56, 5], [56, 40]];
     for _ in 0..16 {
         let (renderer, stores) = (&mut renderer, &mut stores);
@@ -9332,8 +8905,7 @@ fn fog_dims_and_lights_as_its_integral_says() {
     }
     let frame = frame_pixels(&mut renderer);
     assert_fogged(&frame, SIZE, &looking, &sunlit, sunlight, &walled, &flat);
-    // Without perspective, looking a little up, every way rising out of the fog; the particle,
-    // which faces the view, aside.
+    // Orthographic, looking a little up out of the fog; no particle, which faces the view.
     let orthographic = Viewpoint {
         rotation: Quat::from_rotation_x(0.3),
         projection: Projection::Orthographic {
@@ -9365,8 +8937,7 @@ fn fog_dims_and_lights_as_its_integral_says() {
         flat_walled,
         &pixels,
     );
-    // Nothing opaque, all blending, the fog's pass fogging the clear color alone; and the canvas,
-    // a sprite in the view's bottom left corner, unfogged.
+    // Nothing opaque, so the fog's pass fogs the clear color alone; the canvas is unfogged.
     let draws = drawn(&mut stores, &[], true);
     let mut canvas = Draws::default();
     let cornered =
@@ -9430,16 +9001,14 @@ fn fog_dims_and_lights_as_its_integral_says() {
     shut_down(renderer);
 }
 
-/// A scene of every kind of draw that fog fogs, as a camera with perspective sees it, under a sky
-/// and a sun casting shadows: opaque spheres receding along a floor, the sky behind them, a glass
-/// square of a material that blends, a sprite, a circle and an emitter's particles, born in the
-/// frame [`FoggedScene::settle`] ends with, which the frames after, at the same time, draw alike.
+/// Every kind of draw fog fogs, under a sky and a shadowing sun. Its particles are born in
+/// [`FoggedScene::settle`]'s last frame, so later frames at the same time draw alike.
 struct FoggedScene {
     renderer: Renderer,
     stores: Stores,
     viewport: Viewport,
     viewpoint: Viewpoint,
-    /// Its models' draws, each with its transform and ID, the glass last.
+    /// Each with its transform and ID, the glass last.
     models: Vec<(Mat4, MeshDraw, u64)>,
 }
 
@@ -9532,8 +9101,7 @@ impl FoggedScene {
         }
     }
 
-    /// The scene's draws: its models, the glass, which blends, last, then the rest, which blends,
-    /// with the particles' births of the frame if `born`.
+    /// Its models, the glass last, then the rest; the particles' births if `born`.
     fn draws(&mut self, born: bool) -> Draws {
         let stores = &mut self.stores;
         let mut draws = Draws::default();
@@ -9601,7 +9169,7 @@ impl FoggedScene {
         draws
     }
 
-    /// Renders the scene, its particles born in an earlier frame, in `fog`: its pixels.
+    /// Its pixels in `fog`, its particles born in an earlier frame.
     fn render(&mut self, fog: Option<Fog>) -> Vec<u8> {
         let draws = self.draws(false);
         let data = RenderData {
@@ -9630,15 +9198,9 @@ impl FoggedScene {
     }
 }
 
-/// Fog of no density, and fog of no opacity, which takes out none of the light behind it however
-/// far, draw a scene of every kind of draw that fog fogs exactly as it draws without fog, though
-/// fog of no opacity has its pass fog what's opaque and draws what blends after it; fog that takes
-/// some light draws it otherwise. Likewise with ambient occlusion, which has the view draw what's
-/// opaque again, shaded, once the occlusion is found, after which the fog's pass fogs it: the sky,
-/// which the occlusion doesn't darken, as fogged as without it. With the occlusion, the frames
-/// compared are 8 apart, once its history has settled: a still view's occlusion takes 8 frames'
-/// noise in turn, which its history averages, so that each frame draws it as the frame 8 before it
-/// did. Without, each frame draws as the one before.
+/// Fog of no density or opacity draws [`FoggedScene`] as no fog, though no opacity runs the fog's
+/// pass; fog that takes light changes it. Likewise with ambient occlusion, the sky fogged alike, 8
+/// frames apart as a still view cycles 8 frames' noise.
 fn fog_of_no_density_or_opacity_changes_nothing() {
     const SIZE: [u32; 2] = [96, 64];
     let mut scene = FoggedScene::new(SIZE[0], SIZE[1]);
@@ -9699,9 +9261,7 @@ fn fog_of_no_density_or_opacity_changes_nothing() {
     shut_down(scene.renderer);
 }
 
-/// A scene of every kind of draw that fog fogs, as [`FoggedScene`] has it, in a low height fog,
-/// lit by the sky and by the sun, in a lobe round it, as a camera with perspective sees it,
-/// tonemapped by PBR Neutral, against its reference image.
+/// [`FoggedScene`] in a low height fog against its reference image.
 fn fogged_scenes_match_their_reference() {
     const WIDTH: u32 = 200;
     const HEIGHT: u32 = 112;
@@ -9732,14 +9292,9 @@ fn toward_sun(elevation: f32, azimuth: f32) -> Vec3 {
     )
 }
 
-/// Earth's atmosphere at noon and at sunset, seen from 2 m above a gray floor 20 km across, which
-/// its haze hides toward the horizon, under a sun of 120,000 lux outside the air, which casts
-/// shadows of three spheres before the view, a dielectric, a metal and a rough white one, with a
-/// white wall 600 m off, hazed, tonemapped by PBR Neutral, against their reference images: at noon
-/// a blue sky, paler toward the horizon, the world lit white; at sunset an orange glow round the
-/// sun, low ahead, the world lit red and dim, and the sky's light from all around bluer than the
-/// sun's. The view's ambient occlusion darkens the atmosphere's light from all around, as it does
-/// an image sky's.
+/// Earth's atmosphere at noon and sunset against their references, from 2 m up under 120,000 lux
+/// outside the air: a blue noon sky, paler low; an orange sunset glow, red dim light, bluer ambient
+/// light. Ambient occlusion darkens it, as an image sky's.
 fn atmospheres_match_their_references() {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 108;
@@ -9811,7 +9366,7 @@ fn atmospheres_match_their_references() {
         render_without_ui(&mut renderer, data);
         let plain = frame_pixels(&mut renderer);
         compare(name, WIDTH, HEIGHT, &plain);
-        // The view's ambient occlusion darkens the atmosphere's light too, as an image sky's.
+        // With ambient occlusion.
         let data = RenderData {
             tonemapper: Tonemapper::PbrNeutral,
             exposure: 1.0 / (1.2 * math::libm::exp2f(ev100)),
@@ -9831,10 +9386,8 @@ fn atmospheres_match_their_references() {
     shut_down(renderer);
 }
 
-/// The optical depth of Earth's atmosphere, as the paper models it, from `height` meters up along
-/// a way of zenith cosine `mu` out of the air: its Rayleigh scattering, Mie extinction and ozone
-/// absorption, in millionths per meter, thinning with height as `Atmosphere` says, summed by the
-/// midpoints of 20,000 steps.
+/// The paper's optical depth from `height` m up along zenith cosine `mu`, of Rayleigh, Mie and
+/// ozone extinction in millionths per meter, by 20,000 midpoints.
 fn optical_depth(height: f32, mu: f32) -> Vec3 {
     let (ground, top) = (6_360_000.0_f64, 6_460_000.0_f64);
     let earth = Atmosphere::EARTH;
@@ -9864,9 +9417,8 @@ fn optical_depth(height: f32, mu: f32) -> Vec3 {
     Vec3::new(depth[0] as f32, depth[1] as f32, depth[2] as f32)
 }
 
-/// The sun's disk, seen through a view narrower than it from 1 km up, at the zenith, 60° from it
-/// and 85°, under a light of the illuminance that makes the disk's luminance 1 outside the air:
-/// shows the transmittance toward it, as the paper's model gives it, which the GPU's table holds.
+/// The sun's disk from 1 km up, 0°, 60° and 85° from the zenith, of luminance 1 outside the air,
+/// shows the paper's transmittance, which the GPU's table holds.
 fn the_suns_disk_shows_the_transmittance() {
     const SIZE: u32 = 4;
     let mut renderer = renderer(SIZE, SIZE);
@@ -9909,13 +9461,9 @@ fn the_suns_disk_shows_the_transmittance() {
     shut_down(renderer);
 }
 
-/// Along a level way from 2 m up, `far` meters through Earth's atmosphere as the paper models it,
-/// summed in doubles by the midpoints of 20,000 steps: the mean of the channels' transmittance;
-/// the light scattered once toward the start, of each channel, from a sun of an illuminance of 1
-/// at the zenith, a quarter turn from the way, by Rayleigh's and Mie's phase functions, the sun's
-/// light dimmed along the way down to each point as it is straight up from the ground; and the
-/// light of the ground below, of the atmosphere's albedo, lit by that sun, scattered once toward
-/// the start, half of every way round it, whatever the phase function.
+/// Along a level way from 2 m up, `far` m through the paper's atmosphere, 20,000 midpoints in
+/// doubles: the mean transmittance; single scattering from a zenith sun of 1; and the ground's, of
+/// its albedo, from half of every way round, whatever the phase.
 fn level_way(far: f32) -> (f32, Vec3, Vec3) {
     let (ground, earth) = (6_360_000.0_f64, Atmosphere::EARTH);
     let from = ground + 2.0;
@@ -9948,8 +9496,7 @@ fn level_way(far: f32) -> (f32, Vec3, Vec3) {
                 f64::from(earth.mie) * 1.0e-6 * mie,
             );
             let phased = rayleigh * rayleigh_phase + mie * mie_phase;
-            // The ground's light, from below, half of every way round the level way, whatever
-            // the phase function.
+            // From below, half of every way round, whatever the phase function.
             let ground = albedo / std::f64::consts::PI * sunlit * 0.5 * (rayleigh + mie);
             from_sun[channel] += through * phased * sunlit * step;
             from_ground[channel] += through * ground * step;
@@ -9965,13 +9512,10 @@ fn level_way(far: f32) -> (f32, Vec3, Vec3) {
     (mean as f32, light(from_sun), light(from_ground))
 }
 
-/// The haze over what's far, through views narrower than walls 5 and 20 km off from 2 m up: an
-/// emissive white wall under a sun set far below the horizon, whose sky is dark, shows the mean of
-/// the transmittance's channels to it, as the paper's model gives it, within 8%; and a black wall
-/// under a sun at the zenith shows the light scattered toward the eye on the way, bluest and
-/// brighter the farther it is: more than the light scattered once from the sun, as the model gives
-/// it, as the light scattered many times over adds to it, but within a tenth past that and the
-/// sunlit ground's light scattered once, which the paper's light scattered many times over holds.
+/// Walls 5 and 20 km off from 2 m up: an emissive one under a set sun shows the paper's mean
+/// transmittance within 8%; a black one under a zenith sun shows bluer, brighter in-scattering
+/// farther, above single scattering but within a tenth past it plus the ground's, as the paper's
+/// multiple scattering holds it.
 fn the_haze_dims_and_lights_what_is_far() {
     const SIZE: u32 = 4;
     const SUN: f32 = 120_000.0;
@@ -9988,7 +9532,7 @@ fn the_haze_dims_and_lights_what_is_far() {
             emissive: Vec3::ONE,
             ..Material::default()
         },
-        // A metal of no color, which reflects nothing either way.
+        // A black metal reflects nothing either way.
         Material {
             color: Vec4::new(0.0, 0.0, 0.0, 1.0),
             workflow: metallic(1.0, 1.0),
@@ -10062,14 +9606,10 @@ fn the_haze_dims_and_lights_what_is_far() {
     shut_down(renderer);
 }
 
-/// A white floor seen from above, lit by the sky's light alone through dusk, its sun 0.5° to 4.5°
-/// below the horizon in steps of 0.05°, as `atmosphere.ron`'s sun, turning 3° a second, goes in
-/// frames of 60 a second: its light, which falls by about half each degree, falls frame by frame
-/// as smoothly as the sun goes, each frame's fall within 6% of the light of the one before's, which
-/// allows for the steps of about 1% of the 8-bit image it's read from, and for the bends in the
-/// light as the sun crosses the multiple scattering table's texels, rather than in steps of tens of
-/// percent where the light would be prefiltered again too seldom. Each frame is exposed for the
-/// light the frame before showed, and its light found by its exposure.
+/// A floor lit by the sky alone as the sun sinks 0.5° to 4.5° below the horizon, 0.05° a frame
+/// (`atmosphere.ron`'s at 60 fps): each frame's fall within 6% of the last's, allowing for 8-bit
+/// steps and the multiple scattering table's texels. Prefiltering too seldom stepped tens of
+/// percent.
 fn the_skys_light_falls_smoothly_through_dusk() {
     const SIZE: u32 = 4;
     const STEPS: u32 = 80;
@@ -10150,9 +9690,9 @@ fn the_skys_light_falls_smoothly_through_dusk() {
     }
     shut_down(renderer);
 }
-/// An image sky lights and shows its world byte for byte as it did before an atmosphere took its
-/// place, under the same sun, once the atmosphere gives it back: its light is prefiltered from the
-/// image again, and the sun's light is no longer dimmed by the air.
+
+/// An image sky draws byte for byte as before an atmosphere took its place and left: its light
+/// prefiltered again, the sun undimmed.
 fn an_image_sky_renders_as_it_did_before_an_atmosphere() {
     const SIZE: u32 = 32;
     let mut renderer = renderer(SIZE, SIZE);
@@ -10219,14 +9759,13 @@ fn an_image_sky_renders_as_it_did_before_an_atmosphere() {
 /// The bytes of a shadow map of a light's cascade: 2048 texels across and down, of 32-bit depth.
 const SHADOW_MAP_BYTES: u64 = 2048 * 2048 * 4;
 
-/// What places [`model_square`] facing up, `size` across, its center at `at`.
+/// Places [`model_square`] facing up, `size` across, centered at `at`.
 fn facing_up(size: f32, at: Vec3) -> Mat4 {
     let turned = Quat::from_rotation_x(-FRAC_PI_2);
     Mat4::from_scale_rotation_translation(Vec3::new(size, size, 1.0), turned, at)
 }
 
-/// A directional light of white, of 1 lux, shining along `direction`, casting shadows as far as
-/// `shadow_distance` ahead of the view, if given.
+/// A white 1-lux directional light along `direction`, shadowing `shadow_distance` ahead, if given.
 fn sun(direction: Vec3, shadow_distance: Option<f32>) -> Light {
     Light {
         kind: LightKind::Directional,
@@ -10238,8 +9777,8 @@ fn sun(direction: Vec3, shadow_distance: Option<f32>) -> Light {
     }
 }
 
-/// Straight down from `at`, without perspective, onto a square view `across` units of the world
-/// across, its top toward -Z, seeing what's from 1 to `far` below it.
+/// Orthographic, down from `at` onto a view `across` units square, its top toward -Z, seeing 1 to
+/// `far` below.
 fn looking_down(at: Vec3, across: f32, far: f32) -> Viewpoint {
     Viewpoint {
         position: at.as_dvec3(),
@@ -10252,9 +9791,8 @@ fn looking_down(at: Vec3, across: f32, far: f32) -> Viewpoint {
     }
 }
 
-/// A floor, white and rough, 20 units across, and the first `plates` of three plates a unit across,
-/// 2 above it, along Z at -2.5, 0 and 2.5 and at -2 along X, each facing up: opaque, masked and
-/// opaque, and masked and transparent, which draws nothing.
+/// A white floor and the first `plates` of three unit plates 2 above it, facing up: opaque, masked
+/// opaque, and masked transparent, which draws nothing.
 fn floor_and_plates(stores: &mut Stores, plates: usize) -> Draws {
     let square = model_square(&mut stores.meshes);
     let white = Material {
@@ -10291,13 +9829,9 @@ fn floor_and_plates(stores: &mut Stores, plates: usize) -> Draws {
     draws
 }
 
-/// The floor and plates of [`floor_and_plates`], seen from straight above without perspective,
-/// 16 pixels a unit, under a light that comes down 2 for each 1 it goes along +X, casting shadows
-/// 100 units ahead: the light reaches the floor round the plates, as it does without the shadows,
-/// but not where the opaque and the masked opaque ones put their shadows, from a unit along +X
-/// from each, as far across as they are; the transparent one casts none. The frames' own images
-/// take the four shadow maps' memory more only in a frame whose light casts them; synchronization
-/// validation sees each map drawn before the view samples it, and drawn again after.
+/// [`floor_and_plates`] under a light down 2 for each 1 along +X: the opaque plates shadow the
+/// floor a unit along +X, the transparent one none. Shadow maps take memory only when cast;
+/// synchronization validation sees each drawn before and after the view samples it.
 fn shadows_fall_where_their_casters_put_them() {
     const SIZE: u32 = 128;
     let mut renderer = renderer(SIZE, SIZE);
@@ -10320,7 +9854,7 @@ fn shadows_fall_where_their_casters_put_them() {
         unshadowed < SHADOW_MAP_BYTES && shadowed >= 4 * SHADOW_MAP_BYTES,
         "{unshadowed} bytes without the shadows, {shadowed} with"
     );
-    // The floor's pixel `x` along X and `z` along Z from the origin, at the view's center.
+    // The floor's pixel at `x`, `z` from the origin, the view's center.
     let at = |x: f32, z: f32| [(64.0 + 16.0 * x) as u32, (64.0 + 16.0 * z) as u32];
     let floor = pixel_at(&lit, SIZE, at(2.5, 0.0));
     assert!(floor[0] > 100 && floor[0] == floor[2], "{floor:?}");
@@ -10353,14 +9887,9 @@ fn shadows_fall_where_their_casters_put_them() {
     shut_down(renderer);
 }
 
-/// A floor seen from straight above without perspective, 16 pixels a unit, 8 units across, under a
-/// light that comes down 2 for each 1 it goes along +X, casting shadows 100 units ahead, and plates
-/// a unit across over it, of a mesh with a sphere round its vertices: one in the view, which
-/// draws and casts its shadow; one past the view's side, which the view culls but the shadows'
-/// cascades keep, so that its shadow falls in the view; one 200 units away, which both cull; and
-/// a red one across the view's other side, which draws where it shows. And a red square of a mesh
-/// whose vertices are 10 units from its own origin, which is outside the view, its sphere round
-/// its vertices there: it draws. What the view counts on the GPU leaves out those it culled.
+/// Plates lit as in [`shadows_fall_where_their_casters_put_them`]: one in view; one past the side,
+/// kept by the cascades for its shadow; one 200 units off, culled by both; one across the other
+/// side. A square whose sphere is 10 units off its origin draws. GPU counts leave out the culled.
 fn culling_keeps_what_each_view_sees() {
     const SIZE: u32 = 128;
     let mut renderer = renderer(SIZE, SIZE);
@@ -10414,7 +9943,7 @@ fn culling_keeps_what_each_view_sees() {
     stores.lights = vec![sun(Vec3::new(1.0, -2.0, 0.0), Some(100.0))];
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     let drawn = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-    // The floor, the plate in the view and the one across its side, of one run, and the square.
+    // The floor, the plates in view and across its side (one run), and the square.
     let kept = DrawCounts {
         draws: 3,
         instances: 4,
@@ -10423,7 +9952,7 @@ fn culling_keeps_what_each_view_sees() {
     assert_eq!(drawn, kept);
     let frame = frame_pixels(&mut renderer);
     shut_down(renderer);
-    // The floor's pixel `x` along X and `z` along Z from the origin, at the view's center.
+    // The floor's pixel at `x`, `z` from the origin, the view's center.
     let at = |x: f32, z: f32| {
         pixel_at(
             &frame,
@@ -10457,14 +9986,11 @@ fn culling_keeps_what_each_view_sees() {
     }
 }
 
-/// The floor and the plates of [`culling_keeps_what_each_view_sees`], white but one red, in two
-/// frames, the second moving one plate, taking one away and adding one: held by the renderer's
-/// scene, drawn where the draws place it, they draw the same frames, bit for bit, culled as the
-/// same draws pushed are, counting the same.
+/// [`culling_keeps_what_each_view_sees`]'s draws held by the renderer's scene, over two frames
+/// that move, remove and add a plate, draw, cull and count bit for bit as pushed.
 fn the_scene_draws_as_draws_do() {
     const SIZE: u32 = 128;
-    // Each instance's slot, which its ID is one past, and where it is across the floor, in each
-    // frame: the floor's slot is 9.
+    // Each frame's instances: slot (its ID less 1), x and z; the floor's slot is 9.
     let frames: [&[(u32, f32, f32)]; 2] = [
         &[
             (0, -2.0, -2.0),
@@ -10550,19 +10076,15 @@ fn the_scene_draws_as_draws_do() {
     }
 }
 
-/// A wall across the left of a view with perspective, 128 pixels a side, of a mesh without a
-/// sphere, never culled, and plates a unit across of a mesh with one, flat-colored: a red plate
-/// wholly behind the wall, which the depth pyramid built from the view's first pass hides, so that
-/// the view doesn't draw it; a green one beside the wall and a blue one half behind its edge,
-/// which it draws; and a yellow one in front of it. The frame the wall is taken away draws the red
-/// plate, bit for bit as a renderer that never saw the wall draws them all; and once the wall is
-/// back, the frames are as before it went, the red plate hidden again and counted out.
+/// A never-culled wall hides a plate behind it from the depth pyramid; plates beside, half behind
+/// and in front draw. The frame the wall goes draws it as a renderer that never saw the wall; once
+/// back, it's hidden and uncounted again.
 fn occlusion_culling_draws_what_shows() {
     occlusion_culled(false);
 }
 
-/// As [`occlusion_culling_draws_what_shows`], under a sky, with ambient occlusion, whose depth
-/// alone the view's two passes draw before it draws again, shaded, without a visibility buffer.
+/// As [`occlusion_culling_draws_what_shows`] with ambient occlusion: two depth-only passes, then a
+/// shaded draw without a visibility buffer.
 fn occlusion_culling_draws_what_shows_with_ambient_occlusion() {
     occlusion_culled(true);
 }
@@ -10628,8 +10150,8 @@ fn occlusion_culled(occluded: bool) {
                 );
                 draws.push(wall, flat, across, Vec4::new(0.5, 0.5, 0.5, 1.0));
             }
-            // Behind the wall; beside it; half behind its edge, which the line from the camera
-            // past it, 0.5 along X at z = 0, meets at 0.8 along X at z = -3; and in front of it.
+            // Behind the wall; beside it; half behind its edge (the camera's line past x 0.5 at
+            // z = 0 meets z = -3 at x 0.8); and in front.
             for (x, z, color) in [
                 (-2.0, -3.0, Vec4::new(0.8, 0.1, 0.1, 1.0)),
                 (2.5, -3.0, Vec4::new(0.1, 0.7, 0.1, 1.0)),
@@ -10649,9 +10171,8 @@ fn occlusion_culled(occluded: bool) {
     };
     let (mut fresh, mut renderer) = (renderer(SIZE, SIZE), renderer(SIZE, SIZE));
     let (mut stores, walled, open) = made();
-    // The culling's first frame finds nothing shown before it, so its second pass draws all, the
-    // red plate among them; the next frame's first pass draws all the first showed, and its second
-    // finds the red plate hidden; the frame after draws it in neither.
+    // The first frame finds nothing shown before, so its second pass draws all; the next frame's
+    // second pass finds red hidden; the one after draws it in neither.
     settle(&mut renderer, &mut stores, viewport, viewpoint, &walled);
     drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &walled);
     let drawn = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &walled);
@@ -10682,7 +10203,7 @@ fn occlusion_culled(occluded: bool) {
     let (mut fresh_stores, _, open) = made();
     settle(&mut fresh, &mut fresh_stores, viewport, viewpoint, &open);
     if occluded {
-        // The sky shows from the frame after the one its texture came to be drawable in.
+        // The sky shows a frame after its texture is drawable.
         render_without_ui(&mut fresh, fresh_stores.data(viewport, viewpoint, &open));
     }
     assert!(
@@ -10701,10 +10222,8 @@ fn occlusion_culled(occluded: bool) {
     shut_down(renderer);
 }
 
-/// Squares that blend, each pushed before an opaque square, seen without perspective: on the left,
-/// one in front of its opaque square, and on the right, one behind. Opaque draws draw first, so the
-/// one in front blends over the opaque square, as it would pushed after it, and the one behind is
-/// hidden.
+/// Blending squares pushed before opaque ones: opaque draws go first, so one in front blends over
+/// its square and one behind is hidden.
 fn what_blends_goes_over_what_is_opaque_behind_it_in_any_order() {
     const SIZE: u32 = 64;
     let mut renderer = renderer(SIZE, SIZE);
@@ -10750,12 +10269,9 @@ fn what_blends_goes_over_what_is_opaque_behind_it_in_any_order() {
     assert!(close(found, opaque), "the square behind is {found:?}");
 }
 
-/// The floor and the opaque plate of [`floor_and_plates`], seen from straight above without
-/// perspective, 16 pixels a unit, under a light that comes down from +X and +Z, casting shadows
-/// as far as the view sees, 1,000 units, so that the nearest cascade's texels are 2 pixels across,
-/// and the shadow's edges, filtered, a dozen: the view moved a pixel along X shows each pixel of
-/// the frame before it a pixel over, the edges' too, as the cascade's texels stay put in the
-/// world. Were the cascade to move with the view, by a fraction of a texel, the edges would change.
+/// [`floor_and_plates`]'s plate from above, its cascade's texels 2 pixels across: moved a pixel
+/// along X, the view shows every pixel a pixel over, shadow edges too, as the texels stay put in
+/// the world.
 fn shadows_hold_still_as_the_view_moves() {
     const SIZE: u32 = 128;
     let mut renderer = renderer(SIZE, SIZE);
@@ -10787,10 +10303,8 @@ fn shadows_hold_still_as_the_view_moves() {
     shut_down(renderer);
 }
 
-/// A floor 400 units across, seen with perspective from 2 above it, 25° down, under lights 0°,
-/// 40°, 70° and 80° from straight down, casting shadows 50 units ahead: it draws as it does without
-/// the shadows, every pixel, in every cascade and past them all, as it would not if it shadowed
-/// itself, as shadow acne does.
+/// A floor under lights 0°, 40°, 70° and 80° from straight down draws as without shadows, in and
+/// past every cascade: no shadow acne.
 fn surfaces_cast_no_shadows_on_themselves() {
     const SIZE: u32 = 160;
     let mut renderer = renderer(SIZE, SIZE);
@@ -10815,7 +10329,7 @@ fn surfaces_cast_no_shadows_on_themselves() {
     let viewport = filling([SIZE, SIZE]);
     for degrees in [0.0_f32, 40.0, 70.0, 80.0] {
         let (sin, cos) = math::libm::sincosf(math::to_radians(degrees));
-        // Turned a little round, so that the light's texels don't line up with the floor's edges.
+        // Turned a little, so the light's texels don't line up with the floor's edges.
         let direction = Vec3::new(sin * 0.8, -cos, sin * 0.6);
         let [lit, shadowed] = [None, Some(50.0)].map(|distance| {
             stores.lights = vec![sun(direction, distance)];
@@ -10834,9 +10348,8 @@ fn surfaces_cast_no_shadows_on_themselves() {
     shut_down(renderer);
 }
 
-/// A unit square around the origin, a model's, as [`model_square`] is, opaque at its left edge and
-/// transparent at its right, as its vertices' colors' alpha says: a masked material of it draws its
-/// left half.
+/// [`model_square`] with vertex alpha from opaque at its left edge to transparent at its right:
+/// masked, it draws its left half.
 fn half_square(meshes: &mut Meshes) -> Mesh<PackedVertex> {
     let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
         position: Vec3::new(x, y, 0.0),
@@ -10854,11 +10367,8 @@ fn half_square(meshes: &mut Meshes) -> Mesh<PackedVertex> {
     add_model(meshes, "half square", &corners, &[0, 1, 2, 2, 3, 0])
 }
 
-/// Cuts each of `mesh`'s levels into meshlets as the cooker does, more simply: its triangles in
-/// their order, a meshlet ending where the next triangle would take it past a meshlet's vertices or
-/// triangles, each in the sphere round its vertices' box, facing within a cone round its
-/// triangles' mean normal, as `meshopt_computeClusterBounds` makes one, widened for its bytes'
-/// rounding.
+/// Cuts `mesh`'s levels into meshlets as the cooker does, more simply, each with the sphere round
+/// its vertices' box and a cone as `meshopt_computeClusterBounds` makes it, widened for rounding.
 fn cut_meshlets(mesh: &mut ModelMesh) {
     let positions = mesh.positions();
     let mut meshlets = Meshlets::default();
@@ -10934,15 +10444,9 @@ fn cut_meshlets(mesh: &mut ModelMesh) {
     mesh.meshlets = meshlets;
 }
 
-/// Spheres of a mesh of two levels of detail, cut into meshlets, on a floor, lit by a sun that casts
-/// their shadows, seen with perspective: opaque and masked, near enough for their finest level and
-/// far enough for the coarser, mirrored, stretched along one axis, which their cones don't turn
-/// with, and part past the view's side, which culls some of their meshlets. Drawn by their
-/// meshlets, through mesh shaders if `mesh_shaders` and through vertex shaders otherwise, and
-/// shaded as they draw, they draw bit for bit as the same spheres of the mesh without meshlets, by
-/// their indices, the same instances at the same levels, counting fewer triangles, as the meshlets
-/// that face away from the view or lie past its sides are culled; and match their reference. Drawn
-/// into the visibility buffer and shaded from it, they draw the same, and match it too.
+/// Meshlets of two-level spheres, opaque and masked, mirrored, stretched (which their cones don't
+/// turn with) and partly outside, through mesh or vertex shaders: bit for bit as by indices, fewer
+/// triangles counted, and as their reference, via the visibility buffer too.
 fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
     const WIDTH: u32 = 200;
     const HEIGHT: u32 = 128;
@@ -11038,8 +10542,8 @@ fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
         };
         let viewport = filling([WIDTH, HEIGHT]);
         settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-        // Past the frame the mesh came to be drawable in, which planned no room for its meshlets
-        // and drew it by its indices.
+        // Past the frame the mesh became drawable in, which drew it by its indices, with no room
+        // planned for its meshlets.
         render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
         let counts = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
         let pixels = frame_pixels(&mut renderer);
@@ -11064,13 +10568,9 @@ fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
     compare("meshlets", WIDTH, HEIGHT, &seen);
 }
 
-/// A gray floor, a sphere on it, an orange post standing on it, and a masked plate, upright,
-/// whose right half is cut away, seen with perspective from above and in front, under a light
-/// from the upper left, behind them, casting shadows 20 units ahead, the second of two, and a dim
-/// one from the front, which casts none, tonemapped by PBR Neutral: each casts its shadow on the
-/// floor toward the view, the plate's of its left half alone, in which the dim light still
-/// shows the floor, and the sphere's side away from the light is in its own shadow, against
-/// their reference image.
+/// Shadowed models against their reference: a sphere, a post and a plate masked to its left half,
+/// shadowed toward the view, a dim unshadowed front light showing the shade; the sphere shades its
+/// own far side.
 fn shadowed_models_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
@@ -11110,7 +10610,7 @@ fn shadowed_models_match_their_reference() {
     let mut draws = Draws::default();
     draws.push_draw(facing_up(20.0, Vec3::ZERO), &floor, 0);
     draws.push_draw(Mat4::from_translation(Vec3::new(0.1, 0.6, 0.2)), &ball, 0);
-    // A post 0.4 across and 1.6 tall, its faces each a square turned to face out.
+    // A post 0.4 across and 1.6 tall, of four squares facing out.
     for turn in 0..4 {
         let rotation = Quat::from_rotation_y(turn as f32 * FRAC_PI_2);
         let out = rotation * Vec3::new(0.0, 0.0, 0.2);
@@ -11127,8 +10627,7 @@ fn shadowed_models_match_their_reference() {
         Vec3::new(-1.5, 0.5, -0.9),
     );
     draws.push_draw(upright, &plate, 0);
-    // From the upper left, behind, so that the shadows fall toward the view; and a dim light from
-    // the front, which casts none, so that what's in shadow shows.
+    // The dim front light, then the shadowing one.
     stores.lights = vec![
         Light {
             color: Vec3::splat(0.6),
@@ -11157,9 +10656,7 @@ fn shadowed_models_match_their_reference() {
     check(renderer, "shadowed_models", WIDTH, HEIGHT);
 }
 
-/// What the last frame drew in the view of `draws` in `viewport` from `viewpoint`, which comes back
-/// as the frame two later begins: renders them twice more, as they were.
-/// The light the antialiasing tests' models are lit by, from the upper left, in front.
+/// The antialiasing tests' light, from the upper left, in front.
 fn front_light() -> Light {
     Light {
         kind: LightKind::Directional,
@@ -11171,8 +10668,8 @@ fn front_light() -> Light {
     }
 }
 
-/// What the antialiasing tests see from: 4 in front of the origin, a quarter of a turn across,
-/// about 19 pixels a unit at the origin in a view 64 pixels a side; as far again as `moved`.
+/// The antialiasing tests' viewpoint, `moved` from 4 in front of the origin, a quarter turn
+/// across: about 19 pixels a unit there at 64 a side.
 fn seeing_from(moved: Vec3) -> Viewpoint {
     Viewpoint {
         position: DVec3::new(0.0, 0.0, 4.0) + moved.as_dvec3(),
@@ -11194,8 +10691,7 @@ fn decoded(channel: u8) -> f32 {
     }
 }
 
-/// How far apart `a` and `b`, frames read back, are in linear light: the mean over every channel of
-/// every pixel.
+/// The mean linear-light difference over every channel of frames `a` and `b`.
 fn linear_distance(a: &[u8], b: &[u8]) -> f32 {
     assert_eq!(a.len(), b.len(), "frames of a size");
     let sum: f32 = (a.iter().zip(b))
@@ -11204,8 +10700,8 @@ fn linear_distance(a: &[u8], b: &[u8]) -> f32 {
     sum / a.len() as f32
 }
 
-/// `pixels`, a frame read back `size` pixels a side, averaged down `by` times each way in linear
-/// light, as a view of that many samples a pixel shows it.
+/// `pixels`, `size` a side, averaged down `by` each way in linear light, as that many samples a
+/// pixel show it.
 fn averaged_down(pixels: &[u8], size: u32, by: u32) -> Vec<u8> {
     let small = size / by;
     let mut averaged = Vec::with_capacity((small * small * 4) as usize);
@@ -11226,8 +10722,7 @@ fn averaged_down(pixels: &[u8], size: u32, by: u32) -> Vec<u8> {
     averaged
 }
 
-/// `frames`, each read back `size` pixels a side, side by side, as a reference holds frames in a
-/// row.
+/// `frames`, each `size` pixels a side, in a row, as a reference holds them.
 fn side_by_side(frames: &[&[u8]], size: u32) -> Vec<u8> {
     let row = (size * 4) as usize;
     (0..size as usize)
@@ -11243,10 +10738,8 @@ fn side_by_side(frames: &[&[u8]], size: u32) -> Vec<u8> {
 /// The side of the view [`edges_seen`] draws, at its own size.
 const EDGES_SIZE: u32 = 64;
 
-/// `frames` frames of the antialiasing tests' view, [`EDGES_SIZE`] times `scale` pixels a side,
-/// antialiased as `antialiasing` says: a lit sphere, a model's, and a square of a game's opaque
-/// shader, turned so that their edges cross the pixels at every angle, with a square on the
-/// canvas, 12 pixels a side at the view's own size, 8 from its bottom left, over them.
+/// `frames` frames, [`EDGES_SIZE`] times `scale` a side: a lit sphere and a turned square, edges at
+/// every angle, under a canvas square 12 pixels a side, 8 from the bottom left at scale 1.
 fn edges_seen(scale: u32, antialiasing: Antialiasing, frames: usize) -> Vec<Vec<u8>> {
     let size = EDGES_SIZE * scale;
     let mut renderer = renderer(size, size);
@@ -11296,11 +10789,8 @@ fn edges_seen(scale: u32, antialiasing: Antialiasing, frames: usize) -> Vec<Vec<
     drawn
 }
 
-/// A view antialiased frame after frame, against its reference of frames 1, 2, 4 and 16 side by
-/// side, of [`edges_seen`]'s view. By the sixteenth, its edges average what's drawn across their
-/// pixels: it's nearer the view drawn at 4 times the size, without antialiasing, and averaged down
-/// than the view drawn without it is; and the canvas, drawn after the view resolves, shows as it
-/// does without it.
+/// [`edges_seen`] by TAA against its reference of frames 1, 2, 4 and 16: by the 16th, nearer the
+/// 4-times view averaged down than the unaliased view; the canvas unaliased.
 fn antialiasing_smooths_edges_frame_by_frame() {
     const SIZE: u32 = EDGES_SIZE;
     const LARGER: u32 = 4;
@@ -11333,7 +10823,7 @@ fn antialiasing_smooths_edges_frame_by_frame() {
     );
 }
 
-/// What a model or a game's shader draws, as the antialiasing tests draw it.
+/// What the antialiasing tests move.
 #[derive(Clone, Copy, Debug)]
 enum Moved {
     /// A sphere of the model shader drawn by its indices.
@@ -11345,8 +10835,8 @@ enum Moved {
 }
 
 impl Moved {
-    /// What `self` draws with, added to `stores`: a sphere 0.8 across, or a square 1.3 across,
-    /// turned so that its edges cross the pixels aslant.
+    /// Its draw, added to `stores`, and shape: a sphere, or a square 1.3 across turned so its edges
+    /// cross the pixels aslant.
     fn draw(self, stores: &mut Stores) -> (MeshDraw, Mat4) {
         let draw = match self {
             Self::Indices | Self::Meshlets => {
@@ -11384,13 +10874,8 @@ impl Moved {
     }
 }
 
-/// What the camera moves with, antialiased: an instance of the scene, moved each frame as far as
-/// the camera, so that it shows where it did, resolves as though neither moved, as its motion takes
-/// each pixel's history back from where it showed the frame before: after as many frames, within
-/// 0.0015 on average, in linear light, of the view of it standing still, which rounding alone keeps
-/// it from, where moving it with the camera alone, as though it stood still in the world, leaves it
-/// 0.004 or more apart. For the model shader drawn by its indices, and by its meshlets into the
-/// visibility buffer, and a game's shader that returns its motion.
+/// A scene instance moving with the camera resolves as though both stood still: within 0.0015 of
+/// the still view on average, where taken as still in the world it's 0.004 off. For each [`Moved`].
 fn antialiasing_follows_what_moves() {
     const SIZE: u32 = 64;
     const FRAMES: u32 = 20;
@@ -11400,8 +10885,7 @@ fn antialiasing_follows_what_moves() {
         let mut stores = Stores::default();
         let (draw, shape) = moved.draw(&mut stores);
         stores.lights = vec![front_light()];
-        // Where the frame's camera and instance are, from where they start: still, where the
-        // moving ones end.
+        // The frame's camera and instance, from their start; still ones where the moving ones end.
         let at = |frame: u32| step * if moving { frame } else { FRAMES - 1 } as f32;
         let placed = |frame| Mat4::from_translation(at(frame)) * shape;
         let mut draws = Draws::default();
@@ -11437,13 +10921,9 @@ fn antialiasing_follows_what_moves() {
     }
 }
 
-/// A scene 1,000 km from the world's origin, drawn from an origin near it, as the engine draws: a
-/// lit sphere on a floor, both the scene's, and a fire's particles, under fog and ambient
-/// occlusion, antialiased and motion-blurred, as the view and the sphere move along; halfway, the
-/// origin moves a step on, the scene's instances set again from it, as the engine sets them. Frame
-/// by frame, it draws as the same scene at the world's origin, drawn from it, does, within
-/// rounding: antialiasing's, ambient occlusion's and motion blur's histories, the floor's motion,
-/// none, and the particles alive all carried through the move.
+/// A scene 1,000 km out, drawn from a near origin with fog, ambient occlusion, TAA, motion blur and
+/// particles, the view and a sphere moving, draws each frame as at the world's origin within
+/// rounding, through the origin's move halfway.
 fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
     const SIZE: u32 = 96;
     const FRAMES: u32 = 12;
@@ -11464,8 +10944,8 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
         cells: [1, 1],
         additive: true,
     };
-    // Each frame's pixels, of the scene `far` from the world's origin, drawn from the first of
-    // `origins` until `MOVED_AT`, then from the second.
+    // Each frame's pixels of the scene at `far`, drawn from `origins[0]` until `MOVED_AT`, then
+    // `origins[1]`.
     let render = |far: DVec3, origins: [DVec3; 2]| {
         let mut renderer = renderer(SIZE, SIZE);
         let mut stores = Stores::default();
@@ -11481,7 +10961,7 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
             .expect("a shader");
         let square = square(&mut stores.meshes);
         stores.lights = vec![front_light()];
-        // A sky alike every way, whose light the ambient occlusion darkens.
+        // A uniform sky, whose light ambient occlusion darkens.
         let sky = sky_texture(&mut stores.textures, [8, 4], |_, _| [1.0; 3]);
         stores.sky = Some(Sky {
             texture: sky,
@@ -11510,8 +10990,7 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
             ..Fog::default()
         };
         let fire_at = |frame| Mat4::from_translation(from_origin(frame, Vec3::new(-0.9, 0.2, 0.0)));
-        // The scene's draws, and a wall of stripes behind, of draws, which the camera's motion alone
-        // blurs.
+        // The scene, and a wall of pushed stripes behind, which the camera's motion alone blurs.
         let stripes = |frame: u32| {
             let mut draws = Draws::default();
             draws.draw_scene();
@@ -11567,10 +11046,8 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
                 stores.scene.set(1, at, &floor, 2);
             }
             if frame == 0 {
-                // Frames of the first's place until its meshes are drawable: as many as streaming
-                // takes, a count that differs from one render to the next, and so without what a
-                // frame keeps for the next, antialiasing's history, ambient occlusion's, motion
-                // blur's and the particles alive, so that the frames compared follow from none.
+                // Frames until the meshes are drawable, a count that differs between renders, so
+                // they keep nothing for the next frame: the frames compared follow from none.
                 let settling = stripes(0);
                 let settled = (0..200).any(|_| {
                     let data = RenderData {
@@ -11602,11 +11079,9 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
     let first = DVec3::new(1_000_448.0, 1024.0, -1_000_448.0);
     let moved = first + DVec3::new(1024.0, 0.0, 0.0);
     let far_out = render(far, [first, moved]);
-    // Within rounding, of the scene's points 1,500 or so from the origin they're drawn from, at
-    // most 0.0005 apart on average in linear light, and a few pixels; where a renderer that left
-    // one of what it keeps as it was draws the frame of the move apart: by 0.0038 for the scene's
-    // motion, 0.015 for antialiasing's history and 0.02 for motion blur's, or by 26 pixels for the
-    // particles alive.
+    // Within the rounding of points 1,500 or so from their origin: 0.0005 apart on average, and a
+    // few pixels. Leaving one kept state as it was puts the move's frame 0.0038 apart (motion),
+    // 0.015 (TAA's history), 0.02 (motion blur's) or 26 pixels (particles).
     for (frame, (near, far)) in at_the_origin.iter().zip(&far_out).enumerate() {
         let apart = linear_distance(near, far);
         let off = (near.chunks(4).zip(far.chunks(4)))
@@ -11619,11 +11094,8 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
     }
 }
 
-/// A plate of the scene that crosses a view standing still, antialiased, against its reference of
-/// frames 4, 8, 12 and 16 side by side: where it was leaves no trail, every pixel two or more from
-/// where it is now showing the clear color, as its history there, of the plate, is clipped to
-/// what's round it; and no pixel of any frame is darker or brighter than the clear color and the
-/// plate's own, as a filter's undershoot at an edge would be.
+/// A plate crossing a still view, antialiased, against its reference: no trail 2 pixels from it,
+/// and no pixel outside the clear color's and the plate's range, as a filter's undershoot is.
 fn antialiasing_leaves_no_trail() {
     const SIZE: u32 = 64;
     const FRAMES: usize = 16;
@@ -11637,7 +11109,7 @@ fn antialiasing_leaves_no_trail() {
             workflow: metallic(0.0, 0.7),
             ..Material::default()
         });
-        // Unlit, without lights, so that it's one color wherever it is.
+        // No lights, so it's one color wherever it is.
         let draw = MeshDraw::with_material(plate, material, &stores.materials, &mut stores.shaders);
         let placed = |frame: usize| {
             let at = Vec3::new(-1.6 + 0.15 * frame as f32, 0.1, 0.0);
@@ -11669,8 +11141,7 @@ fn antialiasing_leaves_no_trail() {
         SIZE,
         &side_by_side(&shown, SIZE),
     );
-    // Where the plate is in the last frame, and where it was in the fourth, drawn without
-    // antialiasing.
+    // Where the plate is in the last frame, and was in the fourth, unaliased.
     let now = render(Antialiasing::None, FRAMES..FRAMES + 1).remove(0);
     let then = render(Antialiasing::None, 4..5).remove(0);
     let last = &antialiased[FRAMES - 1];
@@ -11694,8 +11165,7 @@ fn antialiasing_leaves_no_trail() {
     }
     assert!(left > 100, "the plate left {left} pixels");
     assert!(trailing.is_empty(), "the plate trails at {trailing:?}");
-    // The plate's color, lit, where nothing of the clear color is round it, and the clear color:
-    // each channel's least and most.
+    // Each channel's least and most of the plate's color, well inside it, and the clear color.
     let inside = (0..SIZE * SIZE)
         .map(|i| [i % SIZE, i / SIZE])
         .find(|&[x, y]| {
@@ -11723,8 +11193,8 @@ fn antialiasing_leaves_no_trail() {
     }
 }
 
-/// The bright plate the antialiasing tests' specks and bars are seen against: unlit, 0.8 in linear
-/// light, behind the origin and filling the view, drawn by `flat`, `flat_color.slang`.
+/// The antialiasing tests' backdrop: unlit 0.8 in linear light behind the origin, filling the view,
+/// drawn by `flat`, `flat_color.slang`.
 fn bright_plate(draws: &mut Draws, square: Mesh<[f32; 3]>, flat: Shader<[f32; 3], Vec4>) {
     let behind =
         Mat4::from_translation(Vec3::new(0.0, 0.0, -0.5)) * Mat4::from_scale(Vec3::splat(4.0));
@@ -11734,9 +11204,8 @@ fn bright_plate(draws: &mut Draws, square: Mesh<[f32; 3]>, flat: Shader<[f32; 3]
 /// [`bright_plate`], sRGB-encoded, as a frame reads back.
 const PLATE: [u8; 4] = [231, 231, 231, 255];
 
-/// What's thinner than a pixel, as the antialiasing tests see it from [`seeing_from`], added to
-/// `stores`: dark bars a third of a pixel wide across [`bright_plate`], aslant, which each of the 8
-/// offsets draws over pixels the others don't.
+/// Sub-pixel detail from [`seeing_from`], added to `stores`: dark bars a third of a pixel wide,
+/// aslant across [`bright_plate`], which each of the 8 offsets draws over pixels the others don't.
 fn thin_bars(stores: &mut Stores) -> Draws {
     let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
@@ -11756,10 +11225,8 @@ fn thin_bars(stores: &mut Stores) -> Draws {
     draws
 }
 
-/// [`thin_bars`] in a still view, antialiased. Once the view has settled, over 16 frames, no pixel's
-/// channel moves more than 2 levels, as rounding may: it shows the mean of what the offsets drew,
-/// where a resolve that clipped its history to the pixels round it, which hold the bars at some
-/// offsets and not at others, showed each offset's own, and moved 24.
+/// [`thin_bars`] still, antialiased: settled, no channel moves more than 2 levels over 16 frames.
+/// Clipping to the pixels round it, which hold the bars at some offsets only, moved 24.
 fn antialiasing_steadies_what_is_thinner_than_a_pixel() {
     const SIZE: u32 = 64;
     const SETTLE: usize = 160;
@@ -11781,7 +11248,7 @@ fn antialiasing_steadies_what_is_thinner_than_a_pixel() {
         }
     }
     shut_down(renderer);
-    // Each channel of each pixel: how far it moves over the frames, and where it moves most.
+    // Each channel's range over the frames, and where it's widest.
     let (mut worst, mut at, mut moving) = (0, 0, 0);
     for channel in (0..(SIZE * SIZE * 4) as usize).filter(|channel| channel % 4 != 3) {
         let values = drawn.iter().map(|frame| frame[channel]);
@@ -11801,13 +11268,9 @@ fn antialiasing_steadies_what_is_thinner_than_a_pixel() {
     );
 }
 
-/// [`thin_bars`] antialiased as the view stops after moving: panning half a pixel a frame at the
-/// bars for 16 frames, then still for 160. As the store of what the offsets drew holds again, two
-/// cycles after the view stops, each pixel settles on the mean of what they drew by a still pixel's
-/// share of the way a frame: in no frame do more than 1% of its pixels land at once within 2 levels
-/// of where they end from 12 or more away, against some 11 that the clip's flicker lands by chance
-/// the frame after the view stops; a resolve that showed that mean as soon as the store held jumped
-/// there, 350 at once.
+/// [`thin_bars`] as the view pans and stops: each pixel settles on the offsets' mean gradually,
+/// under 1% of pixels landing at once from 12 levels off to within 2 (the clip's flicker lands 11
+/// by chance). Settling at once jumped 350.
 fn antialiasing_settles_without_a_jump_once_the_view_stops() {
     const SIZE: u32 = 64;
     const MOVES: usize = 16;
@@ -11860,10 +11323,9 @@ fn antialiasing_settles_without_a_jump_once_the_view_stops() {
     );
 }
 
-/// Dark squares in a still view, antialiased, from a thousandth to a fiftieth in linear light, where
-/// a level of sRGB spans the least light: once settled, each pixel 2 or more inside one shows it as
-/// a view without antialiasing does, within a level, as one whose resolve kept what the offsets drew
-/// in steps of a thousandth, and showed their mean, didn't, by 2.
+/// Still dark squares, a thousandth to a fiftieth in linear light, where an sRGB level spans the
+/// least light: antialiased, their insides show as unaliased within a level. Keeping the offsets'
+/// draws in thousandths was off by 2.
 fn antialiasing_keeps_still_dark_colors_as_drawn() {
     const SIZE: u32 = 64;
     const SETTLE: usize = 64;
@@ -11929,13 +11391,9 @@ fn antialiasing_keeps_still_dark_colors_as_drawn() {
     );
 }
 
-/// A dark speck, about 3 pixels across, crossing a bright plate before a still camera, antialiased,
-/// at a quarter of a pixel, a pixel and 3 pixels a frame, from where it stood still long enough for
-/// the plate to settle: drawn by a shader that returns how far it moved, `moving.slang`, and by one
-/// that doesn't, `flat_color.slang`, as nothing moves where a shadow crosses what stands still. In
-/// every frame of its crossing, every pixel 3 or more from the speck's middle past its edge shows
-/// the plate: where it was leaves no trail, as the pixels it left are resolved against what's round
-/// them.
+/// A dark speck crossing a bright plate before a still camera at 0.25, 1 and 3 pixels a frame,
+/// antialiased, leaves no trail 3 pixels past its edge, drawn with its motion (`moving.slang`) and
+/// without (`flat_color.slang`, as a shadow crossing what's still).
 fn antialiasing_leaves_no_trail_behind_dark_specks() {
     const SIZE: u32 = 64;
     const STILL: usize = 48;
@@ -11955,7 +11413,7 @@ fn antialiasing_leaves_no_trail_behind_dark_specks() {
                 .expect("a shader");
             let square = square(&mut stores.meshes);
             let speck = MeshDraw::new(square, moving, dark);
-            // Where the speck is in a frame of its crossing, from 0, in the world and in pixels.
+            // The speck's middle in the world, in a frame of its crossing from 0.
             let moves = (40.0 / speed) as usize;
             let middle = |frame: usize| {
                 let x = -1.2 + speed * frame as f32 / PIXELS_A_UNIT;
@@ -12017,15 +11475,13 @@ fn antialiasing_leaves_no_trail_behind_dark_specks() {
     }
 }
 
-/// How many pixels a unit is across at the origin, 4 from [`seeing_from`]'s camera, whose view is a
-/// quarter turn tall, in a view `size` pixels a side.
+/// Pixels a unit at the origin from [`seeing_from`], in a `size` view.
 fn pixels_a_unit(size: u32) -> f32 {
     size as f32 / (2.0 * 4.0 * math::libm::tanf(PI / 8.0))
 }
 
-/// A view that moves past what stands still at the origin's depth: what it shows there moves
-/// `across` pixels and `down` every `over` frames, a whole number of pixels, so that each pixel's
-/// point is at a pixel again then.
+/// A view panning `across` and `down` whole pixels every `over` frames at the origin's depth, so
+/// each pixel's point is at a pixel again then.
 #[derive(Clone, Copy, Debug)]
 struct Pan {
     across: i32,
@@ -12045,20 +11501,16 @@ impl Pan {
     }
 }
 
-/// The slats [`slats_seen`] draws, as the side faces of a slatted table's slats show from 9 m:
-/// how tall each is and how far apart they are, both in pixels, and how much they rise for each
-/// pixel across, so that each frame's one sample a pixel shows each as dashes, 5 pixels long every
-/// 14, that run along it as the view moves up or down; and their light and the plate's behind
-/// them.
+/// [`slats_seen`]'s slats, as a slatted table's sides from 9 m: height, spacing and rise per pixel,
+/// so one sample a pixel shows dashes 5 long every 14; their light; the plate's.
 const SLAT_TALL: f32 = 0.36;
 const SLATS_APART: f32 = 2.5;
 const SLAT_RISE: f32 = 1.0 / 14.0;
 const SLAT_LIGHT: f32 = 0.05;
 const SLATS_PLATE: f32 = 0.8;
 
-/// A dark speck that crosses [`slats_seen`]'s view, `speed` pixels a frame across it from 8 pixels
-/// in, 2 above its middle, once the frames are kept: drawn by a shader that returns how far it
-/// moved, or by one that doesn't.
+/// A dark speck crossing [`slats_seen`]'s view at `speed` pixels a frame, from 8 in and 2 above the
+/// middle, drawn with its motion or without.
 #[derive(Clone, Copy, Debug)]
 struct Speck {
     speed: f32,
@@ -12069,15 +11521,14 @@ struct Speck {
 const SPECK_HALF: f32 = 0.08;
 
 impl Speck {
-    /// Where its middle shows, in pixels, in the `kept`th frame kept of a view `size` a side.
+    /// Where its middle shows, in pixels, in the `kept`th kept frame of a `size` view.
     fn seen(self, kept: usize, size: u32) -> [f32; 2] {
         [8.0 + self.speed * kept as f32, size as f32 / 2.0 - 2.0]
     }
 }
 
-/// Frames `frames` of a view `size` pixels a side, antialiased, panning as `pan` says from frame 0
-/// past dark slats at the origin's depth, thinner than a pixel, right before a bright plate. With
-/// `speck` crossing them.
+/// Frames `frames` of a `size` view, antialiased, panning by `pan` past dark sub-pixel slats right
+/// before a bright plate, `speck` crossing them.
 fn slats_seen(
     size: u32,
     pan: Pan,
@@ -12102,11 +11553,11 @@ fn slats_seen(
     let drawing = |stores: &mut Stores, frame: usize| {
         let camera = pan.seeing(frame, size).position.as_vec3();
         let mut draws = Draws::default();
-        // Right behind the slats, so that the two show moving alike.
+        // Right behind the slats, so the two move alike.
         let behind = Mat4::from_translation(Vec3::new(0.0, 0.0, -0.01))
             * Mat4::from_scale(Vec3::splat(800.0));
         draws.push(square, flat, behind, Vec3::splat(SLATS_PLATE).extend(1.0));
-        // The slats that cross the view: each stands where it does whatever the frame.
+        // The slats across the view, each fixed in the world.
         let middle = ((camera.y - camera.x * SLAT_RISE) / apart).round() as i32;
         let rows = ((half * (1.0 + SLAT_RISE) + 0.2) / apart).ceil() as i32;
         for row in middle - rows..=middle + rows {
@@ -12161,21 +11612,21 @@ fn slats_seen(
     drawn
 }
 
-/// How long a point has shown, in frames, where the tests of a panning view measure it: where
-/// it's come into view since, its history is as young.
+/// Frames a point must have shown for the panning tests to measure it, as one come into view since
+/// has a history as young.
 const AGED: usize = 48;
 
-/// Whether the point at (`x`, `y`) of a view that pans as `pan` says has shown for [`AGED`]
-/// frames, 2 pixels or more inside a view `size` a side.
+/// Whether (`x`, `y`) of a view panning by `pan` has shown for [`AGED`] frames, 2 or more pixels
+/// inside a `size` view.
 fn aged(pan: Pan, size: u32, [x, y]: [i32; 2]) -> bool {
     let old = |at: i32, moves: i32| at * pan.over as i32 >= AGED as i32 * moves;
     let inside = 2..size as i32 - 2;
     inside.contains(&x) && inside.contains(&y) && old(x, pan.across) && old(y, pan.down)
 }
 
-/// How each point changes as a view pans: over `samples` of `frames`, `pan.over` apart, each
-/// [`aged`] pixel of the first against where its point shows in the others. How many points; how
-/// many whose channel that changes most ranges over more than 8 levels; and the mean range.
+/// How points change as the view pans, over `samples` of `frames` `pan.over` apart, each [`aged`]
+/// pixel of the first against where its point shows later: the points, those whose most-changing
+/// channel ranges over 8 levels, and the mean range.
 fn wander(frames: &[Vec<u8>], size: u32, pan: Pan, samples: usize) -> (usize, usize, f32) {
     let seen = |x: i32, y: i32, i: usize| [x + i as i32 * pan.across, y + i as i32 * pan.down];
     let (mut points, mut over, mut sum) = (0, 0, 0.0);
@@ -12202,15 +11653,10 @@ fn wander(frames: &[Vec<u8>], size: u32, pan: Pan, samples: usize) -> (usize, us
     (points, over, sum / points as f32)
 }
 
-/// [`slats_seen`]'s slats antialiased as the view pans, a third of a pixel a frame across and
-/// down, and 1.3 across and 0.4 down: once a point has shown for [`AGED`] frames, its pixel holds
-/// as the view carries it along. Over 8 samples and over 4, each where the point is at a pixel
-/// again, the pixels' mean range is under 5 levels, and under 1 in 20 ranges over more than 8; and
-/// the frame is darker than the plate by at least what the slats cover of it, in linear light, as
-/// a still view settles at 1.5 times that, the resolve blending colors weighed by their luminance.
-/// A resolve that clips each pixel's history to the pixels round it alone, which miss a slat in
-/// most frames, shows each frame's dashes in turn: a mean range of 8.4 and 12 levels, 46% and 63%
-/// of the pixels over 8, and 0.19 and 0.36 of that darkness.
+/// [`slats_seen`] panning by two [`Pan`]s: [`aged`] points hold, a mean range under 5 levels and
+/// under 1 in 20 over 8, the frame at least the slats' cover darker than the plate (1.5 times
+/// still, as the resolve weighs by luminance). Clipping to neighbors alone gave mean ranges of 8.4
+/// and 12, 46% and 63% over 8, and 0.19 and 0.36 of that darkness.
 fn antialiasing_steadies_what_is_thinner_than_a_pixel_as_the_view_moves() {
     const WARM: usize = 96;
     let pans = [
@@ -12260,16 +11706,9 @@ fn antialiasing_steadies_what_is_thinner_than_a_pixel_as_the_view_moves() {
     }
 }
 
-/// A dark speck crossing [`slats_seen`]'s slats, antialiased, as the view pans a third of a pixel
-/// a frame across and down, at a quarter of a pixel a frame and at a pixel, drawn by a shader that
-/// returns how far it moved and by one that doesn't, as nothing moves where a shadow crosses what
-/// stands still: against the same frames without it. The slats' pixels flicker, and keep their
-/// history past the pixels round them; the speck is a change, not flicker, which ends that. So it
-/// leaves no trail: under 10 pixels a frame, 3 or more past its edge, show more than 2 levels
-/// darker than without it, 5 at the most, where a flicker test that kept its evidence through a
-/// change left 100 behind the slower speck. And one that returns its motion, whose pixels' history
-/// and evidence are its own, taken where it was, shows dark, its middle no brighter than 90, where
-/// one that doesn't shows as bright as 102 and 193.
+/// A [`Speck`] crossing [`slats_seen`]'s flickering slats leaves no trail: under 10 pixels a frame,
+/// 3 past its edge, over 2 levels darker, as a change ends the flicker evidence (keeping it left
+/// 100). With its motion, its middle is at most 90; without, 102 and 193.
 fn antialiasing_leaves_no_trail_behind_what_crosses_flickering_pixels() {
     const SIZE: u32 = 64;
     const WARM: usize = 64;
@@ -12325,13 +11764,9 @@ fn antialiasing_leaves_no_trail_behind_what_crosses_flickering_pixels() {
     }
 }
 
-/// A bright square 4 pixels a side that shows for 5 frames and then doesn't for 5, over and over,
-/// before a dark plate in a still view, antialiased: once it has blinked for 100 frames, the last
-/// frame of each time it doesn't show shows the plate where its middle was, within a level, as
-/// the clip throws its light out. Each time it goes, its edge's pixels were drawn and are then
-/// held by nothing round them, as what flickers is; but they stood still, and an offset drew them
-/// otherwise than it did a cycle before, which the offsets alone don't do: a resolve that took
-/// them to flicker all the same kept the square's light there, as bright as 135.
+/// A 4-pixel square blinking every 5 frames over a dark plate in a still view leaves no ghost: each
+/// last frame off shows the plate within a level. Its edge looks like flicker, but stood still and
+/// changed at an offset, which offsets alone don't; taking it for flicker kept 135.
 fn antialiasing_keeps_no_ghost_of_what_blinks_in_a_still_view() {
     const SIZE: u32 = 64;
     const SHOWS: usize = 5;
@@ -12379,11 +11814,8 @@ fn antialiasing_keeps_no_ghost_of_what_blinks_in_a_still_view() {
     shut_down(renderer);
 }
 
-/// [`edges_seen`]'s view antialiased by SMAA, against its reference of it without antialiasing and
-/// with SMAA side by side: in its first frame, nearer the view drawn at 4 times the size, without
-/// antialiasing, and averaged down than the view drawn without it is, as near as TAA's sixteenth
-/// frame is; the next frame the same, as SMAA keeps nothing from frame to frame; and the canvas,
-/// drawn after, as it shows without antialiasing.
+/// [`edges_seen`] by SMAA against its reference beside the unaliased view: as near the averaged
+/// 4-times view as TAA's 16th frame, alike each frame, the canvas unaliased.
 fn smaa_smooths_edges_in_a_frame() {
     const SIZE: u32 = EDGES_SIZE;
     const LARGER: u32 = 4;
@@ -12417,8 +11849,8 @@ fn smaa_smooths_edges_in_a_frame() {
     );
 }
 
-/// A disk of `segments` triangles around the origin, of radius 1 in the plane of X and Y, facing
-/// +Z, of positions alone, as `flat_color.slang` takes them.
+/// A unit disk of `segments` triangles in the XY plane facing +Z, of positions alone, for
+/// `flat_color.slang`.
 fn disk(meshes: &mut Meshes, segments: u32) -> Mesh<[f32; 3]> {
     use math::libm::{cosf, sinf};
     let rim = (0..segments).map(|i| {
@@ -12432,24 +11864,16 @@ fn disk(meshes: &mut Meshes, segments: u32) -> Mesh<[f32; 3]> {
     meshes.add("disk", &corners, &indices).expect("a mesh")
 }
 
-/// A gray disk over black, 70 pixels across in a view of 96, antialiased by SMAA in one frame,
-/// against the view drawn at 8 times the size and averaged down, which shows how much of each
-/// pixel the disk covers: each pixel of its edge shows the share of the disk's light that the disk
-/// covers of it, as the view shows it, within bounds on average, in each eighth of the way round,
-/// across, down and along both diagonals, and at every pixel, where without antialiasing it's 0.2
-/// or more off on average; and those across and down alike, as those along either diagonal are.
-/// Of a disk of 0.25 under no tonemapper; of 0.02, whose edges a luma encoded as a display encodes
-/// it finds, and one of the view's light doesn't; of white, 1, which the clamp shows as it is, so
-/// that blending it as PBR Neutral's shoulder would roll it off shows its edge too dark; of 16
-/// under PBR Neutral, which blended in the view's light would show a pixel the disk covers a
-/// fraction of almost as bright as the disk; and of 2 under PBR Neutral graded by a slope of a
-/// half, after SMAA, which brings its light back under the shoulder.
+/// A disk by SMAA against the view 8 times larger averaged down: edge pixels show its light times
+/// their coverage within bounds, per eighth and each pixel (unaliased: 0.2 off), alike every way.
+/// Disks of 0.25; 0.02, which only a display-encoded luma finds; 1, which PBR Neutral's shoulder
+/// would darken; 16 under PBR Neutral, which linear blending would brighten; and 2 under PBR
+/// Neutral graded by 0.5 after SMAA.
 fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
     const SIZE: u32 = 96;
     const LARGER: u32 = 8;
-    // The disk of light `light`, `scale` times the size, graded by a slope of `slope` and
-    // tonemapped by `tonemapper`, drawn by one renderer in a frame as each of `antialiasing` says:
-    // each frame's pixels' green, in linear light. SMAA keeps nothing from one frame to the next.
+    // Each frame's green in linear light, a frame per `antialiasing` from one renderer, as SMAA
+    // keeps nothing between frames.
     let render = |light: f32, tonemapper, slope: f32, scale: u32, antialiasing: &[Antialiasing]| {
         let size = SIZE * scale;
         let mut renderer = renderer(size, size);
@@ -12488,11 +11912,8 @@ fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
         shut_down(renderer);
         frames
     };
-    // The disk of `light` under `tonemapper` and `slope`, with SMAA and without antialiasing: each
-    // eighth of the way round it, from the right, and all of it, the mean distance between each
-    // pixel's share of the disk's light and its share in the larger view, the mean of its 8 by 8,
-    // over the pixels whose share there is between 2% and 98%; and the most at any pixel, with
-    // SMAA.
+    // SMAA's and the unaliased frame's mean distance from coverage, per eighth from the right and
+    // overall, over pixels 2% to 98% covered in the larger view; and SMAA's worst pixel.
     let distances = |light: f32, tonemapper, slope: f32| {
         let modes = [Antialiasing::Smaa, Antialiasing::None];
         let [smaa, aliased] =
@@ -12540,9 +11961,8 @@ fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
         };
         (means, [all(0), all(1)], worst)
     };
-    // Off by at most this with SMAA, on average, in each eighth and at any pixel: more for the dim
-    // disk, whose light 8 bits hold coarsely, and the bright ones under PBR Neutral, whose pixels a
-    // fraction covered are darkened by its toe and offset, where they're dim.
+    // SMAA's bounds: more for the dim disk, which 8 bits hold coarsely, and the bright ones under
+    // PBR Neutral, whose toe darkens dim partly covered pixels.
     let cases = [
         (0.25, Tonemapper::None, 1.0, [0.1, 0.11, 0.25]),
         (0.02, Tonemapper::None, 1.0, [0.11, 0.12, 0.25]),
@@ -12571,8 +11991,7 @@ fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
             worst < most_pixel,
             "a pixel of the disk of {light}'s edge shows its coverage {worst} off with SMAA"
         );
-        // The disk is the same each way, so its edges across and down blend alike, as do those
-        // along either diagonal, rising or falling.
+        // The disk is symmetric: its edges across and down blend alike, as do both diagonals.
         for first in [0, 1] {
             let alike = (first..8).step_by(2).map(|eighth| means[eighth][0]);
             let (least, most) = alike.fold((f32::MAX, 0.0f32), |(least, most), mean| {
@@ -12586,21 +12005,17 @@ fn smaa_blends_by_how_much_of_each_pixel_the_edge_covers() {
         }
     }
 }
-/// A gray square over black, turned 40° in a view of 96, antialiased by SMAA in one frame, against
-/// the view drawn at 8 times the size and averaged down: its edges diagonals of single steps broken
-/// by steps two pixels long, falling, steeper than 45°, and rising, shallower, which SMAA's
-/// diagonal patterns take, as its orthogonal ones would less nearly. Each pixel of its falling
-/// edges and of its rising ones shows the share of the square's light that the square covers of it
-/// within 0.08 on average, where without the diagonal patterns they're 0.11 off, and every pixel 3
-/// or more from its corners, where two edges meet, within 0.3.
+
+/// A gray square turned 40°, by SMAA, against the view 8 times larger averaged down: its stepped
+/// diagonal edges, which SMAA's diagonal patterns take, show their coverage within 0.08 on average
+/// (0.11 without those patterns), and within 0.3 away from the corners.
 fn smaa_blends_along_diagonals_by_how_much_they_cover() {
     const SIZE: u32 = 96;
     const LARGER: u32 = 8;
     const TURNED: f32 = 40.0;
     const SIDE: f32 = 1.6;
     let gray = 0.25;
-    // The square drawn as `antialiasing` says, `scale` times the size: its pixels' green, in
-    // linear light.
+    // The square at `scale` times the size: its pixels' green in linear light.
     let render = |scale: u32, antialiasing| {
         let size = SIZE * scale;
         let mut renderer = renderer(size, size);
@@ -12635,12 +12050,12 @@ fn smaa_blends_along_diagonals_by_how_much_they_cover() {
     };
     let smaa = render(1, Antialiasing::Smaa);
     let larger = render(LARGER, Antialiasing::None);
-    // How far the square's corners are from its middle, the view's, in pixels: half the view is
-    // 4 · tan(π/8) units, 4 away, under a field of view of π/4.
+    // The corners' distance from the middle, in pixels: half the view is 4 · tan(π/8) units at 4
+    // away.
     let half = SIZE as f32 / 2.0;
     let corner = SIDE / SQRT_2 * half / (4.0 * math::libm::tanf(PI / 8.0));
-    // Each pixel the square covers 2% to 98% of: how far its share of the square's light is from
-    // that, on the falling edges, whose outward normals are 40° and 220°, and on the rising ones.
+    // Each 2% to 98% covered pixel's distance from its coverage, on the falling edges (outward
+    // normals 40° and 220°) and the rising ones.
     let (mut offs, mut worst) = ([Vec::new(), Vec::new()], 0.0f32);
     for y in 0..SIZE {
         for x in 0..SIZE {
@@ -12680,12 +12095,10 @@ fn smaa_blends_along_diagonals_by_how_much_they_cover() {
         "a pixel of the square's edges away from its corners shows its coverage {worst} off"
     );
 }
-/// A square of red as bright as a half float holds, 65,504, turned, over white as bright, under no
-/// tonemapper, graded by an offset of -65,470 in red, which shows red of the brightest two a half
-/// float holds, 65,472 and 65,504, as 1, and red of 65,471 or less as less: antialiased by SMAA,
-/// every pixel's red shows as 1, as their blends take light back up to the brightest a half float
-/// holds, within the step a write of it to the view's colors may round down by, while its edges'
-/// green blends.
+
+/// A turned square of red 65,504 over white as bright, graded so only a half float's two brightest
+/// values show as 1: under SMAA all red still shows as 1, as blends reach the brightest within a
+/// write's rounding; its green edges blend.
 fn smaa_blends_light_up_to_a_half_floats_brightest() {
     const SIZE: u32 = 64;
     const BRIGHTEST: f32 = 65504.0;
@@ -12738,6 +12151,9 @@ fn smaa_blends_light_up_to_a_half_floats_brightest() {
         .count();
     assert!(blended > 20, "SMAA blended {blended} pixels' green");
 }
+
+/// What the view drew of `draws`, which comes back as the frame two later begins: renders them
+/// twice more, as they were.
 fn drawn_again(
     renderer: &mut Renderer,
     stores: &mut Stores,
@@ -12790,9 +12206,8 @@ fn view_read(renderer: &Renderer) -> Option<([u32; 2], Vec<u8>)> {
     Some((read.size(), pixels))
 }
 
-/// Draws a square in a view at an offset in the frame, which a frame that asks reads back, as it
-/// shows in the frame, and one that doesn't reads nothing back; then has a frame render into an
-/// offscreen image of another size, which its view fills.
+/// A frame that asks reads its offset view back as it shows; one that doesn't reads nothing. A
+/// frame into an offscreen image of another size fills it with the view.
 fn views_read_back_as_they_render() {
     let mut renderer = renderer(64, 48);
     let mut stores = Stores::default();
@@ -12847,9 +12262,8 @@ fn views_read_back_as_they_render() {
     shut_down(renderer);
 }
 
-/// Shows pixels in the view, as far as they reach of it, the rest of it the clear color: new ones,
-/// the same again, ones larger than the view, and ones to show again at a size no frame wrote,
-/// which show nothing. Nothing is drawn in the view meanwhile.
+/// Pixels show in the view as far as they reach, the rest clear: new, again, larger than the view,
+/// and again at a size no frame wrote, which shows nothing; draws don't.
 fn pixels_show_in_the_view() {
     let mut renderer = renderer(48, 32);
     let mut stores = Stores::default();
@@ -12943,11 +12357,9 @@ Targets fragment_main() {
 }
 "#;
 
-/// A square that covers a view of `SIZE` pixels a side, with a shader written to a file of the
-/// test's own: red, then, compiled again from the file rewritten, green, which replaces it while
-/// frames before may still draw with the old pipeline, over more frames than are in flight. The
-/// frame after draws green, and validation sees the old pipeline destroyed only once the GPU is
-/// done with it.
+/// A shader rewritten from red to green replaces its pipeline while earlier frames may still use
+/// the old: the next frame draws green, and validation sees the old destroyed only once the GPU is
+/// done.
 fn replaced_shaders_draw_from_the_next_frame() {
     const SIZE: u32 = 16;
     let mut renderer = renderer(SIZE, SIZE);
@@ -13004,10 +12416,9 @@ fn replaced_shaders_draw_from_the_next_frame() {
     shut_down(renderer);
 }
 
-/// Renders a frame with a pipeline cache, which the driver fills as the renderer makes the
-/// frame's pipelines, then starts a renderer with what it holds, which renders the frame alike;
-/// validation has nothing to say. lavapipe's cache is a stub that holds nothing (Mesa's
-/// lvp_pipeline_cache.c), so there it isn't seen to fill.
+/// A frame fills a pipeline cache; a renderer started from it renders alike, validation silent.
+/// lavapipe's cache is a stub that holds nothing (Mesa's lvp_pipeline_cache.c), so there it isn't
+/// seen to fill.
 fn pipelines_go_through_the_cache() {
     const SIZE: u32 = 16;
     let cached = |data: &[u8]| {
@@ -13017,7 +12428,7 @@ fn pipelines_go_through_the_cache() {
         };
         Renderer::headless(&settings, SIZE, SIZE).expect("a renderer")
     };
-    // A triangle in the color its draw gives, which takes a pipeline of its own.
+    // A triangle, which takes a pipeline of its own.
     let frame = |renderer: &mut Renderer| {
         let mut stores = Stores::default();
         let flat = (stores.shaders)
@@ -13058,9 +12469,8 @@ fn pipelines_go_through_the_cache() {
     shut_down(second);
 }
 
-/// A renderer asked to capture a frame doesn't start on a GPU that RenderDoc's layer isn't active
-/// on, as it isn't here: the tests turn implicit layers off, RenderDoc's among them where it's
-/// installed.
+/// A renderer asked to capture doesn't start without RenderDoc's layer, which the tests turn off
+/// with every implicit layer.
 fn capturing_needs_renderdoc() {
     let settings = Settings {
         capture: NonZeroU64::new(1),
@@ -13071,8 +12481,8 @@ fn capturing_needs_renderdoc() {
     assert_eq!(error.code(), "renderer.no_renderdoc", "{error:#}");
 }
 
-/// Reads back the last frame `renderer` rendered, shuts it down as [`shut_down`] does, and
-/// compares the frame with reference image `name`.
+/// Compares `renderer`'s last frame with reference image `name`, shutting it down as [`shut_down`]
+/// does.
 fn check(mut renderer: Renderer, name: &str, width: u32, height: u32) {
     let pixels = renderer
         .read_back()
@@ -13089,10 +12499,9 @@ fn shut_down(renderer: Renderer) {
     harness::check(&validation);
 }
 
-/// Compares RGBA8 `pixels` with the reference image `name`, allowing for how GPUs differ in
-/// rasterizing and filtering: a pixel matches if no channel is off by more than 16, and up to
-/// one pixel in a hundred may not match. Writes the pixels beside the reference when they don't
-/// match, to look at.
+/// Compares RGBA8 `pixels` with reference image `name`, allowing for GPUs: a pixel matches within
+/// 16 a channel, and 1 in 100 may not. A mismatch writes `<name>.actual.png` in
+/// `CARGO_TARGET_TMPDIR`.
 fn compare(name: &str, width: u32, height: u32, pixels: &[u8]) {
     let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/references")
