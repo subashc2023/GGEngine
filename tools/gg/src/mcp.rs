@@ -175,46 +175,657 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+/// A tool, as `tools/list` lists it: its name, what it does, and its input's JSON Schema, an object
+/// of `properties`, those `required`.
+struct Tool {
+    name: &'static str,
+    description: &'static str,
+    properties: fn() -> Value,
+    required: &'static [&'static str],
+}
+
+/// The tools, in `tools/list`'s order.
+const TOOLS: &[Tool] = &[
+    Tool {
+        name: "sessions",
+        description: "The running games: each one's app, process, address, engine, log, frames \
+                      run, and what it waits for, if anything.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "status",
+        description: "The game's ticks, pause and stop state, frames, entities, view size and open \
+                      scene's file (`scene`); `unsaved`, whether the scene differs from its file, \
+                      as a playing game's ticks make it; `edited`, whether authors edited it since \
+                      it was saved or opened, which ticks don't; and in a world of cells, `cells`: \
+                      how many are in, and how many out keep what they held.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "wait",
+        description: "Call after editing the game's code, before checking what the edit does: \
+                      waits until the game under `gg run` runs the code of every edit saved before \
+                      the call, patched, or rebuilt and restarted, and answers what the run is \
+                      doing. Fails with `gg.build_failed` and rustc's errors if the edits don't \
+                      build (the game runs its old code), `gg.waiting` if the game ended and waits \
+                      for a change, or `gg.timeout`.",
+        properties: || {
+            json!({"timeout_s": {"type": "integer", "minimum": 1, "default": 300,
+                                 "description": "How long to wait, in seconds"}})
+        },
+        required: &[],
+    },
+    Tool {
+        name: "pause",
+        description: "Pauses the game's simulation.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "resume",
+        description: "Runs the game's simulation in real time again.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "play",
+        description: "Plays a copy of the game's world as edited in its place, until `stop`; a \
+                      game already playing, as a plain `gg run` starts, is left as it is.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "stop",
+        description: "Stops the game: no tick runs, and its world is the world as edited, which \
+                      only edits, scene saves and `scene`'s `open` and `new` change. Stopping a \
+                      playing copy brings the world as edited back: what the copy did goes, its \
+                      edits and the IDs learned meanwhile among it. Recorded runs and lockstep \
+                      peers refuse it.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "step",
+        description: "Runs ticks of the simulation, 64 a second, pausing it, and answers once \
+                      they've run; refused while the game is stopped: `play` first.",
+        properties: || {
+            json!({
+                "ticks": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1},
+            })
+        },
+        required: &[],
+    },
+    Tool {
+        name: "scene",
+        description: "Saves, opens or empties the open scene (the scene file the game started in, \
+                      or one opened since) and answers the status. The open scene owns its file's \
+                      entities and those clients' edits made since, their creates and duplicates, \
+                      never those the game's code made.",
+        properties: || {
+            json!({
+                "action": {
+                    "type": "string",
+                    "enum": ["save", "open", "new"],
+                    "description": "`save` writes the scene's entities to its file, or to `path`, \
+                                    its file from then on; `open` puts the entities of the file \
+                                    at `path` in their place, keeping the game's own; `new` \
+                                    deletes them, leaving the scene untitled. `open` and `new` \
+                                    can't be undone, start every author's edits afresh, stop a \
+                                    playing copy, and are refused while the scene has unsaved \
+                                    edits (`scene.unsaved`), unless `discard`",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The scene file to open, or to save as: from the game's asset \
+                                    root, as `status` names the open scene, such as \
+                                    `scenes/level2.ron`, or absolute; in one of the project's \
+                                    scenes folders, ending in `.ron`",
+                },
+                "discard": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "For `open` and `new`: whether to discard the open scene's \
+                                    unsaved edits",
+                },
+            })
+        },
+        required: &["action"],
+    },
+    Tool {
+        name: "capture",
+        description: "Writes the game's view as a PNG once a frame renders it, as it's shown, the \
+                      look included, without the game's UI; and answers its `path`, which a tool \
+                      that reads images opens. The game keeps its newest 32 captures.",
+        properties: || {
+            json!({
+                "own": {"type": "boolean", "default": false,
+                        "description": "As the game shows it on its own: through its own \
+                                        viewpoint, without the look"},
+                "show": {
+                    "anyOf": [shown(), {"type": "array", "minItems": 1, "items": shown()}],
+                    "description": format!("What this capture alone shows in place of the \
+                                            view's light, the look unchanged, in a frame that \
+                                            isn't published. An array is taken in order from \
+                                            one world, the game paused for it if it plays, and \
+                                            answers an array of captures. {SHOWN}"),
+                },
+                "inline": {"type": "boolean", "default": false,
+                           "description": "Whether the answer holds each PNG too, which a large \
+                                           view makes large"},
+            })
+        },
+        required: &[],
+    },
+    Tool {
+        name: "frames",
+        description: "Writes the game's next frames in a row, none skipped, as PNGs in `dir`, to \
+                      see how the view settles, shimmers, flickers or trails frame by frame \
+                      through a scripted move and a hold. Pause the game first to see the view \
+                      alone change. Answers `frames` once all are written: each one's `path`, \
+                      size, `ticks`, `streaming` and `viewpoint`.",
+        properties: || {
+            json!({
+                "dir": {"type": "string",
+                        "description": "An absolute path to a directory that exists, which gets \
+                                        `frame-0001.png` on"},
+                "count": {"type": "integer", "minimum": 1, "maximum": gg_api::MOST_FRAMES,
+                          "description": "How many frames, from the first with nothing on its \
+                                          way to the GPU"},
+                "viewpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": viewpoint(),
+                        "required": ["position", "rotation", "projection"],
+                    },
+                    "description": "Each frame's viewpoint in turn, as `look`'s, the last held \
+                                    for the frames after it; without them, the view as it's \
+                                    shown, the look included",
+                },
+                "rect": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 0},
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "description": "The part of each frame to keep, [x, y, width, height] in \
+                                    pixels from the view's top left: the frames hold at most \
+                                    1 GiB of pixels",
+                },
+                "show": {
+                    "anyOf": [shown(), {"type": "null"}],
+                    "description": "What to show in place of the view's light, a name as \
+                                    `capture`'s `show` takes it",
+                },
+            })
+        },
+        required: &["dir", "count"],
+    },
+    Tool {
+        name: "look",
+        description: "Sets parts of the view's look, which any client (such as the editor) sets, \
+                      the last to set a part winning, until a client changes it or the game \
+                      restarts. Leave a part out to keep it; null gives it back to the game, as \
+                      you should what you set when done. Answers each part (null where it's the \
+                      game's own), `by` (the client that set each), `revision` (changes in the \
+                      run), `run`, and `seen` (the viewpoint the last frame drew from, null before \
+                      the first or while it isn't finite).",
+        properties: || {
+            json!({
+                "viewpoint": {
+                    "type": ["object", "null"],
+                    "description": "Where the view is seen from, in place of the game's camera. \
+                                    World space is right-handed with +Y up, and a viewpoint \
+                                    without rotation looks down -Z",
+                    "properties": viewpoint(),
+                    "required": ["position", "rotation", "projection"],
+                },
+                "outline": {
+                    "type": ["object", "null"],
+                    "description": "An outline round what the view shows of entities and of \
+                                    every entity under each, one shape where they touch, with \
+                                    a glow past its band, in place of any the game draws; no \
+                                    IDs outline nothing",
+                    "properties": {
+                        "ids": {
+                            "type": "array",
+                            "items": id(),
+                            "description": "The entities to outline, by ID",
+                        },
+                        "color": numbers(4, "Linear RGBA, alpha not multiplied in"),
+                        "width": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "description": "The band's width in the view's pixels, past 8 \
+                                            drawing 8; the glow reaches as far again",
+                        },
+                    },
+                    "required": ["ids", "color", "width"],
+                },
+                "grid": {
+                    "type": ["string", "null"],
+                    "enum": ["xy", "xz", "yz", null],
+                    "description": "The plane a grid is drawn in, fitted to the view: `xy`, \
+                                    where 2D games are, or `xz`, the ground",
+                },
+                "colliders": {
+                    "type": ["boolean", "null"],
+                    "description": "Whether colliders' outlines show, in place of whether the \
+                                    game shows them",
+                },
+                "show": {
+                    "anyOf": [shown(), {"type": "null"}],
+                    "description": format!("What the view shows in place of its light, to see \
+                                            how it's made, and which any capture without its own \
+                                            `show` shows: {SHOWN}"),
+                },
+                "skip": {
+                    "type": ["array", "null"],
+                    "items": {"enum": passes()},
+                    "description": "The passes the view leaves out, to narrow down which one makes \
+                                    what it shows, each by the name of the environment's field \
+                                    that turns it on, or `shadows`: each left out as the game \
+                                    would draw without it, the game itself unchanged, and a \
+                                    capture with `own` showing it as it is. `[]` or null gives \
+                                    them back",
+                },
+            })
+        },
+        required: &[],
+    },
+    Tool {
+        name: "pick",
+        description: "The entity the view shows at a pixel, as it's shown, the look included: its \
+                      ID and name, both null outside the view or where none draws; a model's node \
+                      gives the model's root, which tools change in its place. Answers about four \
+                      frames on, and fails while the game runs no frames, as while its window is \
+                      minimized.",
+        properties: || {
+            json!({
+                "at": numbers(2, "The pixel, [x, y] from the view's top left, as a capture's PNG \
+                                  has it"),
+                "within": {"type": "string",
+                           "description": "The ID of the model's root, or of one of its nodes: \
+                                           answers the node drawn at the pixel, not the root"},
+            })
+        },
+        required: &["at"],
+    },
+    Tool {
+        name: "images",
+        description: "The images the next frame makes that a `show` (of `capture` or `look`) \
+                      names, in the order made, each once: its debug name (`view depth`, `ambient \
+                      occlusion`, `bloom 1`), what it holds (`color`, `hdr`, `ids`, `motion`, \
+                      `visibility`, `depth` or `scalar`, which says how a show reads it) and its \
+                      [width, height]. A frame showing a part of shading makes none after the \
+                      view's passes, such as bloom's. Answers once a frame renders; fails while \
+                      the game runs no frames, as while its window is minimized.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "probe",
+        description: "What shading took and made at one pixel of the view, as numbers: the way to \
+                      find what's wrong there (its material, its normal, which light reaches it), \
+                      rather than reading a PNG by eye. Captures the pixel as each part of \
+                      shading, writing no PNG, with a `pick` and a `look`, from one world, the \
+                      game paused for them if it plays. Answers `at`, `size` (the view's [width, \
+                      height]), `ticks`; `base_color`, `emission`, `specular_color` (reflected \
+                      head-on): linear RGB from 0; `normal` (with its normal map), \
+                      `surface_normal` (without): [x, y, z] in the world, -1 to 1; `metallic`, \
+                      `roughness` (from 0.045), `occlusion` (the share of the light from all \
+                      around that reaches it): 0 to 1; `direct_light` (the frame's lights', \
+                      shadows and all), `sky_light` (from all around, darkened by occlusion), \
+                      `reflection`, `diffuse_light`, `specular_light` (diffused and reflected, of \
+                      all three), `shown` (the view's pixel): sRGB bytes [r, g, b], exposed and \
+                      tonemapped as shown, not linear; `depth`: reversed, 1 at the near plane and \
+                      smaller farther, 0 where nothing drew; `distance`: `near / depth` in world \
+                      units in front of the viewpoint, not from it, null where nothing drew or \
+                      without a perspective; `entity`, `{id, name}` as `pick` answers; \
+                      `quantized`: values are 8-bit, good to about 1/255, `distance` to about 3%. \
+                      Every value is null for a pixel outside the view.",
+        properties: || {
+            json!({
+                "at": numbers(2, "The pixel, [x, y] from the view's top left, not negative, as a \
+                                  capture's PNG has it"),
+                "own": {"type": "boolean", "default": false,
+                        "description": "Whether to probe the view as the game shows it on its \
+                                        own, through its own viewpoint, without the look"},
+            })
+        },
+        required: &["at"],
+    },
+    Tool {
+        name: "input",
+        description: "Hands the game's layers input events, in order, as its window would, as a \
+                      frame starts. Release each key and button you press: the game holds it down \
+                      until then.",
+        properties: || json!({"events": input()}),
+        required: &["events"],
+    },
+    Tool {
+        name: "entities",
+        description: "A page of the world's entities: each one's ID, name, parent and components' \
+                      types.",
+        properties: || {
+            json!({
+                "with": {"type": "string", "description": "Only those with this component"},
+                "skip": {"type": "integer", "minimum": 0, "default": 0},
+                "take": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 100},
+            })
+        },
+        required: &[],
+    },
+    Tool {
+        name: "entity",
+        description: "An entity: its ID, name, parent, children and components' values. For an \
+                      instance's entity (its root, or one its prefab gives), `instance` too: the \
+                      outermost instance's `root` and `prefab`; `link`, its own prefab, if it's an \
+                      instance's root; `overrides`, each component differing from its prefab with \
+                      the fields that differ (`\"\"` for the whole), as `revert` takes them; and \
+                      `added`, the components its prefab doesn't give.",
+        properties: || json!({"id": id()}),
+        required: &["id"],
+    },
+    Tool {
+        name: "get",
+        description: "A component's value, or its field at a path, such as `translation.x` or \
+                      `rect[1]`.",
+        properties: || {
+            json!({
+                "id": id(),
+                "component": {"type": "string"},
+                "path": {"type": "string", "default": ""},
+            })
+        },
+        required: &["id", "component"],
+    },
+    Tool {
+        name: "types",
+        description: "The world's component types in registration order, each with the value an \
+                      `add` without one gives it, or why there's none; and the descriptions of the \
+                      types they hold, by which values are read and written: fields and variants, \
+                      with their types, bounds, defaults and docs.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "hash",
+        description: "The world's hash, its content's and its layout's.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "cells",
+        description: "The world's cells, where `Cells` cuts it into scene files that come in \
+                      around its viewers: its `Cells` entity, folder and cell size; its viewers, \
+                      each where it is and its radius (the look's viewpoint among them while \
+                      stopped, as the editor's camera is); and each cell in, coming, keeping what \
+                      it held, refused, holding a streamed root or filed, with its streamed roots' \
+                      count and whether a scene save would write it. `world` is null without \
+                      cells.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "assets",
+        description: "A page of the game's assets by path from its asset root, as `scene` names \
+                      files: each one's ID (16 hex digits, null while it has none), kind, whether \
+                      a layer added it, and `problem` with its ID file, as `asset.duplicate_id`; \
+                      and `orphans`, ID files whose assets are gone, as after a rename made with \
+                      an edit. Answers once the game has looked at the asset root since the call, \
+                      so files added or renamed before it are listed. The game, but a lockstep \
+                      joiner, writes each missing ID file, `<file>.meta` (commit it with its \
+                      file), and moves one a lone rename left behind.",
+        properties: || {
+            json!({
+                "kind": {
+                    "type": "string",
+                    "enum": gg_api::asset::KINDS,
+                    "description": "Only those of this kind",
+                },
+                "skip": {"type": "integer", "minimum": 0, "default": 0},
+                "take": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 100},
+            })
+        },
+        required: &[],
+    },
+    Tool {
+        name: "ui",
+        description: "Each UI the game's layers added from a `.ui` file, laid out for its view, to \
+                      check a layout as data: `name`, its file's `asset` ID and `path`, whether \
+                      the last frame `drawn` it, `input`, `focus`, and `nodes`, each after its \
+                      parent: `name`, `kind`, `parent`, `rect` ([x, y, width, height] from the \
+                      view's top left in canvas units, 1,080 to its height), `pixels` (the same in \
+                      the view's pixels, as a capture has them), `visible`, `text`, a widget's \
+                      `value` ({\"number\": 0.5}, {\"on\": true} or {\"choice\": 1}), `disabled`, \
+                      `focused` and `pressed`. An edited file reloads, each node keeping what the \
+                      game's code set. Press a button with `input`: the cursor at its pixels, then \
+                      the left button down and up; type into a text field clicked so with `text`; \
+                      scroll a list under the cursor with `scroll`.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "snapshot",
+        description: "Saves the world whole as a snapshot file, which a run given `--restore` \
+                      starts from.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
+        name: "apply",
+        description: "Applies operations in order as one edit, all or none, which `undo` takes \
+                      back, and answers the IDs of the entities it made.",
+        properties: || {
+            json!({"operations": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Each an object of one key, its kind: {\"set\": {\"id\", \
+                                \"component\", \"path\", \"value\"}}, {\"create\": {\"id\"?, \
+                                \"parent\"?, \"components\": {name: value}}}, {\"duplicate\": \
+                                {\"id\", \"copies\"?}}, {\"delete\": {\"id\"}}, {\"add\": {\"id\", \
+                                \"component\", \"value\"?}}, {\"remove\": {\"id\", \
+                                \"component\"}}, {\"reparent\": {\"id\", \"parent\", \
+                                \"in_place\"?}}, keeping the entity's own transform, or with \
+                                \"in_place\" true where it is in the world; {\"unlink\": \
+                                {\"id\"}}, unlinking a prefab's instance into entities of its \
+                                own; {\"revert\": {\"id\", \"component\", \"path\"?}}, setting a \
+                                field of an instance's entity back to its prefab's. Values are \
+                                JSON as `entity` shows them; a struct missing fields takes \
+                                their defaults",
+            }})
+        },
+        required: &["operations"],
+    },
+    Tool {
+        name: "save_prefab",
+        description: "Saves an entity and its descendants as a new prefab with its ID file, \
+                      writing over nothing, its root at its origin, and links the entity to it as \
+                      one edit, which `undo` unlinks, leaving the file; its entities keep their \
+                      IDs. Answers the prefab's path from the asset root and its name, its asset \
+                      ID.",
+        properties: || {
+            json!({
+                "id": id(),
+                "path": {
+                    "type": "string",
+                    "description": "The prefab's file, from the game's asset root, in a folder \
+                                    there that its scan reaches (no hidden or `target` folder), \
+                                    ending in `.prefab`; by default in `prefabs/`, named after \
+                                    the entity",
+                },
+            })
+        },
+        required: &["id"],
+    },
+    Tool {
+        name: "set",
+        description: "Sets a component's field at a path, such as `translation.x`, or the whole \
+                      component for an empty path, as an edit `undo` takes back.",
+        properties: || {
+            json!({
+                "id": id(),
+                "component": {"type": "string"},
+                "path": {"type": "string", "default": ""},
+                "value": {"description": "As `entity` shows values"},
+            })
+        },
+        required: &["id", "component", "value"],
+    },
+    Tool {
+        name: "undo",
+        description: "Undoes an author's last edit, yours by default, and answers it; null if \
+                      there's none.",
+        properties: || json!({"author": author()}),
+        required: &[],
+    },
+    Tool {
+        name: "redo",
+        description: "Redoes the last edit an author undid, yours by default, and answers it; null \
+                      if there's none.",
+        properties: || json!({"author": author()}),
+        required: &[],
+    },
+    Tool {
+        name: "edits",
+        description: "Each author's edits, or one author's: those undo steps back through, and \
+                      those redo does.",
+        properties: || json!({"author": author()}),
+        required: &[],
+    },
+    Tool {
+        name: "debug",
+        description: "Debugs the game's Luau scripts: sets `breakpoints`, does `action`, waits up \
+                      to `wait_ms` for a stop; then answers where a script `stopped` (its stack, \
+                      each function's script, line, locals and upvalues), the pause or step \
+                      `asked`, the `breakpoints` and the `scripts`. A stopped script waits inside \
+                      its tick, and the game with it, the tools but `debug`, `logs` and `sessions` \
+                      waiting too, until `debug` has it go on.",
+        properties: || {
+            json!({
+                "breakpoints": {
+                    "type": "object",
+                    "description": "A script's breakpoints, in place of those it had, each at its \
+                                    line or the next with code; no lines clears them",
+                    "properties": {
+                        "script": {
+                            "type": "string",
+                            "description": "Its path from the project's root, such as \
+                                            `scripts/spin.luau`",
+                        },
+                        "lines": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+                    },
+                    "required": ["script", "lines"],
+                    "additionalProperties": false,
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["pause", "continue", "step_into", "step_over", "step_out"],
+                    "description": "`pause` stops the next line a script runs; from a stop, \
+                                    `continue` goes on to the next, and the steps step",
+                },
+                "wait_ms": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0,
+                            "description": "How long to wait for a script to stop, if none has"},
+            })
+        },
+        required: &[],
+    },
+    Tool {
+        name: "logs",
+        description: "The game's log's events at `level` or above, each its JSON log's line: the \
+                      last 200 it keeps, or those since `from`. Answers them with `next` and \
+                      `run`, for the next call, and how many it `missed`, dropped before they were \
+                      read.",
+        properties: || {
+            json!({
+                "level": {
+                    "type": "string",
+                    "enum": gg_api::LEVELS,
+                    "default": "warn",
+                },
+                "from": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "An earlier answer's `next`, with that answer's `run`: the \
+                                    events since it",
+                },
+                "run": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The earlier answer's `run`, so that after the game restarts, \
+                                    its events are read from the oldest kept",
+                },
+            })
+        },
+        required: &[],
+    },
+];
+
 /// The tools, each with its input's JSON Schema.
 fn tools() -> Value {
-    let id = json!({"type": "string", "description": "An entity's ID, 16 hex digits"});
-    let author = json!({
+    let tool = |tool: &Tool| {
+        json!({
+            "name": tool.name,
+            "description": tool.description,
+            "inputSchema": {
+                "type": "object",
+                "properties": (tool.properties)(),
+                "required": tool.required,
+            },
+        })
+    };
+    TOOLS.iter().map(tool).collect()
+}
+
+/// The schema of an entity's ID.
+fn id() -> Value {
+    json!({"type": "string", "description": "An entity's ID, 16 hex digits"})
+}
+
+/// The schema of an author of edits.
+fn author() -> Value {
+    json!({
         "type": "string",
         "description": "Whose edits: an MCP client's name, `gg`, or a scene file's path, such as \
                         `scenes/grid.ron`; yours without one",
-    });
-    let numbers = |count: usize, description: &str| {
-        json!({
-            "type": "array",
-            "items": {"type": "number"},
-            "minItems": count,
-            "maxItems": count,
-            "description": description,
-        })
-    };
-    let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
-        json!({
-            "name": name,
-            "description": description,
-            "inputSchema": {"type": "object", "properties": properties, "required": required},
-        })
-    };
-    // An object of one key, `name`, whose value is `value`, as gg-api writes an enum's variant
-    // that holds something.
-    let variant = |name: &str, value: Value| {
-        json!({
-            "type": "object",
-            "properties": {name: value},
-            "required": [name],
-            "additionalProperties": false,
-        })
-    };
-    let shown = json!({"anyOf": [
+    })
+}
+
+/// The schema of an array of `count` numbers.
+fn numbers(count: usize, description: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": {"type": "number"},
+        "minItems": count,
+        "maxItems": count,
+        "description": description,
+    })
+}
+
+/// The schema of an object of one key, `name`, whose value is `value`, as gg-api writes an enum's
+/// variant that holds something.
+fn variant(name: &str, value: Value) -> Value {
+    json!({
+        "type": "object",
+        "properties": {name: value},
+        "required": [name],
+        "additionalProperties": false,
+    })
+}
+
+/// The schema of a `show`: a name, or an image's.
+fn shown() -> Value {
+    json!({"anyOf": [
         {"type": "string", "minLength": 1, "maxLength": 64},
         variant("image", json!({"type": "string", "minLength": 1, "maxLength": 64})),
-    ]});
-    // A viewpoint's parts, as `look` and `frames` take them.
-    let viewpoint = json!({
+    ]})
+}
+
+/// The schemas of a viewpoint's parts, as `look` and `frames` take them.
+fn viewpoint() -> Value {
+    json!({
         "position": numbers(3, "[x, y, z]"),
         "rotation": numbers(4, "A unit quaternion, [x, y, z, w]"),
         "projection": {
@@ -223,12 +834,19 @@ fn tools() -> Value {
                             {\"Perspective\": {\"fov\", \"near\"}}, fov vertical, in radians, as \
                             `entity` shows a camera's",
         },
-    });
-    // By the API's own names, so that the list can't fall behind it.
-    let passes: Vec<Value> = (gg_api::Pass::ALL.iter())
+    })
+}
+
+/// The passes, by the API's own names, so that the list can't fall behind it.
+fn passes() -> Vec<Value> {
+    (gg_api::Pass::ALL.iter())
         .map(|pass| serde_json::to_value(pass).expect("a pass's name"))
-        .collect();
-    let input = json!({
+        .collect()
+}
+
+/// The schema of `input`'s events.
+fn input() -> Value {
+    json!({
         "type": "array",
         "description": "The events, each an object of one key, its kind, or a string for one that \
                         holds nothing",
@@ -294,530 +912,7 @@ fn tools() -> Value {
                 "description": "The view gained or lost the keys",
             })),
         ]},
-    });
-    json!([
-        tool(
-            "sessions",
-            "The running games: each one's app, process, address, engine, log, frames run, and \
-             what it waits for, if anything.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "status",
-            "The game's ticks, pause and stop state, frames, entities, view size and open scene's \
-             file (`scene`); `unsaved`, whether the scene differs from its file, as a playing \
-             game's ticks make it; `edited`, whether authors edited it since it was saved or \
-             opened, which ticks don't; and in a world of cells, `cells`: how many are in, and \
-             how many out keep what they held.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "wait",
-            "Call after editing the game's code, before checking what the edit does: waits until \
-             the game under `gg run` runs the code of every edit saved before the call, patched, \
-             or rebuilt and restarted, and answers what the run is doing. Fails with \
-             `gg.build_failed` and rustc's errors if the edits don't build (the game runs its old \
-             code), `gg.waiting` if the game ended and waits for a change, or `gg.timeout`.",
-            json!({"timeout_s": {"type": "integer", "minimum": 1, "default": 300,
-                                 "description": "How long to wait, in seconds"}}),
-            &[],
-        ),
-        tool("pause", "Pauses the game's simulation.", json!({}), &[]),
-        tool(
-            "resume",
-            "Runs the game's simulation in real time again.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "play",
-            "Plays a copy of the game's world as edited in its place, until `stop`; a game \
-             already playing, as a plain `gg run` starts, is left as it is.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "stop",
-            "Stops the game: no tick runs, and its world is the world as edited, which only edits, \
-             scene saves and `scene`'s `open` and `new` change. Stopping a playing copy brings the \
-             world as edited back: what the copy did goes, its edits and the IDs learned meanwhile \
-             among it. Recorded runs and lockstep peers refuse it.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "step",
-            "Runs ticks of the simulation, 64 a second, pausing it, and answers once they've run; \
-             refused while the game is stopped: `play` first.",
-            json!({"ticks": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1}}),
-            &[],
-        ),
-        tool(
-            "scene",
-            "Saves, opens or empties the open scene (the scene file the game started in, or one \
-             opened since) and answers the status. The open scene owns its file's entities and \
-             those clients' edits made since, their creates and duplicates, never those the \
-             game's code made.",
-            json!({
-                "action": {
-                    "type": "string",
-                    "enum": ["save", "open", "new"],
-                    "description": "`save` writes the scene's entities to its file, or to `path`, \
-                                    its file from then on; `open` puts the entities of the file \
-                                    at `path` in their place, keeping the game's own; `new` \
-                                    deletes them, leaving the scene untitled. `open` and `new` \
-                                    can't be undone, start every author's edits afresh, stop a \
-                                    playing copy, and are refused while the scene has unsaved \
-                                    edits (`scene.unsaved`), unless `discard`",
-                },
-                "path": {
-                    "type": "string",
-                    "description": "The scene file to open, or to save as: from the game's asset \
-                                    root, as `status` names the open scene, such as \
-                                    `scenes/level2.ron`, or absolute; in one of the project's \
-                                    scenes folders, ending in `.ron`",
-                },
-                "discard": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "For `open` and `new`: whether to discard the open scene's \
-                                    unsaved edits",
-                },
-            }),
-            &["action"],
-        ),
-        tool(
-            "capture",
-            "Writes the game's view as a PNG once a frame renders it, as it's shown, the look \
-             included, without the game's UI; and answers its `path`, which a tool that reads \
-             images opens. The game keeps its newest 32 captures.",
-            json!({
-                "own": {"type": "boolean", "default": false,
-                        "description": "As the game shows it on its own: through its own \
-                                        viewpoint, without the look"},
-                "show": {
-                    "anyOf": [shown.clone(), {"type": "array", "minItems": 1, "items": shown.clone()}],
-                    "description": format!("What this capture alone shows in place of the \
-                                            view's light, the look unchanged, in a frame that \
-                                            isn't published. An array is taken in order from \
-                                            one world, the game paused for it if it plays, and \
-                                            answers an array of captures. {SHOWN}"),
-                },
-                "inline": {"type": "boolean", "default": false,
-                           "description": "Whether the answer holds each PNG too, which a large \
-                                           view makes large"},
-            }),
-            &[],
-        ),
-        tool(
-            "frames",
-            "Writes the game's next frames in a row, none skipped, as PNGs in `dir`, to see how \
-             the view settles, shimmers, flickers or trails frame by frame through a scripted \
-             move and a hold. Pause the game first to see the view alone change. Answers \
-             `frames` once all are written: each one's `path`, size, `ticks`, `streaming` and \
-             `viewpoint`.",
-            json!({
-                "dir": {"type": "string",
-                        "description": "An absolute path to a directory that exists, which gets \
-                                        `frame-0001.png` on"},
-                "count": {"type": "integer", "minimum": 1, "maximum": gg_api::MOST_FRAMES,
-                          "description": "How many frames, from the first with nothing on its \
-                                          way to the GPU"},
-                "viewpoints": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": viewpoint,
-                        "required": ["position", "rotation", "projection"],
-                    },
-                    "description": "Each frame's viewpoint in turn, as `look`'s, the last held \
-                                    for the frames after it; without them, the view as it's \
-                                    shown, the look included",
-                },
-                "rect": {
-                    "type": "array",
-                    "items": {"type": "integer", "minimum": 0},
-                    "minItems": 4,
-                    "maxItems": 4,
-                    "description": "The part of each frame to keep, [x, y, width, height] in \
-                                    pixels from the view's top left: the frames hold at most \
-                                    1 GiB of pixels",
-                },
-                "show": {
-                    "anyOf": [shown.clone(), {"type": "null"}],
-                    "description": "What to show in place of the view's light, a name as \
-                                    `capture`'s `show` takes it",
-                },
-            }),
-            &["dir", "count"],
-        ),
-        tool(
-            "look",
-            "Sets parts of the view's look, which any client (such as the editor) sets, the last \
-             to set a part winning, until a client changes it or the game restarts. Leave a part \
-             out to keep it; null gives it back to the game, as you should what you set when \
-             done. Answers each part (null where it's the game's own), `by` (the client that set \
-             each), `revision` (changes in the run), `run`, and `seen` (the viewpoint the last \
-             frame drew from, null before the first or while it isn't finite).",
-            json!({
-                "viewpoint": {
-                    "type": ["object", "null"],
-                    "description": "Where the view is seen from, in place of the game's camera. \
-                                    World space is right-handed with +Y up, and a viewpoint \
-                                    without rotation looks down -Z",
-                    "properties": viewpoint.clone(),
-                    "required": ["position", "rotation", "projection"],
-                },
-                "outline": {
-                    "type": ["object", "null"],
-                    "description": "An outline round what the view shows of entities and of \
-                                    every entity under each, one shape where they touch, with \
-                                    a glow past its band, in place of any the game draws; no \
-                                    IDs outline nothing",
-                    "properties": {
-                        "ids": {
-                            "type": "array",
-                            "items": id,
-                            "description": "The entities to outline, by ID",
-                        },
-                        "color": numbers(4, "Linear RGBA, alpha not multiplied in"),
-                        "width": {
-                            "type": "number",
-                            "exclusiveMinimum": 0,
-                            "description": "The band's width in the view's pixels, past 8 \
-                                            drawing 8; the glow reaches as far again",
-                        },
-                    },
-                    "required": ["ids", "color", "width"],
-                },
-                "grid": {
-                    "type": ["string", "null"],
-                    "enum": ["xy", "xz", "yz", null],
-                    "description": "The plane a grid is drawn in, fitted to the view: `xy`, \
-                                    where 2D games are, or `xz`, the ground",
-                },
-                "colliders": {
-                    "type": ["boolean", "null"],
-                    "description": "Whether colliders' outlines show, in place of whether the \
-                                    game shows them",
-                },
-                "show": {
-                    "anyOf": [shown.clone(), {"type": "null"}],
-                    "description": format!("What the view shows in place of its light, to see \
-                                            how it's made, and which any capture without its own \
-                                            `show` shows: {SHOWN}"),
-                },
-                "skip": {
-                    "type": ["array", "null"],
-                    "items": {"enum": passes},
-                    "description": "The passes the view leaves out, to narrow down which one makes \
-                                    what it shows, each by the name of the environment's field \
-                                    that turns it on, or `shadows`: each left out as the game \
-                                    would draw without it, the game itself unchanged, and a \
-                                    capture with `own` showing it as it is. `[]` or null gives \
-                                    them back",
-                },
-            }),
-            &[],
-        ),
-        tool(
-            "pick",
-            "The entity the view shows at a pixel, as it's shown, the look included: its ID and \
-             name, both null outside the view or where none draws; a model's node gives the \
-             model's root, which tools change in its place. Answers about four frames on, and \
-             fails while the game runs no frames, as while its window is minimized.",
-            json!({
-                "at": numbers(2, "The pixel, [x, y] from the view's top left, as a capture's PNG \
-                                  has it"),
-                "within": {"type": "string",
-                           "description": "The ID of the model's root, or of one of its nodes: \
-                                           answers the node drawn at the pixel, not the root"},
-            }),
-            &["at"],
-        ),
-        tool(
-            "images",
-            "The images the next frame makes that a `show` (of `capture` or `look`) names, in the \
-             order made, each once: its debug name (`view depth`, `ambient occlusion`, `bloom \
-             1`), what it holds (`color`, `hdr`, `ids`, `motion`, `visibility`, `depth` or \
-             `scalar`, which says how a show reads it) and its [width, height]. A frame showing a \
-             part of shading makes none after the view's passes, such as bloom's. Answers once a \
-             frame renders; fails while the game runs no frames, as while its window is minimized.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "probe",
-            "What shading took and made at one pixel of the view, as numbers: the way to find \
-             what's wrong there (its material, its normal, which light reaches it), rather than \
-             reading a PNG by eye. Captures the pixel as each part of shading, writing no PNG, \
-             with a `pick` and a `look`, from one world, the game paused for them if it plays. \
-             Answers `at`, `size` (the view's [width, height]), `ticks`; `base_color`, \
-             `emission`, `specular_color` (reflected head-on): linear RGB from 0; `normal` (with \
-             its normal map), `surface_normal` (without): [x, y, z] in the world, -1 to 1; \
-             `metallic`, `roughness` (from 0.045), `occlusion` (the share of the light from all \
-             around that reaches it): 0 to 1; `direct_light` (the frame's lights', shadows and \
-             all), `sky_light` (from all around, darkened by occlusion), `reflection`, \
-             `diffuse_light`, `specular_light` (diffused and reflected, of all three), `shown` \
-             (the view's pixel): sRGB bytes [r, g, b], exposed and tonemapped as shown, not \
-             linear; `depth`: reversed, 1 at the near plane and smaller farther, 0 where nothing \
-             drew; `distance`: `near / depth` in world units in front of the viewpoint, not from \
-             it, null where nothing drew or without a perspective; `entity`, `{id, name}` as \
-             `pick` answers; `quantized`: values are 8-bit, good to about 1/255, `distance` to \
-             about 3%. Every value is null for a pixel outside the view.",
-            json!({
-                "at": numbers(2, "The pixel, [x, y] from the view's top left, not negative, as a \
-                                  capture's PNG has it"),
-                "own": {"type": "boolean", "default": false,
-                        "description": "Whether to probe the view as the game shows it on its \
-                                        own, through its own viewpoint, without the look"},
-            }),
-            &["at"],
-        ),
-        tool(
-            "input",
-            "Hands the game's layers input events, in order, as its window would, as a frame \
-             starts. Release each key and button you press: the game holds it down until then.",
-            json!({"events": input}),
-            &["events"],
-        ),
-        tool(
-            "entities",
-            "A page of the world's entities: each one's ID, name, parent and components' types.",
-            json!({
-                "with": {"type": "string", "description": "Only those with this component"},
-                "skip": {"type": "integer", "minimum": 0, "default": 0},
-                "take": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 100},
-            }),
-            &[],
-        ),
-        tool(
-            "entity",
-            "An entity: its ID, name, parent, children and components' values. For an instance's \
-             entity (its root, or one its prefab gives), `instance` too: the outermost instance's \
-             `root` and `prefab`; `link`, its own prefab, if it's an instance's root; \
-             `overrides`, each component differing from its prefab with the fields that differ \
-             (`\"\"` for the whole), as `revert` takes them; and `added`, the components its \
-             prefab doesn't give.",
-            json!({"id": id}),
-            &["id"],
-        ),
-        tool(
-            "get",
-            "A component's value, or its field at a path, such as `translation.x` or `rect[1]`.",
-            json!({
-                "id": id,
-                "component": {"type": "string"},
-                "path": {"type": "string", "default": ""},
-            }),
-            &["id", "component"],
-        ),
-        tool(
-            "types",
-            "The world's component types in registration order, each with the value an `add` \
-             without one gives it, or why there's none; and the descriptions of the types they \
-             hold, by which values are read and written: fields and variants, with their types, \
-             bounds, defaults and docs.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "hash",
-            "The world's hash, its content's and its layout's.",
-            json!({}),
-            &[]
-        ),
-        tool(
-            "cells",
-            "The world's cells, where `Cells` cuts it into scene files that come in around its \
-             viewers: its `Cells` entity, folder and cell size; its viewers, each where it is and \
-             its radius (the look's viewpoint among them while stopped, as the editor's camera \
-             is); and each cell in, coming, keeping what it held, refused, holding a streamed \
-             root or filed, with its streamed roots' count and whether a scene save would write \
-             it. `world` is null without cells.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "assets",
-            "A page of the game's assets by path from its asset root, as `scene` names files: \
-             each one's ID (16 hex digits, null while it has none), kind, whether a layer added \
-             it, and `problem` with its ID file, as `asset.duplicate_id`; and `orphans`, ID files \
-             whose assets are gone, as after a rename made with an edit. Answers once the game \
-             has looked at the asset root since the call, so files added or renamed before it are \
-             listed. The game, but a lockstep joiner, writes \
-             each missing ID file, `<file>.meta` (commit it with its file), and moves one a lone \
-             rename left behind.",
-            json!({
-                "kind": {
-                    "type": "string",
-                    "enum": gg_api::asset::KINDS,
-                    "description": "Only those of this kind",
-                },
-                "skip": {"type": "integer", "minimum": 0, "default": 0},
-                "take": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 100},
-            }),
-            &[],
-        ),
-        tool(
-            "ui",
-            "Each UI the game's layers added from a `.ui` file, laid out for its view, to check a \
-             layout as data: `name`, its file's `asset` ID and `path`, whether the last frame \
-             `drawn` it, `input`, `focus`, and `nodes`, each after its parent: `name`, `kind`, \
-             `parent`, `rect` \
-             ([x, y, width, height] from the view's top left in canvas units, 1,080 to its \
-             height), `pixels` (the same in the view's pixels, as a capture has them), `visible`, \
-             `text`, a widget's `value` ({\"number\": 0.5}, {\"on\": true} or {\"choice\": 1}), \
-             `disabled`, `focused` and `pressed`. An edited file reloads, each node keeping what \
-             the game's code set. Press a button with `input`: the cursor at its pixels, then the \
-             left button down and up; type into a text field clicked so with `text`; scroll a list \
-             under the cursor with `scroll`.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "snapshot",
-            "Saves the world whole as a snapshot file, which a run given `--restore` starts from.",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "apply",
-            "Applies operations in order as one edit, all or none, which `undo` takes back, and \
-             answers the IDs of the entities it made.",
-            json!({"operations": {
-                "type": "array",
-                "items": {"type": "object"},
-                "description": "Each an object of one key, its kind: {\"set\": {\"id\", \
-                                \"component\", \"path\", \"value\"}}, {\"create\": {\"id\"?, \
-                                \"parent\"?, \"components\": {name: value}}}, {\"duplicate\": \
-                                {\"id\", \"copies\"?}}, {\"delete\": {\"id\"}}, {\"add\": {\"id\", \
-                                \"component\", \"value\"?}}, {\"remove\": {\"id\", \
-                                \"component\"}}, {\"reparent\": {\"id\", \"parent\", \
-                                \"in_place\"?}}, keeping the entity's own transform, or with \
-                                \"in_place\" true where it is in the world; {\"unlink\": \
-                                {\"id\"}}, unlinking a prefab's instance into entities of its \
-                                own; {\"revert\": {\"id\", \"component\", \"path\"?}}, setting a \
-                                field of an instance's entity back to its prefab's. Values are \
-                                JSON as `entity` shows them; a struct missing fields takes \
-                                their defaults",
-            }}),
-            &["operations"],
-        ),
-        tool(
-            "save_prefab",
-            "Saves an entity and its descendants as a new prefab with its ID file, writing over \
-             nothing, its root at its origin, and links the entity to it as one edit, which `undo` \
-             unlinks, leaving the file; its entities keep their IDs. Answers the prefab's path \
-             from the asset root and its name, its asset ID.",
-            json!({
-                "id": id,
-                "path": {
-                    "type": "string",
-                    "description": "The prefab's file, from the game's asset root, in a folder \
-                                    there that its scan reaches (no hidden or `target` folder), \
-                                    ending in `.prefab`; by default in `prefabs/`, named after \
-                                    the entity",
-                },
-            }),
-            &["id"],
-        ),
-        tool(
-            "set",
-            "Sets a component's field at a path, such as `translation.x`, or the whole component \
-             for an empty path, as an edit `undo` takes back.",
-            json!({
-                "id": id,
-                "component": {"type": "string"},
-                "path": {"type": "string", "default": ""},
-                "value": {"description": "As `entity` shows values"},
-            }),
-            &["id", "component", "value"],
-        ),
-        tool(
-            "undo",
-            "Undoes an author's last edit, yours by default, and answers it; null if there's none.",
-            json!({"author": author}),
-            &[],
-        ),
-        tool(
-            "redo",
-            "Redoes the last edit an author undid, yours by default, and answers it; null if \
-             there's none.",
-            json!({"author": author}),
-            &[],
-        ),
-        tool(
-            "edits",
-            "Each author's edits, or one author's: those undo steps back through, and those redo \
-             does.",
-            json!({"author": author}),
-            &[],
-        ),
-        tool(
-            "debug",
-            "Debugs the game's Luau scripts: sets `breakpoints`, does `action`, waits up to \
-             `wait_ms` for a stop; then answers where a script `stopped` (its stack, each \
-             function's script, line, locals and upvalues), the pause or step `asked`, the \
-             `breakpoints` and the `scripts`. A stopped script waits inside its tick, and the game \
-             with it, the tools but `debug`, `logs` and `sessions` waiting too, until `debug` has \
-             it go on.",
-            json!({
-                "breakpoints": {
-                    "type": "object",
-                    "description": "A script's breakpoints, in place of those it had, each at its \
-                                    line or the next with code; no lines clears them",
-                    "properties": {
-                        "script": {
-                            "type": "string",
-                            "description": "Its path from the project's root, such as \
-                                            `scripts/spin.luau`",
-                        },
-                        "lines": {"type": "array", "items": {"type": "integer", "minimum": 1}},
-                    },
-                    "required": ["script", "lines"],
-                    "additionalProperties": false,
-                },
-                "action": {
-                    "type": "string",
-                    "enum": ["pause", "continue", "step_into", "step_over", "step_out"],
-                    "description": "`pause` stops the next line a script runs; from a stop, \
-                                    `continue` goes on to the next, and the steps step",
-                },
-                "wait_ms": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0,
-                            "description": "How long to wait for a script to stop, if none has"},
-            }),
-            &[],
-        ),
-        tool(
-            "logs",
-            "The game's log's events at `level` or above, each its JSON log's line: the last 200 \
-             it keeps, or those since `from`. Answers them with `next` and `run`, for the next \
-             call, and how many it `missed`, dropped before they were read.",
-            json!({
-                "level": {
-                    "type": "string",
-                    "enum": gg_api::LEVELS,
-                    "default": "warn",
-                },
-                "from": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "An earlier answer's `next`, with that answer's `run`: the \
-                                    events since it",
-                },
-                "run": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "The earlier answer's `run`, so that after the game restarts, \
-                                    its events are read from the oldest kept",
-                },
-            }),
-            &[],
-        ),
-    ])
+    })
 }
 
 /// What `tools/call` answers: the tool's result, or the error it failed with, as a result whose
@@ -830,9 +925,7 @@ fn call_tool(pick: &Pick, params: &Value) -> Result<Value, String> {
         .get("name")
         .and_then(Value::as_str)
         .ok_or("`tools/call` names a tool in `name`")?;
-    let tools = tools();
-    let known = tools.as_array().expect("a list of tools").iter();
-    if !known.map(|tool| &tool["name"]).any(|known| known == name) {
+    if !TOOLS.iter().any(|tool| tool.name == name) {
         return Err(format!("there's no tool `{name}`"));
     }
     let arguments = match params.get("arguments") {
