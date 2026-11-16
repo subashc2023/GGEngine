@@ -104,8 +104,8 @@ fn spawn(_: &Lua, (components, options): (Lua_, Lua_)) -> mlua::Result<Lua_> {
             } else {
                 None
             };
-            if let Some(what) = whole.filter(|_| !held.grant.has(&Capability::Write(None))) {
-                return Err(fail("mod.ungranted", ungranted("write", what)));
+            if let Some(what) = whole {
+                shared.needs(|| Capability::Write(None), || what.to_owned())?;
             }
             if let Some((name, _)) = given.iter().find(|(name, _)| !shared.may(name).1) {
                 let what = format!("spawning an entity with `{name}`");
@@ -159,12 +159,13 @@ fn despawn(_: &Lua, entity: Lua_) -> mlua::Result<()> {
     shared(|shared| {
         ticking(shared, "despawns")?;
         let entity = entity_arg("`gg.despawn`'s entity", entity)?;
-        if let Some(held) = &shared.held
-            && !held.grant.has(&Capability::Write(None))
-        {
-            let what = "despawning an entity, which takes all of its components and descendants,";
-            return Err(fail("mod.ungranted", ungranted("write", what)));
-        }
+        shared.needs(
+            || Capability::Write(None),
+            || {
+                "despawning an entity, which takes all of its components and descendants,"
+                    .to_owned()
+            },
+        )?;
         let mut world = shared.world.borrow_mut();
         world.despawn(entity).map_err(|error| {
             let message = format!("can't despawn entity {}: {error:#}", named(&world, entity));

@@ -168,12 +168,10 @@ fn cast(
     run: impl FnOnce(&World, Cast) -> Option<Hit3D>,
 ) -> mlua::Result<CastHit> {
     shared(|shared| {
-        if let Some(held) = &shared.held
-            && !held.grant.has(&Capability::Read(None))
-        {
-            let what = "a cast, which reads where every collider is,";
-            return Err(denied("read", what));
-        }
+        shared.needs(
+            || Capability::Read(None),
+            || "a cast, which reads where every collider is,".to_owned(),
+        )?;
         let mut cast = Cast::new(vec3_of(from).as_dvec3(), vec3_of(toward));
         if let Some(distance) = distance {
             cast = cast.within(distance as f32);
@@ -205,12 +203,10 @@ pub(super) const PARAMS: usize = 64;
 /// static collider is.
 pub(super) fn find_path(lua: &Lua, (from, to): (Vector, Vector)) -> mlua::Result<Lua_> {
     shared(|shared| {
-        if let Some(held) = &shared.held
-            && !held.grant.has(&Capability::Read(None))
-        {
-            let what = "a path, which reads where every static collider is,";
-            return Err(denied("read", what));
-        }
+        shared.needs(
+            || Capability::Read(None),
+            || "a path, which reads where every static collider is,".to_owned(),
+        )?;
         let mut world = shared.world.borrow_mut();
         let Some(corners) = world.find_path(vec3_of(from), vec3_of(to)) else {
             return Ok(Lua_::Nil);
@@ -241,12 +237,10 @@ pub(super) fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> 
             let capability = format!("write:{component}");
             return Err(denied(&capability, &what));
         }
-        if let Some(held) = &shared.held
-            && !held.grant.writes("Tweens")
-        {
-            let what = format!("tweening `{component}.{name}`, which its entity's `Tweens` holds,");
-            return Err(denied("write:Tweens", &what));
-        }
+        shared.needs(
+            || Capability::Write(Some("Tweens".to_owned())),
+            || format!("tweening `{component}.{name}`, which its entity's `Tweens` holds,"),
+        )?;
         let mut world = shared.world.borrow_mut();
         let reached = world.field_at(entity, missing(field)?, field.index);
         let from = reached.map_err(|error| reaching(&world, entity, field, &error))?;
@@ -333,12 +327,10 @@ pub(super) fn play(
     shared(|shared| {
         entities::ticking(shared, "plays clips")?;
         let entity = entity_of(entity)?;
-        if let Some(held) = &shared.held
-            && !held.grant.writes("Animator")
-        {
-            let what = format!("playing clip {clip:?}, which its root's `Animator` holds,");
-            return Err(denied("write:Animator", &what));
-        }
+        shared.needs(
+            || Capability::Write(Some("Animator".to_owned())),
+            || format!("playing clip {clip:?}, which its root's `Animator` holds,"),
+        )?;
         let mut world = shared.world.borrow_mut();
         let played = world.play(entity, &clip, fade.unwrap_or(0.0) as f32);
         played.map_err(|error| {
@@ -360,15 +352,15 @@ pub(super) fn set_param(
     shared(|shared| {
         entities::ticking(shared, "sets parameters")?;
         let entity = entity_of(entity)?;
-        if let Some(held) = &shared.held
-            && !held.grant.writes("AnimationStates")
-        {
-            let what = format!(
-                "setting parameter \"{}\", which its entity's `AnimationStates` holds,",
-                name.display()
-            );
-            return Err(denied("write:AnimationStates", &what));
-        }
+        shared.needs(
+            || Capability::Write(Some("AnimationStates".to_owned())),
+            || {
+                format!(
+                    "setting parameter \"{}\", which its entity's `AnimationStates` holds,",
+                    name.display()
+                )
+            },
+        )?;
         let value = match value {
             Lua_::Number(x) => ParamValue::Float(x as f32),
             Lua_::Integer(n) => ParamValue::Float(n as f32),

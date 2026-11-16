@@ -17,7 +17,7 @@
 use mlua::{LightUserData, Lua, Table, Value as Lua_};
 
 use super::fields::{entity_of, handle};
-use super::{denied, shared};
+use super::shared;
 use crate::grant::Capability;
 use crate::{Contact, Entity, World};
 
@@ -60,12 +60,10 @@ fn listed(
     list: impl FnOnce(&World, &mut Each<'_>) -> mlua::Result<()>,
 ) -> mlua::Result<Table> {
     shared(|shared| {
-        if let Some(held) = &shared.held
-            && !held.grant.has(&Capability::Read(None))
-        {
-            let what = "a contact, which reads which entities' colliders touch,";
-            return Err(denied("read", what));
-        }
+        shared.needs(
+            || Capability::Read(None),
+            || "a contact, which reads which entities' colliders touch,".to_owned(),
+        )?;
         let entity = entity_of(entity)?;
         let world = shared.world.borrow();
         let found = lua.create_table()?;

@@ -18,7 +18,7 @@ use mlua::{Function, Lua, LuaString, Table};
 use tracing::warn;
 
 use crate::ecs::{ComponentId, Kind};
-use crate::grant::Grant;
+use crate::grant::{Capability, Grant};
 use crate::reflect::{Ident, Type, Value};
 use crate::{Context, Entity, Tick, World};
 
@@ -291,6 +291,24 @@ impl Shared {
             Some(held) if held.own.borrow().iter().any(|own| own == component) => (true, true),
             Some(held) => (held.grant.reads(component), held.grant.writes(component)),
         }
+    }
+
+    /// Fails with `mod.ungranted` unless the scripts are a game's, or their mod is granted
+    /// `capability`, which `what` needs. Both are made for a mod's alone, so that a game's calls
+    /// allocate nothing for them.
+    fn needs(
+        &self,
+        capability: impl FnOnce() -> Capability,
+        what: impl FnOnce() -> String,
+    ) -> mlua::Result<()> {
+        let Some(held) = &self.held else {
+            return Ok(());
+        };
+        let capability = capability();
+        if held.grant.has(&capability) {
+            return Ok(());
+        }
+        Err(denied(&capability.to_string(), &what()))
     }
 }
 
