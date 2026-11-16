@@ -178,89 +178,83 @@ pub(crate) fn usage(program: &str) -> String {
         "Usage: {program} [options]
 
 Options:
-  --headless        Run without a window, rendering offscreen, a tick of the simulation a frame
-  --embedded        Run without a window, rendering offscreen in real time for the tool that
-                    started the run, such as the editor, which the tool API's `view` publishes the
-                    view to and its `input` forwards input from: a frame once it has taken the last
-  --supervised      End the run, as the tool API's `quit` does, once stdin ends, as it does as the
-                    supervisor that holds it, such as `gg run`, ends, however it ends; a replay
-                    ends at its recording's end alone
-  --real-time       With --headless, step the simulation in real time, its frames a tick apart,
-                    rather than a tick a frame as fast as frames run, so that a game watched
-                    through the tool API plays at its own pace, and peers (--host, --join) play
-                    as windowed ones do, over a link as slow as --link makes it; --frames and
-                    --capture count frames as they come, a tick's time apart or more
-  --frames <N>      Exit after N frames
-  --size <WxH>      With --headless, render the view W by H pixels, such as `--size 320x180`,
-                    rather than 1280 by 720
-  --capture <N>     Capture frame N through RenderDoc, in a run under `renderdoccmd capture`
-  --gpu <NAME>      Use the GPU whose name contains NAME, such as `--gpu amd`
-  --validation      Run under Vulkan validation (the default in debug builds)
-  --no-validation   Run without Vulkan validation (the default in release builds)
-  --vsync           Present at the display's refresh rate, rather than uncapped
-  --max-fps <N>     Render at most N frames a second in a window, such as `--max-fps 60`, in place
-                    of the cap the title bar's settings keep in a development build; an embedded
-                    run goes at its tool's pace, so an editor capped caps its game
-  --threads <N>     Run the simulation's jobs on N threads, the main one among them (one per CPU
-                    but the one the render thread has)
-  --record <PATH>   Record the run to PATH: its seed, its layers' commands and its hash each tick
-  --replay <PATH>   Replay the recording at PATH without a window or a GPU, checking each hash
-  --dump <TICK>     With --replay, stop after tick TICK, or at `attach`, and print the world
-  --sync-test       Run each tick again, a replay's too, on a copy of the world taken as it
-                    started, with the commands it applied, as rollback runs ticks again, and end
-                    the run where the copy and the world part, naming the field
-  --restore <PATH>  Start from the snapshot at PATH, which the tool API's `snapshot` writes, where
-                    its world was, rather than building the world afresh
-  --no-api          Serve no tool API, which development builds serve for tools such as `gg`
-  --stopped         Start stopped: the world the layers attach is the world as edited, which only
-                    the tool API's edits, its `scene open` and `scene new`, and scene files' saves
-                    change, until its `play`. A run given `--restore` goes on stopped or playing,
-                    as the snapshot's run was
-  --host [ADDRESS]  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0; with
-                    --relay, at the relay too, or there alone without ADDRESS
-  --join [ADDRESS]  Join the lockstep session at ADDRESS as player 1, from the host's world; or
-                    without ADDRESS, through --relay, as its code finds it there
-  --rollback        With --host or --join, of both peers: predict the other peer's inputs, 8 to 16
-                    ticks on, as far as the link needs, and roll back where a prediction missed,
-                    its ticks run again, with an input delay of 2 ticks rather than lockstep's 2 to
-                    16, which follows the link
-  --serve [ADDRESS] Serve the world at ADDRESS, such as `0.0.0.0:7700`, to the clients that connect,
-                    as the server that owns it: without a window or a GPU, in real time, until
-                    Ctrl+C, or --frames frames of a tick's time; with --relay, at the relay too, or
-                    there alone without ADDRESS
-  --connect [ADDRESS]
-                    Play as a client of the server at ADDRESS, from its world, as the player it
-                    gives this run, predicting the world, the other players drawn as it last had
-                    them; or without ADDRESS, through --relay, as its code finds it there
-  --relay <ADDRESS> With --host, --join, --serve or --connect, meet the session's other runs
-                    through the relay at ADDRESS, such as `relay.example.com:7800`, which
-                    `gg-relay` runs: for runs that can't connect to each other, as two behind their
-                    own routers can't. The session's code finds its room there, and its packets go
-                    straight between its runs where their routers let them, and through the relay
-                    where they don't. Alone, the relay of the sessions the game hosts and joins
-                    from its own UI, in place of the one its project names
-  --code <CODE>     With --host, --join, --serve or --connect, the session's code, 16 digits and
-                    letters such as `7KQ2-9XMB-4TZD-P0WH`, which keeps the session to the runs
-                    given it and what they send to them alone: --join and --connect need their
-                    host's or server's, which a host or a server not given one makes, printing
-                    `code <CODE>` to stdout
-  --link <MS,MS,%>  With --host, --join, --serve or --connect, or --relay alone, have each link hold
-                    each packet this run receives the first MS, and up to the second more, losing
-                    the percent of them, such as `--link 100,20,5`, and hold what comes on its
-                    stream the first MS
-  --mods <DIR>     Run the mods in the folder DIR, in place of those installed in the game's
-                    per-user folder, which a windowed run runs
-  --package <PATH>  Read the files under the asset root from the game's package at PATH, which
-                    `tools/cook` writes, in place of the files themselves, as a build without
-                    `dev` reads `<executable>.ggpk` beside its executable
-  -h, --help        Print this help
+  --headless          Run without a window, offscreen, a tick a frame as fast as frames run; each
+                      tick is drawn as it ends, without blending
+  --embedded          For the tool that started it, such as the editor: offscreen in real time, a
+                      frame once the tool took the last through the API's `view`, input by `input`
+  --supervised        End as the tool API's `quit` does once stdin ends, as when the supervisor
+                      holding it (`gg run`) ends, however it ends; a replay ends at its end alone
+  --real-time         With --headless, a tick's time a frame: a watched game, or peers over --link,
+                      play as windowed ones do; --frames and --capture count frames as they come
+  --frames <N>        Exit after N frames
+  --size <WxH>        With --headless, the view's size in pixels, such as `320x180` (1280x720)
+  --capture <N>       Capture frame N through RenderDoc, in a run under `renderdoccmd capture`
+  --gpu <NAME>        Use the GPU whose name contains NAME, such as `amd`
+  --validation        Run under Vulkan validation (the default in debug builds)
+  --no-validation     Run without it (the default in release builds)
+  --vsync             Present at the display's refresh rate, rather than uncapped
+  --max-fps <N>       In a window, render at most N frames a second, in place of the cap a
+                      development build's title bar keeps; an embedded run goes at its tool's pace
+  --threads <N>       Run the simulation's jobs on N threads, the main one among them (CPUs less 1)
+  --mods <DIR>        Run DIR's mods, not those a windowed run runs from the game's per-user folder
+  --package <PATH>    Read the asset root's files from the package at PATH, which `tools/cook`
+                      writes, as a build without `dev` reads `<executable>.ggpk` beside it
+  -h, --help          Print this help
+
+Development builds (`dev`) serve the tool API and apply a scene file or script a layer loaded
+(`Context::load_scene_file`, `Scripts::load`) as it's saved. Serving the API, they reload assets
+as their files change, logging `Shader reloaded`, `Model reloaded` and the like, or a warning.
+  --no-api            Serve no tool API
+  --stopped           Start stopped until the API's `play`: the world the layers attach is the world
+                      as edited, which only the API's edits, `scene open` and `scene new`, and scene
+                      files' saves change. With --restore, stopped or playing as the snapshot's was
+  --restore <PATH>    Start from a snapshot, which the API's `snapshot` writes, not a fresh world
+
+Determinism:
+  --record <PATH>     Record the run: its seed, its layers' commands and its hash each tick
+  --replay <PATH>     Replay a recording without a window or a GPU, checking each hash; one that
+                      diverges names the tick and the part of the hash (`replay.diverged`)
+  --dump <TICK>       With --replay, stop after TICK, or at `attach`, and print the world a field a
+                      line: run where the replay diverges and where it doesn't, and diff the two
+  --sync-test         Run each tick again with its commands, a replay's too, on a copy of the world
+                      from the tick's start, as rollback does; end where the two diverge
+                      (`sync_test.diverged`), naming the field and values
+
+Networking: a run takes one of --host, --join, --serve or --connect, with an ADDRESS such as
+`0.0.0.0:7700`, --relay, or, for a host or server, both. --relay alone (and --link with it) is for
+the sessions the game starts from its own UI, in place of its project's relay. Peers whose worlds
+diverge log `net.desync`, the joiner `net.desync_field`, naming the field and values.
+  --host [ADDRESS]    Host a lockstep session, as player 0
+  --join [ADDRESS]    Join a lockstep session, as player 1, from the host's world
+  --rollback          Of both peers: predict the other's inputs 8 to 16 ticks on, as far as the link
+                      needs, rolling back where a prediction missed, at an input delay of 2 ticks
+                      rather than lockstep's 2 to 16, which follows the link
+  --serve [ADDRESS]   Serve the world to the clients that connect, owning it: without a window or a
+                      GPU, in real time, until Ctrl+C, or --frames frames of a tick's time
+  --connect [ADDRESS] Play as a client, from the server's world, as the player it gives, predicting
+                      the world; the other players are drawn as the server last had them
+  --relay <ADDRESS>   Meet through the relay `gg-relay` runs at ADDRESS, as `relay.example.com:7800`,
+                      for runs that can't connect, each behind its own router. The code finds the
+                      session's room; packets go direct where the routers let them, else through it
+  --code <CODE>       The session's code, 16 digits and letters as `7KQ2-9XMB-4TZD-P0WH`: only runs
+                      given it take part, and only what they send reaches them. A host or server not
+                      given one prints one on stdout (`code <CODE>`); --join and --connect need it
+  --link <MS,MS,%>    Hold each packet this run receives the first MS, plus up to the second, and
+                      lose the percent, such as `100,20,5`; hold its stream the first MS
+
+Each run writes a JSON log, and logs its path as it starts: `logs` beside the executable in a
+development build, else in the user's state directory. A run that doesn't end in an error logs
+`engine.perf` as it ends: its frame times, where they went, and its memory.
 
 Environment:
-  RUST_LOG          The log filter, such as `debug` or `info,gg_gpu=trace`
-  NO_COLOR          Turns the console's colors off
+  RUST_LOG            The log filter, such as `debug`. Without it, info and above, and the engine's
+                      debug events in debug builds. Targets alone, as `gg_gpu=trace` (optimized
+                      builds have no trace events), add to that; a level for every target, as
+                      `info` or `info,gg_gpu=trace`, replaces it
+  NO_COLOR            Turns the console's colors off
 
-Exits 0 on success, 1 on an error, a validation message, a replay that goes another way or a tick
-that goes another way run again, and 2 on bad arguments.
+Exits 0 on success; 1 on an error, a validation message, a replay that diverges or a tick that
+diverges run again; 2 on bad arguments.
 "
     )
 }

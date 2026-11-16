@@ -36,343 +36,603 @@ use game::Pick;
 use run::{Check, Run};
 use ship::Ship;
 
-const USAGE: &str = "\
-Usage: gg [options] <command> [options]
+/// `gg help`'s head, before the commands.
+const OVERVIEW: &str = "\
+Usage: gg [options] <command> [options]   options before or after it: `gg --pid 7 status`
+       gg help [<command>]               a command's options, output and codes
 
-Options go before the command or after it, as `gg --pid 4242 status` or `gg status --pid 4242`.
-
-In a game's project, the directory that holds its `project.ron` beside its `Cargo.toml`, and those
-below it, or in the project that `--project <PATH>` names, by its directory or its `project.ron`,
-gg builds the project's game, runs cargo in the project's directory, and talks to the project's
-games alone; a manifest that doesn't read is an error. Elsewhere, it works on the whole workspace.
-
-Build and run:
-  run [PACKAGE] [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>] [--peers <N>]
-      [--embedded] [-- <ARGS>...]
-      Build PACKAGE's development build, the project's game without one, saying how long that took
-      (`built`), and run a copy of it with ARGS, printing a line as it starts, as it serves the tool
-      API, and as it ends: `exited`, or `crashed` or `hung`, with the errors its log holds. A run
-      whose frames stop for `--hang` seconds (10), while it waits for nothing the user does, has
-      hung, and is ended; `--hang 0` takes none for hung, nor one that never runs its first frame,
-      which otherwise has 120 seconds. It's snapshotted every `--snapshot` seconds (5) from its first
-      frame, `snapshot_failed` saying why they fail, and started again from its last snapshot after
-      a crash or a hang, and from one taken then as PACKAGE is rebuilt (`rebuilt`), as it's asked to
-      quit, in one request, so that no edit lands between the two to be lost; one waiting where it
-      can't answer, at a script's breakpoint, in a file dialog or in the window menu, is killed at
-      once instead (`killed`, with what it waits for), starting again from its last snapshot before.
-      One that ends before its first snapshot waits for a rebuild (`waiting`); one that refuses its
-      snapshot starts afresh (`refused`). A pause lasts across a restart, as a stop does. `run` ends as the game comes to its own end, as its window closes, `quit` asks or
-      its frames run out, whatever its status; as one that has never served the API ends; and as it
-      ends at all with `--snapshot 0` or ARGS with `--record`, `--replay` or `--no-api`, which turn
-      restarts off. With dx, Dioxus's tool, on the PATH, of the release of the subsecond PACKAGE
-      builds with, the game is patched as its code changes, unless `--no-patch`, `--release`,
-      restarts' being off or a library beside PACKAGE's binary, which no patch reaches, turns
-      patches off (`patches_off` says why): `run` builds it with `dx build --fat-binary`, printing
-      each stage the build comes to and, as it compiles, how many of the crates dx counts on it has
-      compiled, every 5 seconds at most (`building`), and watches PACKAGE's modules, the workspace's
-      packages it builds with, and the workspace's manifest and lock file (`watching`). An edit
-      inside function bodies of PACKAGE's modules is built as a patch with `dx tools hotpatch`,
-      which the game applies between ticks (`patched`, or `patch_failed` with rustc's errors, the
-      game running on); any other change rebuilds it with dx, saying which file and why
-      (`rebuilding`, then `rebuilt` or `rebuild_failed`): one to a type, even one declared in a
-      body, or to code that has run as the game started, `main` and a layer's `load` and `restored`,
-      and any change while the last rebuild has failed. A game that waits for a rebuild gets one at
-      any change, and one started again is patched with the edits since its build at once. The game
-      logs a patch or a rebuild that failed too, as warnings `gg.patch_failed` and
-      `gg.rebuild_failed`, which `logs` shows. An edit inside a layer's `attach`, which builds the
-      world as a run starts afresh, is patched, `patched` naming its module in `attach` and the game
-      warning `gg.attach_changed`, but shows only in a run started afresh, as the run keeps its
-      world, its restarts starting from snapshots. Without dx, or where patches can't reach the
-      game, as for `--release`, but with restarts on and no `--no-patch`, `run` builds PACKAGE with
-      cargo and watches its sources all the same (`watching`, `patches` false), every change
-      rebuilding it and starting it again from a snapshot, a build's rustc errors in
-      `rebuild_failed`; a first build that fails waits for a change to build again (`build_failed`).
-      What survives a restart is the world, its entities' components, as a snapshot holds it,
-      never a layer's own fields or a static, which start over as the layer is made again. Once
-      the sources are what the running build was built from again, after a rebuild failed, `recovered`
-      says so, and the failure leaves the run's state.
-      A patch whose answer never comes (`patch_unanswered`) is sent again with every edit since
-      the build. While no game answers, as during a build, the commands that talk to it say
-      what `run` is doing, with a code: `gg.rebuilding`, `gg.starting`, `gg.waiting`, or
-      `gg.build_failed` with the last build's errors; `wait` waits until the game runs an edit's
-      code. A headless game given `--real-time` among ARGS ticks in real time, rather than as fast
-      as it can, for an agent to watch it play. With `--peers 2`, it runs the two peers of a
-      lockstep session from one build, the host given `--host` and the joiner `--join` at a free
-      port of the loopback, and both a `--code` it makes, each `started` naming its `player`:
-      patched together, and stopped and started again together as either ends or the game is
-      rebuilt. With `--embedded`, for the tool that started gg, such as the editor, the game is
-      given `--embedded`, running offscreen for the tool, which shows its view, and the run ends
-      cleanly, stopping the game, once gg's stdin closes (`closed`), as the tool ends, a build
-      under way finishing first. Each game gets `--supervised` and a stdin gg holds, so it ends as
-      gg does, however gg ends. A second `run` of PACKAGE while one runs is refused
-      (`gg.running`).
-  check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
-      Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
-      ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.
-      One that runs longer than SECONDS (600) is ended. First it warns, on stderr, where PACKAGE's
-      settings aren't those of the engine it builds against (`gg.settings`): where the clippy.toml
-      clippy finds for it lacks a method the engine's bans, or its rust-toolchain.toml pins another
-      Rust release.
-  ship [PACKAGE]
-      Build PACKAGE, the project's game without one, as it ships, without `dev` in the shipping
-      profile, cook its project into its package beside its executable, with the cooker of
-      the engine it builds with, and lay the two out in `ship/PACKAGE` in the target directory, emptied first, named
-      after the game, PACKAGE capitalized, as `Shards.exe` and `Shards.ggpk`, with NOTICES.txt:
-      the project's CREDITS.txt and the licenses of the crates it's built from, which cargo-about
-      0.9.2 writes with the workspace's about.toml (`gg.notices`). Side by side on Windows, with the
-      Visual C++ runtime from Visual Studio's redist folder (`gg.no_redist`), and on Linux, whose
-      GPUs' drivers install the Vulkan loader; on macOS in an app bundle, as `Shards.app`, with the
-      project's icon and the loader and KosmicKrisp of the Vulkan SDK, 1.4.363.0 or later, whose
-      `macOS` folder `VULKAN_SDK` names (`gg.no_sdk`, `gg.sdk_version`), signed ad hoc (`gg.sign`).
-      The build's symbols go in `ship/PACKAGE-symbols` beside it, with build.txt naming the build:
-      the PDB on Windows, the executable before it's stripped (objcopy) on Linux, a dSYM (dsymutil)
-      on macOS (`gg.symbols`). Prints a line naming the folders and each file in them, with sizes.
-      Building the project's game, `run`, `check` and `ship` first check that it's the package
-      beside the project's manifest (`gg.project`).
-  fetch
-      Fetch the files the project's fetch list, `fetch.ron` beside its manifest, names: those its
-      repository doesn't hold, as models whose licenses keep them out of it, each from a folder
-      at a URL pinned to what it holds, with curl, into a folder of the project the repository
-      ignores. Each is checked against its SHA-256 before it takes its place (`gg.fetch`), and one
-      there as the list has it is kept. Writes the ID file of each texture, model and font under
-      the asset root that has none, as a development run would. Prints a line for each file,
-      `fetched` or `kept`, with the `id` it wrote, then one for the list.
-
-Make a game:
-  new <NAME> [--engine <SOURCE>]
-      Write a new game, writing over nothing: package NAME, whose binary is `gg-NAME`, a
-      development build of the engine's; its project, whose start scene is `scenes/main.ron`,
-      empty; and its main module, whose layer loads the start scene. In the engine's workspace, a
-      member, in `games/NAME`. Elsewhere, a workspace of its own, in `NAME`, building against the
-      engine SOURCE names, which it needs: an engine checkout's directory, or
-      `<GIT URL>#<REVISION>`; with copies of the engine's `.cargo/config.toml` but its `cargo gg`
-      alias, `clippy.toml`, `rust-toolchain.toml`, `about.toml`, `.gitattributes` and `.gitignore`,
-      its `Cargo.lock`, to start the game's from, and an AGENTS.md and CLAUDE.md pointing agents at
-      the engine's docs. NAME can't be a package's in the engine's lock, as `--package NAME`, with
-      which gg builds a game, would name both. Prints a line naming its directory and files.
-
-Talk to a running game, through its tool API:
-  sessions                       List the running games
-  status                         Its ticks, whether it's paused or stopped, its frames, entities and
-                                 view, and its open scene's file, whether it differs from the file,
-                                 `unsaved`, as a playing game's ticks make it, and whether authors
-                                 edited it since it was saved or opened, `edited`; in a world of
-                                 cells, how many are in and how many out keep what they held,
-                                 `cells`
-  wait [--timeout <SECONDS>]     Wait until the game under `gg run` runs the code of every edit to
-                                 its sources saved before, patched or rebuilt, for at most SECONDS
-                                 (300), and print what `run` is doing; fails with `gg.build_failed`
-                                 and rustc's errors if the edits don't build, `gg.waiting` if the
-                                 game ended and waits for a change, `gg.no_run` without a `gg run`,
-                                 and `gg.timeout`
-  pause                          Pause its simulation
-  resume                         Run its simulation in real time again
-  play                           Play a copy of its world as edited in its place, until `stop`, if
-                                 it's stopped
-  stop                           Stop it: no tick runs, and its world is the world as edited, which
-                                 only edits, scene files' saves, `scene open` and `scene new`
-                                 change; while a copy plays, bring the world as edited back, what
-                                 the copy did, its edits among them, going; recorded runs and
-                                 lockstep peers refuse it
-  step [N]                       Run N ticks (1), and stay paused; refused while it's stopped
-  scene open <PATH> [--discard]  Open the scene file at PATH, in one of the project's scenes
-                                 folders, in place of the open scene: its entities in place of the
-                                 scene's, the game's own kept; refused while the scene has unsaved
-                                 edits, unless `--discard`; every author's edits start afresh
-  scene save [PATH]              Save the open scene's entities, never those the game's code made,
-                                 to its file, or to PATH, its file from then on
-  scene new [--discard]          Delete the open scene's entities, leaving it untitled; refused as
-                                 `scene open` is
-  capture [--own] [--show <NAME>[,<NAME>...]]... [PATH]
-                                 Write its view as a PNG at PATH, or in `captures` beside it, which
-                                 keeps the newest 32: as it's shown, the look included, or with
-                                 `--own`, as the game shows it on its own. With `--show`, as the
-                                 look's `show` has it, that capture alone shows NAME: one of
-                                 `base_color`, `normal`, `surface_normal`, `metallic`, `roughness`,
-                                 `occlusion`, `emission`, `specular_color` (what it reflects
-                                 head-on), `direct_light`, `sky_light`, `reflection`,
-                                 `diffuse_light` and `specular_light` (the light it diffuses and
-                                 reflects, of all three), or else an image's debug name, as `view
-                                 depth`. With several, which PATH refuses, it captures each in
-                                 order from one world, pausing the game for them if it plays, and
-                                 prints an array of the answers
-  frames <N> [--viewpoints <FILE>] [--rect X,Y,W,H] [--show <NAME>] <DIR>
-                                 Write its next N frames in a row, none skipped, as PNGs in DIR,
-                                 `frame-0001.png` on, from the first frame with nothing on its way
-                                 to the GPU: each drawn from the next of the viewpoints in FILE, a
-                                 JSON array of them as `look` takes its `viewpoint`, the last held
-                                 for the frames after it, or else as the view's shown; with
-                                 `--rect`, each cropped to the rectangle of pixels from the view's
-                                 top left; with `--show`, showing NAME, as `capture`'s. N is 1 to
-                                 1000, holding at most 1 GiB of pixels. Prints each frame's PNG,
-                                 size, ticks and viewpoint. Pause the game to see the view alone
-                                 change
-  look [<LOOK>]                  Its look, the view's settings any client sets, the last to set a
-                                 part winning; with LOOK, a JSON object of parts as the API's `look`
-                                 takes them, `viewpoint`, `outline`, round entities and every entity
-                                 under each, `{\"outline\":{\"ids\":[ID,ID],\"color\":[1,0.5,0,1],\"width\":3}}`, a
-                                 band of `width` pixels and a glow as far again, `grid`, `colliders`, `show`,
-                                 what the view shows in place of its light, a name as `capture`'s
-                                 `--show` has it, `{\"show\":\"roughness\"}` or
-                                 `{\"show\":{\"image\":\"view depth\"}}`, or `skip`, the passes the
-                                 view leaves out, to narrow down which one makes what it shows,
-                                 `{\"skip\":[\"reflections\",\"shadows\"]}`, of `ambient_occlusion`,
-                                 `reflections`, `shadows`, `fog`, `bloom`, `depth_of_field`,
-                                 `motion_blur`, `antialiasing`, `grade`, `lens` and `adaptation`;
-                                 those set first, each `null` giving it back to the game
-  pick <X> <Y> [--within <ID>]   The ID and name of the entity its view shows at pixel X, Y from its
-                                 top left, as a capture has it, the look included; `null` for none.
-                                 A model's node gives the model's root, but `--within` the root or
-                                 one of its nodes gives the node itself, as the editor picks parts
-  images                         The images its next frame makes that `--show` and the look's `show`
-                                 name, as `bloom 1` or `view depth`: each one's debug name, what it
-                                 holds and its size, in the order the frame makes them; a frame
-                                 showing a part of shading makes none after the view's passes
-  probe <X> <Y> [--own]          What shading took and made at pixel X, Y of its view, from its top
-                                 left, X and Y not negative, as numbers, in one JSON object, from
-                                 one world: captures of that pixel, writing no PNG, pausing the game
-                                 for them if it plays, with a pick and a look. The view as the look
-                                 shows it, or with `--own`, as the game shows it on its own. Every
-                                 value is `null` for a pixel outside the view, and read from 8-bit
-                                 bytes, good to about 1/255 (`quantized`). `base_color`, `emission`
-                                 and `specular_color` (what it reflects head-on) are linear RGB,
-                                 from 0; `normal` (with its normal map) and `surface_normal`
-                                 (without) are [x, y, z] in the world, each from -1 to 1;
-                                 `metallic`, `roughness` (from 0.045) and `occlusion` are 0 to 1,
-                                 `occlusion` the share of the light from all around that reaches
-                                 the point; `direct_light`, `sky_light`, `reflection`,
-                                 `diffuse_light`, `specular_light` and `shown` (the view's pixel)
-                                 are sRGB bytes [r, g, b], 0 to 255, exposed and tonemapped as the
-                                 view shows them, not linear; `depth` is the view's reversed depth,
-                                 1 at the near plane and smaller farther, 0 where nothing drew;
-                                 `distance` is `near / depth` in world units, in front of the
-                                 viewpoint, not from it, good to about 3%, `null` where nothing
-                                 drew and without a perspective; `entity` is what `pick` answers;
-                                 and `size`, `at` and `ticks`. To find what's wrong at a pixel: its
-                                 material's values, its normal, and which light reaches it
-  input <EVENTS>                Hand its layers EVENTS, a JSON array of the API's input events, in
-                                 order, as its window would, as a frame starts: a key down or up by
-                                 its W3C `code`, `{\"key\":{\"key\":\"KeyW\",\"pressed\":true}}`,
-                                 `{\"text\":\"w\"}`, the cursor at a pixel of the view from its top
-                                 left, `{\"cursor\":[X,Y]}`, `\"cursor_entered\"`,
-                                 `\"cursor_left\"`, the mouse's raw motion right and down, as with
-                                 the cursor grabbed, `{\"motion\":[X,Y]}`, a mouse button,
-                                 `{\"button\":{\"button\":\"left\",\"pressed\":true}}`, a scroll,
-                                 `{\"scroll\":{\"lines\":[0,1]}}`, and the keys' focus,
-                                 `{\"focused\":true}`
-  snapshot [PATH]                Write its world as a snapshot at PATH, or in `snapshots` beside it,
-                                 which keeps the newest 8
-  entities [--with <COMPONENT>] [--skip <N>] [--take <N>]
-                                 List its entities, those with COMPONENT, N at a time (100)
-  entity <ID>                    An entity and its components' values; for an instance's, its root
-                                 or one its prefab gives, `instance` too: what differs from its
-                                 prefab, each component's fields, and the components it adds
-  get <ID> <COMPONENT> [PATH]    A component's value, or its field at PATH, such as `translation.x`
-  types                          Its world's component types, each with the value `add` gives it
-                                 without one, and the descriptions of the types they hold, which
-                                 values are read and written by
-  hash                           Its world's hash
-  cells                          Its world's cells, in a world of cells: those in, coming, kept,
-                                 refused or filed, the streamed roots in each, which a scene save
-                                 would write, and the viewers they come in around, the look's
-                                 viewpoint among them while it's stopped
-  assets [--kind <KIND>] [--skip <N>] [--take <N>]
-                                 List its textures, models, fonts, prefabs and UIs, those of KIND,
-                                 `texture`, `model`, `font`, `prefab` or `ui`, N at a time (100), by
-                                 their paths from its asset root, each with its ID, whether a layer
-                                 has added it, and what's wrong with its ID file, and the ID files
-                                 left without their assets; the game, but a lockstep session's
-                                 joiner, whose host does, writes each one's ID in a file beside it,
-                                 `<file>.meta`, as it starts and as it finds new files: commit it
-                                 with its file. A file renamed or moved alone keeps its ID, the game
-                                 moving its ID file after it, unless it's edited in the same step. A
-                                 file of a texture, a model, a font, a prefab, a UI, a sound or
-                                 music the game has added, edited, reloads in it, as a shader's
-                                 does, the nodes its `ModelRoot`s spawn, the instances its
-                                 `PrefabRoot`s link and the UIs of it with it, but in a recorded run
-                                 or a lockstep session, where a model's nodes and materials and a
-                                 prefab's instances change as it next starts
-  ui                             Each UI its layers added from a `.ui` file, laid out for its view:
-                                 each node's name, kind, parent, rectangle, `[x, y, width, height]`
-                                 from the view's top left in the canvas's units, 1,080 to its
-                                 height, and in its pixels (the `pixels` rectangles, which
-                                 `input` clicks at, as `capture` has them),
-                                 whether it shows, what it says, what a widget holds, and a
-                                 button's or a widget's whether it's disabled, focused or
-                                 pressed; and each UI's focus and whether it takes input. Press a
-                                 button by clicking its pixels with `input`, and type into a text
-                                 field clicked so with `text`
-  apply <OPERATIONS>            Apply OPERATIONS, a JSON array of the API's operations, as one edit:
-                                 all or none, between ticks, which `undo` takes back; among them
-                                 `{\"unlink\":{\"id\":ID}}`, which unlinks a prefab's instance into
-                                 entities of its own, and
-                                 `{\"revert\":{\"id\":ID,\"component\":C,\"path\":P}}`, which sets a
-                                 field of an instance's entity back to its prefab's
-  save-prefab <ID> [PATH]        Save entity ID and its descendants as a new prefab at PATH, in a
-                                 folder under the asset root that its scan reaches, or in its
-                                 `prefabs` folder named after the entity, with its ID file, writing
-                                 over nothing, refused while a copy plays; and link ID to
-                                 it, as one edit, which `undo` unlinks, leaving the file: its
-                                 entities keep their IDs. Prints the prefab's path and name
-  set <ID> <COMPONENT> <PATH> <VALUE>
-                                 Set a field, such as `translation.x`, or a whole component for an
-                                 empty PATH, to VALUE: JSON, or else a string, as one edit
-  undo [--author <NAME>]         Undo gg's last edit, or author NAME's, such as a scene file's path,
-                                 `scenes/grid.ron`, printing it, or `null` if there's none
-  redo [--author <NAME>]         Redo the last edit gg, or NAME, undid
-  edits [--author <NAME>]        Each author's edits, or NAME's, those to undo and those to redo
-  logs [--level <LEVEL>] [--follow]
-                                 Its log's events at LEVEL (`warn`) and above, of the last 10,000 it
-                                 keeps, each its JSON log's line; with `--follow`, then each as it's
-                                 logged, until it ends
-  debug [break <SCRIPT> [<LINE>...] | pause | continue | into | over | out] [--wait <SECONDS>]
-                                 Debug its Luau scripts, and print the debugger: where a script has
-                                 stopped, with its stack and each function's locals and upvalues,
-                                 the pause or step under way, the breakpoints and the scripts.
-                                 `break` sets SCRIPT's breakpoints, by its path from the project's
-                                 root, such as `scripts/spin.luau`, at each LINE, or at the next
-                                 line with code, in place of those it had; none clears them. `pause`
-                                 stops the next line a script runs; from a stop, `continue` goes on
-                                 to the next, and `into`, `over` and `out` step. A stopped script
-                                 waits inside its tick, and the game with it, the commands but
-                                 `debug`, `logs` and `sessions` waiting too, until `debug` has it go
-                                 on; `run` doesn't take it for hung. With `--wait`, it waits up to
-                                 SECONDS, at most 10, for a script to stop, if none has
-  quit                           End it cleanly, as closing its window does, unasked
-  call <METHOD> [<PARAMS>]       Send METHOD with PARAMS, as JSON, and print what it answers
-
-Serve agents:
-  mcp                            Serve the tool API to an agent that speaks MCP, on stdin and stdout:
-                                 a tool for each command that talks to a game but `quit`, `call`,
-                                 `logs --follow` and the PATHs of `capture` and `snapshot`, its
-                                 `capture` answering the PNG's path, and with `inline` the PNG, with
-                                 `scene`'s and `save-prefab`'s PATHs from the game's asset root,
-                                 which reaches the game the options choose at each call, as the
-                                 agent, its MCP client's name, the author of the edits it applies,
-                                 kept to what `--grant` grants
-
-Options for talking to a game:
-  --pid <PID>           The game in process PID, when more than one runs: more than one is
-                        refused (`gg.which_game`), naming each one's process, but the two peers of
-                        a lockstep session of one app, which are reached through the host, player
-                        0, whose edits and patches both apply
-  --app <NAME>          The game whose app is NAME, when more than one runs
-  --timeout <SECONDS>   How long to wait for its answer (30)
-  --grant <LIST>        Keep the connection to the capabilities LIST names, between commas, as
-                        `read,view`, which the tool API's `hello` takes, rather than every one
-
-Options for every command but `new`:
-  --project <PATH>      Work in the project PATH names, by its directory or its `project.ron`,
-                        rather than in the one gg is in
-
-Each result is a line of JSON on stdout; `logs` prints a line for each of the game's events, and
-`run` one for each of its own, the game's own output and cargo's going to stderr. An error is a
-line on stderr, {\"error\":{\"code\":...,\"message\":...}}, and a warning one too,
-{\"warning\":{\"code\":...,\"message\":...,\"path\":...}}: as gg reaches a game, `gg.protocol` where
-the game speaks another revision of the tool API than gg, as one built against another revision of
-the engine may, naming its session file. Exits 0 on success, 1 on an error, a check that failed or
-a run that didn't end cleanly, and 2 on bad arguments.
+In a game's project (the directory of its `project.ron` beside its `Cargo.toml`, or one below it),
+or the one `--project` names, gg builds the project's game, runs cargo in its directory and talks to
+its games alone. Building that game, `run`, `check` and `ship` first check that it's the package
+beside `project.ron` (`gg.project`). A manifest that doesn't read is an error. Elsewhere, gg works
+on the whole workspace.
 ";
+
+/// `gg help`'s tail, after the commands.
+const OPTIONS: &str = "\
+Options for talking to a game:
+  --pid <PID>          The game in process PID, when several run (else `gg.which_game`, naming
+                       each); a lockstep session's peers are reached through the host, player 0,
+                       whose edits and patches apply to both
+  --app <NAME>         The game whose app is NAME, when several run
+  --timeout <SECONDS>  How long to wait for its answer (30)
+  --grant <LIST>       Keep the connection to these capabilities, not all: as `read,view`, which
+                       the API's `hello` takes
+Option for every command but `new`:
+  --project <PATH>     Work in this project, by its directory or its `project.ron`
+
+Each result is a line of JSON on stdout; an error, {\"error\":{\"code\":...,\"message\":...}} on stderr,
+and a warning, {\"warning\":{\"code\":...,\"message\":...,\"path\":...}}, as `gg.protocol` where a
+game speaks another revision of the tool API than gg, naming its session file. Exits 0 on success;
+1 on an error, a check that failed or a run that didn't end cleanly; 2 on bad arguments.
+";
+
+/// A command's help: `gg help` lists its name and summary, and `gg help <name>` prints its usage,
+/// summary and details.
+struct Help {
+    name: &'static str,
+    /// What follows `gg `; lines past the first are indented to line up under its options.
+    usage: &'static str,
+    summary: &'static str,
+    /// Empty where the summary says it all.
+    details: &'static str,
+}
+
+/// The commands' help, by group, in `gg help`'s order.
+const COMMANDS: &[(&str, &[Help])] = &[
+    (
+        "Build and run",
+        &[
+            Help {
+                name: "run",
+                usage: "\
+run [PACKAGE] [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>]
+              [--peers <N>] [--embedded] [-- <ARGS>...]",
+                summary: "Build and run the game, supervised: edits patch in or restart it from a snapshot",
+                details: "\
+Builds PACKAGE's development build (the project's game by default; `built`, with its time) and runs
+a copy with ARGS, the game's own flags. Each game gets `--supervised` and a stdin gg holds, so it
+ends when gg does, however gg ends. A second `run` of PACKAGE is refused (`gg.running`).
+
+  --release             Optimized, which no patch reaches
+  --no-patch            No patches, no watching: a rebuild of the executable restarts it (`rebuilt`)
+  --hang <SECONDS>      Frames stopped this long (10), while the game waits for nothing the user
+                        does, are a hang: gg ends it. The first frame gets 120 s. 0: never hung
+  --snapshot <SECONDS>  Snapshot the world this often (5) from the first frame. 0: no restarts
+  --peers 2             A lockstep host (`--host`) and joiner (`--join`) from one build, at a free
+                        loopback port, with a `--code` gg makes; each `started` names its `player`.
+                        They patch together, and stop and restart together as either ends or the
+                        game is rebuilt
+  --embedded            For the tool that started gg, such as the editor: the game gets
+                        `--embedded`, offscreen, the tool showing its view. When gg's stdin closes
+                        (`closed`), after any build under way, gg stops the game and ends cleanly
+  -- <ARGS>             A headless game given `--real-time` ticks in real time, to be watched
+
+Events, a JSON line each (the game's and cargo's output go to stderr): `started`, `serving` (the
+tool API), and as it ends `exited`, `crashed` or `hung`, with the errors its log holds.
+
+Restarts, from the last snapshot (`snapshot_failed` says why one fails): after a crash or a hang;
+after a rebuild (`rebuilt`), from a snapshot taken in the same request as the quit, so no edit is
+lost between them; and at once (`killed`, with what it waits for) for a game waiting where it can't
+answer: at a script's breakpoint, in a file dialog or in the window menu. A game that ends before
+its first snapshot waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh
+(`refused`). Pauses and stops last across restarts. Only the world, its entities' components,
+survives; a layer's own fields and statics start over. A layer's `load` makes its assets; its
+`attach`, which a restart skips, builds the world.
+
+`run` ends as the game comes to its own end (its window closes, `quit` asks or its frames run out),
+whatever its status; as a game that never served the API ends; and, with restarts off
+(`--snapshot 0`, or `--record`, `--replay` or `--no-api` in ARGS), as the game ends at all.
+
+Patches need dx (Dioxus's tool) on the PATH, of the root Cargo.toml's `subsecond` release. They're
+off with `--no-patch`, `--release`, restarts off, or a library beside PACKAGE's binary, which no
+patch reaches (`patches_off` says why). gg builds with `dx build --fat-binary`, printing each stage
+and, while compiling, the crates done of dx's count, every 5 s at most (`building`). It watches
+PACKAGE's modules, the workspace's packages it builds with, and the workspace's manifest and lock
+file (`watching`). Then:
+- an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
+  between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
+- any other change rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
+  `rebuild_failed`): a change to a type, even one declared in a body, or to code run as the game
+  started (`main`, a layer's `load` and `restored`), and any change after a failed rebuild;
+- an edit inside a layer's `attach` patches (`patched` names its module in `attach`), the game
+  warning `gg.attach_changed`. It shows only in a run started afresh, as restarts keep the world.
+A game waiting for a rebuild gets one at any change; a restarted one gets the edits since its build
+patched in at once. A patch never answered (`patch_unanswered`) is sent again with every edit since
+the build. The game logs failures as warnings too: `gg.patch_failed`, `gg.rebuild_failed`. Once the
+sources match the running build again after a failed rebuild, `recovered` says so, and the failure
+leaves the run's state.
+
+Without dx, or where patches can't reach (as with `--release`), with restarts on and no
+`--no-patch`, gg builds with cargo and watches all the same (`watching`, `patches` false): every
+change rebuilds and restarts from a snapshot, rustc's errors in `rebuild_failed`. A failed first
+build waits for a change (`build_failed`).
+
+While no game answers, the commands that talk to it fail with what `run` is doing: `gg.rebuilding`,
+`gg.starting`, `gg.waiting`, or `gg.build_failed` with the last build's errors. `gg wait` waits
+until the game runs an edit's code.
+",
+            },
+            Help {
+                name: "check",
+                usage: "check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]",
+                summary: "Build the game and run it headless: its status, warnings, errors and frame times",
+                details: "\
+Builds PACKAGE (the project's game by default) and runs it headless with ARGS for N frames (60),
+then prints its exit status, its warnings and errors, and its frame times. A run that takes longer
+than `--timeout` (600 s) is ended. First it warns on stderr (`gg.settings`) where PACKAGE's
+settings differ from the engine's: its clippy.toml lacks a method the engine's bans, or its
+rust-toolchain.toml pins another Rust release.
+",
+            },
+            Help {
+                name: "ship",
+                usage: "ship [PACKAGE]",
+                summary: "Build the game as it ships, with its cooked package, in `ship/PACKAGE`",
+                details: "\
+Builds PACKAGE (the project's game by default) without `dev`, in the shipping profile, and cooks its
+project, with the cooker of the engine it builds against, into its package beside its executable.
+Lays them out in `ship/PACKAGE` in the target directory, emptied first, named for the game with
+PACKAGE capitalized (`Shards.exe`, `Shards.ggpk`), with NOTICES.txt: the project's CREDITS.txt and
+the licenses of the crates it's built from, which cargo-about 0.9.2 writes from about.toml
+(`gg.notices`).
+- Windows: side by side, with the Visual C++ runtime from Visual Studio's redist (`gg.no_redist`).
+- Linux: side by side; GPUs' drivers install the Vulkan loader.
+- macOS: an app bundle (`Shards.app`) with the project's icon, signed ad hoc (`gg.sign`), with the
+  loader and KosmicKrisp of the Vulkan SDK 1.4.363.0 or later, whose `macOS` folder `VULKAN_SDK`
+  names (`gg.no_sdk`, `gg.sdk_version`).
+Symbols go in `ship/PACKAGE-symbols`, with build.txt naming the build (`gg.symbols`): the PDB on
+Windows, the unstripped executable (objcopy) on Linux, a dSYM (dsymutil) on macOS. Prints a line
+naming the folders and each file in them, with sizes.
+",
+            },
+            Help {
+                name: "fetch",
+                usage: "fetch",
+                summary: "Fetch the files the project's `fetch.ron` lists, which its repository doesn't hold",
+                details: "\
+Fetches each file the fetch list (`fetch.ron`, beside `project.ron`) names, as models whose licenses
+keep them out of the repository: with curl, from a folder at a URL pinned to what it holds, into a
+folder of the project the repository ignores. Each must match its SHA-256 before it takes its place
+(`gg.fetch`); one there as the list has it is kept. Each that's an asset under the asset root (a
+texture, model, font, prefab or UI) gets an ID file holding the ID the list gives it, or else, if
+it has no ID file, a fresh one, as a development run would. Prints a line per file, `fetched` or
+`kept`, with the `id` it wrote, then one for the list.
+",
+            },
+        ],
+    ),
+    (
+        "Make a game",
+        &[Help {
+            name: "new",
+            usage: "new <NAME> [--engine <SOURCE>]",
+            summary: "Write a new game, in the engine's workspace or in one of its own",
+            details: "\
+Writes over nothing: package NAME, whose binary `gg-NAME` is a development build of the engine's by
+default; its project, whose start scene `scenes/main.ron` is empty; and its main module, whose layer
+loads the start scene. Prints a line naming its directory and files.
+
+In the engine's workspace, the game is a member in `games/NAME`. Elsewhere it's a workspace of its
+own in `NAME`, built against the engine `--engine` names: a checkout's directory, or
+`<GIT URL>#<REVISION>`. It gets copies of the engine's `.cargo/config.toml` (less its `cargo gg`
+alias), `clippy.toml`, `rust-toolchain.toml`, `about.toml`, `.gitattributes`, `.gitignore` and
+`Cargo.lock`, and an AGENTS.md and CLAUDE.md pointing agents at the engine's docs. NAME can't be a
+package in the engine's lock, as `--package NAME` would name both.
+",
+        }],
+    ),
+    (
+        "Talk to a running game, through its tool API",
+        &[
+            Help {
+                name: "sessions",
+                usage: "sessions",
+                summary: "List the running games",
+                details: "",
+            },
+            Help {
+                name: "status",
+                usage: "status",
+                summary: "Its ticks, pause and stop state, frames, entities, view and open scene",
+                details: "\
+- `scene`: the open scene's file.
+- `unsaved`: whether the scene differs from its file, as a playing game's ticks make it.
+- `edited`: whether authors edited it since it was saved or opened.
+- `cells`: in a world of cells, how many are in, and how many out keep what they held.
+",
+            },
+            Help {
+                name: "wait",
+                usage: "wait [--timeout <SECONDS>]",
+                summary: "Wait until the game under `gg run` runs the code of every edit saved before",
+                details: "\
+Waits at most `--timeout` (300 s) for the edits to be patched in or rebuilt, then prints what `run`
+is doing. Fails with:
+- `gg.build_failed` and rustc's errors, if the edits don't build;
+- `gg.waiting`, if the game ended and waits for a change;
+- `gg.no_run`, without a `gg run`; `gg.which_run`, with several, which `--pid` tells apart;
+- `gg.timeout`.
+",
+            },
+            Help {
+                name: "pause",
+                usage: "pause",
+                summary: "Pause its simulation",
+                details: "",
+            },
+            Help {
+                name: "resume",
+                usage: "resume",
+                summary: "Run its simulation in real time again",
+                details: "",
+            },
+            Help {
+                name: "play",
+                usage: "play",
+                summary: "Play a copy of its world as edited, in its place, until `stop`",
+                details: "A game already playing is left as it is.\n",
+            },
+            Help {
+                name: "stop",
+                usage: "stop",
+                summary: "Stop it: no tick runs, and its world is the world as edited",
+                details: "\
+Only edits, scene files' saves, `scene open` and `scene new` change the world as edited. While a copy
+plays, `stop` brings the world as edited back; what the copy did, its edits among them, goes.
+Recorded runs and lockstep peers refuse it.
+",
+            },
+            Help {
+                name: "step",
+                usage: "step [N]",
+                summary: "Run N ticks (1) and stay paused; refused while it's stopped",
+                details: "",
+            },
+            Help {
+                name: "scene",
+                usage: "scene open <PATH> [--discard] | scene save [PATH] | scene new [--discard]",
+                summary: "Open, save or empty the open scene",
+                // Not `"\`, which would take the first line's indent.
+                details: "  open <PATH>  Open the scene file at PATH, in one of the project's scenes folders: its
+               entities in place of the open scene's, the game's own kept
+  save [PATH]  Save the open scene's entities, never those the game's code made, to its file, or to
+               PATH, its file from then on
+  new          Delete the open scene's entities, leaving it untitled
+`open` and `new` are refused while the scene has unsaved edits (`scene.unsaved`), unless
+`--discard`. They start every author's edits afresh.
+",
+            },
+            Help {
+                name: "capture",
+                usage: "capture [--own] [--show <NAME>[,<NAME>...]]... [PATH]",
+                summary: "Write its view as a PNG, or a part of its shading or an image in place of its light",
+                details: "\
+Writes the view as it's shown, the look included, at PATH, or in `captures` beside the game, which
+keeps the newest 32.
+  --own        As the game shows it on its own
+  --show NAME  That capture alone shows NAME in place of the view's light, as the look's `show`
+               does, each pixel's bytes as gg-api's `Shown` says: a part of shading, or else an
+               image's debug name (`--show \"view depth\"`). Several, as `--show base_color,normal`
+               or repeated, are captured in order from one world, pausing the game for them if it
+               plays, and print an array of the answers; PATH refuses them
+Parts of shading: `base_color`, `normal`, `surface_normal`, `metallic`, `roughness`, `occlusion`,
+`emission`, `specular_color` (what it reflects head-on), `direct_light`, `sky_light`, `reflection`,
+`diffuse_light` and `specular_light` (the light it diffuses and reflects, of all three).
+",
+            },
+            Help {
+                name: "frames",
+                usage: "frames <N> [--viewpoints <FILE>] [--rect X,Y,W,H] [--show <NAME>] <DIR>",
+                summary: "Write its next N frames in a row, none skipped, as PNGs in DIR",
+                details: "\
+Writes `frame-0001.png` on, from the first frame with nothing on its way to the GPU. N is 1 to
+1000, holding at most 1 GiB of pixels. Prints each frame's PNG, size, ticks and viewpoint. Pause the
+game to see the view alone change.
+  --viewpoints <FILE>  Draw each frame from the next viewpoint in FILE, a JSON array of them as
+                       `look` takes its `viewpoint`, the last held for the frames after it; else as
+                       the view's shown
+  --rect X,Y,W,H       Crop each frame to this rectangle of pixels from the view's top left
+  --show <NAME>        Show NAME, as `capture --show` does
+",
+            },
+            Help {
+                name: "look",
+                usage: "look [<LOOK>]",
+                summary: "Read or set its look: viewpoint, outline, grid, colliders, show, skip",
+                details: "\
+The look is the view's settings, which any client sets; the last to set a part wins. LOOK is a JSON
+object of parts, as the API's `look` takes them, set before the look is printed; `null` gives a part
+back to the game:
+- `viewpoint`, `grid`, `colliders`;
+- `outline`, round entities and every entity under each: a band `width` pixels wide and a glow as
+  far again, {\"outline\":{\"ids\":[ID,ID],\"color\":[1,0.5,0,1],\"width\":3}};
+- `show`, what the view shows in place of its light, a name as `capture --show` takes it:
+  {\"show\":\"roughness\"} or {\"show\":{\"image\":\"view depth\"}};
+- `skip`, the passes the view leaves out, to narrow down which one makes what it shows:
+  {\"skip\":[\"reflections\",\"shadows\"]}, of `ambient_occlusion`, `reflections`, `shadows`, `fog`,
+  `bloom`, `depth_of_field`, `motion_blur`, `antialiasing`, `grade`, `lens` and `adaptation`.
+",
+            },
+            Help {
+                name: "pick",
+                usage: "pick <X> <Y> [--within <ID>]",
+                summary: "The entity its view shows at pixel X, Y",
+                details: "\
+Prints its ID and name, `null` for none. X, Y are from the view's top left, as a capture has it, the
+look included. A model's node gives the model's root, but `--within` the root or one of its nodes
+gives the node itself, as the editor picks parts.
+",
+            },
+            Help {
+                name: "images",
+                usage: "images",
+                summary: "The images its next frame makes that `--show` and the look's `show` name",
+                details: "\
+Each one's debug name (as `bloom 1` or `view depth`), what it holds and its size, in the order the
+frame makes them. A frame showing a part of shading makes none after the view's passes.
+",
+            },
+            Help {
+                name: "probe",
+                usage: "probe <X> <Y> [--own]",
+                summary: "What shading took and made at a pixel, as numbers",
+                details: "\
+To find what's wrong at a pixel: its material's values, its normal, and which light reaches it.
+Captures pixel X, Y, from the view's top left, not negative, as each part of shading, writing no PNG,
+with a pick and a look, from one world, pausing the game for them if it plays. The view is as the
+look shows it, or with `--own`, as the game shows it on its own. Prints one JSON object:
+- `base_color`, `emission`, `specular_color` (what it reflects head-on): linear RGB, from 0;
+- `normal` (with its normal map), `surface_normal` (without): [x, y, z] in the world, -1 to 1;
+- `metallic`, `roughness` (from 0.045), `occlusion` (the share of the light from all around that
+  reaches the point): 0 to 1;
+- `direct_light`, `sky_light`, `reflection`, `diffuse_light`, `specular_light`, `shown` (the view's
+  pixel): sRGB bytes [r, g, b], 0 to 255, exposed and tonemapped as the view shows them, not linear;
+- `depth`: the view's reversed depth, 1 at the near plane and smaller farther, 0 where nothing drew;
+- `distance`: `near / depth` in world units, in front of the viewpoint, not from it; `null` where
+  nothing drew and without a perspective;
+- `entity`: what `pick` answers; and `size`, `at` and `ticks`;
+- `quantized`: values are read from 8-bit bytes, good to about 1/255, `distance` to about 3%.
+Every value is `null` for a pixel outside the view.
+",
+            },
+            Help {
+                name: "input",
+                usage: "input <EVENTS>",
+                summary: "Hand its layers input events, as its window would",
+                details: "\
+EVENTS is a JSON array of the API's input events, handed over in order as a frame starts:
+- a key down or up, by its W3C `code`: {\"key\":{\"key\":\"KeyW\",\"pressed\":true}};
+- text: {\"text\":\"w\"};
+- the cursor at a pixel of the view, from its top left: {\"cursor\":[X,Y]}; \"cursor_entered\",
+  \"cursor_left\";
+- the mouse's raw motion right and down, as with the cursor grabbed: {\"motion\":[X,Y]};
+- a mouse button: {\"button\":{\"button\":\"left\",\"pressed\":true}};
+- a scroll: {\"scroll\":{\"lines\":[0,1]}};
+- the keys' focus: {\"focused\":true}.
+",
+            },
+            Help {
+                name: "snapshot",
+                usage: "snapshot [PATH]",
+                summary: "Write its world as a snapshot",
+                details: "At PATH, or in `snapshots` beside the game, which keeps the newest 8.\n",
+            },
+            Help {
+                name: "entities",
+                usage: "entities [--with <COMPONENT>] [--skip <N>] [--take <N>]",
+                summary: "List its entities, those with COMPONENT, N at a time (100)",
+                details: "",
+            },
+            Help {
+                name: "entity",
+                usage: "entity <ID>",
+                summary: "An entity and its components' values",
+                details: "\
+For an instance's entity, its root or one its prefab gives, `instance` too: what differs from its
+prefab, each component's fields, and the components it adds.
+",
+            },
+            Help {
+                name: "get",
+                usage: "get <ID> <COMPONENT> [PATH]",
+                summary: "A component's value, or its field at PATH, such as `translation.x`",
+                details: "",
+            },
+            Help {
+                name: "types",
+                usage: "types",
+                summary: "Its world's component types, their defaults and the types they hold",
+                details: "\
+Each with the value `add` gives it without one, and the descriptions of the types they hold, by
+which values are read and written.
+",
+            },
+            Help {
+                name: "hash",
+                usage: "hash",
+                summary: "Its world's hash",
+                details: "",
+            },
+            Help {
+                name: "cells",
+                usage: "cells",
+                summary: "Its world's cells, in a world of cells",
+                details: "\
+Those in, coming, kept, refused or filed; the streamed roots in each; which a scene save would
+write; and the viewers they come in around, the look's viewpoint among them while it's stopped.
+",
+            },
+            Help {
+                name: "assets",
+                usage: "assets [--kind <KIND>] [--skip <N>] [--take <N>]",
+                summary: "List its textures, models, fonts, prefabs and UIs, with their IDs",
+                details: "\
+By path from the asset root, N at a time (100), those of `--kind` (`texture`, `model`, `font`,
+`prefab` or `ui`): each one's ID, whether a layer has added it, and what's wrong with its ID file;
+and the ID files left without their assets.
+- ID files: the game, but a lockstep session's joiner, whose host does, writes each one's ID in a
+  file beside it, `<file>.meta`, as it starts and as it finds new files: commit it with its file. A
+  file renamed or moved alone keeps its ID, the game moving its ID file after it, unless it's edited
+  in the same step.
+- Reloads: an edited file of a texture, model, font, prefab, UI, sound or music the game has added
+  reloads in it, as a shader's does, with the nodes its `ModelRoot`s spawn, the instances its
+  `PrefabRoot`s link and the UIs of it. In a recorded run or a lockstep session, a model's nodes and
+  materials and a prefab's instances change as it next starts.
+",
+            },
+            Help {
+                name: "ui",
+                usage: "ui",
+                summary: "Each UI its layers added from a `.ui` file, laid out: nodes' rectangles and state",
+                details: "\
+Each UI's focus and whether it takes input. Each node's name, kind, parent, rectangle
+[x, y, width, height] from the view's top left in the canvas's units (1,080 to its height) and in
+its pixels (`pixels`, which `input` clicks at, as `capture` has them), whether it shows, what it
+says, what a widget holds, and whether a button or widget is disabled, focused or pressed. Press a
+button by clicking its pixels with `input`; type into a text field clicked so with `text`.
+",
+            },
+            Help {
+                name: "apply",
+                usage: "apply <OPERATIONS>",
+                summary: "Apply operations as one edit, all or none, which `undo` takes back",
+                details: "\
+OPERATIONS is a JSON array of the API's operations, applied between ticks. Among them:
+- {\"unlink\":{\"id\":ID}} unlinks a prefab's instance into entities of its own;
+- {\"revert\":{\"id\":ID,\"component\":C,\"path\":P}} sets a field of an instance's entity back to its
+  prefab's.
+",
+            },
+            Help {
+                name: "save-prefab",
+                usage: "save-prefab <ID> [PATH]",
+                summary: "Save an entity and its descendants as a new prefab, linked to it",
+                details: "\
+Writes the prefab and its ID file at PATH, in a folder under the asset root that its scan reaches,
+or in `prefabs` named after the entity, writing over nothing; and links ID to it as one edit, which
+`undo` unlinks, leaving the file. Its entities keep their IDs. Refused while a copy plays. Prints the
+prefab's path and name.
+",
+            },
+            Help {
+                name: "set",
+                usage: "set <ID> <COMPONENT> <PATH> <VALUE>",
+                summary: "Set a component's field, or the whole component, as one edit",
+                details: "\
+PATH is a field, such as `translation.x`, or empty for the whole component. VALUE is JSON, or else a
+string.
+",
+            },
+            Help {
+                name: "undo",
+                usage: "undo [--author <NAME>]",
+                summary: "Undo gg's last edit, or author NAME's, printing it, or `null` if there's none",
+                details: "An author is an MCP client's name, `gg`, or a scene file's path, as `scenes/grid.ron`.\n",
+            },
+            Help {
+                name: "redo",
+                usage: "redo [--author <NAME>]",
+                summary: "Redo the last edit gg, or NAME, undid",
+                details: "",
+            },
+            Help {
+                name: "edits",
+                usage: "edits [--author <NAME>]",
+                summary: "Each author's edits, or NAME's: those to undo and those to redo",
+                details: "",
+            },
+            Help {
+                name: "logs",
+                usage: "logs [--level <LEVEL>] [--follow]",
+                summary: "Its log's events at LEVEL (`warn`) and above",
+                details: "\
+Prints a line per event, as its JSON log has it, of the last 10,000 the game keeps; with
+`--follow`, then each as it's logged, until the game ends. LEVEL is `error`, `warn`, `info`, `debug`
+or `trace`. An agent can't hear the game: windowed and embedded runs log each sound or music
+started, `Sound started` or `Music started`, at `debug`.
+",
+            },
+            Help {
+                name: "debug",
+                usage: "debug [break <SCRIPT> [<LINE>...] | pause | continue | into | over | out]
+                [--wait <SECONDS>]",
+                summary: "Debug its Luau scripts: breakpoints, stepping, the stack and its locals",
+                details: "\
+Prints the debugger: where a script has stopped, with its stack and each function's locals and
+upvalues; the pause or step under way; the breakpoints; and the scripts.
+  break <SCRIPT> [<LINE>...]  Set SCRIPT's breakpoints, by its path from the project's root, such
+                              as `scripts/spin.luau`, at each LINE or the next line with code, in
+                              place of those it had; no LINE clears them
+  pause                       Stop the next line a script runs
+  continue                    From a stop, go on to the next
+  into, over, out             From a stop, step
+  --wait <SECONDS>            Wait up to SECONDS, at most 10, for a script to stop, if none has
+A stopped script waits inside its tick, and the game with it. The commands but `debug`, `logs` and
+`sessions` wait too, until `debug` has it go on. `gg run` doesn't take it for hung.
+",
+            },
+            Help {
+                name: "quit",
+                usage: "quit",
+                summary: "End it cleanly, as closing its window does, without asking",
+                details: "",
+            },
+            Help {
+                name: "call",
+                usage: "call <METHOD> [<PARAMS>]",
+                summary: "Send METHOD with PARAMS, as JSON, and print what it answers",
+                details: "",
+            },
+        ],
+    ),
+    (
+        "Serve agents",
+        &[Help {
+            name: "mcp",
+            usage: "mcp",
+            summary: "Serve the tool API to an agent that speaks MCP, on stdin and stdout",
+            details: "\
+A tool for each command that talks to a game but `quit`, `call`, `logs --follow`, and `capture`'s
+and `snapshot`'s PATHs. Its `capture` answers the PNG's path, and with `inline` the PNG; `scene`'s
+and `save-prefab`'s paths are from the game's asset root. Each call reaches the game the options
+choose, kept to what `--grant` grants, as the agent: its MCP client's name authors its edits.
+",
+        }],
+    ),
+];
+
+/// What `gg help` prints: where gg works, a line for each command, and the shared options.
+fn overview() -> String {
+    let mut text = OVERVIEW.to_owned() + "\n";
+    for (group, commands) in COMMANDS {
+        text += &format!("{group}:\n");
+        for help in commands.iter() {
+            text += &format!("  {:<12} {}\n", help.name, help.summary);
+        }
+    }
+    text + "\n" + OPTIONS.trim_end()
+}
+
+/// What `gg help <name>` prints: command `name`'s usage, summary and details.
+///
+/// Fails with `gg.args` for a name no command has, naming those there are.
+fn section(name: &str) -> Result<String, Failure> {
+    let all = COMMANDS.iter().flat_map(|(_, commands)| commands.iter());
+    let Some(help) = all.clone().find(|help| help.name == name) else {
+        let known: Vec<String> = all.map(|help| format!("`{}`", help.name)).collect();
+        return Err(bad(format!(
+            "there's no command `{name}`: it's one of {}",
+            known.join(", ")
+        )));
+    };
+    let mut text = format!("Usage: gg {}\n\n{}.", help.usage, help.summary);
+    if !help.details.is_empty() {
+        text += "\n\n";
+        text += help.details.trim_end();
+    }
+    Ok(text)
+}
 
 /// The project gg works in, as `--project` names it or gg finds it: its manifest's path, absolute,
 /// in whose directory cargo runs, and the game it names.
@@ -391,7 +651,8 @@ impl Scope {
 
 /// What `gg` was asked to do.
 enum Command {
-    Help,
+    /// The help to print: `gg help`'s, or a command's.
+    Help(String),
     Run(Run),
     Check(Check),
     Ship(Ship),
@@ -444,8 +705,8 @@ fn main() -> ExitCode {
         }
     };
     let done = match command {
-        Command::Help => {
-            print(USAGE.trim_end());
+        Command::Help(text) => {
+            print(&text);
             Ok(true)
         }
         Command::Run(run) => run::run(&run),
@@ -773,7 +1034,7 @@ fn command_first(args: &[String]) -> Result<Vec<String>, Failure> {
 fn parse(args: &[String]) -> Result<Command, Failure> {
     let args = command_first(args)?;
     let Some((name, args)) = args.split_first() else {
-        return Ok(Command::Help);
+        return Ok(Command::Help(overview()));
     };
     let mut parsed = Parsed::new(args)?;
     let call = |parsed: &mut Parsed, method: &str, params: Value| -> Result<Command, Failure> {
@@ -784,7 +1045,13 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         })
     };
     let command = match name.as_str() {
-        "help" | "-h" | "--help" => Command::Help,
+        "help" | "-h" | "--help" => {
+            let given = parsed.positional(0, 1, "help [<COMMAND>]")?;
+            Command::Help(match given.first() {
+                Some(name) => section(name)?,
+                None => overview(),
+            })
+        }
         "run" => {
             let project = parsed.scope()?;
             let run = Run {
@@ -1240,18 +1507,57 @@ mod tests {
     /// `look`'s help names each pass a look can leave out, as the API names it.
     #[test]
     fn looks_help_names_every_pass() {
+        let look = section("look").expect("a `look` section");
         for pass in gg_api::Pass::ALL {
             let name = serde_json::to_value(pass).expect("a name");
             let name = name.as_str().expect("a string");
-            assert!(USAGE.contains(&format!("`{name}`")), "{name}");
+            assert!(look.contains(&format!("`{name}`")), "{name}");
         }
     }
 
-    /// The help names each part of shading, which `capture --show` takes and `probe` answers.
+    /// `capture`'s help names each part of shading its `--show` takes, and `probe`'s each one it
+    /// answers.
     #[test]
     fn the_help_names_every_part_of_shading() {
+        let capture = section("capture").expect("a `capture` section");
+        let probing = section("probe").expect("a `probe` section");
         for name in probe::SHADING {
-            assert!(USAGE.contains(&format!("`{name}`")), "{name}");
+            for help in [&capture, &probing] {
+                assert!(help.contains(&format!("`{name}`")), "{name}: {help}");
+            }
+        }
+    }
+
+    /// `gg help` gives each command a line, each a command `parse` knows; `gg help <command>`
+    /// prints that command's section; and a name no command has is refused, naming those there are.
+    #[test]
+    fn help_lists_each_command_and_prints_its_section() {
+        let Ok(Command::Help(overview)) = parsed(&[]) else {
+            panic!("help");
+        };
+        assert!(matches!(parsed(&["help"]), Ok(Command::Help(listed)) if listed == overview));
+        for help in COMMANDS.iter().flat_map(|(_, commands)| commands.iter()) {
+            let name = help.name;
+            let listed = format!("  {name} ");
+            let shown = overview.lines().any(|line| line.starts_with(&listed));
+            assert!(shown, "{name}");
+            // Known, though it may take more than its name.
+            let refused = parsed(&[name]).err().map(|failure| failure.message);
+            let unknown = refused.is_some_and(|message| message.contains("there's no command"));
+            assert!(!unknown, "{name}");
+            for args in [["help", name], ["--help", name]] {
+                let Ok(Command::Help(text)) = parsed(&args) else {
+                    panic!("{args:?}");
+                };
+                assert!(text.starts_with(&format!("Usage: gg {name}")), "{text}");
+                assert!(text.contains(help.summary), "{text}");
+                assert!(text.contains(help.details.trim_end()), "{text}");
+            }
+        }
+        let refused = parsed(&["help", "nonsense"]).err().expect("refused");
+        assert_eq!(refused.code, "gg.args");
+        for named in ["`nonsense`", "`run`", "`save-prefab`", "`gg help`"] {
+            assert!(refused.message.contains(named), "{}", refused.message);
         }
     }
 
@@ -1304,7 +1610,7 @@ mod tests {
             panic!("a run");
         };
         assert_eq!((run.patches, run.args), (false, vec!["--vsync".to_owned()]));
-        assert!(matches!(parsed(&["--help"]), Ok(Command::Help)));
+        assert!(matches!(parsed(&["--help"]), Ok(Command::Help(_))));
         let Ok(Command::Run(run)) = parsed(&["run", "sandbox", "--hang", "30", "--", "--vsync"])
         else {
             panic!("a run");
@@ -1602,6 +1908,9 @@ mod tests {
     fn bad_arguments_are_refused_with_a_code() {
         for args in [
             &["nonsense"][..],
+            &["help", "nonsense"],
+            &["help", "run", "check"],
+            &["help", "run", "--pid", "7"],
             &["--pid", "7"],
             &["--pid"],
             &["--release", "status"],
