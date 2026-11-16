@@ -1,7 +1,6 @@
-//! Recordings and replays: a run's seed and the commands its layers' ticks applied, with the world's
-//! hash once the layers attach and after each tick; and a replay of one, which runs its ticks
-//! again, without a window or a GPU, each layer's with the commands recorded for it, and names the
-//! first hash that goes another way.
+//! Recordings and replays. A recording holds a run's seed, the commands its layers' ticks applied,
+//! and the world's hash at attach and after each tick. A replay reruns the ticks without a window
+//! or GPU, each layer's with its recorded commands, and names the first hash that differs.
 //!
 //! A recording is text, a line at a time:
 //!
@@ -19,21 +18,27 @@
 //! end
 //! ```
 //!
-//! Its header names the format and its version, the app, the engine and its build, the layers from
-//! the bottom up and the seed its world drew its IDs from; then each mod its layers loaded, its
-//! manifest's text and each of its scripts' path and text, which a replay runs in place of those
-//! installed; then come the world's hash once the layers attached, its content then its layout,
-//! and each tick's commands, `>`, the index of the layer whose tick applied them and their value as
-//! [`text`] writes it, before the tick's number and the world's hash after it; and `end`, once the
-//! run ended. A patch of the run's code applied between ticks, through the tool API, has a `patch`
-//! line, the name of the patch's library, before the tick after, where a replay, which can't apply it, stops.
-//! A cell of a world of [cells](crate::Cells) whose file came in as a tick started has a `cell`
-//! line in that tick, the cell and its file's digest, `cell 3_0_-2 9c1e5a07b2d84f36`, which a replay
-//! checks the file it read against, stopping where another file came in.
-//! Before the first line that may
-//! name it, each texture the run named otherwise than by its path, as by its ID, has a `named` line,
-//! its name and the path it names, which a replay names it by, scanning no ID file, so that it goes
-//! as the run went wherever the ID files differ.
+//! In order:
+//!
+//! - Header: format and version, app, engine and build, layers bottom up, and the seed its world
+//!   drew its IDs from.
+//! - Each loaded mod: manifest text, then each script's path and text. A replay runs these, not
+//!   the installed mods.
+//! - The world's hash at attach: content, then layout.
+//! - Per tick, commands as `>`, the applying layer's index and the value as [`text`] writes it;
+//!   then the tick's number and the world's hash after it.
+//! - `end`, once the run ended.
+//!
+//! A `patch` line (the library name) precedes the tick after a patch of the run's code applied
+//! between ticks through the tool API. A replay can't apply it and stops there.
+//!
+//! A `cell` line in a tick, `cell 3_0_-2 9c1e5a07b2d84f36`, gives a cell of a world of
+//! [cells](crate::Cells) whose file came in as the tick started, and its file's digest. A replay
+//! stops where the file it read differs.
+//!
+//! A `named` line, before the first line that may name it, gives each texture named otherwise than
+//! by path (as by ID): its name and path. A replay names it so, scanning no ID file, so it goes as
+//! the run went wherever the ID files differ.
 
 pub(crate) mod text;
 
@@ -58,59 +63,50 @@ use crate::luau::ModText;
 use crate::{App, BUILD, Context, Tick, World, WorldHash, perf};
 use text::Text;
 
-/// A recording's first line: its format, and the format's version, which a change to its lines or
-/// to its values' text takes to the next.
+/// A recording's first line. A change to its lines or values' text takes the version up.
 const FORMAT: &str = "gg-recording 7";
 
-/// The format of the recordings before cells, `cell` lines, which this engine reads too.
+/// The format before `cell` lines. Read too.
 const BEFORE_CELLS: &str = "gg-recording 6";
 
-/// The format of the recordings before an `Amend` held several operations, whose `Amend` has one
-/// `operation`, and before the Inspector's `Delete` and `Duplicate` held several entities, whose
-/// have one `entity`, which this engine reads too.
+/// The format when `Amend` held several operations (now one `operation`) and the Inspector's
+/// `Delete` and `Duplicate` several entities (now one `entity`). Read too.
 const BEFORE_GESTURES: &str = "gg-recording 5";
 
-/// The format of the recordings before patches, `patch` lines, which this engine reads too.
+/// The format before `patch` lines. Read too.
 const BEFORE_PATCHES: &str = "gg-recording 4";
 
-/// The format of the recordings before mods, `mod` lines, which this engine reads too, as runs
-/// without mods.
+/// The format before `mod` lines. Read too, as runs without mods.
 const BEFORE_MODS: &str = "gg-recording 3";
 
-/// The format of the recordings before textures' names, `named` lines, whose values name every
-/// texture by its path, which this engine reads too.
+/// The format before `named` lines: values name every texture by path. Read too.
 const BEFORE_NAMES: &str = "gg-recording 2";
 
-/// The format of the recordings before edits from outside the layers, `@` lines, which this
-/// engine reads too.
+/// The format before `@` lines (edits from outside the layers). Read too.
 const BEFORE_EDITS: &str = "gg-recording 1";
 
-/// The engine, as a recording's `engine` line names it, and the tool API's session file: its
-/// version and its build.
+/// Version and build, as a recording's `engine` line and the tool API's session file name it.
 pub(crate) fn engine() -> String {
     format!("{} {BUILD}", env!("CARGO_PKG_VERSION"))
 }
 
-/// Writes a run's recording as it goes, each line to the file once it's whole, unbuffered, so that
-/// a run that's killed, or that crashes, leaves every line before; a tick that panics leaves the
-/// commands it was applying too.
+/// Writes a run's recording as it goes, each whole line unbuffered, so a killed or crashed run
+/// leaves every line before; a panicking tick leaves its commands too.
 pub(crate) struct Recorder {
     path: PathBuf,
     file: File,
     app: &'static str,
-    /// The line being written, kept for its memory, so that a tick without commands allocates
-    /// nothing.
+    /// Reused, so a tick without commands allocates nothing.
     line: String,
-    /// Why the recording stopped, after which nothing more is written: the first write that failed,
-    /// or the first command that wouldn't replay.
+    /// Why it stopped (nothing more is written): the first failed write or unreplayable command.
     failed: Option<Error>,
-    /// How many textures, models and fonts there were as it last wrote their names, the engine's
-    /// white texture among them.
+    /// How many textures, models and fonts there were at the last `named` write, the engine's
+    /// white texture included.
     named: Counts,
 }
 
 impl Recorder {
-    /// Creates the file at `path`, in place of any there, for a recording of `app`.
+    /// Creates the file at `path`, replacing any, for a recording of `app`.
     ///
     /// Fails with `record.file` if it can't.
     pub(crate) fn create(path: &Path, app: &'static str) -> Result<Self> {
@@ -128,8 +124,7 @@ impl Recorder {
         })
     }
 
-    /// Writes the header: the app, the engine, `layers`, the names of the layers' types from the
-    /// bottom up, and `seed`, where the stream the world draws its IDs from starts.
+    /// Writes the header: `layers` are type names, bottom up; `seed` starts the world's ID stream.
     pub(crate) fn start(&mut self, layers: &[&str], seed: u64) {
         info!(
             path = %self.path.display(),
@@ -148,8 +143,7 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes the mods the layers loaded, `mods`, and the world's hash, once the layers have
-    /// attached.
+    /// Writes the loaded `mods` and the world's hash once the layers have attached.
     pub(crate) fn attached(&mut self, world: &World, mods: &[ModText]) {
         for mod_text in mods {
             self.line.clear();
@@ -165,9 +159,8 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes a `named` line for each texture, model and font of `world`'s that the layers added
-    /// since it last wrote them and that's named otherwise than by its path, before a line that may
-    /// name it.
+    /// Writes a `named` line for each texture, model and font added since the last call that isn't
+    /// named by its path, before any line that may name it.
     fn names(&mut self, world: &World) {
         let assets = world.assets();
         if assets.counts() == self.named {
@@ -183,10 +176,10 @@ impl Recorder {
         self.named = assets.counts();
     }
 
-    /// Writes the commands `commands` holds, the queue of the layer at `layer` from the bottom of
-    /// the stack, of type `name`, as its tick is about to apply them, with the entities they hold
-    /// by their IDs in `world`; but stops the recording before one that the queue's
-    /// [`check`](Commands::check) says its replay would refuse, as one holding something opaque.
+    /// Writes `commands`, the queue of layer `layer` (from the bottom) of type `name`, before its
+    /// tick applies them, entities by ID in `world`. Stops the recording before a command the
+    /// queue's [`check`](Commands::check) says a replay would refuse, such as one holding
+    /// something opaque.
     pub(crate) fn queued(
         &mut self,
         layer: usize,
@@ -216,9 +209,8 @@ impl Recorder {
         }
     }
 
-    /// Writes `edit`, an author's from outside the layers as a value, applied between ticks, with
-    /// the entities it holds by their IDs in `world`: it belongs to the tick after, before its
-    /// commands.
+    /// Writes `edit` (from outside the layers, applied between ticks), entities by ID in `world`.
+    /// It belongs to the tick after, before its commands.
     pub(crate) fn edited(&mut self, edit: &crate::reflect::Value, world: &World) {
         self.names(world);
         self.line.clear();
@@ -228,10 +220,9 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes that the run's code was patched between ticks, with the patch's library at
-    /// `library`, by its file's name alone, which says which patch it was without where the
-    /// machine kept it: it belongs to the tick after, before its edits and commands, where a
-    /// replay, which can't apply the patch, stops.
+    /// Writes a patch of the run's code between ticks, naming the library at `library` by file
+    /// name alone, not where the machine kept it. It belongs to the tick after, before its edits
+    /// and commands; a replay stops there.
     #[cfg(feature = "dev")]
     pub(crate) fn patched(&mut self, library: &Path) {
         let name = library.file_name().unwrap_or(library.as_os_str());
@@ -242,15 +233,14 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes that cell `cell`'s file, of digest `digest`, came in as the tick started: it belongs
-    /// to that tick, as its commands do.
+    /// Writes that `cell`'s file, of `digest`, came in as the tick started; it belongs to that
+    /// tick.
     pub(crate) fn cell_came(&mut self, cell: Cell, digest: u64) {
         self.line.clear();
         writeln!(self.line, "cell {cell} {digest:016x}").expect("a string takes any text");
         self.flush();
     }
 
-    /// Writes the world's hash after `tick`.
     pub(crate) fn ticked(&mut self, tick: Tick, world: &World) {
         self.names(world);
         self.line.clear();
@@ -259,14 +249,12 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes that the run has ended.
     pub(crate) fn end(&mut self) {
         self.line.clear();
         self.line.push_str("end\n");
         self.flush();
     }
 
-    /// Writes the line, unless the recording has stopped.
     fn flush(&mut self) {
         if self.failed.is_none()
             && let Err(error) = self.file.write_all(self.line.as_bytes())
@@ -278,10 +266,9 @@ impl Recorder {
         }
     }
 
-    /// Fails once the recording has stopped, which ends at the last line written whole: with
-    /// `record.file` once a write has failed, and with `record.bad_command`, naming the layer, the
-    /// command and what its replay would refuse of it, once a layer has queued one that wouldn't
-    /// replay.
+    /// Fails once the recording has stopped, at the last whole line: `record.file` after a failed
+    /// write; `record.bad_command`, naming the layer, command and what a replay would refuse,
+    /// after a layer queued one that wouldn't replay.
     pub(crate) fn check(&self) -> Result<()> {
         match &self.failed {
             Some(error) => Err(Error::new(error.code(), error.to_string())),
@@ -293,15 +280,14 @@ impl Recorder {
 /// A recording, as read.
 struct Recording {
     app: String,
-    /// The engine that recorded it, with its build.
+    /// The recording engine and build.
     engine: String,
-    /// The names of the layers' types, from the bottom up.
+    /// Layer type names, bottom up.
     layers: Vec<String>,
     seed: u64,
-    /// The mods its run's layers loaded, which a replay runs in place of those installed.
+    /// The mods the run loaded. A replay runs these, not the installed ones.
     mods: Vec<ModText>,
-    /// The name its run gave each texture it named otherwise than by its path, with the path it
-    /// names.
+    /// Each texture not named by its path: its name and path.
     #[cfg_attr(
         not(feature = "dev"),
         allow(
@@ -310,40 +296,36 @@ struct Recording {
         )
     )]
     names: Vec<(Arc<str>, Arc<str>)>,
-    /// The world's hash once the layers attached, and the line that gives it.
+    /// The world's hash at attach, and its line.
     attach: (WorldHash, usize),
     ticks: Vec<Ticked>,
-    /// Whether it has its `end` line, which one whose run was cut short hasn't.
+    /// Whether it has its `end` line; a run cut short hasn't.
     complete: bool,
 }
 
-/// A tick of a recording: the commands its layers' ticks applied, in the order they did, and the
-/// world's hash after it, with the line that gives it; none for the commands after the last hash
-/// of a recording cut short as their tick ran.
+/// A recorded tick: its commands in order, and the world's hash after it with its line. The hash
+/// is `None` for the commands after the last hash of a recording cut short.
 #[derive(Default)]
 struct Ticked {
-    /// The library of the first patch of the run's code applied before it, and the line that
-    /// gives it, which a replay stops at.
+    /// The library of the first patch applied before it, and its line. A replay stops there.
     patch: Option<(String, usize)>,
-    /// The edits from outside the layers applied before it, each a value and the line that gives it.
+    /// The edits applied before it, each a value and its line.
     edits: Vec<(Text, usize)>,
-    /// The cells whose files came in as it started, each with its file's digest and the line that
-    /// gives it.
+    /// The cells whose files came in as it started: cell, file digest and line.
     cells: Vec<(Cell, u64, usize)>,
     commands: Vec<Recorded>,
     hash: Option<(WorldHash, usize)>,
 }
 
-/// A command recorded: the layer's whose tick applied it, by its index from the bottom of the
-/// stack, its value, and the line that gives it.
+/// A recorded command: its layer's index (bottom up), value and line.
 struct Recorded {
     layer: usize,
     value: Text,
     line: usize,
 }
 
-/// The lines of `text` that end in a line break, numbered from 1: all of them, but the last of a
-/// recording whose writing stopped partway through it.
+/// The lines of `text` that end in a line break, numbered from 1: all but a last one cut off
+/// mid-write.
 fn whole_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     let lines = text
         .split_inclusive('\n')
@@ -351,17 +333,16 @@ fn whole_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     lines.enumerate().map(|(i, line)| (i + 1, line))
 }
 
-/// The error that line `line` isn't one of a recording's.
+/// Line `line` isn't a recording's.
 fn syntax(line: usize, what: impl fmt::Display) -> Error {
     Error::new("replay.syntax", format!("line {line}: {what}"))
 }
 
-/// The error that the recording isn't one the app replays.
+/// The recording isn't one the app replays.
 fn format_error(what: impl fmt::Display) -> Error {
     Error::new("replay.format", what.to_string())
 }
 
-/// A hash as the recording's lines write it, as its `Display` does.
 fn parse_hash(text: &str) -> Option<WorldHash> {
     let (content, layout) = text.split_once(' ')?;
     Some(WorldHash {
@@ -370,20 +351,21 @@ fn parse_hash(text: &str) -> Option<WorldHash> {
     })
 }
 
-/// The number `text` is as 16 hex digits, as a recording writes its seed and each half of a hash.
+/// `text` as 16 hex digits: a seed or half a hash.
 fn hex16(text: &str) -> Option<u64> {
     let digits = text.len() == 16 && text.bytes().all(|b| b.is_ascii_hexdigit());
     digits.then(|| u64::from_str_radix(text, 16).ok()).flatten()
 }
 
 impl Recording {
-    /// Reads `text`, every line of it but a last one without its line break, which a run killed as
-    /// it wrote the line leaves.
+    /// Reads `text`, but for a last line without its line break (a run killed mid-write).
     ///
-    /// Fails with `replay.format` for text that isn't a recording, is of another version of the
-    /// format, or ends in its header; and, saying at which line, with `replay.syntax` for a line
-    /// that isn't one of a recording's, a value that isn't one, or a tick out of order, and with
-    /// `replay.bad_command` for a command of a layer the recording hasn't.
+    /// Fails with:
+    ///
+    /// - `replay.format`: not a recording, another version, or ends in its header.
+    /// - `replay.syntax`, naming the line: not a recording's line, a bad value, or a tick out of
+    ///   order.
+    /// - `replay.bad_command`, naming the line: a command of a layer the recording hasn't.
     fn parse(text: &str) -> Result<Self> {
         let mut lines = whole_lines(text).peekable();
         match lines.next() {
@@ -419,7 +401,7 @@ impl Recording {
         };
         let app = header(&mut lines, "app")?.1.to_owned();
         let engine = header(&mut lines, "engine")?.1.to_owned();
-        // None, for an app without layers, as the player is.
+        // Empty for an app without layers, like the player.
         let layers = header(&mut lines, "layers")?.1.split_whitespace();
         let layers: Vec<String> = layers.map(str::to_owned).collect();
         let (number, seed) = header(&mut lines, "seed")?;
@@ -436,7 +418,7 @@ impl Recording {
             let what = "a texture's name is a list of it and the path it names";
             read.ok_or_else(|| syntax(number, what))
         };
-        // Those of the textures the layers added as they loaded, before the attach.
+        // The textures the layers added as they loaded, before the attach.
         let mut names = Vec::new();
         while let Some((number, line)) = lines.next_if(|(_, line)| line.starts_with("named ")) {
             names.push(named(number, &line["named ".len()..])?);
@@ -509,19 +491,18 @@ impl Recording {
                 recording.ticks.push(std::mem::take(&mut ticked));
             }
         }
-        // A tick cut short, whose commands run again unchecked, so that what stopped it stops the
-        // replay too; but not edits or patches alone, applied after the last tick, which no tick
-        // ran with.
+        // A tick cut short runs its commands again unchecked, so what stopped it stops the replay
+        // too. Edits or patches alone, applied after the last tick, have no tick to run with.
         if !ticked.commands.is_empty() {
             recording.ticks.push(ticked);
         }
         Ok(recording)
     }
 
-    /// The command line `number`, `command` after its `> `, gives.
+    /// The command of line `number`, `command` after its `> `.
     fn command(&self, number: usize, command: &str) -> Result<Recorded> {
         let (layer, value) = command.split_once(' ').unwrap_or((command, ""));
-        // Where the value starts in the line, after `> `, the layer and a space.
+        // Where the value starts: after `> `, the layer and a space.
         let column = "> ".len() + layer.len() + 2;
         let layers = self.layers.len();
         let layer = layer.parse().ok().filter(|&layer| layer < layers);
@@ -541,10 +522,10 @@ impl Recording {
     }
 }
 
-/// A recording, run again: its app's layers attached in a world from its seed, without a window or
-/// a GPU, and its ticks run alone, with no update, UI or event between them, each layer's with the
-/// commands recorded for it in place of what it queued itself, each checked against the world's
-/// hash recorded after it. Dropped, it detaches the layers.
+/// A recording run again: the app's layers attach in a world from its seed, then its ticks run
+/// alone (no update, UI or event between), without a window or GPU. Each layer's tick gets its
+/// recorded commands, not what it queued, and each is checked against the recorded hash. Dropped,
+/// it detaches the layers.
 #[doc(hidden)]
 pub struct Replay {
     app: App,
@@ -555,22 +536,25 @@ pub struct Replay {
 }
 
 impl Replay {
-    /// Reads `text`, a recording of `app`, and attaches `app`'s layers in a world from its seed,
-    /// checking the world's hash once they have.
+    /// Reads `text`, a recording of `app`, attaches the layers in a world from its seed and checks
+    /// the world's hash.
     ///
-    /// Fails with `replay.format` for text that isn't a recording, is of another version of the
-    /// format, ends in its header, or is of another app or other layers; and, saying at which line,
-    /// with `replay.syntax` for a line that isn't one of a recording's, with `replay.bad_command`
-    /// for a command of a layer the recording hasn't, and with `replay.diverged`, as
-    /// [`step`](Self::step) does, if the hash isn't the one recorded; and as the app's project's
-    /// manifest didn't read, as [`App::project`] says.
+    /// Fails with:
+    ///
+    /// - `replay.format`: not a recording, another version, ends in its header, or another app or
+    ///   other layers.
+    /// - `replay.syntax`, naming the line: not a recording's line.
+    /// - `replay.bad_command`, naming the line: a command of a layer the recording hasn't.
+    /// - `replay.diverged`, like [`step`](Self::step).
+    ///
+    /// Also fails if the project manifest didn't read, as [`App::project`] says.
     pub fn new(app: App, text: &str) -> Result<Self> {
         let replay = Self::attach(app, text)?;
         replay.check(None)?;
         Ok(replay)
     }
 
-    /// As [`new`](Self::new), without checking the world's hash.
+    /// Like [`new`](Self::new), without checking the world's hash.
     fn attach(mut app: App, text: &str) -> Result<Self> {
         if let Some(Err(error)) = app.project.take_if(|project| project.is_err()) {
             return Err(error);
@@ -598,9 +582,9 @@ impl Replay {
         let mut cx = Context::seeded(recording.seed);
         cx.mods.game = app.name.to_owned();
         cx.mods.recorded = Some(recording.mods.clone());
-        // So that its textures are named as the run's were, by the names the recording gives them
-        // or by their paths from the root, scanning no ID file, one that can't be loaded standing
-        // in, and it starts in the run's scene, read from the game's package if it has one.
+        // Textures are named as in the run: by the recording's names or paths from the root,
+        // scanning no ID file (an unloadable one stands in). It starts in the run's scene, read
+        // from the game's package if any.
         cx.root.clone_from(&app.root);
         cx.files = app.files.clone();
         #[cfg(feature = "dev")]
@@ -616,18 +600,20 @@ impl Replay {
         })
     }
 
-    /// Runs the recording's next tick, and returns it; or `None` past its last. Each layer's tick
-    /// gets the commands recorded for it, read against the world as its tick finds it, and the
-    /// world's hash after the tick is checked against the one recorded, but for commands after the
-    /// last hash of a recording cut short.
+    /// Runs the next tick and returns it, or `None` past the last. Each layer's tick gets its
+    /// recorded commands, read against the world as the tick finds it. The hash after the tick is
+    /// checked, except for commands after the last hash of a recording cut short.
     ///
-    /// Fails, saying at which line, with `replay.bad_command` for a command recorded for a layer
-    /// that queues none, or that its layer refuses; with `replay.patched`, running nothing, at a
-    /// tick that the run's code was patched before, as the replay runs its own code, which can't
-    /// follow; with `replay.cell_file` where a cell came in from another file than the run's, as
-    /// [`check_cells`](Self::check_cells) says; and with `replay.diverged` if the world's hash
-    /// isn't the one recorded, saying which part of it differs, with both hashes, and both engines'
-    /// builds where another build recorded it, with the world as the tick left it.
+    /// Fails, naming the line, with:
+    ///
+    /// - `replay.bad_command`: a command for a layer that queues none, or that its layer refuses.
+    /// - `replay.patched`, running nothing: the run's code was patched before this tick, and the
+    ///   replay runs its own.
+    /// - `replay.cell_file`: a cell came in from another file than the run's, as
+    ///   [`check_cells`](Self::check_cells) says.
+    /// - `replay.diverged`: the hash differs. It says which part (content, layout or both), gives
+    ///   both hashes, and both builds if another build recorded it. The world stays as the tick
+    ///   left it.
     pub fn step(&mut self) -> Result<Option<Tick>> {
         let Some(tick) = self.run_tick()? else {
             return Ok(None);
@@ -636,11 +622,10 @@ impl Replay {
         Ok(Some(tick))
     }
 
-    /// Fails with `replay.cell_file`, naming the line, the tick and the file, where a cell whose
-    /// file came in as `tick` started in the run came in from a file of another digest here, or
-    /// didn't come in: as the replay reads the cells' files as they are now, which an edit since
-    /// changes. What came is what the tick noted as it started, as the run's recording wrote it,
-    /// since a cell that came may go out again, as it came, as the tick ends.
+    /// Fails with `replay.cell_file`, naming line, tick and file, where a cell that came in as
+    /// `tick` started came in here from a file of another digest, or not at all. The replay reads
+    /// the cells' files as they are now, which an edit since changes. What came is what the tick
+    /// noted as it started: a cell that came may go out again as the tick ends.
     fn check_cells(&self, tick: Tick) -> Result<()> {
         let ticked = &self.recording.ticks[tick.number as usize];
         let world = self.cx.world();
@@ -667,7 +652,7 @@ impl Replay {
         Ok(())
     }
 
-    /// As [`step`](Self::step), without checking the world's hash.
+    /// Like [`step`](Self::step), without checking the world's hash.
     fn run_tick(&mut self) -> Result<Option<Tick>> {
         let Some(ticked) = self.recording.ticks.get(self.ran) else {
             return Ok(None);
@@ -684,8 +669,8 @@ impl Replay {
             return Err(Error::new("replay.patched", message));
         }
         self.ran += 1;
-        // As the run did, refused where it refused them, which the hash after the tick checks; each
-        // read once the textures it names are loaded, as the run had them.
+        // Refused where the run refused them (the hash checks it), each read once the textures it
+        // names are loaded, as in the run.
         for (edit, line) in &ticked.edits {
             self.cx.load_followed(edit);
             let edit = Edit::from_value(&edit.value(self.cx.world())).map_err(|error| {
@@ -731,9 +716,8 @@ impl Replay {
         Ok(Some(tick))
     }
 
-    /// Checks the world's hash against the one recorded once the layers attached, for `None`, or
-    /// after `tick`, if one was; and, first, the files of the cells that came in as `tick`
-    /// started, as [`check_cells`](Self::check_cells) does.
+    /// Checks the world's hash against the recorded one at attach (`None`) or after `tick`, if
+    /// any; for a tick, the cells' files first, as [`check_cells`](Self::check_cells) does.
     fn check(&self, tick: Option<Tick>) -> Result<()> {
         if let Some(tick) = tick {
             self.check_cells(tick)?;
@@ -772,17 +756,16 @@ impl Replay {
         Err(Error::new("replay.diverged", message))
     }
 
-    /// The world, as the last tick run left it, or the layers' attach before the first.
+    /// The world after the last tick, or the attach before the first.
     pub fn world(&self) -> &World {
         self.cx.world()
     }
 
-    /// The recording `text`, of `app`, with the hashes this build gives in place of those it
-    /// recorded, at its attach and after each tick: for a change meant to change the simulation,
-    /// or what the hash reads. A last line without its line break is left out.
+    /// The recording `text`, of `app`, with this build's hashes in place of the recorded ones, for
+    /// a change meant to change the simulation or what the hash reads. A last line without its
+    /// line break is dropped.
     ///
-    /// Fails as [`new`](Self::new) and [`step`](Self::step) do, but for a hash that goes another
-    /// way.
+    /// Fails like [`new`](Self::new) and [`step`](Self::step), except for a differing hash.
     pub fn rewrite(app: App, text: &str) -> Result<String> {
         let mut replay = Self::attach(app, text)?;
         let mut lines: Vec<String> = whole_lines(text).map(|(_, line)| line.to_owned()).collect();
@@ -797,9 +780,8 @@ impl Replay {
         Ok(lines.iter().map(|line| format!("{line}\n")).collect())
     }
 
-    /// Runs the replay as `--replay` does: checks the hash at the layers' attach, then runs each
-    /// tick and checks its hash, to the last, or, with `dump`, to where it says, and writes the
-    /// world there to `out`, stdout for `--replay`, as [`World::dump`] writes it.
+    /// Runs as `--replay` does: checks the attach hash, then runs and checks each tick to the last
+    /// or, with `dump`, where it says, writing the world there to `out` as [`World::dump`] does.
     pub(crate) fn run(&mut self, dump: Option<Dump>, out: &mut impl io::Write) -> Result<()> {
         let attached = self.check(None);
         if dump == Some(Dump::Attach) {
@@ -827,7 +809,6 @@ impl Replay {
         }
     }
 
-    /// Writes the world to `out`, stdout for `--replay`, as [`World::dump`] writes it.
     fn dump(&self, out: &mut impl io::Write) -> Result<()> {
         let written = out.write_all(self.world().dump().as_bytes());
         written.and_then(|()| out.flush()).map_err(|error| {
@@ -843,9 +824,8 @@ impl Drop for Replay {
     }
 }
 
-/// Replays the recording at `path`, of `app`, as `--replay` does: to its end, or, with `dump`, to
-/// where it says, writing the world there to stdout; and returns the exit status, 0 if the world's
-/// hash was the one recorded wherever it was checked.
+/// Replays the recording at `path`, of `app`, as `--replay` does: to its end or, with `dump`, where
+/// it says, writing the world to stdout. Returns the exit status: 0 if every checked hash matched.
 pub(crate) fn replay(app: App, path: &Path, dump: Option<Dump>) -> ExitCode {
     let started = Instant::now();
     let failed = |error: Error, hint: &str| {
@@ -861,8 +841,7 @@ pub(crate) fn replay(app: App, path: &Path, dump: Option<Dump>) -> ExitCode {
             return failed(Error::new("replay.file", message).with_source(error), "");
         }
     };
-    // Its whole lines alone, since the last, cut off as it was written, may end partway through a
-    // character.
+    // Whole lines alone: a last line cut off mid-write may end partway through a character.
     let whole = bytes
         .iter()
         .rposition(|&b| b == b'\n')
@@ -933,11 +912,11 @@ mod tests {
         args, recording,
     };
 
-    /// A command of [`Queuer`]'s: spawns an entity turned by this angle.
+    /// Spawns an entity turned by this angle.
     #[derive(Reflect)]
     struct Spawn(f32);
 
-    /// Queues a spawn as it attaches, and at every third update, which its next tick makes.
+    /// Queues a spawn at attach and every third update.
     #[derive(Default)]
     struct Queuer {
         commands: Vec<Spawn>,
@@ -970,12 +949,11 @@ mod tests {
         }
     }
 
-    /// A command of [`Placer`]'s: spawns this sprite, with a handle of the layer's own, which is
-    /// opaque, so that no value makes it.
+    /// Spawns this sprite, with a handle of the layer's own: opaque, so no value makes it.
     #[derive(Reflect)]
     struct Place(Sprite, #[reflect(opaque)] Handle);
 
-    /// Queues a sprite to place as it attaches, which its next tick spawns.
+    /// Queues a sprite at attach.
     #[derive(Default)]
     struct Placer(Vec<Place>);
 
@@ -995,22 +973,20 @@ mod tests {
         }
     }
 
-    /// What [`Pilot`]'s keys do.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Act {
         Push,
         Tap,
     }
 
-    /// A command of [`Pilot`]'s: a change of one of its actions.
+    /// A change of one of [`Pilot`]'s actions.
     #[derive(Reflect)]
     enum Control {
         Push(f32),
         Tap,
     }
 
-    /// What [`Pilot`]'s commands leave: how it's pushed, how many ticks it was pushed at, and its
-    /// taps.
+    /// What [`Pilot`]'s commands leave: its push, the ticks it was pushed at, and its taps.
     #[derive(Clone, Copy, Component)]
     struct Piloted {
         push: f32,
@@ -1018,8 +994,8 @@ mod tests {
         taps: u32,
     }
 
-    /// Pushes its entity while the left or the right arrow is held, and counts Space's taps,
-    /// queuing its actions' changes as its events come, and noting the tick each applies at.
+    /// Pushes while an arrow key is held and counts Space's taps, queuing action changes as events
+    /// come and noting the tick each applies at.
     struct Pilot {
         actions: Actions<Act>,
         commands: Vec<Control>,
@@ -1087,13 +1063,13 @@ mod tests {
         }
     }
 
-    /// A command of [`Painter`]'s: spawns a sprite of this texture.
+    /// Spawns a sprite of this texture.
     #[cfg(feature = "dev")]
     #[derive(Reflect)]
     struct Paint(crate::Texture);
 
-    /// Adds the texture `assets/stone.png` under the app's root as it loads, and queues a sprite of
-    /// it as it attaches, which its next tick spawns.
+    /// Adds `assets/stone.png` under the root as a texture at load and queues a sprite of it at
+    /// attach.
     #[cfg(feature = "dev")]
     #[derive(Default)]
     struct Painter {
@@ -1128,21 +1104,21 @@ mod tests {
         }
     }
 
-    /// An app of a layer whose commands its updates queue, under one without.
+    /// A command-queuing layer under one without.
     fn two_layers() -> App {
         let app = App::new("Recorded").layer(Queuer::default());
         app.layer(Turner(Rc::default()))
     }
 
-    /// A run of `app` recorded as it goes, frames `frames` apart, as a windowed run steps them:
-    /// its recording, the ticks it ran, and its world's hash as it ended.
+    /// Records `app` over frames `frames` apart, as a windowed run steps them: the recording,
+    /// ticks run and final world hash.
     fn recorded(app: App, frames: &[Duration]) -> (String, u64, WorldHash) {
         let (text, ticks, world) = recorded_with(app, frames, |_, _, _| {});
         (text, ticks, world.hash())
     }
 
-    /// As [`recorded`], with `between` sending the stack events before each frame, given the ticks
-    /// run before it; and the world as it ended.
+    /// Like [`recorded`], with `between` sending events before each frame (given the ticks run so
+    /// far), and the final world.
     fn recorded_with(
         app: App,
         frames: &[Duration],
@@ -1151,15 +1127,13 @@ mod tests {
         recorded_in(app, Context::new(None), frames, between)
     }
 
-    /// As [`recorded_with`], in `cx`.
     fn recorded_in(
         mut app: App,
         mut cx: Context,
         frames: &[Duration],
         mut between: impl FnMut(&mut Stack, &mut Context, u64),
     ) -> (String, u64, World) {
-        // The thread's own: the tests that record run at once, and a new scratch directory empties
-        // one of its name.
+        // Per thread: recording tests run at once, and a new scratch directory empties its name.
         let thread = std::thread::current().id();
         let dir = Scratch::new(&format!("recording-{thread:?}"));
         fs::create_dir_all(&dir.0).expect("a directory");
@@ -1180,8 +1154,7 @@ mod tests {
         (text, stepper.ticks, ended)
     }
 
-    /// A replay of `text` by `app` to its end: the ticks it ran and its world's hash, or the ticks
-    /// it ran before the error it stopped at.
+    /// Replays `text` to its end: ticks run and final hash, or ticks run before the error.
     fn replay_all(app: App, text: &str) -> Result<(u64, WorldHash), (u64, gg_core::Error)> {
         let mut replay = Replay::new(app, text).map_err(|error| (0, error))?;
         let mut ticks = 0;
@@ -1197,19 +1170,17 @@ mod tests {
         }
     }
 
-    /// `text` with its line `at`, from 0, in place of `line`.
     fn changed(text: &str, at: usize, line: &str) -> String {
         let mut lines: Vec<&str> = text.lines().collect();
         lines[at] = line;
         lines.iter().map(|line| format!("{line}\n")).collect()
     }
 
-    /// A run that names a texture by its ID records the name, with its path, before the line that
-    /// first names it, and the commands that hold it by it; and its replay names it so, reading no
-    /// ID file, so that it replays to its hashes once the ID file is gone, loading the texture an
-    /// edit names, which no layer adds, as it reads the edit. Without the names, the replay finds
-    /// no file for the IDs the command and the edit name, so stand-ins take their places, and the
-    /// hashes, which read the names alone, match all the same.
+    /// A texture named by ID is recorded with its path before the first line naming it. Replay
+    /// names it so, reading no ID file, and matches its hashes once the ID file is gone, loading
+    /// the texture an edit names as it reads the edit. Without the `named` lines, stand-ins take
+    /// the places of the IDs the command and edit name; hashes read names alone, so they still
+    /// match.
     #[cfg(feature = "dev")]
     #[test]
     fn a_replay_names_textures_as_its_recording_says_reading_no_id_file() {
@@ -1237,7 +1208,7 @@ mod tests {
         let mut cx = Context::seeded(1).root(root.clone());
         run.stack.attach(&mut cx);
         run.stack.tick(&mut cx, Tick { number: 0 });
-        // An edit that names a texture loaded for it, as the tool API loads one.
+        // An edit naming a texture loaded for it, as the tool API loads one.
         cx.load_named([crate::assets::Asset::Texture(edited)], false);
         let sprite = Sprite {
             texture: cx.world().assets().texture(edited),
@@ -1286,10 +1257,9 @@ mod tests {
         assert_eq!((replayed, stood_in()), ((2, ended), 2));
     }
 
-    /// A run recorded as it goes at a frame rate of its own, of a layer whose commands its updates
-    /// queue, under one without, replays without a frame to the hashes it recorded, and to the
-    /// world it ended with; a copy of it with a command changed, or a hash, goes another way at
-    /// that tick; and a copy cut off partway through a line replays its whole lines.
+    /// A run recorded at its own frame rate replays, without frames, to its hashes and final
+    /// world. A copy with a changed command or hash diverges at that tick; one cut off mid-line
+    /// replays its whole lines.
     #[test]
     fn a_recorded_run_replays_to_its_hashes() {
         let app = two_layers;
@@ -1313,7 +1283,7 @@ mod tests {
 
         let tick_of = |line: &str| line.split_once(' ')?.0.parse::<u64>().ok();
         let changed = |at: usize, line: &str| changed(&text, at, line);
-        // The last command's tick, which its next hash is of.
+        // The last command's tick, whose hash follows.
         let command = lines.iter().rposition(|line| line.starts_with("> 0 "));
         let command = command.expect("a command");
         let hash = lines[command..]
@@ -1342,11 +1312,10 @@ mod tests {
         assert_eq!(ticks, tick + 1);
     }
 
-    /// A layer's actions, fed key events between frames of a rate of their own, change at the
-    /// first tick after the events come, as the commands its event queues: an axis is held at every
-    /// tick until its release, from either key, a tap shorter than a frame applies once, and a
-    /// repeat, a release without its press and a key not bound queue none; and the run replays to
-    /// its hashes.
+    /// Actions fed key events between frames change at the first tick after, as queued commands.
+    /// An axis holds every tick until released from either key; a tap shorter than a frame applies
+    /// once; a repeat, a release without its press and an unbound key queue none. The run replays
+    /// to its hashes.
     #[test]
     fn actions_change_at_the_first_tick_after_their_events() {
         let ms = Duration::from_millis;
@@ -1360,8 +1329,7 @@ mod tests {
             pressed: true,
             repeat: true,
         };
-        // After how many ticks each event comes, and whether the layer queues a command for it:
-        // not for Space's release, which it doesn't apply.
+        // After which tick each event comes, and whether it queues a command (not Space's release).
         let script = [
             (4, key(Key::ArrowRight, true), true),
             (6, repeat, false),
@@ -1406,10 +1374,9 @@ mod tests {
     }
 
     #[cfg(feature = "dev")]
-    /// Edits from outside the layers, applied between ticks, are recorded as they were asked for,
-    /// before the commands of the tick after, and replay to the hashes recorded: a create, which
-    /// draws its ID as the run did, two sets of what it made in one gesture, an edit refused, and
-    /// an undo, which undoes the gesture whole.
+    /// Edits between ticks are recorded before the next tick's commands and replay to the recorded
+    /// hashes: a create (drawing its ID as the run did), two sets in one gesture, a refused edit,
+    /// and an undo of the whole gesture.
     #[test]
     fn edits_between_ticks_replay() {
         let ms = Duration::from_millis;
@@ -1470,7 +1437,7 @@ mod tests {
         assert!(!set, "the undo undid both sets of the gesture");
         let replayed = replay_all(two_layers(), &text).map_err(|(_, error)| error.to_string());
         assert_eq!(replayed, Ok((ticks, ended.hash())));
-        // An edit that goes another way goes another way at its tick.
+        // A differing edit diverges at its tick.
         let at = text
             .lines()
             .position(|line| line.starts_with("@ "))
@@ -1484,16 +1451,15 @@ mod tests {
             replay_all(two_layers(), &changed(&text, at, &other)).expect_err("refused");
         assert_eq!(error.code(), "replay.diverged", "{error}");
         assert!(ran <= 3, "{ran}");
-        // A recording from before edits replays as one of its format.
+        // A recording from before edits replays as its format.
         let (text, ticks, hash) = recorded(two_layers(), &frames);
         let older = changed(&text, 0, "gg-recording 1");
         assert_eq!(replay_all(two_layers(), &older).ok(), Some((ticks, hash)));
     }
 
-    /// A recording whose run's code was patched between ticks replays the ticks before the patch,
-    /// to their hashes, and stops at the tick after it with `replay.patched`, naming the line and
-    /// the tick, rather than run its own code on from there and go another way unsaid; one patched
-    /// after its last tick replays whole, as no tick ran on the patch.
+    /// A patched run replays the ticks before the patch to their hashes, then stops at the tick
+    /// after with `replay.patched`, naming line and tick, rather than diverge unsaid. One patched
+    /// after its last tick replays whole.
     #[test]
     fn a_replay_stops_where_its_run_was_patched() {
         let (text, ticks, hash) = recorded(two_layers(), &[Tick::DT; 4]);
@@ -1519,7 +1485,7 @@ mod tests {
         let bad = changed(&text, first, &format!("{}\npatch 12", lines[first]));
         let (_, error) = replay_all(two_layers(), &bad).expect_err("refused");
         assert_eq!(error.code(), "replay.syntax", "{error}");
-        // As the recorder writes it, the library by its file's name alone.
+        // The recorder writes the library by file name alone.
         #[cfg(feature = "dev")]
         {
             let dir = Scratch::new("recording-patched");
@@ -1532,7 +1498,7 @@ mod tests {
         }
     }
 
-    /// A layer whose Luau script, at `path`, moves its entity at each tick.
+    /// Runs a Luau script at `path` that moves its entity each tick.
     #[cfg(feature = "dev")]
     struct Stepped {
         scripts: crate::Scripts,
@@ -1557,9 +1523,8 @@ mod tests {
         }
     }
 
-    /// A script reloaded between ticks, its component given a field, is recorded as an edit, as it
-    /// was saved, and replays to the hashes recorded, reloading there, its entity's component
-    /// given the field there too, its file as it was as the run started.
+    /// A script reloaded between ticks, its component given a field, is recorded as an edit. It
+    /// replays to the recorded hashes, reloading there from its file as the run started.
     #[cfg(feature = "dev")]
     #[test]
     fn a_script_reloaded_between_ticks_replays() {
@@ -1615,8 +1580,7 @@ mod tests {
         assert_eq!(replayed, Ok((ticks, ended.hash())));
     }
 
-    /// A layer that runs the mods installed, granting them everything, and has an entity they ride
-    /// on.
+    /// Runs the installed mods with every grant, on an entity it spawns.
     struct Modded(Option<crate::Mods>);
 
     impl Layer for Modded {
@@ -1635,8 +1599,8 @@ mod tests {
         }
     }
 
-    /// A run's mods go whole in its recording, whose replay runs them where they aren't installed,
-    /// to the hashes recorded.
+    /// A run's mods go whole in its recording; a replay runs them uninstalled, to the recorded
+    /// hashes.
     #[test]
     fn a_recording_replays_its_mods_where_they_aren_t_installed() {
         let dir = Scratch::new("recording-mods");
@@ -1674,7 +1638,7 @@ mod tests {
         assert_eq!(replayed, Ok((ticks, ended.hash())));
     }
 
-    /// A recording of an app without layers, as the player is, replays too.
+    /// A recording of an app without layers, like the player, replays too.
     #[test]
     fn a_recording_of_no_layers_replays() {
         let (text, ticks, ended) = recorded(App::new("Empty"), &[Tick::DT; 3]);
@@ -1691,8 +1655,8 @@ mod tests {
         assert_eq!((ran, replay.world().hash()), (ticks, ended));
     }
 
-    /// Each line a recording can get wrong is refused with its code, and, but for what's wrong with
-    /// the recording as a whole, its line; and a value's column is the line's.
+    /// Each fault is refused with its code and line (unless it's the recording's as a whole); a
+    /// value's column is the line's.
     #[test]
     fn a_recording_is_refused_where_it_goes_wrong() {
         let (text, ..) = recorded(two_layers(), &[Tick::DT; 4]);
@@ -1718,7 +1682,7 @@ mod tests {
             (changed(&text, 4, "attach"), "replay.syntax", Some(5)),
             (changed(&text, 4, "seed 12"), "replay.syntax", Some(5)),
             (changed(&text, 5, "attach 00 00"), "replay.syntax", Some(6)),
-            // A texture's name that's no list of it and its path.
+            // A texture's name that isn't a list of it and its path.
             (
                 named("named List([String(\"5f3c9a1e07b2d846\")])"),
                 "replay.syntax",
@@ -1773,7 +1737,7 @@ mod tests {
                 assert!(message.starts_with(&format!("line {line}: ")), "{message}");
             }
         }
-        // The value's column, from the start of its line, after `> 0 `.
+        // The value's column from its line's start, after `> 0 `.
         let alone = recording::text::Text::parse(&bad_value[4..], 1).expect_err("refused");
         let alone = alone.to_string();
         let column = |message: &str| {
@@ -1790,9 +1754,9 @@ mod tests {
         assert_eq!(column(&error.to_string()), column(&alone) + 4, "{error}");
     }
 
-    /// A layer's command that its replay would refuse, as one holding something opaque, which no
-    /// value makes, stops the recording before it, which fails, naming the layer, the command and
-    /// where in it what's opaque is; what was written before it replays.
+    /// A command a replay would refuse (such as an opaque part no value makes) stops the recording
+    /// before it, failing with the layer, command and where the opaque part is. What was written
+    /// before replays.
     #[test]
     fn a_command_that_wont_replay_stops_the_recording() {
         let placed = || {
@@ -1818,16 +1782,14 @@ mod tests {
         for named in ["layer 1, Placer,", "(\"1\", Opaque)", "at `1`: it's opaque"] {
             assert!(message.contains(named), "{named}: {message}");
         }
-        // Its header and its attach's hash alone: neither the command, nor the tick's hash after
-        // it, nor an end.
+        // The header and the attach's hash alone: no command, tick hash or end.
         let last = text.lines().last().unwrap_or_default();
         assert!(last.starts_with("attach "), "{text}");
         let replayed = replay_all(placed(), &text).map(|(ticks, _)| ticks);
         assert_eq!(replayed.map_err(|(_, error)| error.code()), Ok(0), "{text}");
     }
 
-    /// A recording that can't be created, as in a directory that isn't there, fails naming its
-    /// file.
+    /// A recording that can't be created (a missing directory) fails naming its file.
     #[test]
     fn a_recording_that_cant_be_created_fails_naming_its_file() {
         let dir = Scratch::new("recording-missing");
@@ -1839,12 +1801,12 @@ mod tests {
         assert!(error.to_string().contains("run.recording"), "{error}");
     }
 
-    /// `--replay` checks every hash to the end, and stops where `--dump` says, writing the world
-    /// there, failing where a hash goes another way, or where no tick is the one it names.
+    /// `--replay` checks every hash to the end, or stops where `--dump` says and writes the world.
+    /// It fails where a hash differs or the named tick doesn't exist.
     #[test]
     fn a_replay_runs_to_its_end_or_its_dump() {
         let (text, ..) = recorded(two_layers(), &[Tick::DT; 4]);
-        // What the run returns and whether it wrote the world where it stopped, and the next tick.
+        // What the run returns, whether it wrote the world where it stopped, and the next tick.
         let run = |text: &str, dump| {
             let mut replay = Replay::new(two_layers(), text).expect("attached");
             let mut out = Vec::new();

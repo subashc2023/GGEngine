@@ -1,7 +1,6 @@
-//! The text of a recording's values: reflection's [`Value`]s, each on one line, every part tagged
-//! with its kind, so that they read back without their types, with their floats' bits, with the
-//! entities they hold by their IDs and with the textures, models and fonts by their names, their
-//! IDs or else their paths. The engine writes the text itself, and `ron` only reads it.
+//! The text of a recording's values: reflection's [`Value`]s on one line, every part tagged by
+//! kind so they read back without their types. Floats keep their bits, entities go by ID, and
+//! textures, models and fonts by name, ID or else path. The engine writes it; `ron` only reads.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -19,18 +18,21 @@ use crate::luau::ModText;
 use crate::reflect::{Ident, Value};
 use crate::{Entity, EntityId, World};
 
-/// Writes `value` on one line, each part tagged with its kind: such as `Variant("Swarm", [("0",
-/// UInt(10000))])`. A float is the shortest text that reads back to its bits, but for a NaN, which
-/// keeps its sign but not its payload, as arithmetic leaves that to the platform; a string is
-/// quoted by a scene's escapes, which leave no line break; an entity is its ID in `world`, or
-/// `Dead` if it isn't alive there; and a texture is its name in `world`, its ID or else its path,
-/// or `Opaque` if it has none, which nothing sets.
+/// Writes `value` on one line, each part tagged by kind: `Variant("Swarm", [("0",
+/// UInt(10000))])`.
+///
+/// - A float is the shortest text reading back to its bits, except a NaN: it keeps its sign, not
+///   its payload, which arithmetic leaves to the platform.
+/// - A string is quoted by a scene's escapes, leaving no line break.
+/// - An entity is its ID in `world`, or `Dead` if not alive there.
+/// - A texture is its name in `world` (ID or else path), or `Opaque` if it has none, which
+///   nothing sets.
 pub(crate) fn write(out: &mut String, value: &Value, world: &World) {
     put(out, value, world, false);
 }
 
-/// As [`write()`], but with every NaN as one, as the world's hash takes them, so that the same
-/// world writes the same text on every platform.
+/// Like [`write()`], but every NaN is one, as the world's hash takes them: the same world writes
+/// the same text on every platform.
 pub(crate) fn write_folded(out: &mut String, value: &Value, world: &World) {
     put(out, value, world, true);
 }
@@ -161,10 +163,10 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
     }
 }
 
-/// Writes `name` and `path`, a texture's name and the path it names, as
-/// [`Assets::named_from`](crate::assets::Assets::named_from) gives them, on one line, as a list of
-/// two strings: as a snapshot's `named` lines, a recording's and a lockstep host's hold them, such
-/// as `List([String("5f3c9a1e07b2d846"), String("assets/stone.png")])`.
+/// Writes a texture's `name` and `path` (from
+/// [`Assets::named_from`](crate::assets::Assets::named_from)) as a list of two strings:
+/// `List([String("5f3c9a1e07b2d846"), String("assets/stone.png")])`. Snapshots', recordings' and a
+/// lockstep host's `named` lines hold them so.
 pub(crate) fn write_named(out: &mut String, name: &str, path: &str) {
     out.push_str("List([String(");
     quote(out, name);
@@ -173,8 +175,7 @@ pub(crate) fn write_named(out: &mut String, name: &str, path: &str) {
     out.push_str(")])");
 }
 
-/// The name and path that `text`, written by [`write_named`] and starting at column `from` of its
-/// line, gives, if it's that.
+/// Reads what [`write_named`] wrote, `text` starting at column `from`.
 pub(crate) fn read_named(text: &str, from: usize) -> Option<(Arc<str>, Arc<str>)> {
     let Text::List(parts) = Text::parse(text, from).ok()? else {
         return None;
@@ -185,7 +186,7 @@ pub(crate) fn read_named(text: &str, from: usize) -> Option<(Arc<str>, Arc<str>)
     }
 }
 
-/// Writes `library`, a patch's, as a recording's `patch` line has it, after `out`: a string.
+/// Writes a patch's `library` as a `patch` line has it: a string.
 #[cfg(feature = "dev")]
 pub(crate) fn write_patch(out: &mut String, library: &str) {
     out.push_str("String(");
@@ -193,8 +194,7 @@ pub(crate) fn write_patch(out: &mut String, library: &str) {
     out.push(')');
 }
 
-/// The library that `text`, written by [`write_patch`] and starting at column `from` of its line,
-/// names, if it's that.
+/// Reads what [`write_patch`] wrote, `text` starting at column `from`.
 pub(crate) fn read_patch(text: &str, from: usize) -> Option<String> {
     match Text::parse(text, from).ok()? {
         Text::String(library) => Some(library),
@@ -202,8 +202,8 @@ pub(crate) fn read_patch(text: &str, from: usize) -> Option<String> {
     }
 }
 
-/// Writes `text`, a mod as a snapshot's or a recording's `mod` line has it, after `out`: a list of
-/// its manifest's text, then each of its scripts' path and text.
+/// Writes the mod `text` as a `mod` line has it: a list of its manifest's text, then each
+/// script's path and text.
 pub(crate) fn write_mod(out: &mut String, text: &ModText) {
     out.push_str("List([String(");
     quote(out, &text.manifest);
@@ -218,8 +218,7 @@ pub(crate) fn write_mod(out: &mut String, text: &ModText) {
     out.push_str("])");
 }
 
-/// The mod that `text`, written by [`write_mod`] and starting at column `from` of its line, gives,
-/// if it's that.
+/// Reads what [`write_mod`] wrote, `text` starting at column `from`.
 pub(crate) fn read_mod(text: &str, from: usize) -> Option<ModText> {
     let Text::List(parts) = Text::parse(text, from).ok()? else {
         return None;
@@ -236,8 +235,8 @@ pub(crate) fn read_mod(text: &str, from: usize) -> Option<ModText> {
     Some(ModText { manifest, scripts })
 }
 
-/// A value as a recording's text gives it: a [`Value`], but with each entity it holds by its ID,
-/// since it's read before the world that the ID names an entity in, at the tick that applies it.
+/// A value as the text gives it: a [`Value`] whose entities are held by ID, as it's read before
+/// the world the ID names an entity in, at the tick that applies it.
 #[derive(Debug, Deserialize)]
 pub(crate) enum Text {
     Bool(bool),
@@ -252,15 +251,15 @@ pub(crate) enum Text {
     DVec3(f64, f64, f64),
     Quat(f32, f32, f32, f32),
     Entity(Id),
-    /// An entity that wasn't alive as it was written.
+    /// An entity that wasn't alive when written.
     Dead,
-    /// A texture, by its name, or a path to its file.
+    /// A texture, by its name or a path to its file.
     Texture(String),
-    /// A model, as a texture.
+    /// A model, named like a texture.
     Model(String),
-    /// A font, as a texture.
+    /// A font, named like a texture.
     Font(String),
-    /// A prefab, as a texture.
+    /// A prefab, named like a texture.
     Prefab(String),
     None,
     Some(Box<Text>),
@@ -270,7 +269,6 @@ pub(crate) enum Text {
     Opaque,
 }
 
-/// An entity's ID, read from its text.
 #[derive(Debug)]
 pub(crate) struct Id(pub(crate) EntityId);
 
@@ -285,7 +283,6 @@ impl<'de> Deserialize<'de> for Id {
 }
 
 impl Text {
-    /// What kind of value it is, as its variant's name says: such as `Vec2`.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Bool(_) => "Bool",
@@ -314,7 +311,7 @@ impl Text {
         }
     }
 
-    /// Adds each texture, model, font and prefab it holds to `names`, in order.
+    /// Adds the textures, models, fonts and prefabs it holds to `names`, in order.
     pub(crate) fn assets<'t>(&'t self, names: &mut Vec<Asset<&'t str>>) {
         let fields = |given: &'t [(String, Text)], names: &mut Vec<Asset<&'t str>>| {
             for (_, text) in given {
@@ -333,19 +330,19 @@ impl Text {
         }
     }
 
-    /// Reads the value `text` writes, which is all of it, and starts at column `from` of its line.
-    /// It may nest as many levels as a scene's values do, 64.
+    /// Reads all of `text`, starting at column `from`, as one value. It may nest as deep as a
+    /// scene's values, 64 levels.
     ///
-    /// Fails with `replay.syntax`, saying at which column of the line, for text that isn't one,
-    /// nests deeper, or enables RON's extensions, which change its grammar.
+    /// Fails with `replay.syntax`, naming the column, for text that isn't a value, nests deeper,
+    /// or enables RON's extensions, which change its grammar.
     pub(crate) fn parse(text: &str, from: usize) -> Result<Self> {
         let syntax = |column: usize, what: &dyn std::fmt::Display| {
             let column = from + column - 1;
             Error::new("replay.syntax", format!("column {column}: {what}"))
         };
-        // Each level of a value takes `ron` up to 7 levels of its recursion, a variant's: 64 of them,
-        // as many as a scene's values nest, fit the 1 MB stack of Windows' main thread in a debug
-        // build, as a test checks, where about 73 overflow it.
+        // A level of a value takes `ron` up to 7 levels of recursion (a variant's). 64 levels, as
+        // deep as a scene's values nest, fit the 1 MB stack of Windows' main thread in a debug
+        // build, as a test checks; about 73 overflow it.
         let options = Options::default().with_recursion_limit(7 * MAX_DEPTH as usize + 16);
         let mut deserializer = ron::Deserializer::from_str_with_options(text, &options)
             .map_err(|error| syntax(error.span.end.col, &error.code))?;
@@ -362,9 +359,8 @@ impl Text {
         })
     }
 
-    /// The value it gives in `world`, where each entity it holds is the one with its ID, or, if none
-    /// has it, a handle that names none; and each texture the one it names, or, if none, `Opaque`,
-    /// which nothing sets.
+    /// The value in `world`: an entity is the one with its ID, else a handle naming none; a
+    /// texture the one it names, else `Opaque`, which nothing sets.
     pub(crate) fn value(&self, world: &World) -> Value {
         let fields = |given: &[(String, Text)]| {
             let given = given.iter();
@@ -410,7 +406,6 @@ mod tests {
     use crate::Transform;
     use crate::reflect::tests::same;
 
-    /// `value` written in `world` and read back in `into`.
     fn round_trip(value: &Value, world: &World, into: &World) -> (String, Value) {
         let mut text = String::new();
         write(&mut text, value, world);
@@ -509,7 +504,7 @@ mod tests {
         world.despawn(dead).expect("alive");
         let text = world.save_scene(&[entity]).expect("saved");
         let mut other = World::seeded(2);
-        // So that the entity takes another slot there.
+        // The entity takes another slot there.
         other.spawn(());
         other.register::<Transform>().expect("registered");
         let loaded = other.load_scene(&text).expect("loaded")[0];
@@ -530,8 +525,7 @@ mod tests {
         assert!(!World::seeded(3).contains(Entity::DEAD));
     }
 
-    /// As deep as a scene's values nest, in a stack the size of Windows' main thread's, where a
-    /// replay reads it; and no deeper.
+    /// A value nests as deep as a scene's, no deeper, in a Windows-main-thread-sized stack.
     #[test]
     fn a_value_nests_as_deep_as_a_scenes() {
         let nested = |levels: usize| {
@@ -564,7 +558,7 @@ mod tests {
 
     #[test]
     fn text_that_isnt_a_value_is_refused_where_it_stops() {
-        // Each column just past where the text stops reading, in a line where it starts at 5.
+        // Each column is just past where reading stops, for text starting at column 5.
         for (text, column) in [
             ("UInt(-1)", 12),
             ("F32(1.0", 12),
