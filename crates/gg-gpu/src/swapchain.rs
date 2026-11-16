@@ -7,7 +7,7 @@ use ash::vk;
 use gg_core::{Error, Result};
 use tracing::{debug, info, trace, warn};
 
-use crate::{COLOR_RANGE, Device, Surface, vk_error};
+use crate::{COLOR_RANGE, Device, Surface, vk_error, vk_failed};
 
 /// The images a window presents, in turn.
 pub struct Swapchain {
@@ -87,10 +87,10 @@ impl Swapchain {
                 .raw()
                 .create_fence(&vk::FenceCreateInfo::default(), None)
         }
-        .map_err(|e| {
-            let fence = format_args!("fence \"{name} swapchain image available\"");
-            vk_error("vkCreateFence", fence, e)
-        })?;
+        .map_err(vk_failed(
+            "vkCreateFence",
+            format_args!("fence \"{name} swapchain image available\""),
+        ))?;
         // SAFETY: the fence is live, and the surface is of the device's instance.
         unsafe {
             device.set_name(available, &format!("{name} swapchain image available"));
@@ -479,22 +479,22 @@ impl Swapchain {
                 self.raw = vk::SwapchainKHR::null();
                 self.images.clear();
             }
-            let raw = created.map_err(|e| {
-                let subject = format_args!(
+            let raw = created.map_err(vk_failed(
+                "vkCreateSwapchainKHR",
+                format_args!(
                     "swapchain \"{name} swapchain\" of {}x{} {:?} pixels, presenting by {:?}",
                     extent.width, extent.height, self.format.format, self.present_mode
-                );
-                vk_error("vkCreateSwapchainKHR", subject, e)
-            })?;
+                ),
+            ))?;
             self.destroy_views_and_semaphores();
             swapchain_fn.destroy_swapchain(self.raw, None);
             self.raw = raw;
             device.set_name(raw, &format!("{name} swapchain"));
             self.extent = extent;
-            self.images = swapchain_fn.get_swapchain_images(raw).map_err(|e| {
-                let subject = format_args!("swapchain \"{name} swapchain\"'s images");
-                vk_error("vkGetSwapchainImagesKHR", subject, e)
-            })?;
+            self.images = swapchain_fn.get_swapchain_images(raw).map_err(vk_failed(
+                "vkGetSwapchainImagesKHR",
+                format_args!("swapchain \"{name} swapchain\"'s images"),
+            ))?;
             for (i, &image) in self.images.iter().enumerate() {
                 let view_info = vk::ImageViewCreateInfo::default()
                     .image(image)
@@ -504,19 +504,18 @@ impl Swapchain {
                 let view = device
                     .raw()
                     .create_image_view(&view_info, None)
-                    .map_err(|e| {
-                        let subject = format_args!("image \"{name} swapchain image {i}\"'s view");
-                        vk_error("vkCreateImageView", subject, e)
-                    })?;
+                    .map_err(vk_failed(
+                        "vkCreateImageView",
+                        format_args!("image \"{name} swapchain image {i}\"'s view"),
+                    ))?;
                 self.views.push(view);
                 let rendered = device
                     .raw()
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                    .map_err(|e| {
-                        let subject =
-                            format_args!("semaphore \"{name} swapchain image {i} rendered\"");
-                        vk_error("vkCreateSemaphore", subject, e)
-                    })?;
+                    .map_err(vk_failed(
+                        "vkCreateSemaphore",
+                        format_args!("semaphore \"{name} swapchain image {i} rendered\""),
+                    ))?;
                 self.rendered.push(rendered);
                 let image_name = format!("{name} swapchain image {i}");
                 device.set_name(image, &image_name);
@@ -636,7 +635,10 @@ fn support(
             surface.raw(),
         )
     }
-    .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceSupportKHR", surface_named, e))?;
+    .map_err(vk_failed(
+        "vkGetPhysicalDeviceSurfaceSupportKHR",
+        surface_named,
+    ))?;
     if !presents {
         return Err(Error::new(
             "gpu.no_present",
@@ -646,14 +648,17 @@ fn support(
     // SAFETY: the physical device and the surface are live.
     let formats =
         unsafe { surface_fn.get_physical_device_surface_formats(physical, surface.raw()) }
-            .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceFormatsKHR", surface_named, e))?;
+            .map_err(vk_failed(
+                "vkGetPhysicalDeviceSurfaceFormatsKHR",
+                surface_named,
+            ))?;
     // SAFETY: the physical device and the surface are live.
     let modes =
         unsafe { surface_fn.get_physical_device_surface_present_modes(physical, surface.raw()) }
-            .map_err(|e| {
-                let call = "vkGetPhysicalDeviceSurfacePresentModesKHR";
-                vk_error(call, surface_named, e)
-            })?;
+            .map_err(vk_failed(
+                "vkGetPhysicalDeviceSurfacePresentModesKHR",
+                surface_named,
+            ))?;
     Ok((formats, modes))
 }
 

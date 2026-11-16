@@ -763,7 +763,7 @@ fn host_copy(
         // the shader-read-only layout, which it listed as one host copies write; no submission has
         // used it, since nothing has been copied into it, and `&mut` keeps the engine off it.
         unsafe { functions.transition_image_layout(slice::from_ref(&transition)) }
-            .map_err(|e| crate::vk_error("vkTransitionImageLayoutEXT", texture, e))?;
+            .map_err(crate::vk_failed("vkTransitionImageLayoutEXT", texture))?;
     }
     // A region for each of the part's, each from where its bytes start. A row length and image
     // height of 0 pack rows tightly, in whole blocks for BC7. A region's extent is its rows',
@@ -793,7 +793,7 @@ fn host_copy(
     // image's levels, whose bytes `pixels`, tightly packed a level after another, was checked to
     // hold.
     unsafe { functions.copy_memory_to_image(&info) }
-        .map_err(|e| crate::vk_error("vkCopyMemoryToImageEXT", texture, e))
+        .map_err(crate::vk_failed("vkCopyMemoryToImageEXT", texture))
 }
 
 /// The barrier that takes `image`, which nothing has used, into the transfer destination layout

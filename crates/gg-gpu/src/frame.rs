@@ -33,7 +33,9 @@ use crate::bindless::PUSH_CONSTANTS;
 use crate::buffer::Buffer;
 use crate::swapchain::{Failure, failure};
 use crate::vma::Memory;
-use crate::{COLOR_RANGE, ColorImage, Device, StorageImage, Swapchain, copy_region, vk_error};
+use crate::{
+    COLOR_RANGE, ColorImage, Device, StorageImage, Swapchain, copy_region, vk_error, vk_failed,
+};
 use batches::{Plan, Timelines};
 use graph::{BufferDecl, Hazard, ImageDecl, PassKind, Queue, Use};
 use timer::Timer;
@@ -352,15 +354,18 @@ impl Frames {
             vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
         let info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
         // SAFETY: the device is live, with timeline semaphores enabled.
-        frames.timeline = unsafe { raw.create_semaphore(&info, None) }
-            .map_err(|e| vk_error("vkCreateSemaphore", "semaphore \"frame timeline\"", e))?;
+        frames.timeline = unsafe { raw.create_semaphore(&info, None) }.map_err(vk_failed(
+            "vkCreateSemaphore",
+            "semaphore \"frame timeline\"",
+        ))?;
         // SAFETY: the semaphore is live.
         unsafe { device.set_name(frames.timeline, "frame timeline") };
         let transfer_family = device.transfer_family();
         if transfer_family.is_some() {
             // SAFETY: as above.
-            frames.transfer_timeline = unsafe { raw.create_semaphore(&info, None) }
-                .map_err(|e| vk_error("vkCreateSemaphore", "semaphore \"upload timeline\"", e))?;
+            frames.transfer_timeline = unsafe { raw.create_semaphore(&info, None) }.map_err(
+                vk_failed("vkCreateSemaphore", "semaphore \"upload timeline\""),
+            )?;
             // SAFETY: the semaphore is live.
             unsafe { device.set_name(frames.transfer_timeline, "upload timeline") };
         }
@@ -370,9 +375,10 @@ impl Frames {
                 .zip(["graphics queue timeline", "compute queue timeline"])
             {
                 // SAFETY: as above.
-                *timeline = unsafe { raw.create_semaphore(&info, None) }.map_err(|e| {
-                    vk_error("vkCreateSemaphore", format_args!("semaphore {name:?}"), e)
-                })?;
+                *timeline = unsafe { raw.create_semaphore(&info, None) }.map_err(vk_failed(
+                    "vkCreateSemaphore",
+                    format_args!("semaphore {name:?}"),
+                ))?;
                 // SAFETY: the semaphore is live.
                 unsafe { device.set_name(*timeline, name) };
             }
@@ -466,13 +472,10 @@ impl Frames {
                     .raw()
                     .get_semaphore_counter_value(self.transfer_timeline)
             }
-            .map_err(|e| {
-                vk_error(
-                    "vkGetSemaphoreCounterValue",
-                    "semaphore \"upload timeline\"",
-                    e,
-                )
-            })?;
+            .map_err(vk_failed(
+                "vkGetSemaphoreCounterValue",
+                "semaphore \"upload timeline\"",
+            ))?;
             self.transfers_finished = finished;
             self.device.transfers_finished(finished);
         }
@@ -521,7 +524,10 @@ impl Frames {
                     .raw()
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
             }
-            .map_err(|e| vk_error("vkCreateSemaphore", format_args!("semaphore {name:?}"), e))?;
+            .map_err(vk_failed(
+                "vkCreateSemaphore",
+                format_args!("semaphore {name:?}"),
+            ))?;
             // SAFETY: the semaphore is live.
             unsafe { self.device.set_name(semaphore, &name) };
             acquired.push(semaphore);
@@ -611,7 +617,7 @@ impl Frames {
             // SAFETY: the GPU has finished the slot's previous frame, so nothing uses the pool's
             // commands.
             unsafe { raw.reset_command_pool(pool, vk::CommandPoolResetFlags::empty()) }.map_err(
-                |e| vk_error("vkResetCommandPool", format_args!("frame {slot}'s pool"), e),
+                vk_failed("vkResetCommandPool", format_args!("frame {slot}'s pool")),
             )?;
         }
         let mut passes = [0; 2];
@@ -799,10 +805,10 @@ fn wait_on(device: &Device, timeline: vk::Semaphore, name: &str, value: u64) -> 
         .semaphores(&semaphores)
         .values(&values);
     // SAFETY: the timeline semaphore is live.
-    unsafe { device.raw().wait_semaphores(&info, u64::MAX) }.map_err(|e| {
-        let reached = format_args!("semaphore {name:?} reaching {value}");
-        vk_error("vkWaitSemaphores", reached, e)
-    })
+    unsafe { device.raw().wait_semaphores(&info, u64::MAX) }.map_err(vk_failed(
+        "vkWaitSemaphores",
+        format_args!("semaphore {name:?} reaching {value}"),
+    ))
 }
 
 /// Where the `read`th ID that slot `slot`'s frame reads back goes in `Frames::reads`.
@@ -1553,10 +1559,10 @@ impl<'a> Frame<'a> {
         if let Some(i) = self.transfers {
             let transfer = &mut transfers[i];
             // SAFETY: the transfer commands are recording.
-            unsafe { raw.end_command_buffer(transfer.commands) }.map_err(|e| {
-                let subject = format_args!("command buffer {:?}", transfer.name);
-                vk_error("vkEndCommandBuffer", subject, e)
-            })?;
+            unsafe { raw.end_command_buffer(transfer.commands) }.map_err(vk_failed(
+                "vkEndCommandBuffer",
+                format_args!("command buffer {:?}", transfer.name),
+            ))?;
             let command_infos =
                 [vk::CommandBufferSubmitInfo::default().command_buffer(transfer.commands)];
             let number = *transfers_submitted + 1;
@@ -1721,10 +1727,10 @@ impl<'a> Frame<'a> {
         let raw = device.raw();
         for (i, &commands) in batch_commands.iter().enumerate() {
             // SAFETY: the commands are recording, outside a pass.
-            unsafe { raw.end_command_buffer(commands) }.map_err(|e| {
-                let subject = format_args!("frame {frame}'s batch {i}");
-                vk_error("vkEndCommandBuffer", subject, e)
-            })?;
+            unsafe { raw.end_command_buffer(commands) }.map_err(vk_failed(
+                "vkEndCommandBuffer",
+                format_args!("frame {frame}'s batch {i}"),
+            ))?;
         }
         Ok(())
     }
@@ -1941,13 +1947,10 @@ fn command_pool(device: &Device, family: u32, name: &str) -> Result<vk::CommandP
         .flags(vk::CommandPoolCreateFlags::TRANSIENT)
         .queue_family_index(family);
     // SAFETY: the device is live.
-    let pool = unsafe { device.raw().create_command_pool(&pool_info, None) }.map_err(|e| {
-        vk_error(
-            "vkCreateCommandPool",
-            format_args!("command pool {name:?}"),
-            e,
-        )
-    })?;
+    let pool = unsafe { device.raw().create_command_pool(&pool_info, None) }.map_err(vk_failed(
+        "vkCreateCommandPool",
+        format_args!("command pool {name:?}"),
+    ))?;
     // SAFETY: the pool is live.
     unsafe { device.set_name(pool, name) };
     Ok(pool)
@@ -1968,10 +1971,10 @@ fn allocate_commands(
         .command_buffer_count(1);
     // SAFETY: the pool is live, and the caller's to allocate from.
     let commands =
-        unsafe { device.raw().allocate_command_buffers(&allocate_info) }.map_err(|e| {
-            let subject = format_args!("command buffer {name:?}");
-            vk_error("vkAllocateCommandBuffers", subject, e)
-        })?[0];
+        unsafe { device.raw().allocate_command_buffers(&allocate_info) }.map_err(vk_failed(
+            "vkAllocateCommandBuffers",
+            format_args!("command buffer {name:?}"),
+        ))?[0];
     // SAFETY: the command buffer is live.
     unsafe { device.set_c_name(commands, &name) };
     Ok((commands, name))
@@ -2012,10 +2015,10 @@ unsafe fn begin_recording(
         (device
             .raw()
             .reset_command_pool(pool, vk::CommandPoolResetFlags::empty()))
-        .map_err(|e| {
-            let subject = format_args!("command pool {name:?}");
-            vk_error("vkResetCommandPool", subject, e)
-        })?;
+        .map_err(vk_failed(
+            "vkResetCommandPool",
+            format_args!("command pool {name:?}"),
+        ))?;
         begin_commands(device, commands, name)
     }
 }
@@ -2031,10 +2034,10 @@ unsafe fn begin_commands(device: &Device, commands: vk::CommandBuffer, name: &CS
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     // SAFETY: the caller guarantees it.
     unsafe {
-        (device.raw().begin_command_buffer(commands, &begin_info)).map_err(|e| {
-            let subject = format_args!("command buffer {name:?}");
-            vk_error("vkBeginCommandBuffer", subject, e)
-        })?;
+        (device.raw().begin_command_buffer(commands, &begin_info)).map_err(vk_failed(
+            "vkBeginCommandBuffer",
+            format_args!("command buffer {name:?}"),
+        ))?;
         device.name_begun(commands, name);
     }
     Ok(())

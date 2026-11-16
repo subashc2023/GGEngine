@@ -7,7 +7,7 @@ use ash::{khr, vk};
 use gg_core::{Error, Result};
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 
-use crate::{Instance, vk_error};
+use crate::{Instance, vk_failed};
 
 /// A window the engine can present to: any window type with raw window handles, such as
 /// winit's.
@@ -45,10 +45,10 @@ impl Surface {
         let raw = unsafe {
             ash_window::create_surface(instance.entry(), instance.raw(), display, handle, None)
         }
-        .map_err(|e| {
-            let subject = format_args!("surface \"{name} surface\"");
-            vk_error("ash_window::create_surface", subject, e)
-        })?;
+        .map_err(vk_failed(
+            "ash_window::create_surface",
+            format_args!("surface \"{name} surface\""),
+        ))?;
         Ok(Self {
             instance: instance.clone(),
             raw,

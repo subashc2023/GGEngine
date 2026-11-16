@@ -14,7 +14,7 @@ use ash::vk;
 use gg_core::{Error, Result};
 
 use crate::frame::FRAMES_IN_FLIGHT;
-use crate::{Device, vk_error};
+use crate::{Device, vk_failed};
 
 /// How many sets there are: one for each frame in flight.
 const SETS: usize = FRAMES_IN_FLIGHT as usize;
@@ -384,7 +384,7 @@ impl Bindless {
             for (info, name) in infos.zip(sampler_names()) {
                 let sampler = device
                     .create_sampler(&info, None)
-                    .map_err(|e| vk_error("vkCreateSampler", format_args!("{name:?}"), e))?;
+                    .map_err(vk_failed("vkCreateSampler", format_args!("{name:?}")))?;
                 self.samplers.push(sampler);
             }
             // Textures change while frames that use other textures are in flight, and a slot of
@@ -426,10 +426,10 @@ impl Bindless {
             );
             self.layout = device
                 .create_descriptor_set_layout(&layout_info, None)
-                .map_err(|e| {
-                    let layout = format_args!("\"bindless set layout\" of {contents}");
-                    vk_error("vkCreateDescriptorSetLayout", layout, e)
-                })?;
+                .map_err(vk_failed(
+                    "vkCreateDescriptorSetLayout",
+                    format_args!("\"bindless set layout\" of {contents}"),
+                ))?;
 
             let sizes = [
                 vk::DescriptorPoolSize {
@@ -451,17 +451,17 @@ impl Bindless {
                 .pool_sizes(&sizes);
             self.pool = device
                 .create_descriptor_pool(&pool_info, None)
-                .map_err(|e| {
-                    let pool = format_args!("\"bindless pool\" of {SETS} sets of {contents}");
-                    vk_error("vkCreateDescriptorPool", pool, e)
-                })?;
+                .map_err(vk_failed(
+                    "vkCreateDescriptorPool",
+                    format_args!("\"bindless pool\" of {SETS} sets of {contents}"),
+                ))?;
             let layouts = [self.layout; SETS];
             let allocate_info = vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(self.pool)
                 .set_layouts(&layouts);
             self.sets = device
                 .allocate_descriptor_sets(&allocate_info)
-                .map_err(|e| vk_error("vkAllocateDescriptorSets", "the bindless sets", e))?;
+                .map_err(vk_failed("vkAllocateDescriptorSets", "the bindless sets"))?;
             // Written into each set once, before any pipeline uses it, rather than made immutable
             // in its layout: AMD's driver (25.10.30) reads immutable samplers that shaders index
             // non-uniformly as a sampler of zeros, which filters by the nearest texel and never
@@ -490,12 +490,12 @@ impl Bindless {
                 .push_constant_ranges(&push_constants);
             self.pipeline_layout = device
                 .create_pipeline_layout(&pipeline_layout_info, None)
-                .map_err(|e| {
-                    let layout = format_args!(
+                .map_err(vk_failed(
+                    "vkCreatePipelineLayout",
+                    format_args!(
                         "\"bindless pipeline layout\" with {PUSH_CONSTANTS} bytes of push constants"
-                    );
-                    vk_error("vkCreatePipelineLayout", layout, e)
-                })?;
+                    ),
+                ))?;
         }
         Ok(())
     }

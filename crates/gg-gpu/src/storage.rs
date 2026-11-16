@@ -10,7 +10,7 @@ use gg_core::Result;
 use crate::device::Retired;
 use crate::texture::mip_sizes;
 use crate::vma::{Allocation, Memory};
-use crate::{Device, vk_error};
+use crate::{Device, vk_failed};
 
 /// An image that compute passes write and shaders sample, in GPU memory: 16-bit floats in linear
 /// RGBA, [`StorageImage::FORMAT`], of a 2D image's one layer or a cube's six, with mip levels.
@@ -262,13 +262,10 @@ fn make_view(
         .format(StorageImage::FORMAT)
         .subresource_range(range);
     // SAFETY: the image is live and bound to memory.
-    let view = unsafe { device.raw().create_image_view(&info, None) }.map_err(|e| {
-        vk_error(
-            "vkCreateImageView",
-            format_args!("storage image view {name:?}"),
-            e,
-        )
-    })?;
+    let view = unsafe { device.raw().create_image_view(&info, None) }.map_err(vk_failed(
+        "vkCreateImageView",
+        format_args!("storage image view {name:?}"),
+    ))?;
     // SAFETY: the view is live.
     unsafe { device.set_name(view, name) };
     Ok(view)

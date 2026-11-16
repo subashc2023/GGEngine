@@ -23,7 +23,7 @@ use gg_core::profile::{self, GpuTimeline, Label};
 
 use super::FRAMES_IN_FLIGHT;
 use super::graph::Queue;
-use crate::{Device, vk_error};
+use crate::{Device, vk_error, vk_failed};
 
 /// The most timestamps a frame writes on a queue, two for each pass: Tracy numbers a timeline's
 /// timestamps with 16 bits, and each frame in flight takes half of them.
@@ -197,7 +197,7 @@ impl Timer {
                 raw.create_query_pool(&info, None)
             };
             let name = format!("frame {slot} {} timestamps", self.name);
-            *pool = made.map_err(|e| vk_error("vkCreateQueryPool", format_args!("{name:?}"), e))?;
+            *pool = made.map_err(vk_failed("vkCreateQueryPool", format_args!("{name:?}")))?;
             *capacity = grown;
             // SAFETY: the pool is live.
             unsafe { device.set_name(*pool, &name) };
@@ -288,7 +288,7 @@ fn read_clock(device: &Device) -> Result<u64> {
         .query_count(1);
     // SAFETY: the device is live.
     let pool = unsafe { device.raw().create_query_pool(&info, None) }
-        .map_err(|e| vk_error("vkCreateQueryPool", "\"clock\"", e))?;
+        .map_err(vk_failed("vkCreateQueryPool", "\"clock\""))?;
     let mut timestamp = 0;
     // SAFETY: the pool is live; the commands reset its query before writing it, and the query is
     // read once they've run, after which nothing uses the pool.
@@ -303,7 +303,7 @@ fn read_clock(device: &Device) -> Result<u64> {
                 let flags = vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT;
                 let results = slice::from_mut(&mut timestamp);
                 (device.raw().get_query_pool_results(pool, 0, results, flags))
-                    .map_err(|e| vk_error("vkGetQueryPoolResults", "\"clock\"", e))
+                    .map_err(vk_failed("vkGetQueryPoolResults", "\"clock\""))
             })
     };
     // SAFETY: as above.

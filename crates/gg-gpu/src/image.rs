@@ -10,7 +10,7 @@ use gg_core::{Error, Result};
 use crate::buffer::Buffer;
 use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
-use crate::{COLOR_RANGE, Device, Format, copy_region, vk_error};
+use crate::{COLOR_RANGE, Device, Format, copy_region, vk_failed};
 
 /// A color image in GPU memory, which frames render into as a target, their later passes sample
 /// through its slot in the bindless set, and the CPU can read back. Dropping it retires it, and its
@@ -247,10 +247,10 @@ pub(crate) fn image_view(
         .format(format)
         .subresource_range(range);
     // SAFETY: the image is live and bound to memory.
-    let view = unsafe { device.raw().create_image_view(&view_info, None) }.map_err(|e| {
-        let view = format_args!("image {name:?}'s view");
-        vk_error("vkCreateImageView", view, e)
-    })?;
+    let view = unsafe { device.raw().create_image_view(&view_info, None) }.map_err(vk_failed(
+        "vkCreateImageView",
+        format_args!("image {name:?}'s view"),
+    ))?;
     // SAFETY: the image and view are live.
     unsafe {
         device.set_name(image, name);

@@ -109,6 +109,11 @@ fn vk_error(call: &str, subject: impl fmt::Display, result: vk::Result) -> Error
     Error::new(code, message)
 }
 
+/// What `map_err` takes to make [`vk_error`]'s error of a result of `call` for `subject`.
+fn vk_failed(call: &str, subject: impl fmt::Display) -> impl FnOnce(vk::Result) -> Error {
+    move |result| vk_error(call, subject, result)
+}
+
 /// Shows a packed Vulkan version as `1.4.341`.
 struct Version(u32);
 

@@ -16,7 +16,7 @@ use crate::bindless::Bindless;
 use crate::capture::{self, Capture, RenderDoc};
 use crate::pipeline_cache::{self, Identity, Refusal};
 use crate::vma::{Allocation, Allocator};
-use crate::{Instance, Surface, Version, vk_error};
+use crate::{Instance, Surface, Version, vk_error, vk_failed};
 use candidate::{Candidate, pick};
 
 /// A resource that was dropped while frames, or copies on the transfer queue, that may use it
@@ -235,8 +235,9 @@ impl Device {
             surface.check_instance(instance);
         }
         // SAFETY: the instance is live.
-        let physicals = unsafe { instance.raw().enumerate_physical_devices() }
-            .map_err(|e| vk_error("vkEnumeratePhysicalDevices", "the instance's GPUs", e))?;
+        let physicals = unsafe { instance.raw().enumerate_physical_devices() }.map_err(
+            vk_failed("vkEnumeratePhysicalDevices", "the instance's GPUs"),
+        )?;
         let candidates: Vec<Candidate> = physicals
             .iter()
             .enumerate()
@@ -345,11 +346,12 @@ impl Device {
         // sampler anisotropy, independent blending, indexing storage images dynamically and
         // indirect draws' first instance, in vk.xml's feature requirements), and the create info's
         // pointers outlive the call.
-        let raw =
-            unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(|e| {
-                let device = format_args!("device {:?}, uploading by {uploads}", chosen.name);
-                vk_error("vkCreateDevice", device, e)
-            })?;
+        let raw = unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(
+            vk_failed(
+                "vkCreateDevice",
+                format_args!("device {:?}, uploading by {uploads}", chosen.name),
+            ),
+        )?;
         let debug_utils = instance
             .has_debug_utils()
             .then(|| ext::debug_utils::Device::new(instance.raw(), &raw));
@@ -581,10 +583,10 @@ impl Device {
                     );
                     payload = None;
                 }
-                make(&[]).map_err(|e| {
-                    let cache = format_args!("device {:?}'s pipeline cache", self.name);
-                    vk_error("vkCreatePipelineCache", cache, e)
-                })?
+                make(&[]).map_err(vk_failed(
+                    "vkCreatePipelineCache",
+                    format_args!("device {:?}'s pipeline cache", self.name),
+                ))?
             }
         };
         // SAFETY: the cache is live.
@@ -607,10 +609,10 @@ impl Device {
             return Ok(None);
         };
         // SAFETY: the cache is live and the device's; reading its data needs no exclusive access.
-        let payload = unsafe { self.raw.get_pipeline_cache_data(cache) }.map_err(|e| {
-            let cache = format_args!("device {:?}'s pipeline cache", self.name);
-            vk_error("vkGetPipelineCacheData", cache, e)
-        })?;
+        let payload = unsafe { self.raw.get_pipeline_cache_data(cache) }.map_err(vk_failed(
+            "vkGetPipelineCacheData",
+            format_args!("device {:?}'s pipeline cache", self.name),
+        ))?;
         Ok(Some(pipeline_cache::seal(&self.identity, &payload)))
     }
 
@@ -666,13 +668,10 @@ impl Device {
         let _transfer = self.transfer.as_ref().map(Queue::lock);
         let _compute = self.compute.as_ref().map(Queue::lock);
         // SAFETY: the device is live, and its queues' locks are held.
-        unsafe { self.raw.device_wait_idle() }.map_err(|e| {
-            vk_error(
-                "vkDeviceWaitIdle",
-                format_args!("device {:?}", self.name),
-                e,
-            )
-        })
+        unsafe { self.raw.device_wait_idle() }.map_err(vk_failed(
+            "vkDeviceWaitIdle",
+            format_args!("device {:?}", self.name),
+        ))
     }
 
     pub(crate) fn physical(&self) -> vk::PhysicalDevice {
@@ -885,10 +884,10 @@ impl Device {
     ) -> Result<()> {
         let queue = self.graphics.lock();
         // SAFETY: the caller guarantees the submissions; the lock is held.
-        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(|e| {
-            let submitted = format_args!("{work} on device {:?}'s graphics queue", self.name);
-            vk_error("vkQueueSubmit2", submitted, e)
-        })
+        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(vk_failed(
+            "vkQueueSubmit2",
+            format_args!("{work} on device {:?}'s graphics queue", self.name),
+        ))
     }
 
     /// Submits `work`, as its errors call it, to the compute queue.
@@ -910,10 +909,10 @@ impl Device {
             .expect("only a device with a compute queue submits to one")
             .lock();
         // SAFETY: the caller guarantees the submissions; the lock is held.
-        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(|e| {
-            let submitted = format_args!("{work} on device {:?}'s compute queue", self.name);
-            vk_error("vkQueueSubmit2", submitted, e)
-        })
+        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(vk_failed(
+            "vkQueueSubmit2",
+            format_args!("{work} on device {:?}'s compute queue", self.name),
+        ))
     }
 
     /// Submits `work`, as its errors call it, to the transfer queue.
@@ -935,10 +934,10 @@ impl Device {
             .expect("only a device that uploads through a transfer queue submits to one")
             .lock();
         // SAFETY: the caller guarantees the submissions; the lock is held.
-        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(|e| {
-            let submitted = format_args!("{work} on device {:?}'s transfer queue", self.name);
-            vk_error("vkQueueSubmit2", submitted, e)
-        })
+        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(vk_failed(
+            "vkQueueSubmit2",
+            format_args!("{work} on device {:?}'s transfer queue", self.name),
+        ))
     }
 
     /// Presents through the graphics queue, which each swapchain checked it can present to.
@@ -972,13 +971,10 @@ impl Device {
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
             .queue_family_index(self.graphics.family);
         // SAFETY: the device is live.
-        let pool = unsafe { self.raw.create_command_pool(&pool_info, None) }.map_err(|e| {
-            vk_error(
-                "vkCreateCommandPool",
-                format_args!("command pool {name:?}"),
-                e,
-            )
-        })?;
+        let pool = unsafe { self.raw.create_command_pool(&pool_info, None) }.map_err(vk_failed(
+            "vkCreateCommandPool",
+            format_args!("command pool {name:?}"),
+        ))?;
         // SAFETY: the pool is live.
         unsafe { self.set_name(pool, name) };
         let ran = (|| {
@@ -993,18 +989,18 @@ impl Device {
                 let commands = self
                     .raw
                     .allocate_command_buffers(&allocate_info)
-                    .map_err(|e| vk_error("vkAllocateCommandBuffers", commands_named, e))?[0];
+                    .map_err(vk_failed("vkAllocateCommandBuffers", commands_named))?[0];
                 let begin_info = vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
                 self.raw
                     .begin_command_buffer(commands, &begin_info)
-                    .map_err(|e| vk_error("vkBeginCommandBuffer", commands_named, e))?;
+                    .map_err(vk_failed("vkBeginCommandBuffer", commands_named))?;
                 // Once begun, as RenderDoc forgets a command buffer's name as it's begun.
                 self.set_name(commands, name);
                 record(commands);
                 self.raw
                     .end_command_buffer(commands)
-                    .map_err(|e| vk_error("vkEndCommandBuffer", commands_named, e))?;
+                    .map_err(vk_failed("vkEndCommandBuffer", commands_named))?;
                 let command_infos =
                     [vk::CommandBufferSubmitInfo::default().command_buffer(commands)];
                 let submit = vk::SubmitInfo2::default().command_buffer_infos(&command_infos);
@@ -1015,10 +1011,10 @@ impl Device {
                 );
                 self.raw
                     .queue_submit2(*queue, &[submit], vk::Fence::null())
-                    .map_err(|e| vk_error("vkQueueSubmit2", submitted, e))?;
+                    .map_err(vk_failed("vkQueueSubmit2", submitted))?;
                 self.raw
                     .queue_wait_idle(*queue)
-                    .map_err(|e| vk_error("vkQueueWaitIdle", submitted, e))
+                    .map_err(vk_failed("vkQueueWaitIdle", submitted))
             }
         })();
         // SAFETY: the queue is idle, or the work never started, so the pool is unused.

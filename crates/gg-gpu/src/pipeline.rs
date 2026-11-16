@@ -12,7 +12,7 @@ use tracing::debug;
 
 use crate::device::Retired;
 use crate::frame::graph::ImageKind;
-use crate::{Device, vk_error};
+use crate::{Device, vk_error, vk_failed};
 
 /// The pixel formats of what a pass renders into, which pipelines are made for: its color
 /// target's, its IDs', if it has them, its motion's beside those, if it has it, and its depth's, if
@@ -530,10 +530,11 @@ fn shader_module(device: &Device, name: &str, spirv: &[u8]) -> Result<vk::Shader
     // SAFETY: the device is live, and the code is a whole number of words that starts with
     // SPIR-V's magic number, which `read_spv` checked. The module itself is trusted to be valid
     // SPIR-V, as `GraphicsDesc::spirv` says.
-    let module = unsafe { device.raw().create_shader_module(&module_info, None) }.map_err(|e| {
-        let shaders = format_args!("the shaders of pipeline {name:?}");
-        vk_error("vkCreateShaderModule", shaders, e)
-    })?;
+    let module =
+        unsafe { device.raw().create_shader_module(&module_info, None) }.map_err(vk_failed(
+            "vkCreateShaderModule",
+            format_args!("the shaders of pipeline {name:?}"),
+        ))?;
     // SAFETY: the module is live.
     unsafe { device.set_name(module, name) };
     Ok(module)

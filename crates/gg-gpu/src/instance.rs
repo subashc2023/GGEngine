@@ -13,7 +13,7 @@ use gg_core::{Error, Result};
 use raw_window_handle::HasDisplayHandle;
 use tracing::{debug, info, trace, warn};
 
-use crate::{Device, Version, capture, vk_error};
+use crate::{Device, Version, capture, vk_error, vk_failed};
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
@@ -112,20 +112,19 @@ impl Instance {
             (
                 entry
                     .try_enumerate_instance_version()
-                    .map_err(|e| vk_error("vkEnumerateInstanceVersion", "the Vulkan loader", e))?,
-                entry.enumerate_instance_layer_properties().map_err(|e| {
-                    vk_error(
+                    .map_err(vk_failed("vkEnumerateInstanceVersion", "the Vulkan loader"))?,
+                entry
+                    .enumerate_instance_layer_properties()
+                    .map_err(vk_failed(
                         "vkEnumerateInstanceLayerProperties",
                         "the loader's layers",
-                        e,
-                    )
-                })?,
+                    ))?,
                 entry
                     .enumerate_instance_extension_properties(None)
-                    .map_err(|e| {
-                        let subject = "the loader's extensions";
-                        vk_error("vkEnumerateInstanceExtensionProperties", subject, e)
-                    })?,
+                    .map_err(vk_failed(
+                        "vkEnumerateInstanceExtensionProperties",
+                        "the loader's extensions",
+                    ))?,
             )
         };
         trace!(
@@ -174,10 +173,10 @@ impl Instance {
                 Error::new("gpu.window", "can't get the window's display handle").with_source(error)
             })?;
             let required =
-                ash_window::enumerate_required_extensions(display.as_raw()).map_err(|e| {
-                    let call = "ash_window::enumerate_required_extensions";
-                    vk_error(call, "the window's display", e)
-                })?;
+                ash_window::enumerate_required_extensions(display.as_raw()).map_err(vk_failed(
+                    "ash_window::enumerate_required_extensions",
+                    "the window's display",
+                ))?;
             // SAFETY: ash-window returns pointers to its static, null-terminated extension names.
             enabled.extend(required.iter().map(|&name| unsafe { CStr::from_ptr(name) }));
         }
@@ -275,13 +274,10 @@ impl Instance {
                 debug_utils
                     .create_debug_utils_messenger(&messenger_info(&instance.validation), None)
             }
-            .map_err(|e| {
-                vk_error(
-                    "vkCreateDebugUtilsMessengerEXT",
-                    "the validation messenger",
-                    e,
-                )
-            })?;
+            .map_err(vk_failed(
+                "vkCreateDebugUtilsMessengerEXT",
+                "the validation messenger",
+            ))?;
         }
         info!(
             loader = %Version(loader.unwrap_or(vk::API_VERSION_1_0)),
