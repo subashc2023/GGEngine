@@ -1,6 +1,6 @@
-//! Shading the game's view from its visibility buffer, which the meshlets its culling keeps of the
-//! runs of the opaque and masked model shaders draw into, into its colors, a pixel at a time, as
-//! `shaders/visibility.slang` says; and, for its reflections, finding its normals from it first.
+//! Shading the game's view from its visibility buffer, where the opaque and masked model shaders'
+//! kept meshlets draw, a pixel at a time (`shaders/visibility.slang`); and first finding its
+//! normals there, for reflections.
 
 use bytemuck::NoUninit;
 use gg_core::Result;
@@ -12,7 +12,7 @@ use super::cull::CullPlan;
 
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/visibility.spv"));
 
-/// How many pixels across and down a workgroup takes: `GROUP` in `shaders/visibility.slang`.
+/// Pixels across and down per workgroup: `GROUP` in `shaders/visibility.slang`.
 const GROUP: u32 = 8;
 
 /// What the shading reads of the view and its culling: `Shading` in `shaders/visibility.slang`,
@@ -47,27 +47,24 @@ struct ShadePush {
     unused: u32,
 }
 
-/// The game's view, as its shading from its visibility buffer takes it.
+/// The game's view, for shading from its visibility buffer.
 pub(crate) struct Shaded {
     /// From the world to its clip space, as its passes drew.
     pub(crate) clip_from_world: Mat4,
-    /// What it clears to, in linear RGBA, where nothing drew.
+    /// Linear RGBA where nothing drew.
     pub(crate) clear: [f32; 4],
-    /// Its size in pixels.
+    /// In pixels.
     pub(crate) size: [u32; 2],
-    /// Its visibility buffer, which the shading's pass samples, and its colors of high dynamic
-    /// range and its motion, which it overwrites.
+    /// Its visibility buffer, which the pass samples; its HDR colors and motion, which it
+    /// overwrites.
     pub(crate) visibility: ImageId,
     pub(crate) colors: ImageId,
     pub(crate) motion: ImageId,
-    /// The address of the frame's data, a [`FrameData`](super::FrameData), as the view's draws
-    /// read it.
+    /// The address of the frame's [`FrameData`](super::FrameData), as the view's draws read it.
     pub(crate) frame: u64,
 }
 
-/// What a pass over the game's view's visibility buffer takes of the view: from the world to its
-/// clip space, what it clears to where nothing drew, its size, its visibility buffer, and the
-/// address of the frame's data.
+/// What a pass over the game's view's visibility buffer takes of the view.
 struct Seen {
     clip_from_world: Mat4,
     clear: [f32; 4],
@@ -76,27 +73,25 @@ struct Seen {
     frame: u64,
 }
 
-/// The game's view, as finding its normals from its visibility buffer takes it, before its
-/// reflections are traced.
+/// The game's view, for finding its normals from its visibility buffer before reflections are
+/// traced.
 pub(crate) struct Normals {
     /// From the world to its clip space, as its passes drew.
     pub(crate) clip_from_world: Mat4,
-    /// Its size in pixels.
+    /// In pixels.
     pub(crate) size: [u32; 2],
-    /// Its visibility buffer, which the pass samples, and its normals, which it overwrites.
+    /// Its visibility buffer, which the pass samples; its normals, which it overwrites.
     pub(crate) visibility: ImageId,
     pub(crate) normals: ImageId,
-    /// The address of the frame's data, as what's drawn into the visibility buffer reads it, its
-    /// materials among it.
+    /// The address of the frame's data, materials among it, as what's drawn into the visibility
+    /// buffer reads it.
     pub(crate) frame: u64,
 }
 
 impl MeshPass {
-    /// Records the shading of `view` from its visibility buffer into `pass`, which samples it,
-    /// overwrites its colors and its motion, and reads what `plan`'s culling kept, as
-    /// [`CullPlan::shaded`] declared it: each pixel of its colors, and of its motion, as the model
-    /// shader's fragment would have written it, where a run's meshlets drew, and its clear color,
-    /// and no motion, elsewhere.
+    /// Records into `pass` the shading of `view` from its visibility buffer, reading what `plan`
+    /// kept ([`CullPlan::shaded`]). Where a run's meshlets drew, each pixel's color and motion are
+    /// as the model shader's fragment would write them; elsewhere, the clear color and no motion.
     pub(crate) fn shade(
         &self,
         pass: &mut Compute<'_, '_>,
@@ -114,10 +109,9 @@ impl MeshPass {
         self.over_visibility(pass, plan, &self.shading, &seen, targets)
     }
 
-    /// Records the finding of `view`'s normals from its visibility buffer into `pass`, which
-    /// samples it, overwrites its normals, and reads what `plan`'s culling kept, as
-    /// [`CullPlan::shaded`] declared it: each pixel's normal in the world, as the view's shading
-    /// turns it, and 1 in alpha, where a run's meshlets drew, and 0 elsewhere.
+    /// Records into `pass` the finding of `view`'s normals from its visibility buffer, reading what
+    /// `plan` kept ([`CullPlan::shaded`]). Where a run's meshlets drew, each pixel's world normal
+    /// as shading turns it, alpha 1; elsewhere 0.
     pub(crate) fn find_normals(
         &self,
         pass: &mut Compute<'_, '_>,
@@ -135,9 +129,8 @@ impl MeshPass {
         self.over_visibility(pass, plan, &self.normals, &seen, targets)
     }
 
-    /// Records `pipeline` over `seen`, a pixel a thread, into `pass`, which reads what `plan`'s
-    /// culling kept, writing the storage images at `targets`, its target and its motion, as
-    /// `ShadePush` names them.
+    /// Records `pipeline` over `seen`, a pixel per thread, into `pass`, reading what `plan` kept
+    /// and writing the storage images at `targets` (target and motion, as `ShadePush` names them).
     fn over_visibility(
         &self,
         pass: &mut Compute<'_, '_>,

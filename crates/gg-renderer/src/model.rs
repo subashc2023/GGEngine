@@ -1,8 +1,6 @@
-//! Models' meshes: the engine's vertex type and shader for meshes with materials, as glTF files
-//! describe them, shaded by glTF's metallic-roughness model, or
-//! KHR_materials_pbrSpecularGlossiness's, under the frame's lights, or drawn unlit in a frame
-//! without any; and the materials themselves, in a table the GPU keeps, which each draw's
-//! parameters index.
+//! Models' meshes: the engine's vertex type and shaders for glTF materials, shaded by glTF's
+//! metallic-roughness model or KHR_materials_pbrSpecularGlossiness's under the frame's lights, or
+//! unlit without any; and the materials, in a GPU table each draw's parameters index.
 
 use bytemuck::NoUninit;
 use gg_core::math::{Vec2, Vec3, Vec4};
@@ -10,21 +8,19 @@ use gg_gpu::{Sampler, Wrap};
 
 use crate::{Mesh, MeshDraw, PackedVertex, Shaders, Texture};
 
-/// The model shaders, which the build compiled from `shaders/model.slang`, for materials that
-/// blend, and from the two files that include it, for opaque and masked ones.
+/// The model shaders, compiled by the build: `shaders/model.slang` for blending materials, and the
+/// two files including it for opaque and masked ones.
 pub(crate) static BLENDED_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/model.spv"));
 pub(crate) static OPAQUE_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque.spv"));
 pub(crate) static MASKED_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_masked.spv"));
-/// The masked one's vertex shader again, with `shadow_main`, which draws its shadows cut out as it
-/// is.
+/// The masked vertex shader again, with `shadow_main`, drawing its shadows cut out.
 pub(crate) static MASKED_SHADOW_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_shadow.spv"));
 
-/// The opaque and masked model shaders again, drawing the meshlets a view kept of a mesh through
-/// vertex shaders, `meshlet_vertex_main`, and the masked one's shadows; for a device without mesh
-/// shaders.
+/// The opaque and masked shaders again, drawing a view's kept meshlets through vertex shaders
+/// (`meshlet_vertex_main`), and the masked one's shadows; for devices without mesh shaders.
 pub(crate) static OPAQUE_MESHLETS_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque_meshlets.spv"));
 pub(crate) static MASKED_MESHLETS_SPIRV: &[u8] =
@@ -34,8 +30,8 @@ pub(crate) static MASKED_MESHLETS_SHADOW_SPIRV: &[u8] = include_bytes!(concat!(
     "/model_masked_meshlets_shadow.spv"
 ));
 
-/// The opaque and masked model shaders' vertex shaders again, by indices and by meshlets, with
-/// `normal_main`, which draws their normals for the view's reflections.
+/// The opaque and masked vertex shaders again, by indices and by meshlets, with `normal_main`,
+/// drawing normals for reflections.
 pub(crate) static OPAQUE_NORMALS_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque_normals.spv"));
 pub(crate) static MASKED_NORMALS_SPIRV: &[u8] =
@@ -49,18 +45,18 @@ pub(crate) static MASKED_MESHLETS_NORMALS_SPIRV: &[u8] = include_bytes!(concat!(
     "/model_masked_meshlets_normals.spv"
 ));
 
-/// The same through a mesh shader, `mesh_main`, alone, for a device with them: its pipelines take
-/// their fragment shaders from the modules above, as
-/// [`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh) says.
+/// The same through a mesh shader alone (`mesh_main`), for devices with them. Its pipelines take
+/// their fragment shaders from the modules above
+/// ([`GraphicsDesc::mesh`](gg_gpu::GraphicsDesc::mesh)).
 pub(crate) static OPAQUE_MESH_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque_mesh.spv"));
 pub(crate) static MASKED_MESH_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_masked_mesh.spv"));
 
-/// What draws the meshlets of the opaque and masked model shaders into the visibility buffer:
-/// through vertex shaders, `meshlet_visibility_main` and `visibility_main`; and through a mesh
-/// shader, `mesh_visibility_main`, alone, and the fragment shader behind it,
-/// `visibility_primitive_main`, alone, as `build.rs` says why.
+/// Draw the opaque and masked shaders' meshlets into the visibility buffer: through vertex shaders
+/// (`meshlet_visibility_main`, `visibility_main`), or through a mesh shader
+/// (`mesh_visibility_main`) and its fragment shader (`visibility_primitive_main`), each alone, as
+/// `build.rs` says why.
 pub(crate) static OPAQUE_VISIBILITY_SPIRV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/model_opaque_visibility.spv"));
 pub(crate) static MASKED_VISIBILITY_SPIRV: &[u8] =
@@ -82,10 +78,9 @@ pub(crate) static MASKED_VISIBILITY_PRIMITIVE_SPIRV: &[u8] = include_bytes!(conc
     "/model_masked_visibility_primitive.spv"
 ));
 
-/// The modules that draw a model shader's meshlets, as [`Meshlets`](crate::shader::Meshlets) holds
-/// them: through vertex shaders, its shadows' cut out, if they are, or empty; through a mesh
-/// shader; into the visibility buffer each way; and its normals, by indices and through vertex
-/// shaders.
+/// The modules drawing a model shader's meshlets ([`Meshlets`](crate::shader::Meshlets)): through
+/// vertex shaders, with cut-out shadows or empty; through a mesh shader; into the visibility buffer
+/// each way; and normals, by indices and through vertex shaders.
 pub(crate) struct MeshletSpirv {
     pub(crate) vertices: &'static [u8],
     pub(crate) vertices_shadow: &'static [u8],
@@ -97,11 +92,10 @@ pub(crate) struct MeshletSpirv {
     pub(crate) vertices_normals: &'static [u8],
 }
 
-/// A vertex of a model's mesh: where it is in the mesh's space, where it samples its material's
-/// textures, a color the material's is multiplied by, in linear RGBA, the way its surface faces,
-/// a unit vector, and its tangent, the way the textures' X runs along it, a unit vector, with the
-/// sign that makes the bitangent `cross(normal, tangent) * w` run along their Y, as glTF's
-/// `TANGENT` has it. A mesh without a normal map may leave its tangents as anything.
+/// A model mesh's vertex: its position in mesh space, its texture coordinates, a linear RGBA color
+/// multiplying the material's, its unit normal, and its unit tangent along the textures' X, with
+/// the sign making the bitangent `cross(normal, tangent) * w` run along their Y, as glTF's
+/// `TANGENT` has it. A mesh without a normal map may leave tangents as anything.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
 pub struct ModelVertex {
@@ -112,21 +106,19 @@ pub struct ModelVertex {
     pub tangent: Vec4,
 }
 
-/// How a material covers what's behind it, as glTF's `alphaMode` says.
+/// How a material covers what's behind it: glTF's `alphaMode`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AlphaMode {
     /// Wholly, whatever its alpha.
     Opaque,
-    /// Wholly where its alpha is at least `cutoff`, and not at all elsewhere.
+    /// Wholly where alpha is at least `cutoff`, else not at all.
     Mask { cutoff: f32 },
-    /// By its alpha, not multiplied into its color, sorted with what else blends by its z in the
-    /// world.
+    /// By straight alpha, sorted with other blending draws by world z.
     Blend,
 }
 
-/// A texture a material samples, and how: at its nearest texel, of its nearest mip level, as
-/// glTF's `magFilter` NEAREST asks, or else filtered linearly within and between its levels, with
-/// up to 16 samples along the way the surface recedes; wrapping as `wrap` says.
+/// A texture a material samples, and how: nearest texel of the nearest level, as glTF's `magFilter`
+/// NEAREST asks, or else trilinear with up to 16 anisotropic samples; wrapping as `wrap` says.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sampled {
     pub texture: Texture,
@@ -135,7 +127,7 @@ pub struct Sampled {
 }
 
 impl Sampled {
-    /// The engine's white texture, which leaves what it multiplies as it is.
+    /// The engine's white texture, leaving what it multiplies as is.
     pub const WHITE: Self = Self::of(Texture::WHITE);
 
     /// `texture`, filtered linearly, repeating.
@@ -147,7 +139,6 @@ impl Sampled {
         }
     }
 
-    /// The engine's sampler for it.
     fn sampler(self) -> u32 {
         match (self.nearest, self.wrap) {
             (true, Wrap::Clamp) => Sampler::NearestClamp.index(),
@@ -158,42 +149,38 @@ impl Sampled {
     }
 }
 
-/// How a model's mesh looks, as glTF's metallic-roughness materials say: lit by the frame's
-/// lights, its base color, how it reflects, its normal map, its occlusion and what it emits; or
-/// unlit, as KHR_materials_unlit has it, its base color alone, as every material draws in a frame
-/// without lights. Each of its textures multiplies its factor, and samples where the vertices say;
-/// covering what's behind it as `alpha` says.
+/// How a model's mesh looks, as glTF's metallic-roughness materials say: lit, its base color,
+/// reflection, normal map, occlusion and emission; or unlit (KHR_materials_unlit), its base color
+/// alone, as every material draws in a frame without lights. Each texture multiplies its factor,
+/// sampled where the vertices say. `alpha` says how it covers what's behind.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
-    /// The base color, in linear RGBA, alpha not multiplied in, which its texture's colors and the
-    /// vertices' multiply: for a [`Workflow::SpecularGlossiness`], its diffuse color.
+    /// Linear RGBA, straight alpha, multiplied by its texture's colors and the vertices'. A
+    /// [`Workflow::SpecularGlossiness`]'s diffuse color.
     pub color: Vec4,
     pub color_texture: Sampled,
-    /// How it reflects, which its surface texture's texels multiply.
+    /// How it reflects, multiplied by its surface texture's texels.
     pub workflow: Workflow,
-    /// Its surface's map: a [`Map::Surface`](crate::Map::Surface), sampled as stored, of a
-    /// [`Workflow::MetallicRoughness`], or colors, sRGB-encoded, of a
-    /// [`Workflow::SpecularGlossiness`].
+    /// A [`Map::Surface`](crate::Map::Surface), read as stored, for
+    /// [`Workflow::MetallicRoughness`]; sRGB colors for [`Workflow::SpecularGlossiness`].
     pub surface_texture: Sampled,
-    /// Its normal map, a [`Map::Normal`](crate::Map::Normal), if it has one, its X and Y scaled
-    /// by `normal_scale`; without one, it faces as its vertices' normals say.
+    /// A [`Map::Normal`](crate::Map::Normal), X and Y scaled by `normal_scale`. Without one, it
+    /// faces as its vertices' normals say.
     pub normal_texture: Option<Sampled>,
     pub normal_scale: f32,
-    /// Its occlusion map, a [`Map::Surface`](crate::Map::Surface) whose red darkens the light that
-    /// reaches it from all around rather than from the frame's lights, by `occlusion_strength`
-    /// from 0, none, to 1, all of it.
+    /// A [`Map::Surface`](crate::Map::Surface) whose red darkens ambient light, not the frame's
+    /// lights, by `occlusion_strength`: 0 none, 1 all.
     pub occlusion_texture: Sampled,
     pub occlusion_strength: f32,
-    /// The light it emits, in linear RGB, which its emissive texture's colors multiply: added as
-    /// the view shows it, rather than scaled by the exposure, so that an emissive white shows as
-    /// white whatever the light.
+    /// Emitted light, linear RGB, multiplied by its emissive texture's colors. Added as the view
+    /// shows it, not scaled by exposure, so emissive white shows white whatever the light.
     pub emissive: Vec3,
     pub emissive_texture: Sampled,
     pub alpha: AlphaMode,
-    /// Whether both of its triangles' faces draw; otherwise only their fronts, those whose corners
-    /// wind counterclockwise seen from in front, or clockwise under a transform that mirrors them.
+    /// Whether both faces draw; otherwise only fronts, wound counterclockwise seen from in front,
+    /// or clockwise under a mirroring transform.
     pub double_sided: bool,
-    /// Whether it draws its base color alone, unlit, whatever the frame's lights.
+    /// Whether it draws its base color alone, whatever the frame's lights.
     pub unlit: bool,
 }
 
@@ -218,24 +205,22 @@ impl Default for Material {
     }
 }
 
-/// How a material's surface reflects light, its workflow, as PBR calls it, with the factors its
-/// surface texture's texels multiply.
+/// How a material's surface reflects light (its PBR workflow), with the factors its surface
+/// texture's texels multiply.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Workflow {
-    /// As glTF's metallic-roughness materials do: how metallic it is, from 0, a dielectric, to 1,
-    /// a metal, which its surface texture's blue multiplies, and how rough, from 0, a mirror, to
-    /// 1, which its green multiplies.
+    /// glTF's metallic-roughness: `metallic` from 0 (dielectric) to 1 (metal), multiplied by the
+    /// surface texture's blue; `roughness` from 0 (mirror) to 1, by its green.
     MetallicRoughness { metallic: f32, roughness: f32 },
-    /// As KHR_materials_pbrSpecularGlossiness's materials do: the color it reflects head-on, in
-    /// linear RGB, which its surface texture's colors multiply, and how glossy it is, from 0, rough,
-    /// to 1, a mirror, which its alpha multiplies. It diffuses its base color times 1 less its
-    /// specular color's strongest channel, and is shaded by the same BRDF, as rough as 1 less its
-    /// glossiness.
+    /// KHR_materials_pbrSpecularGlossiness: `specular`, the linear RGB reflected head-on,
+    /// multiplied by the surface texture's colors; `glossiness` from 0 (rough) to 1 (mirror), by
+    /// its alpha. It diffuses its base color times 1 less specular's strongest channel, shaded by
+    /// the same BRDF with roughness 1 less glossiness.
     SpecularGlossiness { specular: Vec3, glossiness: f32 },
 }
 
 impl Default for Workflow {
-    /// glTF's default material's: fully metallic and rough.
+    /// glTF's default: fully metallic and rough.
     fn default() -> Self {
         Self::MetallicRoughness {
             metallic: 1.0,
@@ -244,8 +229,8 @@ impl Default for Workflow {
     }
 }
 
-/// A material that [`Materials::add`] handed out: its place in the table of materials the GPU
-/// keeps, which a model's draw's parameters carry.
+/// A handle [`Materials::add`] handed out: its place in the GPU's materials table, which a model
+/// draw's parameters carry.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, NoUninit)]
 pub struct MaterialId {
@@ -253,30 +238,27 @@ pub struct MaterialId {
 }
 
 impl MaterialId {
-    /// Its index, the order [`Materials::add`] handed it out in, from 0.
+    /// The order [`Materials::add`] handed it out in, from 0.
     pub fn index(self) -> u32 {
         self.index
     }
 }
 
-/// The materials models' draws index, kept in a table on the GPU, each entry written once as it's
-/// added and again as it's replaced, rather than copied every frame with each draw. It hands out
-/// each one's handle at once, and keeps what it wrote until [`Uploads::take`](crate::Uploads::take)
-/// takes it, for the frame to write into the table before it draws. A renderer draws with the
-/// materials of one `Materials` only. A handle is never given out again, so the table holds every
-/// material a run has added.
+/// The materials models' draws index, in a GPU table. Each entry is written when added or replaced,
+/// not copied per draw per frame. Handles come at once; [`Uploads::take`](crate::Uploads::take)
+/// takes the writes for the frame to make before it draws. A renderer draws one `Materials`'
+/// materials only. Handles are never reused, so the table holds every material a run added.
 #[derive(Default)]
 pub struct Materials {
-    /// What's been written since they were last taken, in order: each material's index and its
-    /// entry in the table.
+    /// Written since last taken, in order: each material's index and entry.
     pub(crate) changes: Vec<(u32, Entry)>,
-    /// How each material draws, which a draw of it takes its shader and its faces from.
+    /// How each material draws, which its draws take their shader and faces from.
     drawn: Vec<(AlphaMode, bool)>,
 }
 
 impl Materials {
-    /// Adds `material`, which a draw [`MeshDraw::with_material`] makes takes from the frame that
-    /// writes it on.
+    /// Adds `material`, which draws from [`MeshDraw::with_material`] take from the frame that
+    /// writes it.
     pub fn add(&mut self, material: &Material) -> MaterialId {
         let index = u32::try_from(self.drawn.len()).expect("fewer than 2^32 materials");
         self.drawn.push((material.alpha, material.double_sided));
@@ -284,14 +266,13 @@ impl Materials {
         MaterialId { index }
     }
 
-    /// Puts `material` in place of `id`'s, which every draw of it takes from the frame that writes
-    /// it on, in place of any of its writes still waiting for a frame. A draw made before keeps
-    /// its shader and its faces, which a material of another alpha mode or sidedness needs drawn
-    /// again for.
+    /// Puts `material` in place of `id`'s, replacing any writes still waiting; draws take it from
+    /// the frame that writes it. Existing draws keep their shader and faces, so a change of alpha
+    /// mode or sidedness needs them made again.
     ///
     /// # Panics
     ///
-    /// If `id` isn't one of these materials, as another `Materials`' handles can be past them.
+    /// - If `id` isn't one of these materials (another `Materials`' handles can be past them).
     pub fn replace(&mut self, id: MaterialId, material: &Material) {
         let Some(drawn) = self.drawn.get_mut(id.index as usize) else {
             panic!("material {} is one of another `Materials`", id.index);
@@ -308,7 +289,7 @@ impl Materials {
         }
     }
 
-    /// How many it has handed out: the index of the next.
+    /// How many it has handed out: the next index.
     pub fn count(&self) -> u32 {
         self.drawn.len() as u32
     }
@@ -320,28 +301,27 @@ impl Materials {
 pub(crate) struct Entry {
     color: Vec4,
     emissive: Vec3,
-    /// A [`Workflow::MetallicRoughness`]'s, 0 for the other.
+    /// A [`Workflow::MetallicRoughness`]'s; 0 for the other.
     metallic: f32,
     roughness: f32,
     normal_scale: f32,
     occlusion_strength: f32,
     /// The alpha below which the masked shader discards; the others read none.
     cutoff: f32,
-    /// [`UNLIT`], [`NORMAL_MAPPED`] and [`SPECULAR_GLOSSINESS`], as they hold.
+    /// [`UNLIT`], [`NORMAL_MAPPED`] and [`SPECULAR_GLOSSINESS`].
     flags: u32,
-    /// Each texture's index and its sampler's: the base color's, the surface's, the normal map's,
-    /// the occlusion's and the emissive's.
+    /// Each texture's index and sampler: base color, surface, normal map, occlusion and emissive.
     textures: [[u32; 2]; 5],
-    /// A [`Workflow::SpecularGlossiness`]'s, 0 for the other.
+    /// A [`Workflow::SpecularGlossiness`]'s; 0 for the other.
     specular: Vec3,
     glossiness: f32,
 }
 
-/// The flag of a material drawn unlit.
+/// Drawn unlit.
 const UNLIT: u32 = 1;
-/// The flag of a material with a normal map.
+/// Has a normal map.
 const NORMAL_MAPPED: u32 = 2;
-/// The flag of a material whose surface is a [`Workflow::SpecularGlossiness`].
+/// Its surface is a [`Workflow::SpecularGlossiness`].
 const SPECULAR_GLOSSINESS: u32 = 4;
 
 impl Entry {
@@ -387,8 +367,8 @@ impl Entry {
     }
 }
 
-/// The model shaders' parameters: `Params` in model.slang. Public for its name and size alone,
-/// which a snapshot's assets give as what a model's draws hold.
+/// The model shaders' parameters: `Params` in model.slang. Public only for its name and size, which
+/// a snapshot's assets give as what a model's draws hold.
 #[doc(hidden)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
@@ -398,12 +378,11 @@ pub struct Params {
 
 impl MeshDraw {
     /// A draw of `mesh` with `material`, one of `materials`, through the engine's model shader for
-    /// its alpha mode, which `shaders` adds the first time one asks for it, and with the faces it
-    /// says.
+    /// its alpha mode (which `shaders` adds when first asked), with its faces.
     ///
     /// # Panics
     ///
-    /// If `material` isn't one of `materials`.
+    /// - If `material` isn't one of `materials`.
     pub fn with_material(
         mesh: Mesh<PackedVertex>,
         material: MaterialId,
@@ -455,7 +434,7 @@ mod tests {
         let masked = draw(AlphaMode::Mask { cutoff: 0.25 }, true);
         let blended = draw(AlphaMode::Blend, false);
         let opaque_again = draw(AlphaMode::Opaque, true);
-        // After the engine's sprite shader, each the first time it's asked for.
+        // After the engine's sprite shader, each when first asked for.
         let shader = |draw: &MeshDraw| draw.shader;
         assert_eq!(
             [&opaque, &masked, &blended, &opaque_again].map(shader),
@@ -470,14 +449,14 @@ mod tests {
         assert!(opaque.batch().is_some() && masked.batch().is_some());
         assert_eq!(blended.batch(), None);
         assert_eq!((opaque.culls, masked.culls), (true, false));
-        // Each draw's parameters are its material's place in the table.
+        // Each draw's parameters are its material's table index.
         assert_eq!(masked.params(), 1u32.to_le_bytes());
         assert_eq!(opaque_again.params(), 3u32.to_le_bytes());
     }
 
-    /// Each material's entry is written as it's added, and again as it's replaced, the last write
-    /// waiting for a frame taking the place of those before it; and each texture samples as it
-    /// says, a material without a normal map flagged so.
+    /// Each material's entry is written when added and replaced, the last waiting write replacing
+    /// earlier ones; each texture samples as it says; and a material without a normal map is
+    /// flagged so.
     #[test]
     fn materials_are_written_as_they_are_added_and_replaced() {
         let mut materials = Materials::default();

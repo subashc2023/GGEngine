@@ -1,4 +1,4 @@
-//! Drawing a pass's runs: what each draw pushes and reads, and the level of detail it picks.
+//! Drawing a pass's runs: what each draw pushes and reads, and its level of detail.
 
 use bytemuck::NoUninit;
 use gg_core::Result;
@@ -12,8 +12,8 @@ use crate::draws::Run;
 use crate::particles::ParticleDraws;
 use crate::{DrawCounts, Draws};
 
-/// Where a frame's draws' instances are, as [`MeshPass::upload_draws`] copied them into the frame:
-/// the addresses of their transforms, their IDs and their parameters, 0 for none.
+/// The addresses of a frame's draws' transforms, IDs and parameters, as [`MeshPass::upload_draws`]
+/// copied them; 0 for none.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Uploaded {
     pub(super) transforms: u64,
@@ -22,10 +22,10 @@ pub(crate) struct Uploaded {
 }
 
 impl MeshPass {
-    /// Copies `draws`' transforms, IDs and parameters into the frame, each array once, for every
-    /// pass that draws them, and for culling them: where they are.
+    /// Copies `draws`' transforms, IDs and parameters into the frame, each array once for every
+    /// pass and the culling.
     pub(crate) fn upload_draws(frame: &mut Frame<'_>, draws: &Draws) -> Result<Uploaded> {
-        // Each array in an upload of its own, so that each starts 16-byte aligned.
+        // An upload per array, so each starts 16-byte aligned.
         let mut address = |bytes: &[u8]| -> Result<u64> {
             Ok(if bytes.is_empty() {
                 0
@@ -40,26 +40,20 @@ impl MeshPass {
         })
     }
 
-    /// Draws `runs` of `draws` and of the scene over the whole of the pass's target, `view` pixels
-    /// across and down, where `view_projection` takes the world to clip space, from their instances
-    /// as `uploaded` has the draws', for shaders that read the frame's data, a [`FrameData`], at
-    /// the address `frame`: the culled runs first, then the rest, each in the order the draws say,
-    /// the scene's runs where they place them. A run that's culled draws what the culling's view
-    /// kept of it, a draw for each of its mesh's levels; any other is one instanced draw, or, of a
-    /// mesh with levels of detail, one for each stretch of its instances in a row that draw at one
-    /// level, in order. The scene's runs draw only as they're culled. A run of a mesh that isn't
-    /// drawable yet, or was removed, or with a shader that was, draws nothing. Each draws as `way`
-    /// says; and an emitter's particles, in their place among the rest, as `particles` draws them,
-    /// where the pass shades, and nothing without them. Returns what it drew of the runs it didn't
-    /// cull, which the culling counts of the rest.
+    /// Draws `runs` of `draws` and the scene into the pass's target (`view` pixels), `frame` being
+    /// a [`FrameData`]'s address. Culled runs draw first, then the rest in the draws' order, the
+    /// scene's at its place. A culled run draws what its view kept, a draw per level; any other is
+    /// one instanced draw, or one per stretch of instances at one level. The scene's runs draw only
+    /// culled. Runs of undrawable or removed meshes or shaders draw nothing. Particles draw in
+    /// their place where the pass shades. Returns what it drew of the unculled runs.
     ///
     /// # Panics
     ///
-    /// If a mesh drawn isn't one of the pass's `Meshes`, a shader isn't one of its `Shaders`, a
-    /// mesh's vertices or a draw's parameters aren't the size its shader reads, a run has more
-    /// instances than Vulkan's 32-bit count, or the pass isn't into what `way` draws into: an
-    /// image of [`Format::HDR`], or a visibility buffer, with IDs and a depth image, or depth
-    /// alone.
+    /// - If a mesh or shader isn't the pass's.
+    /// - If vertices or parameters aren't the size the shader reads.
+    /// - If a run has more instances than Vulkan's 32-bit count.
+    /// - If the target isn't what `way` draws into: a [`Format::HDR`] image or a visibility buffer,
+    ///   with IDs and depth, or depth alone.
     #[expect(
         clippy::too_many_arguments,
         reason = "what a pass draws by, each apart"
@@ -79,8 +73,8 @@ impl MeshPass {
         let _zone = gg_core::zone!();
         let mut drawn = DrawCounts::default();
         let lod_view = LodView::new(&view_projection, view);
-        // What's set, which a pipeline's binding leaves as it is: the scissor the view's own until
-        // a run's clip.
+        // State set so far, which binding a pipeline leaves alone. The scissor is the view's own
+        // until a run's clip.
         let (mut bound, mut faces, mut clipped) = (None, None, None);
         // The draws before the scene's place, the scene's runs, then the draws after.
         let scene_at = draws.scene_at.unwrap_or(0);
@@ -103,8 +97,8 @@ impl MeshPass {
             .flat_map(|_| order().map(|run| (run, true)));
         let rest_order = rest.then(order).into_iter().flatten();
         for (drawn_run, culling) in culled_order.chain(rest_order.map(|run| (run, false))) {
-            // Its mesh, its shader, the faces it draws, the draws' run, if it's theirs, and its
-            // index among the runs culled, if it's culled.
+            // Its mesh, shader and faces, the draws' run if it's theirs, and its culled-run index
+            // if culled.
             let (run, culled_run) = match drawn_run {
                 Drawn::Frame(i) => {
                     let run = &draws.runs[i];
@@ -118,7 +112,7 @@ impl MeshPass {
                 }
             };
             let (mesh, shader, run_faces, run) = run;
-            // Each in its turn, and the scene's runs only as they're culled.
+            // Each in its turn, and the scene's runs only culled.
             if culled_run.is_some() != culling || (run.is_none() && culled_run.is_none()) {
                 continue;
             }
@@ -135,7 +129,7 @@ impl MeshPass {
             let (Some(mesh), Some(shader)) = (mesh.ready(), shader) else {
                 continue;
             };
-            // Its clip, as a scissor, and nothing of a run whose clip the view doesn't show.
+            // Its clip as a scissor; nothing for a clip the view doesn't show.
             let clip = run.and_then(|run| run.clip);
             if clip != clipped {
                 let (origin, size) =
@@ -146,25 +140,24 @@ impl MeshPass {
                 pass.set_scissor(origin, size);
                 clipped = clip;
             }
-            // An emitter's particles, which are never culled, on the quad, whose indices they take.
+            // An emitter's particles, never culled, on the quad, whose indices they take.
             if let Some(index) = run.and_then(|run| run.particles) {
                 if let (Way::Shaded { .. }, Some(particles)) = (way, particles) {
                     pass.begin_label(c"particles");
                     drawn += particles.draw(pass, &mesh.indices, index, view_projection, frame);
                     pass.end_label();
-                    // Its pipeline is bound and its faces are set in place of the runs'.
+                    // Particles bound their own pipeline and faces in place of the runs'.
                     (bound, faces) = (None, None);
                 }
                 continue;
             }
-            // A run the culling draws by its meshlets, by its shader's meshlet geometry.
+            // A run culled by meshlets draws by its shader's meshlet geometry.
             let by_meshlets = culled_run.is_some_and(|run| self.culling.by_meshlets(run));
             let (geometry, depth_only) = match &shader.meshlets {
                 Some((geometry, depth_only)) if by_meshlets => (geometry, depth_only),
                 _ => (&shader.pipeline, &shader.depth_only),
             };
-            // Such a run of a model shader's draws into the visibility buffer where the view has
-            // one.
+            // A model shader's such run draws into the view's visibility buffer, if it has one.
             let visible = shader.visibility.as_ref().filter(|_| by_meshlets);
             let pipeline = match (way, visible) {
                 (Way::Shaded { beside_visibility }, visible) => {
@@ -222,14 +215,14 @@ impl MeshPass {
             let push = Push {
                 clip_from_world: view_projection,
                 vertices: self.vertices_address(mesh_index, mesh),
-                // Where each draw's instances are, which it sets.
+                // Each draw sets its instances' addresses.
                 transforms: 0,
                 ids: 0,
                 params: 0,
                 view: view.map(|side| side as f32),
                 frame,
-                // A draw of meshlets sets them, and a culled draw of the game's view its instances'
-                // transforms the frame before.
+                // A meshlet draw sets them, and a culled draw of the game's view its last-frame
+                // transforms.
                 meshlets: 0,
                 draw: 0,
                 previous: 0,
@@ -259,11 +252,9 @@ impl MeshPass {
     }
 }
 
-/// The pixels of a view `view` across and down, from its top left, that `clip` shows within, a
-/// rectangle in the XY plane of the space `view_projection` takes to clip space, its least corner
-/// then its greatest, as [`Draws::clip`] says: the box round where its corners show, each edge at
-/// the nearest pixel's, so that a pixel draws whose middle is inside, kept within the view; its
-/// origin and its size.
+/// The pixels of a `view`-sized view (origin and size, from its top left) inside `clip`
+/// ([`Draws::clip`]) as `view_projection` shows it: the box round its corners, at the nearest pixel
+/// edges, within the view.
 pub(super) fn scissor(
     clip: [Vec2; 2],
     view_projection: Mat4,
@@ -286,51 +277,44 @@ pub(super) fn scissor(
     }
     let [low, high] = [low, high].map(|edge| edge.round().clamp(Vec2::ZERO, size));
     let extent = (high - low).max(Vec2::ZERO);
-    // A clip of no number, as one past the camera, is cast to none.
+    // A NaN clip, as one past the camera, casts to none.
     (
         [low.x as u32, low.y as u32],
         [extent.x as u32, extent.y as u32],
     )
 }
 
-/// How a pass draws the runs it draws, as [`MeshPass::draw`] draws them.
+/// How [`MeshPass::draw`] draws a pass's runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Way {
-    /// Shaded as they draw, by their shaders' pipelines, into colors of high dynamic range: every
-    /// run, or, beside a visibility buffer, all but those drawn into it, which it shades.
+    /// Into HDR colors: every run, or beside a visibility buffer, all but those it shades.
     Shaded { beside_visibility: bool },
-    /// Their shadows, into a shadow map, by the shadow pipelines of those whose shaders write depth,
-    /// and nothing of the rest.
+    /// Into a shadow map, by the shadow pipelines of runs that write depth.
     Shadows,
-    /// Their depth alone, as the view draws it, into the depth the view's ambient occlusion takes,
-    /// by the depth pipelines of those whose shaders write depth: every such run, or, beside a
-    /// visibility buffer, all but those drawn into it, whose depth the view's holds; and nothing
-    /// of the rest.
+    /// Depth alone, for the view's ambient occlusion, by the depth pipelines of runs that write
+    /// depth; beside a visibility buffer, not those it holds.
     Depth { beside_visibility: bool },
-    /// Their normals, for the view's reflections, as their shading turns them, where they're nearest
-    /// in the depth [`Way::Depth`] drew, which they're tested against, by the normals' pipelines of
-    /// the opaque and masked model shaders: every such run, or, beside a visibility buffer, all but
-    /// those drawn into it, whose normals are found from it; and nothing of the rest, whose normals
-    /// the reflections find from the depth.
+    /// Normals for reflections, where nearest in [`Way::Depth`]'s depth, by the opaque and masked
+    /// model shaders' normals pipelines; beside a visibility buffer, not those it covers.
+    /// Reflections find the rest's from depth.
     Normals { beside_visibility: bool },
-    /// Into a visibility buffer: the culled runs drawn by their meshlets whose shaders have a
-    /// pipeline for it, as the opaque and masked model shaders do, and nothing of the rest.
+    /// Into a visibility buffer: culled runs drawn by meshlets, of the opaque and masked model
+    /// shaders.
     Visibility,
 }
 
-/// Which of a frame's runs a pass draws, as [`MeshPass::draw`] draws them.
+/// Which of a frame's runs [`MeshPass::draw`] draws.
 #[derive(Clone, Copy)]
 pub(crate) enum Runs<'p> {
-    /// What the culling's view in the slot given kept of the runs it culled, alone: the game's
-    /// view's first pass, or a shadow cascade's.
+    /// What the culling's view in that slot kept, alone: the game's view's first pass, or a
+    /// cascade's.
     Culled(&'p CullPlan, usize),
-    /// What the culling's view in the slot given kept of the runs it culled, then the rest: the
-    /// game's view's second pass.
+    /// What the culling's view in that slot kept, then the rest: the game's view's second pass.
     CulledThenRest(&'p CullPlan, usize),
-    /// The runs the culling doesn't cull alone, what blends: the game's view's pass after its fog,
-    /// which fogs what the passes before it drew.
+    /// The unculled runs alone, what blends: the game's view's pass after fog, which fogs the
+    /// earlier passes.
     Rest(&'p CullPlan),
-    /// Every run, on the CPU's levels: the canvas's, or a view's whose frame culls none.
+    /// Every run, at CPU-picked levels: the canvas, or a view whose frame culls none.
     All,
 }
 
@@ -341,27 +325,21 @@ enum Drawn {
     Scene(usize),
 }
 
-/// How many pixels a level's error may span on screen for a draw to use the level: the least that
-/// shows, as the pixel is the least a view resolves.
+/// Pixels a level's error may span on screen for a draw to use it: one, the least a view resolves.
 const LOD_ERROR_PIXELS: f32 = 1.0;
 
-/// What choosing a mesh's level of detail needs of the view it's drawn into, found once for all of
-/// a pass's draws from the matrix, `C`, that takes the world to clip space.
-///
-/// `C` is a projection times a view matrix that is rigid, so that it keeps lengths. In both of the
-/// engine's projections a point's clip W is its distance ahead of the camera, which `C`'s fourth
-/// row dotted with the point gives: perspective's own fourth row is (0, 0, -1, 0), W the view
-/// space's -Z, and orthographic's is (0, 0, 0, 1), W always 1. The rows that make clip X and Y are
-/// the projection's scale on that axis times a row of the view's rotation, so the length of such a
-/// row's XYZ is the scale alone, however the camera turns: the clip units, half the view across,
-/// that a world unit spans where W is 1, and half the view's size in pixels times that is pixels.
+/// What picking levels of detail needs of a pass's view, from `C`, its world-to-clip matrix: a
+/// projection times a rigid view. In both projections clip W is the distance ahead of the camera:
+/// perspective's fourth row is (0, 0, -1, 0), orthographic's (0, 0, 0, 1). Clip X's and Y's rows
+/// are the projection's scale times a rotation row, so their XYZ's length is the scale: clip units
+/// (half the view) per world unit where W is 1.
 pub(super) struct LodView {
-    /// `C`'s fourth row: a point's clip W is its dot product with the point, with a W of 1.
+    /// `C`'s fourth row: a point's clip W is its dot product with the point, W 1.
     pub(super) w: Vec4,
-    /// The length of `w`'s XYZ: how much W changes with a world unit's distance, 1 under
-    /// perspective and 0 under orthographic.
+    /// The length of `w`'s XYZ: W's change per world unit of distance, 1 under perspective and 0
+    /// under orthographic.
     pub(super) w_slope: f32,
-    /// The pixels a world unit spans where W is 1, the larger of across and down.
+    /// Pixels a world unit spans where W is 1, the larger of across and down.
     pub(super) pixels_per_unit: f32,
 }
 
@@ -379,13 +357,10 @@ impl LodView {
         }
     }
 
-    /// The coarsest of `lods`' levels whose error, as `transform` places the mesh in the world,
-    /// spans at most [`LOD_ERROR_PIXELS`] on screen where the mesh is nearest, or level 0 if none
-    /// does, or the mesh reaches the plane of the camera or crosses it.
-    ///
-    /// `transform` scales the mesh's units by the longest of its axes, which is how it scales the
-    /// error and the sphere. The error spans `error * scale * pixels_per_unit / near` pixels, where
-    /// `near` is the W of the sphere's nearest point, W less the radius, at most.
+    /// The coarsest of `lods`' levels whose error spans at most [`LOD_ERROR_PIXELS`] where the mesh
+    /// is nearest; else level 0, as when the mesh reaches the camera's plane. The error spans
+    /// `error * scale * pixels_per_unit / near` pixels, `scale` being `transform`'s longest axis
+    /// and `near` the W of the sphere's nearest point (W less the radius).
     pub(super) fn level(&self, lods: &Lods, transform: &Mat4) -> usize {
         let axes = [transform.x_axis, transform.y_axis, transform.z_axis];
         let scale_squared = axes.map(|axis| axis.truncate().length_squared());
@@ -399,8 +374,7 @@ impl LodView {
         if near <= 0.0 {
             return 0;
         }
-        // The levels' errors never decrease, so the last to pass is the coarsest. A NaN passes
-        // none.
+        // Errors never decrease by level, so the last to pass is the coarsest. A NaN passes none.
         let allowed = LOD_ERROR_PIXELS * near / (scale * self.pixels_per_unit);
         (lods.levels.iter())
             .rposition(|lod| lod.error <= allowed)
@@ -413,14 +387,13 @@ impl LodView {
 struct Instances<'a> {
     run: &'a Run,
     uploaded: Uploaded,
-    /// The size of one instance's parameters.
+    /// Bytes of one instance's parameters.
     params_size: usize,
 }
 
-/// Draws `instances` of `mesh` directly, with what `push` has but for the instances, which each
-/// draw sets: one instanced draw, or, of a mesh with levels of detail, one for each stretch of
-/// instances in a row that draw at the level `view` picks for them, by their `transforms`, in their
-/// order, as what blends and the canvas draw in order. Returns what it drew.
+/// Draws `instances` of `mesh` directly with `push`, setting the instances per draw: one instanced
+/// draw, or one per stretch of consecutive instances at the level `view` picks, in order. Returns
+/// what it drew.
 fn draw_run(
     pass: &mut Pass<'_, '_>,
     mesh: &GpuMesh,
@@ -475,97 +448,83 @@ fn draw_run(
     drawn
 }
 
-/// What the mesh pass pushes before each draw, which a mesh shader's push constants read the
-/// start of, as [`Shaders::add`](crate::Shaders::add) describes, and which the engine's mesh
-/// shaders declare as `Push` in `shaders/mesh.slang`. The matrix goes first, so that every offset
-/// is the same under every layout Slang gives push constants; the IDs before the parameters, so
-/// that a shader that takes none still ends its struct after the last member it reads; and the
-/// view's size, the frame's data and a draw of meshlets after them, each added at the end, so that
-/// it moved none of the offsets games' shaders declare before it, though a shader that takes no
-/// parameters can't read them.
+/// What the mesh pass pushes before each draw: `Push` in `shaders/mesh.slang`. Games' shaders read
+/// its start ([`Shaders::add`](crate::Shaders::add)). The matrix leads, so offsets match under
+/// every Slang push-constant layout. IDs precede parameters, so a shader taking none ends its
+/// struct after its last member. Later fields were appended, moving no offset games declare;
+/// shaders without parameters can't read them.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Push {
     /// From the world to clip space, column-major.
     pub(crate) clip_from_world: Mat4,
-    /// The address of the mesh's vertices.
+    /// Address of the mesh's vertices.
     pub(crate) vertices: u64,
-    /// The address of the instances' transforms.
+    /// Address of the instances' transforms.
     pub(crate) transforms: u64,
-    /// The address of the instances' IDs, each the low and high halves of a 64-bit number.
+    /// Address of the instances' IDs, each the low and high halves of a 64-bit number.
     pub(crate) ids: u64,
-    /// The address of the instances' parameters, or 0 for a shader that takes none.
+    /// Address of the instances' parameters; 0 for a shader that takes none.
     pub(crate) params: u64,
-    /// The size of the view the pass draws into, in pixels, across then down.
+    /// The pass's view size in pixels, across then down.
     pub(crate) view: [f32; 2],
-    /// The address of the frame's data, a [`FrameData`].
+    /// The address of a [`FrameData`].
     pub(crate) frame: u64,
-    /// For a draw of the meshlets a view kept of a mesh, through the model shaders' meshlet
-    /// geometry, the address of the draw as the culling wrote it, which those it kept follow; 0
-    /// for any other draw.
+    /// For a culled run's meshlet draw, the culling's draw address, its kept meshlets following;
+    /// else 0.
     pub(crate) meshlets: u64,
-    /// For a draw of them into the visibility buffer, which run of the frame's culled runs it is
-    /// and in which of the game's view's passes, 1 past twice the run's index, and that pass's 1
-    /// past it, as the visibility buffer holds it, so that 0 is none: 0 for any other draw.
+    /// For a visibility-buffer draw: 1 past twice its culled run's index, plus 1 in the second
+    /// pass, as the buffer holds it; else 0, none.
     pub(crate) draw: u32,
-    /// How many transforms past each instance's, in the array `transforms` points into, its
-    /// transform the frame before is, which the game's view moves what it draws by: for the view's
-    /// culled draws, where the culling kept those, and 0 for the rest, which the renderer knows no
-    /// transform the frame before of, as a layer's draws, made each frame, so that they read their
-    /// own and move with the camera alone.
+    /// Transforms past each instance's to its last-frame one, by which the view moves draws. For
+    /// the game's view's culled draws, where the culling kept them; else 0, reading their own (a
+    /// layer's draws are made each frame), so they move with the camera alone.
     pub(crate) previous: u32,
 }
 
 /// What every draw's shader may read of the frame, through [`Push::frame`]: `Frame` in
-/// `shaders/mesh.slang`, field for field. Fields are added at its end, so that a shader that reads
-/// those before them keeps to the contract.
+/// `shaders/mesh.slang`, field for field. Fields are added at its end, so a shader reading those
+/// before them keeps to the contract.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit)]
 pub(crate) struct FrameData {
-    /// Where the view sees from, in the world.
+    /// The view's position in the world.
     pub(crate) camera: Vec3,
-    /// The time the view shows, in seconds, as [`RenderData::time`](crate::RenderData::time)
-    /// gives it.
+    /// In seconds ([`RenderData::time`](crate::RenderData::time)).
     pub(crate) time: f32,
-    /// What lit shading multiplies light by, as
-    /// [`RenderData::exposure`](crate::RenderData::exposure) gives it.
+    /// What lit shading multiplies light by
+    /// ([`RenderData::exposure`](crate::RenderData::exposure)).
     pub(crate) exposure: f32,
-    /// How many lights the frame has, as [`RenderData::lights`](crate::RenderData::lights) gives
-    /// them.
+    /// How many lights the frame has ([`RenderData::lights`](crate::RenderData::lights)).
     pub(crate) light_count: u32,
-    /// The address of its lights, a [`GpuLight`](crate::light::GpuLight) each, in the order
-    /// [`Lighting::lights`](crate::cluster::Lighting::lights) has them, or 0 for none: for the
-    /// game's view, if a light is binned, their copies, which the clusters follow, as
-    /// [`Lighting::bin`](crate::cluster::Lighting::bin) returns them.
+    /// Address of its lights ([`GpuLight`](crate::light::GpuLight)), in
+    /// [`Lighting::lights`](crate::cluster::Lighting::lights)' order, or 0. In the game's view with
+    /// lights binned, the copies the clusters follow
+    /// ([`Lighting::bin`](crate::cluster::Lighting::bin)).
     pub(crate) lights: u64,
-    /// The address of the table of materials, each by its index, or 0 before any is added.
+    /// The address of the materials table, by index, or 0 before any is added.
     pub(crate) materials: u64,
-    /// Where lit shading sees from: the camera's position and 1 for a perspective, or the way back
-    /// toward it and 0 for an orthographic projection, which sees along one way, so that the way
-    /// to the eye from a point `p` is `eye.xyz - p * eye.w`.
+    /// Where lit shading sees from: the camera and 1, or under orthographic the way back and 0. The
+    /// way to the eye from `p` is `eye.xyz - p * eye.w`.
     pub(crate) eye: Vec4,
-    /// The frame's sky and its prefiltered light, as [`SkyData`](crate::sky::SkyData) has them.
+    /// The sky and its prefiltered light ([`SkyData`](crate::sky::SkyData)).
     pub(crate) sky: crate::sky::SkyData,
-    /// The shadows of the light that casts them, if one does, as
-    /// [`ShadowData`](crate::shadow::ShadowData) has them.
+    /// The shadow-casting light's shadows, if any ([`ShadowData`](crate::shadow::ShadowData)).
     pub(crate) shadows: crate::shadow::ShadowData,
-    /// The clusters the lights are binned into, as [`ClusterData`](crate::cluster::ClusterData)
-    /// has them.
+    /// The clusters lights are binned into ([`ClusterData`](crate::cluster::ClusterData)).
     pub(crate) clusters: crate::cluster::ClusterData,
-    /// The slot of the game's view's ambient occlusion in the bindless set, an image of the view's
-    /// size, the fraction of the light from all around that reaches each pixel, as
-    /// [`AmbientOcclusion`](crate::AmbientOcclusion) says; 0 for none, which shaders take as 1,
-    /// as for every pass but the view's shading.
+    /// The bindless slot of the view's ambient occlusion
+    /// ([`AmbientOcclusion`](crate::AmbientOcclusion)); 0 for none, read as 1, as in all passes but
+    /// the view's shading.
     pub(crate) ambient_occlusion: u32,
-    /// What the view shows in place of its light, as [`Channel::index`](crate::Channel::index)
-    /// numbers it, which lit shading returns in place of its light: 0 for its light.
+    /// What lit shading returns in place of light, by [`Channel::index`](crate::Channel::index); 0
+    /// for light.
     pub(crate) show: u32,
-    /// The height fog the view is in, as [`FogData`](crate::fog::FogData) has it.
+    /// The view's height fog ([`FogData`](crate::fog::FogData)).
     pub(crate) fog: crate::fog::FogData,
-    /// The atmosphere's haze, as [`AerialData`](crate::atmosphere::AerialData) has it.
+    /// The atmosphere's haze ([`AerialData`](crate::atmosphere::AerialData)).
     pub(crate) aerial: crate::atmosphere::AerialData,
-    /// The game's view's reflections, as
-    /// [`ReflectionData`](crate::reflections::ReflectionData) has them: none but in the passes that
-    /// shade the view.
+    /// The game's view's reflections ([`ReflectionData`](crate::reflections::ReflectionData)); none
+    /// but in the passes shading the view.
     pub(crate) reflections: crate::reflections::ReflectionData,
 }

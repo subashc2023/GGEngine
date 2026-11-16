@@ -13,10 +13,8 @@ use crate::packed::MeshletBounds;
 use crate::texture::{self, Map, Texels};
 use crate::{Streaming, Uploads, model};
 
-/// A texture's slot: the texture in it, what its texels stand for, which says which stand-in the
-/// slot shows without an image of its own, whether it was removed, which leaves it showing the
-/// stand-in for good, as stale handles may still sample it, and how many times it has come to show
-/// another image, its own or the stand-in, which tells what it shows apart from what it showed.
+/// A texture's slot: its texture; its kind, which picks its stand-in; whether removed (showing the
+/// stand-in for good, as stale handles may sample it); and how many times it has switched images.
 pub(super) struct TextureSlot {
     texture: GpuTexture,
     kind: texture::Kind,
@@ -24,11 +22,9 @@ pub(super) struct TextureSlot {
     shown: u64,
 }
 
-/// The textures the renderer's slots show until their own images are there: a pixel of white for
-/// colors, so that a sprite shows its tint, and for a surface's map, so that a material shows its
-/// factors; a pixel of zeros for data, so that text draws nothing rather than boxes; and a normal
-/// pointing straight out for a normal map, so that a surface shows as its vertices shape it.
-/// Written in the first frame that begins, before any slot shows them.
+/// Shown until images arrive: white for colors (sprites show their tint) and surface maps
+/// (materials show their factors), zeros for data (text draws nothing), a flat normal for normal
+/// maps. Written in the first frame.
 pub(super) struct StandIns {
     white: GpuTexture,
     zeros: GpuTexture,
@@ -48,7 +44,6 @@ impl StandIns {
         })
     }
 
-    /// The stand-in for a texture whose texels stand for `kind`.
     fn of(&self, kind: texture::Kind) -> &GpuTexture {
         match kind {
             texture::Kind::Color | texture::Kind::Map(Map::Surface) => &self.white,
@@ -57,7 +52,6 @@ impl StandIns {
         }
     }
 
-    /// Writes them, in the first frame.
     fn write(&mut self, frame: &mut Frame<'_>) -> Result<()> {
         if self.written {
             return Ok(());
@@ -71,11 +65,9 @@ impl StandIns {
     }
 }
 
-/// The table of materials, by their handles, in the GPU's own memory: written as materials are added
-/// and replaced, in the frame's own commands, before its passes, so that every draw from that
-/// frame on reads what was written; and made again, twice the size, as more are added than it
-/// holds, the old one retiring until the GPU is done with it. What it holds is kept on the CPU
-/// too, for a table made again to start from.
+/// The materials table, by handle, in GPU memory, written in the frame's commands before its
+/// passes. Grown at twice the size from the CPU's copy, the old one retiring until the GPU is done
+/// with it.
 pub(super) struct MaterialTable {
     /// The table, and how many materials it holds.
     pub(super) table: Option<(GpuBuffer, usize)>,
@@ -86,14 +78,12 @@ impl MaterialTable {
     /// The fewest materials a table holds.
     const LEAST: usize = 64;
 
-    /// Writes `changes`, taking them, each a material's index and its entry, into the table, which
-    /// it makes, or makes again larger, as they need: one copy of every entry from the first that
-    /// changed to the last, or of them all into a table made again.
+    /// Writes `changes` (each a material's index and entry) into the table, making or growing it as
+    /// needed: one copy from the first changed entry to the last, or of all into a grown table.
     ///
     /// # Panics
     ///
-    /// If a material's index is past those before it, as they are where they came from another
-    /// `Materials` than those before them.
+    /// - If a material's index skips past those before it, as from another `Materials`.
     fn write(
         &mut self,
         device: &Arc<Device>,
@@ -120,8 +110,7 @@ impl MaterialTable {
         let len = self.entries.len();
         if self.table.as_ref().is_none_or(|&(_, room)| room < len) {
             let room = len.next_power_of_two().max(Self::LEAST);
-            // The table that's there, if any, retires until the GPU is done with the frames that
-            // read it.
+            // The old table retires until the GPU is done with the frames reading it.
             let table = GpuBuffer::new(device, (room * size) as u64, "materials")?;
             self.table = Some((table, room));
             (first, end) = (0, len);
@@ -131,20 +120,17 @@ impl MaterialTable {
         frame.write_buffer(table, (first * size) as u64, bytes)
     }
 
-    /// The address of the table, which shaders read the materials through: 0 before any is added.
+    /// Shaders read the materials through it; 0 before any is added.
     fn address(&self) -> u64 {
         self.table.as_ref().map_or(0, |(table, _)| table.address())
     }
 }
 
-/// What culls the meshlets of the meshes drawn by them, in one table in the GPU's own memory,
-/// which the culling reaches through one address, as `shaders/meshlets.slang` takes every address
-/// from its push constants: each mesh's meshlets a run of entries, added as the mesh comes to be
-/// drawable, and written in the frame's own commands, before its passes; the table made again,
-/// twice the size, as it fills, the old one retiring until the GPU is done with it, from what's kept
-/// of it on the CPU. A mesh removed or replaced leaves its run unused, which no mesh takes again:
-/// the table grows by every mesh with meshlets a run adds, as a texture's slot isn't given out
-/// again, until reusing runs is worth it, as for a game that streams levels in and out.
+/// Every mesh's meshlet bounds, as one GPU table at one address (`shaders/meshlets.slang` takes
+/// addresses from push constants). Written in the frame's commands before its passes; grown at
+/// twice the size from the CPU's copy, the old one retiring. A removed or replaced mesh's run stays
+/// unused, as texture slots do, so it grows with every mesh; reuse runs once a game streams levels
+/// in and out.
 pub(super) struct MeshletTable {
     /// The table, and how many entries it has room for.
     pub(super) table: Option<(GpuBuffer, usize)>,
@@ -157,15 +143,15 @@ impl MeshletTable {
     /// The fewest entries a table holds.
     const LEAST: usize = 1024;
 
-    /// Adds `bounds`, a mesh's meshlets', and returns where they start.
+    /// Adds a mesh's meshlets' `bounds`; returns where they start.
     fn add(&mut self, bounds: &[MeshletBounds]) -> u32 {
         let first = self.entries.len();
         self.entries.extend_from_slice(bounds);
         u32::try_from(first).expect("fewer than 2^32 meshlets")
     }
 
-    /// Writes the entries added since it last wrote into the table, which it makes, or makes again
-    /// larger, as they need: one copy of those added, or of them all into a table made again.
+    /// Writes the entries added since last time, making or growing the table as needed: one copy of
+    /// the new ones, or of all into a grown table.
     fn write(&mut self, device: &Arc<Device>, frame: &mut Frame<'_>) -> Result<()> {
         let len = self.entries.len();
         if self.written == len {
@@ -185,7 +171,7 @@ impl MeshletTable {
         Ok(())
     }
 
-    /// The address of the table: 0 before any meshlet is added.
+    /// 0 before any meshlet is added.
     pub(super) fn address(&self) -> u64 {
         self.table.as_ref().map_or(0, |(table, _)| table.address())
     }
@@ -193,61 +179,56 @@ impl MeshletTable {
 
 /// Where a mesh's meshlets are in the [`MeshletTable`], and each level's.
 pub(crate) struct PlacedMeshlets {
-    /// The mesh's first entry.
     pub(crate) first: u32,
-    /// Each level's meshlets among the mesh's: the first, and how many.
+    /// Each level's first meshlet among the mesh's, and count.
     pub(crate) levels: Vec<[u32; 2]>,
     /// The most meshlets a level has.
     pub(crate) most: u32,
 }
 
-/// An asset being streamed to the GPU.
+/// An asset streaming to the GPU.
 pub(super) struct Item {
     index: u32,
     name: String,
-    /// The bytes it takes on the GPU, which every part copies some of.
+    /// Its bytes on the GPU, which the parts copy.
     total: u64,
-    /// Whether it has warned that it waits for room in the GPU's memory.
+    /// Whether it has warned that it waits for GPU memory.
     warned: bool,
-    /// When it was queued.
     queued: Instant,
     asset: Asset,
 }
 
 enum Asset {
     Mesh {
-        /// Its bytes, kept until the last part is copied.
+        /// Kept until the last part is copied.
         vertices: Vec<u8>,
         indices: Vec<u32>,
-        /// How many bytes its vertices are, the first of `total`, and its indices the rest.
+        /// Its vertices' bytes, the first of `total`; its indices are the rest.
         vertex_bytes: u64,
         vertex_size: usize,
         lods: Lods,
         meshlets: Option<MeshletParts>,
         skinned: Option<u32>,
-        /// Its buffers, once there's room for them: boxed, so that the queue's items stay small.
+        /// Once there's room. Boxed to keep the queue's items small.
         buffers: Option<Box<(GpuBuffer, GpuBuffer)>>,
     },
     Texture {
         size: [u32; 2],
         texels: Texels,
-        /// Its pixels, kept until the last part is copied, with the mip levels made for them once
-        /// its image is.
+        /// Kept until the last part is copied, with the mip levels made once its image is.
         pixels: Vec<u8>,
-        /// Whether its image is made, once there's room for it.
+        /// Whether its image is made, once there's room.
         made: bool,
     },
 }
 
 impl Item {
-    /// Whether it's `kind`'s asset of handle `index`.
     fn is(&self, kind: Kind, index: u32) -> bool {
         let is_mesh = matches!(self.asset, Asset::Mesh { .. });
         self.index == index && is_mesh == (kind == Kind::Mesh)
     }
 
-    /// Whether its buffers or image are made, so that it's being copied, or copied and waiting to
-    /// be drawable.
+    /// Whether its buffers or image are made: it's copying, or copied and waiting to be drawable.
     fn made(&self) -> bool {
         match &self.asset {
             Asset::Mesh { buffers, .. } => buffers.is_some(),
@@ -255,10 +236,9 @@ impl Item {
         }
     }
 
-    /// Logs that it's drawable, `renderer.mesh_streamed` or `renderer.texture_streamed`, at the
-    /// debug level, as there may be many: its bytes on the GPU, and how long since it was queued,
-    /// as it waited for its turn and for room and was copied, a texture's levels made among it if
-    /// its loader didn't make them.
+    /// Logs that it is drawable, `renderer.mesh_streamed` or `renderer.texture_streamed`, at debug,
+    /// as there may be many: its bytes on the GPU and time since queued (waiting, copying, and
+    /// making a texture's levels if its loader didn't).
     fn streamed(&self) {
         let ms = gg_core::log::millis(self.queued.elapsed());
         match &self.asset {
@@ -287,17 +267,15 @@ enum Kind {
     Texture,
 }
 
-/// How many submissions of copies on the transfer queue may be unfinished as a frame begins
-/// before the frame copies nothing ([`Frame::uploads_behind`]): with two frames in flight, a copy
-/// engine that keeps up leaves at most the last frame's unfinished, so two means it has fallen a
-/// frame or more behind, as over a slow link or under contention. Holding off then bounds what's
-/// in flight to two frames' parts, their staging and their command buffers, with one more frame's
-/// being recorded, whatever the frame rate.
+/// Unfinished transfer submissions at a frame's start past which it copies nothing
+/// ([`Frame::uploads_behind`]). With two frames in flight, a copy engine that keeps up leaves at
+/// most one; two means it's behind (a slow link, contention). Holding off bounds what's in flight
+/// to two frames' parts, staging and command buffers, plus the frame recording, at any frame rate.
 const MAX_UPLOADS_BEHIND: u64 = 2;
 
-/// The bytes a frame may copy of `budget` with `behind` submissions of copies unfinished as it
-/// began: none once the transfer queue is [`MAX_UPLOADS_BEHIND`] behind, so that the frame neither
-/// copies nor makes buffers or images, but takes what's drawable.
+/// The bytes a frame may copy of `budget` with `behind` copies unfinished: none at
+/// [`MAX_UPLOADS_BEHIND`], when the frame neither copies nor makes buffers or images, but takes
+/// what's drawable.
 pub(super) fn budget_behind(behind: u64, budget: u64) -> u64 {
     if behind >= MAX_UPLOADS_BEHIND {
         0
@@ -306,25 +284,21 @@ pub(super) fn budget_behind(behind: u64, budget: u64) -> u64 {
     }
 }
 
-/// Whether an asset of `bytes` would take the GPU's memory past its budget, given `budget` and
-/// how much is in `usage`.
+/// Whether an asset of `bytes` would take GPU memory `usage` past `budget`.
 pub(super) fn exceeds(usage: u64, budget: u64, bytes: u64) -> bool {
     usage.saturating_add(bytes) > budget
 }
 
-/// Whether an asset of `bytes` waits for room in the GPU's memory, given `budget`, how much is in
-/// `usage`, and whether anything of the queue is `copying`, made and not yet drawable: it waits
-/// while it would take usage past the budget, as removals make room, unless nothing is copying,
-/// when it goes ahead alone, so that a game comes up on a GPU whose memory is past the budget
-/// already, as other processes' can take it, an asset at a time; the next asset past the budget
-/// waits until this one is drawable.
+/// Whether an asset of `bytes` waits for GPU memory: while it would take `usage` past `budget`,
+/// unless nothing is `copying`. Then it goes ahead alone, so a game starts, an asset at a time, on
+/// a GPU already past budget from other processes.
 pub(super) fn waits(usage: u64, budget: u64, bytes: u64, copying: bool) -> bool {
     exceeds(usage, budget, bytes) && copying
 }
 
-/// Whether the asset `name`, of `bytes`, waits in the queue for room in the GPU's memory, as
-/// [`waits`] decides from what `device` reports: warning the first time it's past the budget,
-/// which `warned` keeps, whether it waits or goes ahead alone.
+/// Whether asset `name`, of `bytes`, waits for GPU memory, as [`waits`] decides from `device`'s
+/// report. Warns the first time it's past the budget (kept in `warned`), whether it waits or goes
+/// ahead.
 fn waits_for_room(
     device: &Device,
     name: &str,
@@ -357,15 +331,15 @@ fn waits_for_room(
     waits
 }
 
-/// Whether making a buffer or an image failed for want of memory, which [`room_for`] has the
-/// asset wait out rather than end the renderer: the budget it's gated by is an estimate.
+/// Whether making a buffer or image failed for want of memory, which [`room_for`] waits out rather
+/// than ending the renderer: its budget gate is an estimate.
 fn out_of_memory(error: &Error) -> bool {
     error.code() == "gpu.out_of_memory"
 }
 
-/// What `made`, the buffers or image of the asset `name`, of `bytes`, gave: `None` if the GPU's
-/// memory had no room, which warns the first time, `warned` keeping it, and leaves the asset to
-/// wait, to be tried again as room comes; any other error as it is.
+/// What `made`, asset `name`'s buffers or image of `bytes`, gave: `None` if GPU memory had no room,
+/// warning once (kept in `warned`) and leaving the asset to retry as room comes; any other error as
+/// is.
 pub(super) fn room_for<T>(
     made: Result<T>,
     name: &str,
@@ -391,7 +365,7 @@ pub(super) fn room_for<T>(
     }
 }
 
-/// The buffers of the mesh `name`, `vertex_bytes` of vertices and `index_bytes` of indices.
+/// Mesh `name`'s buffers: `vertex_bytes` of vertices and `index_bytes` of indices.
 fn mesh_buffers(
     device: &Arc<Device>,
     name: &str,
@@ -399,29 +373,23 @@ fn mesh_buffers(
     index_bytes: u64,
 ) -> Result<(GpuBuffer, GpuBuffer)> {
     let vertices = GpuBuffer::new(device, vertex_bytes, &format!("{name} vertices"))?;
-    // Should the indices not fit, the vertices' buffer retires with the error.
+    // If the indices don't fit, the vertices' buffer retires with the error.
     let indices = GpuBuffer::new(device, index_bytes, &format!("{name} indices"))?;
     Ok((vertices, indices))
 }
 
 impl MeshPass {
-    /// Takes the changes to the meshes, textures and materials in `uploads`, writes the materials
-    /// into their table and the scene's changes into its, and streams what's queued to the GPU,
-    /// within the frame's budget, which must happen before the frame's passes. A texture
-    /// added gets its slot, which shows a stand-in; its pixels, and a mesh's vertices and indices,
-    /// queue up behind what was added before, and each frame copies parts of the queue in order,
-    /// making an asset's buffers or image as its turn comes, if the GPU's memory has room for
-    /// them, as [`waits`] and [`room_for`] decide, and otherwise leaving it to wait, warning once,
-    /// while those after it go on; a frame the transfer queue has fallen behind copies nothing
-    /// ([`budget_behind`]). A mesh draws once its buffers are there, and a texture's slot shows
-    /// its image once that is; one replaced keeps drawing what it had until then, and whatever of
-    /// it was still being streamed is dropped. A mesh or texture removed draws nothing, or shows
-    /// its stand-in, from this frame on, and whatever of it was queued is dropped.
+    /// Takes `uploads`' changes to meshes, textures and materials, writes materials and the scene's
+    /// changes to their tables, and streams the queue within the frame's budget, before the frame's
+    /// passes. Assets queue in order. Each frame copies parts, making an asset's buffers or image
+    /// in its turn if memory has room ([`waits`], [`room_for`]); else it waits, warning once, while
+    /// later ones go on. A frame whose transfer queue is behind copies nothing ([`budget_behind`]).
+    /// Until an asset is there, its slot shows a stand-in, or a replaced one its old data. Removals
+    /// take effect this frame, dropping what was queued.
     ///
     /// # Panics
     ///
-    /// If they were taken from another `Meshes` or `Textures` than the pass's meshes and textures
-    /// before them.
+    /// - If they come from another `Meshes` or `Textures` than earlier ones.
     pub(crate) fn upload(&mut self, frame: &mut Frame<'_>, uploads: &mut Uploads) -> Result<()> {
         let _zone = gg_core::zone!();
         self.stand_ins.write(frame)?;
@@ -434,17 +402,16 @@ impl MeshPass {
         (self.materials).write(&self.device, frame, &mut uploads.materials)?;
         self.scene.write(&self.device, frame)?;
         self.stream(frame)?;
-        // The meshlets of the meshes that came to be drawable.
+        // The meshlets of meshes that became drawable.
         self.meshlet_table.write(&self.device, frame)
     }
 
-    /// The address of the table of materials, which the frame's data carries: 0 before any is
-    /// added.
+    /// The materials table's address, which the frame's data carries: 0 before any is added.
     pub(crate) fn materials_address(&self) -> u64 {
         self.materials.address()
     }
 
-    /// Takes a change to the meshes: queues what was added, or removes a mesh.
+    /// Queues what was added, or removes a mesh.
     fn mesh_changed(&mut self, change: Change) {
         let added = match change {
             Change::Added(added) => added,
@@ -458,7 +425,7 @@ impl MeshPass {
             }
         };
         let index = added.index as usize;
-        // A mesh replaced is one the pass has; any other is the next its `Meshes` added.
+        // A replaced mesh is one the pass has; any other is its `Meshes`' next.
         let follows = if added.replacement {
             index < self.meshes.len()
         } else {
@@ -496,8 +463,7 @@ impl MeshPass {
         });
     }
 
-    /// Takes a change to the textures: makes a slot's texture, queues an image, or removes a
-    /// texture.
+    /// Makes a slot's texture, queues an image, or removes a texture.
     fn texture_changed(&mut self, frame: &mut Frame<'_>, change: texture::Change) -> Result<()> {
         let Self {
             device,
@@ -529,8 +495,8 @@ impl MeshPass {
                     !slot.removed,
                     "its `Textures` drops a removed texture's images"
                 );
-                // In place of any image of the texture still queued, whose image, if it was made,
-                // retires with whatever was copied into it.
+                // In place of any of the texture's image still queued, which, if made, retires with
+                // what was copied in.
                 streaming.retain(|item| !item.is(Kind::Texture, added.index));
                 slot.texture.discard();
                 let (format, mipmapped) = (added.texels.format(), added.texels.mipmapped());
@@ -561,9 +527,8 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Copies the next parts of what's queued, in order, within the frame's budget, or none if the
-    /// transfer queue has fallen behind, and takes what has come to be drawable off the queue,
-    /// into its place.
+    /// Copies the queue's next parts in order within the frame's budget (none if the transfer queue
+    /// is behind), and moves what's drawable into place.
     fn stream(&mut self, frame: &mut Frame<'_>) -> Result<()> {
         if self.streaming.is_empty() {
             return Ok(());
@@ -585,9 +550,9 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Streams the `i`th queued asset on: makes its buffers or image if there's room, which sets
-    /// `copying`, copies its next parts while the frame's bytes `spent` are under `budget`, and
-    /// once every part is there, takes it for drawing. Returns whether it's drawable, and so done.
+    /// Advances the `i`th queued asset: makes its buffers or image if there's room (setting
+    /// `copying`), copies parts while `spent` is under `budget`, and once all are there takes it
+    /// for drawing. Returns whether it's drawable, and so done.
     fn advance(
         &mut self,
         frame: &mut Frame<'_>,
@@ -678,8 +643,8 @@ impl MeshPass {
                     skinned: *skinned,
                 };
                 let held = &mut meshes[item.index as usize];
-                // Which the draws' sizes are checked against: its own type, since only the
-                // `Meshes` that added it replaces it.
+                // Draws' sizes are checked against it: its own type, as only the `Meshes` that
+                // added it replaces it.
                 if let Some(old) = held.ready() {
                     assert_eq!(
                         old.vertex_size, mesh.vertex_size,
@@ -688,8 +653,7 @@ impl MeshPass {
                         item.name
                     );
                 }
-                // The old buffers, if any, retire until the GPU is done with the frames that
-                // draw them.
+                // Old buffers retire until the GPU is done with the frames drawing them.
                 *held = Held::Ready(mesh);
                 Ok(true)
             }
@@ -714,14 +678,14 @@ impl MeshPass {
                         return Ok(false);
                     }
                     let [width, height] = *size;
-                    // A replacement may be compressed where the image it replaces wasn't, or the
-                    // other way round, as its `Textures` keeps only its kind.
+                    // A replacement may be compressed where the old image wasn't, or the other way
+                    // round, as its `Textures` keeps only its kind.
                     let refilled =
                         texture.refill(width, height, texels.format(), texels.mipmapped());
                     if room_for(refilled, &item.name, item.total, &mut item.warned)?.is_none() {
                         return Ok(false);
                     }
-                    // Once the image is there, so that a refill tried again doesn't make them again.
+                    // Once the image is there, so a retried refill doesn't make them again.
                     texture::add_levels(pixels, *size, *texels);
                     *made = true;
                     *copying = true;
@@ -742,16 +706,16 @@ impl MeshPass {
         }
     }
 
-    /// What `texture`'s slot shows, if it's an image of its own rather than a stand-in: its size,
-    /// and how many times the slot has come to show another image, which tells this one apart
-    /// from those it showed before. `None` for a texture that isn't the pass's.
+    /// What `texture`'s slot shows, if its own image rather than a stand-in: its size, and how many
+    /// times the slot has switched images, telling this one from earlier ones. `None` for a texture
+    /// that isn't the pass's.
     pub(crate) fn texture_shown(&self, texture: crate::Texture) -> Option<([u32; 2], u64)> {
         let slot = self.textures.get(texture.index as usize)?;
         let size = slot.texture.size();
         (size != [0, 0]).then_some((size, slot.shown))
     }
 
-    /// How many bytes of the `item`th queued asset are copied.
+    /// How many bytes of `item` are copied.
     fn copied(&self, item: &Item) -> u64 {
         match &item.asset {
             Asset::Mesh { buffers, .. } => buffers
@@ -761,7 +725,6 @@ impl MeshPass {
         }
     }
 
-    /// What's being streamed.
     pub(crate) fn streaming(&self) -> Streaming {
         Streaming {
             assets: self.streaming.len(),

@@ -1,5 +1,5 @@
-//! Textures: images that shaders sample, games' and the engine's white one, whose handles are their
-//! places in the bindless set, so that a shader's parameters carry them as they are.
+//! Textures shaders sample, games' and the engine's white one. A handle is its place in the
+//! bindless set, so shader parameters carry it as is.
 
 use std::array;
 use std::borrow::Cow;
@@ -9,9 +9,8 @@ use gg_core::math::libm;
 use gg_core::{Error, Result};
 use gg_gpu::{MAX_TEXTURE_SIZE, PLACED_TEXTURES, TextureFormat, mip_sizes};
 
-/// A texture that [`Textures::add`] handed out, or the engine's white one. It's a field of a
-/// shader's parameters as it is: a `uint` in the shader, the texture's index in the bindless set,
-/// which the shader samples as `textures[index]`.
+/// A handle [`Textures::add`] handed out, or the engine's white texture. In shader parameters it's
+/// a `uint`, its bindless index, sampled as `textures[index]`.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, NoUninit)]
 pub struct Texture {
@@ -19,100 +18,88 @@ pub struct Texture {
 }
 
 impl Texture {
-    /// The engine's white texture, a pixel across, which a sprite of only a color shows.
+    /// The engine's white texture, a pixel across: what a color-only sprite shows.
     pub const WHITE: Self = Self { index: 0 };
 
-    /// Its index, the order [`Textures::add`] handed it out in, from 0, the engine's white
-    /// texture's: what finds its name, where the handle is the renderer's own.
+    /// The order [`Textures::add`] handed it out in, from 0 (the white texture's). It finds the
+    /// texture's name where the handle is the renderer's own.
     pub fn index(self) -> u32 {
         self.index
     }
 }
 
-/// Whether a texture has smaller mip levels, which shaders sample where it's drawn smaller than it
-/// is rather than shimmering, and how they're made from it, as a frame copies it to the GPU.
+/// Whether a texture has smaller mip levels (sampled where it's drawn smaller, rather than
+/// shimmering), and how a frame makes them as it copies it to the GPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mipmaps {
-    /// It has one level, as sprites' textures do: a sheet's cells would mix in smaller ones.
+    /// One level, as sprites' textures have: a sheet's cells would mix in smaller ones.
     None,
-    /// Each level averages the one before's colors in linear space, and its alpha: for a texture
-    /// whose alpha nothing reads, such as an opaque material's, whose transparent pixels' colors
-    /// still show.
+    /// Each level averages the last's colors in linear space, and its alpha: for textures whose
+    /// alpha nothing reads, as an opaque material's, whose transparent pixels' colors still show.
     Averaged,
-    /// Each level averages the one before's colors weighted by their alpha, so that a transparent
-    /// pixel's color, which shows nothing, doesn't bleed into those beside it, and its alpha: for a
-    /// texture whose alpha is coverage, as a masked or blended material's is.
+    /// Each level averages the last's colors weighted by alpha, so transparent pixels' colors don't
+    /// bleed, and its alpha: for textures whose alpha is coverage, as masked or blended materials'.
     AlphaWeighted,
 }
 
-/// What a texture's texels are: colors, sRGB-encoded as images store them, which shaders sample
-/// decoded to linear, with smaller mip levels as [`Mipmaps`] says, which a `Mipmaps` stands for, or
-/// with them made already; data, such as a font's distance field, which shaders read as stored,
-/// each channel a byte from 0 to 1, with one level; colors compressed as BC7, as a game's package
-/// holds its textures; a material's map of data, as [`Map`] says, with its full chain of levels,
-/// as stored or compressed; or colors of high dynamic range, as a sky's, of one level, as stored or
-/// compressed.
+/// What a texture's texels are: sRGB colors with [`Mipmaps`] (which converts to one) or with levels
+/// made; data, as a font's distance field, read as stored bytes from 0 to 1, one level; BC7 colors,
+/// as packages hold them; a material's map ([`Map`]) with its full chain, stored or compressed; or
+/// HDR colors, as a sky's, one level, stored or compressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Texels {
     Color(Mipmaps),
-    /// Colors as [`Color`](Self::Color)'s are, with the full chain of mip levels [`mip_sizes`]
-    /// gives, each level's rows of RGBA8 after the one before's, largest first, made already, as
-    /// [`add_mipmaps`] makes them, as the engine's loader makes them off the main thread: a frame
-    /// makes none.
+    /// Colors as [`Color`](Self::Color)'s, with [`mip_sizes`]' full chain made already, each
+    /// level's RGBA8 rows after the last's, largest first, as [`add_mipmaps`] makes them (the
+    /// engine's loader, off the main thread). A frame makes none.
     ColorLevels,
     Data,
-    /// Colors as [`Color`](Self::Color)'s are, sRGB-encoded and alpha not multiplied into them,
-    /// compressed as BC7: blocks of 4 by 4 texels, 16 bytes each, row after row, top row first,
-    /// of each of its levels, largest first, a block covering a level's edge where its side isn't
-    /// a multiple of 4. Its first level alone, or, if `mipmapped`, the full chain [`mip_sizes`]
-    /// gives, which the cooker made: a frame makes none.
+    /// [`Color`](Self::Color)'s colors as BC7: 4 by 4 blocks of 16 bytes, rows top first, per
+    /// level, largest first; edge blocks cover a side that isn't a multiple of 4. One level, or if
+    /// `mipmapped` the cooker's full [`mip_sizes`] chain. A frame makes none.
     Bc7 {
         mipmapped: bool,
     },
-    /// A material's map, which shaders read as stored, each channel a byte from 0 to 1: its first
-    /// level's rows of RGBA8, from which a frame makes the rest of the full chain, each level
-    /// averaging the one before's values by area, as [`add_map_mipmaps`] makes them.
+    /// A material's map, read as stored, each channel a byte from 0 to 1: its first level's RGBA8
+    /// rows. A frame makes the rest of the chain, each level averaging the last's values by area
+    /// ([`add_map_mipmaps`]).
     Map(Map),
-    /// A material's map as [`Map`](Self::Map)'s is, its full chain made already, each level after
-    /// the one before, as the engine's loader makes them off the main thread: a frame makes none.
+    /// A map as [`Map`](Self::Map)'s, its full chain made already by the engine's loader, off the
+    /// main thread. A frame makes none.
     MapLevels(Map),
-    /// A material's map compressed, its blocks laid out as [`Bc7`](Self::Bc7)'s are: as BC5 if
-    /// `bc5`, of a [`Map::Normal`]'s X and Y, as the cooker compresses one, and otherwise as BC7, as
-    /// the cooker compresses a [`Map::Surface`] and as a model's DDS images hold any map. Its first
-    /// level alone, or, if `mipmapped`, its full chain: a frame makes none.
+    /// A compressed map, blocks as [`Bc7`](Self::Bc7)'s: BC5 if `bc5` (a [`Map::Normal`]'s X and Y,
+    /// as the cooker makes them), else BC7 (the cooker's [`Map::Surface`], or any map in a model's
+    /// DDS). One level, or if `mipmapped` the full chain. A frame makes none.
     CompressedMap {
         map: Map,
         bc5: bool,
         mipmapped: bool,
     },
-    /// Colors of high dynamic range, linear, as a `.hdr` image holds them: rows of RGBA of 16-bit
-    /// floats, 8 bytes a texel, tightly packed, top row first, of one level, which shaders read as
-    /// they are.
+    /// Linear HDR colors, as a `.hdr` image holds them: RGBA rows of 16-bit floats, 8 bytes a
+    /// texel, tightly packed, top row first, one level, read as they are.
     Hdr,
-    /// Colors of high dynamic range compressed as BC6H, unsigned, as a game's package holds a sky:
-    /// its one level's blocks of 4 by 4 texels, 16 bytes each, laid out as [`Bc7`](Self::Bc7)'s
-    /// are, which shaders read as [`Hdr`](Self::Hdr)'s, alpha 1.
+    /// HDR colors compressed as unsigned BC6H, as a game's package holds a sky: one level's 4 by 4
+    /// blocks of 16 bytes, laid out as [`Bc7`](Self::Bc7)'s, read as [`Hdr`](Self::Hdr)'s with
+    /// alpha 1.
     Bc6h,
 }
 
-/// What a material's map holds, which says what shows in its place until its image is there, and
-/// how the cooker compresses it.
+/// What a material's map holds, which picks its stand-in and how the cooker compresses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Map {
-    /// Values a channel each, as glTF's metallic-roughness map holds roughness in green and metallic
-    /// in blue, and its occlusion map occlusion in red: white stands in, which leaves a material's
+    /// A value per channel, as glTF's metallic-roughness map holds roughness in green and metallic
+    /// in blue, and its occlusion map occlusion in red. White stands in, leaving a material's
     /// factors as they are. Compressed as BC7.
     Surface,
-    /// A normal map: the X and Y of the surface's normal in its tangent space in red and green,
-    /// from 0 to 1 for -1 to 1, from which shaders make Z, ignoring blue; one that points straight
-    /// out stands in. The cooker compresses one as BC5, which holds the two alone; a model's DDS
-    /// image may hold one as BC7.
+    /// A normal map: the tangent-space normal's X and Y in red and green, 0 to 1 for -1 to 1;
+    /// shaders make Z, ignoring blue. A flat normal stands in. The cooker compresses it as BC5,
+    /// which holds the two alone; a model's DDS image may hold it as BC7.
     Normal,
 }
 
-/// What a texture's texels stand for, which its replacements keep to, and the stand-in its slot
-/// shows until its image is there: white for colors and for a surface's map, zeros for data,
-/// and a normal pointing straight out for a normal map.
+/// What a texture's texels stand for, which replacements keep to, and so the stand-in its slot
+/// shows until its image arrives: white for colors and surface maps, zeros for data, a flat normal
+/// for normal maps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Color,
@@ -127,7 +114,6 @@ impl From<Mipmaps> for Texels {
 }
 
 impl Texels {
-    /// What its texels stand for.
     pub(crate) fn kind(self) -> Kind {
         match self {
             Self::Color(_) | Self::ColorLevels | Self::Bc7 { .. } | Self::Hdr | Self::Bc6h => {
@@ -140,8 +126,8 @@ impl Texels {
         }
     }
 
-    /// These texels once their levels are made from the first, as [`add_levels`] makes them:
-    /// colors' and maps' with their levels; others as they are, a frame making none.
+    /// These texels once their levels are made from the first ([`add_levels`]): colors' and maps'
+    /// with levels; others as they are.
     pub fn with_levels(self) -> Self {
         match self {
             Self::Color(mipmaps) if mipmaps != Mipmaps::None => Self::ColorLevels,
@@ -150,8 +136,7 @@ impl Texels {
         }
     }
 
-    /// Whether the texture has the full chain of mip levels, which a frame makes, or the texels
-    /// come with.
+    /// Whether the texture has the full mip chain, made by a frame or come with the texels.
     pub(crate) fn mipmapped(self) -> bool {
         match self {
             Self::Color(mipmaps) => mipmaps != Mipmaps::None,
@@ -161,7 +146,7 @@ impl Texels {
         }
     }
 
-    /// The format of the texture's image on the GPU.
+    /// The texture's GPU image format.
     pub(crate) fn format(self) -> TextureFormat {
         match self {
             Self::Color(_) | Self::ColorLevels => TextureFormat::Rgba8Srgb,
@@ -174,9 +159,8 @@ impl Texels {
         }
     }
 
-    /// How many bytes a texture `size` texels across and down takes of these: its first level's
-    /// RGBA8 for colors, data and maps, from which a frame makes the rest, and every level's for
-    /// those that come with them, and for what's compressed or of high dynamic range.
+    /// Bytes a `size` texture of these takes: the first level's RGBA8 for colors, data and maps a
+    /// frame makes levels for; every level's for those that come with them, compressed or HDR.
     fn bytes(self, size: [u32; 2]) -> u64 {
         match self {
             Self::Color(_) | Self::Data | Self::Map(_) => self.format().bytes(size, false),
@@ -190,42 +174,38 @@ impl Texels {
     }
 }
 
-/// The textures a renderer's shaders sample, the first of them the engine's white texture. It
-/// hands out each one's handle at once, and keeps its pixels until
-/// [`Uploads::take`](crate::Uploads::take) takes them, for frames to stream to the GPU within
-/// their budget, the texture's slot showing a stand-in until they're there, a pixel of white for
-/// colors and of zeros for data; a texture replaced by another image the same way, which shows in
-/// place of the old once it's there; and a texture removed goes with them, in order. A renderer
-/// samples the textures of one `Textures` only.
+/// The textures a renderer's shaders sample, the engine's white one first. Handles come at once;
+/// [`Uploads::take`](crate::Uploads::take) takes pixels for frames to stream within budget, slots
+/// showing stand-ins until then. Replacements and removals follow in order. A renderer samples one
+/// `Textures`' textures only.
 pub struct Textures {
-    /// Those added, filled, replaced or removed since they were last taken, in order.
+    /// Added, filled, replaced or removed since last taken, in order.
     pub(crate) changes: Vec<Change>,
-    /// Each texture handed out, by its index.
+    /// By index.
     entries: Vec<Entry>,
 }
 
 /// A texture handed out.
 struct Entry {
-    /// What its texels stand for, which its replacements keep to.
+    /// What its texels stand for, which replacements keep to.
     kind: Kind,
-    /// What it was reserved for, its name, size and texels, until its pixels come
-    /// ([`Textures::fill`]).
+    /// Its name, size and texels, until its pixels come ([`Textures::fill`]).
     reserved: Option<(String, [u32; 2], Texels)>,
-    /// Whether it was removed, which leaves it removed.
+    /// Removed for good.
     removed: bool,
 }
 
-/// A change to a renderer's textures, which [`Uploads::take`](crate::Uploads::take) carries to it.
+/// A change [`Uploads::take`](crate::Uploads::take) carries to a renderer.
 pub(crate) enum Change {
-    /// A texture added: its slot, which shows the stand-in for its `kind` until an image is there.
+    /// A texture added: its slot, showing `kind`'s stand-in until an image arrives.
     Reserved {
         index: u32,
         name: String,
         kind: Kind,
     },
-    /// An image for a texture's slot: its first, or one in place of the one it has.
+    /// A texture's first image, or a replacement.
     Image(Added),
-    /// A texture removed, by its index.
+    /// By index.
     Removed(u32),
 }
 
@@ -238,22 +218,17 @@ pub(crate) struct Added {
 }
 
 impl Textures {
-    /// Adds a texture `size` pixels across and down. `pixels` holds its rows of RGBA8, tightly
-    /// packed, top row first, as images store them, which are colors or data as `texels` says: for
-    /// colors, sRGB-encoded, and alpha not multiplied into them, which shaders sample decoded to
-    /// linear, with smaller levels too if the [`Mipmaps`] it gives say so, made from it as frames
-    /// stream it to the GPU, and how, or made already, after it, as [`Texels::ColorLevels`] says;
-    /// for data and maps, read as stored, a map's levels made likewise; and for what's compressed,
-    /// its levels' blocks instead, as [`Texels::Bc7`] says.
-    /// It keeps a `Vec` of pixels as it is, and copies borrowed
-    /// ones. Shaders sample it with texture coordinates from (0, 0) at its top left to (1, 1) at
-    /// its bottom right; until frames have streamed it, they sample its stand-in. `name` names it
-    /// in errors and GPU captures. It's [`reserve`](Self::reserve), then [`fill`](Self::fill).
+    /// Adds a texture of `size` pixels from `pixels`: RGBA8 rows, tightly packed, top first, or for
+    /// compressed texels its levels' blocks ([`Texels::Bc7`]). Colors are sRGB with straight alpha,
+    /// sampled as linear; data and maps are read as stored. Levels are made as it streams if
+    /// `texels` say so, or come made ([`Texels::ColorLevels`]). A `Vec` is kept; borrowed pixels
+    /// are copied. Coordinates run from (0, 0) top left to (1, 1) bottom right; until streamed,
+    /// shaders sample its stand-in. `name` names it in errors and GPU captures. It's
+    /// [`reserve`](Self::reserve), then [`fill`](Self::fill).
     ///
-    /// Fails with `renderer.bad_texture` if a side is 0 or more than 8,192 pixels, the most every
-    /// Vulkan 1.4 device takes, or `pixels` doesn't fill it exactly; and with
-    /// `renderer.too_many_textures` past the 61,440 textures a renderer holds, the engine's white
-    /// one among them, which [`room`](Self::room) counts down.
+    /// Fails with `renderer.bad_texture` if a side is 0 or over 8,192 pixels (the most every Vulkan
+    /// 1.4 device takes) or `pixels` doesn't fill it exactly; with `renderer.too_many_textures`
+    /// past 61,440 textures, the white one included ([`room`](Self::room)).
     pub fn add<'a>(
         &mut self,
         name: &str,
@@ -262,19 +237,18 @@ impl Textures {
         texels: impl Into<Texels>,
     ) -> Result<Texture> {
         let (pixels, texels) = (pixels.into(), texels.into());
-        // Before the handle, which a texture that fails takes none of.
+        // Before the handle, so a texture that fails takes none.
         check_pixels(name, size, &pixels, texels)?;
         let texture = self.reserve(name, size, texels)?;
         self.fill(texture, pixels)?;
         Ok(texture)
     }
 
-    /// Hands out the handle of a texture `size` pixels across and down, of `texels`, whose pixels
-    /// come later, through [`fill`](Self::fill), as those decoded off the main thread do: its slot
-    /// shows its stand-in until frames have streamed them. `name` names it in errors and GPU
-    /// captures.
+    /// Hands out a handle for a `size`-pixel texture of `texels` whose pixels come later through
+    /// [`fill`](Self::fill), as those decoded off the main thread do; its slot shows its stand-in
+    /// until then. `name` names it in errors and GPU captures.
     ///
-    /// Fails with `renderer.bad_texture` if a side is 0 or more than 8,192 pixels, and with
+    /// Fails with `renderer.bad_texture` if a side is 0 or over 8,192 pixels, and with
     /// `renderer.too_many_textures` as [`add`](Self::add) does.
     pub fn reserve(
         &mut self,
@@ -310,19 +284,16 @@ impl Textures {
         Ok(Texture { index })
     }
 
-    /// Gives `texture`, which [`reserve`](Self::reserve) handed out, its `pixels`, as
-    /// [`add`](Self::add) takes them for the size and texels it was reserved with: frames stream
-    /// them to the GPU, and its slot shows them once they're there. A texture removed stays
-    /// removed: pixels for it are dropped.
+    /// Fills `texture`, from [`reserve`](Self::reserve), with `pixels`, as [`add`](Self::add) takes
+    /// them for its reserved size and texels. A removed texture stays removed.
     ///
-    /// Fails with `renderer.bad_texture` if `pixels` doesn't fill it exactly, leaving it to be
-    /// filled.
+    /// Fails with `renderer.bad_texture` if `pixels` doesn't fill it exactly, leaving it unfilled.
     ///
     /// # Panics
     ///
-    /// If `texture` isn't one of these textures, as another `Textures`' handles can be past them,
-    /// or wasn't reserved, or was filled already: another image for it goes through
-    /// [`replace`](Self::replace).
+    /// - If `texture` isn't one of these textures (another `Textures`' handles can be past them).
+    /// - If it wasn't reserved, or is filled: another image goes through
+    ///   [`replace`](Self::replace).
     pub fn fill<'a>(&mut self, texture: Texture, pixels: impl Into<Cow<'a, [u8]>>) -> Result<()> {
         let Some(entry) = self.entries.get_mut(texture.index as usize) else {
             panic!("texture {} is one of another `Textures`", texture.index);
@@ -350,23 +321,17 @@ impl Textures {
         Ok(())
     }
 
-    /// Puts another image in place of `texture`'s, which keeps its handle: `size` pixels across and
-    /// down, whatever size it had, its `pixels` and `texels` as [`add`](Self::add) takes them, so
-    /// that what samples it shows them once frames have streamed them to the GPU, showing the
-    /// image it had until then. It takes the place of any of that texture's pixels still waiting
-    /// for a frame, as it was added or replaced, and of those still to come for one
-    /// [reserved](Self::reserve), which it fills, so that a later [`fill`](Self::fill) of it
-    /// panics. `name` names it in errors. A texture removed stays removed: a replacement of it is
-    /// dropped.
+    /// Replaces `texture`'s image, of any `size`, keeping its handle; `pixels` and `texels` as
+    /// [`add`](Self::add) takes them. Samplers see the old image until the new one streams. It also
+    /// replaces pixels still waiting, or fills a [reserved](Self::reserve) texture, so a later
+    /// [`fill`](Self::fill) panics. `name` names it in errors. A removed texture stays removed.
     ///
     /// Fails with `renderer.bad_texture` as `add` does, leaving the texture as it was.
     ///
     /// # Panics
     ///
-    /// If `texture` isn't one of these textures, as another `Textures`' handles can be past them,
-    /// or `texels` stand for something else than its own, as data where its texels are colors,
-    /// compressed or not, or a normal map where they're a surface's: a texture keeps the kind it
-    /// was added as.
+    /// - If `texture` isn't one of these textures (another `Textures`' handles can be past them).
+    /// - If `texels` change its kind, as data for colors or a normal map for a surface map.
     pub fn replace<'a>(
         &mut self,
         name: &str,
@@ -412,15 +377,14 @@ impl Textures {
         Ok(())
     }
 
-    /// Removes `texture`: its image goes from the GPU once the frames and copies that may use it
-    /// have finished, whatever of it still waits to be streamed is dropped, and its slot shows its
-    /// stand-in from the frame that takes the removal on, for good, as a stale handle, in a world
-    /// or a snapshot, may still sample it. Its handle is never given out again. Removing one
-    /// removed already does nothing.
+    /// Removes `texture`: from the frame taking the removal, its slot shows its stand-in for good,
+    /// as stale handles (in worlds or snapshots) may sample it. Unstreamed pixels are dropped; its
+    /// image goes once the GPU is done with it. Its handle is never reused; removing it again does
+    /// nothing.
     ///
     /// # Panics
     ///
-    /// If `texture` isn't one of these textures, as another `Textures`' handles can be past them.
+    /// - If `texture` isn't one of these textures (another `Textures`' handles can be past them).
     pub fn remove(&mut self, texture: Texture) {
         let Some(entry) = self.entries.get_mut(texture.index as usize) else {
             panic!("texture {} is one of another `Textures`", texture.index);
@@ -433,20 +397,18 @@ impl Textures {
         self.changes.push(Change::Removed(texture.index));
     }
 
-    /// How many more textures it holds, so that what adds several can check they fit before it
-    /// adds any.
+    /// How many more textures it holds, so a caller adding several can check they fit first.
     pub fn room(&self) -> u32 {
         PLACED_TEXTURES - self.count()
     }
 
-    /// How many it has handed out, the engine's white texture among them: the index of the next.
+    /// How many it has handed out, the white texture among them: the next index.
     pub fn count(&self) -> u32 {
         self.entries.len() as u32
     }
 }
 
-/// The error for texture `name`, which has the problem `problem` says, in a phrase that follows
-/// its name.
+/// The error for texture `name`, with `problem` a phrase following its name.
 fn bad_texture(name: &str, problem: String) -> Error {
     Error::new(
         "renderer.bad_texture",
@@ -454,8 +416,7 @@ fn bad_texture(name: &str, problem: String) -> Error {
     )
 }
 
-/// Checks that a texture named `name`, `size` pixels across and down, is one every Vulkan 1.4
-/// device takes, as [`Textures::add`] says.
+/// Checks `size` is one every Vulkan 1.4 device takes ([`Textures::add`]).
 fn check_size(name: &str, size: [u32; 2]) -> Result<()> {
     let [width, height] = size;
     let sides = 1..=MAX_TEXTURE_SIZE;
@@ -470,8 +431,8 @@ fn check_size(name: &str, size: [u32; 2]) -> Result<()> {
     Ok(())
 }
 
-/// Checks that `pixels` fill a texture of `texels` named `name`, `size` pixels across and down,
-/// that every Vulkan 1.4 device takes, as [`Textures::add`] says.
+/// Checks `pixels` fill a texture of `texels` and `size` that every Vulkan 1.4 device takes
+/// ([`Textures::add`]).
 fn check_pixels(name: &str, size: [u32; 2], pixels: &[u8], texels: Texels) -> Result<()> {
     check_size(name, size)?;
     let [width, height] = size;
@@ -516,14 +477,12 @@ fn check_pixels(name: &str, size: [u32; 2], pixels: &[u8], texels: Texels) -> Re
     Ok(())
 }
 
-/// Appends to `pixels`, the RGBA8 of a texture `size` pixels across and down, colors sRGB-encoded
-/// and alpha not multiplied into them, the rest of its full chain of mip levels, as `mipmaps`
-/// says, smallest last: each level averages the one before by area, each of its texels the texels
-/// it covers, wholly or in part, in linear space, as shaders filter them. The levels are kept as
-/// floats until each is encoded, so that each comes from the first's exact colors rather than from
-/// the level before's rounded bytes. The first stays bytes, as it's the largest: a level of floats
-/// takes four times the memory, 16 MiB for a 2,048 by 2,048 texture's second. The cooker makes a
-/// texture's levels with it before it compresses them, as a frame makes those of one it doesn't.
+/// Appends to `pixels` (a `size` texture's RGBA8, sRGB, straight alpha) the rest of its mip chain
+/// as `mipmaps` says, smallest last. Each level area-averages the last in linear space, as shaders
+/// filter. Levels stay floats until encoded, so each comes from the first's exact colors; the first
+/// stays bytes, as floats take four times the memory (16 MiB for a 2,048 by 2,048 texture's second
+/// level). The cooker makes levels with it before compressing; frames make them for textures it
+/// didn't.
 #[doc(hidden)]
 pub fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
     let weighted = match mipmaps {
@@ -568,16 +527,13 @@ pub fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
     }
 }
 
-/// Appends to `pixels`, the RGBA8 of a material's map `size` pixels across and down, the rest of
-/// its full chain of mip levels, smallest last: each level averages the one before by area, as
-/// [`add_mipmaps`] does, but each channel as it's stored, as shaders read a map, rather than
-/// decoded from sRGB, and its alpha with them alike. A normal map's levels average its X and Y,
-/// shortening the normal where those below differ, as it does a shader's that reads them across
-/// a level's texels; shaders make the normal whole again.
+/// As [`add_mipmaps`], for a `size` map's RGBA8, but averaging channels as stored, not decoded from
+/// sRGB, alpha alike. A normal map's averaged X and Y shorten the normal where those below differ,
+/// as filtering does; shaders make it whole again.
 #[doc(hidden)]
 pub fn add_map_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2]) {
     let _zone = gg_core::zone!();
-    // Its channels written out, as arrays' `map` takes several times as long in debug builds.
+    // Channels written out, as arrays' `map` takes several times as long in debug builds.
     let append = |pixels: &mut Vec<u8>, level: &[[f32; 4]]| {
         let byte = |value: f32| (value * 255.0).round() as u8;
         for &[r, g, b, a] in level {
@@ -605,9 +561,9 @@ pub fn add_map_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2]) {
     }
 }
 
-/// Makes room in `pixels` for the RGBA8 of every level from one `from` texels across and down on,
-/// at once, as growing them level by level would double the room of the first, which they're
-/// appended to: a 4,096 by 4,096 texture's 64 MiB to 128, rather than to the 85 its chain takes.
+/// Reserves `pixels`' RGBA8 for every level from one of `from` texels on, at once: growing level by
+/// level would double the first's room, a 4,096 by 4,096 texture's 64 MiB to 128, rather than the
+/// 85 its chain takes.
 fn reserve_levels(pixels: &mut Vec<u8>, [width, height]: [u32; 2]) {
     let levels = mip_sizes(width, height);
     pixels.reserve_exact(
@@ -617,10 +573,9 @@ fn reserve_levels(pixels: &mut Vec<u8>, [width, height]: [u32; 2]) {
     );
 }
 
-/// Appends to `pixels`, the RGBA8 of a texture `size` pixels across and down, of `texels`, the rest
-/// of its levels that a frame would make: a color's as [`add_mipmaps`] makes them, a map's as
-/// [`add_map_mipmaps`] does, and none for what comes with its levels or has none, so that the
-/// pixels are then those of [`Texels::with_levels`].
+/// Appends to `pixels`, a `size` texture's RGBA8 of `texels`, the levels a frame would make: a
+/// color's by [`add_mipmaps`], a map's by [`add_map_mipmaps`], none for what comes with levels or
+/// has none. The pixels are then [`Texels::with_levels`]'.
 #[doc(hidden)]
 pub fn add_levels(pixels: &mut Vec<u8>, size: [u32; 2], texels: Texels) {
     match texels {
@@ -636,11 +591,10 @@ pub fn add_levels(pixels: &mut Vec<u8>, size: [u32; 2], texels: Texels) {
     }
 }
 
-/// The next mip level, `to` texels across and down, of a level `from` texels across and down whose
-/// `i`th texel, row after row, is `texel(i)`: linear RGB, alpha not multiplied in, then alpha.
-/// Each texel averages the ones it covers by area, their colors weighted by their alpha if
-/// `weighted`, or plainly where they're all transparent. Its loops are written out for debug
-/// builds, where a 2,048 by 2,048 texture's levels took seconds through iterators.
+/// The next mip level, `to` texels, of a `from`-texel level whose `i`th texel is `texel(i)` (linear
+/// straight RGB, then alpha). Each texel area-averages those it covers, colors weighted by alpha if
+/// `weighted` (plainly if all are transparent). Loops are written out: through iterators, a 2,048
+/// by 2,048 texture's levels took seconds in debug builds.
 fn shrink(
     texel: impl Fn(usize) -> [f32; 4],
     [width, height]: [u32; 2],
@@ -680,10 +634,9 @@ fn shrink(
     level
 }
 
-/// The texels along a side `from` texels long that texel `i` along the next level's covers, and
-/// how much of it each covers, which add up to 1, then how many of the three there are: two halves
-/// where `from` is even; where it's odd, `2m + 1`, the next level has `m`, each covering `from / m`
-/// texels, so three, the outer two in part; and the one where it's 1, as the next level's is too.
+/// The texels along a side of `from` that the next level's texel `i` covers, with weights adding to
+/// 1, then how many there are. Even `from`: two halves. Odd `2m + 1`: the next level has `m`, each
+/// covering `from / m` texels, so three, the outer two in part. 1: one, as the next level is 1 too.
 fn taps(from: u32, i: u32) -> ([(usize, f32); 3], usize) {
     let at = 2 * i as usize;
     if from == 1 {
@@ -699,22 +652,21 @@ fn taps(from: u32, i: u32) -> ([(usize, f32); 3], usize) {
     }
 }
 
-/// Encodes linear channels, from 0 to 1, as sRGB bytes, rounding as GPUs do, as the byte whose
-/// value is nearest once encoded, rather than taking a power for each channel.
+/// Encodes linear channels, 0 to 1, as sRGB bytes, rounding as GPUs do to the byte nearest once
+/// encoded, without a power per channel.
 struct Encoder {
-    /// The linear values at which encoding rounds up to each byte from the one below, then NaN,
-    /// which no value reaches.
+    /// The linear values where encoding rounds up to each byte from the one below, then NaN, which
+    /// none reach.
     rounding: [f32; 256],
-    /// The byte of each [`STEPS`](Self::STEPS)th of the way from 0 to 1, where it starts.
+    /// The byte at the start of each [`STEPS`](Self::STEPS)th of the way from 0 to 1.
     below: [u8; Self::STEPS + 1],
 }
 
 impl Encoder {
-    /// How finely `below` divides the way from 0 to 1: more finely than the bytes come where they
-    /// come closest, at 0, where the curve is steepest, at a rate of 12.92 × 255 bytes, about
-    /// 3,295, over the whole way. So each step holds at most one of the values where encoding rounds
-    /// up, which a comparison finds: as a search of `rounding` would, but without its branches,
-    /// which mispredict channel after channel, and in a fraction of its time in debug builds.
+    /// How finely `below` divides 0 to 1: finer than bytes come at their closest, at 0 (12.92 ×
+    /// 255, about 3,295 over the way). So each step holds at most one rounding point, and one
+    /// comparison finds it, as a search of `rounding` would, without its mispredicting branches and
+    /// far faster in debug builds.
     const STEPS: usize = 4096;
 
     fn new() -> Self {
@@ -736,7 +688,7 @@ impl Encoder {
         Self { rounding, below }
     }
 
-    /// `linear`, encoded: past 1 as 1 is, and below 0, or NaN, as 0 is.
+    /// `linear`, encoded: past 1 as 1, below 0 or NaN as 0.
     fn encode(&self, linear: f32) -> u8 {
         // Exact, as scaling by a power of two is, and saturating.
         let step = ((linear * Self::STEPS as f32) as usize).min(Self::STEPS);
@@ -745,7 +697,7 @@ impl Encoder {
     }
 }
 
-/// An sRGB-encoded channel, from 0 to 1, decoded to linear, as Vulkan's sRGB formats decode it.
+/// An sRGB channel, 0 to 1, decoded to linear as Vulkan's sRGB formats do.
 fn srgb_to_linear(encoded: f32) -> f32 {
     if encoded <= 0.04045 {
         encoded / 12.92
@@ -819,8 +771,8 @@ mod tests {
         assert_eq!(error.code(), "renderer.too_many_textures");
     }
 
-    /// The changes waiting to be taken: each texture's slot, by its index and what its texels
-    /// stand for; each image, by its texture's index, size and texels; and each removal.
+    /// The changes waiting: each slot by index and kind, each image by texture index, size and
+    /// texels, and each removal.
     #[derive(Clone, Debug, PartialEq)]
     enum Waiting {
         Slot(u32, Kind),
@@ -838,7 +790,7 @@ mod tests {
             .collect()
     }
 
-    /// The images waiting to be taken, in order.
+    /// The images waiting, in order.
     fn images(textures: &Textures) -> Vec<&Added> {
         (textures.changes.iter())
             .filter_map(|change| match change {
@@ -855,7 +807,7 @@ mod tests {
         let a = textures
             .add("a", [1, 1], &[0; 4], Mipmaps::None)
             .expect("a");
-        // Still waiting as it was added, which takes the image instead.
+        // Still waiting as added, so the replacement takes its place.
         let replaced = textures.replace("a", a, [2, 1], &[9; 8], Mipmaps::Averaged);
         replaced.expect("another image");
         let none = Texels::Color(Mipmaps::None);
@@ -863,7 +815,7 @@ mod tests {
         let white = [Slot(0, Kind::Color), Image(0, [1, 1], none)];
         let added = [Slot(1, Kind::Color), Image(1, [2, 1], averaged)];
         assert_eq!(waiting(&textures), [white, added].concat());
-        // Once a frame has taken it, in place of the one the renderer has.
+        // Once a frame has taken it, in place of the renderer's.
         textures.changes.clear();
         let replaced = textures.replace("a", a, [1, 2], &[7; 8], Mipmaps::None);
         replaced.expect("another image");
@@ -887,11 +839,10 @@ mod tests {
         );
     }
 
-    /// A texture reserved has its slot at once and its image once it's filled, as `add` checks
-    /// the pixels; filling it again, or one that went through `add`, is a bug, and another image
-    /// goes through `replace`. A texture removed goes after the changes before it, once however
-    /// many times; its handle isn't given out again, and pixels for it, filled or replaced, are
-    /// dropped, checked still.
+    /// A reserved texture has its slot at once and its image once filled, checked as `add` checks.
+    /// Filling it twice, or after `add`, is a bug: replace instead. A removal follows earlier
+    /// changes once, however often; its handle isn't reused, and later pixels for it are checked,
+    /// then dropped.
     #[test]
     fn a_texture_reserved_is_filled_once_and_one_removed_stays_removed_in_order() {
         use Waiting::{Image, Removed, Slot};
@@ -959,9 +910,8 @@ mod tests {
         Textures::default().remove(Texture { index: 5 });
     }
 
-    /// A texture reserved and replaced before its pixels come takes the replacement, which fills
-    /// it, so that its pixels coming after are a bug; and one of colors whose levels are made
-    /// already is filled by every level's RGBA8.
+    /// A replacement before a reserved texture's pixels come fills it, so the pixels coming after
+    /// are a bug. Colors with levels made already are filled by every level's RGBA8.
     #[test]
     fn a_reserved_texture_replaced_is_filled_and_one_with_levels_takes_them_all() {
         use Waiting::{Image, Slot};
@@ -1009,12 +959,12 @@ mod tests {
                 .expect_err("blocks that don't fill it");
             assert_eq!(error.code(), "renderer.bad_texture", "{texels:?}, {count}");
         }
-        // A texture of colors takes colors compressed in its place, and back.
+        // Colors take compressed colors in their place, and back.
         let replaced = textures.replace("one", texture, [2, 2], &[0; 16], Mipmaps::None);
         replaced.expect("RGBA8 in place of BC7");
         let replaced = textures.replace("one", texture, [1, 1], blocks(1), chain);
         replaced.expect("BC7 in place of RGBA8");
-        // And colors of high dynamic range, as they are or compressed, a level each.
+        // And HDR colors, stored or compressed, a level each.
         let replaced = textures.replace("one", texture, [2, 1], &[0; 16], Texels::Hdr);
         replaced.expect("16-bit floats in place of BC7");
         let replaced = textures.replace("one", texture, [5, 5], blocks(4), Texels::Bc6h);
@@ -1043,9 +993,8 @@ mod tests {
         let _ = textures.replace("n", normals, [1, 1], &[0; 4], surface);
     }
 
-    /// A map's levels average its values as they're stored, where a color's average them decoded
-    /// from sRGB, so that a level halfway between 0 and 255 holds 128 rather than 188; and a map's
-    /// texels say, once made, that its levels are there.
+    /// A map's levels average values as stored, a color's decoded from sRGB, so halfway between 0
+    /// and 255 is 128, not 188; and a map's texels say, once made, that its levels are there.
     #[test]
     fn a_maps_levels_average_its_values_as_stored() {
         let pixels = [0, 0, 0, 0, 255, 255, 255, 255];
@@ -1072,7 +1021,7 @@ mod tests {
         };
         assert_eq!(normals.format(), TextureFormat::Bc5Unorm);
         assert_eq!(normals.bytes([5, 5]), 4 * 16, "four blocks");
-        // A normal map as a DDS image holds one, its X, Y and Z, as BC7.
+        // A normal map as a DDS image holds one, X, Y and Z, as BC7.
         let bc7_normals = Texels::CompressedMap {
             map: Map::Normal,
             bc5: false,
@@ -1082,7 +1031,7 @@ mod tests {
         assert_eq!(bc7_normals.kind(), Kind::Map(Map::Normal));
     }
 
-    /// The levels after the first that `pixels`, `size` pixels across and down, gets.
+    /// The levels after the first that `pixels`, of `size`, gets.
     fn levels(pixels: &[u8], size: [u32; 2], mipmaps: Mipmaps) -> Vec<u8> {
         let mut levels = pixels.to_vec();
         add_mipmaps(&mut levels, size, mipmaps);
@@ -1093,10 +1042,10 @@ mod tests {
     fn levels_average_in_linear_space_by_area() {
         use Mipmaps::{AlphaWeighted, Averaged};
         let (white, black) = ([255; 4], [0, 0, 0, 255]);
-        // Half white light is 188 encoded, where averaging the encoded bytes would give 128.
+        // Half white light is 188 encoded; averaging encoded bytes would give 128.
         let checker = [white, black, black, white].concat();
         assert_eq!(levels(&checker, [2, 2], Averaged), [188, 188, 188, 255]);
-        // Three texels into one: each a third, none skipped.
+        // Three texels into one: a third each, none skipped.
         let row = [white, black, black].concat();
         assert_eq!(levels(&row, [3, 1], Averaged), [156, 156, 156, 255]);
         // Five into two, the middle texel half in each: 0.8 of white light, then none, then 0.4.
@@ -1111,9 +1060,9 @@ mod tests {
         assert_eq!(levels(&row, [4, 1], Averaged), expected);
     }
 
-    /// Each byte's value, decoded, encodes as that byte; encoding rounds up to each byte exactly at
-    /// the value halfway to it from the byte below, as a search of those values would, and not a
-    /// float before; and what's past 1 or below 0, or NaN, takes the nearest end.
+    /// Each byte's decoded value encodes as that byte. Encoding rounds up to each byte exactly
+    /// halfway from the byte below, as a search would, not a float before; past 1, below 0 or NaN
+    /// takes the nearest end.
     #[test]
     fn colors_encode_as_the_nearest_byte() {
         let encoder = Encoder::new();
@@ -1138,7 +1087,7 @@ mod tests {
         let pair = [red, clear_green].concat();
         assert_eq!(levels(&pair, [2, 1], AlphaWeighted), [255, 0, 0, 128]);
         assert_eq!(levels(&pair, [2, 1], Averaged), [188, 188, 0, 128]);
-        // Where everything is transparent, the colors average plainly, rather than dividing by 0.
+        // All transparent: colors average plainly rather than dividing by 0.
         let clear = [[255, 0, 0, 0], [0, 0, 255, 0]].concat();
         assert_eq!(levels(&clear, [2, 1], AlphaWeighted), [188, 0, 188, 0]);
     }

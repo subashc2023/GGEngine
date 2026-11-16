@@ -1,13 +1,10 @@
-//! Skinning: a compute pass before the frame draws, which moves the vertices of each skinned
-//! model's mesh that the frame's [`Draws::skin`] gives, by its joints' matrices, into the frame's
-//! own buffer, where the frame's draws of the mesh read them in place of its own, as
-//! `shaders/skin.slang` moves them. A mesh moves into a part of that buffer of its own, its header
-//! copied first, so that a draw reads it as it reads any mesh's buffer; so each instance of a
-//! skinned model, posed apart, is a mesh of its own.
+//! Skinning: a compute pass before the frame draws (`shaders/skin.slang`). It moves the vertices of
+//! each skinned mesh in [`Draws::skin`] by its joints' matrices into the frame's own buffer, where
+//! the mesh's draws read them instead. Each mesh moves into its own part, header copied first, so
+//! draws read it as any mesh's buffer; each separately posed instance is a mesh of its own.
 //!
-//! A skinned mesh isn't cut into meshlets, whose bounds its joints would leave behind, so it draws
-//! by its indices, outside the visibility buffer. Its motion is its instance's alone, not its
-//! joints'.
+//! A skinned mesh has no meshlets, whose bounds its joints would leave behind, so it draws by its
+//! indices, outside the visibility buffer. Its motion is its instance's alone, not its joints'.
 
 use std::sync::Arc;
 
@@ -21,17 +18,17 @@ use crate::{Draws, PackedVertex};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/skin.spv"));
 
-/// The threads of a workgroup of `shaders/skin.slang`, a vertex each.
+/// Threads per workgroup of `shaders/skin.slang`, a vertex each.
 const GROUP: u32 = 64;
 
-/// The most workgroups a dispatch takes across, as every device takes: a mesh of more vertices
-/// moves in several dispatches.
+/// The most workgroups across a dispatch on every device. A mesh of more vertices moves in several
+/// dispatches.
 const MOST_GROUPS: u32 = 65_535;
 
-/// How many vertices' room a mesh's header takes, as `HEADER_VERTICES` in src/packed.rs.
+/// Vertices' room a mesh's header takes: `HEADER_VERTICES` in src/packed.rs.
 const HEADER_VERTICES: u64 = 2;
 
-/// Where each mesh's part of the buffer starts, a multiple of this many bytes.
+/// Each mesh's part of the buffer starts at a multiple of this many bytes.
 const ALIGN: u64 = 16;
 
 /// `Push` in `shaders/skin.slang`.
@@ -47,8 +44,8 @@ struct SkinPush {
     unused: u32,
 }
 
-/// A mesh the frame moves: its handle, where its buffer is, how many vertices it has, where its
-/// joints' matrices are among the frame's, and where its part of the frame's buffer starts.
+/// A mesh the frame moves: its handle, buffer, vertex count, joints' place among the frame's, and
+/// its part's start in the frame's buffer.
 struct Planned {
     mesh: u32,
     source: u64,
@@ -57,14 +54,13 @@ struct Planned {
     offset: u64,
 }
 
-/// What the frame's skin pass moves, once it's planned: its buffer and its pass.
+/// What the frame's skin pass moves: its buffer and its pass.
 pub(crate) struct SkinPlan {
     pub(crate) buffer: BufferId,
     pass: PassId,
 }
 
-/// The skin pass's pipeline, and what the frame plans, kept from frame to frame so that it
-/// allocates nothing once it's grown.
+/// The pipeline and the frame's plan, kept across frames so it allocates nothing once grown.
 pub(crate) struct Skinning {
     pipeline: ComputePipeline,
     planned: Vec<Planned>,
@@ -78,9 +74,8 @@ impl Skinning {
         })
     }
 
-    /// Declares in `graph` the buffer and the pass that move `draws`' skins, each of a mesh of
-    /// `meshes` that's skinned and drawable, in their order, if there's one: on the graphics
-    /// queue, before the passes that draw.
+    /// Declares in `graph`, on the graphics queue before the passes that draw, the buffer and pass
+    /// that move `draws`' skins of `meshes`' skinned, drawable meshes, in order, if any.
     pub(crate) fn plan(
         &mut self,
         graph: &mut Graph,
@@ -113,9 +108,9 @@ impl Skinning {
         Some(SkinPlan { buffer, pass })
     }
 
-    /// Records `plan`'s pass, the next of the frame's, which moves each mesh it planned by its
-    /// joints' matrices, which `draws` holds; and has the draws of `meshes` read each where it
-    /// moved it. A frame without a plan has them read their own.
+    /// Records `plan`'s pass as the frame's next, moving each planned mesh by its joints' matrices
+    /// in `draws`, and has `meshes`' draws read each where it moved. Without a plan, they read
+    /// their own.
     pub(crate) fn record(
         &self,
         frame: &mut Frame<'_>,

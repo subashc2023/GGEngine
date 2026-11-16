@@ -14,13 +14,13 @@ use crate::shader::Shader;
 use crate::{Draws, Uploads};
 use crate::{grid, sprite};
 
-/// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
+/// A handle [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
     pub(crate) index: u32,
     vertex: PhantomData<fn() -> V>,
 }
 
-// By hand, so that they don't need `V` to be `Clone` or `Debug` too.
+// By hand, so `V` needn't be `Clone` or `Debug`.
 impl<V> Clone for Mesh<V> {
     fn clone(&self) -> Self {
         *self
@@ -37,8 +37,8 @@ impl<V> Mesh<V> {
         }
     }
 
-    /// Its index, the order [`Meshes::add`] handed it out in, from 0, the engine's quad's: what a
-    /// [`MeshDraw`]'s parts hold it by.
+    /// The order [`Meshes::add`] handed it out in, from 0 (the engine's quad's). [`MeshDraw`]s hold
+    /// it.
     pub fn index(self) -> u32 {
         self.index
     }
@@ -50,9 +50,9 @@ impl<V> fmt::Debug for Mesh<V> {
     }
 }
 
-/// A mesh to draw with a shader and the parameters it takes, as [`Draws::push`] draws one, without
-/// their types: they're checked against each other as it's made, then dropped, so that one type
-/// holds a draw of any mesh, as an entity's component does. Its parameters are copied into it.
+/// A mesh, a shader and its parameters, as [`Draws::push`] draws them, without their types: checked
+/// against each other at creation, then erased, so one type holds any draw, as in a component. The
+/// parameters are copied in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshDraw {
     pub(crate) mesh: u32,
@@ -62,17 +62,17 @@ pub struct MeshDraw {
     /// Whether it draws only its mesh's fronts, as a material that isn't double-sided does.
     pub(crate) culls: bool,
     pub(super) params: [u8; MeshDraw::MAX_PARAMS],
-    /// How many bytes of `params` are the parameters'.
+    /// How many bytes of `params` are used.
     pub(super) len: u8,
 }
 
 impl MeshDraw {
-    /// The most bytes of parameters it holds, until materials keep parameters on the GPU; a shader
-    /// that takes more draws through [`Draws::push`].
+    /// The most parameter bytes it holds, until materials keep parameters on the GPU. A shader
+    /// taking more draws through [`Draws::push`].
     pub const MAX_PARAMS: usize = 64;
 
-    /// A draw of `mesh` with `shader`, which reads its vertex type, giving the shader `params`.
-    /// Parameters of more than [`MAX_PARAMS`](Self::MAX_PARAMS) bytes don't compile.
+    /// A draw of `mesh` with `shader`, which reads its vertex type, given `params`. Parameters of
+    /// more than [`MAX_PARAMS`](Self::MAX_PARAMS) bytes don't compile.
     pub fn new<V, P: NoUninit>(mesh: Mesh<V>, shader: Shader<V, P>, params: P) -> Self {
         const {
             assert!(
@@ -93,9 +93,8 @@ impl MeshDraw {
         }
     }
 
-    /// The same draw, of `mesh` in place of its own: of the same vertex type as its own, as a
-    /// skinned model's instance's own copy of its model's mesh is, or its draws panic, as they
-    /// check the mesh's vertices against the shader's.
+    /// The same draw of `mesh` instead, as a skinned instance's copy of its model's mesh. It must
+    /// have the same vertex type, or its draws panic.
     pub fn with_mesh<V>(self, mesh: Mesh<V>) -> Self {
         Self {
             mesh: mesh.index,
@@ -103,33 +102,29 @@ impl MeshDraw {
         }
     }
 
-    /// What it batches by, if its shader is opaque: the same for every draw of its mesh with its
-    /// shader, and ordered by shader, then mesh. An opaque shader writes depth, which hides what's
-    /// behind it whatever order they draw in, so opaque draws can go in this one, which makes each
-    /// run of them one instanced draw.
+    /// Its batch key, if its shader is opaque: equal for draws of one mesh and shader, ordered by
+    /// shader then mesh. Opaque draws hide by depth in any order, so sorting by it makes each run
+    /// one instanced draw.
     pub fn batch(&self) -> Option<u64> {
         self.opaque
             .then(|| (u64::from(self.shader) << 32) | u64::from(self.mesh))
     }
 
-    /// Its parameters, as bytes.
     pub(crate) fn params(&self) -> &[u8] {
         &self.params[..usize::from(self.len)]
     }
 
-    /// Its parts as a snapshot keeps them, which [`from_parts`](Self::from_parts) makes it again
-    /// from: its mesh's index and its shader's, whether its shader is opaque, whether it culls,
-    /// and its parameters' bytes.
+    /// Its parts as a snapshot keeps them, for [`from_parts`](Self::from_parts): its mesh's and
+    /// shader's indices, whether its shader is opaque, whether it culls, and its parameters' bytes.
     #[doc(hidden)]
     pub fn parts(&self) -> (u32, u32, bool, bool, &[u8]) {
         let parts = (self.mesh, self.shader, self.opaque, self.culls);
         (parts.0, parts.1, parts.2, parts.3, self.params())
     }
 
-    /// A draw of the parts [`parts`](Self::parts) gave, for a renderer handed the same meshes and
-    /// shaders, in the same order, as the one it was made for: in another, it draws another mesh,
-    /// or panics as it draws, if its vertices or its parameters aren't its shader's. `None` for
-    /// parameters of more than [`MAX_PARAMS`](Self::MAX_PARAMS) bytes.
+    /// A draw from [`parts`](Self::parts), for a renderer given the same meshes and shaders in the
+    /// same order. In another it draws another mesh, or panics on a mismatch. `None` for parameters
+    /// over [`MAX_PARAMS`](Self::MAX_PARAMS) bytes.
     #[doc(hidden)]
     pub fn from_parts(
         mesh: u32,
@@ -151,41 +146,38 @@ impl MeshDraw {
     }
 }
 
-/// A level of detail of a mesh: some of its indices, whole triangles of them, that a draw uses in
-/// place of the mesh's own when the mesh is small enough on screen that their surface strays from
-/// it by no more than a pixel.
+/// A mesh's level of detail: whole triangles of its indices, drawn in place of the mesh's when it's
+/// small enough on screen that their surface strays from it by at most a pixel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lod {
     /// Where its indices start in the mesh's.
     pub start: u32,
-    /// How many indices it has, three for each triangle.
+    /// Three per triangle.
     pub count: u32,
-    /// How far its surface may stray from the mesh's own, level 0's, in the mesh's own units.
+    /// How far its surface may stray from level 0's, in the mesh's units.
     pub error: f32,
 }
 
-/// The most levels of detail a mesh has, its own among them.
+/// The most levels of detail a mesh has, level 0 among them.
 pub const MAX_LEVELS: usize = 8;
 
-/// A mesh's levels of detail, and the sphere round its vertices that decides which a draw uses,
-/// and whether a view sees it. The levels go finest first, so level 0 is the mesh itself, usually
-/// with an error of 0, and each has at least the error of the one before. They may share indices,
-/// as a chain of levels simplified one from another does.
+/// A mesh's levels of detail, finest first, and the sphere round its vertices that picks among them
+/// and culls. Level 0 is the mesh itself, usually of error 0; errors never decrease. Levels may
+/// share indices.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lods {
-    /// The levels, finest first, [`MAX_LEVELS`] at most.
+    /// Finest first, at most [`MAX_LEVELS`].
     pub levels: Vec<Lod>,
-    /// The center of a sphere that holds every vertex, in the mesh's own space.
+    /// The center of a sphere holding every vertex, in the mesh's space.
     pub center: Vec3,
-    /// Its radius: how near the camera the mesh can reach, where it is largest on screen. One
-    /// larger than the tightest only keeps finer levels in use at greater distances, and draws
-    /// where no view sees it; one smaller leaves out draws that a view sees.
+    /// How near the camera the mesh can reach. Larger than the tightest keeps finer levels farther
+    /// out and draws unseen meshes; smaller leaves out draws a view sees.
     pub radius: f32,
 }
 
 impl Lods {
-    /// The levels of a mesh that has one, all of its `indices`, in a sphere of infinite radius,
-    /// which holds whatever vertices it has: [`Meshes::add`] can't read its vertices' positions.
+    /// One level of all `indices`, in an infinite sphere: [`Meshes::add`] can't read vertex
+    /// positions.
     pub(super) fn whole(indices: usize) -> Self {
         let level = Lod {
             start: 0,
@@ -200,61 +192,54 @@ impl Lods {
     }
 }
 
-/// The meshes a renderer draws, the first of them the engine's quad, which sprites are drawn on.
-/// It hands out each one's handle at once, and keeps its vertices and indices until
-/// [`Uploads::take`] takes them, for frames to stream to the GPU within their budget, drawing the
-/// mesh once they're there; a mesh replaced by others the same way, which draw in place of the old
-/// once they're there; and a mesh removed goes with them, in order. A renderer draws the meshes of
-/// one `Meshes` only.
+/// The meshes a renderer draws, the engine's quad (for sprites) first. Handles come at once;
+/// [`Uploads::take`] takes the data, frames stream it within their budget, and a mesh draws once
+/// there. Replacements and removals follow in order. A renderer draws one `Meshes`' meshes only.
 pub struct Meshes {
-    /// Those added, replaced or removed since they were last taken, in order.
+    /// Added, replaced or removed since last taken, in order.
     pub(crate) changes: Vec<Change>,
-    /// How many have been added.
     count: u32,
-    /// Those removed, whose handles are never given out again.
+    /// Their handles are never given out again.
     removed: HashSet<u32>,
-    /// Each handed-out mesh's bounding sphere, its center and radius in the mesh's own space, by
-    /// its handle; `None` for one without a finite sphere, and for one removed.
+    /// Each mesh's bounding sphere, center and radius in its own space, by handle. `None` without a
+    /// finite sphere, or once removed.
     spheres: Vec<Option<(Vec3, f32)>>,
-    /// The handle of the engine's grid mesh, which is added the first time it's asked for, once
-    /// it has been.
+    /// The engine's grid mesh, added when first asked for.
     grid: Option<u32>,
 }
 
-/// A change to a renderer's meshes, which [`Uploads::take`] carries to it.
+/// A change [`Uploads::take`] carries to a renderer.
 pub(crate) enum Change {
-    /// A mesh added, or vertices and indices in place of one's.
+    /// A mesh added, or replaced.
     Added(Added),
-    /// A mesh removed, by its index.
+    /// By index.
     Removed(u32),
 }
 
 pub(crate) struct Added {
     pub(super) index: u32,
-    /// Whether it's vertices and indices in place of a mesh's a renderer has, rather than a mesh
-    /// added, which comes after those a renderer has.
+    /// Whether it replaces a mesh a renderer has, rather than adding one after them.
     pub(super) replacement: bool,
     pub(super) name: String,
     pub(super) vertices: Vec<u8>,
     pub(super) vertex_size: usize,
     pub(super) indices: Vec<u32>,
     pub(super) lods: Lods,
-    /// A model's mesh's meshlets, if it has them: what culls each, and each level's.
+    /// A model's mesh's meshlets, if any: what culls each, and each level's.
     pub(super) meshlets: Option<MeshletParts>,
-    /// For a skinned model's mesh, how many vertices it has, which the skin pass moves.
+    /// A skinned model's mesh's vertex count, which the skin pass moves.
     pub(super) skinned: Option<u32>,
 }
 
-/// What culls a mesh's meshlets, as the renderer keeps it apart from the mesh's buffer: each
-/// meshlet's bounds, and each level's meshlets, as [`Meshlets::levels`](crate::Meshlets::levels)
-/// has them.
+/// What culls a mesh's meshlets, kept apart from its buffer: their bounds, and each level's
+/// meshlets ([`Meshlets::levels`](crate::Meshlets::levels)).
 pub(crate) struct MeshletParts {
     pub(super) bounds: Vec<MeshletBounds>,
     pub(super) levels: Vec<[u32; 2]>,
 }
 
 impl Added {
-    /// Model's mesh `model`, named `name`, of handle `index`, as a replacement or as one added.
+    /// Model mesh `model`, named `name`, of handle `index`.
     fn model(index: u32, replacement: bool, name: &str, model: &ModelMesh) -> Self {
         let meshlets = &model.meshlets;
         Self {
@@ -277,28 +262,25 @@ impl Added {
 }
 
 impl Meshes {
-    /// How many it has handed out, the engine's quad among them, and its grid mesh once it was
-    /// first asked for: the index of the next.
+    /// How many it has handed out (the quad and, once asked for, the grid among them): the next
+    /// index.
     pub fn count(&self) -> u32 {
         self.count
     }
 
-    /// How many of those it has handed out aren't removed: for the engine's tests of what it
-    /// keeps.
+    /// How many handed out aren't removed, for the engine's tests.
     #[doc(hidden)]
     pub fn kept(&self) -> u32 {
         self.count - self.removed.len() as u32
     }
 
-    /// The sphere round the vertices of the mesh `draw` draws, as its levels of detail hold it: its
-    /// center and radius in the mesh's own space. `None` for a mesh whose sphere is infinite, as one
-    /// added without levels of detail is, whose vertex positions can't be read, and for one removed.
-    /// Readable at once, before a frame has streamed the mesh to the GPU.
+    /// The sphere round `draw`'s mesh's vertices, center and radius in its space, readable before
+    /// it streams. `None` if infinite (a mesh added without levels) or removed.
     pub fn sphere_of(&self, draw: &MeshDraw) -> Option<(Vec3, f32)> {
         self.spheres.get(draw.mesh as usize).copied().flatten()
     }
 
-    /// Keeps `lods`' sphere as the sphere of the mesh of index `index`, unless it was removed.
+    /// Keeps `lods`' sphere for mesh `index`, unless removed.
     fn keep_sphere(&mut self, index: u32, lods: &Lods) {
         if self.removed.contains(&index) {
             return;
@@ -316,9 +298,9 @@ impl Meshes {
         }
     }
 
-    /// The engine's grid mesh, a unit square as four triangles from its center, added as a game's
-    /// meshes are the first time it's asked for: a renderer draws grids with it, but uploads
-    /// nothing for it without them, and games' handles come where they would have.
+    /// The engine's grid mesh, a unit square of four triangles from its center. Added when first
+    /// asked for, so a renderer without grids uploads nothing for it, and games' handles come where
+    /// they would have.
     pub(crate) fn grid(&mut self) -> Mesh<Vec2> {
         let index = match self.grid {
             Some(index) => index,
@@ -331,14 +313,12 @@ impl Meshes {
         Mesh::new(index)
     }
 
-    /// Adds a mesh of triangles, three of `indices` each, which index `vertices`. `name` names it
-    /// in errors and GPU captures. It draws with shaders for `V`, which read its vertices as
-    /// [`Shaders::add`](crate::Shaders::add) says. It has one level of detail, all its indices,
-    /// and no sphere round its vertices, whose positions it can't read: every draw of it draws,
-    /// wherever a view sees.
+    /// Adds a mesh of triangles, three of `indices` each, indexing `vertices`; `name` names it in
+    /// errors and captures. Shaders for `V` draw it ([`Shaders::add`](crate::Shaders::add)). It has
+    /// one level of detail and no sphere, as it can't read positions, so it's never culled.
     ///
-    /// Fails with `renderer.bad_mesh` if it has no triangles, indices left over from whole
-    /// triangles, or an index past its vertices.
+    /// Fails with `renderer.bad_mesh` for no triangles, partial triangles, or an index past
+    /// `vertices`.
     pub fn add<V: NoUninit>(
         &mut self,
         name: &str,
@@ -349,19 +329,14 @@ impl Meshes {
         Ok(self.push(name, vertices, indices, Lods::whole(indices.len())))
     }
 
-    /// Adds a mesh as [`add`](Self::add) does, with the levels of detail `lods` describes, whose
-    /// triangles are among `indices`: each draw of it uses the coarsest level whose error spans no
-    /// more than a pixel on screen, as the draw sees it, or level 0 if none does, or if the sphere
-    /// reaches the camera's plane. Every level indexes the same vertices, and all of them are
-    /// kept in one buffer on the GPU. A draw with an opaque shader whose sphere, as its transform
-    /// places it, is wholly outside what a view sees, the game's view or a shadow's cascade, isn't
-    /// drawn there, so a shader that moves the mesh's vertices outside the sphere may lose them.
+    /// Adds a mesh as [`add`](Self::add) does, with `lods`' levels of detail among `indices`, in
+    /// one GPU buffer. Each draw uses the coarsest level whose error spans at most a pixel, or
+    /// level 0 if the sphere reaches the camera's plane. An opaque draw whose sphere is outside a
+    /// view isn't drawn there, so a shader moving vertices out of the sphere may lose them.
     ///
-    /// Fails with `renderer.bad_mesh` as `add` does over all of `indices`, and if `lods` has no
-    /// levels, or more than [`MAX_LEVELS`]; has a level that is empty, isn't whole triangles or
-    /// reaches past `indices`; has an error that is negative, isn't finite, or is less than the
-    /// level before's; has a center that isn't finite; or a radius that is negative or isn't
-    /// finite.
+    /// Fails with `renderer.bad_mesh` as `add` does, or if `lods` has no levels or over
+    /// [`MAX_LEVELS`]; a level empty, of partial triangles or past `indices`; an error negative,
+    /// not finite or below the last's; a center not finite; or a radius negative or not finite.
     pub fn add_lods<V: NoUninit>(
         &mut self,
         name: &str,
@@ -374,9 +349,9 @@ impl Meshes {
         Ok(self.push(name, vertices, indices, lods))
     }
 
-    /// Adds a model's mesh, `mesh`, as [`add_lods`](Self::add_lods) adds one, its vertices packed,
-    /// which the model shaders draw, and its meshlets, if it has any, which views cull and draw it
-    /// by where it's opaque, as [`ModelMesh`] says; its indices draw it elsewhere.
+    /// Adds a model's mesh as [`add_lods`](Self::add_lods) does, its vertices packed for the model
+    /// shaders. Views cull and draw it by its meshlets, if any, where it's opaque ([`ModelMesh`]);
+    /// elsewhere by its indices.
     ///
     /// Fails with `renderer.bad_mesh` as [`ModelMesh::check`] does.
     pub fn add_model(&mut self, name: &str, mesh: &ModelMesh) -> Result<Mesh<PackedVertex>> {
@@ -389,7 +364,7 @@ impl Meshes {
         Ok(Mesh::new(index))
     }
 
-    /// Hands out the next handle for a mesh `check` has passed.
+    /// Hands out the next handle, for a mesh `check` passed.
     fn push<V: NoUninit>(
         &mut self,
         name: &str,
@@ -414,18 +389,15 @@ impl Meshes {
         Mesh::new(index)
     }
 
-    /// Puts other triangles in place of `mesh`'s, which keeps its handle: `indices` and `vertices`
-    /// as [`add`](Self::add) takes them, as many as they are, so that every draw of it draws them
-    /// once frames have streamed them to the GPU, drawing the triangles it had until then. It takes
-    /// the place of any of that mesh's vertices and indices still waiting for a frame, as it was
-    /// added or replaced. `name` names it in errors. The mesh has one level of detail again, all
-    /// its indices. A mesh removed stays removed: a replacement of it is dropped.
+    /// Puts `vertices` and `indices` (as [`add`](Self::add) takes them) in place of `mesh`'s,
+    /// keeping its handle and one level of detail. Draws show the old triangles until the new ones
+    /// stream, which replace any still waiting. A removed mesh stays removed.
     ///
     /// Fails with `renderer.bad_mesh` as `add` does, leaving the mesh as it was.
     ///
     /// # Panics
     ///
-    /// If `mesh` isn't one of these meshes, as another `Meshes`' handles can be past them.
+    /// - If `mesh` isn't one of these meshes (another `Meshes`' handles can be past them).
     pub fn replace<V: NoUninit>(
         &mut self,
         name: &str,
@@ -436,14 +408,14 @@ impl Meshes {
         self.replace_with(name, mesh, vertices, indices, None)
     }
 
-    /// Puts other triangles in place of `mesh`'s, as [`replace`](Self::replace) does, with the
-    /// levels of detail `lods` describes, as [`add_lods`](Self::add_lods) takes them.
+    /// [`replace`](Self::replace), with levels of detail as [`add_lods`](Self::add_lods) takes
+    /// them.
     ///
     /// Fails with `renderer.bad_mesh` as `add_lods` does, leaving the mesh as it was.
     ///
     /// # Panics
     ///
-    /// If `mesh` isn't one of these meshes, as another `Meshes`' handles can be past them.
+    /// - If `mesh` isn't one of these meshes (another `Meshes`' handles can be past them).
     pub fn replace_lods<V: NoUninit>(
         &mut self,
         name: &str,
@@ -455,8 +427,8 @@ impl Meshes {
         self.replace_with(name, mesh, vertices, indices, Some(lods))
     }
 
-    /// Puts other triangles in place of `mesh`'s, of the levels `lods` describes, or of one, all of
-    /// `indices`, as [`replace_lods`](Self::replace_lods) and [`replace`](Self::replace) say.
+    /// Replaces `mesh`'s triangles with `lods`' levels, or one of all `indices`
+    /// ([`replace_lods`](Self::replace_lods), [`replace`](Self::replace)).
     fn replace_with<V: NoUninit>(
         &mut self,
         name: &str,
@@ -489,14 +461,14 @@ impl Meshes {
         Ok(())
     }
 
-    /// Puts a model's mesh, `model`, in place of `mesh`'s, as [`replace_lods`](Self::replace_lods)
-    /// does, as [`add_model`](Self::add_model) takes one.
+    /// [`replace_lods`](Self::replace_lods), with a model's mesh as [`add_model`](Self::add_model)
+    /// takes it.
     ///
     /// Fails with `renderer.bad_mesh` as `add_model` does, leaving the mesh as it was.
     ///
     /// # Panics
     ///
-    /// If `mesh` isn't one of these meshes, as another `Meshes`' handles can be past them.
+    /// - If `mesh` isn't one of these meshes (another `Meshes`' handles can be past them).
     pub fn replace_model(
         &mut self,
         name: &str,
@@ -513,8 +485,8 @@ impl Meshes {
         Ok(())
     }
 
-    /// Queues `added`, a mesh's replacement, in place of any of it still waiting for a frame, unless
-    /// the mesh was removed.
+    /// Queues `added`, a replacement, in place of any of the mesh still waiting, unless it was
+    /// removed.
     fn replace_added(&mut self, added: Added) {
         if self.removed.contains(&added.index) {
             return;
@@ -534,26 +506,24 @@ impl Meshes {
         }
     }
 
-    /// Removes `mesh`: its buffers go from the GPU once the frames and copies that may use them
-    /// have finished, whatever of it still waits to be streamed is dropped, and every draw of it
-    /// draws nothing from the frame that takes the removal on. Its handle is never given out
-    /// again, so a stale one, in a world or a snapshot, never draws another mesh. Removing one
-    /// removed already does nothing. Returns whether it removed it, rather than finding it removed
-    /// already.
+    /// Removes `mesh`: its draws draw nothing from the frame that takes the removal, unstreamed
+    /// data is dropped, and its buffers go once the GPU is done with them. Its handle is never
+    /// reused, so a stale one (in a world or snapshot) never draws another mesh. Returns whether it
+    /// wasn't already removed.
     ///
     /// # Panics
     ///
-    /// If `mesh` isn't one of these meshes, as another `Meshes`' handles can be past them.
+    /// - If `mesh` isn't one of these meshes (another `Meshes`' handles can be past them).
     pub fn remove<V>(&mut self, mesh: Mesh<V>) -> bool {
         self.remove_index(mesh.index)
     }
 
-    /// Removes the mesh of index `index`, as [`remove`](Self::remove) does, whatever its vertex
-    /// type: for the engine's restores, which hold a mesh by its index alone, as a snapshot does.
+    /// [`remove`](Self::remove) by index, whatever the vertex type, for the engine's restores,
+    /// which hold meshes by index, as snapshots do.
     ///
     /// # Panics
     ///
-    /// If `index` is past the meshes handed out.
+    /// - If `index` is past the meshes handed out.
     #[doc(hidden)]
     pub fn remove_index(&mut self, index: u32) -> bool {
         assert!(
@@ -569,8 +539,7 @@ impl Meshes {
     }
 }
 
-/// Checks that `indices` are whole triangles of `vertices`, mesh `name`'s, as [`Meshes::add`]
-/// says.
+/// Checks that `indices` are whole triangles of `vertices` ([`Meshes::add`]).
 pub(crate) fn check<V>(name: &str, vertices: &[V], indices: &[u32]) -> Result<()> {
     // Vulkan's buffers hold at least a byte.
     const { assert!(size_of::<V>() > 0, "a vertex type has a size") };
@@ -593,8 +562,7 @@ pub(crate) fn check<V>(name: &str, vertices: &[V], indices: &[u32]) -> Result<()
     Ok(())
 }
 
-/// Checks that `lods`' levels are whole triangles among `indices`, mesh `name`'s, and the rest of
-/// what [`Meshes::add_lods`] says.
+/// Checks `lods` against `indices` as [`Meshes::add_lods`] says.
 pub(crate) fn check_lods(name: &str, indices: &[u32], lods: &Lods) -> Result<()> {
     let bad = |problem: String| bad_mesh(name, problem);
     if lods.levels.is_empty() {
@@ -653,8 +621,7 @@ pub(crate) fn check_lods(name: &str, indices: &[u32], lods: &Lods) -> Result<()>
     Ok(())
 }
 
-/// The error for mesh `name`, which has the problem `problem` says, in a phrase that follows its
-/// name.
+/// The error for mesh `name`, with `problem` a phrase following its name.
 pub(crate) fn bad_mesh(name: &str, problem: String) -> Error {
     Error::new("renderer.bad_mesh", format!("mesh {name:?} {problem}"))
 }

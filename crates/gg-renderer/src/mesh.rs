@@ -1,6 +1,4 @@
-//! Meshes: the handles that the engine draws with, and the vertices and indices behind them in
-//! GPU memory, drawn with their shaders and textures, games' and the engine's, in the game's view,
-//! as its camera sees them.
+//! Meshes: the handles the engine draws with, and their vertices and indices in GPU memory.
 
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -37,42 +35,39 @@ use streaming::{Item, MaterialTable, MeshletTable, PlacedMeshlets, StandIns, Tex
 pub(crate) use visibility::SPIRV as VISIBILITY_SPIRV;
 pub(crate) use visibility::{Normals, Shaded};
 
-/// Draws meshes with their shaders into the game's view, colors of high dynamic range of
-/// [`Format::HDR`], writing their IDs beside them and testing its depth image, streams the
-/// meshes' vertices and indices and the textures the shaders sample to the GPU within a budget of
-/// bytes each frame, and keeps them there.
+/// Draws meshes with their shaders into the game's view ([`Format::HDR`]), writing IDs and testing
+/// depth. It streams meshes and the textures shaders sample to the GPU within a byte budget per
+/// frame, and keeps them there.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
-    /// Each shader's pipeline, by its handle; `None` for one removed.
+    /// By handle; `None` for one removed.
     shaders: Vec<Option<GpuShader>>,
-    /// Each mesh's buffers, by its handle, once they're drawable.
+    /// By handle, once drawable.
     meshes: Vec<Held<GpuMesh>>,
-    /// Each texture, by its handle, which is its slot in the bindless sets too.
+    /// By handle, which is also its slot in the bindless sets.
     textures: Vec<TextureSlot>,
-    /// What the renderer's slots show until their textures' images are there: dropped after the
-    /// textures, whose slots show them.
+    /// What slots show until their images arrive. Dropped after `textures`, whose slots show them.
     stand_ins: StandIns,
-    /// What's being streamed to the GPU, in the order it was added, each until it's drawable or
-    /// removed; it keeps its memory, so that a frame with nothing to stream allocates nothing.
+    /// What's streaming, in the order added, each until it's drawable or removed. It keeps its
+    /// memory, so a frame with nothing to stream allocates nothing.
     streaming: VecDeque<Item>,
     /// The materials models' draws index.
     materials: MaterialTable,
-    /// The most bytes a frame copies, as [`Settings::upload_budget`](crate::Settings::upload_budget)
-    /// has it, but for the smallest whole part.
+    /// The most bytes a frame copies ([`Settings::upload_budget`](crate::Settings::upload_budget)),
+    /// but for the smallest whole part.
     budget: u64,
-    /// What culls the frame's opaque runs, and what it culled.
+    /// Culls the frame's opaque runs, and keeps what it culled.
     culling: cull::Culling,
     /// The scene's instances, as the GPU keeps them.
     scene: scene::Kept,
-    /// What culls the meshlets of the meshes drawn by them.
+    /// Culls the meshlets of the meshes that have them.
     meshlet_table: MeshletTable,
-    /// What shades the game's view from its visibility buffer, and what finds its normals from it
-    /// for its reflections.
+    /// Shades the view from its visibility buffer; `normals` finds its normals there for
+    /// reflections.
     shading: ComputePipeline,
     normals: ComputePipeline,
-    /// Where this frame's skin pass moved each skinned mesh's vertices, by the mesh's handle, which
-    /// its draws read in place of its own; 0 for a mesh it didn't move. Kept from frame to frame,
-    /// each frame setting again those it sets, so that it allocates nothing once it's grown.
+    /// By mesh handle, where this frame's skin pass moved its vertices, which its draws read
+    /// instead; 0 if it didn't. Kept across frames, so it allocates nothing once grown.
     skinned: Vec<u64>,
     /// The meshes `skinned` holds an address for.
     skinned_set: Vec<u32>,
@@ -80,29 +75,25 @@ pub(crate) struct MeshPass {
 
 struct GpuShader {
     pipeline: Pipeline,
-    /// What draws its depth alone, if it writes depth: its vertex shader, and `shadow_main` if its
+    /// Draws its depth alone, if it writes depth: its vertex shader, and `shadow_main` if its
     /// shadows are cut out ([`shader::Added::shadow`]).
     depth_only: Option<DepthOnly>,
-    /// What draws the meshlets a view keeps of a mesh, and their depth alone, for a model shader
-    /// that views draw meshes with meshlets by: through mesh shaders where the device has them, and
-    /// through vertex shaders elsewhere ([`shader::Added::meshlets`]).
+    /// For a model shader: draws a view's kept meshlets, and their depth alone. Through mesh
+    /// shaders where the device has them, else vertex shaders ([`shader::Added::meshlets`]).
     meshlets: Option<(Pipeline, Option<DepthOnly>)>,
-    /// What draws them into the visibility buffer, for such a shader, likewise.
+    /// Draws them into the visibility buffer, likewise.
     visibility: Option<Pipeline>,
-    /// Its name, which captures label its runs of draws with.
+    /// Labels its runs of draws in captures.
     label: CString,
-    /// The size of the vertices it reads.
     vertex_size: usize,
-    /// The size of the parameters it takes.
     params_size: usize,
-    /// Whether the pipeline writes depth, as [`shader::writes_depth`] says.
+    /// As [`shader::writes_depth`] says.
     writes_depth: bool,
 }
 
-/// What draws a shader's depth alone, by its geometry: into a shadow map, its depth clamped to the
-/// map's near side and set back by its slope; and into the depth the view's ambient occlusion
-/// takes, as the view draws it. And for a model shader, which has `normal_main`, what draws its
-/// normals, for the view's reflections, where it's nearest in that depth, once it's drawn.
+/// Draws a shader's depth alone: into a shadow map, clamped to the map's near side and set back by
+/// slope; and into the depth the view's ambient occlusion takes. For a model shader (with
+/// `normal_main`), also draws its normals for reflections, where it's nearest in that depth.
 struct DepthOnly {
     shadow: Pipeline,
     view: Pipeline,
@@ -113,18 +104,18 @@ struct GpuMesh {
     vertices: GpuBuffer,
     /// Every level's indices.
     indices: GpuBuffer,
-    /// Where each level is in `indices`, and the sphere that picks among them: a mesh added
-    /// without levels has one, all its indices.
+    /// Where each level is in `indices`, and the sphere that picks among them. A mesh added without
+    /// levels has one: all its indices.
     lods: Lods,
     vertex_size: usize,
     /// Where its meshlets are in the table, for a model's mesh that has them.
     meshlets: Option<PlacedMeshlets>,
-    /// For a skinned model's mesh, how many vertices it has, which the skin pass moves.
+    /// For a skinned model's mesh, its vertex count, which the skin pass moves.
     skinned: Option<u32>,
 }
 
-/// What the pass holds for a mesh's handle: nothing yet, while what was added streams, what it
-/// draws with, or nothing again, once removed.
+/// What the pass holds for a mesh handle: nothing while it streams, what it draws with, or nothing
+/// once removed.
 enum Held<T> {
     Waiting,
     Ready(T),
@@ -141,7 +132,6 @@ impl<T> Held<T> {
 }
 
 impl MeshPass {
-    /// A pass whose frames copy at most `budget` bytes each.
     pub(crate) fn new(device: &Arc<Device>, budget: u64) -> Result<Self> {
         let from_visibility = shader::non_uniform(visibility::SPIRV);
         let pipeline = |name, entry| ComputePipeline::new(device, name, &from_visibility, entry);
@@ -171,16 +161,15 @@ impl MeshPass {
         })
     }
 
-    /// The vertices of skinned mesh `index`, and how many there are, if it's drawable: the
-    /// address of its buffer, which starts with its header, as its own draws read it.
+    /// Skinned mesh `index`'s vertices and their count, if drawable: its buffer's address, which
+    /// starts with its header, as its own draws read it.
     pub(crate) fn skinned_mesh(&self, index: u32) -> Option<(u64, u32)> {
         let mesh = self.meshes.get(index as usize)?.ready()?;
         Some((mesh.vertices.address(), mesh.skinned?))
     }
 
-    /// Has the frame's draws of each of `moved`'s meshes, by its handle, read its vertices where
-    /// the skin pass moved them, at the address beside it, which starts with its header; and of
-    /// the rest, theirs.
+    /// Has this frame's draws of each mesh in `moved` read its vertices at the address beside it
+    /// (starting with its header), where the skin pass moved them; the rest read their own.
     pub(crate) fn set_skinned(&mut self, moved: impl Iterator<Item = (u32, u64)>) {
         for index in self.skinned_set.drain(..) {
             self.skinned[index as usize] = 0;
@@ -195,8 +184,8 @@ impl MeshPass {
         }
     }
 
-    /// Where mesh `index`, `mesh`, has its draws read its vertices this frame: where the skin pass
-    /// moved them, if it did, or else its own buffer.
+    /// Where mesh `index`'s draws read its vertices this frame: where the skin pass moved them, or
+    /// its own buffer.
     fn vertices_address(&self, index: u32, mesh: &GpuMesh) -> u64 {
         match self.skinned.get(index as usize) {
             Some(&moved) if moved != 0 => moved,
@@ -204,8 +193,8 @@ impl MeshPass {
         }
     }
 
-    /// Takes the scene's records into the space of a frame whose origin is `by` further along than
-    /// the frame before's, as [`Kept::moved`](scene::Kept::moved) says.
+    /// Moves the scene's records into a frame whose origin is `by` past the last frame's
+    /// ([`Kept::moved`](scene::Kept::moved)).
     pub(crate) fn moved(&mut self, by: Vec3) {
         self.scene.moved(by);
     }

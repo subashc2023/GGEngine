@@ -1,4 +1,4 @@
-//! The pipelines each shader draws with, made as it's added or compiled again.
+//! The pipelines each shader draws with, made as it's added or recompiled.
 
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
@@ -10,10 +10,10 @@ use tracing::warn;
 use super::{DepthOnly, GpuShader, MeshPass};
 use crate::{Uploads, shader, shadow};
 
-/// A shader's geometry, which its pipelines draw with: its module, named `name`, the module of its
-/// shadows if they're cut out, as [`shader::Added::shadow`] says, and of its normals, for a model
-/// shader, as [`shader::Meshlets`] says; and its geometry's entry point in each, or in `mesh`, a
-/// mesh shader's module apart from them, as [`GraphicsDesc::mesh`] says.
+/// A shader's geometry for its pipelines: its module (`name`), its cut-out shadows' module
+/// ([`shader::Added::shadow`]), a model shader's normals module ([`shader::Meshlets`]), and its
+/// geometry's entry point in each, or in `mesh`, a separate mesh-shader module
+/// ([`GraphicsDesc::mesh`]).
 struct Geometry<'a> {
     name: &'a str,
     spirv: &'a [u8],
@@ -24,10 +24,10 @@ struct Geometry<'a> {
 }
 
 impl Geometry<'_> {
-    /// Its pipeline, into the game's view, with `fragment_main`, blending as `blend` says and
-    /// writing the IDs of what it draws if `ids` says so, as [`shader::Added::ids`] says; and, if
-    /// that writes depth, what draws its depth alone, by its geometry and, if its shadows are cut
-    /// out, `shadow_main`, and its normals, if it has a module of them, by `normal_main`.
+    /// Its pipeline into the game's view, with `fragment_main`, blending by `blend` and writing IDs
+    /// if `ids` ([`shader::Added::ids`]). If it writes depth, also its depth-only pipelines, by its
+    /// geometry and `shadow_main` if its shadows are cut out, and its normals by `normal_main`, if
+    /// it has their module.
     fn pipelines(
         &self,
         device: &Arc<Device>,
@@ -51,8 +51,8 @@ impl Geometry<'_> {
                 depth_clamp: false,
             },
         )?;
-        // What's opaque casts shadows, drawn by its own geometry into the shadow maps, and draws
-        // its depth so for the view's ambient occlusion, as the view draws it.
+        // What's opaque casts shadows by its own geometry, and draws depth so for the view's
+        // ambient occlusion.
         let depth_only = |name: &str, shadow: bool| {
             Pipeline::graphics(
                 device,
@@ -71,8 +71,8 @@ impl Geometry<'_> {
                 },
             )
         };
-        // Its normals, into an image of high dynamic range's format, tested against the depth drawn
-        // alone and leaving it as it is, so that what's nearest there alone draws.
+        // Normals, into an HDR-format image, tested against the depth-only depth without writing
+        // it, so only what's nearest there draws.
         let normals = |spirv| {
             Pipeline::graphics(
                 device,
@@ -102,9 +102,8 @@ impl Geometry<'_> {
     }
 }
 
-/// What draws the meshlets of the model shader `name` into the visibility buffer, from `meshlets`'
-/// modules: through its mesh shader where the device draws through them, and through its vertex
-/// shaders elsewhere.
+/// Draws model shader `name`'s meshlets into the visibility buffer, from `meshlets`' modules: by
+/// its mesh shader where the device has them, else its vertex shaders.
 fn visibility_pipeline(
     device: &Arc<Device>,
     name: &str,
@@ -143,15 +142,14 @@ fn visibility_pipeline(
 }
 
 impl MeshPass {
-    /// Makes the pipelines of the shaders in `uploads`, taking them, and drops those of the shaders
-    /// it removes. A shader that has a pipeline already, compiled again, gets a new one in place of
-    /// the old, which retires until the GPU is done with it; one whose new pipeline can't be made
-    /// warns, and keeps the old; one removed stays removed. Then takes the changes to the scene,
-    /// as frame `frame`'s, the next to begin, which writes them to the GPU.
+    /// Makes the pipelines of `uploads`' shaders, taking them, and drops those of removed shaders.
+    /// A recompiled shader's new pipeline replaces the old, which retires until the GPU is done
+    /// with it; if the new one can't be made, it warns and keeps the old. A removed shader stays
+    /// removed. Then takes the scene's changes as frame `frame`'s, the next to begin.
     ///
     /// # Panics
     ///
-    /// If they were taken from another `Shaders` than the pass's shaders before them.
+    /// - If they come from another `Shaders` than earlier ones.
     pub(crate) fn add_shaders(&mut self, uploads: &mut Uploads, frame: u64) -> Result<()> {
         let _zone = gg_core::zone!();
         for change in uploads.shaders.drain(..) {
@@ -167,8 +165,7 @@ impl MeshPass {
                 }
             };
             let index = added.index as usize;
-            // A shader compiled again replaces one the pass has; any other is the next its
-            // `Shaders` added.
+            // A recompiled shader replaces one the pass has; any other is its `Shaders`' next.
             let follows = if added.replacement {
                 index < self.shaders.len()
             } else {
@@ -178,8 +175,8 @@ impl MeshPass {
                 follows,
                 "a renderer draws with the shaders of one `Shaders`"
             );
-            // Which the draws' sizes are checked against: its own types, since only the
-            // `Shaders` that added it replaces it.
+            // Draws' sizes are checked against it: its own types, as only the `Shaders` that added
+            // it replaces it.
             if let Some(Some(old)) = self.shaders.get(index) {
                 assert_eq!(
                     (old.vertex_size, old.params_size),
@@ -252,7 +249,7 @@ impl MeshPass {
                         depth_only,
                         meshlets,
                         visibility,
-                        // A name with a nul is labeled as far as it goes.
+                        // A name with a nul is labeled up to it.
                         label: CString::new(added.name.split('\0').next().unwrap_or_default())
                             .expect("cut at its first nul"),
                         vertex_size: added.vertex_size,

@@ -1,7 +1,5 @@
-//! The world's opaque meshes, kept on the GPU from frame to frame: [`Scene`], what's changed of
-//! them, which the engine fills and [`Uploads`](crate::Uploads) carries to a renderer; and what a
-//! renderer keeps of them, each instance's record in a table in the GPU's own memory, written as it
-//! changes, and the order frames cull and draw them in, by batch, then ID, written as it changes.
+//! The world's opaque meshes: [`Scene`], the changes the engine fills, and [`Kept`], what a
+//! renderer keeps of them on the GPU.
 
 use std::sync::Arc;
 
@@ -12,15 +10,12 @@ use gg_gpu::{Device, Faces, Frame, GpuBuffer};
 
 use crate::{MeshDraw, halves};
 
-/// The world's opaque meshes, which a renderer keeps on the GPU from frame to frame, as what's
-/// changed of them since [`Uploads::take_scene`](crate::Uploads::take_scene) last took it: each an
-/// instance of a mesh with a shader that writes depth, its transform, its parameters and its ID,
-/// in a slot its caller picks, set as it changes and taken away as it goes. Frames draw them where
-/// their draws say [`Draws::draw_scene`](crate::Draws::draw_scene), culled, and at their levels of
-/// detail, as the frames' other opaque runs are: by shader, then mesh, then the faces they draw,
-/// then ID, as many instanced draws as their meshes have levels for each, whatever their
-/// instances. A frame whose instances didn't change writes nothing of them. It keeps its memory,
-/// so that a frame that changes no more than the last allocates nothing.
+/// The world's opaque meshes, as changes since [`Uploads::take_scene`](crate::Uploads::take_scene)
+/// last took them; renderers keep them on the GPU. Each is an instance of a mesh with a
+/// depth-writing shader, with a transform, parameters and ID, in a slot its caller picks. Frames
+/// draw them at [`Draws::draw_scene`](crate::Draws::draw_scene), culled and batched as other opaque
+/// runs are: by shader, mesh, faces and ID. A frame without changes writes nothing, and one
+/// changing no more than the last allocates nothing.
 #[derive(Debug, Default)]
 pub struct Scene {
     pub(crate) changes: Vec<Change>,
@@ -29,8 +24,7 @@ pub struct Scene {
 /// A slot's instance, as [`Scene::changes`] gives it: its transform, ID and draw.
 type Set = (Mat4, u64, MeshDraw);
 
-/// A change to a renderer's scene, which [`Uploads::take_scene`](crate::Uploads::take_scene)
-/// carries to it.
+/// A change [`Uploads::take_scene`](crate::Uploads::take_scene) carries to a renderer.
 #[derive(Debug)]
 pub(crate) enum Change {
     Set {
@@ -44,13 +38,13 @@ pub(crate) enum Change {
 }
 
 impl Scene {
-    /// Puts in slot `slot` an instance of `draw`, which `transform` places in the world, with the
-    /// ID `id`, in place of what the slot held: its mesh's fronts alone, if it culls, as
-    /// [`Draws::push_draw`](crate::Draws::push_draw) draws them.
+    /// Puts in `slot` an instance of `draw` at `transform` with ID `id`, replacing what it held. It
+    /// draws only its mesh's fronts if it culls, as [`Draws::push_draw`](crate::Draws::push_draw)
+    /// does.
     ///
     /// # Panics
     ///
-    /// If `draw`'s shader doesn't write depth.
+    /// - If `draw`'s shader doesn't write depth.
     pub fn set(&mut self, slot: u32, transform: Mat4, draw: &MeshDraw, id: u64) {
         assert!(
             draw.batch().is_some(),
@@ -64,19 +58,19 @@ impl Scene {
         });
     }
 
-    /// Takes away the instance in slot `slot`, if it holds one.
+    /// Empties `slot`, if it holds an instance.
     pub fn remove(&mut self, slot: u32) {
         self.changes.push(Change::Remove(slot));
     }
 
-    /// Takes away every instance, forgetting what changed before.
+    /// Empties every slot, forgetting earlier changes.
     pub fn clear(&mut self) {
         self.changes.clear();
         self.changes.push(Change::Clear);
     }
 
-    /// What's changed, in order: each slot set, with its transform, ID and draw, or emptied; and
-    /// for a change that empties every slot, `None`. For tests, which read what changed.
+    /// What's changed, in order: each slot set (transform, ID and draw) or emptied, and `None` for
+    /// a clear. For tests.
     #[doc(hidden)]
     pub fn changes(&self) -> impl Iterator<Item = Option<(u32, Option<Set>)>> {
         self.changes.iter().map(|change| match *change {
@@ -92,8 +86,7 @@ impl Scene {
     }
 }
 
-/// What an instance of the scene draws with, which orders its batch among the rest: its shader,
-/// its mesh, and the faces it draws, as [`faces`] numbers them.
+/// What orders an instance's batch: its shader, mesh and faces (numbered by [`faces`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Batch {
     shader: u32,
@@ -101,7 +94,7 @@ struct Batch {
     faces: u8,
 }
 
-/// An instance, in the order frames draw them: its batch, its ID, and its slot.
+/// An instance in draw order: its batch, ID and slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Member {
     batch: Batch,
@@ -109,12 +102,14 @@ struct Member {
     slot: u32,
 }
 
-/// An instance's record, as `Record` in `shaders/gather.slang` has it: its transform,
-/// column-major; the transform the frame it changed in found it at, its own for an instance new to
-/// its slot; its ID's low and high halves; the number of the frame its transform last changed in,
-/// its low and high words, which the gather takes the transform before from only in that frame,
-/// and the transform after; and its parameters, up to [`MeshDraw::MAX_PARAMS`] bytes, the rest
-/// zeros.
+/// An instance's record: `Record` in `shaders/gather.slang`.
+///
+/// - Its transform, column-major.
+/// - Its transform as of the frame it changed in; its own if new to its slot.
+/// - Its ID's low and high halves.
+/// - The frame its transform last changed in, low and high words. Only in that frame does the
+///   gather take the earlier transform, and the current one after.
+/// - Its parameters, up to [`MeshDraw::MAX_PARAMS`] bytes, zero-padded.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct Record {
@@ -125,11 +120,10 @@ pub(crate) struct Record {
     params: [u32; MeshDraw::MAX_PARAMS / 4],
 }
 
-/// The bytes of a [`Record`].
 const RECORD: u64 = size_of::<Record>() as u64;
 
-/// A run of the scene's instances of one batch, as frames cull and draw it: its mesh, its shader,
-/// the faces it draws, and where its instances are in the order.
+/// A run of one batch, as frames cull and draw it: its mesh, shader, faces, and where its instances
+/// are in the order.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SceneRun {
     pub(crate) mesh: u32,
@@ -139,23 +133,20 @@ pub(crate) struct SceneRun {
     pub(crate) count: u32,
 }
 
-/// What a renderer keeps of its scene: each slot's instance, its record on the CPU and in a table
-/// on the GPU, and the instances in order, by batch, then ID, on the CPU and on the GPU too. A
-/// table on the GPU is made again, twice the size, as more slots are used than it holds, the old
-/// retiring until the GPU is done with it, and written whole from the CPU's records.
+/// What a renderer keeps of its scene: each slot's instance, its record on the CPU and in a GPU
+/// table, and the instances by batch then ID, on both. A GPU table full of slots is made again at
+/// twice the size from the CPU's records, the old one retiring until the GPU is done with it.
 #[derive(Default)]
 pub(crate) struct Kept {
-    /// By slot: its instance, if it holds one.
+    /// By slot: its instance, if any.
     slots: Vec<Option<Member>>,
-    /// By slot: its record.
     records: Vec<Record>,
-    /// By slot: whether its record changed since a frame last wrote it, and the slots that did.
+    /// By slot: whether its record changed since last written; then the slots that did.
     dirty: Vec<bool>,
     changed: Vec<u32>,
-    /// The instances, in order.
+    /// In draw order.
     members: Vec<Member>,
-    /// The instances set into a slot since `members` was last ordered, in place of another or of
-    /// none, and whether any was taken away.
+    /// Instances set since `members` was last ordered, and whether any was taken away.
     added: Vec<Member>,
     removed: bool,
     /// What `members` merges into.
@@ -163,20 +154,20 @@ pub(crate) struct Kept {
     /// The runs of `members`, and their slots in order.
     runs: Vec<SceneRun>,
     order: Vec<u32>,
-    /// Whether `order` changed since a frame last wrote it.
+    /// Whether `order` changed since last written.
     reordered: bool,
-    /// The table of records on the GPU, and how many it holds; and the order there likewise.
+    /// The GPU's records table and its room; then the order's, likewise.
     table: Option<(GpuBuffer, usize)>,
     ordered: Option<(GpuBuffer, usize)>,
-    /// The bytes and their offsets a frame writes into the table.
+    /// The bytes, and their offsets, a frame writes into the table.
     bytes: Vec<u8>,
     offsets: Vec<u64>,
 }
 
-/// The fewest records or slots a table on the GPU holds.
+/// The fewest records or slots a GPU table holds.
 const LEAST: usize = 1024;
 
-/// What `faces` orders by, among a mesh's runs with a shader.
+/// What `faces` orders by among a mesh's runs with one shader.
 fn faces(faces: Faces) -> u8 {
     match faces {
         Faces::Both => 0,
@@ -185,7 +176,6 @@ fn faces(faces: Faces) -> u8 {
     }
 }
 
-/// The faces `faces` numbers.
 fn faces_of(faces: u8) -> Faces {
     match faces {
         0 => Faces::Both,
@@ -195,11 +185,10 @@ fn faces_of(faces: u8) -> Faces {
 }
 
 impl Kept {
-    /// Takes its records into the space of a frame whose origin is `by` further along than the
-    /// frame before's, before that frame's changes: each one's transform and the transform the
-    /// frame before drew it at moved by `-by`, so that a record set again from there, as the engine
-    /// sets every one again when the origin moves, moves from where it was, and one that isn't
-    /// stays put; each written again.
+    /// Moves its records into the space of a frame whose origin is `by` past the last's, before
+    /// that frame's changes. Each transform and last-frame transform moves by `-by`, so a record
+    /// set again (as the engine sets every one when the origin moves) moves from where it was, and
+    /// one that isn't stays put. All are written again.
     pub(crate) fn moved(&mut self, by: Vec3) {
         let by = by.to_array();
         for (slot, record) in self.records.iter_mut().enumerate() {
@@ -217,12 +206,11 @@ impl Kept {
         }
     }
 
-    /// Takes `changes`, in order, into what it keeps, as frame `frame`'s, the next to begin, and
-    /// orders its instances again if any came, went or moved to another batch or ID: in a merge of
-    /// those that came, sorted, into those that stayed, so that ordering them again costs the
-    /// instances once and what came as it's sorted. An instance set again keeps the transform the
-    /// first of the frame's changes found it at, which the frame before drew it at, a frame that
-    /// doesn't begin taking its changes on to the next, of the same number.
+    /// Takes `changes` in order as frame `frame`'s, the next to begin. If any instance came, went
+    /// or changed batch or ID, it reorders by merging the sorted arrivals into those that stayed,
+    /// costing one pass plus the sort. An instance set again keeps the transform from the frame's
+    /// first change, where last frame drew it. A frame that doesn't begin carries its changes into
+    /// the next, of the same number.
     pub(crate) fn apply(&mut self, changes: &mut Vec<Change>, frame: u64) {
         if changes.is_empty() {
             return;
@@ -259,8 +247,8 @@ impl Kept {
                         id,
                         slot,
                     };
-                    // Where the frame before drew it: as the record held it before the frame's
-                    // first change, if the slot held its entity, or else where it is now.
+                    // Where last frame drew it: the record before the frame's first change, if the
+                    // slot held this entity; else where it is now.
                     let held = self.records[at];
                     let changed = halves(frame);
                     let previous = match self.slots[at] {
@@ -305,7 +293,7 @@ impl Kept {
         if self.added.is_empty() && !self.removed {
             return;
         }
-        // Those that stayed are still in order; those that came, in theirs, merge into them.
+        // Those that stayed are still in order; arrivals, sorted, merge into them.
         let slots = &self.slots;
         let held = |member: &Member| slots[member.slot as usize] == Some(*member);
         self.members.retain(held);
@@ -323,8 +311,8 @@ impl Kept {
             };
             self.merged.extend(next.copied());
         }
-        // One set again as it was into a slot these changes emptied, as a clear empties each, both
-        // stayed and came: an instance is drawn once.
+        // An instance set again as it was into a slot these changes emptied (as a clear empties
+        // each) both stayed and came: it's drawn once.
         self.merged.dedup();
         std::mem::swap(&mut self.members, &mut self.merged);
         self.added.clear();
@@ -353,21 +341,19 @@ impl Kept {
         self.reordered = true;
     }
 
-    /// Its runs, in the order frames draw them.
+    /// In draw order.
     pub(crate) fn runs(&self) -> &[SceneRun] {
         &self.runs
     }
 
-    /// Writes into its tables on the GPU what changed since a frame last did: the records that
-    /// changed, each where its slot is, and the order whole, if it changed; or every record, into
-    /// a table made again as more slots are used than the last held, or a first. Before the frame's
-    /// passes, which read them.
+    /// Writes to its GPU tables what changed since last time: changed records at their slots, and
+    /// the whole order if it changed; or every record, into a new table, if slots outgrew the old
+    /// or none existed. Before the frame's passes, which read them.
     pub(crate) fn write(&mut self, device: &Arc<Device>, frame: &mut Frame<'_>) -> Result<()> {
         let slots = self.slots.len();
         if self.table.as_ref().is_none_or(|&(_, room)| room < slots) && slots > 0 {
             let room = slots.next_power_of_two().max(LEAST);
-            // The table that's there, if any, retires until the GPU is done with the frames that
-            // read it.
+            // The old table retires until the GPU is done with the frames reading it.
             let table = GpuBuffer::new(device, room as u64 * RECORD, "scene")?;
             self.table = Some((table, room));
             // Every record, written whole below.
@@ -407,7 +393,7 @@ impl Kept {
         Ok(())
     }
 
-    /// The addresses of its table of records and of its order on the GPU, 0 for one not made.
+    /// The GPU addresses of its records table and order; 0 for one not made.
     pub(crate) fn addresses(&self) -> [u64; 2] {
         let address = |table: &Option<(GpuBuffer, usize)>| {
             table.as_ref().map_or(0, |(table, _)| table.address())
@@ -436,9 +422,9 @@ mod tests {
             .collect()
     }
 
-    /// The scene's instances are ordered by shader, then mesh, then faces, then ID, whatever their
-    /// slots, as they come, go, and move to other batches; a run for each batch; and a slot set
-    /// again with what it held keeps its place, its record alone changed.
+    /// Instances order by shader, mesh, faces and ID, whatever their slots, as they come, go and
+    /// change batch; a run per batch; and a slot set again with what it held keeps its place, only
+    /// its record changing.
     #[test]
     fn instances_order_by_batch_then_id_as_they_come_and_go() {
         let [a, b] = [draw(0), draw(1)];
@@ -485,9 +471,8 @@ mod tests {
         assert_eq!(runs(&kept), vec![(1, 1, both, vec![1])]);
     }
 
-    /// An instance set again into its slot once the slot's emptied, by a clear, as every one is
-    /// when the engine plays or stops a copy of the world, or taken away in the same frame's
-    /// changes, is ordered once, as it was.
+    /// An instance set again into its slot after a clear (as when the engine plays or stops a world
+    /// copy) or a removal in the same frame's changes is ordered once.
     #[test]
     fn an_instance_set_again_once_its_slot_is_emptied_is_ordered_once() {
         let a = draw(0);
@@ -511,9 +496,8 @@ mod tests {
         assert_eq!(runs(&kept), want, "after a removal");
     }
 
-    /// A record keeps the transform the frame before drew its instance at, from the first of a
-    /// frame's changes, and the frame it changed in; an instance new to its slot, another entity's
-    /// before, starts where it is.
+    /// A record keeps last frame's transform from a frame's first change, and the frame it changed
+    /// in; an instance new to its slot (another entity's before) starts where it is.
     #[test]
     fn records_keep_where_the_frame_before_drew_them() {
         let a = draw(0);
@@ -528,7 +512,7 @@ mod tests {
         kept.apply(&mut scene.changes, 5);
         assert_eq!(record(&kept), (1.0, 1.0, [5, 0]));
 
-        // Moved in a frame, then again in it, as a frame that didn't begin leaves its changes.
+        // Moved twice in a frame, as a frame that didn't begin leaves its changes.
         scene.set(3, at(2.0), &a, 9);
         kept.apply(&mut scene.changes, 6);
         scene.set(3, at(3.0), &a, 9);

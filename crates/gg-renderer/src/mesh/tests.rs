@@ -12,11 +12,10 @@ use crate::{Mipmaps, Projection, Uploads, Viewpoint, sprite, texture};
 
 const TRIANGLE: [[f32; 3]; 3] = [[0.0, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]];
 
-/// Three triangles of `TRIANGLE`'s corners, which levels of detail pick among.
+/// Three triangles of `TRIANGLE`'s corners, for levels of detail to pick among.
 const THREE: [u32; 9] = [0, 1, 2, 2, 1, 0, 1, 2, 0];
 
-/// Levels of detail that each start where they please and have `errors`, round a sphere of
-/// `radius` around the origin.
+/// Levels of detail starting anywhere, with `errors`, in a sphere of `radius` round the origin.
 fn lods(errors: &[f32], radius: f32) -> Lods {
     let level = |&error| Lod {
         start: 0,
@@ -30,7 +29,7 @@ fn lods(errors: &[f32], radius: f32) -> Lods {
     }
 }
 
-/// The meshes added or replaced, waiting to be taken, in order.
+/// The meshes added or replaced, waiting, in order.
 fn adds(meshes: &Meshes) -> Vec<&Added> {
     (meshes.changes.iter())
         .filter_map(|change| match change {
@@ -57,8 +56,8 @@ fn a_mesh_is_whole_triangles_of_its_own_vertices() {
     assert_eq!(add(&[2, 1, 0]).ok(), Some(2));
 }
 
-/// A mesh's sphere is the one its levels of detail hold, at once, through replacements; a mesh
-/// without a finite sphere, or removed, has none.
+/// A mesh's sphere is its levels' at once, through replacements; one without a finite sphere, or
+/// removed, has none.
 #[test]
 fn a_mesh_s_sphere_is_the_one_its_levels_hold() {
     let mut meshes = Meshes::default();
@@ -87,7 +86,7 @@ fn a_mesh_s_sphere_is_the_one_its_levels_hold() {
     let replaced = meshes.replace_lods("b", b, &TRIANGLE, &[0, 1, 2], replacement);
     replaced.expect("b");
     assert_eq!(sphere(&meshes, b.index), Some((Vec3::ZERO, 3.0)));
-    // Removed, and a replacement of it dropped.
+    // Removed, and its replacement dropped.
     assert!(meshes.remove(c));
     assert_eq!(sphere(&meshes, c.index), None);
     let again = meshes.replace_lods("c", c, &TRIANGLE, &[0, 1, 2], lods(&[0.0], 4.0));
@@ -105,14 +104,14 @@ fn a_mesh_replaced_keeps_its_handle_and_the_place_of_triangles_waiting() {
             .map(|added| (added.index, added.replacement, added.indices.clone()))
             .collect()
     };
-    // Still waiting as it was added, which takes the triangles instead.
+    // Still waiting as added, so the replacement takes its place.
     let square = [TRIANGLE.as_slice(), &[[1.0; 3]]].concat();
     meshes
         .replace("a", a, &square, &[0, 1, 2, 2, 1, 3])
         .expect("others");
     let quad = (0, false, sprite::INDICES.to_vec());
     assert_eq!(waiting(&meshes), [quad, (1, false, vec![0, 1, 2, 2, 1, 3])]);
-    // Once a frame has taken it, in place of the one the renderer has.
+    // Once a frame has taken it, in place of the renderer's.
     meshes.changes.clear();
     meshes
         .replace("a", a, &TRIANGLE, &[2, 1, 0])
@@ -124,9 +123,8 @@ fn a_mesh_replaced_keeps_its_handle_and_the_place_of_triangles_waiting() {
     assert_eq!(waiting(&meshes), [(1, true, vec![2, 1, 0])]);
 }
 
-/// A mesh removed goes after the changes before it, once however many times, by its handle or
-/// its index; its handle isn't given out again, and a replacement of it is dropped, as its
-/// triangles are checked still.
+/// A removal, by handle or index, follows the changes before it, once however often; its handle
+/// isn't reused, and its replacement is checked, then dropped.
 #[test]
 fn a_mesh_removed_stays_removed_in_order() {
     let mut meshes = Meshes::default();
@@ -161,9 +159,9 @@ fn another_meshes_mesh_cant_be_removed() {
     Meshes::default().remove(Mesh::<Vec2>::new(5));
 }
 
-/// An asset waits for room when its bytes would take usage past the budget, however large,
-/// while something else is being copied; with nothing else copying, the oldest waiting goes
-/// ahead alone, so that nothing waits forever on a GPU past its budget already.
+/// An asset waits when its bytes, however large, would take usage past the budget while something
+/// else copies; with nothing copying, the oldest waiting goes ahead alone, so nothing waits forever
+/// on a GPU already past budget.
 #[test]
 fn an_asset_past_the_budget_waits_unless_nothing_else_is_copying() {
     assert!(!exceeds(10, 100, 90));
@@ -178,8 +176,8 @@ fn an_asset_past_the_budget_waits_unless_nothing_else_is_copying() {
     assert!(waits(200, 100, 16, true));
 }
 
-/// A frame copies its budget while the transfer queue is at most a frame behind, and nothing
-/// once it's two or more behind.
+/// A frame copies its budget while the transfer queue is at most a frame behind, and nothing at two
+/// or more.
 #[test]
 fn a_frame_copies_nothing_once_the_transfer_queue_falls_behind() {
     assert_eq!(budget_behind(0, 1 << 20), 1 << 20);
@@ -188,8 +186,8 @@ fn a_frame_copies_nothing_once_the_transfer_queue_falls_behind() {
     assert_eq!(budget_behind(7, 1 << 20), 0);
 }
 
-/// Buffers or an image that don't fit the GPU's memory leave their asset waiting, warned once;
-/// any other failure ends the renderer.
+/// Buffers or an image that don't fit GPU memory leave their asset waiting, warned once; any other
+/// failure ends the renderer.
 #[test]
 fn an_asset_that_doesnt_fit_waits_and_other_failures_propagate() {
     let mut warned = false;
@@ -213,7 +211,7 @@ fn uploads_keep_what_a_frame_left_ahead_of_what_they_take_next() {
     let mut materials = crate::Materials::default();
     let mut uploads = Uploads::default();
     uploads.take(&mut meshes, &mut shaders, &mut textures, &mut materials);
-    // As a frame that presented nothing leaves them, and more are added before the next.
+    // As a frame that presented nothing leaves them, with more added before the next.
     meshes.add("a", &TRIANGLE, &[0, 1, 2]).unwrap();
     textures.add("a", [1, 1], &[255; 4], Mipmaps::None).unwrap();
     uploads.take(&mut meshes, &mut shaders, &mut textures, &mut materials);
@@ -296,7 +294,7 @@ fn levels_of_detail_are_whole_triangles_among_the_indices_with_errors_that_grow(
         assert!(message.contains("\"broken\""), "{message}");
         assert!(message.contains(problem), "{message} for {problem}");
     }
-    // Indices that no mesh has, though every level is among them.
+    // Indices no mesh has, though every level is among them.
     let error = (meshes.add_lods(
         "broken",
         &TRIANGLE,
@@ -306,7 +304,7 @@ fn levels_of_detail_are_whole_triangles_among_the_indices_with_errors_that_grow(
     .expect_err("an index past the vertices");
     assert_eq!(error.code(), "renderer.bad_mesh");
     assert!(error.to_string().contains("past its 3 vertices"), "{error}");
-    // Only the engine's quad has been added, whose handle the next follows.
+    // Only the engine's quad was added; the next handle follows it.
     assert_eq!(meshes.count(), 1);
     assert_eq!(meshes.changes.len(), 1);
 
@@ -327,7 +325,7 @@ fn a_mesh_has_one_level_of_all_its_indices_unless_added_with_more_and_again_once
             count: indices,
             error: 0.0,
         }],
-        // No sphere, as `add` can't read the vertices' positions.
+        // No sphere, as `add` can't read vertex positions.
         center: Vec3::ZERO,
         radius: f32::INFINITY,
     };
@@ -362,8 +360,8 @@ fn a_mesh_has_one_level_of_all_its_indices_unless_added_with_more_and_again_once
         .replace("plain", plain, &TRIANGLE, &[0, 1, 2, 2, 1, 0])
         .expect("others");
     assert_eq!(adds(&meshes)[0].lods, whole(6));
-    // Replaced with levels, which it takes as `add_lods` takes them, and checks alike, leaving
-    // what waits as it was where they're refused.
+    // Replaced with levels, taken and checked as `add_lods` does; refused ones leave what waits as
+    // it was.
     meshes
         .replace_lods("plain", plain, &TRIANGLE, &THREE, finer.clone())
         .expect("levels");
@@ -377,8 +375,7 @@ fn a_mesh_has_one_level_of_all_its_indices_unless_added_with_more_and_again_once
     assert_eq!(adds(&meshes)[0].lods, finer);
 }
 
-/// What a viewpoint at the origin facing down -Z, or as `viewpoint` has it, sees of a view
-/// `size` pixels across and down.
+/// What a viewpoint at the origin facing -Z, or as `viewpoint` has it, sees of a `size`-pixel view.
 fn lod_view(viewpoint: Viewpoint, size: [u32; 2]) -> LodView {
     let aspect = size[0] as f32 / size[1] as f32;
     LodView::new(&viewpoint.view_projection(aspect), size)
@@ -393,24 +390,23 @@ fn looking(projection: Projection) -> Viewpoint {
 
 #[test]
 fn perspective_picks_the_coarsest_level_whose_error_spans_a_pixel_where_the_sphere_is_nearest() {
-    // A quarter turn from the view's bottom to its top, over 200 pixels: 100 a unit where W is
-    // 1, and across too, over 320.
+    // A quarter turn bottom to top over 200 pixels: 100 a unit where W is 1, across too, over 320.
     let perspective = Projection::Perspective {
         fov: FRAC_PI_2,
         near: 0.1,
     };
     let view = lod_view(looking(perspective), [320, 200]);
-    // The sphere's nearest point is a unit nearer than its center, so the second level's error
-    // spans 0.05 * 100 / (depth - 1) pixels, and the third's 0.4 * 100 / (depth - 1).
+    // The sphere's nearest point is a unit nearer than its center, so level 1's error spans 0.05 *
+    // 100 / (depth - 1) pixels, and level 2's 0.4 * 100 / (depth - 1).
     let lods = lods(&[0.0, 0.05, 0.4], 1.0);
     let level = |at: Vec3| view.level(&lods, &Mat4::from_translation(at));
     for (depth, expected) in [(1.5, 0), (5.9, 0), (6.1, 1), (40.9, 1), (41.1, 2), (1e6, 2)] {
         assert_eq!(level(Vec3::new(0.0, 0.0, -depth)), expected, "{depth} away");
-        // Off to the side, as far from the center of the view as it is far, it's as far.
+        // Off to the side as far as it is ahead, it's as far.
         let aside = Vec3::new(depth, -depth / 2.0, -depth);
         assert_eq!(level(aside), expected, "{depth} away and aside");
     }
-    // Behind the camera, and so close that its sphere reaches the plane of the camera.
+    // Behind the camera, and so close its sphere reaches the camera's plane.
     assert_eq!(level(Vec3::new(0.0, 0.0, 1e3)), 0, "behind");
     assert_eq!(
         level(Vec3::new(0.0, 0.0, -1.0)),
@@ -418,7 +414,7 @@ fn perspective_picks_the_coarsest_level_whose_error_spans_a_pixel_where_the_sphe
         "the sphere reaches the plane"
     );
 
-    // Turned and moved, the camera sees the same: the distance ahead is what counts.
+    // Turned and moved, the camera sees the same: distance ahead is what counts.
     let rotation = Quat::from_rotation_y(1.0) * Quat::from_rotation_x(-0.4);
     let position = Vec3::new(3.0, -2.0, 5.0);
     let viewpoint = Viewpoint {
@@ -443,7 +439,7 @@ fn a_transform_scales_the_error_and_the_sphere_by_its_longest_axis() {
     let view = lod_view(looking(perspective), [320, 200]);
     let lods = lods(&[0.0, 0.05], 1.0);
     let level = |scale: Vec3, depth: f32| {
-        // Turned, so that the axes aren't the world's.
+        // Turned, so the axes aren't the world's.
         let turn = Quat::from_rotation_z(0.7) * Quat::from_rotation_y(0.3);
         let at = Vec3::new(1.0, 2.0, -depth);
         let placed = Mat4::from_scale_rotation_translation(scale, turn, at);
@@ -452,7 +448,7 @@ fn a_transform_scales_the_error_and_the_sphere_by_its_longest_axis() {
     // Doubled: the error spans 0.05 * 2 * 100 / (depth - 2) pixels.
     assert_eq!(level(Vec3::splat(2.0), 11.9), 0);
     assert_eq!(level(Vec3::splat(2.0), 12.1), 1);
-    // Three times as long on one axis alone: the same, by 3 and (depth - 3), whichever axis.
+    // Three times as long on one axis alone: the same by 3 and (depth - 3), whichever axis.
     for scale in [
         Vec3::new(3.0, 1.0, 1.0),
         Vec3::new(1.0, 3.0, 2.0),
@@ -472,9 +468,8 @@ fn the_sphere_is_round_its_center_not_the_meshs_origin() {
         }),
         [320, 200],
     );
-    // 5 farther than the origin of the mesh, so that its sphere's nearest point is 4 farther
-    // than the origin's depth, and the second level's error spans 0.05 * 100 / (depth + 4)
-    // pixels: one at 1.
+    // 5 farther than the mesh's origin, so its sphere's nearest point is 4 past the origin's depth,
+    // and level 1's error spans 0.05 * 100 / (depth + 4) pixels: one at 1.
     let behind = Lods {
         center: Vec3::new(0.0, 0.0, -5.0),
         ..lods(&[0.0, 0.05], 1.0)
@@ -485,8 +480,8 @@ fn the_sphere_is_round_its_center_not_the_meshs_origin() {
     };
     assert_eq!(level(0.9), 0);
     assert_eq!(level(1.1), 1);
-    // Turned a half about Y, the center is 5 nearer than the origin instead, and the nearest
-    // point 6: 0.05 * 100 / (depth - 6) is a pixel at 11.
+    // Turned a half about Y, the center is 5 nearer than the origin instead, the nearest point 6:
+    // 0.05 * 100 / (depth - 6) is a pixel at 11.
     let turned = |depth: f32| {
         let at = Mat4::from_translation(Vec3::new(0.0, 0.0, -depth));
         view.level(&behind, &(at * Mat4::from_rotation_y(std::f32::consts::PI)))
@@ -497,8 +492,8 @@ fn the_sphere_is_round_its_center_not_the_meshs_origin() {
 
 #[test]
 fn orthographic_levels_do_not_depend_on_distance() {
-    // 4 units over 200 pixels: 50 a unit, and across too. The error spans 50 * error pixels
-    // wherever the mesh is, and the sphere's radius doesn't reach any nearer.
+    // 4 units over 200 pixels: 50 a unit, across too. The error spans 50 * error pixels anywhere,
+    // and the sphere's radius reaches no nearer.
     let orthographic = Projection::Orthographic {
         height: 4.0,
         near: -10.0,
@@ -523,8 +518,8 @@ fn orthographic_levels_do_not_depend_on_distance() {
     assert_eq!([level(1.0), level(0.4), level(3.0)], [1, 2, 0]);
 }
 
-/// A clip on the canvas, in the view's pixels from its bottom left, scissors those pixels from
-/// its top left, its edges at the nearest pixel's; kept within the view, and of none outside it.
+/// A canvas clip, in view pixels from the bottom left, scissors those pixels from the top left,
+/// edges at the nearest pixel's, kept within the view; none outside it.
 #[test]
 fn a_clip_on_the_canvas_scissors_its_pixels() {
     let canvas = canvas_projection([400, 300]);
@@ -573,7 +568,7 @@ fn a_mesh_of_one_level_draws_its_indices_however_far() {
         let at = Mat4::from_translation(Vec3::new(0.0, 0.0, -depth));
         assert_eq!(view.level(&whole, &at), 0, "{depth} away");
     }
-    // A transform that is no number leaves the finest level too.
+    // A NaN transform also leaves the finest level.
     let broken = Mat4::from_scale(Vec3::NAN);
     assert_eq!(view.level(&lods(&[0.0, 1.0], 1.0), &broken), 0);
 }
