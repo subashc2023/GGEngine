@@ -1,5 +1,5 @@
-//! The relay, `gg-relay`, that a session's runs meet through when they can't connect to each
-//! other: `gg-relay --help` says how it's run, and gg-relay's root what it does.
+//! The relay, `gg-relay`, that a session's runs meet through when they can't connect directly. How
+//! to run it: `gg-relay --help`. What it does: gg-relay's root.
 
 use std::process::ExitCode;
 
