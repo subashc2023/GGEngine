@@ -1,11 +1,10 @@
-//! GPU tests. They run on whatever GPU the loader offers, which in Linux CI is lavapipe.
+//! GPU tests, on whatever GPU the loader offers: lavapipe in Linux CI.
 //!
 //! They run in one process with a main of their own, which turns off the Vulkan loader's
-//! implicit layers before any thread exists, then runs the tests one after another: those whose
-//! names contain an argument that isn't a flag, as libtest picks them, or all of them without one.
+//! implicit layers before any thread exists, then runs the tests one after another. An argument
+//! that isn't a flag picks those whose names contain it, as libtest does.
 
-// For setting the environment, and for breaking a Vulkan rule on purpose; see the SAFETY
-// comments.
+// For setting the environment, and for breaking a Vulkan rule on purpose: see the SAFETY comments.
 #![allow(unsafe_code)]
 
 use std::mem;
@@ -23,8 +22,7 @@ use gg_gpu::{
     PassId, Pipeline, Sampler, StorageImage, Target, Texture, TextureFormat, UploadPath, mip_sizes,
 };
 
-/// Runs each test through `tests`, by the name it's written with, given the arguments written
-/// after it, if any.
+/// Runs each test through `tests` by its name, with the arguments written after it, if any.
 macro_rules! run {
     ($tests:ident $(, $test:ident $(($($arg:expr),*))?)+ $(,)?) => {
         $($tests.run(stringify!($test), || $test($($($arg),*)?));)+
@@ -75,8 +73,8 @@ fn main() -> ExitCode {
     tests.finish()
 }
 
-/// Runs `tried`, and gives what it returned, or the message of the panic that ended it. The panic
-/// isn't logged, as a failing test's is: the panic hook is set aside while it runs.
+/// What `tried` returns, or its panic's message. The panic hook is set aside meanwhile, so the
+/// panic isn't logged as a failing test's is.
 fn tries<T>(tried: impl FnOnce() -> T) -> Result<T, String> {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
@@ -146,7 +144,7 @@ fn color_of(n: u32) -> [u8; 4] {
 
 /// A BC7 block of mode 6 that holds `color` in all 16 pixels. The mode gives each endpoint's
 /// channels 7 bits and the endpoint one more, the low bit of all four, so `color`'s channels must
-/// share one. Both endpoints are `color`, so that every pixel is, whatever weight its index picks.
+/// share one. Both endpoints are `color`, so every pixel is, whatever weight its index picks.
 fn bc7_solid(color: [u8; 4]) -> [u8; 16] {
     let low = color[0] & 1;
     assert!(color.iter().all(|&channel| channel & 1 == low), "{color:?}");
@@ -164,9 +162,9 @@ fn bc7_solid(color: [u8; 4]) -> [u8; 16] {
     bits.to_le_bytes()
 }
 
-/// The BC7 pixels of a `size` texture, a solid block of a color of its own to each, and a probe
-/// for each block, at the middle of its pixels or the last row or column of its level if that ends
-/// first, so that a block put in the wrong place, or the wrong level, shows.
+/// The BC7 pixels of a `size` texture, each block solid in a color of its own, and a probe per
+/// block: at its middle, or its level's last row or column if that ends first. A block in the
+/// wrong place or level shows.
 fn bc7_blocks(size: [u32; 2], mipmapped: bool) -> (Vec<u8>, Vec<Probe>) {
     let mut pixels = Vec::new();
     let mut probes = Vec::new();
@@ -192,8 +190,7 @@ fn bc7_blocks(size: [u32; 2], mipmapped: bool) -> (Vec<u8>, Vec<Probe>) {
     (pixels, probes)
 }
 
-/// The RGBA8 pixels of a `size` texture, a color of its own to each mip level, and a probe for
-/// each level.
+/// The RGBA8 pixels of a `size` texture, each mip level a color of its own, and a probe per level.
 fn rgba8_levels(size: [u32; 2], mipmapped: bool) -> (Vec<u8>, Vec<Probe>) {
     let mut pixels = Vec::new();
     let mut probes = Vec::new();
@@ -220,8 +217,8 @@ fn sampling_spirv() -> Vec<u8> {
     )
 }
 
-/// The SPIR-V of `tests/shaders/<shader>.slang`, of its `entries`, each an entry point and its
-/// stage, compiled as [`sampling_spirv`] says.
+/// The SPIR-V of `tests/shaders/<shader>.slang`'s `entries`, each an entry point and its stage,
+/// compiled as [`sampling_spirv`] says.
 fn spirv(shader: &str, entries: &[(&str, &str)]) -> Vec<u8> {
     let exe = if cfg!(windows) {
         "slangc.exe"
@@ -287,9 +284,9 @@ fn sampling_pipeline(device: &Arc<Device>, spirv: &[u8]) -> Pipeline {
     Pipeline::graphics(device, &desc).expect("a pipeline")
 }
 
-/// Records `pass` of `frame`, a pass that clears its target, an image a pixel across for each of
-/// `probes`, in which the GPU samples `texture` at each probe, into a pixel of its own: by three
-/// vertices, or by the first three of `indices`, a buffer of indices frames have taken, if given.
+/// Records `pass`, which clears its target, an image a pixel across per probe. The GPU samples
+/// `texture` at each probe into its own pixel, by three vertices, or by the first three of
+/// `indices`, a buffer frames have taken, if given.
 fn draw_probes(
     frame: &mut Frame<'_>,
     pass: PassId,
@@ -320,8 +317,8 @@ fn draw_probes(
     }
 }
 
-/// Reads `image` back, and checks that its pixels are what `probes` expect, to within the 1 that
-/// sRGB's encoding may round by; `what` says which texture.
+/// Checks `image`'s pixels against `probes`, within the 1 that sRGB's encoding may round by. `what`
+/// names the texture.
 fn check_probes(image: &mut ColorImage, probes: &[Probe], what: &str) {
     let pixels = image.read_back().expect("the image's pixels");
     for (pixel, probe) in pixels.as_chunks::<4>().0.iter().zip(probes) {
@@ -351,8 +348,7 @@ fn write_stand_in(frame: &mut Frame<'_>, stand_in: &mut Texture) {
     written.expect("a write");
 }
 
-/// Streams all of `pixels` into the image made for `texture` in one part, which a budget past
-/// them takes.
+/// Streams all of `pixels` into `texture`'s image in one part, by a budget past them.
 fn stream_whole(frame: &mut Frame<'_>, texture: &mut Texture, pixels: &[u8]) {
     let copied = frame
         .stream_texture(texture, pixels, u64::MAX)
@@ -437,9 +433,8 @@ fn clear_reads_back() {
     check(&validation);
 }
 
-/// The frames' arenas count the most a frame's uploads took, each from a multiple of 16 bytes, and
-/// hold at least that, in buffers of 1 MiB at least, which they keep: a frame that takes less
-/// leaves the peak as it was.
+/// The arenas' peak is the most a frame's uploads took, each from a multiple of 16 bytes, and a
+/// frame taking less leaves it. They hold at least that, in buffers of 1 MiB at least, kept.
 fn arenas_hold_more_than_a_frame_took() {
     let instance = instance();
     let validation = instance.validation();
@@ -508,12 +503,11 @@ fn sampled_images_keep_their_layout() {
     check(&validation);
 }
 
-/// A compute pass writes each face of a cube's first level, another halves it into its second,
-/// reading what the first wrote, and a render pass samples both levels of each face by direction,
-/// then the next frame samples them again without declaring the cube, as a frame whose last use
-/// sampled it leaves it to: synchronization validation sees each use wait for the write before it.
-/// A storage image's slot to sample through comes only once a frame has left it so, and an
-/// offscreen image written as storage is refused.
+/// A compute pass writes each face of a cube's first level, another halves it into the second, and
+/// a render pass samples both levels of each face by direction. The next frame samples them again
+/// without declaring the cube, as a frame whose last use sampled it may. Synchronization validation
+/// sees each use wait for the write before it. A storage image's slot to sample through comes only
+/// once a frame has left it sampled, and an offscreen image written as storage is refused.
 fn compute_passes_write_cubes_that_passes_sample() {
     let instance = instance();
     let validation = instance.validation();
@@ -664,13 +658,12 @@ fn compute_passes_write_cubes_that_passes_sample() {
     check(&validation);
 }
 
-/// A compute pass writes two commands of indirect draws into a buffer of the graph's own, the
-/// instances' colors into another and two counts into a third, the second by an atomic add; a
-/// render pass draws by the commands, the first of two instances from the second, the other of
-/// none, each instance over a pixel of its own in the color it reads; and the counts and the colors
-/// come back as the frame two later begins, each by its buffer's name. Three frames, so that
-/// synchronization validation sees each frame's writes wait for the frame before's reads, of the
-/// commands and of the copies.
+/// A compute pass writes two indirect draw commands into a graph buffer, the instances' colors into
+/// another, and two counts into a third, the second by an atomic add. A render pass draws by the
+/// commands, the first two instances from the second, the other none, each instance over its own
+/// pixel in the color it reads. The counts and colors come back by their buffers' names as the
+/// frame two later begins. Three frames, so synchronization validation sees each frame's writes
+/// wait for the frame before's reads of the commands and the copies.
 fn compute_passes_write_buffers_that_draws_take_commands_from() {
     let instance = instance();
     let validation = instance.validation();
@@ -827,14 +820,14 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
     check(&validation);
 }
 
-/// The compute pass of [`compute_passes_write_buffers_that_draws_take_commands_from`] on the compute
-/// queue, which the RTX 4090 and AMD's GPUs have apart from graphics, and which is the graphics
-/// queue on lavapipe: beside a pass on the graphics queue that clears the image, it writes the
-/// commands and the colors, which it reads from a buffer each frame writes before its passes, two
-/// colors that change places from frame to frame; and the reads back and the draws that take what
-/// it wrote wait for it, as the next frame's pass waits for them before it writes over it, as
-/// synchronization validation sees across the queues. Four frames, so that two come after the
-/// first to begin with what another frame left in each of the graph's buffers.
+/// The compute pass of [`compute_passes_write_buffers_that_draws_take_commands_from`] on the
+/// compute queue: apart from graphics on the RTX 4090 and AMD's GPUs, the graphics queue on
+/// lavapipe.
+/// Beside a graphics pass that clears the image, it writes the commands, and the colors it reads
+/// from a buffer each frame writes before its passes, two colors that swap each frame. Read-backs
+/// and draws wait for it, and the next frame's pass waits for them before writing over it, as
+/// synchronization validation sees across the queues. Four frames, so two begin after the first
+/// with what another frame left in each graph buffer.
 fn compute_queue_passes_run_beside_the_graphics_queues() {
     let instance = instance();
     let validation = instance.validation();
@@ -963,11 +956,10 @@ fn compute_queue_passes_run_beside_the_graphics_queues() {
     check(&validation);
 }
 
-/// Clears an image, then draws over it in a pass that draws nothing, and samples it from a pass
-/// into another, in more frames than are in flight, and reads it back as the clear left it:
-/// synchronization validation sees the second pass's load wait for the first's writes, and the
-/// next frame's clear wait for the sampling. A pass over the image before anything has drawn into
-/// it is refused before anything is recorded.
+/// Clears an image, passes over it drawing nothing, then samples it into another, over more frames
+/// than are in flight; it reads back as the clear left it. Synchronization validation sees the
+/// second pass's load wait for the first's writes, and the next frame's clear wait for the
+/// sampling. A pass over the image before anything drew into it is refused before it's recorded.
 fn passes_over_keep_what_their_target_holds() {
     let instance = instance();
     let validation = instance.validation();
@@ -1014,10 +1006,10 @@ fn passes_over_keep_what_their_target_holds() {
     check(&validation);
 }
 
-/// Clears images, a color for each frame, reads them back as frames render them, and finds each
-/// frame's pixels once it has finished, until the frame two later reads back into its slot's
-/// buffer; a frame reads a larger image than its slot read before whole, and samples it after.
-/// Synchronization validation checks the copies' barriers, and the sampling after them.
+/// Clears images a color per frame and reads them back, finding each frame's pixels once it has
+/// finished, until the frame two later reads into its slot's buffer. A frame reads a larger image
+/// than its slot read before, whole, and samples it after. Synchronization validation checks the
+/// copies' barriers and the sampling after.
 fn images_read_back_once_their_frame_has_finished() {
     let instance = instance();
     let validation = instance.validation();
@@ -1086,8 +1078,8 @@ fn images_read_back_once_their_frame_has_finished() {
     check(&validation);
 }
 
-/// Makes and drops more images, one at a time, than the bindless sets have slots to give out past
-/// the placed ones, 4,096, which works only if each gives its slot back.
+/// Makes and drops, one at a time, more images than the bindless sets' 4,096 slots past the placed
+/// ones, which works only if each gives its slot back.
 fn dropped_images_free_their_slots() {
     let instance = instance();
     let validation = instance.validation();
@@ -1101,10 +1093,10 @@ fn dropped_images_free_their_slots() {
     check(&validation);
 }
 
-/// Clears an image and the graph's own depth in two passes each frame, over more frames than are
-/// in flight, so that every pass but the first follows another's use of the depth, in its own
-/// submission or the last: synchronization validation reports a pass whose barrier doesn't wait
-/// for that use, and core validation one that leaves the depth in the wrong layout.
+/// Clears an image and the graph's own depth in two passes a frame, over more frames than are in
+/// flight, so every pass but the first follows another's use of the depth, in its submission or the
+/// last. Synchronization validation reports a barrier that doesn't wait for that use, and core
+/// validation a pass that leaves the depth in the wrong layout.
 fn depth_clears_in_every_pass() {
     let instance = instance();
     let validation = instance.validation();
@@ -1138,15 +1130,16 @@ fn depth_clears_in_every_pass() {
     check(&validation);
 }
 
-/// Draws the depth alone of three triangles into a 16x16 shadow map, each over a viewport of its
-/// own, and samples the map by comparison in a later pass, in three frames: the left half flat at
-/// 0.5; the top right past the near plane, at 1.5, which depth clamp holds at the plane, 1; and the
-/// bottom right sloping by 0.0375 a texel, which a slope-scaled depth bias of 2 takes back by twice
-/// that. A depth as near as the map's or nearer reads 1, and a farther one 0: half the bias nearer
-/// than the sloped triangle reads 1, as it wouldn't without the bias, or with its sign wrong.
-/// Synchronization validation sees the pass that samples wait for the depth, and the next frame's
-/// depth wait for the sampling. A pipeline without a fragment shader draws depth alone, one clamps
-/// or biases depth only where its targets have it, and one draws IDs only beside a color target.
+/// Draws three triangles' depth alone into a 16x16 shadow map, each over its own viewport, and
+/// samples the map by comparison in a later pass, over three frames. The left half is flat at 0.5;
+/// the top right is at 1.5, past the near plane, which depth clamp holds at 1; the bottom right
+/// slopes 0.0375 a texel, which a slope-scaled depth bias of 2 takes back by twice that.
+///
+/// A depth as near as the map's or nearer reads 1, a farther one 0. So half the bias nearer than
+/// the slope reads 1, as it wouldn't without the bias or with its sign wrong. Synchronization
+/// validation sees the sampling wait for the depth, and the next frame's depth wait for it. A
+/// pipeline without a fragment shader draws depth alone; one clamps or biases depth only where its
+/// targets have it, and draws IDs only beside a color target.
 fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
     let instance = instance();
     let validation = instance.validation();
@@ -1295,16 +1288,20 @@ fn shadow_maps_draw_depth_alone_and_sample_by_comparison() {
     check(&validation);
 }
 
-/// Renders the graph's own IDs beside an image in eight frames, each pass clearing them to 0, and
-/// reads pixels of them back: one in the first frame, none in the second, three in the third,
-/// none in the fourth, two in the fifth; in the sixth, sixty, then after another pass the four of
-/// ten more that the most a frame reads leaves, then none; and none in the last two. Each frame
-/// finds what the one two before it read, by its number, and none after a frame that read none, as
-/// the first two find of frame 0. Each frame then samples them from a pass, from the layout its
-/// reads left them in, and the sixth between its reads too, before its second pass.
-/// Synchronization validation sees each copy wait for the pass before it, a pass for the copies
-/// and the sampling before it, and the host for the copies. A pixel outside the IDs is refused
-/// before anything is recorded, and a read of IDs no pass has rendered before the graph has it.
+/// Renders the graph's own IDs beside an image over eight frames, each pass clearing them to 0,
+/// and reads pixels of them back:
+///
+/// - frames 0 to 4: one, none, three, none and two;
+/// - frame 5: sixty, then, after another pass, the four of ten more that the most a frame reads
+///   leaves, then none;
+/// - frames 6 and 7: none.
+///
+/// Each frame finds what the one two before read, by its number, and none after a frame that read
+/// none, as the first two find of frame 0. Each then samples the IDs from the layout its reads
+/// left, frame 5 between its reads too. Synchronization validation sees each copy wait for the
+/// pass before it, a pass for the copies and sampling before it, and the host for the copies. A
+/// pixel outside the IDs is refused before anything is recorded, and a read of IDs no pass renders
+/// as the graph is built.
 fn ids_read_back_two_frames_later() {
     let instance = instance();
     let validation = instance.validation();
@@ -1405,11 +1402,11 @@ fn ids_read_back_two_frames_later() {
 }
 
 /// A graph's own images whose uses in a frame don't overlap share memory, and keep what each pass
-/// left for the next to use, over more frames than are in flight: a color image cleared red and
-/// read back, then another cleared blue and sampled into the target, after the first's last use,
-/// take no more memory than the larger of them, where the same images used together take more.
-/// Synchronization validation, which tracks the memory they share, sees each first use wait for
-/// the last use of the memory before it, in its frame or the one before.
+/// left for the next, over more frames than are in flight. A color image cleared red and read
+/// back, then another cleared blue and sampled into the target after the first's last use, take
+/// no more memory than the larger; used together, they take more. Synchronization validation,
+/// which tracks the shared memory, sees each first use wait for the memory's last use before it,
+/// in its frame or the one before.
 fn the_graphs_own_images_share_memory_where_their_uses_dont_overlap() {
     let instance = instance();
     let validation = instance.validation();
@@ -1488,10 +1485,10 @@ fn the_graphs_own_images_share_memory_where_their_uses_dont_overlap() {
     check(&validation);
 }
 
-/// Depth that a pass tests and writes, then colors that a later pass clears blue and the last
-/// samples into the target, in the memory the depth took, over more frames than are in flight.
-/// Synchronization validation sees each first use wait for what the other image left in the memory
-/// and for what its own uses left a frame before, of other stages and accesses than the other's.
+/// Depth a pass tests and writes, then colors a later pass clears blue and the last samples into
+/// the target, in the depth's memory, over more frames than are in flight. Synchronization
+/// validation sees each first use wait for what the other image left in the memory, and for what
+/// its own uses left a frame before, of other stages and accesses than the other's.
 fn depth_and_colors_take_turns_in_memory() {
     let instance = instance();
     let validation = instance.validation();
@@ -1545,8 +1542,8 @@ fn depth_and_colors_take_turns_in_memory() {
     check(&validation);
 }
 
-/// Each frame's passes are timed on the GPU, and the frame two later, which reuses its resources,
-/// finds how long they took, from the first's beginning to the last's end; none before.
+/// The frame two later, which reuses a frame's resources, finds how long its passes took on the
+/// GPU, from the first's beginning to the last's end; none before.
 fn frames_time_their_passes_on_the_gpu() {
     let instance = instance();
     let validation = instance.validation();
@@ -1583,13 +1580,12 @@ fn frames_time_their_passes_on_the_gpu() {
     check(&validation);
 }
 
-/// Streams a texture, one with mip levels and a buffer in a frame, each whole in one part, then
-/// writes over a pixel of the texture in each of the two frames after the one that shows it, more
-/// frames than are in flight, once for each way of uploading that the GPU has: validation checks
-/// the layout each way leaves the texture in against the one the write starts from, which it
-/// doesn't for what the bindless sets sample. The copies of the texture with levels validation
-/// checks against each level's size and the staged bytes. A texture whose slot shows a stand-in
-/// can't be written, which is refused before anything is recorded.
+/// For each upload path the GPU has, streams a texture, one with mip levels and a buffer in a
+/// frame, each whole in one part. It then writes over a pixel of the texture in each of the two
+/// frames after the one that shows it, more frames than are in flight. Validation checks the layout
+/// each path leaves the texture in against the one the write starts from, which it doesn't for
+/// what the bindless sets sample, and the levels' copies against each level's size and the staged
+/// bytes. A write to a texture whose slot shows a stand-in is refused before anything is recorded.
 fn streamed_textures_can_be_written_over_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
@@ -1658,13 +1654,12 @@ fn streamed_textures_can_be_written_over_on_every_path() {
     check(&validation);
 }
 
-/// Streams BC7 textures in a frame, each whole in one part, once for each way of uploading that
-/// the GPU has: one of 13x5 pixels, whose 4 by 2 blocks reach past its sides; another of 13x5 with
-/// its full chain of mip levels, 6x2, 3x1 and 1x1 below it, which copies and validation check
-/// against each level's blocks and the staged bytes; and one of a pixel. Each block is solid and
-/// of a color of its own, and the GPU samples each in the frame that shows them, and again in the
-/// two after it, which finds each block decoded, in the level and at the place it was streamed. A
-/// BC7 texture can't be written, which is refused before anything is recorded.
+/// For each upload path the GPU has, streams BC7 textures in a frame, each whole in one part: one
+/// of 13x5 pixels, whose 4 by 2 blocks reach past its sides; one of 13x5 with its mip levels,
+/// 6x2, 3x1 and 1x1, which copies and validation check against each level's blocks and the staged
+/// bytes; and one of a pixel. Each block is solid in a color of its own. The GPU samples each in
+/// the frame that shows them and the two after, finding each block decoded in its level and place.
+/// A write to a BC7 texture is refused before anything is recorded.
 fn bc7_textures_stream_and_decode_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
@@ -1753,12 +1748,11 @@ fn bc7_textures_stream_and_decode_on_every_path() {
     check(&validation);
 }
 
-/// Refills one texture in turn, as RGBA8 of 2x2, as BC7 of 13x5 with its mip levels, as RGBA8 of
-/// 5x3 with its, as BC7 of 4x4 and of a pixel, each streamed whole in a frame, once for each way
-/// of uploading that the GPU has: each refill makes the image anew in its format, which validation
-/// checks the copies into against, and the texture's slot shows it from the frame that shows it,
-/// found by the GPU sampling it there, as it samples the image before until then. Pixels of
-/// another format's size are refused before anything changes.
+/// For each upload path the GPU has, refills one texture in turn, each streamed whole in a frame:
+/// RGBA8 of 2x2, BC7 of 13x5 with mip levels, RGBA8 of 5x3 with its, then BC7 of 4x4 and of a
+/// pixel. Each refill makes the image anew in its format, which validation checks the copies
+/// against. The GPU samples the image before until the frame that shows the new one, and the new
+/// one from then. Pixels of another format's size are refused before anything changes.
 fn textures_refill_between_rgba8_and_bc7_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
@@ -1846,20 +1840,21 @@ fn textures_refill_between_rgba8_and_bc7_on_every_path() {
     check(&validation);
 }
 
-/// Streams a texture of 64 by 64 texels with its mip levels, 21,844 bytes, and a buffer of 4,096
-/// bytes of indices, a part a frame within a budget of 4 KiB for the texture and 1 KiB for the
-/// buffer, once for each way of uploading that the GPU has. Each frame's part keeps within the
-/// budget, in whole rows, and the texture takes six: four of 16 rows of its first level, its
-/// second whole, and the tail of its five smaller levels together, which validation checks against
-/// the levels and the staged bytes. Until the frame that shows the texture, which is the last
-/// part's frame through the graphics queue or the host, and a later one through a transfer queue,
-/// whose copies no frame waits for, the GPU samples its slot's stand-in, white; from that frame
-/// on, its levels. The buffer draws the probes by its indices from the frame that takes it, which
-/// comes at the earliest with its last part, as the texture's does. Then the texture is hidden
-/// behind the stand-in, which the next frames sample; an image is streamed into it again and
-/// hidden after its first part, whose copies may still run; another is streamed whole, handed
-/// over on the transfer queue, and discarded in the next frame before it's shown; and the frames
-/// go on, validation silent.
+/// For each upload path the GPU has, streams a 64x64 texture with mip levels, 21,844 bytes, and a
+/// buffer of 4,096 bytes of indices, a part a frame, within budgets of 4 KiB and 1 KiB.
+///
+/// - Each part keeps within its budget, in whole rows. The texture takes six: four of 16 rows of
+///   its first level, its second whole, and its five smaller levels together, which validation
+///   checks against the levels and the staged bytes.
+/// - The GPU samples the slot's white stand-in until the frame that shows the texture, then its
+///   levels. That frame is the last part's on the graphics queue or the host, and a later one on a
+///   transfer queue, whose copies no frame waits for.
+/// - The buffer draws the probes by its indices from the frame that takes it, at the earliest with
+///   its last part, as the texture's.
+/// - Then the texture is hidden behind the stand-in, which the next frames sample. An image is
+///   streamed into it again and hidden after its first part, whose copies may still run. Another
+///   is streamed whole, handed over on the transfer queue, and discarded in the next frame before
+///   it's shown. The frames go on, validation silent.
 fn textures_and_buffers_stream_by_parts_on_every_path() {
     const BUDGET: u64 = 4096;
     let instance = instance();
@@ -2002,10 +1997,10 @@ fn textures_and_buffers_stream_by_parts_on_every_path() {
     check(&validation);
 }
 
-/// Streams an image into a texture, and in each frame after, begins a pass before finishing it:
-/// once its copies are done, the frame refuses to show the image after the pass, which would
-/// sample it before it's ready, before anything changes, and the frame still submits; the next
-/// frame shows it before its passes.
+/// Streams an image into a texture, then in each frame after, begins a pass before finishing it.
+/// Once its copies are done, the frame refuses to show the image after the pass, which would
+/// sample it before it's ready, before anything changes. The frame still submits, and the next
+/// shows it before its passes.
 fn textures_come_to_show_images_before_the_frames_passes() {
     let instance = instance();
     let validation = instance.validation();
@@ -2056,12 +2051,11 @@ fn textures_come_to_show_images_before_the_frames_passes() {
     check(&validation);
 }
 
-/// Drops the stand-in a placed texture's slot shows a frame after writing it, and the one a
-/// hidden texture's slot shows in the frame that hides it: each slot holds its stand-in's image,
-/// which draws white in every frame after, with nothing for validation to say, until the slot
-/// shows an image of its own, and its stand-in's goes. Textures of the stand-ins' size, written
-/// blue, are made once each stand-in's frames have finished, so that the memory of one freed too
-/// soon is taken and written over, rather than left reading white.
+/// Drops a placed texture's stand-in a frame after writing it, and a hidden texture's in the frame
+/// that hides it. Each slot holds its stand-in's image, drawing white in every frame after, with
+/// validation silent, until it shows an image of its own and the stand-in's goes. Blue textures of
+/// the stand-ins' size are made once each stand-in's frames finish, so memory freed too soon is
+/// taken and written over rather than left reading white.
 fn stand_ins_live_while_slots_show_them() {
     let instance = instance();
     let validation = instance.validation();
@@ -2150,9 +2144,8 @@ fn stand_ins_live_while_slots_show_them() {
     check(&validation);
 }
 
-/// An offscreen image, and an image of a graph's own, of a side past any device's most, are
-/// refused with `gpu.image_too_large` before Vulkan is asked to make them, and the frames go on
-/// with a graph whose images fit.
+/// An offscreen image and a graph's own image with a side past any device's limit are refused with
+/// `gpu.image_too_large` before Vulkan is asked, and the frames go on with a graph that fits.
 fn images_past_the_devices_most_are_refused() {
     let instance = instance();
     let validation = instance.validation();
@@ -2187,7 +2180,7 @@ fn images_past_the_devices_most_are_refused() {
 /// Forgets a frame, which the next frame catches, and a pass, which the frame's next call catches,
 /// its submission among them, after which no frame begins again. Each reaches the JSON log as an
 /// error with its code: the frame's as the frames drop, the pass's as the frame does. Nothing
-/// forgotten reaches the GPU, so validation has nothing to say.
+/// forgotten reaches the GPU, so validation is silent.
 fn forgotten_frames_and_passes_are_caught(log: &Path) {
     let instance = instance();
     let validation = instance.validation();
@@ -2258,10 +2251,10 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
     }
 }
 
-/// Opens two devices, and gives a frame of the one objects the other made: a target, textures to
-/// write, stream, finish and hide, a stand-in, a buffer to stream and finish, and an upload's
-/// indices. Each is refused before anything is recorded, so the frame goes on to submit. The
-/// graph's own images are the frame's device's.
+/// Gives one device's frame objects another device made: a target, textures to write, stream,
+/// finish and hide, a stand-in, a buffer to stream and finish, and an upload's indices. Each is
+/// refused before anything is recorded, so the frame still submits. The graph's own images are the
+/// frame's device's.
 fn another_devices_objects_are_refused() {
     let instance = instance();
     let validation = instance.validation();
@@ -2334,8 +2327,8 @@ fn another_devices_objects_are_refused() {
 }
 
 /// A device has one `Frames` at a time, and once one has begun a frame, no other, whose frame
-/// numbers would repeat; one dropped before it began any, as one whose making fails is, leaves the
-/// device to another.
+/// numbers would repeat. One dropped before beginning any, as a failed one is, leaves the device to
+/// another.
 fn frames_that_began_none_leave_the_device_to_another() {
     let instance = instance();
     let validation = instance.validation();
@@ -2360,9 +2353,9 @@ fn frames_that_began_none_leave_the_device_to_another() {
     check(&validation);
 }
 
-/// Makes a texture in a placed slot, then asks for its slot again, and for a slot that isn't
-/// placed: both are refused before anything is made, so that dropping the device leaks nothing,
-/// which VMA would abort on. A stand-in without an image of its own is refused too.
+/// Makes a texture in a placed slot, then asks for that slot again and for one that isn't placed.
+/// Both are refused before anything is made, so dropping the device leaks nothing, which VMA would
+/// abort on. A stand-in without an image of its own is refused too.
 fn refused_texture_slots_leak_nothing() {
     let instance = instance();
     let validation = instance.validation();
@@ -2397,9 +2390,8 @@ fn refused_texture_slots_leak_nothing() {
     check(&validation);
 }
 
-/// Asks a pass for viewports no device draws, one wider than its limit and one reaching past its
-/// bounds, and to draw the indices of a buffer no frame has taken: each is refused before it's
-/// recorded, so the pass goes on.
+/// Asks a pass for a viewport wider than the limit, one past the bounds, and indices from a buffer
+/// no frame has taken. Each is refused before it's recorded, so the pass goes on.
 fn passes_refuse_what_the_device_cant_draw() {
     let instance = instance();
     let validation = instance.validation();
@@ -2428,10 +2420,10 @@ fn passes_refuse_what_the_device_cant_draw() {
     check(&validation);
 }
 
-/// Saves a device's pipeline cache, and loads it into other devices of the same GPU: whole, it
-/// loads; changed or cut short, it doesn't, and no driver is given it, so validation has nothing
-/// to say. A device loads one cache. Data of another GPU is refused as the header's unit tests
-/// show; drivers fill caches as pipelines are made, which the renderer's GPU tests check.
+/// Saves a device's pipeline cache and loads it into other devices of the same GPU. Whole, it
+/// loads; changed or cut short, it doesn't, and no driver is given it, so validation is silent. A
+/// device loads one cache. The header's unit tests cover another GPU's data, and the renderer's GPU
+/// tests drivers filling caches as pipelines are made.
 fn pipeline_caches_load_what_this_gpu_saved_whole() {
     let instance = instance();
     let validation = instance.validation();
