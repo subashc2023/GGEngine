@@ -1,14 +1,28 @@
 use std::fs;
+use std::time::SystemTime;
 
+use gg_api::asset::{AssetKind, Meta};
+use gg_api::probe::Probe;
 use gg_api::view::Writer;
-use gg_api::{By, Look, Outline};
+use gg_api::{By, Failure, Look, Looked, Outline, Scene, SceneAction, Status};
 use gg_engine::Key;
-use gg_engine::math::DVec2;
+use gg_engine::grid::Plane;
+use gg_engine::math::{DVec2, Quat};
+use gg_engine::reflect::{self, Reflect};
+use gg_engine::{MouseButton, Name, Projection, Scroll, Transform};
 
+use super::frames::api_viewpoint;
+use super::input::forwarded;
+use super::logs::LOGGED;
+use super::run::gg_run;
 use super::*;
 use crate::assets::tests::{Scratch, find, texts};
 use crate::camera::{Move, Tool};
+use crate::file::Choice;
+use crate::look::Parts;
+use crate::overlay::Mode;
 use crate::tests::{SCALE, VIEW, reading};
+use crate::view::{OUTLINE, OUTLINE_WIDTH};
 
 /// The game runs embedded and starts stopped either way; `--release-game` has `gg run` build
 /// it optimized, by its `--release`, which goes before the game's own arguments.
