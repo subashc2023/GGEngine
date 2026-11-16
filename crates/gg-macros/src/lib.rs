@@ -1,9 +1,9 @@
-//! The derives that `gg-engine` re-exports beside its traits of the same names: `Reflect`, which
-//! describes a type to the engine's reflection, and `Component`, which makes it a component too,
-//! one that code changes.
-//! Rust builds a derive as a crate of its own; games use them from `gg-engine`, as
-//! `#[derive(Clone, gg_engine::Component)]`, and the code they write names everything through
-//! `::gg_engine`.
+//! The derives `gg-engine` re-exports beside its traits of the same names: `Reflect`, which
+//! describes a type to the engine's reflection, and `Component`, which also makes it a component
+//! that code changes.
+//!
+//! A derive must be a crate of its own. Games use these through `gg-engine`, as
+//! `#[derive(Clone, gg_engine::Component)]`, so their code names everything through `::gg_engine`.
 
 use proc_macro2::{Literal, Span, TokenStream, TokenTree};
 use quote::{ToTokens, format_ident, quote, quote_spanned};
@@ -22,7 +22,7 @@ pub fn derive_reflect(input: proc_macro::TokenStream) -> proc_macro::TokenStream
         .into()
 }
 
-/// Makes the type a component, one that code changes, which `Reflect` describes:
+/// Makes the type a component that code changes, described as `Reflect` does:
 /// `gg_engine::Component` says how.
 #[proc_macro_derive(Component, attributes(reflect))]
 pub fn derive_component(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -33,15 +33,14 @@ pub fn derive_component(input: proc_macro::TokenStream) -> proc_macro::TokenStre
         .into()
 }
 
-/// The path of gg-engine's reflection module, which most of the derives' code names its items
-/// through.
+/// gg-engine's reflection module, through which the derives' code names most items.
 fn reflect() -> TokenStream {
     quote!(::gg_engine::reflect)
 }
 
-/// The code `#[derive(Reflect)]`, or `#[derive(Component)]` if `component`, writes for `input`.
-/// Each name it binds starts with `__`, as its fields' bindings do: a const of the name where the
-/// type is would make the binding a pattern of the const, which doesn't compile.
+/// What `#[derive(Reflect)]`, or `#[derive(Component)]` if `component`, writes for `input`. Each
+/// name it binds starts with `__`: a const of that name where the type is would make the binding a
+/// pattern of the const, which doesn't compile.
 fn expand(input: &DeriveInput, component: bool) -> syn::Result<TokenStream> {
     let derive = if component { "Component" } else { "Reflect" };
     if let Some(param) = input.generics.params.first() {
@@ -125,8 +124,7 @@ fn no_hints(attrs: &[Attribute], why: &str) -> syn::Result<()> {
     }
 }
 
-/// The methods of a type marked `#[reflect(opaque)]`, by `hint`, which reflection keeps but
-/// doesn't read.
+/// The methods of a type marked `#[reflect(opaque)]` at `hint`, which reflection keeps unread.
 fn opaque(name: &str, doc: &str, hint: Span) -> TokenStream {
     let r = reflect();
     // At the hint, so that a type that isn't `Clone` is reported there.
@@ -170,8 +168,8 @@ fn opaque(name: &str, doc: &str, hint: Span) -> TokenStream {
     }
 }
 
-/// A struct's methods: its fields described, read, made and kept, by name, and reached by index;
-/// `component` if it's a component, whose own fields alone may be `hashed_when_set`.
+/// A struct's methods: its fields described, read, made and kept by name, and reached by index.
+/// Only a `component`'s own fields may be `hashed_when_set`.
 fn structure(
     name: &str,
     doc: &str,
@@ -216,8 +214,8 @@ fn structure(
         .iter()
         .map(|(index, _)| Literal::u32_unsuffixed(*index))
         .collect();
-    // At the field's type, as its tuple index is, so that a type that isn't reflected is reported
-    // there for these as for its other uses, rather than at the derive.
+    // At the field's type, as its tuple index is, so that an unreflected type is reported there, as
+    // for its other uses, not at the derive.
     let parts = read.iter().map(|(_, field)| {
         let member = &field.member;
         quote_spanned!(at_type(field.ty)=> &self.#member as &dyn #r::Reflect)
@@ -231,7 +229,7 @@ fn structure(
         let digest =
             quote_spanned!(at_type(ty)=> <#ty as #r::Reflect>::digest(&self.#member, __to));
         match (&field.hints.hashed_when_set, &field.hints.default) {
-            // Its index first, so that one such field set tells apart from another set alike.
+            // Its index first, so that two such fields set alike hash apart.
             (Some(_), Some(default)) => {
                 let index = Literal::u32_unsuffixed(*index);
                 quote! {
@@ -507,21 +505,19 @@ fn enumeration(
     })
 }
 
-/// A span at `ty`, for an error about it to be reported there, but resolved where the derive is,
-/// as everything it writes is: so that `self` is the method's own, even for a type that a macro
-/// wrote.
+/// A span located at `ty`, for errors, but resolved at the derive, as all it writes is, so that
+/// `self` is the method's own even in a type a macro wrote.
 fn at_type(ty: &syn::Type) -> Span {
     Span::call_site().located_at(ty.span())
 }
 
-/// A field of a struct or a variant, as the derives write about it.
+/// A struct's or a variant's field.
 struct Field<'a> {
-    /// How its struct or variant names it: by its name, or its index.
     member: Member,
     /// Its name in descriptions and values: its own, or its index, such as `0`.
     name: String,
     ty: &'a syn::Type,
-    /// What the code written binds its value to.
+    /// What the written code binds its value to.
     binding: Ident,
     hints: FieldHints,
     doc: String,
@@ -556,13 +552,11 @@ impl<'a> Field<'a> {
         Ok(all)
     }
 
-    /// Its description, as a `Field`.
     fn describe(&self) -> TokenStream {
         let r = reflect();
         let Self { name, ty, doc, .. } = self;
         let default = match &self.hints.default {
-            // Bound to its type first, so that one of another type is reported at it, as a
-            // mismatch.
+            // Bound to its type first, so that one of another type is reported there as a mismatch.
             Some(expr) => quote! {
                 ::std::option::Option::Some({
                     let __default: #ty = #expr;
@@ -605,7 +599,7 @@ impl<'a> Field<'a> {
         }
     }
 
-    /// Its name and its value, read from `place`, a reference to it.
+    /// Its name and value, read through `place`, a reference to it.
     fn to_value(&self, place: &impl ToTokens) -> TokenStream {
         let r = reflect();
         let Self { name, ty, .. } = self;
@@ -616,7 +610,7 @@ impl<'a> Field<'a> {
         quote!((::std::borrow::Cow::Borrowed(#name), #value))
     }
 
-    /// It, made from its value, which `binding` holds.
+    /// It, made from the value `binding` holds.
     fn make(&self) -> TokenStream {
         let r = reflect();
         let Self {
@@ -629,7 +623,7 @@ impl<'a> Field<'a> {
         quote!(#made.map_err(|__error| #r::within(__error, #name))?)
     }
 
-    /// It, as `place`, a reference to it, is with its value, which `binding` holds.
+    /// It as `place`, a reference to it, is with the value `binding` holds.
     fn keep(&self, place: &TokenStream) -> TokenStream {
         let r = reflect();
         let Self {
@@ -874,9 +868,9 @@ impl Bound {
     }
 }
 
-/// `tokens`, each located at `span`, so that an error in them is reported there, but resolved as
-/// they were; but literals, as an array's length, which stay where they are, as lints read the
-/// source at a literal's span as its text, and would take a hint's `0` for a length's `2`.
+/// `tokens`, each located at `span` for errors but resolved as before. Literals, such as an array's
+/// length, keep their spans: lints read a literal's text at its span, and would take a hint's `0`
+/// for a length's `2`.
 fn respanned(tokens: TokenStream, span: Span) -> TokenStream {
     tokens
         .into_iter()
@@ -909,12 +903,10 @@ fn doc(attrs: &[Attribute]) -> String {
         else {
             continue;
         };
-        // Split, not cut into lines, so that an empty attribute, which a bare `///` is, ends a
-        // paragraph.
+        // Split, not cut into lines, so that an empty attribute, a bare `///`, ends a paragraph.
         let value = lit.value();
         let lines: Vec<&str> = value.split('\n').map(str::trim).collect();
-        // A block comment's lines after its first may each start with a `*`, which rustdoc
-        // leaves out.
+        // A block comment's later lines may start with a `*`, which rustdoc leaves out.
         let starred = lines.len() > 1
             && lines[1..]
                 .iter()
@@ -944,9 +936,6 @@ mod tests {
 
     use super::*;
 
-    /// The derive refuses, saying why, a generic type, a union, a hint it doesn't know, one given
-    /// twice or beside `opaque`, one on a variant or inside an opaque type, and `hashed_when_set`
-    /// without a default, on a variant's field, on a float, or on a type that isn't a component.
     #[test]
     fn the_derive_refuses_what_reflection_cant_describe() {
         let cases: [(DeriveInput, &str); 11] = [
