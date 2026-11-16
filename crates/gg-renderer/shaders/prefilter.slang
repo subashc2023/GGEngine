@@ -1,13 +1,14 @@
 // The sky's prefiltering, in compute passes, as Khronos's glTF Sample Renderer prefilters an
-// environment (source/shaders/ibl_filtering.frag, at commit df3e51cb): the sky's equirectangular
-// image into a cube, whose levels each average the one before; from that cube, the light from all
-// around that Lambert's diffuse takes, cosine-weighted, and that GGX's specular takes at each of a
-// cube's levels, a step of roughness each, both by importance sampling the cube's levels by the
-// solid angle a sample covers (Křivánek and Colbert, "Real-time Shading with Filtered Importance
-// Sampling", 2008); and the split sum's table of how much of the light GGX reflects, as F0's scale
-// and bias, with Smith's height-correlated visibility, by the cosine of the view's angle across and
-// roughness down (Karis, "Real Shading in Unreal Engine 4", 2013). `Push` in src/sky.rs, which
-// `Push` here matches field for field.
+// environment (source/shaders/ibl_filtering.frag, at commit df3e51cb):
+// - the sky's equirectangular image into a cube, each level averaging the one before;
+// - from that cube, Lambert's diffuse light, cosine-weighted, and GGX's specular at each level, a
+//   step of roughness each. Both importance sample the cube's levels by the solid angle a sample
+//   covers (Křivánek and Colbert, "Real-time Shading with Filtered Importance Sampling", 2008).
+// - the split sum's table of GGX's reflectance as F0's scale and bias, with Smith's
+//   height-correlated visibility: view cosine across, roughness down (Karis, "Real Shading in
+//   Unreal Engine 4", 2013).
+//
+// `Push` matches `Push` in src/sky.rs field for field.
 
 #include "equirect.slang"
 
@@ -17,27 +18,26 @@
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
 
 struct Push {
-    // The size of what's read, in texels: the sky's width and height, or a cube's first level's
-    // side, twice.
+    // The size read, in texels: the sky's width and height, or a cube's first level's side, twice.
     uint2 source_size;
     // What's read: the sky's texture, the cube's, or a level's storage slot.
     uint source;
-    // The storage slot of the level written.
+    // The written level's storage slot.
     uint target;
-    // The side of the level written, in texels.
+    // The written level's side, in texels.
     uint size;
-    // The roughness of the specular level written.
+    // The written specular level's roughness.
     float roughness;
-    // How many samples each texel takes.
+    // Samples per texel.
     uint samples;
-    // The luminance, in the sky's texels' units, that the cube keeps each point of the sky to: what
-    // lies past it is the sun's, which a directional light stands for.
+    // The luminance, in the sky's units, the cube clamps the sky to. What's past it is the sun's,
+    // which a directional light stands for.
     float cutoff;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// The sky into a cube's first level, each texel the average of four points of the image across it,
-// each kept to the cutoff's luminance, in its own hue.
+// The sky into a cube's first level: each texel the mean of four points of the image across it,
+// each clamped to the cutoff's luminance, keeping its hue.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cube_main(uint3 id: SV_DispatchThreadID) {
@@ -57,7 +57,7 @@ void cube_main(uint3 id: SV_DispatchThreadID) {
     storage[push.target][id] = float4(sum / 4.0, 1.0);
 }
 
-// A cube's next level, each texel the average of the four of the level before that it covers.
+// A cube's next level, each texel the mean of the four it covers.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void downsample_main(uint3 id: SV_DispatchThreadID) {
@@ -71,12 +71,12 @@ void downsample_main(uint3 id: SV_DispatchThreadID) {
     storage[push.target][id] = float4(sum.rgb / 4.0, 1.0);
 }
 
-// The `i`th of `count` points of the Hammersley set across the unit square.
+// The `i`th of `count` Hammersley points in the unit square.
 float2 hammersley(uint i, uint count) {
     return float2(float(i) / float(count), float(reversebits(i)) * 2.3283064365386963e-10);
 }
 
-// A frame of unit vectors whose third is `normal`, as columns.
+// An orthonormal frame whose third vector is `normal`, as columns.
 float3x3 frame_of(float3 normal) {
     float3 up = abs(normal.y) < 0.9999999 ? float3(0.0, 1.0, 0.0)
                                           : float3(0.0, 0.0, normal.y > 0.0 ? 1.0 : -1.0);
@@ -90,16 +90,16 @@ float3 in_world(float3x3 frame, float3 local) {
     return frame[0] * local.x + frame[1] * local.y + frame[2] * local.z;
 }
 
-// The level of the cube to sample for a sample of probability density `pdf` over solid angle, of
-// `count`: the level whose texels cover as much as the sample does, by Křivánek and Colbert's
-// formula for cubes, as the Sample Renderer has it.
+// The cube level for one of `count` samples of density `pdf` over solid angle: the level whose
+// texels cover as much as the sample, by Křivánek and Colbert's formula for cubes, as the Sample
+// Renderer has it.
 float level_of(float pdf, uint count) {
     float side = float(push.source_size.x);
     return max(0.5 * log2(6.0 * side * side / (float(count) * pdf)), 0.0);
 }
 
-// The cosine-weighted average of the cube's light round each texel's way: its irradiance over π,
-// which Lambert's diffuse multiplies by the base color.
+// The cosine-weighted mean of the cube's light round each texel's way: irradiance over π, which
+// Lambert's diffuse multiplies by the base color.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void irradiance_main(uint3 id: SV_DispatchThreadID) {
@@ -123,17 +123,15 @@ void irradiance_main(uint3 id: SV_DispatchThreadID) {
     storage[push.target][id] = float4(sum / float(push.samples), 1.0);
 }
 
-// GGX's distribution, of the cosine of the halfway vector's angle `n_dot_h`, and `alpha`, the
-// roughness squared.
+// GGX's distribution; `alpha` is the roughness squared.
 float ggx(float n_dot_h, float alpha) {
     float a = n_dot_h * alpha;
     float k = alpha / (1.0 - n_dot_h * n_dot_h + a * a);
     return k * k / PI;
 }
 
-// A halfway vector for the `i`th of `count` samples of GGX's distribution of `alpha`, in its
-// frame's space, and its probability density over the reflected way's solid angle, seen straight
-// on, as the normal is the view.
+// The `i`th of `count` halfway vectors sampling GGX's distribution, in its frame's space, and its
+// density over the reflected way's solid angle, seen straight on, the view being the normal.
 float4 ggx_sample(uint i, uint count, float alpha) {
     float2 xi = hammersley(i, count);
     float cosine = saturate(sqrt((1.0 - xi.y) / (1.0 + (alpha * alpha - 1.0) * xi.y)));
@@ -142,9 +140,8 @@ float4 ggx_sample(uint i, uint count, float alpha) {
     return float4(sine * cos(phi), sine * sin(phi), cosine, ggx(cosine, alpha) / 4.0);
 }
 
-// The cube's light round each texel's way, weighted by GGX's distribution of the level's
-// roughness, seen straight on, as the split sum takes it; at no roughness, the cube's level of the
-// texel's size.
+// The cube's light round each texel's way, weighted by GGX at the level's roughness, seen straight
+// on, as the split sum takes it. At roughness 0, the cube's level of the texel's size.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void specular_main(uint3 id: SV_DispatchThreadID) {
@@ -179,7 +176,7 @@ void specular_main(uint3 id: SV_DispatchThreadID) {
     storage[push.target][id] = float4(color, 1.0);
 }
 
-// Smith's height-correlated visibility for GGX, of `alpha`, the roughness squared.
+// Smith's height-correlated visibility for GGX; `alpha` is the roughness squared.
 float visibility(float n_dot_v, float n_dot_l, float alpha) {
     float alpha2 = alpha * alpha;
     float from_view = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - alpha2) + alpha2);
@@ -187,8 +184,8 @@ float visibility(float n_dot_v, float n_dot_l, float alpha) {
     return 0.5 / (from_view + from_light);
 }
 
-// The split sum's table, a texel for each cosine of the view's angle across and each roughness
-// down, at their centers: GGX's reflectance as F0's scale in red and its bias in green.
+// The split sum's table, view cosine across and roughness down, at texel centers: GGX's
+// reflectance as F0's scale in red, its bias in green.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void brdf_main(uint3 id: SV_DispatchThreadID) {
@@ -208,7 +205,7 @@ void brdf_main(uint3 id: SV_DispatchThreadID) {
         float n_dot_h = saturate(h.z);
         float v_dot_h = saturate(dot(view, h));
         if (n_dot_l > 0.0) {
-            // GGX's distribution cancels against the sample's density, leaving the rest of it.
+            // GGX's distribution cancels against the sample's density.
             float weighted = visibility(n_dot_v, n_dot_l, alpha) * v_dot_h * n_dot_l / n_dot_h;
             float fresnel = pow(1.0 - v_dot_h, 5.0);
             scale += (1.0 - fresnel) * weighted;

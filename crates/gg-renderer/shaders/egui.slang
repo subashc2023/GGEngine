@@ -1,16 +1,14 @@
-// egui's meshes, drawn over the frame into an sRGB target: egui-wgpu's shader for egui 0.37
-// (`fs_main_linear_framebuffer`), without its dithering. egui's colors and textures are
-// sRGB-encoded and premultiplied; they're multiplied together encoded, as egui expects, and
-// decoded on output, which the target encodes again.
+// egui's meshes over the frame, into an sRGB target: egui-wgpu's shader for egui 0.37
+// (`fs_main_linear_framebuffer`), without dithering. Colors and textures are sRGB, premultiplied:
+// multiplied encoded, as egui expects, then decoded for the target to encode.
 
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(1, 0)]] SamplerState samplers[];
 
 struct Push {
-    // egui's vertices, five words each: position and texture coordinates as two floats each,
-    // in points, then the color as four bytes.
+    // Five words each: position and UV in points, two floats each, then the color's four bytes.
     uint* vertices;
-    // The target's size in points.
+    // In points.
     float2 screen_size;
     uint texture;
     uint sampler;
@@ -29,7 +27,7 @@ Varyings vertex_main(uint index: SV_VulkanVertexID) {
     float2 position = float2(asfloat(vertex[0]), asfloat(vertex[1]));
     uint color = vertex[4];
     Varyings out;
-    // Points from the top left to Vulkan's clip space, whose y points down too.
+    // Points from the top left to clip space, whose y points down too.
     out.position = float4(2.0 * position / push.screen_size - 1.0, 0.0, 1.0);
     out.uv = float2(asfloat(vertex[2]), asfloat(vertex[3]));
     out.color = float4(color & 255, (color >> 8) & 255, (color >> 16) & 255, color >> 24) / 255.0;

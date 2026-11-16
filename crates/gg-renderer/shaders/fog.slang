@@ -1,45 +1,41 @@
-// Height fog, which a shader includes after mesh.slang, as the frame's data says it: what the fog
-// does to the light from a point on its way to the eye, which fogging.slang's pass applies to
-// what's opaque in the view, the sky among it, and what blends applies to itself as it draws: a
-// fragment at a time, or, for what's drawn on the engine's quad, small as a sprite, a glyph or a
-// particle is, at its corners, between which the fog changes too little to tell.
+// Height fog, included after mesh.slang: what the frame's fog does to light from a point on its
+// way to the eye. fogging.slang's pass applies it to what's opaque, the sky included. What blends
+// applies it to itself: per fragment, or, on the engine's quad (sprites, glyphs, particles), at
+// its corners, between which the fog changes too little to tell.
 //
-// The fog's density at height y is `density * exp(-falloff * (y - height))`. Along a ray from
-// `origin` the way `way`, a unit vector, from its start, `start` along it, to a point `length`
-// further, its optical depth, the integral of that density, is in closed form `density * length *
-// exp(-falloff * (y_low - height)) * (1 - exp(-z)) / z`, of `z = falloff * |way.y| * length`, where
-// y_low is the height of the lower of the ray's ends, where the fog's densest: from there, the fog
-// thins toward the other end, whichever way the ray goes, so that nothing grows past the density
-// at the ray's ends, as a closed form from the eye would where the ray falls far below it. Toward
-// the sky, infinitely far, a ray that rises takes `density * exp(-falloff * (y_start - height)) /
-// (falloff * way.y)`, and one that doesn't rise never comes out of the fog, and takes all of the
-// light. Of what the fog takes out, it scatters back toward the eye its color of the light that
-// reaches it, as the light that reaches every point of the ray is the same, which, with the light
-// it lets through, `exp(-depth)`, sums to `light * (1 - exp(-depth))` (single scattering without
-// shadows): the light from all around, the sky's diffuse light the way the eye looks, sampled from
-// its cube as it lights Lambert's diffuse, which scatters as the sky's light from round that way
-// would, or in a frame without a sky its color alone; and the sun's, by Henyey-Greenstein's phase
-// function, a lobe round the way toward the sun as sharp as `lobe`, normalized over the sphere, so
-// that the fog scatters no more of it than reaches it (Henyey and Greenstein, "Diffuse Radiation in
-// the Galaxy", 1941). How much it lets through is kept to `least` and more, its opacity's cap.
+// Density at height y is `density * exp(-falloff * (y - height))`. Along a ray from `origin` the
+// unit way `way`, from `start` along it to a point `length` further, the optical depth is
+// `density * length * exp(-falloff * (y_low - height)) * (1 - exp(-z)) / z`, where
+// `z = falloff * |way.y| * length` and y_low is the lower end's height, where the fog's densest.
+// Taken from there, nothing grows past the ends' density, as a form from the eye would where the
+// ray falls far below it. To the sky, a rising ray takes `density * exp(-falloff * (y_start -
+// height)) / (falloff * way.y)`; any other takes all the light.
+//
+// Each point of the ray gets the same light, so in-scattering plus what's let through,
+// `exp(-depth)`, is `light * (1 - exp(-depth))` (single scattering, no shadows). The light:
+// - ambient: the sky's diffuse light the way the eye looks, from its irradiance cube, as the sky's
+//   light from round that way would scatter; without a sky, the fog's color alone.
+// - the sun's: Henyey-Greenstein's phase function, a lobe toward the sun as sharp as `lobe`,
+//   normalized over the sphere so it scatters no more than reaches it (Henyey and Greenstein,
+//   "Diffuse Radiation in the Galaxy", 1941).
+//
+// What's let through is `least` or more, the opacity's cap.
 
-// `Sampler::LinearClamp`'s index in the bindless set, which the sky's diffuse light is sampled by.
+// `Sampler::LinearClamp`'s index in the bindless set, for the sky's diffuse light.
 static const uint FOG_SAMPLER = 0;
-// 1 over the 4π steradians of a sphere: what a phase function that scatters alike every way gives
-// each.
+// 1 over a sphere's 4π steradians: an isotropic phase function's value.
 static const float PER_STERADIAN = 0.0795774715;
-// The most the fog's density at a ray's lower end is taken to grow past its density at its height,
-// e^60, so that the optical depth stays a finite float: past it, the fog lets no light through at
-// any density a world gives it anyway.
+// The most the density's exponent below the fog's height grows, e^60, so the optical depth stays
+// finite. Past it, no light gets through at any density anyway.
 static const float DENSEST = 60.0;
-// The most optical depth taken, which lets through e^-80 of the light, less than a half float holds.
+// The most optical depth taken: e^-80 lets through less than a half float holds.
 static const float DEEPEST = 80.0;
-// The largest a half float holds, short of infinity, which the view's colors are, and what a color
-// fogged is kept to: a sharp lobe toward a bright sun scatters more.
+// The largest half float short of infinity, which the view's colors are. Fogged colors are kept to
+// it: a sharp lobe toward a bright sun scatters more.
 static const float HALF_MOST = 65504.0;
 
-// How much of the light from `along` further than the fog's start, `way` from `origin`, or from
-// infinitely far if `endless`, the fog lets through, from 0 to 1.
+// The share of the light, 0 to 1, the fog lets through from `along` past its start, `way` from
+// `origin`, or from infinitely far if `endless`.
 float transmittance(Fog fog, float3 origin, float3 way, float along, bool endless) {
     if (!endless && !(along > 0.0)) {
         return 1.0;
@@ -49,7 +45,7 @@ float transmittance(Fog fog, float3 origin, float3 way, float along, bool endles
     float rising = k * way.y;
     float depth;
     if (endless) {
-        // Thinning ever after where it rises, without end where it doesn't.
+        // Rising, it thins forever; otherwise it never ends.
         if (!(rising > 1e-6)) {
             return 0.0;
         }
@@ -57,7 +53,7 @@ float transmittance(Fog fog, float3 origin, float3 way, float along, bool endles
     } else {
         float low = min(y, y + way.y * along);
         float z = abs(rising) * along;
-        // The series where z is small, as the division would cancel.
+        // The series for small z, where the division would cancel.
         float spread =
             z < 0.01 ? along * (1.0 - z * (0.5 - z / 6.0)) : (1.0 - exp(-z)) / abs(rising);
         depth = fog.density * exp(min(k * (fog.height - low), DENSEST)) * spread;
@@ -65,9 +61,9 @@ float transmittance(Fog fog, float3 origin, float3 way, float along, bool endles
     return exp(-min(depth, DEEPEST));
 }
 
-// What the frame's fog does to the light from `distance` along `way`, a unit vector, from
-// `origin`, or from infinitely far if `endless`, on its way to the eye: in rgb, the light it
-// scatters toward the eye, exposed; in a, the share of the light from there it lets through.
+// What the frame's fog does to light from `distance` along `way`, a unit vector, from `origin`, or
+// from infinitely far if `endless`: rgb, the light it scatters toward the eye, exposed; a, the
+// share it lets through.
 float4 fog_along(Frame frame, float3 origin, float3 way, float distance, bool endless) {
     Fog fog = frame.fog;
     if (!(fog.density > 0.0)) {
@@ -86,15 +82,15 @@ float4 fog_along(Frame frame, float3 origin, float3 way, float distance, bool en
     return float4(light * (1.0 - through), through);
 }
 
-// The way the view sees a point along, from where, and how far along it the point is.
+// The ray the view sees a point along, and the point's distance on it.
 struct ViewRay {
     float3 origin;
     float3 way;
     float distance;
 };
 
-// The way the frame's view sees `point` along: from the camera, with perspective; or without it,
-// the one way the view looks, from the camera's plane.
+// The view's ray to `point`: from the camera, with perspective; without, the view's one way, from
+// the camera's plane.
 ViewRay view_ray(Frame frame, float3 point) {
     ViewRay ray;
     if (frame.eye.w != 0.0) {
@@ -110,22 +106,20 @@ ViewRay view_ray(Frame frame, float3 point) {
     return ray;
 }
 
-// What the frame's fog does to the light from `world` on its way to the eye, as `fog_along` gives
-// it, along the way the view sees it.
+// `fog_along` for `world`, along the view's ray to it.
 float4 fog_at(Frame frame, float3 world) {
     ViewRay ray = view_ray(frame, world);
     return fog_along(frame, ray.origin, ray.way, ray.distance, false);
 }
 
-// `color`, of alpha not multiplied in, fogged by `fog`, as `fog_at` gives it where the color is:
-// blended by its alpha, what it covers of the fog behind it, which the fog's pass fogged already,
-// gives way to the fog in front of it.
+// `color`, alpha not multiplied in, fogged by `fog` from `fog_at` where it is. Blended by its
+// alpha, it trades the fog behind it, which the fog's pass applied, for the fog in front.
 float4 fogged(float4 fog, float4 color) {
     return float4(min(color.rgb * fog.a + fog.rgb, HALF_MOST), color.a);
 }
 
-// `color`, of alpha multiplied in, as `fogged`: so that of a color that adds its light, of alpha 0,
-// the fog lets its share through and adds none of its own.
+// `fogged` for alpha multiplied in: of an additive color, alpha 0, the fog lets its share through
+// and adds none of its own.
 float4 fogged_premultiplied(float4 fog, float4 color) {
     return float4(min(color.rgb * fog.a + fog.rgb * color.a, HALF_MOST), color.a);
 }

@@ -1,12 +1,12 @@
-// Sprites: the engine's quad, whose corners are positions in its own space and where they are in
-// the sprite's rectangle, showing that rectangle of a texture, tinted by the sprite's color, and
-// drawn by its alpha over what's behind it. Each instance is a sprite, with its own transform, ID
-// and parameters, writing its ID where it shows but where it's fully transparent, so that a pick
-// there finds what's behind it. `Params` in src/sprite.rs, which `Sprite` here matches byte for
-// byte, its `rect` being `top_left` then `bottom_right`. A sprite samples only the texels its
-// rectangle covers, so that the cells of a sprite sheet packed edge to edge show nothing of one
-// another: Godot's region filter clip, which Godot makes optional and always insets by half a
-// texel. It's fogged where it is by the frame's fog, at its corners, as fog.slang says.
+// Sprites: the engine's quad showing a rectangle of a texture, tinted, drawn by its alpha. Corners
+// are positions in its own space and where they fall in the rectangle. An instance per sprite,
+// with its own transform, ID and parameters; fully transparent fragments write no ID, so picks
+// find what's behind. `Sprite` matches `Params` in src/sprite.rs byte for byte, `rect` as
+// `top_left` then `bottom_right`.
+//
+// Only the texels the rectangle covers are sampled, so a sheet's cells packed edge to edge don't
+// bleed: Godot's region filter clip, which Godot makes optional and insets by half a texel. Fogged
+// at its corners, as fog.slang says.
 
 #include "mesh.slang"
 #include "fog.slang"
@@ -25,20 +25,18 @@ struct Sprite {
 
 struct Varyings {
     float4 position : SV_Position;
-    // What the frame's fog does to it, at its corners, as fog.slang's `fog_at` gives it.
+    // The fog at its corners, from fog.slang's `fog_at`.
     float4 fog;
     float2 uv;
-    // Where the fragment stage may sample, in texture coordinates: the least corner, then the
-    // greatest.
+    // Where the fragment stage may sample, in texture coordinates: least corner, then greatest.
     nointerpolation float4 inside;
     nointerpolation uint instance;
     nointerpolation uint2 id;
 };
 
-// How far, in texels, a texture coordinate times its texture's size can round from the number it
-// stands for: about a thousandth at 8,192 texels. A rectangle's edge that near a texel's is taken
-// to be on it, and the bounds keep that far inside the texels' centers, which a sampler that
-// truncates its position within a texel could otherwise cross.
+// How far a texture coordinate times its texture's size can round off, in texels: about a
+// thousandth at 8,192. An edge that near a texel's is taken as on it, and the bounds keep that far
+// inside texel centers, which a sampler truncating within a texel could cross.
 static const float ROUNDING = 1.0 / 256.0;
 
 [shader("vertex")]
@@ -51,11 +49,10 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     Frame frame = *push.frame;
     out.fog = fog_at(frame, world.xyz);
     out.uv = lerp(sprite.top_left, sprite.bottom_right, corner.uv);
-    // The centers of the outermost texels the rectangle covers, wholly or in part, between which
-    // neither a linear sampler, which reads the 2 by 2 texels around a point, nor a nearest one
-    // reaches a texel past the rectangle's edges. A rectangle within one texel samples its center;
-    // the max keeps the least bound from passing the greatest, which clamp needs, for one of no
-    // width on a texel's edge, and the nudge inward stops halfway between them.
+    // The centers of the outermost texels the rectangle touches: between them neither a linear
+    // sampler (2 by 2 texels) nor a nearest one reaches past its edges. A rectangle within a texel
+    // samples its center. The max keeps the bounds ordered, as clamp needs, for one of no width on
+    // a texel's edge; the nudge stops halfway.
     uint width, height;
     textures[NonUniformResourceIndex(sprite.texture)].GetDimensions(width, height);
     float2 size = float2(width, height);
@@ -71,14 +68,14 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
     Sprite sprite = push.params[input.instance];
-    // The sprites of one draw sample textures of their own, so the index can differ across it.
-    // Decoded from sRGB to linear as it's sampled, as the view's colors are.
+    // A draw's sprites sample their own textures, so the index can differ across it. Sampling
+    // decodes sRGB to linear.
     Texture2D texture = textures[NonUniformResourceIndex(sprite.texture)];
     SamplerState sampler = samplers[NonUniformResourceIndex(sprite.sampler)];
     float2 uv = clamp(input.uv, input.inside.xy, input.inside.zw);
     float4 color = texture.Sample(sampler, uv) * sprite.color;
-    // Blending what's fully transparent changes no pixel, but its ID would hide what's behind it
-    // from picks. It writes no depth, so it keeps early depth testing.
+    // Its ID would hide what's behind from picks. With no depth written, discarding keeps early
+    // depth tests.
     if (color.a == 0.0) {
         discard;
     }

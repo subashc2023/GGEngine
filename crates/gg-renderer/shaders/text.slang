@@ -1,11 +1,9 @@
-// Glyphs: a font's letters on the engine's quad, each showing a rectangle of its font's field, a
-// texture of data whose red, green and blue are distances to the glyph's edges, multi-channel so
-// that their median keeps its corners sharp, and filled with its color by how far inside it each
-// pixel is, smoothed over a pixel however big it shows. Each instance is a glyph, with its own
-// transform, ID and parameters, writing its ID where it shows but where it's fully transparent, so
-// that a pick between its strokes finds what's behind it, and fogged where it is by the frame's
-// fog, at its corners, as fog.slang says. `Params` in src/text.rs, which `Glyph` here matches byte
-// for byte, its `rect` being `top_left` then `bottom_right`.
+// Glyphs: a font's letters on the engine's quad, each a rectangle of its font's multi-channel
+// distance field, whose RGB median keeps corners sharp. Filled by how far inside each pixel is,
+// smoothed over a pixel at any size. An instance per glyph, with its own transform, ID and
+// parameters; fully transparent fragments write no ID, so picks between strokes find what's
+// behind. Fogged at its corners, as fog.slang says. `Glyph` matches `Params` in src/text.rs byte
+// for byte, `rect` as `top_left` then `bottom_right`.
 
 #include "mesh.slang"
 #include "fog.slang"
@@ -17,21 +15,21 @@ struct Glyph {
     float2 top_left;
     float2 bottom_right;
     uint field;
-    // How far the field's distances reach, in its texels: from -range / 2 at 0 to range / 2 at 1.
+    // The distances' reach in field texels: -range / 2 at 0 to range / 2 at 1.
     float range;
 };
 
 [[vk::push_constant]] ConstantBuffer<Push<Corner, Glyph>> push;
 
-// The engine's sampler that filters linearly and clamps to the edge, the first.
+// The engine's first sampler: linear, clamped to the edge.
 static const uint LINEAR_CLAMP = 0;
 
 struct Varyings {
     float4 position : SV_Position;
-    // What the frame's fog does to it, at its corners, as fog.slang's `fog_at` gives it.
+    // The fog at its corners, from fog.slang's `fog_at`.
     float4 fog;
     float2 uv;
-    // How far the field's distances reach, in texture coordinates, across and down.
+    // The distances' reach in texture coordinates, across and down.
     nointerpolation float2 range;
     nointerpolation uint instance;
     nointerpolation uint2 id;
@@ -62,23 +60,21 @@ float median(float3 v) {
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
     Glyph glyph = push.params[input.instance];
-    // The glyphs of one draw can be of fonts of their own, so the index can differ across it. Read
-    // as stored, since the field is data.
+    // A draw's glyphs can be of their own fonts, so the index can differ across it. Read as
+    // stored: the field is data.
     Texture2D field = textures[NonUniformResourceIndex(glyph.field)];
     float3 distances = field.Sample(samplers[LINEAR_CLAMP], input.uv).rgb;
-    // How many of the view's pixels the field's range spans here, from how far its coordinates go
-    // from one pixel to the next, so that the edge is smoothed over a pixel at any size: at least
-    // one, as glyphs drawn smaller than the field blur rather than alias.
+    // The view's pixels the range spans here, at least one: glyphs smaller than the field blur
+    // rather than alias.
     float2 texels_per_pixel = fwidth(input.uv);
     float2 pixels = input.range / max(texels_per_pixel, 1e-9);
     float range = max(0.5 * (pixels.x + pixels.y), 1.0);
-    // In pixels, from the glyph's edge, inward.
+    // In pixels, inward from the glyph's edge.
     float inside = (median(distances) - 0.5) * range;
     float4 color = glyph.color;
     color.a *= clamp(inside + 0.5, 0.0, 1.0);
-    // Blending what's fully transparent changes no pixel, but its ID would hide what's behind it
-    // from picks, as between the glyph's strokes. It writes no depth, so it keeps early depth
-    // testing.
+    // Its ID would hide what's behind from picks. With no depth written, discarding keeps early
+    // depth tests.
     if (color.a == 0.0) {
         discard;
     }

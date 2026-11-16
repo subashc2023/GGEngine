@@ -1,8 +1,7 @@
-// Fogs the game's view's colors, a pixel a thread, once what's opaque in it has drawn and before
-// what blends draws over it, by the frame's fog, as fog.slang says: each pixel's point found from
-// the view's depth, as the view drew it, offset as antialiasing offsets it; and where the depth is
-// 0, as far as depth goes, where the sky or the clear color shows, the way the pixel sees, endless.
-// `FogPush` matches `FogPush` in src/fog.rs field for field.
+// Fogs the view's colors by the frame's fog, as fog.slang says, a pixel a thread, after what's
+// opaque draws and before what blends. Each pixel's point comes from the view's depth, as drawn,
+// offset by antialiasing. Where depth is 0, the farthest (sky or clear color), the pixel's way is
+// fogged endlessly. `FogPush` matches `FogPush` in src/fog.rs field for field.
 
 #include "mesh.slang"
 #include "fog.slang"
@@ -11,12 +10,12 @@
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
 
 struct FogPush {
-    // From the view's clip space, as this frame draws it, to the world, homogeneous.
+    // From this frame's clip space to the world, homogeneous.
     float4x4 world_from_clip;
     Frame* frame;
     // The view's size in pixels.
     uint2 size;
-    // Its depth, a texture of the bindless set's, and its colors, a storage image of it.
+    // Its depth, a bindless texture, and its colors, a bindless storage image.
     uint depth;
     uint target;
 };
@@ -39,7 +38,7 @@ void fog_main(uint3 pixel: SV_DispatchThreadID) {
         float4 point = mul(push.world_from_clip, float4(clip, depth, 1.0));
         fog = fog_at(frame, point.xyz / point.w);
     } else {
-        // The way the pixel sees, through its point at the near plane, where reversed depth is 1.
+        // The pixel's way, through its point at the near plane, reversed depth 1.
         float4 near = mul(push.world_from_clip, float4(clip, 1.0, 1.0));
         ViewRay ray = view_ray(frame, near.xyz / near.w);
         fog = fog_along(frame, ray.origin, ray.way, 0.0, true);

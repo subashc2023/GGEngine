@@ -1,24 +1,25 @@
 // Particles' births, written into their emitters' rings in the pool before the frame draws them:
-// `emit_main`, a thread for each slot an emitter's frame writes, its births', or, for a ring made or
-// grown, every slot of it, the particles kept from its old ring first, then the births, then
-// nothing; `grow_main`, a thread for each word of the pool copied into the pool that takes its
-// place, a larger one, in the same slots; and `moved_main`, a thread for each slot of the pool,
-// moving each particle's birth by `-shift`, as a frame whose origin moved by `shift` does. A
-// birth's randomness is a hash of its emitter's ID and its number, so that it's born alike whatever
-// the frames. `EmitPush` in src/particles.rs matches the one here byte for byte.
+// - `emit_main`, a thread per slot an emitter's frame writes: its births', or, for a ring made or
+//   grown, every slot, the particles kept from the old ring first, then the births, then nothing;
+// - `grow_main`, a thread per word, copying the pool into its larger successor, in the same slots;
+// - `moved_main`, a thread per slot, moving each birth by `-shift` as the frame's origin moved by
+//   `shift`.
+//
+// A birth's randomness hashes its emitter's ID and its number, so it's born alike whatever the
+// frames. `EmitPush` matches the one in src/particles.rs byte for byte.
 
 #include "particle.slang"
 
 struct EmitPush {
-    // The pool the frame writes, which every emitter's ring is in.
+    // The pool the frame writes, holding every emitter's ring.
     Particle* pool;
-    // The emitter's part of the frame, for `emit_main`.
+    // For `emit_main`.
     Emitter* emitter;
     // The pool before it grew, for `grow_main`, a word at a time.
     uint* from;
-    // The slots `emit_main` writes, or the words of the pool before it grew.
+    // The slots `emit_main` writes, or the old pool's words.
     uint count;
-    // The first word this dispatch of `grow_main` copies, or slot `moved_main` moves.
+    // The first word this `grow_main` dispatch copies, or slot `moved_main` moves.
     uint first;
     // How far the frame's origin moved, for `moved_main`.
     float3 shift;
@@ -53,8 +54,8 @@ void emit_main(uint3 thread: SV_DispatchThreadID) {
         slot = (emission.write_at + i) % look.capacity;
         particle = birth(look, emission, i);
     }
-    // A field at a time, as slangc leaves the alignment off a store of a whole struct copied from
-    // an address, which SPIR-V requires.
+    // A field at a time: slangc leaves the alignment SPIR-V requires off a whole struct's store
+    // copied from an address.
     uint at = look.offset + slot;
     push.pool[at].position = particle.position;
     push.pool[at].tick = particle.tick;
@@ -84,14 +85,14 @@ void moved_main(uint3 thread: SV_DispatchThreadID) {
     push.pool[slot].position = push.pool[slot].position - push.shift;
 }
 
-// Birth `i` of the emitter's frame: its births, then its burst particles.
+// Birth `i` of the emitter's frame: births first, then burst particles.
 Particle birth(Look look, Emission emission, uint i) {
     uint seed;
     uint tick;
     float fraction;
     float4x4 at;
     if (i < emission.births) {
-        // Its number among the emitter's, 64 bits as two halves.
+        // Its number among the emitter's: 64 bits, two halves.
         uint low = emission.first.x + i;
         uint high = emission.first.y + (low < i ? 1u : 0u);
         seed = pcg(look.id.x ^ pcg(look.id.y ^ pcg(low ^ pcg(high))));
@@ -124,7 +125,7 @@ Particle birth(Look look, Emission emission, uint i) {
     } else if (emission.shape_kind == 2) {
         position = (float3(r[0], r[1], r[2]) * 2.0 - 1.0) * emission.shape.xyz;
     } else {
-        // Uniformly over the cone's cap of directions, from a disc at its base.
+        // Uniform over the cone's cap of directions, from a disc at its base.
         float across = emission.shape.y * sqrt(r[0]);
         float about = 2.0 * PI * r[1];
         position = float3(across * cos(about), 0.0, across * sin(about));
@@ -152,7 +153,7 @@ Particle birth(Look look, Emission emission, uint i) {
     return particle;
 }
 
-// A way uniformly over the sphere's, of `u` and `v` from 0 up to 1.
+// A way uniform over the sphere, of `u` and `v` in [0, 1).
 float3 any_way(float u, float v) {
     float y = 1.0 - 2.0 * u;
     float across = sqrt(max(0.0, 1.0 - y * y));
@@ -160,7 +161,7 @@ float3 any_way(float u, float v) {
     return float3(across * cos(about), y, across * sin(about));
 }
 
-// No particle: a lifetime of 0, as a slot cleared to zeros holds.
+// No particle: lifetime 0, as a slot cleared to zeros holds.
 Particle none() {
     Particle particle;
     particle.position = float3(0.0);

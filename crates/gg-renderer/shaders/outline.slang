@@ -1,34 +1,30 @@
-// An outline round what the game's view shows of a set of IDs, drawn into the view's image over its
-// draws, the second of two passes (outline_distances.slang is the first), from the distances it
-// wrote: how far along its row each pixel is from the nearest pixel of the set.
-//
-// The pixels of the set are left alone, and every other pixel is covered by the distance `d` from
-// its middle to the middle of the nearest pixel of the set, the least over the rows within the reach
-// of the square root of that row's distance squared and the rows' own. The outline is a solid band
-// to `width` pixels, with its outer edge smoothed over the pixel past it, since the set's edge is
-// half a pixel past the middle of its nearest pixel, and this pixel's middle half a pixel short of
-// the far side of it; and a glow past that, which fades from half the band's alpha at the band's
-// inner edge to nothing at twice the width, by the square of the way left.
+// The outline round a set of IDs, over the view's image, after outline_distances.slang. The set's
+// pixels are left alone. Every other pixel takes its distance to the set: the least, over rows
+// within `reach`, of the hypotenuse of the row's distance and its rows away. It draws:
+// - A solid band to `width` pixels, its outer edge smoothed over the next pixel: the set's edge is
+//   half a pixel past its nearest center, and this pixel's center half a pixel short of its far
+//   side.
+// - A glow past it, fading from `GLOW` of the band's alpha at its inner edge to nothing at twice
+//   the width, by the square of the way left.
 
 [[vk::binding(0, 0)]] Texture2D<float> distances[];
 
 struct Push {
-    // Its color, linear RGBA, alpha not multiplied in.
+    // Linear RGBA, alpha not multiplied in.
     float4 color;
-    // The distances, a texture of the bindless set's.
+    // The distances, in the bindless set.
     uint image;
-    // How wide the band is, in pixels, from more than 0 to 8.
+    // The band's, in pixels: more than 0, at most 8.
     float width;
-    // How far along a row the distances look, in pixels: they hold 1 more past it.
+    // How far along a row the distances look, in pixels; past it they hold 1 more.
     uint reach;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// How much alpha the glow has at the band's inner edge, as a share of the band's.
+// The glow's alpha at the band's inner edge, as a share of the band's.
 static const float GLOW = 0.5;
 
-// A triangle over the whole viewport, from three vertices and no buffer: (-1, -1), (3, -1) and
-// (-1, 3) in clip space.
+// A triangle over the viewport from three vertices, no buffer: (-1, -1), (3, -1), (-1, 3) in clip.
 [shader("vertex")]
 float4 vertex_main(uint index: SV_VulkanVertexID) : SV_Position {
     float2 corner = float2((index << 1) & 2, index & 2);
@@ -37,7 +33,7 @@ float4 vertex_main(uint index: SV_VulkanVertexID) : SV_Position {
 
 [shader("fragment")]
 float4 fragment_main(float4 position: SV_Position) : SV_Target {
-    // A pixel's position is its center, so its whole part is the pixel's.
+    // Positions are pixels' centers: their whole part is the pixel.
     int2 texel = int2(position.xy);
     uint columns, rows;
     distances[push.image].GetDimensions(columns, rows);

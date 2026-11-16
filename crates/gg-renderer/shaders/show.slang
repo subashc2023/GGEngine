@@ -1,11 +1,13 @@
-// An image the frame makes, shown in the game's view in place of its light, a pixel a thread, into
-// colors of the view's own that the tonemap pass then maps, as src/show.rs plans it: the image
-// stretched over the view, each pixel the texel at its center, read as its kind says, as `Shown`
-// in gg-api says a capture reads it. Colors as they are; depth as `1 + log2(depth) / 24`, white at
-// the near plane, where reversed depth is 1, a 24th darker each time the distance doubles, and
-// black where nothing drew, at 0; IDs and a visibility buffer as a color for each value, black for
-// 0; motion as normals are, each axis from -1 to 1 as 0 to 1; and a float a pixel as its value. An
-// image of no kind, which the frame doesn't make, shows black.
+// Shows an image the frame makes in place of the view's light, a pixel a thread, as src/show.rs
+// plans it, into the view's colors for the tonemap pass. Stretched over the view, each pixel the
+// texel at its center, read by kind as `Shown` in gg-api says a capture reads it:
+// - Colors: as they are.
+// - Depth: `1 + log2(depth) / 24`, white at the near plane (reversed depth 1), a 24th darker per
+//   doubling of distance, black where nothing drew (0).
+// - IDs and visibility: a color per value, black for 0.
+// - Motion: as normals, each axis's -1 to 1 as 0 to 1.
+// - Scalars: the value.
+// - No kind, which the frame doesn't make: black.
 //
 // `Push` matches `ShowPush` in src/show.rs field for field.
 
@@ -16,7 +18,7 @@
 [[vk::binding(0, 0)]] Texture2D<uint2> pairs[];
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
 
-// How many pixels across and down a workgroup takes: `GROUP` in src/show.rs.
+// Pixels across and down a workgroup: `GROUP` in src/show.rs.
 static const uint GROUP = 8;
 
 // What an image holds, as `kind` in src/show.rs numbers gg-gpu's `ImageKind`.
@@ -30,8 +32,7 @@ static const uint DEPTH = 6;
 static const uint SCALAR = 7;
 
 struct Push {
-    // The view's size, the image, a texture of the bindless set's, and what's written, a storage
-    // image of its.
+    // The view's size, the image (a bindless texture) and the target (a bindless storage image).
     uint2 size;
     uint source;
     uint kind;
@@ -40,15 +41,15 @@ struct Push {
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// `value`, each channel from 0 to 1, as the view's colors hold it so that the view's sRGB image
-// stores it as its byte over 255, as shading.slang's `stored_as` says.
+// `value`, each channel 0 to 1, encoded so the view's sRGB image stores it as byte / 255, as
+// shading.slang's `stored_as` says.
 float3 stored_as(float3 value) {
     float3 v = saturate(value);
     return select(v <= 0.04045, v / 12.92, pow((v + 0.055) / 1.055, 2.4));
 }
 
-// A color for `value`, one of each value's, from a hash of it by PCG3D (Jarzynski and Olano, "Hash
-// Functions for GPU Rendering", 2020), bright enough to tell apart: black for 0.
+// A color per value from its PCG3D hash (Jarzynski and Olano, "Hash Functions for GPU Rendering",
+// 2020), bright enough to tell apart; black for 0.
 float3 hashed(uint2 value) {
     if (value.x == 0 && value.y == 0) {
         return float3(0.0);
@@ -64,7 +65,7 @@ float3 hashed(uint2 value) {
     return 0.15 + 0.85 * float3(v >> 24u) / 255.0;
 }
 
-// The texel of an image `texels` across and down at the center of `pixel` of the view.
+// The texel of a `texels`-sized image at the center of the view's `pixel`.
 int3 texel_at(uint2 pixel, uint2 texels) {
     float2 at = (float2(pixel) + 0.5) * float2(texels) / float2(push.size);
     return int3(min(uint2(at), texels - 1), 0);
@@ -95,7 +96,7 @@ void show_main(uint3 pixel: SV_DispatchThreadID) {
         if (push.kind == MOTION) {
             shown = stored_as(value * 0.5 + 0.5);
         } else {
-            // No number shows as none, as common.slang's `finite` takes it.
+            // NaN shows as none, as in common.slang's `finite`.
             bool3 nan = (asuint(value) & 0x7FFFFFFF) > 0x7F800000;
             shown = clamp(select(nan, float3(0.0), value), 0.0, BRIGHTEST);
         }

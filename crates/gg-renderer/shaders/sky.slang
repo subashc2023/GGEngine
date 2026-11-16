@@ -1,7 +1,6 @@
-// The sky behind the world: each pixel of the view what the sky's equirectangular image holds the
-// way the pixel sees, times its luminance and the exposure, drawn before anything else at depth 0,
-// as far as depth goes, writing no ID. `Push` in src/sky.rs, which `Push` here matches field for
-// field.
+// The sky behind the world: each pixel the sky's equirectangular image the way it sees, times its
+// luminance and the exposure. Drawn first, at depth 0 (the farthest), writing no ID. `Push`
+// matches `Push` in src/sky.rs field for field.
 
 #include "common.slang"
 #include "equirect.slang"
@@ -10,13 +9,13 @@
 [[vk::binding(1, 0)]] SamplerState samplers[];
 
 struct Push {
-    // From clip space to the ways the view sees, as points whose way from the origin is the way:
-    // the inverse of the view's projection and rotation, without its translation, for perspective,
-    // and for an orthographic projection a matrix that takes every point to the one way it sees.
+    // From clip space to the ways the view sees, as points whose way from the origin is the way.
+    // With perspective, the inverse of the projection and rotation, without translation; for an
+    // orthographic projection, a matrix taking every point to its one way.
     float4x4 world_from_clip;
     // The sky's texture in the bindless set.
     uint sky;
-    // What its colors are multiplied by.
+    // Multiplies its colors.
     float scale;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
@@ -26,7 +25,7 @@ struct Varyings {
     float2 clip;
 };
 
-// A triangle over the whole viewport, from three vertices and no buffer, at depth 0.
+// A triangle over the viewport, from three vertices and no buffer, at depth 0.
 [shader("vertex")]
 Varyings vertex_main(uint index: SV_VulkanVertexID) {
     float2 corner = float2((index << 1) & 2, index & 2) * 2.0 - 1.0;
@@ -36,8 +35,8 @@ Varyings vertex_main(uint index: SV_VulkanVertexID) {
     return out;
 }
 
-// The color, no ID, and zeros at the motion's location, which the pipeline doesn't write, but
-// lavapipe may, as `GraphicsDesc::format` in gg-gpu says.
+// The color, no ID, and zero motion: the pipeline doesn't write motion, but lavapipe may, as
+// `GraphicsDesc::format` in gg-gpu says.
 struct Targets {
     float4 color : SV_Target0;
     uint2 id : SV_Target1;
@@ -46,7 +45,7 @@ struct Targets {
 
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
-    // The near plane, where reversed depth is 1, which perspective's inverse takes to a point.
+    // The near plane, reversed depth 1, which perspective's inverse takes to a point.
     float4 point = mul(push.world_from_clip, float4(input.clip, 1.0, 1.0));
     float3 way = normalize(point.xyz / point.w);
     Texture2D sky = textures[push.sky];

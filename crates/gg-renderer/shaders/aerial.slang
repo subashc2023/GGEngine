@@ -1,18 +1,15 @@
-// The aerial perspective, which shading.slang includes: the haze the atmosphere puts between the
-// viewer and what it lights, from the froxels atmosphere.slang's `aerial_main` writes, as the
-// reference's RenderRayMarchingPS samples its volume (github.com/sebh/UnrealEngineSkyAtmosphere,
-// MIT licensed, Copyright (c) 2020 Epic Games, Inc.).
+// Aerial perspective, included by shading.slang: the atmosphere's haze between the viewer and what
+// it lights, from the froxels atmosphere.slang's `aerial_main` writes, sampled as the reference's
+// RenderRayMarchingPS samples its volume (github.com/sebh/UnrealEngineSkyAtmosphere, MIT licensed,
+// Copyright (c) 2020 Epic Games, Inc.).
 
-// The froxels' slices, and how far each reaches: `SLICES` and `SLICE_KM` in atmosphere.slang, in
-// the world's units, meters.
+// The froxels' slices and each one's reach, in meters: `SLICES` and `SLICE_KM` in atmosphere.slang.
 static const float AERIAL_SLICES = 32.0;
 static const float AERIAL_SLICE = 4000.0;
 
-// `color`, a lit point's at `world`, as the view sees it through the atmosphere's haze: dimmed by
-// the transmittance from it and with the light scattered toward the viewer on the way added,
-// times the sun's illuminance and the exposure, from the froxels round it, between the two slices
-// round its distance and fading to none at the viewer within the first half slice; or as it is in
-// a frame without an atmosphere.
+// `color`, lit at `world`, seen through the haze: dimmed by the transmittance, plus the light
+// scattered toward the viewer times the sun's illuminance and the exposure. Blends the two slices
+// round its distance, fading to none within the first half slice. Unchanged without an atmosphere.
 float3 hazed(Frame frame, float3 world, float3 color) {
     Aerial aerial = frame.aerial;
     if (aerial.luminance <= 0.0) {
@@ -26,13 +23,12 @@ float3 hazed(Frame frame, float3 world, float3 color) {
         weight = saturate(slice * 2.0);
         slice = 0.5;
     }
-    // Between the slices' middles, which are as far through them as the square root of how far
-    // through their reach.
+    // Between the slices' middles, which go as the square root of the distance through their reach.
     float between = sqrt(slice / AERIAL_SLICES) * AERIAL_SLICES - 0.5;
     between = clamp(between, 0.0, AERIAL_SLICES - 1.0);
     float below = floor(between);
     float above = min(below + 1.0, AERIAL_SLICES - 1.0);
-    // Kept half a froxel in from a tile's sides, so that a sample reads its slice's alone.
+    // Half a froxel in from a tile's sides, so a sample reads its own slice alone.
     float across = clamp(uv.x * AERIAL_SLICES, 0.5, AERIAL_SLICES - 0.5);
     Texture2D froxels = textures[aerial.texture];
     SamplerState clamp_ = samplers[LINEAR_CLAMP];
