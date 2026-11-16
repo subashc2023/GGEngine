@@ -15,20 +15,20 @@ use super::{Game, Level};
 #[cfg(doc)]
 use gg_engine::{Event, InspectorLink, Layer};
 
-/// A `scene` request of the File menu's, and whether it's sent: once the Inspector has nothing
-/// waiting for the game, as [`InspectorLink::idle`] says, so that the game has its edits first.
+/// A File menu `scene` request, and whether it's sent: once the Inspector has nothing waiting for
+/// the game, as [`InspectorLink::idle`] says, so the game has its edits first.
 pub(super) struct Request {
     pub(super) scene: Scene,
     pub(super) sent: bool,
 }
 
-/// What asks whether to save the open scene's unsaved edits first: New and Open, which the game
-/// refuses while it has some, unless it's to discard them, and a close of the editor.
+/// What asks whether to save unsaved edits first: New and Open, which the game refuses while it
+/// has some unless they're to be discarded, and a close of the editor.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Action {
     New,
-    /// Opens the scene at this path, as the dialog picked it, which a prompt keeps, so that the
-    /// dialog doesn't show again.
+    /// Opens the scene at this path, as the dialog picked it, which a prompt keeps so the dialog
+    /// doesn't show again.
     Open(PathBuf),
     Close,
 }
@@ -56,18 +56,18 @@ impl Action {
 pub(super) enum Closing {
     /// None asked for, or the last cancelled.
     No,
-    /// Vetoed, until the answer to a status asked after it says whether the open scene has unsaved
+    /// Vetoed until the answer to a status asked after it says whether the scene has unsaved
     /// edits: `true` once that's asked.
     Checking(bool),
-    /// Vetoed, until the prompt is answered, or the save its Save chose is done.
+    /// Vetoed until the prompt is answered or the save its Save chose is done.
     Prompting,
     /// Granted: the UI asks the main window to close, and the close that makes goes ahead.
     Granted,
 }
 
 impl Game {
-    /// What the title bar says of the open scene, once a game has served: its file's name, or
-    /// Untitled, with a `*` after it while it has unsaved edits.
+    /// What the title bar says of the open scene once a game has served: its file's name, or
+    /// Untitled, then a `*` while it has unsaved edits.
     pub(super) fn scene_label(&self) -> Option<String> {
         let name = self.scene_name().unwrap_or("Untitled");
         let mark = if self.unsaved { "*" } else { "" };
@@ -80,20 +80,23 @@ impl Game {
         scene.rsplit('/').next()
     }
 
-    /// Whether the File menu's items on the open scene, their shortcuts and the Scenes panel do
-    /// anything: while a game serves, which needs a project, the hub doesn't show, and neither a
-    /// prompt, a request of theirs nor a close waits.
+    /// Whether the File menu's scene items, their shortcuts and the Scenes panel do anything: while
+    /// a game serves (which needs a project), the hub doesn't show, and no prompt, request of
+    /// theirs or close waits.
     pub(super) fn files(&self) -> bool {
         let waits = self.prompt.is_some() || self.request.is_some() || self.due.is_some();
         self.talker.is_some() && !waits && self.closing == Closing::No && !self.hub_shows()
     }
 
     /// Does what the File menu's `item` does, from [`Layer::ui`], as the menu, a shortcut or a
-    /// refusal chooses it: Open and Save As show the OS's dialog, which blocks the frame until it
-    /// closes, and then do as [`open`](Self::open) and [`save_as`](Self::save_as) do with the file
-    /// it picked; New prompts or asks the game, as [`act`](Self::act) says; and Save has the game
-    /// save the open scene to its file, or, without one, does as Save As does. A Save As cancelled
-    /// cancels what was to follow it.
+    /// refusal chooses it.
+    ///
+    /// - Open and Save As show the OS's dialog, which blocks the frame until it closes, then do as
+    ///   [`open`](Self::open) and [`save_as`](Self::save_as) do with the file it picked.
+    /// - New prompts or asks the game, as [`act`](Self::act) says.
+    /// - Save has the game save the open scene to its file, or, without one, does as Save As does.
+    ///
+    /// A Save As cancelled cancels what was to follow it.
     pub(super) fn choose(&mut self, cx: &mut Context, item: Item) {
         match item {
             Item::New => self.act(Action::New),
@@ -111,8 +114,8 @@ impl Game {
     }
 
     /// Shows the dialog that picks a scene to open, or, if `save`, a file to save the open scene
-    /// as, and returns its path, absolute, as the game takes it: one that shows scenes, in the open
-    /// scene's folder, or without its file, the project's first scene folder, and suggests its
+    /// as, and returns its absolute path, as the game takes it. It shows scenes, in the open
+    /// scene's folder or, without its file, the project's first scene folder, and suggests the
     /// file's name to save as.
     fn pick(&self, cx: &mut Context, save: bool) -> Option<PathBuf> {
         let folders = self.folders.as_ref()?;
@@ -138,8 +141,8 @@ impl Game {
     }
 
     /// Has the game save the open scene to `picked`, the file Save As's dialog picked, with `.ron`
-    /// after its name unless it ends in it, in any case, as the XDG portal's dialog may leave it. A
-    /// file there at the name with `.ron` after is one the dialog didn't ask about replacing, so it
+    /// added unless it ends in it, in any case, as the XDG portal's dialog may leave it. A file
+    /// there at the name with `.ron` added is one the dialog didn't ask about replacing, so it
     /// isn't replaced: the editor says so, `editor.scene_exists`, and what was to follow the save
     /// is cancelled.
     pub(super) fn save_as(&mut self, mut picked: PathBuf) {
@@ -169,8 +172,8 @@ impl Game {
         });
     }
 
-    /// Has the game save the open scene to its file, or, without one as the last status said, has
-    /// the next UI choose Save As.
+    /// Has the game save the open scene to its file, or, without one as the last status said,
+    /// has the next UI choose Save As.
     fn save(&mut self) {
         if self.scene.is_none() {
             self.due = Some(Item::SaveAs);
@@ -183,8 +186,8 @@ impl Game {
         });
     }
 
-    /// Does `action`, a New or an Open: prompts first, if the last status said the open scene has
-    /// unsaved edits; otherwise asks the game, which refuses if it has some by then.
+    /// Does `action`, a New or Open: prompts first if the last status said the scene has unsaved
+    /// edits; otherwise asks the game, which refuses if it has some by then.
     pub(super) fn act(&mut self, action: Action) {
         if self.unsaved {
             self.prompt = Some(action);
@@ -198,11 +201,12 @@ impl Game {
         self.request = Some(Request { scene, sent: false });
     }
 
-    /// Does what `choice` answers the prompt with, for what it asks about: Save saves the open
-    /// scene, or saves it as, then does it once the game has saved, a New or an Open again and a
-    /// close going ahead, but does nothing while no game serves; Don't Save does it, discarding the
-    /// unsaved edits, as a close going ahead does; Cancel does nothing, and a close, or a switch to
-    /// another project, goes back to none.
+    /// Does what `choice` answers the prompt with, for what it asks about.
+    ///
+    /// - Save saves the open scene, or saves it as, then does the action once the game has saved:
+    ///   a New or Open again, or a close going ahead. It does nothing while no game serves.
+    /// - Don't Save does the action, discarding the unsaved edits, as a close going ahead does.
+    /// - Cancel does nothing; a close, or a switch to another project, goes back to none.
     pub(super) fn answer(&mut self, choice: Choice) {
         let Some(action) = self.prompt.take() else {
             return;
@@ -235,11 +239,13 @@ impl Game {
         self.switching = None;
     }
 
-    /// Goes on from the File menu's request, `scene`, that the game did: from a New or an Open, to
-    /// the view through the game's camera, as the editor starts, until the editor's adopts where it
-    /// sees from, so that it frames the scene the game has now, rather than the one before, whose
-    /// grid goes too, as the user's turn would; but not while a Play or Simulate clicked since waits
-    /// for its answer, which turned the view itself; from a save, to what was to follow it.
+    /// Goes on from the File menu's request, `scene`, that the game did.
+    ///
+    /// - From a New or Open, the view goes through the game's camera, as the editor starts, until
+    ///   the editor's adopts where it sees from, so it frames the scene the game has now, not the
+    ///   last. The grid goes too, as the user's turn would. Not while a Play or Simulate clicked
+    ///   since waits for its answer, which turned the view itself.
+    /// - From a save, it goes on to what was to follow it.
     pub(super) fn scene_done(&mut self, scene: &Scene) {
         if scene.action != SceneAction::Save {
             let toolbar = &mut self.view.toolbar;
@@ -259,11 +265,13 @@ impl Game {
         }
     }
 
-    /// Goes on from the File menu's request, `scene`, that the game refused with `failure`: a New
-    /// or an Open refused for unsaved edits the last status didn't know of prompts, but while a
-    /// close goes on; a Save refused for an untitled scene has the next UI choose Save As, but
-    /// while a close goes on, unless it's the close prompt's own Save, the refusal logged alone;
-    /// any other refusal cancels what was to follow, and shows in a message.
+    /// Goes on from the File menu's request, `scene`, that the game refused with `failure`.
+    ///
+    /// - A New or Open refused for unsaved edits the last status didn't know of prompts, except
+    ///   while a close goes on.
+    /// - A Save refused for an untitled scene has the next UI choose Save As. While a close goes
+    ///   on, only the logged refusal remains, unless it's the close prompt's own Save.
+    /// - Any other refusal cancels what was to follow and shows in a message.
     pub(super) fn scene_refused(&mut self, scene: Scene, failure: Failure) {
         let action = match (scene.action, scene.path) {
             (SceneAction::New, _) => Action::New,
@@ -313,8 +321,8 @@ impl Game {
         self.cancel_then();
     }
 
-    /// What the prompt asks about `action`, and says of it: whether to save the open scene's
-    /// unsaved edits first.
+    /// The prompt's title and text for `action`: whether to save the open scene's unsaved edits
+    /// first.
     pub(super) fn asks(&self, action: &Action) -> (String, String) {
         let title = match self.scene_name() {
             Some(name) => format!("Save the edits to {name}?"),
@@ -339,16 +347,18 @@ impl Game {
     }
 
     /// Whether a close of the editor, by Quit or the window's close button, goes ahead, as
-    /// [`Event::CloseRequested`] asks: at once outside a project and before any game has served,
-    /// and once it's granted. Otherwise it's vetoed, `Break`, while the editor checks whether the
-    /// open scene has unsaved edits, asking the game for a status once the Inspector has nothing
-    /// waiting for it; granted if it has none, and prompted for if it has, a prompt for a New or an
-    /// Open giving way to it. While no game serves after one has, as `gg run` restarts it, waits
-    /// for a rebuild or the game crashed, only the last status answers: granted if it said none,
-    /// and otherwise prompted for without Save, which no game would do; and a close being checked,
-    /// or prompted for, as the game goes goes the same way. A close while the window is minimized
-    /// waits until it's restored, since no frames run meanwhile. A switch to another project goes
-    /// the same way, as [`switch_to`](Self::switch_to) says.
+    /// [`Event::CloseRequested`] asks.
+    ///
+    /// - At once outside a project, before any game has served, and once it's granted.
+    /// - Otherwise it's vetoed, `Break`, while the editor checks whether the open scene has unsaved
+    ///   edits, asking the game for a status once the Inspector has nothing waiting for it. It's
+    ///   granted if none, prompted for if some; a prompt for a New or Open gives way to it.
+    /// - While no game serves after one has (`gg run` restarts it, waits for a rebuild, or the game
+    ///   crashed), only the last status answers: granted if it said none, otherwise prompted for
+    ///   without Save, which no game would do. A close being checked or prompted for as the game
+    ///   goes goes the same way.
+    /// - A close while the window is minimized waits until it's restored: no frames run meanwhile.
+    /// - A switch to another project goes the same way, as [`switch_to`](Self::switch_to) says.
     pub(super) fn close(&mut self) -> ControlFlow<()> {
         match self.closing {
             Closing::Granted => return ControlFlow::Continue(()),
@@ -370,8 +380,8 @@ impl Game {
         }
     }
 
-    /// Settles a close by whether the open scene has unsaved edits, as the last status said: it's
-    /// prompted for if it has some, and granted otherwise.
+    /// Settles a close by whether the open scene has unsaved edits, as the last status said:
+    /// prompted for if so, granted otherwise.
     pub(super) fn settle_close(&mut self) {
         if self.unsaved {
             self.prompt = Some(Action::Close);
@@ -383,8 +393,8 @@ impl Game {
     }
 }
 
-/// `path`, relative, with `/` between its parts, as manifests and the API name files, joined to
-/// `dir` a part at a time, so that its separators are the OS's.
+/// `path`, relative with `/` between its parts, as manifests and the API name files, joined to
+/// `dir` a part at a time, so its separators are the OS's.
 fn under(dir: &Path, path: &str) -> PathBuf {
     path.split('/')
         .fold(dir.to_owned(), |under, part| under.join(part))

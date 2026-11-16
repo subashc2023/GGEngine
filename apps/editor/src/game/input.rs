@@ -13,12 +13,14 @@ use super::{Game, Grab, Probing, along, picked};
 
 impl Game {
     /// Does what `event` does, which the view got, as the editor reads the window, `reading`, with
-    /// the view at `view`: in Play, it goes to the game, in the view's pixels, and to the view's
-    /// tools only if it lets go of what's held, so that no click picks, and no wheel or button
-    /// turns the view to the editor's camera; otherwise the tools take it, the game getting
-    /// nothing, and a press off the handles asks the game for a pick. In every mode, neither gets
-    /// a key of the File menu's shortcuts, the key at N, O or S's position, as [`shortcuts_key`]
-    /// says. `Break` for what the tools took.
+    /// the view at `view`. `Break` for what the tools took.
+    ///
+    /// - In Play, it goes to the game, in the view's pixels, and to the view's tools only if it
+    ///   lets go of what's held, so no click picks and no wheel or button turns the view to the
+    ///   editor's camera.
+    /// - Otherwise the tools take it, the game gets nothing, and a press off the handles asks the
+    ///   game for a pick.
+    /// - In every mode, neither gets a File menu shortcut's key, as [`shortcuts_key`] says.
     pub(super) fn route(
         &mut self,
         event: &Event<'_>,
@@ -27,9 +29,9 @@ impl Game {
     ) -> ControlFlow<()> {
         let origin = view.map_or([0, 0], |view| view.origin);
         let through = self.through();
-        // Escape lets go of the cursor grabbed for the game, whatever the game does with it, as a
-        // game may not let go itself, and ends Play's capture; a press in the view grabs it again,
-        // if the game asks. The game gets both, as its own window would give them.
+        // Escape lets go of the cursor, whatever the game does with it (a game may not let go
+        // itself), and ends Play's capture; a press in the view grabs it again if the game asks.
+        // The game gets both, as its own window would give them.
         let escape = matches!(
             *event,
             Event::Key {
@@ -61,11 +63,11 @@ impl Game {
             self.queue(input);
         }
         if let Some((at, toggles)) = self.view.picking.take() {
-            // Within the active pick's model, so that a click on a model picked goes into it.
+            // Within the active pick's model, so a click on a picked model goes into it.
             self.view.asked = self.ask_pick(at, origin, self.view.link.picked());
             self.view.toggles = toggles;
         }
-        // Escape closes the Probe tool's numbers, and a probe asked shows its own in their place.
+        // Escape closes the Probe tool's numbers; a new probe shows its own instead.
         if escape {
             self.probing = None;
         }
@@ -86,8 +88,8 @@ impl Game {
     }
 
     /// Tells the game the view's input started or stopped going to it, as
-    /// [`through`](Self::through) says, if it did since it was last told: as it stops, the game
-    /// loses the focus, letting go of what's held; as it starts, it gets the cursor, at `cursor`,
+    /// [`through`](Self::through) says, if it did since it was last told. As it stops, the game
+    /// loses the focus, letting go of what's held. As it starts, it gets the cursor, at `cursor`
     /// in the main window's pixels, if it's over the view, at `view`.
     pub(super) fn tell(&mut self, cursor: Option<[f64; 2]>, view: Option<Viewport>) {
         let through = self.through();
@@ -107,12 +109,10 @@ impl Game {
         }
     }
 
-    /// Queues `input` for the game's next `input`, a move of the cursor taking the place of one
-    /// queued just before it, and the mouse's raw motion adding to the motion queued just before
-    /// it: so that while an `input` waits for its answer, as while a script has stopped the game,
-    /// what's queued grows with presses, as a key's, rather than with every move of the mouse. The
-    /// game gets what's queued then in one frame, as a game's window gets what its OS queued while
-    /// its frames waited.
+    /// Queues `input` for the game's next `input`. A cursor move replaces one queued just before,
+    /// and raw motion adds to the motion just before, so while an `input` awaits its answer, as
+    /// while a script stopped the game, the queue grows with presses alone. The game then gets it
+    /// in one frame, as a window gets what its OS queued while its frames waited.
     fn queue(&mut self, input: InputEvent) {
         match (self.input.last_mut(), input) {
             (Some(InputEvent::Cursor(last)), InputEvent::Cursor(at)) => *last = at,
@@ -125,10 +125,10 @@ impl Game {
     }
 }
 
-/// Whether `event` is a press, or a repeat, of a key of the File menu's shortcuts in
-/// [`SHORTCUTS`], the key at N, O or S's position, whatever the layout calls it, as the menu matches
-/// it, with `command` held, Ctrl, or Cmd on macOS, which the menu takes from egui: neither the game
-/// nor the view's tools get it. Its release does, which changes nothing without its press.
+/// Whether `event` is a press, or a repeat, of a File menu key in [`SHORTCUTS`] (matched by
+/// position, whatever the layout calls it) with `command` held, Ctrl or Cmd on macOS, which the
+/// menu takes from egui: neither the game nor the view's tools get it. Its release does, which
+/// changes nothing without its press.
 fn shortcuts_key(event: &Event<'_>, command: bool) -> bool {
     let Event::Key {
         key, pressed: true, ..
@@ -155,9 +155,9 @@ pub(super) fn in_view(at: [f64; 2], origin: [u32; 2]) -> [f64; 2] {
     [at[0] - f64::from(origin[0]), at[1] - f64::from(origin[1])]
 }
 
-/// The event of the tool API's `input` that the game gets for `event`, which the view got, the
-/// cursor's position taken from the main window's pixels to the view's, whose top left is at
-/// `origin`; `None` for what the game reads itself, or doesn't get.
+/// The event of the tool API's `input` that the game gets for `event`, with the cursor's position
+/// taken from the main window's pixels to the view's, whose top left is at `origin`; `None` for
+/// what the game reads itself, or doesn't get.
 pub(super) fn forwarded(event: &Event<'_>, origin: [u32; 2]) -> Option<InputEvent> {
     let event = match *event {
         Event::Key {

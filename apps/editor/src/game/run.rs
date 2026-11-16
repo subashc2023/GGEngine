@@ -18,34 +18,34 @@ use crate::look::Part;
 use super::{Action, CLIENT, Closing, Game, Level};
 
 /// How long the connection to the game waits to connect. It waits for each answer as long as it
-/// takes: a script stopped in the game holds the answers for as long as it's debugged, and `gg run`
-/// ends a game that hangs, which closes the connection.
+/// takes: a script stopped in the game holds answers while it's debugged, and `gg run` ends a game
+/// that hangs, which closes the connection.
 const CONNECT: Duration = Duration::from_secs(10);
 
 /// How long each `logs` that follows the game's events waits for them to come, in milliseconds.
 const FOLLOWING_MS: u64 = 1_000;
 
-/// How long the connection that follows the game's events waits for each answer: well past the
-/// time each `logs` waits.
+/// How long the connection that follows the game's events waits for each answer: well past
+/// [`FOLLOWING_MS`].
 const FOLLOWING: Duration = Duration::from_secs(30);
 
 /// How long the editor, as it ends, waits for `gg run` to end the game and itself.
 pub(super) const ENDING: Duration = Duration::from_secs(15);
 
-/// How often the editor asks the game how it runs, `status`, which another client, such as an
-/// agent, may change: the title bar lags such a change by as much.
+/// How often the editor asks the game how it runs, `status`, which another client may change: the
+/// title bar lags such a change by as much.
 pub(super) const STATUS_EVERY: Duration = Duration::from_millis(250);
 
-/// A line `gg run` printed: on stdout, its events; on stderr, its errors, and what the game and the
+/// A line `gg run` printed: on stdout, its events; on stderr, its errors and what the game and the
 /// build print.
 pub(super) enum Line {
     Out(String),
     Err(String),
 }
 
-/// How the run goes, as the title bar says, but `Running`, while a game serves, for which it says
-/// how the game runs, as [`Game::label`] has it. A build says where it has come to once `gg run`
-/// does, as [`progress`] puts it.
+/// How the run goes, as the title bar says. For `Running` it says how the game runs instead, as
+/// [`Game::label`] has it. A build says where it has come to once `gg run` does, as [`progress`]
+/// puts it.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum RunState {
     Building(Option<String>),
@@ -58,10 +58,9 @@ pub(super) enum RunState {
 }
 
 impl Game {
-    /// Starts gg with [`gg_run`]'s arguments in the project's directory, once, with threads
-    /// that read what it prints, saying why if it can't start it; but nothing outside a project,
-    /// and while the run of the project open before in the same directory goes on ending, it waits,
-    /// each update starting it again, until that has ended.
+    /// Starts gg with [`gg_run`]'s arguments in the project's directory, once, with threads that
+    /// read what it prints, saying why if it can't. Does nothing outside a project. While the
+    /// earlier run in the same directory goes on ending, it waits, each update starting it again.
     pub(super) fn start(&mut self) {
         let Some(dir) = &self.dir else {
             return;
@@ -100,8 +99,8 @@ impl Game {
         self.run = Some((child, stdin));
     }
 
-    /// Takes what `gg run` printed since: its events, which say how the run goes, and connect the
-    /// editor to each game that serves; its errors; and what else it printed; and its end.
+    /// Takes what `gg run` printed since: its events, which say how the run goes and connect the
+    /// editor to each game that serves; its errors; the rest; and its end.
     pub(super) fn take_lines(&mut self) {
         while let Ok(line) = self.lines.try_recv() {
             match line {
@@ -197,12 +196,11 @@ impl Game {
         }
     }
 
-    /// Lets go of the connection to the game, which has gone, of the input it didn't get, of the
-    /// picks it didn't answer, a drop's among them, of its look and of how it ran, which the next
-    /// to serve answers anew; and the Inspector, of its world. The File menu's request goes,
-    /// unanswered, with what was to follow it, and a prompt for New or Open; a close being checked
-    /// or prompted for goes by the last status, as [`close`](Self::close) says of one while no game
-    /// serves.
+    /// Lets go of the connection to the game, which has gone, and of what the next game to serve
+    /// answers anew: the input it didn't get, the picks it didn't answer (a drop's among them), its
+    /// look, how it ran, and the Inspector's world. The File menu's request goes unanswered, with
+    /// what was to follow it and a prompt for New or Open. A close being checked or prompted for
+    /// goes by the last status, as [`close`](Self::close) says of one while no game serves.
     pub(super) fn disconnect(&mut self) {
         self.request = None;
         self.then = None;
@@ -231,8 +229,7 @@ impl Game {
         self.polled = None;
     }
 
-    /// Connects to the game that `serving`, `gg run`'s event, says serves, in place of the one
-    /// before, which has ended.
+    /// Connects to the game `serving`, `gg run`'s event, says serves, in place of the one before.
     fn serve(&mut self, serving: &Value) {
         let session = serving["session"].as_str().map(Path::new).and_then(|file| {
             let text = std::fs::read(file).ok()?;
@@ -250,8 +247,8 @@ impl Game {
         self.debugger.serve(session.clone());
         self.talker = Some(Talker::connect(session));
         self.served = true;
-        // The game before's memory, which this one makes anew; the view shows its last frame
-        // until this one's first.
+        // The last game's memory; this one makes its own. The view shows the last frame until
+        // this one's first.
         self.reader = None;
         self.asked = None;
         self.refused = false;
@@ -259,12 +256,14 @@ impl Game {
         self.run_state = RunState::Running;
     }
 
-    /// Takes the game's answers since: to `view`, which puts the memory it asked for in place of
-    /// the one before; to `status`, `play`, `stop`, `pause`, `resume`, `step` and `scene`, which
-    /// say how it runs, as [`take_status`](Self::take_status) takes it, a `scene` going on as
-    /// [`scene_done`](Self::scene_done) says, and a status asked after a close settling it; to
-    /// `look`, what the editor takes of which it takes; and errors, which it logs, a `scene`'s as
-    /// [`scene_refused`](Self::scene_refused) says.
+    /// Takes the game's answers since:
+    ///
+    /// - `view` puts the memory it asked for in place of the last.
+    /// - `status`, `play`, `stop`, `pause`, `resume`, `step` and `scene` say how it runs, as
+    ///   [`take_status`](Self::take_status) takes it. A `scene` goes on as
+    ///   [`scene_done`](Self::scene_done) says, and a status asked after a close settles it.
+    /// - `look` is taken for what the editor takes of it.
+    /// - Errors are logged, a `scene`'s as [`scene_refused`](Self::scene_refused) says.
     pub(super) fn take_answers(&mut self) {
         let Some(talker) = &self.talker else {
             return;
@@ -338,12 +337,12 @@ impl Game {
                     if method == "look" {
                         self.looking.failed();
                     }
-                    // As an older game, which doesn't know `images`, refuses it.
+                    // An older game doesn't know `images` and refuses it.
                     if method == "images" {
                         let Failure { code, message } = &failure;
                         self.view.toolbar.images_refused = Some(format!("[{code}] {message}"));
                     }
-                    // What the File menu goes on from, rather than refusals to show.
+                    // The File menu goes on from these; they're no refusals to show.
                     let goes_on =
                         matches!(failure.code.as_str(), "scene.unsaved" | "scene.untitled");
                     let level = if scene.is_some() && goes_on {
@@ -364,22 +363,26 @@ impl Game {
                     }
                 }
             }
-            // The answer to the status asked after a close, statuses being asked one at a time:
-            // what it says, as `take_status` took it, or, failed, what the last said.
+            // The answer to the status asked after a close, asked one at a time: what it says, or,
+            // failed, what the last said.
             if method == "status" && self.closing == Closing::Checking(true) {
                 self.settle_close();
             }
         }
     }
 
-    /// Takes `status`, how the game runs as it answered: whether it's paused, whether it's
-    /// stopped, and its open scene's file, and whether it has unsaved edits. As it stops, at the
-    /// editor's Stop, another client's `stop`, or a New or Open of the File menu's that stopped a
-    /// copy playing, the input meant for it that wasn't sent goes, but its letting go, and the view
-    /// turns to the editor's camera, if it was through the game's, whose viewpoint goes to the game
-    /// with the grid, as the user's turn would, a New or an Open turning it back to the game's, as
-    /// [`scene_done`](Self::scene_done) says; but neither while a Play or Simulate clicked since
-    /// waits for its answer, the input then going to the copy it plays.
+    /// Takes `status`, how the game runs as it answered: whether it's paused or stopped, its open
+    /// scene's file, and whether it has unsaved edits.
+    ///
+    /// As it stops (at the editor's Stop, another client's `stop`, or a File menu New or Open that
+    /// stopped a copy playing):
+    ///
+    /// - The unsent input meant for it goes, but its letting go.
+    /// - The view turns to the editor's camera, if it was through the game's, whose viewpoint goes
+    ///   to the game with the grid, as the user's turn would. A New or Open turns it back to the
+    ///   game's, as [`scene_done`](Self::scene_done) says.
+    /// - Neither happens while a Play or Simulate clicked since waits for its answer; the input
+    ///   then goes to the copy it plays.
     fn take_status(&mut self, status: &Status) {
         self.paused = status.paused;
         self.scene.clone_from(&status.scene);
@@ -402,15 +405,15 @@ impl Game {
     }
 }
 
-/// What the editor gives gg to run its game: `run`, optimized if `release`, embedded, the game
-/// starting stopped.
+/// What the editor gives gg to run its game: `run`, optimized if `release`, embedded, starting
+/// stopped.
 pub(super) fn gg_run(release: bool) -> Vec<&'static str> {
     let optimized: &[&str] = if release { &["--release"] } else { &[] };
     [&["run"], optimized, &["--embedded", "--", "--stopped"]].concat()
 }
 
-/// Reads `from` a line at a time on a thread of its own, until it ends, sending each to `send` as
-/// `line` makes it one.
+/// Reads `from` a line at a time on its own thread until it ends, sending each to `send` as `line`
+/// makes it.
 fn read_lines(from: impl Read + Send + 'static, send: Sender<Line>, line: fn(String) -> Line) {
     thread::spawn(move || {
         for text in BufReader::new(from).lines() {
@@ -424,8 +427,8 @@ fn read_lines(from: impl Read + Send + 'static, send: Sender<Line>, line: fn(Str
     });
 }
 
-/// The fields of an event of the game's JSON log that aren't shown among its other fields: where
-/// and when it was logged, and those shown before them.
+/// The fields of an event of the game's JSON log not shown among its other fields: where and when
+/// it was logged, and those shown before them.
 pub(super) const PLACES: [&str; 9] = [
     "timestamp",
     "level",
@@ -438,9 +441,9 @@ pub(super) const PLACES: [&str; 9] = [
     "threadName",
 ];
 
-/// What `gg run`'s `building` event `event` says the build has come to, for the title bar: as it
-/// compiles, how many of the crates dx counts on it has compiled, as `212 of 530 crates`; else its
-/// stage, as `linking`.
+/// What `gg run`'s `building` event says the build has come to, for the title bar: while
+/// compiling, the crates dx counts compiled, as `212 of 530 crates`; else its stage, as
+/// `linking`.
 fn progress(event: &Value) -> String {
     match (event["compiled"].as_u64(), event["crates"].as_u64()) {
         (Some(compiled), Some(crates)) => format!("{compiled} of {crates} crates"),
@@ -452,8 +455,8 @@ fn progress(event: &Value) -> String {
 }
 
 /// Follows the log of the game `session` names on a connection of its own, as the editor, sending
-/// `send` each `logs`'s events, from the oldest the game keeps, as each comes, until the game ends
-/// or the editor lets go of it, `send`'s receiver dropping: each `logs` sends, events or none.
+/// `send` each `logs`'s events as it comes, from the oldest the game keeps, until the game ends or
+/// the editor lets go (`send`'s receiver dropping). Each `logs` sends, events or none.
 fn follow(session: &Session, send: &Sender<Vec<Value>>) {
     let connected = Client::connect(session, CLIENT, CONNECT)
         .and_then(|mut client| client.set_timeout(Some(FOLLOWING)).map(|()| client));
@@ -472,9 +475,9 @@ fn follow(session: &Session, send: &Sender<Vec<Value>>) {
 }
 
 /// Asks the game `session` names, on a connection of its own, as the editor, for the entity its
-/// view shows at each pixel `asks` gives, within the model of the entity it gives, if any, as
-/// [`gg_api::Pick::within`] says, with its ticket, in turn, sending `send` each answer with the
-/// ticket, or why there's none, until the editor lets go of the game, `asks`' sender dropping.
+/// view shows at each pixel `asks` gives, in turn, within the model of the entity given, if any,
+/// as [`gg_api::Pick::within`] says. Sends `send` each answer with its ticket, or why there's
+/// none, until the editor lets go (`asks`' sender dropping).
 fn pick(
     session: &Session,
     asks: Receiver<(u64, [f64; 2], Option<EntityId>)>,
@@ -495,9 +498,9 @@ fn pick(
 }
 
 /// Asks the game `session` names, on a connection of its own, as the editor, what shading took and
-/// made at each pixel of its view `asks` gives, with its ticket, in turn, as `gg probe` does, the
-/// view as the look shows it, sending `send` each answer with the ticket, or why there's none,
-/// until the editor lets go of the game, `asks`' sender dropping.
+/// made at each pixel of its view `asks` gives, in turn, as `gg probe` does, the view as the look
+/// shows it. Sends `send` each answer with its ticket, or why there's none, until the editor lets
+/// go (`asks`' sender dropping).
 fn probe(
     session: &Session,
     asks: Receiver<(u64, [f64; 2])>,
@@ -518,12 +521,14 @@ fn probe(
     }
 }
 
-/// Connections to the game, each on a thread of its own, so that no frame waits for the game's
-/// answer: one that requests go to in order, their answers coming back in order; one that follows
-/// the game's log, as [`follow`] does, whose events come back as they're read, each read's
-/// together; one that picks go to, as [`pick`] does, each of which waits for a frame to read it,
-/// their answers coming back in order, with their tickets; and one that probes go to, as [`probe`]
-/// does, likewise, each of which waits for a frame for each of its captures.
+/// Connections to the game, each on its own thread so no frame waits for an answer:
+///
+/// - Requests go in order; answers come back in order.
+/// - One follows the game's log, as [`follow`] does; events come back as they're read, each
+///   read's together.
+/// - Picks go to one, as [`pick`] does; each waits for a frame to read it, and answers come back
+///   in order with their tickets.
+/// - Probes go to one, as [`probe`] does, likewise; each waits for a frame for each capture.
 pub(super) struct Talker {
     pub(super) asks: Sender<(String, Value)>,
     pub(super) answers: Receiver<(String, Result<Value, Failure>)>,
@@ -586,7 +591,7 @@ impl Talker {
     }
 
     /// Asks for the entity the game's view shows at `at`, in its pixels from its top left, within
-    /// the model of `within`, if it's given, whose answer comes back in `picked` with `ticket`.
+    /// the model of `within`; the answer comes back in `picked` with `ticket`.
     pub(super) fn pick(&self, ticket: u64, at: [f64; 2], within: Option<EntityId>) {
         let _ = self.picks.send((ticket, at, within));
     }

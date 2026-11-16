@@ -17,10 +17,9 @@ use super::{Game, Level, picked};
 /// How many frames the measures of the view's frames keep, from the last; 68 s at 240 fps.
 const MEASURED: usize = 16_384;
 
-/// What the parts of the look the editor wants go by, which between updates only the user changes:
-/// whether the game's camera drives the view, what the editor's camera sees from, what the
-/// Inspector has picked, and the toolbar's grid, its plane, the colliders' switch, what the view
-/// shows and the passes it leaves out.
+/// What the editor's wanted parts of the look go by, which between updates only the user changes:
+/// the camera in charge, the editor's viewpoint, the picks, and the toolbar's grid, plane,
+/// colliders, shown image and skipped passes.
 #[derive(Clone, PartialEq)]
 pub(super) struct Wants {
     pub(super) through: bool,
@@ -34,10 +33,9 @@ pub(super) struct Wants {
 }
 
 impl Game {
-    /// Has the game render its view at `size`, the Viewport's in pixels: in the memory it's shared
-    /// through, if it fits there, or else in memory made for it, a bit larger, so that a drag that
-    /// grows the view makes few, which a `view` asks the game to share it through, once the last
-    /// asked is answered.
+    /// Has the game render its view at `size`, the Viewport's in pixels: in the shared memory if it
+    /// fits, or else in new memory a bit larger, so that a drag that grows the view makes few,
+    /// which a `view` asks the game to share it through once the last asked is answered.
     pub(super) fn fit(&mut self, size: [u32; 2]) {
         let Some(talker) = &self.talker else {
             return;
@@ -63,12 +61,14 @@ impl Game {
         }
     }
 
-    /// Takes the parts of the look that `taken` sets, as another client set them: a viewpoint the
-    /// editor's camera adopts, driving the view, and `null` turns the view back to the game's
-    /// camera, either turn taking the grid with it, as the user's does, unless another client set
-    /// the grid; an outline's entities the Inspector picks, and `null` unpicks; and the grid and the
-    /// colliders set the toolbar's switches, and the grid its plane; and what the view shows and
-    /// the passes it leaves out set the toolbar's choices.
+    /// Takes the parts of the look `taken` sets, as another client set them:
+    ///
+    /// - A viewpoint the editor's camera adopts, driving the view; `null` turns the view back to
+    ///   the game's camera. Either turn takes the grid with it, as the user's does, unless another
+    ///   client set the grid.
+    /// - An outline's entities the Inspector picks; `null` unpicks.
+    /// - The grid and the colliders set the toolbar's switches, and the grid its plane.
+    /// - What the view shows and the passes it leaves out set the toolbar's choices.
     pub(super) fn take_look(&mut self, taken: gg_api::Look) {
         let toolbar = &mut self.view.toolbar;
         let through = toolbar.world_camera;
@@ -106,11 +106,13 @@ impl Game {
         }
     }
 
-    /// Shows the game's latest frame, if one came since: what it was drawn from is what the handles
-    /// are hit against, while it projects, and the editor's camera adopts it while the game's
-    /// drives the view, in Edit turning the view to the editor's camera, if the game's turned only
-    /// for that, once a frame drew through the game's; and the look it drew with may have changed
-    /// since the editor last read it.
+    /// Shows the game's latest frame, if one came since.
+    ///
+    /// - What it was drawn from is what the handles are hit against, while it projects.
+    /// - The editor's camera adopts it while the game's drives the view. In Edit, if the game's
+    ///   turned only for that, the view turns to the editor's camera once a frame drew through the
+    ///   game's.
+    /// - The look it drew with may have changed since the editor last read it.
     pub(super) fn take_frame(&mut self, cx: &mut Context) {
         // Another turn of the view's ends the adoption.
         self.adopting &= self.view.toolbar.world_camera;
@@ -141,8 +143,8 @@ impl Game {
     }
 
     /// Where the view shows the game's last frame, in the main window's pixels, with the view at
-    /// `view`: from its top left, as large as the frame. What the editor's camera and the handles
-    /// read as the view.
+    /// `view`: from its top left, as large as the frame. The editor's camera and the handles read
+    /// it as the view.
     pub(super) fn screen(&self, view: Option<Viewport>) -> Option<Viewport> {
         let (view, size) = view.zip(self.size)?;
         Some(Viewport {
@@ -151,22 +153,24 @@ impl Game {
         })
     }
 
-    /// Tells the look which of its parts the user changed since the last update, as what the parts
-    /// the editor wants go by changed since, to `now`: the viewpoint, as the editor's camera moved
-    /// while it drives the view, by its input, an ease or flying, or the view turned, to the
-    /// editor's camera or back to the game's; the outline, as the picks changed, but to what the
-    /// Inspector made of the picks the look's outline asked for, its entities, or none for IDs a
-    /// read of the game has found gone; the grid, as the view turned, or the toolbar's grid or its
-    /// plane changed; the colliders, as their switch did; and what the view shows and the passes it
-    /// leaves out, as the toolbar's choices did.
+    /// Tells the look which of its parts the user changed since the last update, as what the
+    /// wanted parts go by changed to `now`:
+    ///
+    /// - The viewpoint: the editor's camera moved while it drives the view (input, an ease or
+    ///   flying), or the view turned to the editor's camera or back to the game's.
+    /// - The outline: the picks changed, but to what the Inspector made of the picks the look's
+    ///   outline asked for, its entities, or none for IDs a read of the game has found gone.
+    /// - The grid: the view turned, or the toolbar's grid or plane changed.
+    /// - The colliders, what the view shows and the passes it leaves out: the toolbar's choices
+    ///   changed.
     pub(super) fn changes(&mut self, now: Wants) {
         let was = self.wants.clone();
         let turned = now.through != was.through;
         if turned || (!now.through && now.viewpoint != was.viewpoint) {
             self.looking.change(Part::Viewpoint);
         }
-        // A pick of the user's in the Inspector's pass that made the outline's is theirs; an
-        // unpick of theirs there passes for the outline's.
+        // A user's pick in the Inspector's pass that made the outline's is theirs; their unpick
+        // there passes for the outline's.
         let took = self.took_pick.take();
         let taken = took.is_some_and(|asked| now.picks == asked || now.picks.is_empty());
         if now.picks != was.picks && !taken {
@@ -187,8 +191,7 @@ impl Game {
     }
 
     /// Frames what the Entities panel asked to frame, as the view's F does, once the link places
-    /// every pick: the active one, as the panel picks what it frames, and the others; or drops the
-    /// ask as the active pick changes.
+    /// every pick; drops the ask as the active pick changes.
     pub(super) fn frame_asked(&mut self) {
         let link = &self.view.link;
         if let Some(asked) = link.framed() {
@@ -205,12 +208,14 @@ impl Game {
         }
     }
 
-    /// What the editor wants of the game's look, with the window at `scale` pixels a point: the
-    /// editor's camera's viewpoint while it drives the view; every entity the Inspector has picked
-    /// outlined; the
-    /// toolbar's grid, while it's on and the editor's camera drives; the colliders' outlines while
-    /// their switch is on, or else whether the game shows them; what the toolbar has the view show,
-    /// or else its light; and the passes the toolbar has it leave out, if any.
+    /// What the editor wants of the game's look, with the window at `scale` pixels a point:
+    ///
+    /// - The editor's camera's viewpoint, while it drives the view.
+    /// - Every entity the Inspector has picked, outlined.
+    /// - The toolbar's grid, while it's on and the editor's camera drives.
+    /// - The colliders' outlines while their switch is on, or else whatever the game does.
+    /// - What the toolbar has the view show, or else its light.
+    /// - The passes the toolbar has it leave out, if any.
     pub(super) fn wanted(&self, scale: f32) -> Parts {
         let ViewTools {
             camera,
@@ -236,7 +241,7 @@ impl Game {
     }
 }
 
-/// What the parts of the look the editor wants go by, as `view`, the view's tools, has them.
+/// What the wanted parts of the look go by, as `view`'s tools have them.
 pub(super) fn wants<T, F>(view: &ViewTools<T, F>) -> Wants {
     Wants {
         through: view.toolbar.world_camera,
@@ -268,9 +273,9 @@ fn engine_plane(given: gg_api::Plane) -> Plane {
     }
 }
 
-/// What the editor measures of the view's frames, as it shows them: each frame's age, from when
+/// What the editor measures of the last [`MEASURED`] frames it shows: each one's age, from when
 /// the game's frame that rendered it started to when the editor took it, and how long copying it
-/// out of the memory took, of the last [`MEASURED`] frames; and the size of the last.
+/// out of the memory took; and the size of the last.
 #[derive(Default)]
 pub(super) struct Measures {
     frames: u64,
@@ -299,8 +304,8 @@ impl Measures {
         self.size = size;
     }
 
-    /// Logs them, `editor.view`, as the editor ends, in milliseconds: their median, 95th and 99th
-    /// percentiles, by nearest rank, and maximum.
+    /// Logs them, `editor.view`, as the editor ends, in milliseconds: median, 95th and 99th
+    /// percentiles by nearest rank, and maximum.
     pub(super) fn report(&self) {
         if self.frames == 0 {
             return;

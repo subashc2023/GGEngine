@@ -13,8 +13,8 @@ use super::{Closing, Game, Level};
 use gg_engine::Layer;
 
 /// The project's folders, as its manifest names them: its asset root, which the open scene's file
-/// is named from, and its scene folders, where the dialogs start without an open scene's file; and
-/// its start scene.
+/// is named from; its scene folders, where the dialogs start without an open scene's file; and its
+/// start scene.
 pub(super) struct Folders {
     pub(super) root: PathBuf,
     pub(super) scenes: Vec<PathBuf>,
@@ -22,18 +22,17 @@ pub(super) struct Folders {
 }
 
 impl Game {
-    /// Whether the hub shows over the panels: while no project is open, and from the File menu's
-    /// Open Project until it's gone back from, or another project opens.
+    /// Whether the hub shows over the panels: while no project is open, and from Open Project until
+    /// it's gone back from or another project opens.
     pub(super) fn hub_shows(&self) -> bool {
         self.dir.is_none() || self.hub.asked
     }
 
-    /// Opens the project in `dir`, as the hub picked it, in place of the one open: at once while
+    /// Opens the project in `dir`, as the hub picked it, in place of the one open. At once while
     /// no game has served; otherwise as a close of the editor goes, as [`close`](Self::close)
-    /// says, the prompt asking whether to save the open scene's unsaved edits before the project
-    /// opens, and the switch going, as [`switch`](Self::switch) does, once the close is granted.
-    /// The project open itself opens nothing, the hub giving way to it; and none opens while a
-    /// close is under way.
+    /// says: the prompt asks whether to save unsaved edits first, and the switch goes, as
+    /// [`switch`](Self::switch) does, once the close is granted. The project open itself opens
+    /// nothing, the hub giving way to it. None opens while a close is under way.
     pub(super) fn switch_to(&mut self, dir: PathBuf) {
         if self
             .dir
@@ -52,12 +51,15 @@ impl Game {
         }
     }
 
-    /// Opens the project in `dir` in place of the one open, if one is: lets go of its game, closing
-    /// its run's stdin, which ends it, the run going on ending meanwhile; logs what was measured of
-    /// its view, and empties the view, which would show its game's last frame until the new game's
-    /// first, as a restart's does, through the new project's build; and makes the layer the new
-    /// project's, as it starts but for the hub, the Logs, the runs ending and where the toolbar is,
-    /// noting the project opened, and starting its run, as [`start`](Self::start) does.
+    /// Opens the project in `dir` in place of the one open, if one is.
+    ///
+    /// - Lets go of its game, closing its run's stdin, which ends it; the run goes on ending
+    ///   meanwhile.
+    /// - Logs what was measured of its view, and empties the view, which would show its game's
+    ///   last frame until the new game's first, through the new project's build.
+    /// - Makes the layer the new project's, as it starts but for the hub, the Logs, the runs
+    ///   ending and where the toolbar is; notes the project opened; and starts its run, as
+    ///   [`start`](Self::start) does.
     pub(super) fn switch(&mut self, cx: &mut Context, dir: PathBuf) {
         self.disconnect();
         if let Some((child, stdin)) = self.run.take() {
@@ -85,8 +87,8 @@ impl Game {
     }
 
     /// Picks a project's manifest with the OS's dialog, from [`Layer::ui`], and opens its project,
-    /// as [`switch_to`](Self::switch_to) does; the hub says why if the folder it's in isn't a
-    /// project's, or its manifest doesn't read.
+    /// as [`switch_to`](Self::switch_to) does. The hub says why if its folder isn't a project's or
+    /// the manifest doesn't read.
     pub(super) fn browse(&mut self, cx: &mut Context) {
         let games = self.hub_games();
         let picked = cx.pick_file(&FileDialog {
@@ -114,8 +116,8 @@ impl Game {
         }
     }
 
-    /// Picks the folder the hub's New Project makes its game in with the OS's dialog, from
-    /// [`Layer::ui`], starting in `start`, and has the form make it there.
+    /// Picks the folder for the hub's New Project with the OS's dialog, from [`Layer::ui`],
+    /// starting in `start`, and has the form make it there.
     pub(super) fn pick_folder(&mut self, cx: &mut Context, start: Option<&Path>) {
         let picked = cx.pick_file(&FileDialog {
             title: "Choose the folder to make the project in",
@@ -129,15 +131,15 @@ impl Game {
         }
     }
 
-    /// The folder Open's dialog starts in: the open project's parent, or else the workspace's games.
+    /// The folder Open's dialog starts in: the open project's parent, else the workspace's games.
     fn hub_games(&self) -> Option<PathBuf> {
         let parent = self.dir.as_deref().and_then(Path::parent);
         parent.map(Path::to_owned).or_else(|| self.hub.games())
     }
 }
 
-/// The folders of the project in directory `dir`, as its manifest names them; or if the manifest
-/// doesn't read, which `gg run` says why of, `dir` as the asset root, and no scene folders.
+/// The folders of the project in `dir`, as its manifest names them. If the manifest doesn't read
+/// (`gg run` says why), `dir` is the asset root, with no scene folders.
 pub(super) fn folders(dir: &Path) -> Folders {
     match gg_api::Project::read(dir) {
         Ok(project) => Folders {

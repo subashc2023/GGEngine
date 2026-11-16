@@ -11,17 +11,16 @@ use super::{Game, PLACES};
 /// The most lines the Logs panel keeps, past which the oldest go.
 pub(super) const LOGGED: usize = 5000;
 
-/// A line of the Logs panel, which shows each of its text's lines, between its newlines, as a row.
+/// A line of the Logs panel, shown as a row for each line of its text.
 pub(super) struct Logged {
     pub(super) level: Level,
     pub(super) text: String,
-    /// The row its first line has among those logged since the editor started, so that the panel
-    /// finds the rows it shows without laying out the rest, as [`show_logs`] does.
+    /// The row its first line has among those logged since the editor started, so [`show_logs`]
+    /// finds the rows it shows without laying out the rest.
     line: usize,
 }
 
-/// How a line of the Logs panel shows: `Debug` for the game's debug and trace events, which
-/// recede.
+/// How a line shows: `Debug`, for the game's debug and trace events, recedes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Level {
     Debug,
@@ -39,8 +38,8 @@ impl Game {
         self.logs.push_back(Logged { level, text, line });
     }
 
-    /// Takes the game's events logged since, each a line of the Logs panel, as [`logged`] makes it,
-    /// but `gg run`'s notes of a patch or a rebuild that failed, which its own events show.
+    /// Takes the game's events logged since, each a line as [`logged`] makes it, but not `gg run`'s
+    /// notes of a failed patch or rebuild, which its own events show.
     pub(super) fn take_logged(&mut self) {
         let Some(talker) = &self.talker else {
             return;
@@ -59,9 +58,9 @@ impl Game {
     }
 }
 
-/// The Logs panel's line for `event`, an event of the game's JSON log, as the console shows it but
-/// for where and when it was logged: `[code] message  name=value ...`, a string among the fields
-/// quoted if it's empty or has spaces; at its level, `Debug` for a debug or trace event.
+/// The line for `event`, an event of the game's JSON log, as the console shows it but for where
+/// and when it was logged: `[code] message  name=value ...`, a string field quoted if it's empty
+/// or has spaces. Its level is `Debug` for a debug or trace event.
 fn logged(event: &Value) -> (Level, String) {
     let level = match event["level"].as_str() {
         Some("ERROR") => Level::Error,
@@ -92,10 +91,9 @@ fn logged(event: &Value) -> (Level, String) {
     (level, text)
 }
 
-/// Shows the Logs panel's lines, `logs`, in `ui`: a row to each line of their text, unwrapped, as
-/// rustc renders its errors, the newest showing while the panel's scrolled to the bottom. It lays
-/// out only the rows in view: laying out all the [`LOGGED`] the panel keeps took 5 ms a frame in a
-/// debug build, its egui optimized.
+/// Shows `logs` in `ui`: a row to each line of their text, unwrapped, as rustc renders its errors,
+/// the newest showing while scrolled to the bottom. Lays out only the rows in view: all the
+/// [`LOGGED`] took 5 ms a frame in a debug build, its egui optimized.
 pub(super) fn show_logs(ui: &mut egui::Ui, logs: &VecDeque<Logged>) {
     let first = logs.front().map_or(0, |logged| logged.line);
     let rows = (logs.back()).map_or(0, |last| last.line + last.text.split('\n').count() - first);

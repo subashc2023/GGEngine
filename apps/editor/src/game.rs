@@ -1,100 +1,123 @@
-//! The game of the project the editor is started in, run as an agent runs it: under `gg run
-//! --embedded` in the project's directory, wherever it is, with the gg of the engine the editor
-//! is built from, as [`crate::gg`] has it, which builds it, patches it as its code changes and
-//! restarts it after any other change, and which ends, with the game, as the editor ends,
-//! closing its stdin; or, given `--release-game`, under `gg run --release --embedded`, which builds
-//! it optimized, without patches. The game starts stopped, as `--stopped` has it: its world is the
-//! world as edited, which only edits, scene files' saves and the File menu's New and Open change,
-//! until Play. It renders offscreen for the editor, which shows its view in the Viewport from
-//! memory the two share, as the tool API's `view` asks. The Entities and Inspector panels show the
-//! game's world, and edit it, through the API, as a remote [`Inspector`] does; the Logs panel
-//! shows `gg run`'s events, the build's errors among them, the game's events as it logs them,
-//! which the tool API's `logs` follows, and what the game and the build print; the Assets panel,
-//! the files in the project's asset root; the [Debugger](crate::debugger) panel, its scripts; and
-//! the title bar, how the run goes, or while a game serves, whether it's stopped, playing or
-//! simulating, and whether it's paused, as the game answers the editor's requests and the `status`
-//! it asks for every quarter second, which catches another client's, or that it waits at a
-//! script's stop, as the Debugger panel learns; with the controls [`overlay::show_run`] draws:
-//! Play, which pauses and resumes the game while it plays, Simulate, Stop and Step.
+//! The editor's game layer: the project's game, run as an agent runs it, and every panel, menu and
+//! control. The keys are in [`SHORTCUTS`](crate::shortcuts::SHORTCUTS).
 //!
-//! Started outside a project, the editor shows the [`hub`] over its panels, where a
-//! project is picked, unless it's to open the latest as it starts; and the File menu's Open Project
-//! shows it over the project open, which its Back goes back to. A project picked there opens in
-//! place of the one open as a close of the editor goes, asking whether to save the open scene's
-//! unsaved edits first: the run of the one open ends, going on ending as the new project's starts,
-//! but in the same project, which waits for it, and the panels show the new project's, the view
-//! empty until its game's first frame.
+//! # The run
 //!
-//! Play has a copy of the world as edited play in its place, as the API's `play` does, the view
-//! seeing through the game's own camera, which gets all the input the view gets, the view's tools
-//! only what lets go of what they hold; Simulate plays it the same, through the editor's camera,
-//! the game getting no input. Simulate, while the game plays, switches between the two, carrying
-//! on, moving the camera and the input over, the game letting go of what's held as the input
-//! leaves it, as the toolbar's camera switch does while the game plays. Play from stopped plays a
-//! game paused since before its stop in real time, as Play plays; while it plays, Play is Pause,
-//! and while it's paused, Resume. Step, while it's paused, runs a tick, and while it's stopped
-//! plays it paused first, through the camera the view shows. Stop stops the input at once, and
-//! brings back the world as edited, as `stop` does, with its edits' history, the view going to the
-//! editor's camera, as it does at any client's `stop` that no Play clicked since follows. Stopped,
-//! the camera switch has the view show what the game's camera sees, as it does at first and as a
-//! New or an Open opens a scene, the input staying the editor's, until the editor's camera takes
-//! some, which turns the view to it. Play and Simulate are Unreal's Play and Simulate In Editor,
-//! and a switch between them its Possess and Eject.
+//! - `gg run --embedded` in the project's directory, by the gg of the editor's engine
+//!   ([`crate::gg`]): it builds the game, patches in code edits, and restarts after other changes.
+//!   With `--release-game`, `gg run --release --embedded`: optimized, without patches.
+//! - The editor closes `gg run`'s stdin as it ends, which ends the run.
+//! - The game starts stopped (`--stopped`). Until Play, only edits, scene saves and File > New and
+//!   Open change its world, the world as edited.
+//! - It renders offscreen. The Viewport shows its view from memory they share, as the tool API's
+//!   `view` asks.
 //!
-//! A game that asks for the cursor grabbed, for looking about with the mouse, as the view's memory
-//! says it does, has the editor grab its own window's in Play while the view has the keys, the
-//! mouse's raw motion going to the game; Escape lets go of it, whatever the game does with the key,
-//! which it gets, as a game may not let go itself, and a press in the view grabs it again;
-//! Simulate and Stop let go. Play, and Resume in Play, capture the view's input for any game: they
-//! give the view the keys, which their click in the title bar took, and grab the cursor, which the
-//! engine moves onto the view, until Escape, after which a press in the view grabs it again only for
-//! a game that asks. In Play, an outline round the view says while it has the keys, which go to the
-//! game. The editor's camera grabs the cursor too, while it looks about, orbits or dollies, as
-//! [`camera`](crate::camera) says.
+//! # Panels and the title bar
 //!
-//! Through the editor's camera, the handles show. A click in the view, but in Play, picks what the
-//! game's view shows there alone, as the API's `pick` finds it, which the panels show picked, and
-//! with Ctrl (Cmd on macOS) or Shift held adds it to what's picked, or takes it out: of a model,
-//! its root, but while the root or one of its nodes is the entity picked last, the node there, so
-//! that a second click goes into a model. The handles, at the entity picked last, move, turn and
-//! scale it, and the others picked with it by the same change, each about its own origin, but
-//! those under another picked, whose drag carries them, through the Inspector's link, each drag
-//! one edit of the editor's, which its Edit menu undoes; none show while one they'd move is a
-//! model's node, which the game refuses to change. F frames them all; and the view's bottom left
-//! names what's under the cursor, as a click there would pick.
-//! Move's and Rotate's go along the entity's own axes or the world's, as the toolbar's space switch
-//! says, which X flips; Scale's are always the entity's own.
-//! The toolbar's Probe tool reads what shading took and made at the pixel clicked, through gg-api's
-//! [`probe`](gg_api::probe), as `gg probe` does, pausing a playing game for its captures, and shows
-//! the numbers beside the pixel until Escape, another probe or another tool.
-//! The title bar's settings switch on the game's frame rate and the editor's at the view's bottom
-//! right, as [`rates`](crate::rates) says.
-//! The editor's camera, the outline round what's picked, the grid, the colliders' switch, what the
-//! toolbar has the view show in place of its light, and the passes its Passes list leaves out, to
-//! narrow down which one makes what the view shows, reach the game as parts of its look, as
-//! [`look`](crate::look) says: each as the user changes it, the editor taking the parts another
-//! client, such as an agent, sets. The list of what the view shows lists, after the parts of
-//! shading, the images the game's frame makes, as the API's `images` answers them as it opens.
+//! - Entities and Inspector show and edit the game's world through the API, as a remote
+//!   [`Inspector`].
+//! - Logs: `gg run`'s events, build errors among them; the game's events, as the API's `logs`
+//!   follows them; and what the game and the build print.
+//! - Assets: the asset root's files. [Scenes](crate::scenes). [Debugger](crate::debugger): the
+//!   scripts.
+//! - The title bar shows how the run goes, and while a game serves, whether it's stopped, playing
+//!   or simulating, and paused. It learns that from the game's answers and a `status` every quarter
+//!   second, which catches other clients' changes and a wait at a script's stop.
+//! - Its middle holds Play, Simulate, Stop and Step ([`overlay::show_run`]).
 //!
-//! A texture, a model, a font or a prefab dragged from the Assets panel outlines the view while it's
-//! held over it, and is let go there as an edit of the editor's, through the Inspector's link,
-//! which names it by its asset ID: a texture sets the texture of the sprite the game's view shows
-//! there, as the API's `pick` finds it, and a font the font of the text there, which the panels
-//! show picked, and whose refusal, as of an entity without a sprite or a text, the Inspector shows;
-//! a model is a root, named after its file, where the cursor shows the grid's plane, as
-//! [`landing`](Game::landing) says, and a prefab an instance's root there, linked, which the game
-//! spawns the prefab's entities under; each of which the panels show picked.
+//! # The hub
 //!
-//! The File menu acts on the game's open scene through the API's `scene`, never reading or writing
-//! a scene file itself: New empties it, Open opens a scene the OS's dialog picks in its place, as a
-//! click in the [Scenes](crate::scenes) panel opens one, and Save and Save As save the world as
-//! edited to its file, or to one the dialog picks, which is then its file; each request, and a
-//! close's status, sent once the Inspector has nothing waiting for the game, so that the game has
-//! its edits first. The title bar names the open scene's file,
-//! marked while the game says it has unsaved edits, which New, Open, Quit and the window's close
-//! button ask whether to save first, discard or keep, cancelling; a close asks the game for a
-//! status first, while one serves, and otherwise goes by the last. A refusal shows in a message,
-//! and in the Logs.
+//! - Started outside a project, the editor shows the [`hub`] over its panels, unless it opens the
+//!   latest at start. File > Open Project shows it over the open project; Back returns.
+//! - A project picked replaces the open one as a close does, asking first to save unsaved edits.
+//!   The old run goes on ending as the new one starts; in the same project, the new one waits for
+//!   it. The view is empty until the new game's first frame.
+//!
+//! # Play, Simulate and Stop
+//!
+//! They're Unreal's Play and Simulate In Editor; switching between them is its Possess and Eject.
+//!
+//! - Play plays a copy of the world as edited in its place, as the API's `play` does, through the
+//!   game's camera. The game gets all the view's input; the view's tools get only what lets go of
+//!   what they hold.
+//! - Simulate plays it through the editor's camera; the game gets no input.
+//! - While the game plays, Simulate and the toolbar's camera switch swap the two, carrying on: the
+//!   camera and the input move over, the game letting go of what's held.
+//! - Play from stopped plays a game paused before its stop in real time. Playing, Play is Pause;
+//!   paused, Resume.
+//! - Step runs a tick while paused. Stopped, it first plays the game paused, through the camera the
+//!   view shows.
+//! - Stop ends the input at once and brings back the world as edited with its edits' history, as
+//!   `stop` does. The view goes to the editor's camera, as at any client's `stop` that no Play
+//!   clicked since follows.
+//! - Stopped, the camera switch shows the game's camera, as at start and after a New or an Open.
+//!   The input stays the editor's; the view turns to the editor's camera once that takes some.
+//!
+//! # The cursor and the keys
+//!
+//! - In Play, a game that asks for the cursor grabbed, as the view's memory says, has the editor
+//!   grab it while the view has the keys. The mouse's raw motion goes to the game.
+//! - Escape lets go, though the game still gets the key: a game may not let go itself. A press in
+//!   the view grabs again. Simulate and Stop let go.
+//! - Play, and Resume in Play, capture the view's input for any game: the view gets the keys their
+//!   click took, and the cursor is grabbed, the engine moving it onto the view, until Escape. After
+//!   that, a press grabs again only for a game that asks.
+//! - In Play, an outline round the view says it has the keys.
+//! - The editor's camera grabs the cursor while it looks about, orbits or dollies
+//!   ([`camera`](crate::camera)).
+//!
+//! # Picking and handles
+//!
+//! - A click in the view, but in Play, picks what the game's view shows there, as the API's `pick`
+//!   finds it. With Ctrl (Cmd on macOS) or Shift, it adds it to what's picked, or takes it out.
+//! - A click on a model picks its root. While the root or one of its nodes was picked last, it
+//!   picks the node there, so a second click goes into a model.
+//! - Through the editor's camera, the [handles](crate::handles) at the entity picked last move,
+//!   turn and scale all those picked, each about its own origin; one under another picked is
+//!   carried by its drag. Move's and Rotate's go along the toolbar's space; Scale's along the
+//!   entity's own axes.
+//! - A drag is one edit, through the Inspector's link, which its Edit menu undoes. No handles show
+//!   while one they'd move is a model's node, which the game refuses to change.
+//! - The view's bottom left names what's under the cursor.
+//! - Probe reads what shading took and made at the pixel clicked, through [`probe`](gg_api::probe),
+//!   as `gg probe` does, pausing a playing game for its captures. The numbers show beside the pixel
+//!   until Escape, another probe or another tool.
+//!
+//! # The look and frame rates
+//!
+//! - The editor's camera, the pick's outline, the grid, the colliders' switch, what the view shows
+//!   in place of its light, and the passes left out go to the game as parts of its
+//!   [`look`](crate::look) as the user changes them. The editor takes the parts another client,
+//!   such as an agent, sets.
+//! - The view's list shows, after shading's parts, the images the game's frame makes, as the API's
+//!   `images` answers as the list opens.
+//! - The title bar's settings show frame rates at the view's bottom right
+//!   ([`rates`](crate::rates)).
+//!
+//! # Drag and drop
+//!
+//! A texture, model, font or prefab dragged from Assets outlines the view while it's over it. Let
+//! go there, it's an edit through the Inspector's link, by asset ID, and the panels show the result
+//! picked.
+//!
+//! - A texture sets the texture of the sprite there, as `pick` finds it; a font, the font of the
+//!   text there. The Inspector shows a refusal, as for an entity without one.
+//! - A model is a root named after its file, where the cursor shows the grid's plane
+//!   ([`landing`](Game::landing)).
+//! - A prefab is a linked instance's root there; the game spawns its entities under it.
+//!
+//! # The File menu
+//!
+//! - It acts on the game's open scene through the API's `scene`, never touching a scene file
+//!   itself. Each request, and a close's status, goes once the Inspector has nothing waiting, so
+//!   the game has the edits first.
+//! - New empties the scene. Open opens one the OS's dialog picks, as a click in Scenes does. Save
+//!   and Save As save the world as edited to its file, or to one the dialog picks, which becomes
+//!   its file.
+//! - The title bar names the open scene's file, marked while the game says it has unsaved edits.
+//!   New, Open, Quit and the window's close then ask whether to save, discard, or cancel. A close
+//!   asks the game for a status first while one serves, and otherwise goes by the last.
+//! - A refusal shows in a message and in the Logs.
 
 mod controls;
 mod frames;
@@ -143,13 +166,9 @@ use project::{Folders, folders};
 use run::{ENDING, Line, PLACES, RunState, STATUS_EVERY, Talker};
 use scene::{Action, Closing, Request};
 
-/// The editor of the project in directory `dir`, if it's started in one, and otherwise of the one
-/// the hub picks, the hub finding projects in `workspace`, the engine's, if it runs in one: in a
-/// window 1920 by 1080 points as it opens, the game's view in the Viewport, its entities left of
-/// it, above its scenes, the one picked right of it, above the Performance panel, and the Logs
-/// below it, the Assets and the Debugger among their tabs; the sides wide enough, at that size,
-/// for the Inspector's vectors and the Entities panel's header. Its game is built optimized if
-/// `release`.
+/// The editor of project `dir`, or else of the one the hub picks, finding projects in `workspace`,
+/// the engine's, if it runs in one. Its game is optimized if `release`. The side panels' widths fit
+/// the Inspector's vectors and the Entities header in a 1920 by 1080 point window.
 pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>, release: bool) -> App {
     let app = App::new("Editor")
         .custom_title_bar()
@@ -173,58 +192,45 @@ pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>, release: boo
 /// The client the editor is to the game, the author of its edits.
 const CLIENT: &str = "editor";
 
-/// The editor's layer: the `gg run` of the project's game, the connection to the game that serves,
-/// the memory its view is shared through, how the game runs, and what the Logs, Assets and Scenes
-/// panels and the title bar show; the game's open scene, what the File menu asks of it, and how far
-/// a close has got; the view's tools, the picks they ask of the game and the look they keep with
-/// it; and the hub, with the runs of the projects it switched from that are ending.
+/// The editor's layer: the project's `gg run`, its connection to the game, and everything the
+/// panels, title bar and File menu show of both.
 struct Game {
-    /// The project's directory, while one's open: the one it was started in, or the hub opened.
     dir: Option<PathBuf>,
-    /// Whether `gg run` builds the game optimized, as the editor's `--release-game` asks.
     release: bool,
     /// `gg run`, until it ends, with its stdin, which the editor closes as it ends.
     run: Option<(Child, ChildStdin)>,
-    /// The `gg run`s of the projects open before, each with its project's directory, which go on
-    /// ending once their stdins are closed, until they've ended; and whether this project's waits
-    /// to start until the one in its directory has, as [`start`](Self::start) says.
+    /// The `gg run`s of earlier projects, each with its directory, until they've ended.
     ending: Vec<(PathBuf, Child)>,
+    /// Whether this project's run waits to start until the one in its directory has ended, as
+    /// [`start`](Self::start) says.
     waiting: bool,
     hub: Hub,
-    /// The project a close under way opens in place of the one open, rather than closing the
-    /// editor, as [`switch_to`](Self::switch_to) says.
+    /// The project a close under way opens instead of closing the editor, as
+    /// [`switch_to`](Self::switch_to) says.
     switching: Option<PathBuf>,
-    /// What `gg run` prints, a line at a time.
     lines: Receiver<Line>,
-    /// What the threads reading `gg run`'s output send `lines`, until the run starts.
+    /// The sender the threads reading `gg run`'s output share, until the run starts.
     send: Option<Sender<Line>>,
-    /// The connections to the game that serves, each on a thread of its own.
     talker: Option<Talker>,
-    /// The view's tools, whose link is the Inspector's, which shows the world of the game that
-    /// serves; each pick's ticket the next of the editor's count, `tickets`, and what one finds the
-    /// entity the game's view showed.
+    /// The view's tools, whose link is the Inspector's. Each pick's ticket is the next of
+    /// `tickets`.
     view: ViewTools<u64, Found>,
     tickets: u64,
-    /// The ticket of the pick at the cursor that waits for its answer, if one does: one at a time.
+    /// The ticket of the pick at the cursor that waits for its answer: one at a time.
     hovering: Option<u64>,
-    /// The texture or font let go over the view whose pick waits for its answer, if one does: the
-    /// latest.
+    /// The latest texture or font let go over the view whose pick waits for its answer.
     dropping: Option<Dropping>,
-    /// The Probe tool's last probe, whose numbers show beside its pixel until Escape, another
-    /// probe, or another tool: its ticket, the next of `tickets`; its pixel, in the main window's
-    /// pixels; and its answer, once it's come.
+    /// The Probe tool's last probe, shown until Escape, another probe or another tool.
     probing: Option<Probing>,
     /// The answers to picks that came back since the last update, each with its ticket.
     answered: Vec<(u64, Option<Found>)>,
-    /// The game's look, as the editor keeps it.
     looking: Looking,
     /// What the editor's wanted parts of the look went by as the last update left them, and the
-    /// picks that update asked the Inspector for as the look's outline, if it asked for them: none
-    /// unpicks.
+    /// picks that update asked the Inspector for as the look's outline: none unpicks.
     wants: Wants,
     took_pick: Option<Vec<EntityId>>,
-    /// The entity the Entities panel asked to frame in the view, while the link doesn't place it
-    /// yet, as it doesn't a pick just made until a read of it comes.
+    /// The entity the Entities panel asked to frame, while the link doesn't place it yet, as it
+    /// doesn't a pick just made until a read of it comes.
     framing: Option<EntityId>,
     /// Whether the view's input went to the game as the game was last told, as
     /// [`through`](Self::through) says: as it stops, the game lets go of what's held, and as it
@@ -234,27 +240,25 @@ struct Game {
     /// if that projects.
     size: Option<[u32; 2]>,
     seen: Option<Viewpoint>,
-    /// Whether the view sees through the game's camera only for the editor's camera to adopt where
-    /// it sees from, as the editor starts and as a New or an Open is done, so that the view frames
-    /// the scene the game has: in Edit, the first frame that drew through it turns the view to the
-    /// editor's camera, which shows the handles and the grid. Any other turn of the view, and a
-    /// Play or Simulate, end it.
+    /// Whether the view sees through the game's camera only for the editor's to adopt its
+    /// viewpoint, at start and after a New or an Open, so the view frames the game's scene. In
+    /// Edit, the first frame drawn through it turns the view to the editor's camera. Any other turn
+    /// of the view, or a Play or Simulate, ends it.
     adopting: bool,
     /// The memory the game's view is shared through, and memory a `view` asked the game to share it
-    /// through instead, until the game answers; and whether the game refused a `view`, after which
-    /// the editor asks for none until another game serves.
+    /// through instead, until the game answers.
     reader: Option<Reader>,
     asked: Option<Reader>,
+    /// Whether the game refused a `view`: the editor asks for none until another game serves.
     refused: bool,
-    /// The input the view got for the game, since the last `input` sent, and whether that's still
+    /// The input the view got for the game since the last `input` sent, and whether that's still
     /// to be answered: one at a time, as the game answers one a frame.
     input: Vec<InputEvent>,
     inputting: bool,
-    /// The cursor's grab for the game, in Play, as Escape and Play have it.
     grab: Grab,
     run_state: RunState,
-    /// Whether the game's simulation is paused, and whether the game is stopped, as it last
-    /// answered: stopped until a game that serves answers, so that nothing goes to it before.
+    /// As the game last answered: stopped until a game that serves answers, so that nothing goes
+    /// to it before.
     paused: bool,
     stopped: bool,
     /// Whether the editor's Stop waits for the game's answer, whatever it is: until it comes, the
@@ -268,17 +272,15 @@ struct Game {
     statusing: bool,
     polled: Option<Instant>,
     logs: VecDeque<Logged>,
-    /// The Assets panel, at the project's asset root, the Scenes panel, of its scenes folders, and
-    /// the project's folders; none outside a project.
+    /// None outside a project.
     assets: Option<Assets>,
     scenes: Option<Scenes>,
     folders: Option<Folders>,
-    /// The Debugger panel, of the scripts of the game that serves.
     debugger: Debugger,
     /// Whether a game has served since the editor started, from when a close asks whether to save.
     served: bool,
-    /// The open scene's file, as the asset root names it, `None` while it's untitled, and whether
-    /// it has unsaved edits, as the game last answered: kept while no game serves, as `gg run`
+    /// The open scene's file, as the asset root names it (`None` while untitled), and whether it
+    /// has unsaved edits, as the game last answered. Kept while no game serves, as `gg run`
     /// restarts it.
     scene: Option<String>,
     unsaved: bool,
@@ -288,10 +290,10 @@ struct Game {
     cells: Option<gg_api::WorldCells>,
     /// The File menu's `scene` request, until the game answers it.
     request: Option<Request>,
-    /// What the prompt asks whether to save the open scene's unsaved edits before, while it shows;
-    /// what the save its Save chose goes on to once the game has saved them; and the File menu's
-    /// item that the next UI chooses, as Save As for a Save the game refused for an untitled
-    /// scene, since its dialog shows from the UI.
+    /// What the prompt asks whether to save unsaved edits before, while it shows; what the save
+    /// its Save chose goes on to once the game has saved them; and the File menu's item that the
+    /// next UI chooses, as Save As for a Save the game refused for an untitled scene, since its
+    /// dialog shows from the UI.
     prompt: Option<Action>,
     then: Option<Action>,
     due: Option<Item>,
@@ -299,7 +301,6 @@ struct Game {
     /// Why the game, or the editor, refused the File menu's last request, until it's dismissed.
     message: Option<Message>,
     measures: Measures,
-    /// The game's frame rate and the editor's, which the view shows while the settings say.
     rates: Rates,
 }
 
@@ -310,17 +311,16 @@ enum Grab {
     /// Grabbed as the game asks, as the view's memory says.
     Asks,
     /// Play captured the view's input for the game, the cursor grabbed whether or not the game
-    /// asks: from a click of Play, or of Resume in Play, until Escape, or the view's input stopping
-    /// going to the game, but while a Play clicked waits for the game's answer.
+    /// asks: from a click of Play, or of Resume in Play, until Escape or the input stopping going
+    /// to the game, but while a Play clicked waits for the game's answer.
     Captured,
-    /// Escape let go of the cursor grabbed for the game, until a press in the view.
+    /// Escape let go of the cursor, until a press in the view.
     Escaped,
 }
 
 impl Game {
-    /// The layer of the project in directory `dir`, or of none, through the game's camera until
-    /// the editor's adopts where it sees from, whose tools pick and edit through `inspector`, the
-    /// Inspector's link.
+    /// The layer of the project in directory `dir`, or of none, seeing through the game's camera
+    /// until the editor's adopts where it sees from. Its tools pick and edit through `inspector`.
     fn new(dir: Option<PathBuf>, inspector: InspectorLink) -> Self {
         let (send, lines) = mpsc::channel();
         let toolbar = Toolbar {
@@ -397,9 +397,8 @@ impl Game {
 }
 
 impl Layer for Game {
-    /// Reads the projects the hub keeps, and where the toolbar was, and opens the project the
-    /// editor was started in, noting it, or else the latest opened, if the hub's to skip to it; or,
-    /// with neither, opens none, the hub showing.
+    /// Reads the hub's projects and the toolbar's state, then opens the project the editor was
+    /// started in, or else the latest if the hub skips to it, or none, the hub showing.
     fn attach(&mut self, cx: &mut Context) {
         self.hub.read(cx);
         self.view.toolbar.read(cx);
@@ -419,7 +418,7 @@ impl Layer for Game {
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
-        // The runs of the projects open before, which may hold up this project's.
+        // Earlier projects' runs may hold up this one's.
         (self.ending).retain_mut(|(_, child)| matches!(child.try_wait(), Ok(None)));
         if self.waiting {
             self.start();
@@ -427,8 +426,8 @@ impl Layer for Game {
         // Before `gg run`'s lines, which may say the game has gone, letting go of what it logged.
         self.take_logged();
         self.take_lines();
-        // What the user changed since the last update, before what the game answered changes it,
-        // and before the camera settles, which changes nothing the view shows.
+        // The user's changes, before the game's answers change them and before the camera
+        // settles, which changes nothing the view shows.
         self.view.camera.update(dt);
         self.frame_asked();
         self.changes(wants(&self.view));
@@ -440,9 +439,8 @@ impl Layer for Game {
         if let Some(view) = cx.view() {
             self.fit(view.size);
         }
-        // The game's grab, as it asks or Play captured the view's input for it, in Play alone, a
-        // Stop or Simulate ending what Escape and Play did too, but while a Play clicked waits for
-        // its answer; and the editor's camera's, while it looks about, orbits or dollies.
+        // The game's grab, in Play alone: Stop or Simulate end what Escape and Play did, but not
+        // while a Play clicked waits for its answer. Also the editor's camera's grab.
         let through = self.through();
         self.grab = match self.grab {
             Grab::Escaped if !through => Grab::Asks,
@@ -462,7 +460,7 @@ impl Layer for Game {
                 talker.ask("look", json!(look));
             }
         }
-        // The images the game's frame makes, for the list of what the view shows, as it opens.
+        // The images the game's frame makes, as the list of what the view shows opens.
         if mem::take(&mut self.view.toolbar.ask_images)
             && let Some(talker) = &self.talker
         {
@@ -477,16 +475,16 @@ impl Layer for Game {
             self.inputting = true;
         }
         // After the look and the input: the game starts its next frame as the editor takes this
-        // one, and draws it with what came before. Sent after the take, a camera moving steadily
-        // showed the viewpoint of the frame before in a third of the game's frames, and twice the
+        // one, and draws it with what came before. Sent after the take, a steadily moving camera
+        // showed the previous frame's viewpoint in a third of the game's frames, and twice the
         // step in the next.
         self.take_frame(cx);
         let published = self.reader.as_ref().map(Reader::published);
         self.rates.see(Instant::now(), published);
         let driving = !self.view.toolbar.world_camera;
         self.view.shown = self.seen.filter(|_| driving);
-        // The File menu's request, and a close's status, once the game has answered the Inspector's
-        // edits, which go on a connection of their own: so that the game has them first.
+        // The File menu's request and a close's status wait for the game to answer the Inspector's
+        // edits, which go on a connection of their own, so that the game has them first.
         let idle = self.view.link.idle();
         if let Some(talker) = &self.talker
             && let Some(request) = &mut self.request
@@ -505,7 +503,7 @@ impl Layer for Game {
                     .is_none_or(|asked| asked.elapsed() >= STATUS_EVERY))
         {
             talker.ask("status", Value::Null);
-            // With the status, a world's cells, for the Scenes panel.
+            // The world's cells, for the Scenes panel.
             if self.streams {
                 talker.ask("cells", Value::Null);
             }
@@ -517,9 +515,8 @@ impl Layer for Game {
         }
     }
 
-    /// Has the view's tools see what the view gets, or in Play the game, as [`route`](Game::route)
-    /// says; and vetoes a close of the editor until it's granted, as [`close`](Game::close) says, a
-    /// switch to another project under way becoming the close.
+    /// Routes events as [`route`](Game::route) says, and vetoes a close of the editor until it's
+    /// granted, as [`close`](Game::close) says. A switch under way becomes the close.
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         if *event == Event::CloseRequested {
             self.switching = None;
@@ -557,7 +554,7 @@ impl Layer for Game {
             self.hub.asked = true;
         }
         self.rates.settings(ui, cx);
-        // The hub, over the panels, which go on showing the project open, if one is, behind it.
+        // The hub, over the panels, which go on showing the open project behind it.
         if self.hub_shows() {
             let current = self.dir.clone();
             let hub = &mut self.hub;
@@ -570,9 +567,8 @@ impl Layer for Game {
             }
             self.hub.save(cx);
         }
-        // The shortcuts, whichever panel of the main window has the keys. What's chosen is done
-        // once the menu is drawn, since Open and Save As show a dialog, which takes the context
-        // and blocks the frame.
+        // The shortcuts, whichever panel has the keys. What's chosen is done once the menu is
+        // drawn: Open and Save As show a dialog, which takes the context and blocks the frame.
         let pressed = ui
             .egui()
             .input_mut(|input| file::shortcut(&mut input.events));
@@ -594,7 +590,7 @@ impl Layer for Game {
             (scene, tip)
         });
         let (paused, serves) = (self.paused, self.talker.is_some());
-        // None over the hub, where the bar shows the editor's title.
+        // None over the hub, where the bar shows the title.
         let bar = !self.hub_shows();
         let title_bar = |ui: &mut egui::Ui| {
             if let Some((scene, tip)) = scene {
@@ -607,12 +603,12 @@ impl Layer for Game {
         let clicked = bar.then(|| ui.title_bar(title_bar)).flatten();
         if let Some(clicked) = clicked.flatten() {
             self.click(clicked);
-            // A capture gives the view the keys, which the click's press, off the view, took.
+            // The click's press, off the view, took the keys a capture gives the view.
             if self.grab == Grab::Captured {
                 ui.focus_view();
             }
         }
-        // A click on a scene, once the menus' choices are done, as a New of the File menu.
+        // A click on a scene, after the menus' choices, as a File menu New.
         let (open, unsaved, enabled) = (self.scene.clone(), self.unsaved, self.files());
         let (scenes, cells) = (&mut self.scenes, self.cells.as_ref());
         let mut chosen = None;
@@ -639,8 +635,8 @@ impl Layer for Game {
         });
         let debugger = &mut self.debugger;
         ui.panel("Debugger", |ui| debugger.show(ui));
-        // What's held over the view counts as over it, as egui's hover doesn't while another
-        // widget drags, so that the corner names what would take it.
+        // What's held over the view counts as over it, unlike egui's hover while another widget
+        // drags, so that the corner names what would take it.
         let view = ui.view();
         let held = self.talker.is_some()
             && (view.as_ref()).is_some_and(|view| view.dnd_hover_payload::<Dragged>().is_some());
@@ -649,8 +645,8 @@ impl Layer for Game {
         }
         let logs = &self.logs;
         ui.panel("Logs", |ui| show_logs(ui, logs));
-        // What the game's view shows under the cursor, while the cursor's over it: a pick at the
-        // cursor as each comes back, and what the latest answer found, painted over the handles.
+        // What the game's view shows under the cursor: a pick as each comes back, the latest
+        // answer's find painted over the handles.
         let origin = cx.view().map_or([0, 0], |view| view.origin);
         let over = view.filter(|view| view.hovered() || held);
         let at = over.and(cx.input().cursor());
@@ -663,7 +659,7 @@ impl Layer for Game {
             self.view.hover.ask(self.hovering);
         }
         let name = self.view.hover.under().map(|found| found.name);
-        // Where the frame shows as this frame renders the view.
+        // Where the frame shows in this frame's render of the view.
         let pixels = (ui.viewport().zip(self.size)).map(|(view, size)| Viewport {
             origin: view.origin,
             size,
@@ -683,7 +679,7 @@ impl Layer for Game {
                 let text = overlay::probe_text(probing.answer.as_ref());
                 overlay::probe_readout(ui.egui(), &view, at, text);
             }
-            // Where the keys go in Play, which are the game's.
+            // In Play the keys are the game's.
             if self.through() && ui.view_focused() {
                 overlay::outline_view(ui.egui(), &view);
             }
@@ -704,8 +700,8 @@ impl Layer for Game {
         {
             self.message = None;
         }
-        // A close granted: a switch to another project, which goes now, or the editor's, which the
-        // main window's close makes again, to go ahead.
+        // A close granted: a switch to another project goes now; the editor's close is made again
+        // to go ahead.
         if self.closing == Closing::Granted {
             match self.switching.take() {
                 Some(dir) => self.switch(cx, dir),
@@ -716,9 +712,9 @@ impl Layer for Game {
         }
     }
 
-    /// Closes `gg run`'s stdin, which ends the game and the run, and, while a game serves, waits for
-    /// it to end, for at most [`ENDING`], rather than for a build under way, which `gg run` finishes
-    /// first; then logs what it measured of the view's frames.
+    /// Closes `gg run`'s stdin, which ends the game and the run. While a game serves, waits for the
+    /// end for at most [`ENDING`], but not for a build under way, which `gg run` finishes first.
+    /// Then logs what it measured of the view's frames.
     fn detach(&mut self, _: &mut Context) {
         let serves = self.talker.is_some();
         self.disconnect();
