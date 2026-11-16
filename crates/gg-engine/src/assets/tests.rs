@@ -1,8 +1,8 @@
 use super::*;
 use crate::dirs::tests::Scratch;
 
-/// A path inside the root is named relative to it, with `/` between its parts on every
-/// platform; one outside it as it's given.
+/// A path inside the root is named relative to it, with `/` between parts on every platform; one
+/// outside it as given.
 #[test]
 fn files_are_named_by_their_paths_from_the_root() {
     let root = Path::new("game");
@@ -13,11 +13,10 @@ fn files_are_named_by_their_paths_from_the_root() {
     assert_eq!(&*name_of(None, &inside), "game/assets/logo.png");
 }
 
-/// A file's name is its path as the layer wrote it, whatever case the disk keeps it in: a file
-/// system that ignores case keeps the case an editor last saved a file in, which git doesn't
-/// see, so that a name taken from the disk would differ between checkouts of one commit. The
-/// file itself is one however its path is written, through `.` and `..`, or, on Windows, with
-/// `\` or in another case.
+/// A file's name is its path as written, whatever case the disk keeps: a case-ignoring file system
+/// keeps the case an editor last saved, which git doesn't see, so names from the disk would differ
+/// between checkouts. The file itself is one however written: `.`, `..`, and on Windows `\` or
+/// another case.
 #[test]
 fn a_file_is_named_as_its_path_is_written() {
     let scratch = Scratch::new("named-as-written");
@@ -41,11 +40,10 @@ fn a_file_is_named_as_its_path_is_written() {
     assert_eq!(file_of(&root.join("assets/none.png")), None);
 }
 
-/// A scan gives each asset under the root the ID its ID file holds; writes the ID files missing
-/// where the run may, and says why an asset has none where it may not; warns of each problem
-/// once a run; never writes over an ID file that's there; keeps an asset's ID for the run,
-/// whatever its ID file comes to hold, until it's renamed with its ID file, which takes it
-/// along; and writes back no ID another ID file holds.
+/// A scan gives each asset the ID its ID file holds, writes missing ID files where the run may
+/// (else says why there's none), warns of each problem once a run, never writes over an ID file or
+/// writes back an ID another holds. An asset keeps its ID for the run, whatever its ID file comes
+/// to hold, until renamed with its ID file.
 #[cfg(feature = "dev")]
 #[test]
 fn a_scan_writes_missing_id_files_where_the_run_may_and_each_problem_warns_once() {
@@ -186,11 +184,11 @@ fn a_scan_writes_missing_id_files_where_the_run_may_and_each_problem_warns_once(
     assert_eq!(held.len(), files, "no two ID files hold one ID");
 }
 
-/// An asset renamed without its ID file, its file as it was, takes the ID file along where the
-/// run writes ID files, the ID file moved beside it, logging `asset.renamed`: as the rename is
-/// looked at, or, by the prints a cache kept, as the next run starts. One renamed and edited
-/// at once, and twins of one that's renamed, get fresh IDs, the ID file left behind warned of;
-/// and a run that writes none moves none.
+/// An asset renamed without its ID file, its file as it was, keeps its ID where the run writes ID
+/// files: the ID file is moved beside it, logging `asset.renamed`, as the rename is looked at or,
+/// by a cache's prints, as the next run starts. One renamed and edited at once, and twins of a
+/// renamed one, get fresh IDs, the ID file left behind warned of. A run that writes none moves
+/// none.
 #[cfg(feature = "dev")]
 #[test]
 fn an_asset_renamed_without_its_id_file_keeps_its_id_by_what_its_file_holds() {
@@ -244,8 +242,8 @@ fn an_asset_renamed_without_its_id_file_keeps_its_id_by_what_its_file_holds() {
     );
     let fresh = ["asset.id_written"; 3];
     assert_eq!(codes(), [&fresh[..], &["asset.orphaned"; 2]].concat());
-    // The prints of what the assets left behind held are kept, and those of an asset gone with
-    // its ID file forgotten.
+    // The prints of what the assets left behind held are kept; those of an asset gone with its ID
+    // file are forgotten.
     assert!([b, e].iter().all(|id| prints.by_id.contains_key(id)));
     let d = catalog.id("d.png").expect("an ID");
     for name in ["d.png", "d.png.meta"] {
@@ -254,8 +252,8 @@ fn an_asset_renamed_without_its_id_file_keeps_its_id_by_what_its_file_holds() {
     look(&mut catalog, &mut prints, true);
     assert!(!prints.by_id.contains_key(&d), "forgotten");
 
-    // An ID file left behind whose ID another asset's ID file holds, as one copied beside the
-    // asset it renamed, pairs with none, though a new file holds what its asset held.
+    // An ID file left behind whose ID another ID file holds (a copy beside the renamed asset)
+    // pairs with none, though a new file holds what its asset held.
     write("x.png", "ex");
     look(&mut catalog, &mut prints, true);
     let x = held("x.png.meta");
@@ -288,8 +286,7 @@ fn an_asset_renamed_without_its_id_file_keeps_its_id_by_what_its_file_holds() {
     assert!(other.by_id.is_empty(), "a cache is of its root alone");
 }
 
-/// A file's print is its length and its bytes mixed 8 at a time, whatever the parts it's read
-/// in.
+/// A file's print is its length and its bytes mixed 8 at a time, however it's read in parts.
 #[cfg(feature = "dev")]
 #[test]
 fn a_print_mixes_every_byte_of_its_file_however_its_read() {
@@ -315,9 +312,8 @@ fn a_print_mixes_every_byte_of_its_file_however_its_read() {
     assert_ne!(Print::of(&path).expect("read"), print);
 }
 
-/// A copy of an asset made with its ID file has no ID while the original keeps it this run,
-/// and is told which of the two keeps it from the next run, whose first scan gives it to the
-/// first by path whose ID file holds it: here the copy.
+/// A copy made with its ID file has no ID while the original keeps it this run, and is told which
+/// keeps it from the next run, whose first scan gives it to the first by path: here the copy.
 #[cfg(feature = "dev")]
 #[test]
 fn a_duplicate_is_told_which_asset_keeps_the_id_from_the_next_run() {

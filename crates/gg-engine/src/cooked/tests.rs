@@ -4,9 +4,9 @@ use super::*;
 use crate::image::tests::ktx2;
 use gg_renderer::ModelVertex;
 
-/// A model of two parts, the first a spot light and the second under it drawing a primitive of
-/// two levels with a masked material that samples its two images, colors and a normal map; and
-/// the KTX2 of those images, each a block 4 texels across and down, BC7 of sRGB and BC5.
+/// A model of two parts: a spot light, and under it a part drawing a primitive of two levels with a
+/// masked material that samples two images, colors and a normal map. Also the KTX2 of those
+/// images, each a block 4 texels square, BC7 of sRGB and BC5.
 fn model() -> (Imported, Vec<Vec<u8>>) {
     let colors = ktx2(ktx2::Format::BC7_SRGB_BLOCK, [4, 4], &[vec![7; 16]], true);
     let normals = ktx2(ktx2::Format::BC5_UNORM_BLOCK, [4, 4], &[vec![9; 16]], true);
@@ -307,8 +307,8 @@ fn a_cooked_model_that_doesnt_hold_together_is_refused() {
         edited(&mesh(|mesh| mesh.meshlets.meshlets[1].triangle_count = 2)),
     ));
     cases.push(("a step of 0", edited(&mesh(|mesh| mesh.packing.step = 0.0))));
-    // Its skinned part's mesh skinned, without meshlets, which skinning would leave behind:
-    // moved by the skin's two joints, it reads; by a third, it's refused, as glTF's would be.
+    // The skinned part's mesh skinned, without meshlets (skinning leaves none): moved by the
+    // skin's two joints it reads; by a third it's refused, as glTF's would be.
     let skinned = |joint| {
         move |imported: &mut Imported| {
             let mesh = imported.primitives[0].mesh.as_mut().expect("a mesh");
@@ -357,8 +357,8 @@ fn a_cooked_model_that_doesnt_hold_together_is_refused() {
         .into_iter()
         .enumerate()
         .map(|(i, byte)| {
-            // The light's kind is the byte after the first part's name, its transform and its
-            // three indices, past the ignored's count and string and the parts' count.
+            // The light's kind is the byte after the first part's name, transform and three
+            // indices, past the ignored's count and string and the parts' count.
             let at = 4 + 4 + "1 camera".len() + 4 + 4 + "lamp".len() + 40 + 12;
             if i == at { 9 } else { byte }
         })

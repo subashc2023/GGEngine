@@ -1,11 +1,11 @@
-//! Cooked models: a model as the cooker writes it into a game's package, which a run from the
-//! package reads in place of its glTF file and the files that names. It holds what [`gltf::read`]
-//! makes of them, its primitives' meshes as the cooker made them, their triangles optimized, with
-//! their levels of detail, their vertices packed and their levels cut into meshlets, as
-//! [`ModelMesh`] holds them, and its images compressed in KTX2 as what each holds says, BC7 of colors or of values,
-//! or BC5 of a normal map, or BC7 of one, as a DDS image holds it, with their mip levels, as
-//! [`read_ktx2`] reads them, so that a run neither decodes PNGs and JPEGs nor makes levels for
-//! them, but takes the levels' blocks out of zstd, as the loader does.
+//! Cooked models: a model as the cooker writes it into a game's package. A run from the package
+//! reads it in place of the glTF file and the files that names. It holds what [`gltf::read`] makes
+//! of them, with each primitive's mesh as the cooker made it: triangles optimized, with levels of
+//! detail, vertices packed and levels cut into meshlets, as [`ModelMesh`] holds them. Its images
+//! are compressed in KTX2 by what each holds: BC7 of colors or of values, or BC5 or BC7 of a normal
+//! map, as a DDS image holds it, with mip levels, as [`read_ktx2`] reads them. A run so neither
+//! decodes PNGs and JPEGs nor makes levels for them, but takes the levels' blocks out of zstd, as
+//! the loader does.
 //!
 //! The format, every number little-endian, every count and length 32 bits, a string its length
 //! then its UTF-8:
@@ -46,8 +46,8 @@
 //! images      a count, then each one's KTX2, as its length and its bytes
 //! ```
 //!
-//! Its floats are the bits the reader made, so that a model's nodes, which reach the world hash,
-//! are the same from a package as from the model's files.
+//! Its floats are the bits the reader made, so a model's nodes, which reach the world hash, are the
+//! same from a package as from the model's files.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -69,14 +69,14 @@ use crate::{Light, LightKind, Transform};
 /// What stands for none, where the format holds an index.
 const NONE: u32 = u32::MAX;
 
-/// Model `imported`, as the cooker writes it into a game's package, its images given as `images`,
-/// their KTX2 in its images' order, in place of those `imported` has, and each primitive's mesh as
-/// the cooker made it.
+/// Model `imported` as the cooker writes it into a game's package, with `images` (KTX2, in its
+/// images' order) in place of its own, and each primitive's mesh as the cooker made it.
 ///
 /// # Panics
 ///
-/// If `images` aren't as many as `imported`'s, a primitive hasn't its mesh, or a count or a length
-/// is past 32 bits.
+/// - `images` aren't as many as `imported`'s.
+/// - A primitive hasn't its mesh.
+/// - A count or length is past 32 bits.
 pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
     assert_eq!(
         imported.images.len(),
@@ -122,7 +122,6 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
     bytes
 }
 
-/// Writes `part` as the format lays out each of the parts.
 fn encode_part(bytes: &mut Vec<u8>, part: &Part) {
     string(bytes, part.name.as_deref().unwrap_or(""));
     let Transform {
@@ -158,7 +157,6 @@ fn encode_part(bytes: &mut Vec<u8>, part: &Part) {
     );
 }
 
-/// Writes `mesh`, a primitive's as the cooker made it, as the format lays it out.
 fn encode_mesh(bytes: &mut Vec<u8>, mesh: &ModelMesh) {
     let Packing {
         offset,
@@ -229,7 +227,6 @@ fn encode_mesh(bytes: &mut Vec<u8>, mesh: &ModelMesh) {
     }
 }
 
-/// Writes `material`, a primitive's, as the format lays it out.
 fn encode_material(bytes: &mut Vec<u8>, material: &Material) {
     floats(bytes, &material.color);
     match material.workflow {
@@ -273,7 +270,6 @@ fn encode_material(bytes: &mut Vec<u8>, material: &Material) {
     bytes.extend_from_slice(&[u8::from(material.double_sided), u8::from(material.unlit)]);
 }
 
-/// Writes `clip` as the format lays out each of the clips.
 fn encode_clip(bytes: &mut Vec<u8>, clip: &Clip) {
     string(bytes, &clip.name);
     floats(bytes, &[clip.duration]);
@@ -297,20 +293,18 @@ fn encode_clip(bytes: &mut Vec<u8>, clip: &Clip) {
     }
 }
 
-/// Writes `count` in 32 bits.
 fn count(bytes: &mut Vec<u8>, count: usize) {
     let count = u32::try_from(count).expect("a count of 32 bits");
     bytes.extend_from_slice(&count.to_le_bytes());
 }
 
-/// Writes `floats`, each as its bits.
 fn floats(bytes: &mut Vec<u8>, floats: &[f32]) {
     for float in floats {
         bytes.extend_from_slice(&float.to_le_bytes());
     }
 }
 
-/// Writes `index` in 32 bits, [`NONE`] for none.
+/// Writes `index`, [`NONE`] for none.
 fn index(bytes: &mut Vec<u8>, index: Option<usize>) {
     let index = index.map_or(NONE, |index| {
         u32::try_from(index).expect("an index of 32 bits")
@@ -318,23 +312,24 @@ fn index(bytes: &mut Vec<u8>, index: Option<usize>) {
     bytes.extend_from_slice(&index.to_le_bytes());
 }
 
-/// Writes `string` as its length, then its UTF-8.
 fn string(bytes: &mut Vec<u8>, string: &str) {
     count(bytes, string.len());
     bytes.extend_from_slice(string.as_bytes());
 }
 
-/// Writes `words`, each in 32 bits.
 fn words(bytes: &mut Vec<u8>, words: &[u32]) {
     for word in words {
         bytes.extend_from_slice(&word.to_le_bytes());
     }
 }
 
-/// Reads model `name`'s file at `path` as the game's package holds it, cooked, through `files`, as
-/// [`decode`] reads it.
+/// Reads model `name`'s file at `path` as the game's package holds it, cooked, through `files`,
+/// with [`decode`].
 ///
-/// Fails with `engine.bad_model` if the package hasn't it as a cooked model, and as `decode` does.
+/// # Errors
+///
+/// - `engine.bad_model`: the package hasn't it as a cooked model.
+/// - Like [`decode`].
 pub(crate) fn read(name: &str, path: &Path, files: &Files) -> Result<Imported> {
     let zone = gg_core::zone!();
     zone.text(path.display());
@@ -346,13 +341,18 @@ pub(crate) fn read(name: &str, path: &Path, files: &Files) -> Result<Imported> {
 }
 
 /// Reads model `name`, as the cooker writes it, from `bytes`, its file at `path`, checking that it
-/// holds what [`gltf::read`] would give: each part after its parent, of a transform and a light
-/// [`gltf::takes`] and [`gltf::allowed`] take, primitives whose materials' numbers are finite and
-/// whose meshes hold together, as [`ModelMesh::check`] checks them, and images that
-/// read, each the KTX2 of BC7 that [`read_ktx2`] takes, read as far as its header, taking no more
-/// memory than [`gltf::MAX_MEMORY`], what its images decode to among it.
+/// holds what [`gltf::read`] would give:
 ///
-/// Fails with `engine.bad_model` for what doesn't, saying where.
+/// - each part after its parent, with a transform and light that [`gltf::takes`] and
+///   [`gltf::allowed`] take;
+/// - primitives whose materials' numbers are finite and whose meshes hold together, as
+///   [`ModelMesh::check`] checks;
+/// - images that read, each the KTX2 of BC7 that [`read_ktx2`] takes, read as far as its header;
+/// - no more memory than [`gltf::MAX_MEMORY`], what its images decode to among it.
+///
+/// # Errors
+///
+/// - `engine.bad_model`: something above doesn't hold, saying where.
 pub(crate) fn decode(name: &str, path: &Path, bytes: &[u8]) -> Result<Imported> {
     let bad = |problem: String| {
         let path = path.display();
@@ -368,13 +368,11 @@ pub(crate) fn decode(name: &str, path: &Path, bytes: &[u8]) -> Result<Imported> 
     Ok(imported)
 }
 
-/// What's left to read of a cooked model's bytes.
 struct Reader<'a> {
     bytes: &'a [u8],
 }
 
 impl<'a> Reader<'a> {
-    /// The model, but for any bytes after it.
     fn imported(&mut self) -> Result<Imported, String> {
         let ignored = (0..self.count(4)?)
             .map(|_| self.string())
@@ -493,8 +491,8 @@ impl<'a> Reader<'a> {
         if let Some(i) = samples.find(|&i| i >= images.len()) {
             return Err(format!("a material samples image {i}, which it hasn't"));
         }
-        // Each image compressed as what its materials sample it as, which reading the model left
-        // one of: colors, values or a normal map.
+        // Each image is compressed as what its materials sample it as: colors, values or a normal
+        // map, which reading the model left one of.
         for (i, image) in images.iter().enumerate() {
             let texels = model::texels(&primitives, i);
             if !image.compressed().is_some_and(|held| held.holds(texels)) {
@@ -514,8 +512,8 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// A skin of a model of `parts` parts: its joints, each one of them, and their inverse bind
-    /// matrices, finite. The error says what's wrong with it.
+    /// A skin of a model of `parts` parts: joints each of one of them, and finite inverse bind
+    /// matrices. The error says what's wrong.
     fn skin(&mut self, parts: usize) -> Result<Skin, String> {
         // A joint's part and its matrix.
         let count = self.count(68)?;
@@ -540,9 +538,9 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// A clip of a model of `parts` parts: its channels, each of one of them, its times from 0 up,
-    /// each after the last, and as many values as its interpolation takes, all finite. The error
-    /// says what's wrong with it.
+    /// A clip of a model of `parts` parts: channels each of one of them, with times from 0 up, each
+    /// after the last, and as many values as the interpolation takes, all finite. The error says
+    /// what's wrong.
     fn clip(&mut self, parts: usize) -> Result<Clip, String> {
         let name = self.string()?;
         let [duration] = self.floats()?;
@@ -609,8 +607,7 @@ impl<'a> Reader<'a> {
             .collect())
     }
 
-    /// A part's light, if it has one, as [`gltf::allowed`] allows it. The error says what's wrong
-    /// with it.
+    /// A part's light, if any, as [`gltf::allowed`] allows it. The error says what's wrong.
     fn light(&mut self) -> Result<Option<Light>, String> {
         let [kind]: [u8; 1] = self.take(1)?.try_into().expect("a byte");
         let kind = match kind {
@@ -639,7 +636,7 @@ impl<'a> Reader<'a> {
         Ok(Some(light))
     }
 
-    /// A primitive. The error says what's wrong with it.
+    /// A primitive. The error says what's wrong.
     fn primitive(&mut self) -> Result<Primitive, String> {
         let name = self.string()?;
         let mesh = self.mesh()?;
@@ -725,8 +722,8 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// A primitive's mesh, which holds together as [`ModelMesh::check`] checks it. The error says
-    /// what's wrong with it.
+    /// A primitive's mesh, which holds together per [`ModelMesh::check`]. The error says what's
+    /// wrong.
     fn mesh(&mut self) -> Result<ModelMesh, String> {
         let [x, y, z, step, u, v, u_scale, v_scale] = self.floats()?;
         let packing = Packing {
@@ -826,13 +823,11 @@ impl<'a> Reader<'a> {
         Ok(mesh)
     }
 
-    /// A count of words, then the words, the count checked against the bytes left, `each` bytes a
-    /// word.
+    /// A count of words of `each` bytes, then the words, the count checked against the bytes left.
     fn words(&mut self, each: usize) -> Result<Vec<u32>, String> {
         (0..self.count(each)?).map(|_| self.u32()).collect()
     }
 
-    /// The next `len` bytes.
     fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
         if len > self.bytes.len() {
             return Err(format!("it ends {} bytes short", len - self.bytes.len()));
@@ -847,8 +842,8 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(bytes))
     }
 
-    /// A count of what follows, each of which takes at least `each` bytes: no more than the bytes
-    /// left hold, so that nothing is allocated for more than the file has.
+    /// A count of what follows, each taking at least `each` bytes: no more than the bytes left
+    /// hold, so nothing is allocated for more than the file has.
     fn count(&mut self, each: usize) -> Result<usize, String> {
         let count = self.u32()? as usize;
         if count.saturating_mul(each) > self.bytes.len() {
@@ -860,7 +855,6 @@ impl<'a> Reader<'a> {
         Ok(count)
     }
 
-    /// An index, or none.
     fn index(&mut self) -> Result<Option<usize>, String> {
         let index = self.u32()?;
         Ok((index != NONE).then_some(index as usize))

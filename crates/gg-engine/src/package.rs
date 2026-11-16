@@ -1,8 +1,8 @@
-//! A game's package: the files under its project's asset root that its runs read, in one file,
-//! cooked where the engine would otherwise make something of them as they load, as a font's field
-//! or a shader's SPIR-V, or where they draw faster cooked, as a texture compressed or a model's
-//! meshes optimized, which `tools/cook` writes, as its root says, and a build without `dev` runs
-//! from; and [`Files`], where a run reads them, its package or the disk.
+//! A game's package: the files under its project's asset root that its runs read, in one file.
+//! `tools/cook` writes it (see its root), and a build without `dev` runs from it. Files are cooked
+//! where the engine would otherwise make something of them as they load (a font's field, a
+//! shader's SPIR-V) or where they draw faster cooked (a compressed texture, a model's optimized
+//! meshes). [`Files`] is where a run reads them: its package or the disk.
 //!
 //! The format, every number little-endian:
 //!
@@ -18,8 +18,8 @@
 //! data     each entry's, at an offset that's a multiple of 16
 //! ```
 //!
-//! Offsets are from the file's start and point nowhere else, so that the file can be mapped into
-//! memory and read in place; a run reads it at those offsets instead, as mapping a file is unsafe
+//! Offsets are from the file's start and point nowhere else, so the file could be mapped into
+//! memory and read in place. A run reads it at those offsets instead: mapping a file is unsafe
 //! where another process may change it, and an error reading a mapped page ends the process.
 
 use std::collections::BTreeMap;
@@ -33,32 +33,32 @@ use gg_core::{Error, Result};
 use crate::dirs;
 
 const MAGIC: &[u8; 4] = b"GGPK";
-/// Changes whenever the format, or what an entry of some kind holds, changes, as a baked font's
-/// layout or a cooked model's: 6 since its header names the project's relay.
+/// Changes whenever the format, or what an entry of some kind holds (a baked font's layout, a
+/// cooked model's), changes. 6 since the header names the project's relay.
 const VERSION: u32 = 6;
 const HEADER: usize = 40;
 const ENTRY: usize = 32;
-/// What each entry's data starts at a multiple of, so that data mapped into memory is aligned for
-/// any of the GPU's types.
+/// Each entry's data starts at a multiple of this, so mapped data is aligned for any of the GPU's
+/// types.
 const ALIGN: u64 = 16;
 
 /// What an entry holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// The file as it is under the asset root, as a texture's PNG or a scene's text.
+    /// The file as it is under the asset root, such as a texture's PNG or a scene's text.
     File,
-    /// A font's file, baked as [`Context::add_font`](crate::Context::add_font) bakes it.
+    /// A font's file, baked as [`Context::add_font`](crate::Context::add_font) does.
     Font,
-    /// A game's shader, compiled to SPIR-V as
-    /// [`Context::add_shader`](crate::Context::add_shader) compiles it.
+    /// A game's shader, compiled to SPIR-V as [`Context::add_shader`](crate::Context::add_shader)
+    /// does.
     Shader,
-    /// A texture's PNG or JPEG, compressed to BC7 in KTX2, as
-    /// [`decode_ktx2`](crate::image::decode_ktx2) reads it, of the one level that
-    /// [`Context::add_texture`](crate::Context::add_texture) gives a texture.
+    /// A texture's PNG or JPEG compressed to BC7 in KTX2, with the one level
+    /// [`Context::add_texture`](crate::Context::add_texture) gives a texture; see
+    /// [`decode_ktx2`](crate::image::decode_ktx2).
     Texture,
-    /// A model's glTF file and the files it names, read as
-    /// [`Context::add_model`](crate::Context::add_model) reads them, its meshes optimized and given
-    /// levels of detail and its images compressed, as gg-engine's `cooked` module says.
+    /// A model's glTF file and the files it names, as
+    /// [`Context::add_model`](crate::Context::add_model) reads them, with optimized meshes, levels
+    /// of detail and compressed images (see gg-engine's `cooked` module).
     Model,
 }
 
@@ -84,7 +84,7 @@ impl Kind {
         })
     }
 
-    /// What it is, in words, as errors say.
+    /// What it is, in words, for errors.
     fn words(self) -> &'static str {
         match self {
             Self::File => "a file",
@@ -106,33 +106,34 @@ struct Entry {
     kind: Kind,
 }
 
-/// A game's package, opened: its table, read whole as it opens, and its file, whose entries' data
-/// it reads as they're asked for.
+/// A game's package, opened: its table, read whole, and its file, whose data is read on request.
 #[derive(Debug)]
 pub(crate) struct Package {
     file: File,
     /// Where it was opened from, for errors.
     path: PathBuf,
-    /// In the order of their paths.
+    /// In path order.
     entries: Vec<Entry>,
-    /// Each entry's index, by its ID, for those with one.
+    /// Each entry's index by ID, for those with one.
     by_id: BTreeMap<u64, usize>,
-    /// The asset root's path from the project's directory, `/` between its parts.
+    /// The asset root's path from the project's directory, `/` between parts.
     assets: Box<str>,
     /// The start scene's path from the project's directory.
     start: Option<Box<str>>,
-    /// The project's relay, `host:port`.
+    /// `host:port`.
     relay: Option<Box<str>>,
 }
 
 impl Package {
     /// Opens the package at `path`, reading its table.
     ///
-    /// Fails with `package.unreadable` if the file can't be opened or read, and with `package.bad`
-    /// if it isn't a package of this version, or its table doesn't hold together: an entry past
-    /// the file's end, a path that isn't UTF-8, or that isn't inside the asset root on every OS, as
-    /// [`Writer::add`] refuses, paths out of order or twice, an ID twice, or a kind or a codec this
-    /// engine doesn't know.
+    /// # Errors
+    ///
+    /// - `package.unreadable`: the file can't be opened or read.
+    /// - `package.bad`: it isn't a package of this version, or its table doesn't hold together: an
+    ///   entry past the file's end, a path that isn't UTF-8 or isn't inside the asset root on every
+    ///   OS (as [`Writer::add`] refuses), paths out of order or twice, an ID twice, or a kind or
+    ///   codec this engine doesn't know.
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let unreadable = |error: io::Error| {
             let message = format!("can't read the package {}", path.display());
@@ -245,20 +246,17 @@ impl Package {
         })
     }
 
-    /// The asset root's path from the project's directory, `/` between its parts, as the project's
-    /// manifest gives it.
+    /// The asset root's path, as the manifest gives it.
     pub(crate) fn assets(&self) -> &str {
         &self.assets
     }
 
-    /// The start scene's path from the project's directory, as its manifest gives it, if the
-    /// project has one.
+    /// The start scene's path, as the manifest gives it, if any.
     pub(crate) fn start(&self) -> Option<&str> {
         self.start.as_deref()
     }
 
-    /// The relay the game's own sessions meet through, `host:port`, as its manifest names it, if
-    /// it names one.
+    /// The relay the game's own sessions meet through, as the manifest names it, if any.
     pub(crate) fn relay(&self) -> Option<&str> {
         self.relay.as_deref()
     }
@@ -275,16 +273,18 @@ impl Package {
         self.entry(path).map(|entry| entry.id).filter(|&id| id != 0)
     }
 
-    /// The path from the asset root of the entry whose ID is `id`, if one has it.
+    /// The path from the asset root of the entry whose ID is `id`.
     pub(crate) fn path_of(&self, id: u64) -> Option<&str> {
         self.by_id.get(&id).map(|&at| &*self.entries[at].path)
     }
 
-    /// Reads the entry at `path` from the asset root, of `kind`, as far as its first `most` bytes,
-    /// as [`dirs::read_file`] reads a file.
+    /// Reads the first `most` bytes of the entry of `kind` at `path` from the asset root, like
+    /// [`dirs::read_file`].
     ///
-    /// Fails with `NotFound` for a path the package hasn't, and with `InvalidData` for an entry of
-    /// another kind.
+    /// # Errors
+    ///
+    /// - `NotFound`: the package hasn't `path`.
+    /// - `InvalidData`: the entry is of another kind.
     pub(crate) fn read(&self, path: &str, kind: Kind, most: u64) -> io::Result<Vec<u8>> {
         let Some(entry) = self.entry(path) else {
             let message = format!("the package {} hasn't `{path}`", self.path.display());
@@ -301,21 +301,23 @@ impl Package {
         }
         let len = entry.len.min(most);
         let mut bytes = Vec::new();
-        // An error rather than an abort if there's no memory for it, as `dirs::read_file` gives.
+        // An error, not an abort, if there's no memory for it, like `dirs::read_file`.
         bytes.try_reserve_exact(usize::try_from(len).map_err(io::Error::other)?)?;
         bytes.resize(len as usize, 0);
         read_at(&self.file, entry.offset, &mut bytes)?;
         Ok(bytes)
     }
 
-    /// The digest of the whole file, as [`bytes_digest`](crate::ecs::bytes_digest) has it, which a
-    /// session's hello names the run's build by, as [`Build`](crate::net::Build) says, so that
-    /// runs of other packages, whose simulations may go otherwise, don't join.
+    /// The [`bytes_digest`](crate::ecs::bytes_digest) of the whole file. A session's hello names
+    /// the run's build by it (see [`Build`](crate::net::Build)), so runs of other packages, whose
+    /// simulations may go otherwise, don't join.
     ///
-    /// Reads the file whole, as the hello's digest of an executable does: a package of hundreds of
-    /// MB, as no game's is yet, would be read and digested a piece at a time instead.
+    /// Reads the file whole, like the hello's digest of an executable. A package of hundreds of MB,
+    /// which no game's is yet, would need reading and digesting a piece at a time.
     ///
-    /// Fails with `package.unreadable` if the file can't be read.
+    /// # Errors
+    ///
+    /// - `package.unreadable`: the file can't be read.
     pub(crate) fn digest(&self) -> Result<u64> {
         let unreadable = |error: io::Error| {
             let message = format!("can't read the package {}", self.path.display());
@@ -323,7 +325,7 @@ impl Package {
         };
         let len = self.file.metadata().map_err(unreadable)?.len();
         let mut bytes = Vec::new();
-        // An error rather than an abort if there's no memory for it, as `read` gives.
+        // An error, not an abort, if there's no memory for it, like `read`.
         let len = usize::try_from(len)
             .map_err(io::Error::other)
             .map_err(unreadable)?;
@@ -337,29 +339,27 @@ impl Package {
     }
 }
 
-/// Where a run reads the files under its asset root: the disk, or its game's package, in which
-/// each is found by its path from the root, `root`, exactly as written, case and all, so that a
-/// package runs alike wherever it's copied and on every OS.
+/// Where a run reads the files under its asset root: the disk, or its game's package, where each is
+/// found by its path from `root` exactly as written, case and all, so a package runs alike
+/// wherever it's copied and on every OS.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Files {
     package: Option<(Arc<Package>, PathBuf)>,
 }
 
 impl Files {
-    /// The files under `root` as `package` holds them.
     pub(crate) fn package(package: Arc<Package>, root: PathBuf) -> Self {
         Self {
             package: Some((package, root)),
         }
     }
 
-    /// The run's package, if it reads one.
     pub(crate) fn packaged(&self) -> Option<&Package> {
         self.package.as_ref().map(|(package, _)| &**package)
     }
 
-    /// The paths of the files the package holds, each joined to the root as [`under`] joins it, in
-    /// the order of their paths' bytes; none for the disk.
+    /// The paths of the files the package holds, each joined to the root by [`under`], in the order
+    /// of their paths' bytes. None for the disk.
     pub(crate) fn paths(&self) -> Vec<PathBuf> {
         let Some((package, root)) = &self.package else {
             return Vec::new();
@@ -368,15 +368,15 @@ impl Files {
         entries.map(|entry| under(root, &entry.path)).collect()
     }
 
-    /// Reads the file at `path`, as far as its first `most` bytes, as [`dirs::read_file`] does: from
-    /// the package, if the run reads one, the file as it is under the asset root.
+    /// Reads the first `most` bytes of the file at `path`, like [`dirs::read_file`]: from the
+    /// package, if the run reads one, the file as it is under the asset root.
     pub(crate) fn read(&self, path: &Path, most: u64) -> io::Result<Vec<u8>> {
         self.read_as(path, Kind::File, most)
     }
 
-    /// Reads what the package holds of `kind` for the file at `path`, as far as its first `most`
-    /// bytes, as [`Package::read`] does; and from the disk, if the run reads no package, the file
-    /// as it is, whatever `kind` says.
+    /// Reads the first `most` bytes of what the package holds of `kind` for the file at `path`,
+    /// like [`Package::read`]. Without a package, reads the file from the disk as it is, whatever
+    /// `kind` says.
     pub(crate) fn read_as(&self, path: &Path, kind: Kind, most: u64) -> io::Result<Vec<u8>> {
         match &self.package {
             None => dirs::read_file(path, most),
@@ -394,10 +394,9 @@ impl Files {
         }
     }
 
-    /// The file at `path`, as one file however its path is written, as [`assets::file_of`]
-    /// resolves it on the disk: in the package, its path from the root joined to the root, its
-    /// `.` and `..` taken away as written; `None` for a path outside the root, or one the package
-    /// hasn't.
+    /// The file at `path`, one file however written, as [`assets::file_of`] resolves it on the
+    /// disk. In the package, that's its path from the root joined to the root, `.` and `..` taken
+    /// away as written. `None` for a path outside the root or one the package hasn't.
     ///
     /// [`assets::file_of`]: crate::assets::file_of
     pub(crate) fn file_of(&self, path: &Path) -> Option<PathBuf> {
@@ -411,32 +410,32 @@ impl Files {
         }
     }
 
-    /// The path from the asset root of the file at `path`, as the package names its entries, if
-    /// the run reads one and the path is inside the root, as written.
+    /// The path from the asset root of the file at `path`, as the package names entries, if the run
+    /// reads a package and the path is inside the root as written.
     pub(crate) fn within(&self, path: &Path) -> Option<String> {
         let (_, root) = self.package.as_ref()?;
         within(root, path)
     }
 }
 
-/// Whether `path`, `/` between its parts, is inside the directory it's from, as a manifest's check
-/// keeps its paths on every OS: none of its parts empty, `.` or `..`, nor holding `:`, a drive's
-/// on Windows, or `\`, a separator there.
+/// Whether `path`, `/` between parts, is inside the directory it's from, as a manifest's check
+/// keeps paths on every OS: no part is empty, `.` or `..`, or holds `:` (a Windows drive's) or `\`
+/// (a separator there).
 pub(crate) fn inside(path: &str) -> bool {
     !(path.split('/')).any(|part| matches!(part, "" | "." | "..") || part.contains([':', '\\']))
 }
 
-/// `path`, relative, `/` between its parts, joined to `dir` a part at a time, so that its separators
-/// are the OS's: `dir` itself for `.`, as gg-api joins a manifest's paths.
+/// `path`, relative, `/` between parts, joined to `dir` a part at a time, so separators are the
+/// OS's. `.` gives `dir`, as gg-api joins a manifest's paths.
 pub(crate) fn under(dir: &Path, path: &str) -> PathBuf {
     let parts = path.split('/').filter(|&part| part != ".");
     parts.fold(dir.to_owned(), |under, part| under.join(part))
 }
 
-/// The path from `root` of the file at `path`, as written, `/` between its parts: as a package names
-/// its entries. Both are taken as the disk takes them, a relative path from the working directory,
-/// but without reading it, their `.` and `..` taken away as written. `None` for a path outside the
-/// root, or the root itself.
+/// The path from `root` of the file at `path`, as written, `/` between parts, as a package names
+/// its entries. Both are taken as the disk takes them (a relative path from the working
+/// directory), without reading it and with `.` and `..` taken away as written. `None` for a path
+/// outside the root, or the root itself.
 pub(crate) fn within(root: &Path, path: &Path) -> Option<String> {
     let (root, path) = (lexical(root)?, lexical(path)?);
     let parts = path.strip_prefix(root).ok()?.components();
@@ -445,8 +444,8 @@ pub(crate) fn within(root: &Path, path: &Path) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-/// `path` made absolute, from the working directory if it's relative, its `.` and `..` taken away as
-/// written, without reading the disk; `None` if the working directory can't be had.
+/// `path` made absolute, from the working directory if relative, with `.` and `..` taken away as
+/// written, without reading the disk. `None` if the working directory can't be had.
 fn lexical(path: &Path) -> Option<PathBuf> {
     let mut lexical = PathBuf::new();
     for component in std::path::absolute(path).ok()?.components() {
@@ -498,20 +497,19 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8 bytes"))
 }
 
-/// A package as `tools/cook` makes it, entry by entry, which it writes whole.
+/// A package as `tools/cook` makes it, entry by entry, written whole.
 #[derive(Debug, Default)]
 pub struct Writer {
     assets: String,
     start: Option<String>,
     relay: Option<String>,
-    /// Each entry's ID, 0 for none, its kind and its data, by its path.
+    /// Each entry's ID (0 for none), kind and data, by path.
     entries: BTreeMap<String, (u64, Kind, Vec<u8>)>,
 }
 
 impl Writer {
-    /// A package of a project whose asset root is at `assets` from its directory, whose start
-    /// scene, if it has one, is at `start` from it, each with `/` between its parts, and whose
-    /// relay, if it names one, is `relay`, as its manifest gives them.
+    /// A package of a project whose asset root is `assets` from its directory, `/` between parts,
+    /// with the start scene `start` (a path likewise) and `relay`, if its manifest has them.
     pub fn new(assets: &str, start: Option<&str>, relay: Option<&str>) -> Self {
         Self {
             assets: assets.to_owned(),
@@ -521,12 +519,14 @@ impl Writer {
         }
     }
 
-    /// Adds the entry at `path` from the asset root, `/` between its parts, of `kind`, holding
-    /// `data`, with the ID `id` names, if it has one.
+    /// Adds the entry of `kind` at `path` from the asset root, `/` between parts, holding `data`,
+    /// with ID `id` if it has one.
     ///
-    /// Fails with `package.bad` for a path it has, a path longer than 65,535 bytes or that isn't
-    /// inside the asset root on every OS, of an empty part, `.` or `..`, or holding `:` or `\`, or
-    /// an ID another entry has.
+    /// # Errors
+    ///
+    /// - `package.bad`: the package has `path`; `path` is longer than 65,535 bytes, or isn't inside
+    ///   the asset root on every OS (an empty part, `.` or `..`, or holding `:` or `\`); or another
+    ///   entry has the ID.
     pub fn add(&mut self, path: &str, id: Option<u64>, kind: Kind, data: Vec<u8>) -> Result<()> {
         let bad = |problem: &str| {
             Error::new(
@@ -553,10 +553,12 @@ impl Writer {
         Ok(())
     }
 
-    /// The package, as its file holds it: its entries in the order of their paths' bytes, so that
-    /// the same entries make the same bytes.
+    /// The package as its file holds it: entries in the order of their paths' bytes, so the same
+    /// entries make the same bytes.
     ///
-    /// Fails with `package.bad` past 4 GiB of paths or 2³² entries, which the table can't count.
+    /// # Errors
+    ///
+    /// - `package.bad`: past 4 GiB of paths or 2³² entries, which the table can't count.
     // Made whole in memory, as packages are some megabytes: one of gigabytes would want writing as
     // each entry is cooked.
     pub fn bytes(&self) -> Result<Vec<u8>> {
@@ -615,11 +617,12 @@ impl Writer {
         Ok(bytes)
     }
 
-    /// Writes the package to the file at `path`, whole or not at all, making the directories it's
-    /// in.
+    /// Writes the package to the file at `path`, whole or not at all, making its directories.
     ///
-    /// Fails as [`bytes`](Self::bytes) does, and with `package.unwritten` if the file can't be
-    /// written.
+    /// # Errors
+    ///
+    /// - Like [`bytes`](Self::bytes).
+    /// - `package.unwritten`: the file can't be written.
     pub fn write(&self, path: &Path) -> Result<()> {
         let bytes = self.bytes()?;
         dirs::write(path, &bytes).map_err(|error| {
@@ -641,9 +644,8 @@ mod tests {
         path
     }
 
-    /// What's written reads back: each entry by its path, of its kind, its ID both ways, the asset
-    /// root, the start scene and the relay; and the same entries, added in any order, make the same
-    /// bytes.
+    /// What's written reads back: each entry by path and kind, its ID both ways, the asset root,
+    /// the start scene and the relay. The same entries, added in any order, make the same bytes.
     #[test]
     fn a_package_reads_back_what_was_written() {
         let relay = Some("relay.example.com:7800");
@@ -701,7 +703,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// A writer refuses a path twice, an ID twice and paths with empty parts, `.` or `..`, or
+    /// A writer refuses a path twice, an ID twice, and paths with empty parts, `.` or `..`, or
     /// holding `\` or `:`, which Windows reads as a separator and a drive's.
     #[test]
     fn a_writer_refuses_what_wouldnt_read_back() {
@@ -722,9 +724,9 @@ mod tests {
         }
     }
 
-    /// A file that isn't a package, or whose table doesn't hold together, or whose asset root or
-    /// start scene a manifest couldn't have, or an entry's path outside the root, is refused with
-    /// `package.bad`, and one that isn't there with `package.unreadable`.
+    /// A file that isn't a package, whose table doesn't hold together, whose asset root or start
+    /// scene a manifest couldn't have, or with an entry's path outside the root, is refused with
+    /// `package.bad`. One that isn't there is `package.unreadable`.
     #[test]
     fn a_package_that_doesnt_hold_together_is_refused() {
         let mut writer = Writer::new("assets", None, None);
@@ -793,8 +795,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// The files a package holds are listed under the root, as layers name them, in the order of
-    /// their paths, each found again by its path; the disk lists none.
+    /// A package's files are listed under the root, as layers name them, in path order, each found
+    /// again by its path. The disk lists none.
     #[test]
     fn a_packages_files_are_listed_under_the_root_in_the_order_of_their_paths() {
         let mut writer = Writer::new(".", Some("scenes/arena.ron"), None);
@@ -814,9 +816,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// A path is found in the package by its path from the root as written, `.` and `..` taken
-    /// away, and a relative path or root from the working directory, as on the disk; none outside
-    /// the root is.
+    /// A path is found in the package by its path from the root as written, with `.` and `..` taken
+    /// away and a relative path or root taken from the working directory, as on the disk. None
+    /// outside the root is.
     #[test]
     fn paths_are_found_by_their_paths_from_the_root() {
         let root = std::env::temp_dir().join("game");

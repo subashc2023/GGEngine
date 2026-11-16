@@ -1,11 +1,11 @@
-//! Assets by their names: what scenes, snapshots, recordings, lockstep inputs, the world's hash and
-//! the tool API name a texture by, where its handle is the renderer's own, so that a restart in
-//! another process, or another machine, finds it again: its asset ID, where it has one, and else
-//! its path; what the layers loaded, and what was loaded where text named it, by their files as the
-//! OS resolves them, so that a file loads once however its path is written; and, in development
-//! builds, the asset database, `Catalog`: the textures, models, fonts and prefabs under the root
-//! and the IDs their ID files hold, whose text and scan are gg-api's, an ID going with its asset as
-//! it's renamed or moved, paired by what its file holds where the rename left its ID file behind.
+//! Assets by name. Scenes, snapshots, recordings, lockstep inputs, the world's hash and the tool
+//! API name a texture by its asset ID, else its path: a handle is the renderer's own, and a restart
+//! elsewhere must find the texture again. Loaded files are keyed as the OS resolves them, so a file
+//! loads once however its path is written.
+//!
+//! In development builds, `Catalog` is the asset database: the assets under the root and the IDs
+//! their ID files hold (gg-api owns their text and scan). An ID goes with its asset through a
+//! rename or move, paired by what the file holds where the rename left its ID file behind.
 
 use std::collections::HashMap;
 #[cfg(feature = "dev")]
@@ -39,61 +39,55 @@ use crate::ecs::mix64;
 use crate::model::{Made, Nodes};
 use crate::{Font, Model, Music, Prefab, Sound};
 
-/// The textures a context added, as its layers added them or where text named them, each by its
-/// index, with the path of the file it was loaded from: relative to the app's
-/// [root](crate::App::root), with `/` between its parts, or as it was given for a file outside it;
-/// a model's images by the model's path and their order in it, such as `assets/truck.glb#0`. Each
-/// is named, as text names it, by its asset ID, 16 hex digits, or a model's image by its model's and
-/// its order, such as `5f3c9a1e07b2d846#0`, where the context gave it one as it was added, or since,
-/// as a lockstep joiner takes its host's names, and otherwise by its path; a stand-in for one that
-/// couldn't be loaded, by the name it stands in for. The engine's white texture has none. A
-/// context's worlds and their copies share it, and what a world loads from text finds its textures
-/// here, by a name or a path, as an entity is found by its ID: text no texture has names none, and
-/// says why it couldn't be loaded, if it was tried. A texture or a model removed keeps its name and
-/// path, which its names go on finding, so that what the simulation reads doesn't change with when
-/// it was removed; but what loads by a name takes it for none, loading its file anew, and names
-/// the new one from then on. In development builds it holds the asset database too, as the last
-/// scan left it.
+/// The textures, models, fonts and prefabs a context added, by index, each with its file's path:
+/// relative to the app's [root](crate::App::root), `/` between parts, or as given for a file
+/// outside it. A model's images take the model's path and their order, as `assets/truck.glb#0`.
+///
+/// Text names a texture by its asset ID (16 hex digits) and a model's image by its model's ID and
+/// order, as `5f3c9a1e07b2d846#0`, if the context gave it one when adding it or since (a lockstep
+/// joiner takes its host's names), else by path. A stand-in takes the name it stands in for. The
+/// white texture has no name.
+///
+/// A context's worlds and copies share it. Loads from text find assets here by name or path, as
+/// an entity is found by its ID; unknown text names none, and says why it couldn't load, if tried.
+/// A removed texture or model keeps its name and path, and its names go on finding it, so what the
+/// simulation reads doesn't change with when it was removed. A load by name takes it for none,
+/// loads the file anew and names the new one from then on. Development builds also hold the asset
+/// database as the last scan left it.
 #[derive(Clone, Debug)]
 pub(crate) struct Assets {
-    /// Each texture's name and path, by its index.
     textures: Vec<Option<Named>>,
     /// Each texture loaded from a file, by its name and by each path the layers gave its file: the
-    /// first added, if two have one.
+    /// first added, if two have one. The other `_names` maps are keyed alike.
     by_name: HashMap<Arc<str>, Texture>,
-    /// Each model's name and path, as a texture's, and what its root spawns, by its index.
     models: Vec<NamedModel>,
-    /// Each model, by its name and by each path the layers gave its file, as a texture by
-    /// `by_name`.
     model_names: HashMap<Arc<str>, Model>,
-    /// Each font's name and path, as a texture's, by its index.
+    /// Each font's name and path, by index.
     fonts: Vec<(Arc<str>, Arc<str>)>,
-    /// Each font, by its name and by each path the layers gave its file, as a texture by `by_name`.
     font_names: HashMap<Arc<str>, Font>,
-    /// Each prefab's name and path, as a texture's, and its text, by its index.
     prefabs: Vec<NamedPrefab>,
-    /// Each prefab, by its name and by each path the layers gave its file, as a texture by
-    /// `by_name`.
     prefab_names: HashMap<Arc<str>, Prefab>,
-    /// What the layers added, and the textures loaded where text named them, and stand-ins, in
-    /// order, each with how many meshes, shaders and textures there were after it, as
-    /// `texture 1 1 2 assets/logo.png`: what names the meshes, shaders and textures by their
-    /// indices, so that what's opaque in a snapshot, which holds indices, comes back only into a
-    /// run whose layers added the same, those named loaded again as it's restored. A mesh's, a
-    /// shader's and a model's give the types their draws hold the bytes of too, by their names and
-    /// sizes, and a shader's its blend, as
-    /// `shader 1 2 1 shaders/colored.slang game::Colored 28 () 0 Opaque`, so that a draw comes back
-    /// only where its bytes mean what they did. A file a layer adds again counts again; one that
-    /// text names, loaded already, doesn't, as a run that names it otherwise, as a lockstep joiner
-    /// by its path where its host has its ID, loads it so where that run doesn't. A removal is
-    /// noted too, by the index and the path of what it removed, as `removed texture 2
-    /// assets/logo.png`, `removed model 0 models/truck.glb` and `removed mesh 3`, so that a run
-    /// restored from a snapshot removes it again, where its own assets line up.
+    /// What the layers added, plus textures loaded where text named them, and stand-ins, in order.
+    /// Each line has how many meshes, shaders and textures there were after it, as
+    /// `texture 1 1 2 assets/logo.png`, so a snapshot's opaque indices come back only into a run
+    /// whose layers added the same; those named load again on restore.
+    ///
+    /// A mesh's, shader's and model's line also gives, by name and size, the types their draws hold
+    /// the bytes of, and a shader's its blend, as
+    /// `shader 1 2 1 shaders/colored.slang game::Colored 28 () 0 Opaque`: a draw comes back only
+    /// where its bytes mean what they did.
+    ///
+    /// A file a layer adds again counts again. One that text names, already loaded, doesn't: a run
+    /// that names it otherwise (a lockstep joiner by path where its host has the ID) loads it where
+    /// that run doesn't.
+    ///
+    /// A removal is noted by index and path, as `removed texture 2 assets/logo.png`, `removed
+    /// model 0 models/truck.glb` and `removed mesh 3`, so a restored run removes it again, where
+    /// its own assets line up.
     added: Vec<Arc<str>>,
-    /// Why each texture that text named by a name no texture had couldn't be loaded, as the last
-    /// try at loading such textures found it: its error's code and message, by that name, which a
-    /// refusal of text naming it gives. Only the last try's, as what names them is refused just
-    /// after it, so that names that never load don't pile up.
+    /// Why each texture that text named by an unknown name couldn't load at the last try, as the
+    /// error's code and message, for refusing text that names it. Only the last try's: that text
+    /// is refused just after, so names that never load don't pile up.
     failed: HashMap<Arc<str>, (&'static str, Arc<str>)>,
     /// The asset database, as [`Context::scan_assets`](crate::Context::scan_assets) last left it.
     #[cfg(feature = "dev")]
@@ -103,28 +97,27 @@ pub(crate) struct Assets {
 /// A texture loaded from a file, as [`Assets`] holds it.
 #[derive(Clone, Debug)]
 struct Named {
-    /// Which it is.
     texture: Texture,
-    /// What text names it by: its ID, or else its path.
+    /// Its ID, else its path.
     name: Arc<str>,
-    /// The path of its file, as the first layer to add it wrote it.
+    /// As the first layer to add it wrote it.
     path: Arc<str>,
-    /// Whether it was removed, as [`Assets::remove_texture`] says.
+    /// See [`Assets::remove_texture`].
     removed: bool,
 }
 
-/// A model, as [`Assets`] holds it: named as a texture is, and what its root spawns.
+/// A model as [`Assets`] holds it, named like a texture, with what its root spawns.
 #[derive(Clone, Debug)]
 struct NamedModel {
     name: Arc<str>,
     path: Arc<str>,
     nodes: Nodes,
-    /// Whether it was removed, as [`Assets::remove_model`] says.
+    /// See [`Assets::remove_model`].
     removed: bool,
 }
 
-/// A prefab, as [`Assets`] holds it: named as a texture is, and its text, as its file held it as
-/// last read, `None` for a stand-in, whose instances are their roots alone.
+/// A prefab as [`Assets`] holds it, named like a texture, with its file's text as last read.
+/// `None` for a stand-in, whose instances are their roots alone.
 #[derive(Clone, Debug)]
 struct NamedPrefab {
     name: Arc<str>,
@@ -132,12 +125,11 @@ struct NamedPrefab {
     text: Option<Arc<str>>,
 }
 
-/// How many textures, models, fonts and prefabs there are, the engine's white texture among them:
-/// the indices the next added take, from which [`Assets::named_from`] goes on.
+/// How many textures, models, fonts and prefabs there are, the white texture among them: the
+/// indices the next added take, where [`Assets::named_from`] resumes.
 pub(crate) type Counts = (usize, usize, usize, usize);
 
-/// An asset that text names, by its name or a path to its file: a texture, a model, a font or a
-/// prefab.
+/// An asset that text names by name or path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Asset<S> {
     Texture(S),
@@ -147,7 +139,6 @@ pub(crate) enum Asset<S> {
 }
 
 impl<S: AsRef<str>> Asset<S> {
-    /// The name or path that names it.
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::Texture(name) | Self::Model(name) | Self::Font(name) | Self::Prefab(name) => {
@@ -156,7 +147,6 @@ impl<S: AsRef<str>> Asset<S> {
         }
     }
 
-    /// It, named by a borrowed name.
     pub(crate) fn as_deref(&self) -> Asset<&str> {
         match self {
             Self::Texture(name) => Asset::Texture(name.as_ref()),
@@ -166,7 +156,6 @@ impl<S: AsRef<str>> Asset<S> {
         }
     }
 
-    /// It, named by a name of its own.
     pub(crate) fn owned(&self) -> Asset<String> {
         match self {
             Self::Texture(name) => Asset::Texture(name.as_ref().to_owned()),
@@ -176,7 +165,7 @@ impl<S: AsRef<str>> Asset<S> {
         }
     }
 
-    /// What it is, in words, as refusals of what names it say.
+    /// What it is, in words, for refusals.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Texture(_) => "texture",
@@ -188,7 +177,7 @@ impl<S: AsRef<str>> Asset<S> {
 }
 
 impl Default for Assets {
-    /// The engine's white texture alone, which every renderer's textures start with.
+    /// The white texture alone, which every renderer's textures start with.
     fn default() -> Self {
         Self {
             textures: vec![None],
@@ -208,70 +197,64 @@ impl Default for Assets {
 }
 
 impl Assets {
-    /// What the layers added, in order, as the struct says.
     pub(crate) fn added(&self) -> &[Arc<str>] {
         &self.added
     }
 
-    /// Records that the layers added `what`, as the struct says.
     pub(crate) fn note(&mut self, what: String) {
         self.added.push(what.into());
     }
 
-    /// The name of `texture`, which text names it by, if it has one.
     pub(crate) fn name(&self, texture: Texture) -> Option<&str> {
         let named = self.textures.get(texture.index() as usize)?.as_ref()?;
         Some(&named.name)
     }
 
-    /// The path of `texture`'s file, if it has one: for people, whom a path tells more than an ID.
+    /// The path of `texture`'s file: for people, whom a path tells more than an ID.
     pub(crate) fn path(&self, texture: Texture) -> Option<&str> {
         let named = self.textures.get(texture.index() as usize)?.as_ref()?;
         Some(&named.path)
     }
 
-    /// The texture that `name` names, by its name or a path to its file, if one does: one removed
-    /// too, which its names find until another loads from its file, as the simulation finds it.
+    /// The texture `name` names, a removed one too: its names find it until another loads from its
+    /// file, as the simulation finds it.
     pub(crate) fn texture(&self, name: &str) -> Option<Texture> {
         self.by_name.get(name).copied()
     }
 
-    /// The texture that `name` names, as [`texture`](Self::texture) finds it, unless it was
-    /// removed: what a load finds loaded, rather than loading it anew.
+    /// Like [`texture`](Self::texture), but not a removed one: what a load finds loaded.
     pub(crate) fn live_texture(&self, name: &str) -> Option<Texture> {
         self.texture(name).filter(|&texture| !self.removed(texture))
     }
 
-    /// The texture of index `index`, if its file's path is `path` and it isn't removed: as a run
+    /// The texture of index `index` if its file's path is `path` and it isn't removed: how a run
     /// restored from a snapshot finds what the snapshot's run removed.
     pub(crate) fn live_texture_at(&self, index: u32, path: &str) -> Option<Texture> {
         let named = self.textures.get(index as usize)?.as_ref()?;
         (&*named.path == path && !named.removed).then_some(named.texture)
     }
 
-    /// Whether `texture` was removed.
     pub(crate) fn removed(&self, texture: Texture) -> bool {
         let named = self.textures.get(texture.index() as usize);
         named.is_some_and(|named| named.as_ref().is_some_and(|named| named.removed))
     }
 
-    /// Has `texture` count as removed from now on, keeping its name and path, as the struct says.
+    /// Counts `texture` as removed from now on, keeping its name and path.
     pub(crate) fn remove_texture(&mut self, texture: Texture) {
         let named = self.textures.get_mut(texture.index() as usize);
         let named = named.and_then(Option::as_mut);
         named.expect("a texture of a file is named").removed = true;
     }
 
-    /// How many textures, models, fonts and prefabs there are, as [`Counts`] says.
     pub(crate) fn counts(&self) -> Counts {
         let (textures, models) = (self.textures.len(), self.models.len());
         (textures, models, self.fonts.len(), self.prefabs.len())
     }
 
-    /// The name and path of each texture, then each model, then each font, then each prefab from
-    /// `from` on, as [`counts`] gave it, that's named otherwise than by its path, as by its ID, in
-    /// the order they were added: what a run that names its assets by IDs tells those that follow
-    /// it, as a recording does its replay and a lockstep host its joiner.
+    /// The name and path of each texture, model, font and prefab from `from` on (see [`counts`])
+    /// that's named otherwise than by its path, as by its ID, in the order added. A run that names
+    /// assets by IDs tells those that follow it so, as a recording does its replay and a lockstep
+    /// host its joiner.
     ///
     /// [`counts`]: Self::counts
     pub(crate) fn named_from(&self, from: Counts) -> impl Iterator<Item = (&str, &str)> {
@@ -291,35 +274,32 @@ impl Assets {
         named.map(|(name, path)| (&**name, &**path))
     }
 
-    /// The name of `prefab`, which text names it by.
     pub(crate) fn prefab_name(&self, prefab: Prefab) -> &str {
         &self.prefabs[prefab.index()].name
     }
 
-    /// The path of `prefab`'s file: for people, whom a path tells more than an ID.
+    /// For people, whom a path tells more than an ID.
     pub(crate) fn prefab_path(&self, prefab: Prefab) -> &str {
         &self.prefabs[prefab.index()].path
     }
 
-    /// Whether these assets have `prefab`, as they haven't one another context added.
+    /// Whether another context added `prefab`: then these assets haven't it.
     pub(crate) fn has_prefab(&self, prefab: Prefab) -> bool {
         prefab.index() < self.prefabs.len()
     }
 
-    /// The prefab that `name` names, by its name or a path to its file, if one does.
     pub(crate) fn prefab(&self, name: &str) -> Option<Prefab> {
         self.prefab_names.get(name).copied()
     }
 
-    /// The text of `prefab`, as its file held it as last read; `None` for a stand-in, or a prefab
-    /// these assets don't have, as one another context added.
+    /// The text of `prefab` as its file was last read. `None` for a stand-in, or a prefab another
+    /// context added.
     pub(crate) fn prefab_text(&self, prefab: Prefab) -> Option<&Arc<str>> {
         self.prefabs.get(prefab.index())?.text.as_ref()
     }
 
-    /// Adds the next prefab, loaded from the file `path` names, named `name`, of `text`, or a
-    /// stand-in without, and returns it: each named by them from now on, unless another names it
-    /// already.
+    /// Adds the next prefab, from the file `path` names, named `name`, with `text` (`None` for a
+    /// stand-in). Both name it unless another prefab has the name.
     pub(crate) fn add_prefab(
         &mut self,
         path: Arc<str>,
@@ -337,15 +317,13 @@ impl Assets {
         prefab
     }
 
-    /// Has `path` name `prefab` too, added before from another path to its file, unless it names
-    /// one already.
+    /// Has `path`, another path to `prefab`'s file, name it too, unless it names a prefab already.
     pub(crate) fn alias_prefab(&mut self, prefab: Prefab, path: Arc<str>) {
         self.prefab_names.entry(path).or_insert(prefab);
     }
 
-    /// Adds the next prefab, as [`add_prefab`](Self::add_prefab) does, of `text`, which the run has
-    /// just written in a new file at `path`: which `path` names from now on, in place of a prefab
-    /// loaded from a file there before, as one deleted since.
+    /// Like [`add_prefab`](Self::add_prefab), with `text` the run just wrote to a new file at
+    /// `path`, which names it in place of a prefab loaded there before and deleted since.
     #[cfg(feature = "dev")]
     pub(crate) fn add_saved_prefab(
         &mut self,
@@ -357,30 +335,27 @@ impl Assets {
         self.add_prefab(path, name, Some(text))
     }
 
-    /// Has `prefab` hold `text` from now on, as its file read again gives it.
+    /// Sets `prefab`'s text, its file read again.
     #[cfg(feature = "dev")]
     pub(crate) fn set_prefab_text(&mut self, prefab: Prefab, text: Arc<str>) {
         self.prefabs[prefab.index()].text = Some(text);
     }
 
-    /// The name of `font`, which text names it by.
     pub(crate) fn font_name(&self, font: Font) -> &str {
         &self.fonts[font.index()].0
     }
 
-    /// The path of `font`'s file: for people, whom a path tells more than an ID, as the Inspector
-    /// shows it in development builds.
+    /// For people, in the Inspector.
     #[cfg(feature = "dev")]
     pub(crate) fn font_path(&self, font: Font) -> &str {
         &self.fonts[font.index()].1
     }
 
-    /// The font that `name` names, by its name or a path to its file, if one does.
     pub(crate) fn font(&self, name: &str) -> Option<Font> {
         self.font_names.get(name).copied()
     }
 
-    /// Adds `font`, the next font added, loaded from the file `path` names, named `name`.
+    /// Adds `font`, the next added, from the file `path` names, named `name`.
     pub(crate) fn add_font(&mut self, font: Font, path: Arc<str>, name: Arc<str>) {
         assert_eq!(
             font.index(),
@@ -392,63 +367,54 @@ impl Assets {
         self.fonts.push((name, path));
     }
 
-    /// Has `path` name `font` too, added before from another path to its file, unless it names one
-    /// already.
+    /// Has `path`, another path to `font`'s file, name it too, unless it names a font already.
     pub(crate) fn alias_font(&mut self, font: Font, path: Arc<str>) {
         self.font_names.entry(path).or_insert(font);
     }
 
-    /// The name of `model`, which text names it by.
     pub(crate) fn model_name(&self, model: Model) -> &str {
         &self.models[model.index()].name
     }
 
-    /// The path of `model`'s file: for people, whom a path tells more than an ID.
+    /// For people, whom a path tells more than an ID.
     pub(crate) fn model_path(&self, model: Model) -> &str {
         &self.models[model.index()].path
     }
 
-    /// The model that `name` names, by its name or a path to its file, if one does: one removed
-    /// too, as [`texture`](Self::texture) finds a texture.
+    /// Like [`texture`](Self::texture), for models.
     pub(crate) fn model(&self, name: &str) -> Option<Model> {
         self.model_names.get(name).copied()
     }
 
-    /// The model that `name` names, unless it was removed, as
-    /// [`live_texture`](Self::live_texture) finds a texture.
+    /// Like [`live_texture`](Self::live_texture), for models.
     pub(crate) fn live_model(&self, name: &str) -> Option<Model> {
         self.model(name).filter(|&model| !self.model_removed(model))
     }
 
-    /// The model of index `index`, if its file's path is `path` and it isn't removed, as
-    /// [`live_texture_at`](Self::live_texture_at) finds a texture.
+    /// Like [`live_texture_at`](Self::live_texture_at), for models.
     pub(crate) fn live_model_at(&self, index: usize, path: &str) -> Option<Model> {
         let model = self.models.get(index)?;
         (&*model.path == path && !model.removed).then(|| Model::new(index))
     }
 
-    /// Whether `model` was removed.
     pub(crate) fn model_removed(&self, model: Model) -> bool {
         self.models
             .get(model.index())
             .is_some_and(|model| model.removed)
     }
 
-    /// Has `model` count as removed from now on, keeping its name, its path and what its root
-    /// spawns, as the struct says.
+    /// Counts `model` as removed from now on, keeping its name, path and what its root spawns.
     pub(crate) fn remove_model(&mut self, model: Model) {
         self.models[model.index()].removed = true;
     }
 
-    /// What `model`'s root spawns; `None` for a model these assets don't have, as one another
-    /// context added.
+    /// What `model`'s root spawns; `None` for a model another context added.
     pub(crate) fn nodes(&self, model: Model) -> Option<&Nodes> {
         self.models.get(model.index()).map(|model| &model.nodes)
     }
 
-    /// Adds the next model, loaded from the file `path` names, named `name`, whose root spawns
-    /// `nodes`, and returns it: each named by them from now on, unless another names it already
-    /// that isn't removed.
+    /// Adds the next model, from the file `path` names, named `name`, whose root spawns `nodes`.
+    /// Both name it unless an unremoved model has the name.
     pub(crate) fn add_model(&mut self, path: Arc<str>, name: Arc<str>, nodes: Nodes) -> Model {
         let model = Model::new(self.models.len());
         self.models.push(NamedModel {
@@ -462,8 +428,7 @@ impl Assets {
         model
     }
 
-    /// Has `path` name `model` too, added before from another path to its file, unless it names
-    /// one already that isn't removed.
+    /// Has `path`, another path to `model`'s file, name it too, unless it names an unremoved model.
     pub(crate) fn alias_model(&mut self, model: Model, path: Arc<str>) {
         let models = &self.models;
         let entry = self.model_names.entry(path).or_insert(model);
@@ -472,14 +437,14 @@ impl Assets {
         }
     }
 
-    /// Has `model`'s root spawn `nodes` from now on, as its file read again gives them.
+    /// Sets what `model`'s root spawns, its file read again.
     #[cfg(feature = "dev")]
     pub(crate) fn set_nodes(&mut self, model: Model, nodes: Nodes) {
         self.models[model.index()].nodes = nodes;
     }
 
-    /// Adds `texture`, the next texture added, loaded from the file `path` names, named `name`:
-    /// each naming it from now on, unless it names another already that isn't removed.
+    /// Adds `texture`, the next added, from the file `path` names, named `name`. Both name it
+    /// unless one names an unremoved texture.
     pub(crate) fn add_texture(&mut self, texture: Texture, path: Arc<str>, name: Arc<str>) {
         assert_eq!(
             texture.index() as usize,
@@ -496,7 +461,7 @@ impl Assets {
         self.alias(texture, path);
     }
 
-    /// Adds `texture`, the next texture added, which no text names, as a font's field.
+    /// Adds `texture`, the next added, which no text names, as a font's field.
     pub(crate) fn add_unnamed(&mut self, texture: Texture) {
         assert_eq!(
             texture.index() as usize,
@@ -506,8 +471,8 @@ impl Assets {
         self.textures.push(None);
     }
 
-    /// Has `path` name `texture` too, added before from another path to its file, unless it names
-    /// one already that isn't removed; `texture` keeps its first path.
+    /// Has `path`, another path to `texture`'s file, name it too, unless it names an unremoved
+    /// texture. `texture` keeps its first path.
     pub(crate) fn alias(&mut self, texture: Texture, path: Arc<str>) {
         let textures = &self.textures;
         let entry = self.by_name.entry(path).or_insert(texture);
@@ -517,9 +482,8 @@ impl Assets {
         }
     }
 
-    /// What a refusal of text that names a texture, a model, a font or a prefab, as `kind` says,
-    /// `name`,
-    /// which none has, says of it: that none is loaded, and why it couldn't be, if it was tried.
+    /// The refusal of text naming a `kind` of asset `name` that none has: none is loaded, and why
+    /// it couldn't be, if it was tried.
     pub(crate) fn not_found(&self, kind: &str, name: &str) -> String {
         match self.failed.get(name) {
             Some((code, why)) => {
@@ -531,9 +495,8 @@ impl Assets {
         }
     }
 
-    /// Keeps why the last try at loading textures couldn't load each that text names as `failed`
-    /// does, in place of what the tries before kept, for refusals of text naming one to say, as
-    /// [`not_found`](Self::not_found) does.
+    /// Keeps why the last try couldn't load each, for [`not_found`](Self::not_found), replacing
+    /// earlier tries'.
     pub(crate) fn failed(&mut self, failed: &[(&str, gg_core::Error)]) {
         let why = |error: &gg_core::Error| (error.code(), format!("{error:#}").into());
         let failed = failed
@@ -542,12 +505,11 @@ impl Assets {
         self.failed = failed.collect();
     }
 
-    /// Whether the last try at loading textures couldn't load the one text names `name`.
     pub(crate) fn has_failed(&self, name: &str) -> bool {
         self.failed.contains_key(name)
     }
 
-    /// Whether `asset` names one loaded, and not removed, as a load takes it.
+    /// Whether `asset` names one loaded and not removed, as a load takes it.
     pub(crate) fn has<S: AsRef<str>>(&self, asset: &Asset<S>) -> bool {
         match asset {
             Asset::Texture(name) => self.live_texture(name.as_ref()).is_some(),
@@ -557,10 +519,8 @@ impl Assets {
         }
     }
 
-    /// Names each texture, model, font and prefab as `names` gives its path a name, and every other
-    /// by its
-    /// path, in place of what named it before: as a run takes the names its recording's run, or
-    /// its lockstep host, gave its assets.
+    /// Names each asset whose path `names` has by that name, and every other by its path: how a run
+    /// takes the names its recording's run, or its lockstep host, gave.
     #[cfg(feature = "dev")]
     pub(crate) fn rename(&mut self, names: &HashMap<Arc<str>, Arc<str>>) {
         let Self {
@@ -627,53 +587,50 @@ impl Assets {
         }
     }
 
-    /// The asset database, as the last scan left it.
     #[cfg(feature = "dev")]
     pub(crate) fn catalog(&self) -> &Catalog {
         &self.catalog
     }
 
-    /// Puts `catalog`, what a scan made of the database, in its place.
     #[cfg(feature = "dev")]
     pub(crate) fn set_catalog(&mut self, catalog: Catalog) {
         self.catalog = catalog;
     }
 
-    /// Takes an asset the run has just written into the database, as [`Catalog::bind`] does.
+    /// See [`Catalog::bind`].
     #[cfg(feature = "dev")]
     pub(crate) fn bind(&mut self, path: Arc<str>, kind: AssetKind, id: AssetId) {
         self.catalog.bind(path, kind, id);
     }
 }
 
-/// What the layers loaded from files, or was loaded where text named it, each by its file, as
-/// [`file_of`] resolves it, so that a file added again, by whatever form of its path, isn't loaded
-/// again; but for what's removed, whose file loads anew.
+/// What the layers loaded, or was loaded where text named it, by file as [`file_of`] resolves it,
+/// so a file added again by any form of its path isn't loaded again. Removed assets are the
+/// exception: their files load anew.
 #[derive(Default)]
 pub(crate) struct Loaded {
-    /// Each texture's or sprite sheet's, which share it: its texture, and its size in pixels, which
-    /// a sheet is cut by.
+    /// Textures and sprite sheets share it: the texture and its size in pixels, which a sheet is
+    /// cut by.
     pub(crate) textures: HashMap<PathBuf, (Texture, [u32; 2])>,
     pub(crate) models: HashMap<PathBuf, Model>,
     pub(crate) fonts: HashMap<PathBuf, Font>,
     pub(crate) prefabs: HashMap<PathBuf, Prefab>,
     pub(crate) sounds: HashMap<PathBuf, Sound>,
     pub(crate) music: HashMap<PathBuf, Music>,
-    /// What each model is made of on the renderer, by its index, which a reload replaces and a
-    /// removal removes: a stand-in's of nothing.
+    /// What each model is made of on the renderer, by index: nothing for a stand-in. A reload
+    /// replaces it and a removal removes it.
     pub(crate) made: Vec<Made>,
-    /// Each path a shader's file was added by, which the renderer's shaders know it by, with the
-    /// file it resolves to.
+    /// Each path a shader's file was added by, which the renderer knows it by, with the file it
+    /// resolves to.
     pub(crate) shaders: HashMap<PathBuf, PathBuf>,
     /// The textures cut into sprite sheets, whose cells a reload at another size would move.
     #[cfg(feature = "dev")]
     pub(crate) sheets: Vec<Texture>,
 }
 
-/// What names the file at `path` among assets: its path relative to `root`, with `/` between its
-/// parts, if it's in `root`, and otherwise as it's given, with `/` too: as the layer wrote it,
-/// rather than as the disk spells it, so that every checkout of a game names its files alike, as
-/// one whose file system ignores case may keep a file in the case an editor last saved it in.
+/// The name of the file at `path`: relative to `root` if it's in `root`, else as given, `/` between
+/// parts either way. It's as the layer wrote it, not as the disk spells it, so every checkout names
+/// its files alike: a case-ignoring file system may keep the case an editor last saved.
 pub(crate) fn name_of(root: Option<&Path>, path: &Path) -> Arc<str> {
     let relative = root.and_then(|root| path.strip_prefix(root).ok());
     let text = relative.unwrap_or(path).to_string_lossy();
@@ -684,39 +641,35 @@ pub(crate) fn name_of(root: Option<&Path>, path: &Path) -> Arc<str> {
     }
 }
 
-/// The file at `path`, as the OS resolves `.`, `..`, links and, where names ignore it, as on
-/// Windows, case, so that one file is one file however its path is written; `None` for a path that
-/// doesn't resolve, as one of no file.
+/// The file at `path` as the OS resolves `.`, `..`, links and (on Windows) case, so one file is one
+/// file however its path is written. `None` if the path doesn't resolve.
 pub(crate) fn file_of(path: &Path) -> Option<PathBuf> {
     let _zone = gg_core::zone!();
     fs::canonicalize(path).ok()
 }
 
-/// Whether text names a texture `name` by an asset ID, 16 lowercase hex digits, rather than by a
-/// path, as ARCHITECTURE.md's Project state says.
+/// Whether `name` is an asset ID, 16 lowercase hex digits, rather than a path (ARCHITECTURE.md's
+/// Project state).
 pub(crate) fn is_id(name: &str) -> bool {
     name.len() == 16 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The textures, models, fonts and prefabs under the app's root, as the scans found them, and their
-/// IDs,
-/// from their ID files, which gg-api reads: the asset database. An asset the run has found it
-/// keeps, with its ID, even once its file is gone, so that its ID stays its for the run, until it
-/// turns up at another path, renamed or moved, which takes it, as [`scanned`] says.
+/// The asset database: the textures, models, fonts and prefabs under the app's root as the scans
+/// found them, with their IDs from their ID files (gg-api reads them). An asset the run has found
+/// keeps its ID for the run even once its file is gone, until it turns up renamed or moved, which
+/// takes the ID (see [`scanned`]).
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Catalog {
-    /// Each asset found, by its path from the root, with `/` between its parts.
+    /// Each asset found, by path from the root, `/` between parts.
     assets: BTreeMap<Arc<str>, Cataloged>,
-    /// The asset each ID is, by its path: each ID bound once a run.
+    /// The path of the asset each ID is: bound once a run.
     ids: HashMap<AssetId, Arc<str>>,
-    /// The ID files whose assets the last scan didn't find: each its path, its asset's kind, and its
-    /// ID if it reads.
+    /// The ID files whose assets the last scan didn't find: path, asset's kind, and ID if it reads.
     orphans: Vec<(Arc<str>, AssetKind, Option<AssetId>)>,
     /// Why the root couldn't be listed at the last scan, if it couldn't.
     unlisted: Option<Arc<str>>,
-    /// The problems warned of, each by its code and the path of what it's about, so that each warns
-    /// once a run.
+    /// The problems warned of, by code and path: each warns once a run.
     warned: HashSet<(&'static str, Arc<str>)>,
 }
 
@@ -728,12 +681,11 @@ pub(crate) struct Cataloged {
     pub(crate) id: Option<AssetId>,
     /// Whether the last scan found its file.
     pub(crate) present: bool,
-    /// What's wrong with its ID file as the last scan found it, if anything.
+    /// What's wrong with its ID file at the last scan, if anything.
     pub(crate) problem: Option<Problem>,
 }
 
-/// A problem with an asset's ID file: its code, as [`scanned`] lists them, and its warning's
-/// message.
+/// A problem with an asset's ID file: its code (see [`scanned`]) and its warning's message.
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Problem {
@@ -751,7 +703,7 @@ impl Problem {
 
 #[cfg(feature = "dev")]
 impl Catalog {
-    /// The assets the last scan found, in the order of their paths: each its path and what's known.
+    /// The assets the last scan found, in path order.
     pub(crate) fn listed(&self) -> impl Iterator<Item = (&str, &Cataloged)> {
         let present = self
             .assets
@@ -760,37 +712,34 @@ impl Catalog {
         present.map(|(path, cataloged)| (&**path, cataloged))
     }
 
-    /// Whether the last scan found an asset at `path` from the root, with `/` between its parts.
+    /// Whether the last scan found an asset at `path`, from the root with `/` between parts (as
+    /// in the methods below).
     pub(crate) fn present(&self, path: &str) -> bool {
         self.assets.get(path).is_some_and(|asset| asset.present)
     }
 
-    /// The ID of the asset at `path` from the root, with `/` between its parts, if it has one: the
-    /// ID it keeps for the run.
+    /// The ID the asset at `path` keeps for the run.
     pub(crate) fn id(&self, path: &str) -> Option<AssetId> {
         self.assets.get(path)?.id
     }
 
-    /// The path from the root, with `/` between its parts, of the asset whose ID is `id` this run,
-    /// if one's is.
+    /// The path of the asset whose ID is `id` this run.
     pub(crate) fn path(&self, id: AssetId) -> Option<&str> {
         let path = self.ids.get(&id)?;
         (self.id(path) == Some(id)).then_some(&**path)
     }
 
-    /// The ID files whose assets the last scan didn't find, in the order of their paths.
+    /// The ID files whose assets the last scan didn't find, in path order.
     pub(crate) fn orphans(&self) -> &[(Arc<str>, AssetKind, Option<AssetId>)] {
         &self.orphans
     }
 
-    /// Why the root couldn't be listed at the last scan, if it couldn't.
     pub(crate) fn unlisted(&self) -> Option<&str> {
         self.unlisted.as_deref()
     }
 
-    /// Takes in the asset of `kind` the run has just written at `path` from the root, with `/`
-    /// between its parts, and its ID file, holding `id`, which no asset has this run: as the next
-    /// scan would, so that what names it by its ID finds it at once.
+    /// Takes in the asset of `kind` the run just wrote at `path`, with its ID file holding `id`,
+    /// which no asset has this run: what the next scan would, so its ID finds it at once.
     pub(crate) fn bind(&mut self, path: Arc<str>, kind: AssetKind, id: AssetId) {
         let cataloged = Cataloged {
             kind,
@@ -803,8 +752,7 @@ impl Catalog {
     }
 }
 
-/// Scans the assets under `root`, as gg-api's `scan` does, and gives what `catalog` becomes, as
-/// [`scanned`] says.
+/// Scans the assets under `root` with gg-api's `scan`, then [`scanned`].
 #[cfg(feature = "dev")]
 pub(crate) fn scan(
     catalog: &Catalog,
@@ -816,22 +764,23 @@ pub(crate) fn scan(
 }
 
 /// What `catalog` becomes of `found`, what a scan found under the asset root, or `None` if nothing
-/// changed, warning of each problem once a run and writing the ID files missing if `writes`.
+/// changed. Warns of each problem once a run, and writes the ID files missing if `writes`.
 ///
-/// The problems: `asset.no_id`, none where the run writes none; `asset.bad_meta`, one that doesn't
-/// read, its asset going without an ID; `asset.meta_case`, one named so in case alone;
-/// `asset.duplicate_id`; `asset.orphaned`, one without its asset; `asset.id_changed`;
-/// `asset.unwritten`; and `asset.unlisted`, what the scan couldn't take. The run rewrites no ID
-/// file there, as one that doesn't read may be a merge's conflict or someone's edit.
+/// The problems: `asset.no_id` (none, where the run writes none), `asset.bad_meta` (an ID file that
+/// doesn't read; its asset goes without an ID), `asset.meta_case` (one named so in case alone),
+/// `asset.duplicate_id`, `asset.orphaned` (an ID file without its asset), `asset.id_changed`,
+/// `asset.unwritten` and `asset.unlisted` (what the scan couldn't take). The run rewrites no ID
+/// file there: one that doesn't read may be a merge's conflict or someone's edit.
 ///
 /// An asset found gets the ID its ID file holds, unless another asset has it this run, and keeps
-/// it for the run, whatever its ID file holds later: at a run's first scan, the asset first by
-/// path keeps an ID two hold. An asset whose ID file holds the ID of one the run had that's gone
-/// takes it, as after a rename that took its ID file along, logging `asset.renamed`. Where the run
-/// `writes`, an asset new to the run without an ID file takes one that a rename left behind, moved
-/// beside it, if its file holds what that ID's asset last held, as [`renamed`] says, `prints`
-/// telling; and any other without one gets one written whole beside it, holding the ID it has
-/// this run, or else one drawn, unless another ID file holds that ID now.
+/// it for the run whatever its ID file holds later. At a run's first scan, the first by path keeps
+/// an ID two hold. An asset whose ID file holds the ID of a gone asset the run had takes it, as
+/// after a rename that took the ID file along, logging `asset.renamed`.
+///
+/// Where the run `writes`, an asset new to the run without an ID file takes one a rename left
+/// behind, moved beside it, if its file holds what that ID's asset last held (see [`renamed`]),
+/// `prints` telling. Any other without one gets one written whole beside it: the ID it has this
+/// run, else a drawn one, unless another ID file holds it now.
 #[cfg(feature = "dev")]
 pub(crate) fn scanned<'f>(
     catalog: &Catalog,
@@ -846,8 +795,8 @@ pub(crate) fn scanned<'f>(
     }
     let root_unread = found.unread.iter().find(|unread| unread.path == ".");
     next.unlisted = root_unread.map(|unread| unread.error.as_str().into());
-    // Every asset found is present before any takes an ID, so that a duplicate's holder, and a
-    // renamed asset's former self, are told present or gone whatever their paths' order.
+    // All found are present before any takes an ID, so a duplicate's holder and a renamed asset's
+    // former self are told present or gone whatever the path order.
     for scanned in &found.assets {
         let cataloged = (next.assets.entry(scanned.path.as_str().into())).or_insert(Cataloged {
             kind: scanned.kind,
@@ -863,12 +812,12 @@ pub(crate) fn scanned<'f>(
     } else {
         HashMap::new()
     };
-    // Each asset's ID file, as found, or as moved beside it.
+    // Each asset's ID file as found or as moved beside it.
     let moved: HashMap<&str, Result<Meta, Failure>> = (renamed.iter())
         .map(|(&path, &(_, id))| (path, Ok(Meta { id })))
         .collect();
     let meta_of = |scanned: &'f Scanned| moved.get(scanned.path.as_str()).or(scanned.meta.as_ref());
-    // Each ID an ID file holds, by the path of the first in order of those that hold it.
+    // Each ID an ID file holds, by the path of the first that holds it.
     let ids = (found.assets.iter()).filter_map(|scanned| match meta_of(scanned) {
         Some(Ok(meta)) => Some((format!("{}.{}", scanned.path, Meta::EXTENSION), meta.id)),
         _ => None,
@@ -882,8 +831,8 @@ pub(crate) fn scanned<'f>(
     for (path, id) in holders {
         held.entry(id).or_insert(path);
     }
-    // Each ID an asset's ID file holds, by the path of the first asset in order whose file holds
-    // it: the asset a run's first scan gives it to.
+    // Each ID an asset's ID file holds, by the first such asset's path: who a run's first scan
+    // gives it to.
     let mut first = HashMap::new();
     for scanned in &found.assets {
         if let Some(Ok(meta)) = meta_of(scanned) {
@@ -939,12 +888,14 @@ pub(crate) fn scanned<'f>(
     (next != *catalog).then_some(next)
 }
 
-/// What asset `scanned` gets of its ID file, `meta`, as the scan found it beside it or a rename's
-/// was moved there, `paired`, given the ID it had this run, if any; `held`, each ID an ID file
-/// holds, by the path of the first that holds it; and `first`, each ID an asset's ID file holds, by
-/// the first such asset's path: its ID, and what's wrong, if anything, warned of once a run;
-/// writing its ID file if it's missing and the run `writes`, and binding its ID in `next` if it's
-/// new to it, as [`scanned`] says.
+/// The ID and problem, if any, `scanned` gets of its ID file `meta`, found beside it or a rename's
+/// moved there (`paired`). Warns of the problem once a run, writes the ID file if it's missing and
+/// the run `writes`, and binds the ID in `next` if it's new there (see [`scanned`]).
+///
+/// - `held`: each ID an ID file holds, by the path of the first that holds it.
+/// - `first`: each ID an asset's ID file holds, by the first such asset's path.
+///
+/// The asset's ID this run, if any, is already in `next`.
 #[cfg(feature = "dev")]
 fn identify(
     next: &mut Catalog,
@@ -1054,8 +1005,8 @@ fn identify(
                 // A run's first scan gives an ID to the first by path whose ID file holds it.
                 let takes = first.get(&id) == Some(&path);
                 if takes && !present {
-                    // Renamed or moved, its ID file with it or moved after it: its ID goes with it,
-                    // and the asset it was is no more.
+                    // Renamed or moved, its ID file with it or moved after it: the ID goes with it,
+                    // and the old asset is no more.
                     next.ids.insert(id, path.into());
                     next.assets.remove(&holder);
                     if !paired {
@@ -1128,16 +1079,17 @@ fn identify(
     }
 }
 
-/// The assets `found` new to the run without ID files, as after a rename that left theirs behind,
-/// whose files hold what the asset of an ID file left behind last held, as `prints` last found it,
-/// and no other's: each by its path, with the path of that ID file, which is moved beside it, and
-/// the ID it holds, logging `asset.renamed`. An ID file is left behind where the scan finds it
-/// without its asset, holding an ID that no asset found holds in its ID file, nor has this run. Two
-/// new assets alike, or two ID files left behind whose assets were alike, pair with none, as a copy
-/// may be either. The move links the ID file beside the asset, which fails rather than write over
-/// one there, then removes it, so that a move that fails leaves it where it was.
+/// The assets `found` new to the run, without ID files, whose files hold what an ID file left
+/// behind by a rename last held (per `prints`) and no other's. Each comes by its path with that ID
+/// file's path, which is moved beside it, and the ID. Logs `asset.renamed`.
 ///
-/// Reads each new asset's file of a length that such an asset had, as [`Prints`] says.
+/// An ID file is left behind if the scan finds it without its asset, holding an ID that no asset
+/// found holds in its ID file, nor has this run. Two new assets alike, or two ID files left behind
+/// whose assets were alike, pair with none: a copy may be either. The move links the ID file
+/// beside the asset, which fails rather than write over one there, then removes it, so a failed
+/// move leaves it where it was.
+///
+/// Reads each new asset's file of a length such an asset had (see [`Prints`]).
 #[cfg(feature = "dev")]
 fn renamed<'f>(
     next: &Catalog,
@@ -1184,8 +1136,8 @@ fn renamed<'f>(
         if fs::hard_link(&orphan.file, Meta::path(&asset.file)).is_err() {
             continue;
         }
-        // Should it stay, its ID is in two ID files, and the scans from then on warn of it as left
-        // without its asset, saying to delete it.
+        // Should it stay, its ID is in two ID files, and later scans warn of it as left without
+        // its asset, saying to delete it.
         let _ = fs::remove_file(&orphan.file);
         let (path, from) = (asset.path.as_str(), orphan.path.as_str());
         let was = from.rsplit_once('.').map_or(from, |(asset, _)| asset);
@@ -1202,9 +1154,8 @@ fn renamed<'f>(
     renamed
 }
 
-/// What a file holds, as far as telling an asset's file renamed from another goes: its length, and
-/// a hash of its bytes, each 8 of them mixed in turn by SplitMix64's mix, which files of one length
-/// share by chance about once in 2^64 pairs.
+/// What tells a renamed asset's file from another: its length and a hash of its bytes, each 8 mixed
+/// in turn by SplitMix64's mix. Files of one length collide by chance about once in 2^64 pairs.
 #[cfg(feature = "dev")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Print {
@@ -1214,13 +1165,10 @@ pub(crate) struct Print {
 
 #[cfg(feature = "dev")]
 impl Print {
-    /// How much of a file is read at a time: a multiple of 8, so that only the last part read ends
-    /// in a part of a word.
+    /// How much of a file is read at a time: a multiple of 8, so only the last part ends mid-word.
     const CHUNK: usize = 1 << 16;
 
-    /// The print of the file at `path`.
-    ///
-    /// Fails as reading it does.
+    /// The print of the file at `path`. Fails like reading it.
     fn of(path: &Path) -> io::Result<Self> {
         let _zone = gg_core::zone!();
         let mut file = File::open(path)?;
@@ -1250,12 +1198,11 @@ fn mixed(hash: u64, bytes: &[u8]) -> u64 {
     })
 }
 
-/// The assets' [`Print`]s, which pair a renamed asset with the ID file its rename left behind, as
-/// [`scanned`] says: each file's, by its path from the root, with its stamp as it was read, so that
-/// it's read again only once it changes; and each ID's, of what its asset last held, of the assets
-/// found and those whose ID files are left behind. A run that writes ID files keeps them in its
-/// clone's [`cache`] for the next, so that a rename made while no run watched pairs as the
-/// next run starts.
+/// The assets' [`Print`]s, which pair a renamed asset with the ID file its rename left behind (see
+/// [`scanned`]): each file's, by path from the root, with its stamp as read, so it's read again
+/// only once it changes; and each ID's, of what its asset last held, for assets found and those
+/// whose ID files are left behind. A run that writes ID files keeps them in its clone's [`cache`]
+/// for the next, so a rename made while no run watched pairs as the next run starts.
 #[cfg(feature = "dev")]
 #[derive(Debug, Default)]
 pub(crate) struct Prints {
@@ -1266,9 +1213,8 @@ pub(crate) struct Prints {
 }
 
 /// What a clone's cache holds: the prints of the assets under the asset root, which resolves to
-/// `root`, the file's name a hash of it: each file's, as its path from the root, when it last
-/// changed in nanoseconds since 1970, its length and its hash; and each ID's, as the ID, the length
-/// and the hash.
+/// `root`; the file's name is a hash of it. A file's is its path from the root, when it last
+/// changed in nanoseconds since 1970, its length and hash. An ID's is the ID, length and hash.
 #[cfg(feature = "dev")]
 #[derive(Serialize, Deserialize)]
 struct Cached {
@@ -1277,14 +1223,13 @@ struct Cached {
     ids: Vec<(String, u64, u64)>,
 }
 
-/// The most a cache's file may hold, which is read whole.
+/// The most a cache file may hold: it's read whole.
 #[cfg(feature = "dev")]
 const MOST_CACHED: u64 = 1 << 26;
 
 #[cfg(feature = "dev")]
 impl Prints {
-    /// What the cache at `cache` holds of the asset root `root`; none if it's missing, can't be
-    /// read, or is of another root, as a cache may be.
+    /// What the cache at `cache` holds of `root`; none if it's missing, unreadable or another's.
     pub(crate) fn read(cache: &Path, root: &Path) -> Self {
         let _zone = gg_core::zone!();
         let read = dirs::read_file(cache, MOST_CACHED).ok();
@@ -1309,8 +1254,8 @@ impl Prints {
         }
     }
 
-    /// Writes the prints to the cache at `cache`, of the asset root `root`, whole, as
-    /// [`dirs::write`] does, warning `asset.no_cache` once a run if it can't.
+    /// Writes the prints of `root` to the cache at `cache`, whole like [`dirs::write`], warning
+    /// `asset.no_cache` once a run if it can't.
     pub(crate) fn save(&mut self, cache: &Path, root: &Path) {
         let _zone = gg_core::zone!();
         let nanos = |stamp: &Option<Stamp>| {
@@ -1342,8 +1287,7 @@ impl Prints {
         }
     }
 
-    /// The print of `scanned`'s file, read unless it was since the file last changed; `None` if it
-    /// can't be read.
+    /// The print of `scanned`'s file, read unless kept since it last changed. `None` if unreadable.
     fn of(&mut self, scanned: &Scanned) -> Option<Print> {
         if let Some(&(stamp, print)) = self.by_path.get(scanned.path.as_str())
             && stamp.is_some()
@@ -1358,8 +1302,8 @@ impl Prints {
     }
 
     /// Takes the prints of the assets `found` that have IDs in `catalog`, each its ID's too, reading
-    /// those whose files changed since they were last read; keeps those of the IDs that ID files
-    /// `found` left behind hold; and forgets the rest. Returns whether any changed.
+    /// those whose files changed since last read. Keeps those of the IDs that ID files `found` left
+    /// behind hold, and forgets the rest. Returns whether any changed.
     pub(crate) fn update(&mut self, catalog: &Catalog, found: &Scan) -> bool {
         let was = mem::take(&mut self.by_path);
         let mut changed = false;
@@ -1392,10 +1336,10 @@ impl Prints {
     }
 }
 
-/// Where the [`Prints`] of the assets under `root` are kept between runs of app `app`: a file of the
-/// root's own, by a hash of the path it resolves to, in the app's directory for caches, as
-/// [`dirs::dir`] says, so that each clone of a game keeps its own, whichever build runs it. `None`
-/// without the directory, or for a root that doesn't resolve.
+/// Where the [`Prints`] of the assets under `root` are kept between runs of app `app`: a file named
+/// by a hash of the path the root resolves to, in the app's cache directory (see [`dirs::dir`]), so
+/// each clone of a game keeps its own, whichever build runs it. `None` without the directory, or
+/// for a root that doesn't resolve.
 #[cfg(feature = "dev")]
 pub(crate) fn cache(app: &str, root: &Path) -> Option<PathBuf> {
     let root = file_of(root)?;
