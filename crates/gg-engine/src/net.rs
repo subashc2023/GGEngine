@@ -385,7 +385,7 @@ impl Merged {
 }
 
 /// Fails with `net.bad_command` if `command`, of player `player`'s inputs, names another player:
-/// a variant or a struct whose field `player` holds an integer, as the demos' commands name the
+/// a variant or a struct whose field `player` holds an integer, as Shards' commands name the
 /// player they steer, and a run's layers queue commands for its own player alone. So no client of a
 /// server, nor either peer of a session, steers another's player; peers refuse alike, as each knows
 /// whose inputs are whose. A server's own commands, which steer any player, aren't checked.

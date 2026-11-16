@@ -27,7 +27,6 @@ apps/             executables
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
   relay/          `gg-relay`, the relay's executable, which games don't run
 games/shards/     the first demo, a project: two players, alone, as peers or as a server's clients
-games/foxball/    the 3D demo, networked as Shards is: two foxes, a ball and two goals
 games/showcase/   a project of a scene for each feature: add one as a feature lands
 tools/            gg/, the command-line tool `cargo gg` runs; cook/, the cooker of games' packages
 docs/              PLAN.md, the roadmap, and DEFECTS.md, known defects (see Workflow); LUAU.md, what
@@ -62,8 +61,8 @@ Each topic's one home. A crate's own docs are its root's `//!` comment and its i
   scenes](games/showcase/scenes).
 - The simulation: [ECS](ARCHITECTURE.md#ecs), [Networking](ARCHITECTURE.md#networking),
   [Physics](ARCHITECTURE.md#physics), [Animation](ARCHITECTURE.md#animation),
-  [Navigation](ARCHITECTURE.md#navigation), [Audio](ARCHITECTURE.md#audio); the demos' rules,
-  [Shards'](games/shards/AGENTS.md) and [Foxball's](games/foxball/AGENTS.md) AGENTS.md.
+  [Navigation](ARCHITECTURE.md#navigation), [Audio](ARCHITECTURE.md#audio); the demo's rules,
+  [Shards' AGENTS.md](games/shards/AGENTS.md).
 - Diagnostics and their codes: [Diagnostics](ARCHITECTURE.md#diagnostics).
 - A game of its own, in a repository of its own, which `gg new --engine` makes outside the
   workspace, and the `gg` installed to run it: [Game code](ARCHITECTURE.md#game-code); what an agent
@@ -169,7 +168,7 @@ A change is done when all seven pass:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features sandbox/tracy -- -D warnings
-cargo clippy -p player -p shards -p foxball -p showcase --no-default-features --all-targets -- -D warnings
+cargo clippy -p player -p shards -p showcase --no-default-features --all-targets -- -D warnings
 cargo clippy -p gg-engine --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 cargo test --workspace
@@ -180,12 +179,12 @@ need a Vulkan 1.4 driver and the Khronos validation layer. Without a GPU, lavapi
 or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later) and `vulkan-validationlayers`. When a test's
 image differs from its reference, the test says where it wrote its own; after an intended change,
 `GG_UPDATE_REFERENCES=1` rewrites the references, which you look at before committing them. The
-sandbox's and the demos' world hashes, at each tick of a seeded run, are references too, which CI
+sandbox's and the demo's world hashes, at each tick of a seeded run, are references too, which CI
 checks on every platform: a change to their simulations, to what the hash reads, or to glam, libm,
-rapier or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p sandbox -p shards -p foxball`
-rewrites them and the demos' live recordings' alone. gg-engine's `physics/` holds five more, its
+rapier or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p sandbox -p shards` rewrites
+them and the demo's live recording's alone. gg-engine's `physics/` holds five more, its
 `animation/` three and its `navigation/` one, edited by hand. A difference on some platforms alone
-is a bug. Some changes need a new recording, as each demo's AGENTS.md says.
+is a bug. Some changes need a new recording, as the demo's AGENTS.md says.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push of more than docs, on Windows
 and Linux, x86-64 and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the

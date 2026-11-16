@@ -290,7 +290,7 @@ struct Bundle {
 }
 
 /// The files of `folder`, by their paths in it, `/` between their parts, named after the game, its
-/// executable keeping its extension, as `Foxball.exe`: its executable and its package side by side,
+/// executable keeping its extension, as `Shards.exe`: its executable and its package side by side,
 /// with the runtime's DLLs; or, with a bundle, as on macOS, an app bundle holding them, named after
 /// the game, as Apple lays bundles out, the executable in `Contents/MacOS` and the package, which is
 /// data, in `Contents/Resources`, where an executable in a bundle finds it, with the icon as
@@ -720,7 +720,7 @@ fn pdb(exe: &Path) -> Result<PathBuf, Failure> {
 }
 
 /// A copy of the executable `exe` stripped of its debug info, by binutils' objcopy, beside it, as
-/// `gg-foxball-stripped`, which players get: its symbols stay, which name its functions in a
+/// `gg-shards-stripped`, which players get: its symbols stay, which name its functions in a
 /// panic's backtrace.
 ///
 /// Fails with `gg.symbols` if objcopy can't run or fails.

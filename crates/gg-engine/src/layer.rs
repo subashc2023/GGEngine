@@ -935,7 +935,7 @@ impl Context {
     /// run alone has, as a player the game plays itself, which a server's world, whose
     /// [`player`](Self::player) is `None` as a run alone's is, mustn't have. It changes as a
     /// session the game hosts or joins starts, and as it leaves it, from the frame after, which a
-    /// layer that sets up such a player follows, as Foxball's does its bot.
+    /// layer that sets up such a player follows, taking its bot off and putting it back.
     pub fn networked(&self) -> bool {
         self.networked
     }

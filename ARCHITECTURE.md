@@ -158,9 +158,7 @@ Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code
 `games/shards`, is a demo of two players, alone or networked in lockstep, as
 [Networking](#networking) describes, which the v0.1 loop is tested on. The second, in
 `games/showcase`, is a scene for each of what the engine draws and simulates, opened from the
-editor's Scenes panel, which grows as the engine does. The third, in `games/foxball`, is the 3D
-demo, networked as Shards is: two foxes, skinned characters that rapier3d walks, knocking a ball
-into goals, looked about with the grabbed mouse and heard in 3D. Executables are
+editor's Scenes panel, which grows as the engine does. Executables are
 named `gg-` and the app, such as `gg-sandbox`: GPU drivers apply per-game settings by executable
 name, and a generic name can match one.
 
@@ -227,7 +225,7 @@ window on Windows, their logs recording their runs. A game's build script, gg-ap
 manifest's icon, which its window takes too, through `App::icon`. `cargo gg ship` builds a
 project's game so, cooks its package beside it with the cooker of the engine it builds against,
 built in `target/gg-cook` for a game of its own, and lays the two out in `target/ship/<game>`,
-named after the game, its package's name capitalized, as `Foxball.exe` and `Foxball.ggpk`, with
+named after the game, its package's name capitalized, as `Shards.exe` and `Shards.ggpk`, with
 `NOTICES.txt`: the project's `CREDITS.txt` and the licenses of every crate the build is made from,
 build dependencies included, as Luau's C++ is compiled in through one, which cargo-about writes
 with the workspace's `about.toml`, a license it doesn't accept failing the ship. Side by side on
@@ -1378,9 +1376,9 @@ gives each client the least player no other client has, as `Context::player` tel
 queues commands for its own player alone, naming it in them, since each run runs every player's
 world. `Context::networked` tells a layer whether its run takes part in a session at all, a
 server's too, whose player is none as a run alone's is, so that what a game sets up for a run
-alone, as Foxball's bot, a session's runs leave out.
+alone, as a bot playing the other player, a session's runs leave out.
 
-A game hosts and joins sessions from its own UI too, as Foxball's menu does, so that its players
+A game hosts and joins sessions from its own UI too, as from a menu's buttons, so that its players
 need no flags. `Context::host` starts a lockstep session through the run's relay, the one
 `--relay` names, given without a session flag, else the one its project names, from the next frame: the run plays on from its world as player 0, alone
 until someone joins. `Context::join` joins one by the code a player types or pastes, its host's
@@ -1388,10 +1386,10 @@ world taking the run's place, as a joiner's does. `Context::leave` ends either, 
 alone from the world it has, a joiner's its host's. `Context::session` says where the session
 stands, with its code, for the game's UI to show: waiting, no host for the code yet, joining,
 playing, refused as another build, the relay out of reach, or the host lost. `networked` and
-`player` change as such a session starts or ends, which the layer follows, as Foxball takes its
+`player` change as such a session starts or ends, which the layer follows, as a game takes its
 bot off and puts it back. `App::predicting` has a game's own sessions predict each other's inputs,
-so that both runs of a build agree: Foxball's do, as lockstep had a player's own fox answer some
-160 ms late over a link of 150 ms there and back, and predicting in 31 ms. A run that's recorded
+so that both runs of a build agree: lockstep had a player's own character answer some 160 ms late
+over a link of 150 ms there and back, and predicting in 31 ms. A run that's recorded
 starts none, as a recording holds a run alone or a session from its start.
 
 - **A tick runs on its inputs alone.** A tick's inputs are each layer's commands, the host's then
@@ -1524,12 +1522,13 @@ starts none, as a recording holds a run alone or a session from its start.
   end of a pair to 500 datagrams and 256 KiB of them a second, in bursts of 1,000 and 512 KiB,
   dropping those past as a lossy link does, and its stream to 128 KiB a second past a burst of
   1 MiB, reading it more slowly, so that TCP holds the sender back and nothing is lost
-  (`relay.limited`): token buckets, at three to four times what Foxball's sessions send at the
-  most, a server to each client, with a joiner's world passing in one burst. On a server it runs as
+  (`relay.limited`): token buckets, at three to four times what a 3D game's sessions of two
+  skinned characters and a ball sent at the most, a server to each client, with a joiner's world
+  passing in one burst. On a server it runs as
   the systemd service `apps/relay/gg-relay.service`, sandboxed and restarting itself, its JSON log
   in `/var/log/gg-relay`.
 - **A player's commands steer that player alone.** A command whose variant or struct has a field
-  `player`, an integer, as the demos' have, names the player whose inputs carry it, a peer's or a
+  `player`, an integer, as Shards' have, names the player whose inputs carry it, a peer's or a
   server's client's, or is refused, by every run of the session alike (`net.bad_command`), so that
   no peer or client steers another's player; a server's own commands, which may steer any, aren't
   checked.
@@ -1547,7 +1546,7 @@ starts none, as a recording holds a run alone or a session from its start.
   commands, each tick's tagged with the tick; the server applies them in their order, each tick's
   at the first tick it runs that's theirs or past it, its own layers' first and then each client's
   by its player. After every second tick, 32 times a second, which halves a client's download
-  against every tick's (0.77 Mbit/s for Foxball's), it sends each client its state: the text of
+  against every tick's (0.77 Mbit/s for that 3D game's), it sends each client its state: the text of
   what it sees of the world, as a snapshot writes the world, but with what hasn't changed since
   the latest state the client has said it has named as kept, a line in place of each run of
   tables kept, the children and each resource whose text is the same; compressed by zstd against
@@ -1556,7 +1555,7 @@ starts none, as a recording holds a run alone or a session from its start.
   kept as the ECS's change marks say nothing joined it or changed in it since that state, and it
   has as many rows: the server's world moves its change tick on as each tick ends, as a run that
   draws does as each tick starts. A thread of the server's own writes the states, from a copy of
-  the world the main thread takes as the tick ends (44 µs a tick for Foxball's, in a release
+  the world the main thread takes as the tick ends (44 µs a tick for that 3D game's, in a release
   build), so that the main thread's time doesn't grow with the clients or the world; a tick that
   ends while it's still writing sends none, which `net.served` counts. The client rebuilds each
   state's text whole from the state it's against, which it keeps, as the server does.
@@ -1668,12 +1667,12 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   RenderDoc's layer hides them. A panic is logged as `log.panic`, with its location, before the
   process ends, even under `RUST_LOG=off`, with its backtrace, whatever `RUST_BACKTRACE` says, and
   its `frames`: each return address, innermost first, as its module's file name and the offset
-  there of the call, as `Foxball.exe+0x12a4f0`, which the symbols `gg ship` kept beside the
+  there of the call, as `Shards.exe+0x12a4f0`, which the symbols `gg ship` kept beside the
   shipped folder turn into functions and lines offline, as a player's machine can't: on Windows,
-  `llvm-symbolizer --obj <symbols>/Foxball.exe --relative-address <offset>...`, which Visual Studio
-  installs, finding the PDB beside it; on Linux, `addr2line -f -C -e <symbols>/Foxball <offset>...`
+  `llvm-symbolizer --obj <symbols>/Shards.exe --relative-address <offset>...`, which Visual Studio
+  installs, finding the PDB beside it; on Linux, `addr2line -f -C -e <symbols>/Shards <offset>...`
   (binutils 2.36 or later demangles Rust's symbols); on macOS, `atos -o
-  <symbols>/Foxball.dSYM/Contents/Resources/DWARF/<executable> -l 0x100000000 <0x100000000 plus
+  <symbols>/Shards.dSYM/Contents/Resources/DWARF/<executable> -l 0x100000000 <0x100000000 plus
   the offset>`. `Starting GGEngine` names the build's source digest (`source`), as the symbols'
   `build.txt` does.
 - **Captures.** A run that RenderDoc's layer is active on, as one `renderdoccmd capture` starts,
@@ -1805,8 +1804,8 @@ it shows, a button's or a widget's whether it's disabled, a widget's value and t
 a widget's value, by its name, kept as the file reloads, and turns the UI's input off while the game
 plays under it; only input gives a change. Its state, the focus, the widgets' values and what code
 set, is the run's, not the world's: each lockstep peer has its own, and none of it is hashed,
-snapshot or recorded, as Shards' layer keeps its menu's, so that a change that's the game's, as
-Foxball's bot's difficulty, queues a command, as a press does. A choice that changes the game
+snapshot or recorded, as Shards' layer keeps its menu's, so that a change that's the game's, as a
+bot's difficulty, queues a command, as a press does. A choice that changes the game
 queues a command, as input does, so that the next tick applies it on every peer, and a replay too; a
 Quit asks the run to end through `Context::exit`, as closing the window does. The tool API's `ui`
 lists each UI's nodes where they lie, as [Agents and tools](#agents-and-tools) says.
@@ -2788,7 +2787,7 @@ it itself or with one of them. A viewpoint isn't in the world: it moves every fr
 the world changes only at ticks, so no hash, scene or recording holds it.
 
 A layer sets how the view is antialiased in place of its environment's, through
-`Context::set_antialiasing`, as Foxball's options do, a world without an environment antialiased by
+`Context::set_antialiasing`, as a game's options may, a world without an environment antialiased by
 it too, until it's unset. It's the run's own, as the buses' volumes are, and for the same reason:
 the environment is the world's, which the hash reads, so a player's choice written into it would
 part lockstep peers whose players chose otherwise, and their replays and recordings with them. No

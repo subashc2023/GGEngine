@@ -127,9 +127,10 @@ pub struct Rate {
 }
 
 impl Default for Limits {
-    /// At four times the datagrams a second, and three times their bytes, that Foxball's sessions
-    /// send at the most, a server's to each client; and a stream that passes the world a joiner
-    /// takes at once, in its burst, and 30 times what a session's stream sends after.
+    /// At four times the datagrams a second, and three times their bytes, that a 3D game's sessions
+    /// of two skinned characters and a ball sent at the most, a server's to each client; and a
+    /// stream that passes the world a joiner takes at once, in its burst, and 30 times what a
+    /// session's stream sends after.
     fn default() -> Self {
         Self {
             most: MOST,

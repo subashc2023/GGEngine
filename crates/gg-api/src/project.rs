@@ -164,7 +164,7 @@ impl Project {
         Ok(())
     }
 
-    /// The game's name as a player sees it: its package's, capitalized, as `Foxball`, which a
+    /// The game's name as a player sees it: its package's, capitalized, as `Shards`, which a
     /// shipped folder names its executable, its package and a macOS bundle by.
     pub fn name(&self) -> String {
         let mut chars = self.game.chars();

@@ -11,8 +11,8 @@ on:
       game:
         description: The game to ship
         type: choice
-        options: [foxball, shards]
-        default: foxball
+        options: [shards]
+        default: shards
 
 permissions:
   contents: read

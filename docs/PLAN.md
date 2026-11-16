@@ -172,17 +172,16 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Round trips and joins in the logs** (2026-11-14)
 - **The engine reads no game's folder** (2026-11-14)
 - **A game of its own, outside the workspace** (2026-11-15)
+- **Foxball deleted** (2026-11-15)
 
 ## Now
 
 Phase 21 closes once two people on other networks, one of them on a phone's hotspot, play a match
-of Foxball's shipped builds through the rented relay, its numbers read from both ends' logs and the
-relay's and what they call for fixed, as Next has it. The builds are made and rehearsed through that
-relay, a Windows host and a Linux joiner on one network, and wait for players at hand.
+of a game's shipped builds through the rented relay, its numbers read from both ends' logs and the
+relay's and what they call for fixed, as Next has it; which game, now that the 3D demo is deleted,
+is an open question.
 
-Phase 22 is under way, its next milestone Foxball's move to a repository of its own, which starts
-by covering in the engine what Foxball alone covers in CI, and needs the repository and a deploy
-key that reads the engine's.
+Phase 22 is under way, its next milestone the sweep.
 
 Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
 checked on an Apple Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
@@ -210,8 +209,8 @@ Each phase ends in something you can run and check.
 
 Phases 11 to 20 are done, as Done has it, but for what Deferred holds.
 
-21. **A game shipped to players**: Foxball, as `gg ship` lays it out, played by two people on
-    different networks. *Done when* each downloads the shipped build; one hosts from the game's
+21. **A game shipped to players**, as `gg ship` lays it out, played by two people on different
+    networks. *Done when* each downloads the shipped build; one hosts from the game's
     menu and the other joins by the code it shows, typed or pasted; they meet through a relay the
     project names, on a rented server, and play a match, its join time, paths, delay, stalls and
     bandwidth measured from both ends' logs and the relay's; and the shipped folder holds its
@@ -220,20 +219,20 @@ Phases 11 to 20 are done, as Done has it, but for what Deferred holds.
     asks, as predicting peers; sessions across OSes, a build named by its sources and package
     rather than its executable's bytes; a relay for players, named by the project, with limits per
     address and per pair, run on a rented server; what a shipped build owes, its name, icon and
-    version, its notices, its symbols, an older glibc on Linux, Foxball shipped in CI, and its
+    version, its notices, its symbols, an older glibc on Linux, the game shipped in CI, and its
     options kept between runs; and measured over the real internet, two machines on other
     networks, a phone's among them, and what the numbers call for fixed.
 22. **Games of their own, and a sweep.** The engine reads no game's folder; a game in a repository
     of its own builds, runs, reloads, ships and joins sessions as one in `games/` does, with the
-    same determinism, build digest and `gg` commands; Foxball, the game going to players, moves to
-    one, the first to, while Shards and the showcase stay as the engine's demo and test bed; and the
-    backlog is triaged. *Done when* Foxball's repository builds, tests and ships it against the
-    engine pinned by revision, two of its builds join a session, and each of Deferred's rows and
-    DEFECTS.md's defects has been kept, rewritten, deleted or fixed. Its milestones, in order: the
-    engine reading no game's folder; a game outside the workspace, which `gg new` makes, whose build
-    gets the engine's settings and whose digest reads the engine it builds against, with Luau's
-    flags checked as gg-engine builds and `gg ship` cooking with that engine's cooker; Foxball's
-    move; and the sweep, Deferred and DEFECTS.md triaged, the fixes chosen made, and the docs
+    same determinism, build digest and `gg` commands; the 3D demo is deleted, gg-engine's tests
+    covering what it alone did, while Shards and the showcase stay as the engine's demo and test
+    bed; and the backlog is triaged. *Done when* a game `gg new --engine` makes builds and tests
+    against the engine, as CI checks at each push, and each of Deferred's rows and DEFECTS.md's
+    defects has been kept, rewritten, deleted or fixed. Its milestones, in order: the engine
+    reading no game's folder; a game outside the workspace, which `gg new` makes, whose build gets
+    the engine's settings and whose digest reads the engine it builds against, with Luau's flags
+    checked as gg-engine builds and `gg ship` cooking with that engine's cooker; the 3D demo
+    deleted; and the sweep, Deferred and DEFECTS.md triaged, the fixes chosen made, and the docs
     checked against the code.
 
 Later: upscalers (DLSS, FSR, XeSS); and ray-traced effects where the driver exposes ray tracing
@@ -479,16 +478,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | State machines as asset files of their own, shared by entities and prefabs and reloaded as saved | Several models share a machine, as a game's characters do |
 | Sub-state machines, a fade a transition cuts short, a transition's offset into its state, a from-any transition into the state it's in | A machine grows past a dozen states, or a game needs one of them |
 | Scripts reading a machine's state, as `gg.state(entity)`, which scripts can't read as a field, holding no strings | A script branches on what its model plays |
-| Where frames draw an entity between ticks, for layers: `Context` gives none, so Foxball's view eases toward its fox as each tick left it, a little behind | A layer's camera must sit exactly on what it follows, as a first-person view's does |
-| Damping on 3D bodies, of their speed and spin: Foxball slows its ball itself, each tick | A second game needs drag, or rolling resistance |
-| Foxball's menu sounds, as Shards plays them for its focus moving and its choices: the menu is silent | Foxball has sounds of its own for them |
-| Pausing a run alone as Foxball's menu opens: the engine has no pause a game can ask for, so the match goes on behind the menu and the bot can score meanwhile | A game alone needs a pause, or players lose goals to the menu |
+| Where frames draw an entity between ticks, for layers: `Context` gives none, so a layer's view that follows an entity eases toward it as each tick left it, a little behind | A layer's camera must sit exactly on what it follows, as a first-person view's does |
+| Damping on 3D bodies, of their speed and spin: a game slows its bodies itself, each tick | A game needs drag, or rolling resistance |
+| Pausing a run alone as a game's menu opens: the engine has no pause a game can ask for, so the match goes on behind the menu | A game alone needs a pause, or players lose points to the menu |
 | Asking the other player before a session's New match: either player's menu starts the match afresh for both, scores and wins wiped, at the next tick | Players of a session start matches over each other's |
-| A bot for a session's empty player, as a server's player 1 before a client takes it: a session's foxes are all people's | A session wants a player it hasn't |
-| Foxball's goals' crossbars as instances of its wall prefab: they collide with nothing, and an instance can't drop a component its prefab gives, nor can a prefab's root link another | Prefab variants land, or the bars should stop a lofted ball |
-| Foxball's foxes as instances of a prefab: each fox, its model, animator, state machine and dust, is built in code as the arena attaches | The editor places players, or a game has a second kind of character |
-| Foxball's players' colors read from one place: each is written in ui/menu.ui's texts and, brightened, in arena.ron's emitter at its scorer's goal mouth | The players' colors change, or a game has more than two players |
-| Textures for Foxball's particles, as dust puffs and confetti: its emitters draw soft discs | Its look gets an art pass |
 | Reading assets' files off the main thread, and decoding sounds and reading music there: a layer's add, and text that names an asset, read its file whole on the main thread, images' pixels alone decoding on `gg-load`; `add_sound` decodes before it returns, and `add_music` reads its file whole, up to 64 MiB | A game's reads or sounds hitch as it plays |
 | Loading meshes' vertices and indices off the main thread: a model's are read with its nodes, as the simulation needs those | A model's read hitches |
 | Models that take more than 8 GiB to read, of their buffers, images, encoded and decoded, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | A game's model is that large |
@@ -674,9 +667,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
 | Colliders other than 2D's boxes and circles and 3D's boxes, spheres, capsules and models' triangles, such as polygons and convex hulls; damping; and a body's mass and center of mass set, rather than given by its colliders' densities | Each with its first game use |
 | Mesh colliders' outlines: `MeshCollider3D` outlines nothing, as its model shows where it is, and Sponza's would draw some 790,000 lines | Someone needs to see a mesh collider apart from its model, as one of another model's |
-| Characters carried by what they stand on, as a moving platform or a turning one; characters of other shapes than a capsule; and a character's rotation turned by its controller, toward where it goes | Each with its first game use; the platforms with the 3D demo's level, if it moves |
+| Characters carried by what they stand on, as a moving platform or a turning one; characters of other shapes than a capsule; and a character's rotation turned by its controller, toward where it goes | Each with its first game use |
 | Casts that give every hit along their way, rather than the first; overlap queries, what's within a shape or at a point; casts that pass through colliders by component or group rather than an entity's; and casts in 2D | Each with its first game use |
-| Flipbooks of sheets whose cells don't fill their texture, or have space between them, by cells in pixels as `SpriteSheet` takes them; clips, named runs of cells a game switches between; and events at a flipbook's cells, as a footstep's sound at a foot's | Each with its first game use; clips and events with the 3D demo's animated characters, if they need them |
+| Flipbooks of sheets whose cells don't fill their texture, or have space between them, by cells in pixels as `SpriteSheet` takes them; clips, named runs of cells a game switches between; and events at a flipbook's cells, as a footstep's sound at a foot's | Each with its first game use |
 | Tweens of another entity's fields, or of fields deeper than a vector's component, as a list's element; tweens one after another or together as a sequence; a tween's end told to code and scripts, as an event, and scripts asking whether a field is tweening; and tweens of integers, or of colors through a space other than linear's | Each with its first game use |
 | A 3D body's rotation locked about some axes alone, as one that turns about Y but never tips: `RigidBody3D::fixed_rotation` locks all three, and what sets its rotation turns it | A game's body tips about some axes but not others |
 | Ragdolls: a skinned model's bones made bodies held by limited joints from its nodes | A game knocks a character down, or one goes limp |
@@ -763,7 +756,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A session's code given through the environment, which the machine's other users can't read, as they can a process's arguments | Sessions are hosted on machines others use |
 | `--link` holding the handshake, which goes at the link's own speed; it holds the lines and packets after | A test needs a slow handshake |
 | Sessions measured over Docker's NATs with `--link`, packets kept on the relay: Phase 20 measured on one machine's loopback, through a local relay, every link's packets direct, `--link` holding them as a slow link would; Phase 21 through its rented relay, both ends on one network, their packets direct by the LAN | Phase 21's sessions on other networks keep their packets on the relay |
-| A server's states compressed against their base as zstd's reference prefix, as `zstd --patch-from` does, in place of its dictionary: 2.7 times quicker for Foxball's (0.17 ms against 0.46), at 10% more bytes | A server's states thread falls behind with many clients, skipping ticks |
+| A server's states compressed against their base as zstd's reference prefix, as `zstd --patch-from` does, in place of its dictionary: 2.7 times quicker for a 3D game's of two skinned characters and a ball (0.17 ms against 0.46), at 10% more bytes | A server's states thread falls behind with many clients, skipping ticks |
 
 ## Open questions
 
@@ -777,3 +770,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
   Recommendation: no cap for a game's own scripts, as Rust code has none; for mods, a count a tick
   beside their budget of interrupts, a few hundred, failing past it as the budget does, once a mod
   that spawns is written. Decide before mods that spawn ship.
+- Which game Phase 21's match on other networks is played on, its shipped builds through the
+  rented relay, now that the 3D demo, whose menu hosted and joined sessions by a code, is deleted:
+  Shards, whose sessions start by flags alone (`--relay`, its host printing the code), or Shards
+  given the 3D demo's Host and Join to its menu. Recommendation: Shards by flags, as the match
+  measures the network, which the menu doesn't change, and `Context::host` and `join` keep tests of
+  their own. Decide before the match is played.
