@@ -1,10 +1,9 @@
-//! A file only its owner can open, on Windows, as the tool API's session file must be, whose token
-//! unlocks the game: created with a DACL of its own, which inherits none of its directory's ACEs
-//! and allows its owner, the user the process runs as, all access and no one else any, so that no
-//! other user ever holds a handle to it, not even one opened before a byte is written. std's
-//! `OpenOptions` creates a file with the ACEs it inherits from its directory, and a DACL set after
-//! would leave the handles opened meanwhile as they were, so this creates the file itself, through
-//! `CreateFileW`.
+//! A file only its owner can open, on Windows, as the tool API's session file (whose token unlocks
+//! the game) must be. It's created with its own DACL: no ACEs inherited from its directory, all
+//! access for its owner (the user the process runs as) and none for anyone else, so no other user
+//! ever holds a handle, even one opened before a byte is written. std's `OpenOptions` inherits
+//! its directory's ACEs, and a DACL set afterwards leaves earlier handles as they were, so this
+//! calls `CreateFileW` itself.
 
 use std::fs::{self, File};
 use std::io;
@@ -23,22 +22,20 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_WRITE,
 };
 
-/// The DACL a private file is created with, in SDDL: protected (`P`), so that it inherits none of
-/// its directory's ACEs, and of one ACE, which allows (`A`) all of a file's access rights (`FA`) to
-/// its owner (`OW`, the Owner Rights SID), in place of the rights to read and change the DACL that
-/// an owner has without one. A file's owner is the default owner of its creator's token: the user
-/// the process runs as, or, for an elevated administrator's where policy says so, as Windows
-/// Server's does by default, the Administrators group, whose members can take any file anyway.
+/// A private file's DACL, in SDDL: protected (`P`), inheriting no ACEs, with one ACE allowing
+/// (`A`) all file access rights (`FA`) to its owner (`OW`, the Owner Rights SID), replacing the
+/// read and change-DACL rights an owner has without one. The owner is the creator token's default:
+/// the user the process runs as, or, for an elevated administrator where policy says so (Windows
+/// Server's default), the Administrators group, whose members can take any file anyway.
 const OWNER_ALONE: &str = "D:P(A;;FA;;;OW)";
 
-/// Creates a new file at `path`, open for writing, whose DACL is [`OWNER_ALONE`] from its creation.
+/// Creates a new file at `path`, open for writing, with [`OWNER_ALONE`] from creation.
 ///
-/// Fails with `AlreadyExists` if anything is at `path`, a link too, which it doesn't follow, as
-/// `O_EXCL` doesn't on Unix; and with `InvalidInput` for a path with a NUL in it, as std does.
+/// Fails with `AlreadyExists` if anything is there, a link too (not followed, as `O_EXCL` on
+/// Unix), and with `InvalidInput` for a path with a NUL, as std does.
 pub(crate) fn create_new(path: &Path) -> io::Result<File> {
-    // Windows reaches a path as long as std's threshold, MAX_PATH less room for an 8.3 name, only
-    // in its verbatim form, `\\?\`, as std makes it for its own calls: `fs::canonicalize` gives the
-    // directory so.
+    // Paths as long as std's threshold (MAX_PATH less room for an 8.3 name) work only in verbatim
+    // form, `\\?\`, as std makes it for its own calls; `fs::canonicalize` gives the directory so.
     let verbatim;
     let path = match (path.parent(), path.file_name()) {
         (Some(dir), Some(name)) if path.as_os_str().len() >= 248 => {
@@ -54,8 +51,8 @@ pub(crate) fn create_new(path: &Path) -> io::Result<File> {
     }
     let sddl: Vec<u16> = OWNER_ALONE.encode_utf16().chain([0]).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    // SAFETY: the SDDL is a string ending in 0, which outlives the call, and `descriptor` takes the
-    // descriptor it makes, which is freed below; its size isn't asked for.
+    // SAFETY: the SDDL ends in 0 and outlives the call. `descriptor` takes the descriptor made,
+    // freed below; its size isn't asked for.
     let made = unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
@@ -72,9 +69,8 @@ pub(crate) fn create_new(path: &Path) -> io::Result<File> {
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    // SAFETY: the path is a string ending in 0, and the attributes hold the descriptor just made,
-    // both of which outlive the call, which copies the descriptor into the file it creates; shared
-    // as std shares the files it opens.
+    // SAFETY: the path ends in 0, and the attributes hold the descriptor just made; both outlive
+    // the call, which copies the descriptor into the file. Shared as std shares files it opens.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -86,18 +82,18 @@ pub(crate) fn create_new(path: &Path) -> io::Result<File> {
             0,
         )
     };
-    // Before the descriptor's freed, which may set the thread's last error.
+    // Before freeing the descriptor, which may set the thread's last error.
     let created = if handle == INVALID_HANDLE_VALUE {
         Err(io::Error::last_os_error())
     } else {
         Ok(handle)
     };
-    // SAFETY: the descriptor was allocated by the conversion above, as `LocalFree` frees, and
-    // nothing refers to it now that `CreateFileW` has returned; it's freed once.
+    // SAFETY: the conversion above allocated the descriptor, as `LocalFree` frees; nothing refers
+    // to it now that `CreateFileW` has returned; it's freed once.
     unsafe { LocalFree(descriptor) };
     let handle = created?;
-    // SAFETY: the handle is a file's, open, which `CreateFileW` just returned and nothing else owns
-    // or closes.
+    // SAFETY: the handle is an open file's, just returned by `CreateFileW`; nothing else owns or
+    // closes it.
     Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
 }
 
@@ -116,9 +112,9 @@ mod tests {
     fn dacl(path: &Path) -> String {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
         let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-        // SAFETY: the path is a string ending in 0, which outlives the call, and `descriptor`
-        // takes the descriptor it allocates, which is freed below; the DACL's own pointer, into
-        // that descriptor, the owner's, the group's and the SACL's aren't asked for.
+        // SAFETY: the path ends in 0 and outlives the call. `descriptor` takes the descriptor
+        // allocated, freed below; the DACL pointer (into it), owner, group and SACL aren't asked
+        // for.
         let read = unsafe {
             GetNamedSecurityInfoW(
                 wide.as_ptr(),
@@ -134,8 +130,8 @@ mod tests {
         assert_eq!(read, 0, "the file's DACL wasn't read");
         let mut sddl: PWSTR = ptr::null_mut();
         let mut len = 0;
-        // SAFETY: the descriptor is the one just read, and `sddl` takes the string the call
-        // allocates, which is freed below, and `len` its length, its 0 among it.
+        // SAFETY: the descriptor is the one just read. `sddl` takes the string allocated, freed
+        // below, and `len` its length, its 0 included.
         let converted = unsafe {
             ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 descriptor,
@@ -146,11 +142,11 @@ mod tests {
             )
         };
         assert_ne!(converted, 0, "the DACL wasn't written as SDDL");
-        // SAFETY: the string is `len` UTF-16 units, which live until it's freed, after this.
+        // SAFETY: the string is `len` UTF-16 units, alive until freed after this.
         let units = unsafe { std::slice::from_raw_parts(sddl, len as usize) };
         let text = String::from_utf16(units).expect("UTF-16");
-        // SAFETY: each was allocated by the call that made it, as `LocalFree` frees, and is freed
-        // once, nothing referring to it after.
+        // SAFETY: each was allocated by its call, as `LocalFree` frees, and is freed once with
+        // nothing referring to it after.
         unsafe {
             LocalFree(sddl.cast());
             LocalFree(descriptor);
@@ -158,9 +154,8 @@ mod tests {
         text.trim_end_matches('\0').to_owned()
     }
 
-    /// A private file's DACL is protected, so that it inherits none of its directory's ACEs, and
-    /// allows its owner alone all access, which reads it, in place of a file there before, whose
-    /// DACL it doesn't take, one inherited from the directory; and so at a path past MAX_PATH.
+    /// A private file's DACL is [`OWNER_ALONE`] (the owner can read it), even over a file there
+    /// before, whose DACL it doesn't take, and past MAX_PATH.
     #[test]
     fn a_private_file_is_its_owner_s_alone_whatever_was_there() {
         let scratch = Scratch::new("private-dacl");
@@ -173,7 +168,7 @@ mod tests {
         assert_eq!(fs::read(&path).expect("its owner reads it"), b"token");
         let long = (scratch.0.join("d".repeat(150)).join("e".repeat(150))).join("game-1.json");
         crate::dirs::write_private(&long, b"token").expect("written");
-        // Which `GetNamedSecurityInfoW` reaches through its verbatim form too.
+        // `GetNamedSecurityInfoW` reaches it through its verbatim form.
         assert_eq!(dacl(&fs::canonicalize(&long).expect("there")), OWNER_ALONE);
     }
 }

@@ -1,6 +1,5 @@
-//! Frame-rate caps: holding a windowed run's frames to at most so many a second, as
-//! [`Context::set_max_fps`] says, and, in development builds, the frame rate limit among the title
-//! bar's settings, which the app keeps for the user from run to run.
+//! Frame-rate caps for windowed runs, as [`Context::set_max_fps`] says, and, in development
+//! builds, the frame rate limit among the title bar's settings, kept across runs.
 
 use std::num::NonZeroU32;
 use std::thread;
@@ -16,30 +15,26 @@ use tracing::warn;
 #[cfg(feature = "dev")]
 use crate::{Context, Ui};
 
-/// The file the frame rate limit that the settings set is kept in, for the app's later runs, in
-/// RON: `Some(60)`, or `None` while uncapped.
+/// The file keeping the settings' limit for later runs, in RON: `Some(60)`, or `None` if uncapped.
 #[cfg(feature = "dev")]
 const KEPT: &str = "max_fps.ron";
 
-/// The rates the settings offer at a click, in frames a second, beside a field for any other.
+/// Rates offered at a click, in frames a second.
 #[cfg(feature = "dev")]
 const RATES: [u32; 6] = [10, 30, 60, 120, 144, 240];
 
-/// The most frames a second the settings' field takes.
+/// The field's most frames a second.
 #[cfg(feature = "dev")]
 const MOST: u32 = 1000;
 
-/// What the settings' frame rate limit is, which its label's tooltip says.
 #[cfg(feature = "dev")]
 const TIP: &str = "The most frames a second this app renders, which a game it embeds, as the \
                    editor does, renders no more of; kept for its next runs, unless --max-fps sets \
                    another";
 
-/// Holds a windowed run's frames to at most so many a second, as [`Context::set_max_fps`] says,
-/// by sleeping before each, as Unreal's `t.MaxFPS` and Godot's `max_fps` do: unlike waking from
-/// winit's `ControlFlow::WaitUntil`, which Windows doesn't do while the user moves or resizes the
-/// window, a sleep paces the frames that go on then too. Input that comes during the sleep waits
-/// for the frame after, at most a frame's share of a second later.
+/// Holds frames to [`Context::set_max_fps`]'s rate by sleeping before each, as Unreal and Godot
+/// do. Winit's `ControlFlow::WaitUntil` doesn't wake while the user moves or resizes the window
+/// on Windows; a sleep paces those frames too. Input arriving mid-sleep waits one period at most.
 #[derive(Default)]
 pub(crate) struct Limiter {
     /// When the next frame is due, while capped.
@@ -47,8 +42,7 @@ pub(crate) struct Limiter {
 }
 
 impl Limiter {
-    /// Waits until the next frame is due under at most `max` frames a second, if capped, and
-    /// returns how long it waited.
+    /// Sleeps until the next frame is due under `max`, if capped. Returns the wait.
     pub(crate) fn wait(&mut self, max: Option<NonZeroU32>) -> Duration {
         let Some(max) = max else {
             self.due = None;
@@ -65,19 +59,17 @@ impl Limiter {
     }
 }
 
-/// When the frame after one due at `due`, which started at `start`, is due, at most a frame a
-/// `period`: a period after `due`, so that a sleep that ends late doesn't slow the rate, or after
-/// `start` once that's a period or more past `due`, as a slow frame or a pause leaves it, so that
-/// no burst of frames follows to catch up.
+/// When the frame after one due at `due`, started at `start`, is due. A period after `due`, so a
+/// late sleep doesn't slow the rate; after `start` once that's a period or more past `due` (a
+/// slow frame, a pause), so no burst follows to catch up.
 fn next_due(due: Instant, start: Instant, period: Duration) -> Instant {
     let next = due + period;
     if start >= next { start + period } else { next }
 }
 
-/// Adds the frame rate limit to the title bar's settings, as [`Ui::settings`] says: Off or a rate
-/// at a click, or, while capped, any other from 1 in a field, as slow motion for what settles over
-/// frames. A choice caps `cx`'s frames from the next frame on, and is kept for the user, which
-/// [`kept`] reads as the app's next run starts; a drag of the field is kept as it ends.
+/// Adds the frame rate limit to the title bar's settings ([`Ui::settings`]): Off or a rate at a
+/// click, or, while capped, any rate from 1 in a field, as slow motion. A choice caps `cx`'s
+/// frames from the next and is kept for [`kept`]; a field drag is kept as it ends.
 #[cfg(feature = "dev")]
 pub(crate) fn settings(ui: &mut Ui<'_>, cx: &mut Context) {
     let max = cx.max_fps();
@@ -116,8 +108,8 @@ pub(crate) fn settings(ui: &mut Ui<'_>, cx: &mut Context) {
     }
 }
 
-/// The frame rate limit the settings last kept for the user, if any: uncapped where they kept
-/// none, and, with a warning (`engine.state`), where what they kept can't be read.
+/// The limit the settings last kept. Uncapped if none, or, with an `engine.state` warning, if it
+/// can't be read.
 #[cfg(feature = "dev")]
 pub(crate) fn kept(cx: &Context) -> Option<NonZeroU32> {
     let read = cx.read_state(KEPT).and_then(|bytes| match bytes {
@@ -130,7 +122,6 @@ pub(crate) fn kept(cx: &Context) -> Option<NonZeroU32> {
     })
 }
 
-/// `max` as [`KEPT`] holds it.
 #[cfg(feature = "dev")]
 fn kept_text(max: Option<NonZeroU32>) -> String {
     match max {
@@ -139,7 +130,6 @@ fn kept_text(max: Option<NonZeroU32>) -> String {
     }
 }
 
-/// What [`KEPT`] holds, from its `bytes`.
 #[cfg(feature = "dev")]
 fn read_kept(bytes: &[u8]) -> Result<Option<NonZeroU32>> {
     let text = std::str::from_utf8(bytes).map_err(|e| e.to_string());
@@ -183,8 +173,8 @@ mod tests {
         assert!(limiter.wait(hundred) < Duration::from_millis(1));
     }
 
-    /// Runs frame `frame` of `stack` with `cx`, in `dock`, a window 1280 by 720 points, at 60
-    /// frames a second, given `events`, and returns each text it drew, with where its middle is.
+    /// Runs frame `frame` in a 1280 by 720 point window at 60 frames a second. Returns each text
+    /// drawn, with its middle.
     #[cfg(feature = "dev")]
     fn texts(
         (stack, cx, dock, egui): (
@@ -222,8 +212,8 @@ mod tests {
         texts.collect()
     }
 
-    /// The gear opens the settings, whose frame rate limit caps the frames at a click and keeps
-    /// the cap for the app's next run, and whose Off uncaps them, keeping that.
+    /// The gear opens the settings; a rate click caps the frames and keeps the cap; Off uncaps
+    /// and keeps that.
     #[cfg(feature = "dev")]
     #[test]
     fn the_settings_frame_rate_limit_caps_the_frames_and_keeps_the_cap() {

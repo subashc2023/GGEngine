@@ -1,8 +1,7 @@
-//! The OS's directories where an app keeps its files for the user, never beside the executable:
-//! one for what it keeps from run to run, such as the dock's layout, and one for what it can make
-//! again, such as its pipeline cache; and reading a file, a regular one alone, and writing one
-//! whole, there or, as a scene's, anywhere, or creating one whole, as an asset's ID file, or
-//! writing one whole that only the user can read, as the tool API's session file.
+//! The OS's per-user directories for an app's files, never beside the executable: state it keeps
+//! across runs (the dock's layout) and a cache it can remake. Also whole-file I/O: reading
+//! regular files, writing (a scene), creating (an asset's ID file), and writing private files
+//! (the tool API's session file).
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -10,21 +9,23 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Which of the per-user directories a file goes in.
+/// Which per-user directory a file goes in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// What the app keeps for the user, such as the dock's layout.
     State,
-    /// What the app can make again, which the user may delete, such as its pipeline cache.
+    /// Remakable, so the user may delete it: the pipeline cache.
     Cache,
 }
 
-/// Where app `app` keeps its files of `kind`: `%LOCALAPPDATA%\GGEngine\<app>` on Windows, both
-/// kinds; on macOS `~/Library/Application Support/GGEngine/<app>`, and caches in
-/// `~/Library/Caches/GGEngine/<app>`; and elsewhere `$XDG_STATE_HOME/ggengine/<app>`, by default
-/// `~/.local/state/ggengine/<app>`, and caches in `$XDG_CACHE_HOME/ggengine/<app>`, by default
-/// `~/.cache/ggengine/<app>`. `os` is [`std::env::consts::OS`], and `var` reads the environment.
-/// `None` without the variables.
+/// Where app `app` keeps files of `kind`:
+///
+/// - Windows, both kinds: `%LOCALAPPDATA%\GGEngine\<app>`.
+/// - macOS: `~/Library/Application Support/GGEngine/<app>`; caches in
+///   `~/Library/Caches/GGEngine/<app>`.
+/// - Elsewhere: `$XDG_STATE_HOME/ggengine/<app>`, default `~/.local/state/ggengine/<app>`; caches
+///   in `$XDG_CACHE_HOME/ggengine/<app>`, default `~/.cache/ggengine/<app>`.
+///
+/// `os` is [`std::env::consts::OS`]; `var` reads the environment. `None` without the variables.
 pub(crate) fn dir(
     app: &str,
     kind: Kind,
@@ -55,24 +56,23 @@ pub(crate) fn dir(
     Some(dir.join(app))
 }
 
-/// Reads the file at `path`, as far as its first `most` bytes: a regular file alone, so that a FIFO
-/// or a device, such as /dev/zero, can neither hang the read nor fill memory.
+/// Reads the first `most` bytes of the file at `path`. Regular files only, so a FIFO or device
+/// such as /dev/zero can neither hang the read nor fill memory.
 pub(crate) fn read_file(path: &Path, most: u64) -> io::Result<Vec<u8>> {
-    // Before it's opened, since opening a FIFO waits for a writer.
+    // Before opening, since opening a FIFO waits for a writer.
     let metadata = fs::metadata(path)?;
     if !metadata.is_file() {
         let not_regular = "it isn't a regular file";
         return Err(io::Error::new(io::ErrorKind::InvalidInput, not_regular));
     }
     let mut bytes = Vec::new();
-    // An error rather than an abort, as `fs::read` gives, if there's no memory for it.
+    // An error, not `fs::read`'s abort, if memory runs out.
     bytes.try_reserve_exact(metadata.len().min(most).try_into().unwrap_or(0))?;
     File::open(path)?.take(most).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
-/// Writes `data` to the file at `path` whole, as [`write_whole`] does, making the directories it's
-/// in.
+/// Like [`write_whole`], but makes the directories.
 pub(crate) fn write(path: &Path, data: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -80,15 +80,16 @@ pub(crate) fn write(path: &Path, data: &[u8]) -> io::Result<()> {
     write_whole(path, data)
 }
 
-/// Writes `data` to the file at `path` whole or not at all, so that a crash or the power going
-/// while it writes leaves the last one whole: to a file of its own beside the one `path` names,
-/// through any link, which it flushes to the disk and renames over that one, with its permissions.
-/// It refuses a file that's read only, on every OS, as Windows' rename would; replaces one with
-/// other hard links rather than writing through it, so that they keep what it held; makes no
-/// directories; and removes what it wrote if it fails.
+/// Writes `data` to `path` whole or not at all: a crash or power loss mid-write leaves the last
+/// file whole. It writes a file beside the one `path` names (through any link), flushes it and
+/// renames it over that one, keeping its permissions.
+///
+/// Refuses a read-only file on every OS, as Windows' rename would. Replaces a file with other hard
+/// links rather than writing through it, so they keep what it held. Makes no directories; removes
+/// what it wrote on failure.
 pub(crate) fn write_whole(path: &Path, data: &[u8]) -> io::Result<()> {
-    // The file a link names, so that the link stays one, and its permissions, which the file
-    // renamed over it takes rather than the umask's.
+    // The file a link names, so the link stays one; and its permissions, which the renamed file
+    // takes instead of the umask's.
     let (target, permissions) = match fs::canonicalize(path) {
         Ok(target) => {
             let permissions = fs::metadata(&target)?.permissions();
@@ -109,14 +110,11 @@ pub(crate) fn write_whole(path: &Path, data: &[u8]) -> io::Result<()> {
     written
 }
 
-/// Writes `data` to the file at `path` whole or not at all, as [`write_whole`] does, but so that
-/// only the user the process runs as can read it: to a file of its own beside `path` that's the
-/// user's alone from its creation, before it holds a byte, which it renames over whatever is at
-/// `path`, a link too, rather than taking its permissions or writing through it; making the
-/// directories it's in, as [`write()`] does. On Unix the file's mode is 0600, and that of the
-/// directories it makes 0700; on Windows the file's DACL allows its owner alone access, inheriting
-/// none of its directory's ACEs, as `windows_private` says. For the tool API's session file, whose
-/// token unlocks the game.
+/// Like [`write()`], but only the user the process runs as can read the file. It's written beside
+/// `path`, the user's alone from creation, and renamed over whatever is at `path` (a link too),
+/// taking none of its permissions. Unix: file mode 0600, new directories 0700. Windows: the
+/// file's DACL allows its owner alone, as `windows_private` says. For the tool API's session
+/// file, whose token unlocks the game.
 #[cfg(feature = "dev")]
 pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
@@ -146,10 +144,9 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     written
 }
 
-/// Writes `data` as a new file at `path`, whole or not at all, unless something is there, when it
-/// fails with `AlreadyExists`: to a file of its own beside it, flushed to the disk, then hard-linked
-/// at `path`, which fails if anything is there, the file of its own removed either way, so that two
-/// processes never both write one, and none reads one half-written. Makes no directories.
+/// Writes `data` as a new file at `path`, whole or not at all; `AlreadyExists` if anything is
+/// there. It's written beside `path`, flushed, hard-linked at `path` and removed either way, so
+/// two processes never both write one and none reads one half-written. Makes no directories.
 #[cfg(feature = "dev")]
 pub(crate) fn create(path: &Path, data: &[u8]) -> io::Result<()> {
     let (temporary, file) = create_beside(path, open_new)?;
@@ -158,9 +155,9 @@ pub(crate) fn create(path: &Path, data: &[u8]) -> io::Result<()> {
     created
 }
 
-/// A file new to the disk beside `target`, which `open` creates, failing with `AlreadyExists` if
-/// anything is at the name it's given: named after `target` with this process's ID, a count and
-/// `.new` after, so that none already there, such as one a user named so, is emptied or replaced.
+/// A new file beside `target`, made by `open`, which must fail with `AlreadyExists` if the name
+/// is taken. The name is `target`'s plus process ID, count and `.new`, so no existing file is
+/// emptied or replaced, even a user's.
 fn create_beside(
     target: &Path,
     open: impl Fn(&Path) -> io::Result<File>,
@@ -173,20 +170,17 @@ fn create_beside(
         let name = PathBuf::from(name);
         match open(&name) {
             Ok(file) => return Ok((name, file)),
-            // One a run that crashed left, whose process had this one's ID.
+            // Left by a crashed run whose process had this ID.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
     }
 }
 
-/// A new file at `path`, open for writing, with the permissions files are created with; failing
-/// with `AlreadyExists` if anything is there.
 fn open_new(path: &Path) -> io::Result<File> {
     File::options().write(true).create_new(true).open(path)
 }
 
-/// Writes `data` to `file`, gives it `permissions`, if any, and flushes it to the disk, closing it.
 fn flush(mut file: File, data: &[u8], permissions: Option<fs::Permissions>) -> io::Result<()> {
     file.write_all(data)?;
     if let Some(permissions) = permissions {
@@ -199,8 +193,7 @@ fn flush(mut file: File, data: &[u8], permissions: Option<fs::Permissions>) -> i
 pub(crate) mod tests {
     use super::*;
 
-    /// A directory of a test's own in the OS's temporary directory, emptied but not made, and
-    /// removed as the test ends, failed or not.
+    /// A test's temporary directory: emptied, not made, removed as the test ends, failed or not.
     pub(crate) struct Scratch(pub(crate) PathBuf);
 
     impl Scratch {
@@ -282,7 +275,7 @@ pub(crate) mod tests {
         let whole = fs::read(&manifest).expect("the manifest");
         assert_eq!(read_file(&manifest, 10).expect("its start"), whole[..10]);
         assert_eq!(read_file(&manifest, u64::MAX).expect("all of it"), whole);
-        // A device, which would read as far as it's asked: zeros, or on Windows nothing.
+        // A device would read as far as asked: zeros, or on Windows nothing.
         let device = if cfg!(windows) {
             "models/NUL"
         } else {
@@ -291,8 +284,8 @@ pub(crate) mod tests {
         read_file(Path::new(device), 1 << 20).expect_err("a device");
     }
 
-    /// A file created whole holds its bytes, and creating it again, as a second process would,
-    /// fails with `AlreadyExists`, leaving the first's bytes; neither leaves a file of its own.
+    /// A second create fails with `AlreadyExists` and keeps the first's bytes; neither leaves
+    /// temporaries.
     #[cfg(feature = "dev")]
     #[test]
     fn a_file_is_created_whole_once_whoever_writes_first() {
@@ -311,9 +304,7 @@ pub(crate) mod tests {
         assert_eq!(names, ["stone.png.meta"], "no file of its own left");
     }
 
-    /// A private file is the user's alone, of mode 0600, in directories it makes 0700, and stays so
-    /// written again in place of a file there that others could read, whose permissions it doesn't
-    /// take.
+    /// A private file is 0600 in 0700 directories, even replacing a file others could read.
     #[cfg(all(unix, feature = "dev"))]
     #[test]
     fn a_private_file_is_the_user_s_alone_whatever_was_there() {

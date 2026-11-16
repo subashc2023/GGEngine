@@ -1,6 +1,6 @@
-//! Windowed runs: the winit event loop, which hands the main window's events to the layers and
-//! runs a frame whenever the window can show one, which renders on the render thread while the
-//! next runs.
+//! Windowed runs: the winit event loop hands the main window's events to the layers and runs a
+//! frame whenever the window can show one. Each frame renders on the render thread while the next
+//! runs.
 
 use std::any::Any;
 use std::mem;
@@ -57,9 +57,8 @@ use crate::viewports::{self, Viewports, WindowInput};
 use crate::windows_frame::Frame;
 use crate::{App, Context, Event, event};
 
-/// Runs `app` in a window until it closes, or, under `--supervised`, stdin ends, `api` serving
-/// tools as each frame starts, and between frames while the window is minimized, woken by each
-/// request.
+/// Runs `app` in a window until it closes or, under `--supervised`, stdin ends. `api` serves
+/// tools as each frame starts, and while the window is minimized, woken by each request.
 pub(crate) fn run(
     app: &mut App,
     args: &Args,
@@ -75,7 +74,7 @@ pub(crate) fn run(
     })?;
     let proxy = event_loop.create_proxy();
     api::set_waker(&mut api, move || {
-        // Only once the loop has ended, as the run does.
+        // Fails only once the loop has ended, as the run does.
         let _ = proxy.send_event(());
     });
     if args.supervised {
@@ -158,76 +157,66 @@ pub(crate) fn run(
     }
 }
 
-/// The event loop's state: the window and the render thread once the loop starts, and how the run
-/// went. The layers are attached while the renderer exists.
+/// The event loop's state. The layers attach while the renderer exists.
 struct Handler<'a> {
     app: &'a mut App,
     args: &'a Args,
-    /// The snapshot the run starts from, if it's given one, in place of the world the layers
-    /// attach, until the window opens and its world is restored.
+    /// The snapshot the run starts from, restored once the window opens.
     snapshot: Option<Snapshot>,
-    /// Who draws the windows' frames.
     #[cfg(feature = "dev")]
     chrome: Chrome,
     window: Option<Arc<Window>>,
-    /// Windows' own frame around the main window, when the UI draws its title bar.
+    /// Windows' frame around the main window, when the UI draws its title bar.
     #[cfg(all(target_os = "windows", feature = "dev"))]
     frame: Option<Frame>,
-    /// Renders the frames, each while the next runs. Before `viewports` and `cx`, which hold the
-    /// windows too, so that on a way out that leaves it running, it takes the renderer back as it
-    /// drops, and the renderer drops here, before the windows it presents to.
+    /// Renders each frame while the next runs. Declared before `viewports` and `cx`, which hold
+    /// windows too: it drops first and returns the renderer, which drops before its windows.
     render: Option<RenderThread>,
-    /// The pipeline cache's file, which the renderer loads as it starts and saves as it ends.
+    /// The pipeline cache's file: loaded as the renderer starts, saved as it ends.
     pipelines: Option<PathBuf>,
-    /// The main window's size since the renderer was last told it, which it's told once it's back
-    /// from rendering.
+    /// The main window's size since the renderer was last told; it's told once back from rendering.
     resized: Option<PhysicalSize<u32>>,
     #[cfg(feature = "dev")]
     egui: egui::Context,
-    /// Whether frames run egui's pass, as they do until one shows that it has nothing to draw.
+    /// Whether frames run egui's pass, until one shows it has nothing to draw.
     #[cfg(feature = "dev")]
     egui_runs: bool,
-    /// egui's view of the window, which turns its events into egui's input.
     #[cfg(feature = "dev")]
     egui_winit: Option<WindowInput>,
-    /// In a dockspace, what of the main window's input reaches the layers through the game's view.
+    /// In a dockspace, which main-window input reaches the layers through the game's view.
     #[cfg(feature = "dev")]
     view_input: Option<ViewInput>,
-    /// The windows of their own that panels tear off into.
+    /// The windows panels tear off into.
     #[cfg(feature = "dev")]
     viewports: Option<Viewports>,
-    /// Opened with the window, since Windows gives a pad's input only to a focused window.
+    /// Opened with the window: Windows gives a pad's input only to a focused window.
     gamepads: Gamepads,
-    /// What the layers paste from and copy to.
     clipboard: Clipboard,
     #[cfg(feature = "dev")]
     dock: Dock,
     cx: Context,
     clock: Clock,
-    /// Holds the frames to the run's cap, as [`Context::set_max_fps`] says.
     limiter: Limiter,
-    /// Steps the simulation in real time, or as the tool API asks.
     stepper: Stepper,
-    /// Serves tools, in development builds.
     api: Option<Api>,
     frames: u64,
     /// Set while the window has no area to render into.
     minimized: bool,
     /// Whether the cursor is grabbed, as [`hold_cursor`](Self::hold_cursor) last left it.
     grabbed: bool,
-    /// Tells `ping` that frames have paused while the window is minimized.
+    /// Tells `ping` that frames have paused while minimized.
     waiting: Option<Waited>,
     error: Option<Error>,
     ran: Option<Ran>,
-    /// A panic rendering the frame that renders as the loop ends, which resumes once it has:
-    /// winit on Windows drops a panic that leaves `exiting`.
+    /// A panic rendering the last frame as the loop ends. It resumes after: winit on Windows
+    /// drops a panic that leaves `exiting`.
     panic: Option<Box<dyn Any + Send>>,
 }
 
 impl Handler<'_> {
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         let _zone = gg_core::zone!();
-        // The app's size, or the primary monitor's, where windows open, if that's smaller.
+        // The app's size, or the primary monitor's if smaller.
         let [mut width, mut height] = self.app.window_size.map(f64::from);
         if let Some(monitor) = event_loop.primary_monitor() {
             let most: LogicalSize<f64> = monitor.size().to_logical(monitor.scale_factor());
@@ -241,8 +230,7 @@ impl Handler<'_> {
         let attributes = Window::default_attributes()
             .with_title(self.app.name)
             .with_inner_size(LogicalSize::new(width, height));
-        // Windows' taskbar and Alt+Tab show a window's big icon, which winit sets apart from the
-        // small one its title bar shows.
+        // The taskbar and Alt+Tab show the big icon, which winit sets apart from the title bar's.
         #[cfg(target_os = "windows")]
         let attributes = {
             use winit::platform::windows::WindowAttributesExtWindows as _;
@@ -286,7 +274,7 @@ impl Handler<'_> {
             ));
         }
         self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app, true);
-        // What the settings kept, which a flag overrides for the run.
+        // What the settings kept; a flag overrides it for the run.
         #[cfg(feature = "dev")]
         let kept = frame_rate::kept(&self.cx);
         #[cfg(not(feature = "dev"))]
@@ -308,9 +296,8 @@ impl Handler<'_> {
     }
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
-        // Before the frame starts, so that the frame before counts the wait, and the pads read and
-        // the tools' requests that came meanwhile go into this one; the window's events that came
-        // meanwhile reach the layers after it, as the event loop hands them on.
+        // Before the frame starts, so the last frame counts the wait and this one takes the pad
+        // reads and tool requests that came meanwhile. Window events reach the layers after it.
         let waited = self.limiter.wait(self.cx.max_fps());
         self.cx.perf.limited(waited);
         let _zone = gg_core::zone!();
@@ -367,7 +354,7 @@ impl Handler<'_> {
         if let Some(view_input) = &self.view_input {
             self.dock.set_view_focused(view_input.focused());
         }
-        // egui opens the windows of their own during the main window's pass.
+        // egui opens the panel windows during the main window's pass.
         #[cfg(feature = "dev")]
         let pass = viewports::with_event_loop(event_loop, || {
             run_frame(
@@ -383,7 +370,7 @@ impl Handler<'_> {
             self.egui_runs = keeps_egui(&self.app.stack, layers_draw, self.chrome, &self.dock);
             output
         });
-        // After the pass, and so after the press on a layer's control that asked, which took them.
+        // After the pass, so after the press that asked and took the keys.
         #[cfg(feature = "dev")]
         if self.dock.take_focus_asked()
             && let Some(view_input) = &mut self.view_input
@@ -395,7 +382,7 @@ impl Handler<'_> {
             Some(output) => tessellate(&self.egui, output),
             None => (MainUi::none(), Duration::ZERO),
         };
-        // Without `dev`, which has no UI, frames run no pass of egui's and hand the renderer none.
+        // Without `dev` there's no UI: frames run no egui pass and hand the renderer none.
         #[cfg(not(feature = "dev"))]
         let (ui, tessellated) = {
             let dt = self.clock.start_frame();
@@ -411,7 +398,7 @@ impl Handler<'_> {
         if let Some(copied) = self.cx.copied.take() {
             self.clipboard.copy(copied);
         }
-        // egui shows the cursor as its widgets' hover asks, unless told it's hidden.
+        // egui shows its widgets' hover cursor unless told it's hidden.
         #[cfg(feature = "dev")]
         if self.grabbed
             && let Some(output) = &mut output
@@ -428,7 +415,7 @@ impl Handler<'_> {
                 }
             }
             // Nothing was presented. Without a window area, rendering waits for a resize;
-            // otherwise the swapchain is rebuilt in time for the next frame.
+            // otherwise the swapchain is rebuilt for the next frame.
             Ok(Some(false)) => {
                 let size = window.inner_size();
                 minimized = size.width == 0 || size.height == 0;
@@ -440,7 +427,7 @@ impl Handler<'_> {
             }
         }
         api::frame_back(&mut self.api, render, &self.cx, self.stepper.ticks);
-        // A run that's ending hands over no more frames: one past `--frames` would present.
+        // An ending run hands over no more frames: one past `--frames` would present.
         #[cfg(feature = "dev")]
         let mut close = false;
         if !event_loop.exiting() {
@@ -485,8 +472,7 @@ impl Handler<'_> {
             let ppp = egui_winit::pixels_per_point(&self.egui, window);
             frame.set_caption(self.dock.caption(), ppp);
         }
-        // egui's requests of the main window, such as the cursor to show, which don't wait for
-        // the frame to render.
+        // egui's requests of the main window (the cursor) don't wait for the render.
         #[cfg(feature = "dev")]
         if let Some(output) = output {
             (egui_winit.state).handle_platform_output(window, output.platform_output);
@@ -506,11 +492,9 @@ impl Handler<'_> {
         }
     }
 
-    /// Opens the OS's window menu where the title bar was right-clicked, if it was since this last
-    /// ran, between frames rather than in one. On Windows the menu runs a loop of its own until it
-    /// closes, which passes on no redraws, so frames pause meanwhile: the clock restarts as the
-    /// menu closes, so that neither the frame before nor the update after counts the pause.
-    /// Wayland's compositor shows the menu while frames go on.
+    /// Opens the OS's window menu where the title bar was right-clicked, between frames. On Windows
+    /// its loop passes on no redraws, so frames pause and the clock restarts as it closes.
+    /// Wayland's compositor shows it while frames go on.
     #[cfg(feature = "dev")]
     fn show_window_menu(&mut self) {
         let Some(window) = &self.window else {
@@ -519,8 +503,7 @@ impl Handler<'_> {
         let ppp = egui_winit::pixels_per_point(&self.egui, window);
         let at = (self.dock.take_window_menu())
             .map(|pos| Position::from(PhysicalPosition::new(pos.x * ppp, pos.y * ppp)));
-        // In Windows' frame, the title bar's free space is the OS's, whose right-click the frame
-        // keeps.
+        // In Windows' frame the free space is the OS's, and the frame keeps its right-click.
         #[cfg(target_os = "windows")]
         let at = (self.frame.as_ref())
             .and_then(Frame::take_window_menu)
@@ -535,12 +518,11 @@ impl Handler<'_> {
         }
     }
 
-    /// Grabs the cursor, or lets it go, as the layers want it, while the window has focus, and in a
-    /// dockspace while the view shows and has the keys, as [`Context::set_cursor_grabbed`] says.
-    /// Locked where the platform locks it, as Windows, macOS and Wayland do, and otherwise kept
-    /// inside the window, as on X11, which still reports the mouse's raw motion past its edges;
-    /// warns `engine.cursor_grab` if it can't be either. In a dockspace, a grab that starts with the
-    /// cursor off the view moves it to the view's center first, as [`Dock::grab_at`] says.
+    /// Grabs or releases the cursor as the layers want ([`Context::set_cursor_grabbed`]), while
+    /// the window has focus and, in a dockspace, the view shows and has the keys. Locks where the
+    /// platform does (Windows, macOS, Wayland), else confines it (X11, which still reports raw
+    /// motion past the edges); warns `engine.cursor_grab` if neither works. [`Dock::grab_at`]
+    /// covers a grab starting off the view.
     fn hold_cursor(&mut self) {
         let Some(window) = &self.window else {
             return;
@@ -569,8 +551,7 @@ impl Handler<'_> {
             let at = PhysicalPosition::new(at.x * ppp, at.y * ppp);
             match window.set_cursor_position(at) {
                 Ok(()) => debug!(x = at.x, y = at.y, "Cursor moved onto the view"),
-                // As on Wayland, which moves no cursor it hasn't locked: the grab goes on where
-                // the cursor is.
+                // Wayland moves no cursor it hasn't locked; the grab goes on where it is.
                 Err(error) => debug!("The cursor can't move onto the view: {error}"),
             }
         }
@@ -592,19 +573,16 @@ impl Handler<'_> {
         debug!(grabbed = grab, "Cursor grab");
     }
 
-    /// Restarts the clock if a layer paused the frames since it was last read, as a file dialog
-    /// does while it's open, so that neither the frame the pause came in nor the update after it
-    /// counts the pause. Where the clock is read, as a frame starts and as the run ends, rather
-    /// than as a frame ends, so that it covers a dialog that a layer shows for an event between
-    /// frames, such as the OS's close button, as well as one from its update or its UI.
+    /// Restarts the clock if a layer paused the frames (an open file dialog does), so no frame
+    /// counts the pause. Called at frame start and run end, not frame end, so it covers a dialog
+    /// shown for an event between frames, such as the OS's close button.
     fn take_pause(&mut self) {
         if mem::take(&mut self.cx.paused) {
             self.clock.resume();
         }
     }
 
-    /// Asks the layers whether the app should close, for the OS's close button or egui's Close
-    /// command to the main window, and exits unless one handles it.
+    /// Asks the layers whether to close the main window; exits unless one handles it.
     fn close(&mut self, event_loop: &ActiveEventLoop) {
         if self.dispatch(&Event::CloseRequested).is_continue() {
             debug!("Window closed");
@@ -612,10 +590,9 @@ impl Handler<'_> {
         }
     }
 
-    /// Tells the layers when the window loses or regains its area, which is when rendering
-    /// pauses and resumes. The clock restarts at both, so that no frame counts the pause: neither
-    /// the first after it nor, in the frame times, the last before it, should the app quit while
-    /// it's minimized.
+    /// Tells the layers the window lost or regained its area, pausing or resuming rendering. The
+    /// clock restarts at both, so no frame counts the pause, even the last if the app quits
+    /// minimized.
     fn set_minimized(&mut self, minimized: bool) {
         if self.minimized == minimized {
             return;
@@ -643,9 +620,8 @@ impl Handler<'_> {
         dispatch(&mut self.app.stack, &mut self.cx, event)
     }
 
-    /// What of `event`, from the main window, reaches the layers, `consumed` saying whether egui
-    /// keeps it: in a dockspace, what its view says, and otherwise the event, which egui doesn't
-    /// keep.
+    /// What of `event` reaches the layers, given whether egui `consumed` it. In a dockspace the
+    /// view decides.
     #[cfg(feature = "dev")]
     fn view_reach(&mut self, event: &Event<'_>, consumed: bool) -> Reach {
         let Some(input) = &mut self.view_input else {
@@ -656,8 +632,8 @@ impl Handler<'_> {
         input.route(&self.egui, event, consumed, under, shown)
     }
 
-    /// Whether keys reach the layers: in a dockspace, as its view says; otherwise while none of
-    /// egui's widgets has focus.
+    /// Whether keys reach the layers: in a dockspace, as its view says (no egui modal open, view
+    /// shown, view has the keys or cursor); otherwise while no egui widget has focus.
     #[cfg(feature = "dev")]
     fn keys(&self) -> bool {
         match &self.view_input {
@@ -686,8 +662,8 @@ impl Handler<'_> {
 }
 
 fn dispatch(stack: &mut Stack, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-    // Every event but the cursor's and the mouse's moves, which would drown the rest, and what's
-    // pasted, which may be a session's code.
+    // Not cursor and mouse moves, which would drown the rest, nor pastes, which may be a
+    // session's code.
     if !matches!(
         event,
         Event::CursorMoved { .. } | Event::MouseMotion { .. } | Event::Paste(_)
@@ -697,9 +673,8 @@ fn dispatch(stack: &mut Stack, cx: &mut Context, event: &Event<'_>) -> ControlFl
     stack.event(cx, event)
 }
 
-/// The OS's clipboard, opened as a layer first pastes or copies, as on Linux that connects to the
-/// display's server: what [`Event::Paste`] carries and [`Context::copy`] puts there. Where it can't
-/// be opened, read or written, each paste or copy warns (`ui.clipboard`) and does nothing.
+/// The OS's clipboard, opened at the first paste or copy (on Linux that connects to the display
+/// server). A failed open, read or write warns (`ui.clipboard`); that paste or copy does nothing.
 #[derive(Default)]
 struct Clipboard(Option<arboard::Clipboard>);
 
@@ -717,7 +692,6 @@ impl Clipboard {
         self.0.as_mut()
     }
 
-    /// The text it holds, if it holds any.
     fn paste(&mut self) -> Option<String> {
         match self.opened()?.get_text() {
             Ok(text) => Some(text),
@@ -732,7 +706,6 @@ impl Clipboard {
         }
     }
 
-    /// Puts `text` there.
     fn copy(&mut self, text: String) {
         if let Some(clipboard) = self.opened()
             && let Err(error) = clipboard.set_text(text)
@@ -745,8 +718,7 @@ impl Clipboard {
     }
 }
 
-/// What's at the cursor in the main window, whose input egui reads through `input`, as `dock` drew
-/// it in the last frame.
+/// What's at the cursor in the main window, as `dock` drew it last frame.
 #[cfg(feature = "dev")]
 fn under(dock: &Dock, egui: &egui::Context, input: Option<&WindowInput>) -> Under {
     let cursor = input.map(WindowInput::cursor);
@@ -774,17 +746,13 @@ impl ApplicationHandler for Handler<'_> {
             viewports.window_event(id, &event);
             return;
         }
-        // Without `dev`, which has no UI, the main window is the only one, and its events go
-        // straight to the layers.
+        // Without `dev` there's no UI and one window; events go straight to the layers.
         #[cfg(not(feature = "dev"))]
         let _ = id;
-        // egui, the top overlay, sees each event first, and keeps the input it wants: a click
-        // on one of its panels, or keys while one of its widgets has focus. Tab is the
-        // exception: egui-winit keeps every Tab press, for egui to move focus between its
-        // widgets, so while keys reach the layers, Tab goes past egui to them alone: while none
-        // of egui's widgets has focus, and in a dockspace, as its view says, while no modal of
-        // egui's is open, the view shows, and the view has the keys or the cursor. Once egui has
-        // stopped running, as it does in an app that draws no UI, it sees none.
+        // egui, the top overlay, sees each event first and keeps what it wants: clicks on its
+        // panels, keys while a widget has focus. egui-winit keeps every Tab press to move focus,
+        // so while keys reach the layers (see `keys`), Tab skips egui. Once egui has stopped
+        // running, as in an app with no UI, it sees nothing.
         #[cfg(feature = "dev")]
         let tab_for_layers = matches!(
             &event,
@@ -801,9 +769,8 @@ impl ApplicationHandler for Handler<'_> {
         {
             consumed = egui_winit.on_window_event(window, &event).consumed;
         }
-        // Releases reach the layers regardless: egui keeps input by what it wants when the
-        // input comes, so it would keep the release of a key held down before one of its text
-        // fields took focus, or of a button pressed over the scene and let go over a panel.
+        // Releases reach the layers regardless: egui would keep the release of a key held before
+        // a text field took focus, or of a button pressed over the scene and released over a panel.
         #[cfg(feature = "dev")]
         {
             consumed &= !matches!(
@@ -817,8 +784,7 @@ impl ApplicationHandler for Handler<'_> {
                 }
             );
         }
-        // In a dockspace, the view decides what reaches the layers, from what egui keeps among the
-        // rest.
+        // In a dockspace, the view decides what reaches the layers, among what egui keeps.
         #[cfg(feature = "dev")]
         let kept = consumed && self.view_input.is_none();
         match event {
@@ -833,25 +799,25 @@ impl ApplicationHandler for Handler<'_> {
                     width: size.width,
                     height: size.height,
                 });
-                // Frames stop while the window has no area, and while the user drags its edge,
-                // Windows doesn't call `about_to_wait` to start them again.
+                // Frames stop without a window area; Windows doesn't call `about_to_wait` to
+                // restart them while the user drags an edge.
                 self.request_frame(event_loop);
             }
             WindowEvent::RedrawRequested => {
-                // No frame runs while the window has no area, or it would count the pause: a
-                // redraw asked for before the window was minimized still comes, and as Windows
-                // restores it, a redraw comes before the resize that ends the pause.
+                // No frame runs without a window area, or it would count the pause. A redraw
+                // asked for before minimizing still comes, and Windows sends one on restoring,
+                // before the resize that ends the pause.
                 if !self.minimized {
                     self.frame(event_loop);
                     #[cfg(feature = "dev")]
                     self.show_window_menu();
                 }
-                // Windows doesn't call `about_to_wait` while it moves or resizes one of the app's
-                // windows, in a loop of its own, so each frame asks for the next. winit calls
-                // `about_to_wait` between two frames otherwise, and the two requests make one.
+                // Windows doesn't call `about_to_wait` while it moves or resizes a window in its
+                // own loop, so each frame asks for the next. Otherwise winit calls it between
+                // frames, and the two requests make one.
                 self.request_frame(event_loop);
             }
-            // Untraced, as `dispatch` leaves the cursor's moves.
+            // Untraced, as `dispatch` leaves out cursor moves.
             #[cfg(feature = "dev")]
             WindowEvent::CursorMoved { .. } if kept => {}
             #[cfg(feature = "dev")]
@@ -871,7 +837,7 @@ impl ApplicationHandler for Handler<'_> {
                     }
                     Reach::Event => {}
                 }
-                // The pads let go first, as the window loses focus.
+                // The pads release first, as the window loses focus.
                 if let Event::Focused(focused) = event {
                     let Self {
                         gamepads, app, cx, ..
@@ -896,9 +862,8 @@ impl ApplicationHandler for Handler<'_> {
         }
     }
 
-    /// The mouse's raw motion, which winit reports while the window has focus, as its
-    /// `DeviceEvents::WhenFocused`, its default, has it; in a dockspace, while the view has the
-    /// keys too.
+    /// The mouse's raw motion: winit reports it while the window has focus (`WhenFocused`, its
+    /// default); in a dockspace, also while the view has the keys.
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
         let Some(event) = event::device(&event) else {
             return;
@@ -911,14 +876,13 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Frames run back to back, paced by the render thread, which presentation paces: mailbox's
-        // to the GPU, FIFO's (`--vsync`) to the display.
+        // Frames run back to back, paced by the render thread, itself paced by presentation
+        // (mailbox: the GPU; FIFO under `--vsync`: the display).
         self.request_frame(event_loop);
     }
 
-    /// A request has come to the tool API, or stdin has ended under `--supervised`: frames answer
-    /// requests and look for stdin's end as they start, but while the window is minimized, and no
-    /// frames run, it's done here, a request answered unless it needs a frame.
+    /// A tool API request came, or stdin ended under `--supervised`. Frames handle both as they
+    /// start; while minimized, it's done here, and a request is answered unless it needs a frame.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
         if !self.minimized {
             return;
@@ -938,8 +902,8 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        // The last frame ends here, and the frame handed over last renders, and counts, before
-        // the run's end is timed.
+        // The last frame ends here; the frame handed over last renders, and counts, before the
+        // run's end is timed.
         self.take_pause();
         (self.cx.perf).finish(self.clock.since_last(Instant::now()));
         let stopped = self.render.take().and_then(|render| {
@@ -995,9 +959,7 @@ impl ApplicationHandler for Handler<'_> {
     }
 }
 
-/// The window's icon, `png` decoded to RGBA.
-///
-/// Fails with `engine.icon` if it doesn't decode.
+/// The window's icon from `png`, decoded to RGBA. Fails with `engine.icon` if it doesn't decode.
 fn window_icon(png: &[u8]) -> Result<Icon> {
     let failed = |why: String| {
         let message = format!("can't give the window its icon, which {why}; it opens without one");
