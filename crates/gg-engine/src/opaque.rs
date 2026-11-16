@@ -153,7 +153,9 @@ impl OpaqueMeshes {
         }
         self.set_in[slot] = pass;
         self.held[slot] = entity;
-        let place = placed.drawn(entity).expect("a drawn entity is placed");
+        let place = placed
+            .drawn(world, entity)
+            .expect("a drawn entity is placed");
         let id = world.id(entity).expect("a row's entity is alive").get();
         let matrix = from_origin(place.matrix, self.origin);
         scene.set(slot as u32, matrix, &skins.draw_of(entity, draw), id);
@@ -218,7 +220,7 @@ mod tests {
         (past, alpha, started): (&Past, f32, u64),
         held: &mut Held,
     ) -> Vec<u32> {
-        placed.place(world);
+        placed.place(world, world.component::<MeshDraw>());
         placed.draw(world, past, alpha, started, world.component::<MeshDraw>());
         opaque.hold(world, placed, &Skins::default(), scene, DVec3::ZERO);
         world.advance();
@@ -342,7 +344,7 @@ mod tests {
         let past = Past::default();
         // The slots the frame from `origin` sets, with their transforms.
         let mut hold = |world: &mut World, origin: DVec3| {
-            placed.place(world);
+            placed.place(world, world.component::<MeshDraw>());
             placed.draw(world, &past, 1.0, 0, world.component::<MeshDraw>());
             opaque.hold(world, &placed, &Skins::default(), &mut scene, origin);
             world.advance();

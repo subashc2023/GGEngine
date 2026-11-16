@@ -410,8 +410,8 @@ impl Context {
     /// grid, unless the frame is bare, as the viewpoint the frame sees from so far sees it.
     pub(crate) fn draw_world(&mut self, alpha: f32, time: f32, ticks: u64) {
         self.past.resolve(&self.world);
-        self.placed.place(&self.world);
         let held = self.world.component::<MeshDraw>();
+        self.placed.place(&self.world, held);
         (self.placed).draw(&self.world, &self.past, alpha, self.tick_started, held);
         let (made, meshes, draws) = (&self.loaded.made, &mut self.meshes, &mut self.draws);
         (self.skins).find(&self.world, &self.placed, made, meshes, draws);

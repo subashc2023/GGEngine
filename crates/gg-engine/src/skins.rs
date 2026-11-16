@@ -107,7 +107,8 @@ impl Skins {
                 // A part whose draw code changed to another mesh draws that, unskinned.
                 let model_mesh = made.meshes.get(primitive).map(|mesh| mesh.index());
                 let drawn = world.get::<MeshDraw>(entity).map(|draw| draw.parts().0);
-                let Some(place) = placed.drawn(entity).filter(|_| drawn == model_mesh) else {
+                let Some(place) = placed.drawn(world, entity).filter(|_| drawn == model_mesh)
+                else {
                     continue;
                 };
                 let mesh = self.own(entity, of, (model.index(), primitive), meshes);
@@ -117,7 +118,7 @@ impl Skins {
                     (skin.joints.iter().zip(&skin.inverse_binds)).map(|(&joint, &bind)| {
                         let joint = node_id(id, joint as usize).and_then(|node| world.entity(node));
                         // In `f64` up to the mesh's space, near the mesh, where `f32` holds.
-                        match joint.and_then(|joint| placed.drawn(joint)) {
+                        match joint.and_then(|joint| placed.drawn(world, joint)) {
                             Some(joint) => {
                                 Mat4::from((into_mesh * joint.matrix).as_affine3a()) * bind
                             }

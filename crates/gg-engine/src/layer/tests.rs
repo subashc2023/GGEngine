@@ -654,6 +654,54 @@ fn a_skinned_part_draws_a_mesh_of_its_own_moved_by_its_joints() {
     assert_eq!((cx.meshes.count(), cx.skins.held()), (meshes, (1, 0)));
 }
 
+/// A joint made a root carrying nothing, which placing leaves to its transform, skins its mesh by
+/// where `World::pose` puts it, bit for bit.
+#[test]
+fn a_joint_made_a_root_carrying_nothing_skins_by_its_transform() {
+    let mut cx = Context::seeded(1);
+    let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox");
+    let model = cx
+        .add_model("fox", fox.join("Fox.gltf"))
+        .expect("the Fox reads");
+    let root = model.spawn(cx.world_mut(), Transform::IDENTITY);
+    cx.draw_world(1.0, 0.0, 0);
+    let world = cx.world();
+    let nodes = world.assets().nodes(model).expect("its nodes").clone();
+    let id = world.id(root).expect("alive");
+    let node = |part: usize| {
+        let node = crate::ecs::node_id(id, part).and_then(|node| world.entity(node));
+        node.expect("spawned")
+    };
+    let skinned = |part: &gltf::Part| part.skin.filter(|_| part.primitive.is_some());
+    let (skin, part) = (nodes.parts.iter().enumerate())
+        .find_map(|(index, part)| skinned(part).map(|skin| (skin, node(index))))
+        .expect("a skinned part");
+    let skin = &nodes.skins[skin];
+    let (joint, leaf) = (skin.joints.iter().enumerate())
+        .map(|(joint, &at)| (joint, node(at as usize)))
+        .find(|&(_, entity)| world.children(entity).expect("alive").next().is_none())
+        .expect("a joint carrying nothing");
+    assert!(world.get::<MeshDraw>(leaf).is_none(), "in no held table");
+    let world = cx.world_mut();
+    world.set_parent(leaf, None).expect("no cycle");
+    (world.get_mut::<Transform>(leaf))
+        .expect("it has one")
+        .translation
+        .x += 3.0;
+    cx.draws.clear();
+    cx.draw_world(1.0, 0.0, 0);
+    let pose = |entity| cx.world().pose(entity).expect("alive").matrix;
+    let into_mesh = pose(part).inverse();
+    let want = Mat4::from((into_mesh * pose(leaf)).as_affine3a()) * skin.inverse_binds[joint];
+    let skins: Vec<Vec<Mat4>> = (cx.draws.skins())
+        .map(|(_, joints)| joints.to_vec())
+        .collect();
+    let [joints] = &skins[..] else {
+        panic!("a skin: {skins:?}");
+    };
+    assert_eq!(joints[joint], want);
+}
+
 /// A Fox's context, its model added, after a Fox spawned and despawned in a frame, leaving its
 /// skinned copy spare.
 fn spare_fox() -> (Context, Model) {

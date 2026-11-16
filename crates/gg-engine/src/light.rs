@@ -337,7 +337,7 @@ mod tests {
             }
             change(&mut world, [lone, parent, carried]);
             past.resolve(&world);
-            placed.place(&world);
+            placed.place(&world, None);
             placed.draw(&world, &past, alpha, started, None);
             kept.find(&world, &past, &placed, (alpha, DVec3::ZERO), started);
             let mut fresh = Vec::new();

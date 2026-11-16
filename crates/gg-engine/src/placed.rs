@@ -1,8 +1,9 @@
 //! Where the world's entities are: each one's matrix to world space (its transform's, then its
 //! ancestors' in turn) and its rotation. They're kept from frame to frame as the latest tick left
-//! them, and placed again only where a transform or parent changed, with what it carries. Also
-//! where entities on their way between ticks draw this frame, which follows only what the latest
-//! tick moved.
+//! them, and placed again only where a transform or parent changed, with what it carries. A root
+//! carrying nothing, outside tables whose places are held elsewhere, isn't kept: drawing reads its
+//! transform, and [`Placed::kept`] finds its place from it. Also where entities on their way
+//! between ticks draw this frame, which follows only what the latest tick moved.
 
 use std::mem;
 
@@ -24,6 +25,9 @@ pub(crate) struct Placed {
     /// By slot: where its entity is as the latest tick left it. `None` is the origin, unturned, at
     /// its own size: a root without a transform, and what it carries without one.
     kept: Vec<Option<Place>>,
+    /// By slot: whether its entity was last placed as a root carrying nothing, whose place isn't
+    /// in `kept` but its transform's.
+    own: Vec<bool>,
     /// By slot: the last pass that found its entity changed, and the last that placed it or drew
     /// it on its way.
     found: Vec<u32>,
@@ -85,9 +89,11 @@ impl Place {
 impl Placed {
     /// Places `world`'s entities that changed since last placed, or all in another world: each
     /// whose transform or parent changed or that joined a table (as spawning or giving a
-    /// transform or parent does), and what each carries, from the topmost changed. Cost follows
-    /// what changed and what it carries, apart from a look over each table's marks.
-    pub(crate) fn place(&mut self, world: &World) {
+    /// transform or parent does), and what each carries, from the topmost changed. A root
+    /// carrying nothing, in a table without component `held`, is only marked placed again (see
+    /// [`kept`](Self::kept)). Cost follows what changed and what it carries, apart from a look over
+    /// each table's marks.
+    pub(crate) fn place(&mut self, world: &World, held: Option<ComponentId>) {
         let _zone = gg_core::zone!();
         let since = match self.seen {
             Some((serial, tick)) if serial == world.serial() => Some(tick),
@@ -102,8 +108,12 @@ impl Placed {
         let (transform, parent) = (world.component::<Transform>(), world.component::<Parent>());
         for table in world.tables() {
             let entities = table.entities();
+            let roots = !parent.is_some_and(|id| table.has(id));
+            let own = roots && !held.is_some_and(|id| table.has(id));
             let Some(since) = since else {
-                list.extend_from_slice(entities);
+                for &entity in entities {
+                    self.add(world, own, entity, &mut list);
+                }
                 continue;
             };
             let marks = [
@@ -113,13 +123,36 @@ impl Placed {
             ];
             for marks in marks.into_iter().flatten() {
                 if marks.since(since) {
-                    let rows = (0..entities.len()).filter(|&row| marks.row(row) > since);
-                    list.extend(rows.map(|row| entities[row]));
+                    for row in (0..entities.len()).filter(|&row| marks.row(row) > since) {
+                        self.add(world, own, entities[row], &mut list);
+                    }
                 }
             }
         }
         self.walk_from_tops(world, &list, None);
         self.list = list;
+    }
+
+    /// Adds `entity`, which changed, to `list` to place; or, if `own` (its table's roots draw by
+    /// their transforms) and it carries nothing, marks it placed again without placing it.
+    fn add(&mut self, world: &World, own: bool, entity: Entity, list: &mut Vec<Entity>) {
+        let carries = || {
+            let mut children = world.children(entity).expect("a row's entity is alive");
+            children.next().is_some()
+        };
+        if !own || carries() {
+            list.push(entity);
+            return;
+        }
+        let slot = entity.slot();
+        // Another of its table's marks may have found it this pass.
+        if self.placed[slot] == self.pass {
+            return;
+        }
+        self.placed[slot] = self.pass;
+        self.entities[slot] = entity;
+        self.own[slot] = true;
+        self.changed.push(entity);
     }
 
     /// Finds where entities on their way between ticks draw this frame, with what they carry:
@@ -193,7 +226,7 @@ impl Placed {
             let under = up.and_then(|parent| {
                 let slot = parent.slot();
                 debug_assert_eq!(self.entities[slot], parent, "a parent is placed before");
-                self.kept[slot]
+                self.place_of(world, parent)
             });
             self.walk(world, top, under, drawn);
         }
@@ -231,6 +264,7 @@ impl Placed {
             } else {
                 self.entities[slot] = entity;
                 self.kept[slot] = place;
+                self.own[slot] = false;
                 self.changed.push(entity);
             }
             let children = world.children(entity).expect("a placed entity is alive");
@@ -238,19 +272,31 @@ impl Placed {
         }
     }
 
-    pub(crate) fn kept(&self, entity: Entity) -> Option<Place> {
+    /// Where `entity` of `world` is as the latest tick left it, if placed. A root the placing
+    /// left unplaced is where its transform puts it in `world`, which hasn't changed since.
+    pub(crate) fn kept(&self, world: &World, entity: Entity) -> Option<Place> {
         let slot = entity.slot();
-        (self.entities.get(slot) == Some(&entity)).then(|| self.kept[slot].unwrap_or(Place::ORIGIN))
+        (self.entities.get(slot) == Some(&entity))
+            .then(|| self.place_of(world, entity).unwrap_or(Place::ORIGIN))
     }
 
-    /// Where `entity` draws this frame, if placed: on its way between ticks, else as the latest
-    /// tick left it.
-    pub(crate) fn drawn(&self, entity: Entity) -> Option<Place> {
+    /// Where `entity` of `world` draws this frame, if placed: on its way between ticks, else as
+    /// the latest tick left it.
+    pub(crate) fn drawn(&self, world: &World, entity: Entity) -> Option<Place> {
         let slot = entity.slot();
         if self.drawing != 0 && self.placed.get(slot) == Some(&self.drawing) {
             return Some(self.drawn[slot].unwrap_or(Place::ORIGIN));
         }
-        self.kept(entity)
+        self.kept(world, entity)
+    }
+
+    /// The place of `entity`, placed in its slot, as `kept` holds them: `None` is the origin.
+    fn place_of(&self, world: &World, entity: Entity) -> Option<Place> {
+        let slot = entity.slot();
+        match self.own[slot] {
+            true => Place::under(None, world.get::<Transform>(entity)),
+            false => self.kept[slot],
+        }
     }
 
     /// The entities the latest placing placed again.
@@ -268,6 +314,7 @@ impl Placed {
         if self.entities.len() < slots {
             self.entities.resize(slots, Entity::DEAD);
             self.kept.resize(slots, None);
+            self.own.resize(slots, false);
             self.drawn.resize(slots, None);
             self.found.resize(slots, 0);
             self.placed.resize(slots, 0);
@@ -317,7 +364,7 @@ impl Placed {
     /// changed since the latest tick started: for tests, which draw a world once.
     pub(crate) fn of(world: &World, past: &Past, alpha: f32) -> Self {
         let mut placed = Self::default();
-        placed.place(world);
+        placed.place(world, None);
         placed.draw(world, past, alpha, 0, None);
         placed
     }
@@ -345,16 +392,16 @@ mod tests {
     /// a fresh placing, bit for bit, advances the world's change tick as a frame's drawing does,
     /// and returns the entities placed again, sorted.
     fn place(world: &mut World, kept: &mut Placed, entities: &[Entity]) -> Vec<Entity> {
-        kept.place(world);
+        kept.place(world, None);
         let fresh = Placed::of(world, &Past::default(), 1.0);
         for &entity in entities.iter().filter(|&&entity| world.contains(entity)) {
             assert_eq!(
-                bits(kept.kept(entity)),
-                bits(fresh.kept(entity)),
+                bits(kept.kept(world, entity)),
+                bits(fresh.kept(world, entity)),
                 "{entity}"
             );
             let pose = world.pose(entity).expect("alive");
-            let place = kept.kept(entity).expect("placed");
+            let place = kept.kept(world, entity).expect("placed");
             assert_eq!(format!("{:?}", pose.matrix), format!("{:?}", place.matrix));
         }
         world.advance();
@@ -411,13 +458,30 @@ mod tests {
         world.despawn(a).expect("alive");
         assert_eq!(place(&mut world, &mut kept, &all), []);
         let f = world.spawn(at(2.0, 2.0));
-        assert!(kept.kept(f).is_none(), "its slot was another's");
+        assert!(kept.kept(&world, f).is_none(), "its slot was another's");
         assert_eq!(place(&mut world, &mut kept, &all), sorted([f]));
 
         let copy = world.clone();
         world.clone_from(&copy);
         let all = [root, bare, f];
         assert_eq!(place(&mut world, &mut kept, &all), sorted(all));
+
+        // `f`, a root carrying nothing in `a`'s old slot, is left unplaced: where its transform
+        // now puts it, as a skin asks of a joint, and under where it now is for a child it gains.
+        let moved = |world: &mut World, entity, x| {
+            (world.get_mut::<Transform>(entity))
+                .expect("it has one")
+                .translation
+                .x = x;
+        };
+        moved(&mut world, f, 5.0);
+        assert_eq!(place(&mut world, &mut kept, &all), sorted([f]));
+        let g = world.spawn(at(0.5, -0.5));
+        world.set_parent(g, Some(f)).expect("no cycle");
+        let all = [root, bare, f, g];
+        assert_eq!(place(&mut world, &mut kept, &all), sorted([g]));
+        moved(&mut world, f, -1.0);
+        assert_eq!(place(&mut world, &mut kept, &all), sorted([f, g]));
     }
 
     /// Between ticks, what the latest tick moved draws on its way, with what it carries (each
@@ -431,7 +495,7 @@ mod tests {
         world.set_parent(kid, Some(mover)).expect("no cycle");
         world.set_parent(calm, Some(still)).expect("no cycle");
         let mut placed = Placed::default();
-        placed.place(&world);
+        placed.place(&world, None);
         world.advance();
         let mut past = Past::default();
         past.capture(&mut world);
@@ -444,7 +508,7 @@ mod tests {
             .x = 2.0;
         let to = *world.get::<Transform>(mover).expect("it has one");
         past.resolve(&world);
-        placed.place(&world);
+        placed.place(&world, None);
         placed.draw(&world, &past, 0.5, started, None);
 
         let mut moving = placed.moving().to_vec();
@@ -452,19 +516,19 @@ mod tests {
         assert_eq!(moving, sorted([mover, kid]));
         let local = |entity| world.get::<Transform>(entity).expect("it has one").matrix();
         let way = interpolation::between(&from, &to, 0.5).matrix();
-        let drawn = |entity| placed.drawn(entity).expect("placed").matrix;
+        let drawn = |entity| placed.drawn(&world, entity).expect("placed").matrix;
         assert_eq!(
             format!("{:?}", drawn(kid)),
             format!("{:?}", way * local(kid))
         );
         assert_eq!(format!("{:?}", drawn(mover)), format!("{way:?}"));
-        let kept = |entity| placed.kept(entity).expect("placed").matrix;
+        let kept = |entity| placed.kept(&world, entity).expect("placed").matrix;
         assert_eq!(kept(kid), to.matrix() * local(kid));
         assert_eq!(drawn(calm), kept(calm));
 
         placed.draw(&world, &past, 1.0, started, None);
         assert_eq!(placed.moving(), []);
-        assert_eq!(placed.drawn(kid), placed.kept(kid));
+        assert_eq!(placed.drawn(&world, kid), placed.kept(&world, kid));
     }
 
     /// 1,000 km from the world's origin, a parent moving 1 mm a tick draws on its way, and its
@@ -484,7 +548,7 @@ mod tests {
         });
         world.set_parent(child, Some(parent)).expect("no cycle");
         let mut placed = Placed::default();
-        placed.place(&world);
+        placed.place(&world, None);
         world.advance();
         let mut past = Past::default();
         past.capture(&mut world);
@@ -492,11 +556,11 @@ mod tests {
         let moved = world.get_mut::<Transform>(parent).expect("it has one");
         moved.translation.x += 0.001;
         past.resolve(&world);
-        placed.place(&world);
+        placed.place(&world, None);
         placed.draw(&world, &past, 0.5, started, None);
         let origin = DVec3::new(1.0e6, 0.0, -1.0e6);
         let drawn = |entity| {
-            let place = placed.drawn(entity).expect("placed");
+            let place = placed.drawn(&world, entity).expect("placed");
             crate::transform::from_origin(place.matrix, origin)
                 .w_axis
                 .truncate()

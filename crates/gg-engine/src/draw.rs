@@ -222,7 +222,7 @@ impl Scratch {
             let z = |row: usize| match children {
                 true => {
                     (placed
-                        .kept(entities[row])
+                        .kept(world, entities[row])
                         .expect("a drawn entity is placed"))
                     .matrix
                     .translation
@@ -333,7 +333,7 @@ impl Scratch {
             Drawn::Transforms => transforms[row].matrix_from(origin),
             Drawn::Blended(blended) => blended[row],
             Drawn::Placed(entities) => {
-                let place = placed.drawn(entities[row]);
+                let place = placed.drawn(world, entities[row]);
                 from_origin(place.expect("a drawn entity is placed").matrix, origin)
             }
         };
@@ -421,7 +421,7 @@ impl Scratch {
                         // Where the latest tick left it: its bursts are born there.
                         let ticked = match drawn {
                             Drawn::Placed(entities) => {
-                                let place = placed.kept(entities[row]);
+                                let place = placed.kept(world, entities[row]);
                                 from_origin(place.expect("a drawn entity is placed").matrix, origin)
                             }
                             Drawn::Transforms | Drawn::Blended(_) => {
@@ -525,7 +525,7 @@ impl<'a> Poses<'a> {
 
     fn placed(&self, table: usize, row: usize) -> crate::placed::Place {
         let entity = self.world.tables()[table].entities()[row];
-        (self.placed.drawn(entity)).expect("a child is placed")
+        (self.placed.drawn(self.world, entity)).expect("a child is placed")
     }
 
     /// Row `row` of `table`, which has transforms: its transform as the tick left it and as drawn
