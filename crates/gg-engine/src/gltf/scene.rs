@@ -12,9 +12,9 @@ use gg_core::math::{Mat4, Quat, Vec3, Vec4};
 use super::{Part, Reader, json};
 use crate::{Light, LightKind, Transform};
 
-/// How far a matrix may be from the one its translation, rotation and scale compose back to, as a
-/// fraction of each column's length: past what rounding gives, as of a matrix printed to four
-/// places, and short of a shear that would show.
+/// How far a matrix may differ from its translation, rotation and scale composed back, as a
+/// fraction of each column's length: past rounding (a matrix printed to four places), short of a
+/// shear that would show.
 const DECOMPOSES_WITHIN: f32 = 1e-3;
 
 impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
@@ -29,10 +29,9 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         let scene = model.item(&gltf.scenes, "scene", index)?;
         let mut reached = vec![false; gltf.nodes.len()];
         self.parts_of = vec![None; gltf.nodes.len()];
-        // Each skinned part, and its skin in glTF's order, which are read once every joint's part
-        // is known.
+        // Each skinned part and its skin in glTF's order, read once every joint's part is known.
         let mut skinned: Vec<(usize, u32)> = Vec::new();
-        // A stack of its own rather than recursion, so that no chain of nodes is too deep.
+        // A stack, not recursion, so no chain of nodes is too deep.
         let mut stack: Vec<(u32, Option<usize>)> =
             scene.nodes.iter().rev().map(|&node| (node, None)).collect();
         while let Some((index, parent)) = stack.pop() {
@@ -42,7 +41,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     "reaches node {index} twice: it's in a cycle, or has two parents"
                 )));
             }
-            // A node's morph weights replace its mesh's, which are only their default.
+            // A node's morph weights replace its mesh's, which are only defaults.
             let weights = match (node.mesh, node.weights.is_empty()) {
                 (Some(mesh), true) => &model.item(&gltf.meshes, "mesh", mesh)?.weights,
                 _ => &node.weights,
@@ -80,7 +79,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 skinned.push((part, skin));
             }
             if primitives.len() > 1 {
-                // An entity draws one primitive, so each of the mesh's is a child of the node's.
+                // An entity draws one primitive: each of the mesh's is a child of the node.
                 self.memory.hold(primitives.len() * size_of::<Part>())?;
                 for primitive in primitives {
                     if let Some(skin) = node.skin {
@@ -98,7 +97,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             }
             stack.extend(node.children.iter().rev().map(|&child| (child, Some(part))));
         }
-        // Each skin once, as it's first reached, and the parts it moves checked against it.
+        // Each skin once, in order first reached, with the parts it moves checked against it.
         let mut read: BTreeMap<u32, usize> = BTreeMap::new();
         for (part, index) in skinned {
             let skin = match read.get(&index) {
@@ -139,9 +138,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(())
     }
 
-    /// Light `index` of KHR_lights_punctual's, which a node holds, checked as the extension says,
-    /// of a type it has, and as [`allowed`] says. Its intensity and range are in its units, candela
-    /// or lux, and meters, the engine's.
+    /// KHR_lights_punctual light `index`, which must have a type the extension has and be
+    /// [`allowed`]. Intensity and range are in candela or lux, and meters.
     fn light(&self, index: u32) -> Result<Light> {
         let (model, gltf) = (self.model, self.gltf);
         let lights = gltf.extensions.lights_punctual.as_ref();
@@ -177,9 +175,9 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(read)
     }
 
-    /// Node `index`'s transform: its matrix decomposed, or its translation, rotation and scale, its
-    /// rotation made unit; one [`takes`] takes, as JSON's numbers are finite, and serde_json's
-    /// `float_roundtrip`, which the workspace turns on, refuses one past an f32's range.
+    /// Node `index`'s transform: its matrix decomposed, or its translation, rotation (made unit)
+    /// and scale. [`takes`] takes it: JSON's numbers are finite, and the workspace's serde_json
+    /// `float_roundtrip` refuses one past f32's range.
     fn transform(&self, index: u32, node: &json::Node) -> Result<Transform> {
         let model = self.model;
         let Some(matrix) = node.matrix else {
@@ -221,8 +219,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         if !scale.is_finite() {
             return Err(doesnt_decompose());
         }
-        // A shear, or a column of 0, composes back to another matrix. Each column is compared with
-        // its own length, so that a small scale on one axis hides no shear along it.
+        // A shear or a column of 0 composes back to another matrix. Each column is compared with
+        // its own length, so a small scale on one axis hides no shear along it.
         let composed = Mat4::from_scale_rotation_translation(scale, rotation, translation);
         let decomposes = (0..3).all(|i| {
             let (column, back) = (matrix.col(i), composed.col(i));
@@ -240,16 +238,14 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
     }
 }
 
-/// `rotation` scaled to unit length; `None` if it's 0, or too near it or too large to scale to a
-/// unit, as the world takes one.
+/// `rotation` scaled to a unit, as the world takes one; `None` if it's 0, too near 0 or too large.
 pub(super) fn unit(rotation: Quat) -> Option<Quat> {
     let length = rotation.length();
     let scaled = (length > 0.0 && length.is_finite()).then(|| rotation / length);
     scaled.filter(|unit| unit.is_normalized())
 }
 
-/// Whether `transform` is one a model's part may have, as the world takes it: of finite numbers,
-/// its rotation a unit.
+/// Whether `transform` may be a model part's: finite numbers, a unit rotation.
 pub(crate) fn takes(transform: &Transform) -> bool {
     let Transform {
         translation,
@@ -259,10 +255,9 @@ pub(crate) fn takes(transform: &Transform) -> bool {
     translation.is_finite() && scale.is_finite() && rotation.is_normalized()
 }
 
-/// Whether `light` is one a model's part may have, as KHR_lights_punctual allows it, of finite
-/// numbers: of a color and an intensity not negative, a range more than 0 if it has one, and a
-/// spot's cone's angles from 0 to the outer, which is more than the inner and at most a quarter
-/// turn.
+/// Whether `light` may be a model part's, per KHR_lights_punctual: finite numbers, color and
+/// intensity not negative, a range (if any) above 0, and a spot's inner angle from 0 up to an
+/// outer one above it of at most a quarter turn.
 pub(crate) fn allowed(light: &Light) -> bool {
     let Light {
         color,

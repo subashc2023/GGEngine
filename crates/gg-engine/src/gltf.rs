@@ -1,12 +1,10 @@
-//! glTF 2.0 models: reads a model's `.gltf` or `.glb` file, and the buffers and images it names,
-//! into what its default scene draws, for the engine to add as entities, meshes and textures.
-//! Reading adds nothing anywhere, so a model that fails to read leaves no trace.
+//! glTF 2.0 models: reads a `.gltf` or `.glb` file, and the buffers and images it names, into what
+//! its default scene draws. Reading adds nothing anywhere, so a failed read leaves no trace.
 
 mod animation;
 mod buffers;
-/// The parts of a glTF file's JSON that reading uses, which serde reads with glTF's defaults,
-/// skipping the rest, extras and extensions among them. Every list is in the file's order, and
-/// attributes are by name, so nothing follows a hash's order.
+/// The JSON fields reading uses, with glTF's defaults. Lists keep the file's order and attributes
+/// go by name, so nothing follows a hash's order.
 mod json;
 mod material;
 mod mesh;
@@ -41,33 +39,29 @@ use crate::package::Files;
 use crate::{Light, Transform};
 
 /// What `read` gives: the default scene's parts, the primitives they draw and the images those
-/// sample. The cooker reads it through [`cook`](crate::cook), and cooks its primitives and images.
+/// sample. The cooker reads it through [`cook`](crate::cook).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Imported {
-    /// The scene's nodes, and a child for each primitive of a mesh with more than one, in
-    /// pre-order: each part after its parent.
+    /// The scene's nodes, plus a child per primitive of a mesh with several, in pre-order.
     pub(crate) parts: Vec<Part>,
-    /// Each primitive the scene draws, once, in the order the walk first reaches it.
+    /// Each primitive the scene draws, once, in first-reached order.
     pub primitives: Vec<Primitive>,
-    /// Each image a reached material samples, once, in the order first reached: read as far as its
-    /// header, for the loader to decode, unless the engine has decoded it, as for hot reload.
+    /// Each image a reached material samples, once, in first-reached order. Read as far as its
+    /// header for the loader to decode, unless already decoded (hot reload).
     pub images: Vec<Image>,
-    /// Each skin a part's node names, once, in the order the walk first reaches it.
+    /// Each skin a part's node names, once, in first-reached order.
     pub(crate) skins: Vec<Skin>,
-    /// Each animation, in the file's order, its channels of nodes in the scene.
+    /// Each animation in the file's order, its channels of nodes in the scene.
     pub(crate) clips: Vec<Clip>,
-    /// What the file has that the engine ignores, for an info event, such as "1 camera" or
-    /// "extension KHR_texture_transform".
+    /// What the engine ignores, for an info event: "1 camera", "extension KHR_texture_transform".
     pub(crate) ignored: Vec<String>,
 }
 
 impl Imported {
-    /// Decodes its images, which reading it read as far as their headers, as [`Image::decoded`]
-    /// decodes them, model `name`'s from `path`: as a model read again, which hot reload puts in
-    /// place at once, and the cooker need them.
+    /// Decodes its images like [`Image::decoded`], for model `name` at `path`. Hot reload and the
+    /// cooker need them decoded.
     ///
-    /// Fails with `engine.bad_model`, naming the image as the model's textures are named, for one
-    /// that doesn't decode.
+    /// Fails with `engine.bad_model`, naming the image, for one that doesn't decode.
     pub(crate) fn decode_images(&mut self, name: &str, path: &Path) -> Result<()> {
         let images = mem::take(&mut self.images).into_iter().enumerate();
         let decoded = images.map(|(i, image)| {
@@ -85,36 +79,32 @@ impl Imported {
 /// A node of the scene, or a primitive of a node's mesh: what an entity holds.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Part {
-    /// Its node's name, as the glTF gives it, if it isn't empty: what the world calls the node,
-    /// as [`World::name`](crate::World::name) says. None for a primitive's part.
+    /// Its node's name if not empty (see [`World::name`](crate::World::name)); None for a
+    /// primitive's part.
     pub(crate) name: Option<Arc<str>>,
-    /// Where it is in its parent's space, or in the model's if it has none.
+    /// In its parent's space, or the model's if it has none.
     pub(crate) transform: Transform,
-    /// Its parent's index in `parts`, which comes before its own.
+    /// Its parent's index in `parts`, before its own.
     pub(crate) parent: Option<usize>,
-    /// The index in `primitives` of what it draws, if it draws anything.
+    /// The index in `primitives` of what it draws.
     pub(crate) primitive: Option<usize>,
-    /// The light its node holds, as KHR_lights_punctual gives it, if it has one.
+    /// The KHR_lights_punctual light its node holds.
     pub(crate) light: Option<Light>,
-    /// The index in `skins` of the skin whose joints move what it draws, if its node's skinned.
+    /// The index in `skins` of the skin whose joints move what it draws.
     pub(crate) skin: Option<usize>,
 }
 
-/// The most memory reading a model may take, in bytes, for what it makes of its files: buffers read
-/// from files and data URIs, images' files and what they decode to, which both are held until the
-/// loader has decoded them, primitives' vertices, indices and names, and parts; and while it reads,
-/// the accessors it has read, and a primitive's vertices before it's drawn flat or its vertices
-/// part for MikkTSpace's tangents, with what making those takes.
-/// Past what a model that fits a GPU needs, as the Amazon Lumberyard Bistro's 2 GB of images, BC7
-/// with their levels, held as their files and as their blocks, and its 4 million triangles take
-/// about 4.2 GiB at most as it's read, so that a small file can't fill memory by naming its data
-/// many times, such as one PNG's bytes as many images, nor by its primitives' vertices, as each
-/// corner of a triangle drawn flat takes a vertex of 64 bytes, though an index of a byte names it.
+/// The most memory, in bytes, reading a model may take: buffers, image files and decoded pixels
+/// (held until the loader decodes them), primitives' vertices, indices and names, parts, and
+/// while reading, accessors and the vertices of primitives made flat or split for MikkTSpace.
+///
+/// The Amazon Lumberyard Bistro (2 GB of BC7 images, 4 million triangles) takes about 4.2 GiB at
+/// most. The limit stops a small file filling memory by naming data many times (one PNG as many
+/// images) or through flat vertices: a corner takes 64 bytes, though a byte indexes it.
 pub(crate) const MAX_MEMORY: u64 = 8 << 30;
 
-/// Reads model `name`'s file at `path`, and the files it names, from `from`, the disk or the game's
-/// package, as [`read`] does through [`Files::read`], and lists the files it read, its own first,
-/// each once: those that hot reload watches, and that a package holds for it.
+/// Like [`read`] through [`Files::read`], from `from` (the disk or the game's package). Lists the
+/// files read, its own first, each once: those hot reload watches and a package holds.
 pub(crate) fn read_listing(
     name: &str,
     path: &Path,
@@ -132,11 +122,11 @@ pub(crate) fn read_listing(
     Ok((imported, files.into_inner()))
 }
 
-/// Reads model `name`'s file at `path`, and the files it names, through `read_file`, which reads a
-/// regular file as far as the bytes it's given ([`dirs::read_file`](crate::dirs::read_file), or
-/// tests' files from memory), taking no more than `memory` bytes of what [`MAX_MEMORY`] counts, and
-/// taking, ignoring and refusing what [`Context::add_model`](crate::Context::add_model) says. Each
-/// check it makes fails with the element it's about, such as "accessor 7 reads past buffer view 2".
+/// Reads model `name`'s file at `path`, and the files it names, through `read_file`
+/// ([`dirs::read_file`](crate::dirs::read_file), or tests' memory), counting at most `memory` bytes
+/// as [`MAX_MEMORY`] does. Takes, ignores and refuses what
+/// [`Context::add_model`](crate::Context::add_model) says. A failed check names its element:
+/// "accessor 7 reads past buffer view 2".
 pub(crate) fn read(
     name: &str,
     path: &Path,
@@ -146,15 +136,14 @@ pub(crate) fn read(
     let zone = gg_core::zone!();
     zone.text(path.display());
     let model = Model { name, path };
-    // As far as a GLB's header can say it reaches, past which a GLB holds nothing, and a .gltf's
-    // JSON, cut short, doesn't parse.
+    // As far as a GLB's header can say it reaches; a .gltf's JSON cut short doesn't parse.
     let file = read_file(path, u32::MAX.into())
         .map_err(|error| model.bad("can't be read").with_source(error))?;
     let (json, bin) = container(model, &file)?;
-    // A byte-order mark, which JSON may start with.
+    // JSON may start with a byte-order mark.
     let json = json.strip_prefix(b"\xef\xbb\xbf").unwrap_or(json);
     let not_gltf = |error: serde_json::Error| model.bad("isn't glTF's JSON").with_source(error);
-    // The version first, since a file of another version may have its other fields of other types.
+    // Version first: another version's fields may have other types.
     let versioned: json::Versioned = serde_json::from_slice(json).map_err(not_gltf)?;
     check_version(model, &versioned.asset)?;
     let gltf: json::Gltf = serde_json::from_slice(json).map_err(not_gltf)?;
@@ -204,7 +193,7 @@ pub(crate) fn read(
     Ok(reader.imported)
 }
 
-/// What reading a model holds of what [`MAX_MEMORY`] counts, in bytes, and the most it may.
+/// What [`MAX_MEMORY`] counts as held by a read, and the most, in bytes.
 struct Memory<'a> {
     model: Model<'a>,
     held: u64,
@@ -212,16 +201,15 @@ struct Memory<'a> {
 }
 
 impl Memory<'_> {
-    /// Counts `bytes` more held, before they're allocated, failing if that's past the most reading
-    /// may take, so that it never holds more; but for what's read of a file or a data URI, counted
-    /// once it's read, so that reading takes at most one of those more: a buffer's file, read no
-    /// further than a byte past the room left, an image's, of at most [`image::MAX_FILE`], or a
-    /// data URI's bytes, fewer than the model's own file holds.
+    /// Counts `bytes` more held, before allocating them, failing past the most. A file's or data
+    /// URI's bytes are counted once read, so each may overshoot: a buffer's file by a byte (it's
+    /// read to one past the room left), an image's by [`image::MAX_FILE`], a data URI's by fewer
+    /// bytes than the model's own file holds.
     fn hold(&mut self, bytes: usize) -> Result<()> {
         self.hold_for(bytes, "its buffers, images, vertices and nodes")
     }
 
-    /// Counts `bytes` more held as [`hold`](Self::hold) does, for `what`, which the error names.
+    /// Like [`hold`](Self::hold), naming `what` in the error.
     fn hold_for(&mut self, bytes: usize, what: &str) -> Result<()> {
         let held = self.held.saturating_add(bytes as u64);
         if held > self.most {
@@ -234,27 +222,26 @@ impl Memory<'_> {
         Ok(())
     }
 
-    /// Counts `bytes` that [`hold`](Self::hold) counted as freed.
+    /// Counts `bytes` as freed.
     fn release(&mut self, bytes: usize) {
         self.held = self.held.saturating_sub(bytes as u64);
     }
 
-    /// `items`, copied once the copy is counted.
+    /// `items` copied, once counted.
     fn copy<T: Clone>(&mut self, items: &[T]) -> Result<Vec<T>> {
         self.hold(size_of_val(items))?;
         Ok(items.to_vec())
     }
 
-    /// `len` of `item`, once they're counted.
+    /// `len` of `item`, once counted.
     fn filled<T: Clone>(&mut self, item: T, len: usize) -> Result<Vec<T>> {
         self.hold(len * size_of::<T>())?;
         Ok(vec![item; len])
     }
 }
 
-/// The extensions the engine reads: materials drawn unlit, nodes' lights, materials' emission
-/// stronger than 1, materials of specular and glossiness, and textures' DDS images, which it
-/// samples in place of their sources.
+/// The extensions the engine reads: unlit materials, lights, emission above 1, specular-glossiness
+/// materials, and DDS images sampled instead of textures' sources.
 const READ_EXTENSIONS: [&str; 5] = [
     "KHR_materials_unlit",
     "KHR_lights_punctual",
@@ -290,14 +277,13 @@ impl Model<'_> {
         self.error("engine.unsupported_model", problem)
     }
 
-    /// `items[index]`, which the file names as its `what` `index`.
+    /// `items[index]`, the file's `what` `index`.
     fn item<'i, T>(self, items: &'i [T], what: &str, index: u32) -> Result<&'i T> {
         (items.get(index as usize)).ok_or_else(|| self.bad(format!("has no {what} {index}")))
     }
 }
 
-/// Splits `file` into its JSON and its GLB's BIN chunk, if it's a GLB with one; any other file is
-/// JSON alone.
+/// Splits `file` into its JSON and, for a GLB with one, its BIN chunk. Other files are JSON alone.
 fn container<'f>(model: Model, file: &'f [u8]) -> Result<(&'f [u8], Option<&'f [u8]>)> {
     if word(file, 0) != Some(GLB_MAGIC) {
         return Ok((file, None));
@@ -341,7 +327,7 @@ fn container<'f>(model: Model, file: &'f [u8]) -> Result<(&'f [u8], Option<&'f [
             (0, JSON_CHUNK) => json = Some(&file[start..end]),
             (0, _) => return Err(model.bad("is a GLB that doesn't start with a JSON chunk")),
             (1, BIN_CHUNK) => bin = Some(&file[start..end]),
-            // A chunk of a type glTF leaves to extensions, which it says to skip.
+            // A type glTF leaves to extensions, and says to skip.
             _ => {}
         }
         (at, chunk) = (end, chunk + 1);
@@ -356,7 +342,7 @@ fn word(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
 
-/// Fails unless `asset` says the file is glTF 2.x, and needs no later version than 2.0.
+/// Fails unless `asset` says glTF 2.x needing no later than 2.0.
 fn check_version(model: Model, asset: &json::Asset) -> Result<()> {
     let not_a_version = |field: &str, version: &str| {
         model.bad(format!(
@@ -364,7 +350,7 @@ fn check_version(model: Model, asset: &json::Asset) -> Result<()> {
         ))
     };
     let version = &asset.version;
-    // Only the major number, since glTF 1's versions can have more parts, such as "1.0.1".
+    // Only the major number: glTF 1's versions can have more parts, as "1.0.1".
     match version.split('.').next().map(str::parse::<u32>) {
         Some(Ok(2)) => {}
         Some(Ok(_)) => {
@@ -394,26 +380,26 @@ fn parse_version(version: &str) -> Option<(u32, u32)> {
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
-/// A model as it's read: its file's JSON, and what's been read of it, each once.
+/// A model as it's read: its JSON and what's been read of it, each once.
 struct Reader<'a, F> {
     model: Model<'a>,
     read_file: F,
     gltf: &'a json::Gltf,
-    /// The GLB's BIN chunk, if it has one.
+    /// The GLB's BIN chunk, if any.
     bin: Option<&'a [u8]>,
-    /// Each buffer read, by its index: exactly its byteLength.
+    /// Each buffer read, by index: exactly its byteLength.
     buffers: BTreeMap<u32, Cow<'a, [u8]>>,
-    /// Each accessor read as an attribute, by its index: its elements' components, in order, and
-    /// whether they're all finite; which a primitive copies.
+    /// Each accessor read as an attribute, by index: its components in order, and whether all are
+    /// finite. Primitives copy it.
     floats: BTreeMap<u32, (Vec<f32>, bool)>,
-    /// Each accessor read as indices, by its index, which a primitive copies.
+    /// Each accessor read as indices, by index. Primitives copy it.
     indices: BTreeMap<u32, Vec<u32>>,
-    /// Each mesh read, by its index: where the primitives it draws are in `imported.primitives`.
+    /// Each mesh read, by index: its range in `imported.primitives`.
     meshes: BTreeMap<u32, Range<usize>>,
-    /// Each image read, by its index: where it is in `imported.images`.
+    /// Each image read, by index: its place in `imported.images`.
     images: BTreeMap<u32, usize>,
-    /// What each image in `imported.images` holds, as the first texture that samples it says:
-    /// colors, `None`, or a map of data.
+    /// What each image in `imported.images` holds, per the first texture sampling it: colors
+    /// (`None`) or a data map.
     holds: BTreeMap<usize, Option<Map>>,
     /// By node: the part it is, if the scene reaches it.
     parts_of: Vec<Option<usize>>,

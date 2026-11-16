@@ -11,15 +11,13 @@ use super::{Imported, Reader};
 use crate::Transform;
 use crate::animation::{Channel, Clip, Influences, Interpolation, Path as Moved, Skin, place};
 
-/// The most steps finding a model's skinned meshes' reach may take, each a part placed, a leaf of
-/// [`Influences`] posed or a channel set, for one of its clips' poses: some seconds in a debug
-/// build, past what a model of fifty clips of 64 poses, two hundred parts and 50,000 skinned
-/// vertices takes, so that a small file of many clips and many skinned parts can't take minutes to
-/// read.
+/// The most steps (a part placed, an [`Influences`] leaf posed or a channel set, per clip pose)
+/// finding skinned meshes' reach may take, so a small file can't take minutes. It's some seconds
+/// in a debug build at fifty clips of 64 poses, two hundred parts and 50,000 skinned vertices.
 const MAX_POSE_WORK: u64 = 1 << 27;
 
 impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
-    /// Skin `index`: its joints' parts, each node of them in the scene, and their inverse bind
+    /// Skin `index`: its joints' parts (each joint node must be in the scene) and inverse bind
     /// matrices, identities without them.
     pub(super) fn skin(&mut self, index: u32) -> Result<Skin> {
         let (model, gltf) = (self.model, self.gltf);
@@ -67,10 +65,10 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         })
     }
 
-    /// Reads each animation into a clip, in the file's order, its channels that move nodes the
-    /// scene reaches, each checked as glTF says: its times from 0 up, each after the last, and as
-    /// many values as its interpolation takes, its rotations made unit. A channel of morph weights,
-    /// or of a node outside the scene, is ignored, as `imported.ignored` says.
+    /// Reads each animation into a clip, in the file's order, with its channels of nodes in the
+    /// scene. Checks glTF's rules: times rise from 0; as many values as the interpolation takes;
+    /// rotations made unit. Channels of morph weights or of nodes outside the scene go to
+    /// `imported.ignored`.
     pub(super) fn animations(&mut self) -> Result<()> {
         let (model, gltf) = (self.model, self.gltf);
         for (i, animation) in gltf.animations.iter().enumerate() {
@@ -160,8 +158,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     )));
                 }
                 if rotation {
-                    // Values of a cubic spline in turn its tangents and its values, of which the
-                    // values alone are rotations.
+                    // A cubic spline's values run in tangent, value, tangent; only values are
+                    // rotations.
                     for (v, value) in values.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                         if keys == 3 && v % 3 != 1 {
                             continue;
@@ -191,15 +189,14 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(())
     }
 
-    /// Gives each primitive a skinned part draws its reach: the box its vertices span as the part's
-    /// skin moves them, as the model rests and posed at each clip's keys' times, or at as many as
-    /// [`Clip::pose_times`] gives, each clip's from the model at rest; grown by a tenth of its
-    /// longest side each way, for the poses between those times, and between clips blended. Each
-    /// pose bounds the vertices by the leaves [`Influences`] parts each joint's into, so that a
-    /// pose costs some of the vertices; and the poses are found one at a time, of the parts that
-    /// place the joints alone, in memory counted as the rest of reading is, so that a small file of
-    /// many clips and parts can't ask for their product. A model whose poses would take more than
-    /// [`MAX_POSE_WORK`] to bound is refused, as one of more memory is.
+    /// Gives each primitive a skinned part draws its reach: the box its vertices span as the skin
+    /// moves them, at rest and posed at each clip's key times (or [`Clip::pose_times`]'), each
+    /// clip from the model at rest. The box grows a tenth of its longest side each way, for poses
+    /// between those times and clips blended. A pose bounds the vertices by the leaves
+    /// [`Influences`] parts each joint's into, so it costs some of the vertices. Poses are found
+    /// one at a time, of the parts placing the joints alone, in counted memory, so many clips and
+    /// parts can't ask for their product. Past [`MAX_POSE_WORK`] steps a model is refused, like
+    /// one taking too much memory.
     pub(super) fn reach(&mut self) -> Result<()> {
         let Self {
             model,
@@ -221,9 +218,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         if skinned().next().is_none() {
             return Ok(());
         }
-        // The parts' rest, posed and placed transforms, their parents, and which of them place the
-        // skins' joints, as a flag and in order; each skinned part, its leaves and its box; and
-        // a clip's keys' times, as its poses' are found.
+        // Held while posing: each part's rest, posed and placed transforms, parent, needed flag
+        // and order; each skinned part's leaves and box; a clip's key times.
         let each_part = 2 * size_of::<Transform>()
             + size_of::<Option<usize>>()
             + size_of::<bool>()
@@ -251,7 +247,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 needed[joint as usize] = true;
             }
         }
-        // Each part's parent after it, as parents come first.
+        // Each part's parent after it: parents come first.
         for part in (0..parts.len()).rev() {
             if let (true, Some(parent)) = (needed[part], parents[part]) {
                 needed[parent] = true;

@@ -16,43 +16,42 @@ use super::{Memory, Reader, json};
 /// Triangles, with what their vertices and their material give them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Primitive {
-    /// The mesh's name, or its index, then the primitive's index, such as "Cesium_Milk_Truck/2".
+    /// The mesh's name or index, then the primitive's index: "Cesium_Milk_Truck/2".
     pub(crate) name: String,
     pub positions: Vec<[f32; 3]>,
     /// As many as the positions: (0, 0) where the material samples no texture.
     pub uvs: Vec<[f32; 2]>,
     /// As many as the positions, linear RGBA: white without COLOR_0, alpha 1 for a VEC3.
     pub colors: Vec<[f32; 4]>,
-    /// As many as the positions, unit vectors: its NORMALs, or, without them, each triangle's own,
-    /// its corners apart from its neighbors', as glTF says to draw such a primitive flat; and +Z,
-    /// which nothing reads, for an unlit material's without them.
+    /// As many as the positions, unit vectors: its NORMALs. Without them, each triangle's own
+    /// with its corners apart from its neighbors' (glTF's flat drawing); +Z (unread) for an unlit
+    /// material.
     pub normals: Vec<[f32; 3]>,
-    /// As many as the positions: its TANGENTs, W the bitangent's sign, or, without them, those
-    /// MikkTSpace makes for a lit material with a normal map, as glTF says, its vertices apart where
-    /// their corners' tangents differ; and (1, 0, 0, 1), which nothing reads, for the rest.
+    /// As many as the positions: its TANGENTs, W the bitangent's sign. Without them, for a lit
+    /// material with a normal map, MikkTSpace's (as glTF says), vertices apart where their
+    /// corners' tangents differ; otherwise (1, 0, 0, 1), unread.
     pub tangents: Vec<[f32; 4]>,
-    /// As many as the positions, for a primitive with JOINTS_0 and WEIGHTS_0: each vertex's four
-    /// joints, of the skin that moves it; and none for the rest.
+    /// With JOINTS_0 and WEIGHTS_0, as many as the positions: each vertex's four joints, of the
+    /// skin that moves it. Empty otherwise.
     pub joints: Vec<[u16; 4]>,
-    /// As many as `joints`: how much each of a vertex's joints moves it.
+    /// As many as `joints`: how much each moves its vertex.
     pub weights: Vec<[f32; 4]>,
-    /// For a primitive a skinned node draws, the box, its least corner and its most, that its
-    /// vertices reach as its skins' joints move them through the model's clips, with room to
-    /// spare, which its mesh packs within and views cull it by.
+    /// For a skinned node's primitive, the box (least, most corner) its vertices reach as the
+    /// skins' joints move them through the model's clips, with room to spare. Its mesh packs
+    /// within it and views cull by it.
     pub reach: Option<[Vec3; 2]>,
     /// Three for each triangle; 0..count where the primitive has none.
     pub indices: Vec<u32>,
-    /// Its mesh as the cooker made it, its triangles optimized, with levels of detail and
-    /// meshlets, and its vertices packed, as a run from a package reads it in place of the
-    /// vertices and indices above, which are then empty; none as glTF is read, which a run packs
-    /// as it adds the primitive.
+    /// Its mesh as the cooker made it: triangles optimized, with levels of detail and meshlets,
+    /// vertices packed. A run from a package reads it instead of the then-empty vertices and
+    /// indices above. None as read from glTF; a run packs it when it adds the primitive.
     pub mesh: Option<ModelMesh>,
     pub(crate) material: Material,
 }
 
 impl Primitive {
-    /// Whether its material blends, so that its triangles cover each other in the order they draw
-    /// in, which the cooker keeps.
+    /// Whether its material blends: its triangles cover each other in draw order, which the cooker
+    /// keeps.
     pub fn blends(&self) -> bool {
         matches!(self.material.alpha, AlphaMode::Blend)
     }
@@ -69,7 +68,7 @@ impl Primitive {
             + size_of_val(self.indices.as_slice())
     }
 
-    /// The bytes each of its vertices' joints and weights take: none for a primitive without them.
+    /// The bytes a vertex's joints and weights take: none without them.
     fn skin_bytes(&self) -> usize {
         if self.joints.is_empty() {
             0
@@ -78,16 +77,16 @@ impl Primitive {
         }
     }
 
-    /// Gives each triangle corners of its own, facing as the triangle does, counterclockwise its
-    /// front: as glTF draws a primitive without normals, flat. A triangle of no area faces +Z,
-    /// covering nothing that shows. Its tangents go, which it has none of before its normals.
+    /// Gives each triangle corners of its own, facing as it does (front counterclockwise): glTF's
+    /// flat drawing without normals. A triangle of no area faces +Z, covering nothing that shows.
+    /// Its tangents go; it has none before it has normals.
     ///
-    /// Fails, making nothing, if `memory` hasn't room for its corners' vertices beside those it has.
+    /// Fails, changing nothing, if `memory` lacks room for the new vertices beside the old.
     fn make_flat(&mut self, memory: &mut Memory) -> Result<()> {
         fn corners<T: Copy>(indices: &[u32], values: &[T]) -> Vec<T> {
             indices.iter().map(|&i| values[i as usize]).collect()
         }
-        // A vertex a corner, but its tangent, and its index.
+        // A vertex a corner, less its tangent, plus its index.
         let corner = VERTEX - size_of::<[f32; 4]>() + size_of::<u32>() + self.skin_bytes();
         memory.hold(self.indices.len() * corner)?;
         let before = self.held();
@@ -117,18 +116,17 @@ impl Primitive {
         Ok(())
     }
 
-    /// Gives it the tangents MikkTSpace makes from its positions, normals and texture coordinates,
-    /// as glTF says to for a normal map's primitive without them: a tangent for each triangle's
-    /// corner, which its vertices then take, each vertex apart for each tangent of its corners,
-    /// in the order its corners first reach them. A corner MikkTSpace gives none, of a triangle of
-    /// no area alone, takes +X.
+    /// Gives it MikkTSpace's tangents from its positions, normals and texture coordinates, as
+    /// glTF says for a normal-mapped primitive without them: a tangent per triangle corner, each
+    /// vertex split per distinct tangent of its corners, in the order the corners first reach
+    /// them. A corner MikkTSpace gives none (only in a triangle of no area) takes +X.
     ///
-    /// Fails, changing nothing, if `memory` hasn't room for the tangents and the vertices apart
-    /// beside those it has.
+    /// Fails, changing nothing, if `memory` lacks room for the tangents and split vertices beside
+    /// the old.
     fn make_tangents(&mut self, memory: &mut Memory) -> Result<()> {
         let count = self.indices.len();
-        // MikkTSpace's tangent for each corner; then each corner's index, and the vertex and
-        // tangent of each vertex apart, at most one a corner.
+        // Each corner's tangent from MikkTSpace and index, and its vertex and tangent if split
+        // (at most one a corner).
         let made = count * (size_of::<[f32; 4]>() + size_of::<u32>() + PLACED);
         memory.hold(made)?;
         let mut corners = Corners {
@@ -177,25 +175,22 @@ impl Primitive {
         }
         let before = self.held();
         *self = welded;
-        // Its vertices and indices before, MikkTSpace's tangents and the vertices placed, of what
-        // was held, its new indices kept.
+        // Frees the old vertices and indices, MikkTSpace's tangents and the placed vertices; the
+        // new indices stay.
         memory.release(before + made - count * size_of::<u32>());
         Ok(())
     }
 }
 
-/// The bytes a vertex of a [`Primitive`] takes: its position, texture coordinates, color, normal
-/// and tangent.
+/// The bytes a [`Primitive`] vertex takes: position, texture coordinates, color, normal, tangent.
 const VERTEX: usize = size_of::<[f32; 3]>() * 2 + size_of::<[f32; 2]>() + size_of::<[f32; 4]>() * 2;
 
-/// The most bytes an entry of the `BTreeMap` that places [`Primitive::make_tangents`]' vertices
-/// takes, its share of the map's nodes included: std's nodes hold 5 to 11 entries, the root fewer,
-/// beside a header and an internal node's edges, which comes to about 2.5 times the entry, at most,
-/// once the map holds a node's worth.
+/// The most bytes an entry of the `BTreeMap` placing [`Primitive::make_tangents`]' vertices takes,
+/// with its share of the nodes. std's nodes hold 5 to 11 entries (the root fewer) beside a header
+/// and an internal node's edges: at most about 2.5 times the entry, once a node's worth is held.
 const PLACED: usize = 3 * size_of::<((u32, [u32; 4]), u32)>();
 
-/// A primitive's triangles as MikkTSpace reads them, a face each, and the tangent it gives each
-/// corner.
+/// A primitive's triangles as MikkTSpace reads them, and the tangent it gives each corner.
 struct Corners<'a> {
     primitive: &'a Primitive,
     tangents: Vec<[f32; 4]>,
@@ -235,8 +230,8 @@ impl Geometry<Libm> for Corners<'_> {
     }
 }
 
-/// MikkTSpace's square roots and arccosines, libm's, as the engine's are, so that a model's
-/// tangents are the same on every platform, from its files or cooked.
+/// MikkTSpace's square roots and arccosines, from libm like the engine's, so a model's tangents
+/// are the same on every platform, from its files or cooked.
 struct Libm;
 
 impl Ops for Libm {
@@ -252,7 +247,7 @@ impl Ops for Libm {
 const TRIANGLES: u32 = 4;
 
 impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
-    /// Reads mesh `index`, once: where the primitives it draws are in `imported.primitives`.
+    /// Reads mesh `index`, once. Gives where its primitives are in `imported.primitives`.
     pub(super) fn mesh(&mut self, index: u32) -> Result<Range<usize>> {
         if let Some(primitives) = self.meshes.get(&index) {
             return Ok(primitives.clone());
@@ -270,8 +265,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(primitives)
     }
 
-    /// Reads primitive `index` of mesh `mesh`, which is mesh `mesh_index`: `None` if it has no
-    /// positions, which glTF says not to draw.
+    /// Reads primitive `index` of `mesh` (`mesh_index`): `None` without positions, which glTF
+    /// says not to draw.
     fn primitive(
         &mut self,
         mesh_index: u32,
@@ -309,8 +304,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             Some(material) => self.material(material)?,
             None => (Material::default(), None),
         };
-        // Its own copies, each counted before it's made, as primitives that share accessors or a
-        // mesh's name each have their own.
+        // Own copies, counted before they're made: primitives sharing accessors or a mesh's name
+        // each have their own.
         self.attribute(&what, "POSITION", position, &[3], false)?;
         let positions = self.copied(position)?;
         let vertices = positions.len();
@@ -382,9 +377,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             }
             None => None,
         };
-        // Tangents that aren't all finite, as a tool can leave where a triangle's texture
-        // coordinates have no area, are ignored, the primitive drawn as one without them, which
-        // glTF says to make them for.
+        // Tangents not all finite (a tool can leave them where a triangle's texture coordinates
+        // have no area) are ignored: the primitive is drawn as without them.
         let tangents = match primitive.attributes.get("TANGENT") {
             Some(&accessor) => {
                 let (_, finite) = self.floats(&what, "TANGENT", accessor, &[4], false)?;
@@ -446,8 +440,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             mesh: None,
             material,
         };
-        // Tangents without normals are ignored, as glTF says, as the primitive is drawn flat; but
-        // an unlit material reads neither, so its vertices stay as they are, welded.
+        // Tangents without normals are ignored (glTF): the primitive is drawn flat. An unlit
+        // material reads neither, so its vertices stay welded.
         let tangents = match normals {
             Some(normals) => {
                 read.normals = normals;

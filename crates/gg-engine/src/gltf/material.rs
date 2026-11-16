@@ -10,35 +10,31 @@ use gg_renderer::{AlphaMode, Map, Workflow, Wrap};
 use super::Reader;
 use crate::image;
 
-/// How a primitive looks, as glTF's metallic-roughness materials say, or
-/// KHR_materials_pbrSpecularGlossiness's: its base color, or its diffuse color, which the
-/// material's factor and texture and the primitive's vertex colors multiply together; how it
-/// reflects, its normal map, occlusion and emission; whether it's unlit, as KHR_materials_unlit has
-/// it; and how its alpha covers what's behind it.
+/// How a primitive looks: glTF's metallic-roughness or KHR_materials_pbrSpecularGlossiness
+/// material. Base or diffuse color is the factor, texture and primitive's vertex colors multiplied.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Material {
     /// The base color factor, or the diffuse factor, linear RGBA.
     pub(crate) color: [f32; 4],
     /// How metallic and rough it is, or its specular color and how glossy.
     pub(crate) workflow: Workflow,
-    /// The normal map's scale of its X and Y.
+    /// The normal map's scale of X and Y.
     pub(crate) normal_scale: f32,
     /// How much the occlusion map darkens, from 0 to 1.
     pub(crate) occlusion_strength: f32,
     /// The emissive factor, linear RGB, times KHR_materials_emissive_strength's strength.
     pub(crate) emissive: [f32; 3],
-    /// Its textures, each at its [`Slot`]'s place, which it samples, if it has one.
+    /// Its textures, each at its [`Slot`]'s place.
     pub(crate) textures: [Option<Sampling>; 5],
     pub(crate) alpha: AlphaMode,
-    /// Whether the back of each triangle shows, as well as its front, where its vertices go
-    /// counterclockwise.
+    /// Whether a triangle's back shows too; its front is where its vertices go counterclockwise.
     pub(crate) double_sided: bool,
     pub(crate) unlit: bool,
 }
 
 impl Default for Material {
-    /// glTF's default material, for a primitive without one: white, metallic and rough,
-    /// untextured, opaque and single-sided.
+    /// glTF's default for a primitive without a material: white, metallic, rough, untextured,
+    /// opaque, single-sided.
     fn default() -> Self {
         Self {
             color: [1.0; 4],
@@ -55,7 +51,7 @@ impl Default for Material {
 }
 
 impl Material {
-    /// Whether its numbers are all finite, as a model's material's must be.
+    /// Whether its numbers are all finite, as a model's must be.
     pub(crate) fn is_finite(&self) -> bool {
         let workflow = match self.workflow {
             Workflow::MetallicRoughness {
@@ -75,14 +71,12 @@ impl Material {
         workflow && (numbers.chain(self.color).chain(self.emissive)).all(f32::is_finite)
     }
 
-    /// Its texture of `slot`, if it has one.
     pub(crate) fn texture(&self, slot: Slot) -> Option<Sampling> {
         self.textures[slot as usize]
     }
 
-    /// What its texture of `slot` holds, as [`Slot::map`] says, but that a specular-glossiness
-    /// map holds colors, its specular color sRGB-encoded, as KHR_materials_pbrSpecularGlossiness
-    /// has it.
+    /// Like [`Slot::map`], but a specular-glossiness surface texture holds colors (specular
+    /// sRGB-encoded), per KHR_materials_pbrSpecularGlossiness.
     pub(crate) fn map(&self, slot: Slot) -> Option<Map> {
         match (slot, self.workflow) {
             (Slot::Surface, Workflow::SpecularGlossiness { .. }) => None,
@@ -95,13 +89,13 @@ impl Material {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Sampling {
     pub(crate) image: usize,
-    /// Whether it magnifies to the nearest texel, rather than blending the nearest four.
+    /// Magnifies to the nearest texel, rather than blending the nearest four.
     pub(crate) nearest: bool,
-    /// How it wraps, the same across and down.
+    /// The same across and down.
     pub(crate) wrap: Wrap,
 }
 
-/// Each of a material's textures, in the order its `textures` hold them.
+/// A material's textures, in the order its `textures` hold them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
     /// Base color, or diffuse.
@@ -122,8 +116,8 @@ impl Slot {
         Self::Emissive,
     ];
 
-    /// What its texture's image holds in a metallic-roughness material: colors, `None`,
-    /// sRGB-encoded, or a map of data.
+    /// What its texture's image holds in a metallic-roughness material: sRGB-encoded colors
+    /// (`None`) or a map of data.
     pub(crate) fn map(self) -> Option<Map> {
         match self {
             Self::Color | Self::Emissive => None,
@@ -133,7 +127,7 @@ impl Slot {
     }
 }
 
-/// What an image holds, as a texture samples it, in a phrase.
+/// A phrase for what an image holds, as a texture samples it.
 pub(crate) fn holds(map: Option<Map>) -> &'static str {
     match map {
         None => "colors",
@@ -148,12 +142,11 @@ const MIRRORED_REPEAT: u32 = 33648;
 const REPEAT: u32 = 10497;
 
 impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
-    /// Material `index`, and the TEXCOORD set its textures read, if it has any: that of the first
-    /// in [`Slot`]'s order, as a primitive's vertices have one set. A material of
-    /// KHR_materials_pbrSpecularGlossiness's is that, in place of its metallic-roughness, which is
-    /// the extension's fallback. A texture that reads another set, or whose image another texture
-    /// samples as what it doesn't, as colors where it samples a map, is left out, which
-    /// `imported.ignored` says.
+    /// Material `index`, and the TEXCOORD set its textures read, if any: the first in [`Slot`]'s
+    /// order, since a primitive's vertices have one set. KHR_materials_pbrSpecularGlossiness
+    /// replaces its metallic-roughness fallback. A texture reading another set, or whose image
+    /// another texture samples as something else (colors, not a map), is left out and goes to
+    /// `imported.ignored`.
     pub(super) fn material(&mut self, index: u32) -> Result<(Material, Option<u32>)> {
         let (model, gltf) = (self.model, self.gltf);
         let material = model.item(&gltf.materials, "material", index)?;
@@ -223,8 +216,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             unlit: extensions.unlit.is_some(),
             ..Material::default()
         };
-        // As the emissive factor times its strength can be past an f32's range, though each of the
-        // file's numbers is within it.
+        // The emissive factor times its strength can pass f32's range though each number is in it.
         if !read.is_finite() {
             return Err(model.bad(format!("material {index} has a number that isn't finite")));
         }
@@ -270,10 +262,10 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok((read, set))
     }
 
-    /// Texture `texture`, which material `material` samples as its `name`, as what `wanted` says
-    /// its image holds, colors or a map: its image, its DDS image if it has one, which
-    /// MSFT_texture_dds names in place of its source, and how it samples it; or `None` where
-    /// another texture samples its image as what it doesn't, which `imported.ignored` says.
+    /// Texture `texture`, which material `material` samples as its `name`, its image holding
+    /// `wanted` (colors or a map): the image (MSFT_texture_dds's DDS one instead of its source)
+    /// and how it's sampled. `None`, noted in `imported.ignored`, where another texture samples
+    /// the image as something else.
     fn sampling(
         &mut self,
         material: u32,
@@ -329,16 +321,16 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         }))
     }
 
-    /// Image `index`, read once, as far as its header, as [`image::read`] reads it, or as
-    /// [`image::read_dds`] reads a DDS file, which it tells apart by its first bytes, for the loader
-    /// to decode: where it is in `imported.images`.
+    /// Image `index`, read once as far as its header for the loader to decode: by
+    /// [`image::read`], or [`image::read_dds`] for a DDS file (told by its first bytes). Gives its
+    /// place in `imported.images`.
     fn image(&mut self, index: u32) -> Result<usize> {
         if let Some(&at) = self.images.get(&index) {
             return Ok(at);
         }
         let (model, gltf) = (self.model, self.gltf);
         let image = model.item(&gltf.images, "image", index)?;
-        // A byte past the most an image's file holds, so that a longer one fails to decode.
+        // A byte past the most an image's file holds, so a longer one fails to decode.
         let most = image::MAX_FILE + 1;
         let bytes = match (&image.uri, image.buffer_view) {
             (Some(uri), None) => self.uri(&format!("image {index}"), uri, most)?,
@@ -365,8 +357,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 ))
             })?
         };
-        // Read and decoded for each image, as images that share a source each decode it, its file
-        // held until it's decoded.
+        // Images sharing a source each decode it, so each counts; the file is held until decoded.
         self.memory.hold(read.pixels.len() + read.decoded_len())?;
         let at = self.imported.images.len();
         self.imported.images.push(read);

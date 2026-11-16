@@ -11,7 +11,7 @@ use crate::LightKind;
 use crate::animation::{Influences, Interpolation, Path as Moved, place};
 use crate::image;
 
-/// A BIN chunk as tests build it, and its buffer views, each starting at a multiple of 4 bytes.
+/// A BIN chunk as tests build it, with buffer views each starting at a multiple of 4 bytes.
 #[derive(Default)]
 struct Bin {
     bytes: Vec<u8>,
@@ -19,8 +19,8 @@ struct Bin {
 }
 
 impl Bin {
-    /// Adds `bytes` as a buffer view of buffer 0, its elements `stride` apart if that's given,
-    /// and returns its index.
+    /// Adds `bytes` as a buffer view of buffer 0, elements `stride` apart if given. Returns its
+    /// index.
     fn view(&mut self, bytes: &[u8], stride: Option<u32>) -> usize {
         while !self.bytes.len().is_multiple_of(4) {
             self.bytes.push(0);
@@ -39,7 +39,6 @@ impl Bin {
     }
 }
 
-/// `values` as glTF stores floats.
 fn floats(values: &[f32]) -> Vec<u8> {
     values
         .iter()
@@ -73,8 +72,7 @@ fn encode(bytes: &[u8]) -> String {
     text
 }
 
-/// A GLB of `json`, and of `bin` as its BIN chunk unless it's empty, each padded as glTF pads
-/// them.
+/// A GLB of `json`, and `bin` as its BIN chunk unless empty, each padded as glTF pads them.
 fn glb(json: &str, bin: &[u8]) -> Vec<u8> {
     let pad = |bytes: &[u8], with: u8| {
         let mut padded = bytes.to_vec();
@@ -100,8 +98,8 @@ fn glb(json: &str, bin: &[u8]) -> Vec<u8> {
     file
 }
 
-/// Reads `file` as model "m" at `path` in folder "models", with `files` beside it there, each
-/// as far as it's asked, as `dirs::read_file` reads.
+/// Reads `file` as model "m" at `path` in folder "models", with `files` beside it, each as far as
+/// asked, as `dirs::read_file` reads.
 fn read_files(path: &str, file: &[u8], files: &[(&str, &[u8])]) -> Result<Imported> {
     let folder = Path::new("models");
     let read_file = |asked: &Path, most: u64| {
@@ -121,7 +119,7 @@ fn read_glb(file: &[u8]) -> Result<Imported> {
     read_files("m.glb", file, &[])
 }
 
-/// A GLB of a model of each kind of node, primitive and material that reading takes.
+/// A GLB with each kind of node, primitive and material that reading takes.
 pub(crate) fn model() -> Vec<u8> {
     let mut bin = Bin::default();
     // Three vertices' positions and texture coordinates, interleaved.
@@ -131,7 +129,7 @@ pub(crate) fn model() -> Vec<u8> {
     );
     let bytes = bin.view(&[0, 1, 2], None);
     let shorts = bin.view(&[2, 0, 1, 0, 0, 0], None);
-    // Normalized RGB, with a byte after each, as glTF aligns vertices' attributes.
+    // Normalized RGB, a byte after each: glTF aligns vertices' attributes.
     let colors = bin.view(&[255, 0, 0, 7, 0, 255, 0, 7, 0, 0, 255, 7], Some(4));
     let positions = bin.view(&floats(&[0., 0., 1., 1., 0., 1., 0., 1., 1.]), None);
     // Normalized 16-bit RGBA, little-endian: 1, 0 and 0x8000 / 0xffff.
@@ -167,8 +165,8 @@ pub(crate) fn model() -> Vec<u8> {
                 "mesh": 0,
                 "children": [1, 2],
             },
-            // A rotation of length 2, which is the identity once it's unit, and morph weights
-            // of 0, which replace its mesh's; named nothing.
+            // A rotation of length 2, the identity once unit, and morph weights of 0, which
+            // replace its mesh's; named nothing.
             {
                 "name": "",
                 "translation": [0, 5, 0],
@@ -197,8 +195,8 @@ pub(crate) fn model() -> Vec<u8> {
                     "mode": 4,
                 },
             ]},
-            // A primitive without positions, which isn't drawn, then one without indices or
-            // a material, with 16-bit colors.
+            // A primitive without positions (not drawn), then one without indices or a
+            // material, with 16-bit colors.
             {"weights": [0.5], "primitives": [
                 {"attributes": {}},
                 {"attributes": {"POSITION": 5, "COLOR_0": 6}},
@@ -240,7 +238,7 @@ pub(crate) fn model() -> Vec<u8> {
                     "metallicFactor": 0.25,
                     "roughnessFactor": 0.5,
                 },
-                // Of the image that its base color samples as colors, so left out.
+                // Its image is sampled as colors by the base color, so it's left out.
                 "occlusionTexture": {"index": 1, "strength": 0.5},
                 "emissiveFactor": [1, 0.5, 0],
                 "extensions": {
@@ -253,7 +251,7 @@ pub(crate) fn model() -> Vec<u8> {
             {
                 "pbrMetallicRoughness": {"baseColorTexture": {"index": 1, "texCoord": 0}},
                 "normalTexture": {"index": 2, "scale": 0.5},
-                // Of another set of texture coordinates, so left out.
+                // Another set of texture coordinates, so left out.
                 "emissiveTexture": {"index": 1, "texCoord": 1},
                 "alphaMode": "BLEND",
                 "doubleSided": true,
@@ -262,7 +260,7 @@ pub(crate) fn model() -> Vec<u8> {
         // Two textures of one image, and one of a second.
         "textures": [{"source": 0, "sampler": 0}, {"source": 0}, {"source": 1}],
         "samplers": [{"magFilter": 9728, "minFilter": 9986, "wrapS": 33071, "wrapT": 33071}],
-        // Said to be a JPEG, but a PNG, as its bytes say; and the same PNG again.
+        // Said to be a JPEG, but a PNG by its bytes; then the same PNG again.
         "images": [{"bufferView": image, "mimeType": "image/jpeg"}, {"bufferView": image}],
         "buffers": [{"byteLength": bin.bytes.len()}],
         "bufferViews": bin.views,
@@ -272,10 +270,8 @@ pub(crate) fn model() -> Vec<u8> {
     glb(&gltf.to_string(), &bin.bytes)
 }
 
-/// A model reads into its parts, each node's name and light among them; its primitives, with
-/// their normals, or made flat without them, and their tangents, made by MikkTSpace for a
-/// normal map's, and their materials, with each texture and factor and the extensions the
-/// engine reads; and its images; leaving out what it says it leaves out.
+/// A model reads into parts (names, lights), primitives (normals, or flat without; MikkTSpace
+/// tangents for a normal map; materials) and images, leaving out what `ignored` says.
 #[test]
 fn a_model_reads_into_parts_primitives_and_images() {
     let imported = read_glb(&model()).expect("a model");
@@ -310,7 +306,7 @@ fn a_model_reads_into_parts_primitives_and_images() {
     assert_eq!(
         imported.parts,
         [
-            // The first node, with each of its mesh's two primitives as a child, unnamed.
+            // The first node, each of its mesh's two primitives an unnamed child.
             Part {
                 name: Some(Arc::from("frame")),
                 ..part(mirrored, None, None)
@@ -338,8 +334,8 @@ fn a_model_reads_into_parts_primitives_and_images() {
         })
     };
     let mut primitives = imported.primitives.clone();
-    // MikkTSpace's, along +X, the bitangent cross(normal, tangent) * W along +Y, as V runs up
-    // the triangle facing -Z: compared within rounding, then as exactly that.
+    // MikkTSpace's: along +X, the bitangent cross(normal, tangent) * W along +Y, as V runs up the
+    // triangle facing -Z. Compared within rounding, then as exactly that.
     let made = &mut primitives[1].tangents;
     for tangent in made.iter() {
         let near = Vec4::from(*tangent).abs_diff_eq(Vec4::new(1.0, 0.0, 0.0, -1.0), 1e-6);
@@ -375,7 +371,7 @@ fn a_model_reads_into_parts_primitives_and_images() {
                 weights: Vec::new(),
                 reach: None,
             },
-            // Without normals, so flat: each triangle's corners its own, in its order.
+            // Without normals, so flat: corners its own, in its order.
             Primitive {
                 name: "pair/1".to_owned(),
                 positions: triangle.into_iter().rev().collect(),
@@ -426,7 +422,7 @@ fn a_model_reads_into_parts_primitives_and_images() {
             },
         ]
     );
-    // Read as far as their headers, the PNG they are, which decodes as the loader decodes it.
+    // Read as far as their headers: PNGs, which decode as the loader decodes them.
     let [colors, normals] = &imported.images[..] else {
         panic!("two images: {:?}", imported.images);
     };
@@ -443,7 +439,7 @@ fn a_model_reads_into_parts_primitives_and_images() {
         .decode_images("m", Path::new("m.glb"))
         .expect("its images decode");
     assert_eq!(decoded.images, [image.clone(), image]);
-    // Its animation of no channels, a clip that moves nothing, named by its index.
+    // An animation of no channels: a clip that moves nothing, named by its index.
     let clips: Vec<(&str, f32, usize)> = (imported.clips.iter())
         .map(|clip| (clip.name.as_str(), clip.duration, clip.channels.len()))
         .collect();
@@ -474,7 +470,7 @@ fn a_model_cut_short_or_with_a_byte_changed_fails_without_panicking() {
     for length in 0..model.len() {
         assert!(read_glb(&model[..length]).is_err(), "{length} bytes");
     }
-    // Some changes, such as to padding, leave a model that reads.
+    // Some changes (to padding, say) leave a model that reads.
     for at in 0..model.len() {
         let mut changed = model.clone();
         changed[at] = 0xff;
@@ -569,7 +565,7 @@ fn a_gltf_reads_buffers_and_images_from_data_uris_and_files_beside_it() {
     assert_eq!(imported.primitives, [primitive]);
     assert_eq!(imported.images[0].pixels, PIXELS);
 
-    // From the disk, listing the files read, its own first, as hot reload watches them.
+    // From disk, listing the files read, its own first, as hot reload watches them.
     let scratch = crate::dirs::tests::Scratch::new("gltf-files");
     let folder = scratch.0.join("models");
     std::fs::create_dir_all(folder.join("textures")).expect("a directory");
@@ -653,8 +649,7 @@ fn base64_decodes_as_rfc_4648_has_it() {
         let bytes = &every_byte[..length];
         assert_eq!(base64(&encode(bytes)).as_deref(), Some(bytes));
     }
-    // Characters outside the alphabet, such as URL-safe base64's, and padding missing or out
-    // of place.
+    // Characters outside the alphabet (URL-safe base64's, say), and padding missing or misplaced.
     for text in [
         "Zm9v!A==",
         "Zm9v YmFy",
@@ -684,7 +679,7 @@ fn uris_percent_decode() {
     }
 }
 
-/// The JSON and BIN chunk of a model of one textured triangle, for tests to break.
+/// The JSON and BIN chunk of one textured triangle, for tests to break.
 fn triangle() -> (Value, Vec<u8>) {
     let mut bin = Bin::default();
     let positions = bin.view(&floats(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]), None);
@@ -719,11 +714,10 @@ fn triangle() -> (Value, Vec<u8>) {
     (gltf, bin.bytes)
 }
 
-/// A model of a triangle without normals, so drawn flat, that a skin of two joints moves, a
-/// root's and its child's, a unit along X: its first corner the root's alone, its second half
-/// each, its third the child's; and an animation, "Turn", that turns the child a quarter about
-/// Z over a second, along a line, lifts the root two units at once at half a second, by steps,
-/// and moves node 3, outside the scene.
+/// A triangle without normals (drawn flat) moved by a skin of two joints, a root and its child a
+/// unit along X: the first corner the root's alone, the second half each, the third the child's.
+/// An animation "Turn" turns the child a quarter about Z over a second, linearly; lifts the root
+/// two units at half a second, by steps; and moves node 3, outside the scene.
 fn skinned() -> (Value, Vec<u8>) {
     let mut bin = Bin::default();
     let positions = bin.view(&floats(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]), None);
@@ -780,11 +774,9 @@ fn skinned() -> (Value, Vec<u8>) {
     (gltf, bin.bytes)
 }
 
-/// A skinned model reads its skin, its joints' parts and their inverse bind matrices; its
-/// primitive's joints and weights, which follow its corners as it's made flat; its skinned
-/// part's skin; and its animation's channels of nodes in its scene, as clips, sampled along
-/// their keys, leaving out the one of a node outside it. Its primitive reaches as far as its
-/// joints carry it in every pose, with room to spare.
+/// A skinned model reads its skin, its primitive's joints and weights (following its corners as
+/// it's made flat) and its animation's channels as clips, leaving out a node outside the scene.
+/// Its primitive reaches as far as its joints carry it in every pose, with room to spare.
 #[test]
 fn a_skinned_model_reads_its_skin_its_weights_and_its_clips() {
     let (gltf, bin) = skinned();
@@ -835,11 +827,10 @@ fn a_skinned_model_reads_its_skin_its_weights_and_its_clips() {
     );
     let ignored = "channel 2 of animation 0, of node 3 outside the scene";
     assert_eq!(imported.ignored, [ignored]);
-    // Lifted two at half a second, its first corner at (0, 2) and its second at (1, 2); and
-    // its third, the child turned an eighth, at (1 - √2, 2): within its reach. That's the box
-    // round what the child moves, its second corner and its third, turned with it, a unit
-    // square turned an eighth, which reaches √½ past the child's center at (1 - √½, 2); with
-    // a tenth of its longest side, 2 + √½, to spare each way.
+    // Lifted two at half a second: corners at (0, 2), (1, 2) and, the child turned an eighth,
+    // (1 - √2, 2), all within reach. The box round what the child moves is a unit square turned
+    // an eighth, reaching √½ past its center at (1 - √½, 2); a tenth of the longest side,
+    // 2 + √½, is spare each way.
     let [low, high] = primitive.reach.expect("a skinned primitive reaches");
     let turned = Vec3::new(1.0 - std::f32::consts::SQRT_2, 2.0, 0.0);
     let held = [Vec3::ZERO, Vec3::Y * 2.0, Vec3::new(1.0, 2.0, 0.0), turned];
@@ -865,8 +856,7 @@ fn a_skinned_model_reads_its_skin_its_weights_and_its_clips() {
     );
 }
 
-/// A skin, a skinned primitive or a clip that doesn't hold together refuses the model, saying
-/// how.
+/// A skin, skinned primitive or clip that doesn't hold together refuses the model, saying how.
 #[test]
 fn a_skin_or_clip_that_doesnt_hold_together_is_refused() {
     let (gltf, bin) = skinned();
@@ -908,8 +898,7 @@ fn a_skin_or_clip_that_doesnt_hold_together_is_refused() {
     }
 }
 
-/// A `.gltf` of [`triangle`]'s model, its buffer in a data URI, with `edit` made to its JSON:
-/// for tests that edit a model's file as people do.
+/// A `.gltf` of [`triangle`], its buffer in a data URI, with `edit` made to its JSON.
 #[cfg(feature = "dev")]
 pub(crate) fn triangle_gltf(edit: impl FnOnce(&mut Value)) -> String {
     let (mut gltf, bin) = triangle();
@@ -919,17 +908,15 @@ pub(crate) fn triangle_gltf(edit: impl FnOnce(&mut Value)) -> String {
     gltf.to_string()
 }
 
-/// Removes `key` from the object `value`.
 fn remove(value: &mut Value, key: &str) {
     value.as_object_mut().expect("an object").remove(key);
 }
 
-/// A material of KHR_materials_pbrSpecularGlossiness's is that, its diffuse color and texture
-/// in place of a base color's and its specular-glossiness map, which holds colors, in place of
-/// its metallic-roughness, the extension's fallback, which is ignored. A texture whose
-/// MSFT_texture_dds names a DDS image samples that, not its source, which isn't there: a DDS of
-/// BC7, read as far as its headers. Neither extension is ignored; a DDS that isn't of BC7 is
-/// refused, naming its image.
+/// KHR_materials_pbrSpecularGlossiness's diffuse color and texture replace the base color's, and
+/// its specular-glossiness map (colors) replaces the ignored metallic-roughness fallback. A
+/// texture whose MSFT_texture_dds names a DDS image samples that, not its absent source: a BC7
+/// DDS, read as far as its headers. Neither extension is ignored; a non-BC7 DDS is refused,
+/// naming its image.
 #[test]
 fn specular_glossiness_and_dds_images_read_as_their_extensions_say() {
     let (mut gltf, bin) = triangle();
@@ -989,9 +976,9 @@ fn specular_glossiness_and_dds_images_read_as_their_extensions_say() {
     );
 }
 
-/// A primitive whose TANGENT holds numbers that aren't finite, as a tool can leave them where a
-/// triangle's texture coordinates have no area, is drawn as one without tangents, its normal
-/// map's from MikkTSpace, which `ignored` says; its other attributes still may hold none.
+/// A TANGENT that isn't finite (a tool can leave one where a triangle's texture coordinates have
+/// no area) is ignored, noted in `ignored`: MikkTSpace makes a normal map's. Other attributes
+/// that aren't finite still fail.
 #[test]
 fn tangents_that_arent_finite_are_ignored() {
     let (mut gltf, mut bin) = triangle();
@@ -1020,7 +1007,7 @@ fn tangents_that_arent_finite_are_ignored() {
     let attributes = &mut gltf["meshes"][0]["primitives"][0]["attributes"];
     attributes["NORMAL"] = json!(3);
     attributes["TANGENT"] = json!(4);
-    // Its own image, of the same PNG, which the base color samples as colors.
+    // Its own image of the same PNG, as the base color samples colors.
     let png = gltf["images"][0].clone();
     gltf["images"].as_array_mut().expect("images").push(png);
     let texture = json!({"source": 1});
@@ -1059,8 +1046,7 @@ fn a_matrix_rounded_as_it_was_printed_still_decomposes() {
     assert!(rotation.abs_diff_eq(turn, 1e-4), "{rotation}");
 }
 
-/// The code of the error that a change to a model's JSON makes, what its message says, and the
-/// change.
+/// The error code a change to a model's JSON makes, what its message says, and the change.
 type Refusal = (&'static str, &'static str, fn(&mut Value));
 
 #[test]
@@ -1142,13 +1128,13 @@ fn what_the_engine_doesnt_draw_or_that_isnt_gltf_is_refused_with_its_code() {
         (bad, "rotation is 0", |g| {
             g["nodes"][0]["rotation"] = json!([0, 0, 0, 0])
         }),
-        // A rotation so near 0 that its length, squared, loses its precision, which then
-        // isn't a unit as the world takes one.
+        // A rotation so near 0 that its squared length loses precision, so it isn't a unit as
+        // the world takes one.
         (bad, "rotation is 0", |g| {
             g["nodes"][0]["rotation"] = json!([2e-22, 0, 0, 0])
         }),
-        // A number past an f32's range, which `float_roundtrip` refuses, where it would read
-        // as infinite; and an emissive factor within it, times a strength, past it.
+        // A number past f32's range, which `float_roundtrip` refuses (it would read as
+        // infinite); and an emissive factor within it that a strength takes past it.
         (bad, "isn't glTF's JSON", |g| {
             g["nodes"][0]["translation"] = json!([1e39, 0, 0]);
         }),
@@ -1206,8 +1192,7 @@ fn what_the_engine_doesnt_draw_or_that_isnt_gltf_is_refused_with_its_code() {
         (bad, "reads past buffer view 0", |g| {
             g["bufferViews"][0]["byteLength"] = json!(35);
         }),
-        // A count far past the bytes there are, which fails before anything is allocated for
-        // it.
+        // A count far past the bytes there are fails before allocating for it.
         (bad, "reads past buffer view 0", |g| {
             g["accessors"][0]["count"] = json!(4_000_000_000u64);
         }),
@@ -1251,7 +1236,7 @@ fn what_the_engine_doesnt_draw_or_that_isnt_gltf_is_refused_with_its_code() {
         (bad, "can't be read", |g| {
             g["buffers"][0]["uri"] = json!("missing.bin")
         }),
-        // URIs with a scheme, a root, a drive or a backslash, as they are or percent-encoded.
+        // URIs with a scheme, root, drive or backslash, plain or percent-encoded.
         (bad, "isn't a relative path", |g| {
             g["buffers"][0]["uri"] = json!("https://example.com/m.bin");
         }),
@@ -1273,7 +1258,7 @@ fn what_the_engine_doesnt_draw_or_that_isnt_gltf_is_refused_with_its_code() {
         (bad, "isn't a relative path", |g| {
             g["buffers"][0]["uri"] = json!("//server/share/m.bin");
         }),
-        // URIs that go up a folder, as they are or percent-encoded.
+        // URIs that go up a folder, plain or percent-encoded.
         (bad, "has a `..`", |g| {
             g["buffers"][0]["uri"] = json!("../m.bin")
         }),
@@ -1302,7 +1287,7 @@ fn what_the_engine_doesnt_draw_or_that_isnt_gltf_is_refused_with_its_code() {
 
 #[test]
 fn a_buffers_file_is_read_no_further_than_its_byte_length_or_the_memory_left() {
-    // The triangle's buffer in a file of its own, with bytes past its byteLength.
+    // The triangle's buffer in its own file, with bytes past its byteLength.
     let (mut gltf, bin) = triangle();
     gltf["buffers"][0]["uri"] = json!("m.bin");
     let model = glb(&gltf.to_string(), &[]);
@@ -1329,7 +1314,7 @@ fn a_buffers_file_is_read_no_further_than_its_byte_length_or_the_memory_left() {
     assert_eq!(error.code(), "engine.bad_model");
     let message = error.to_string();
     assert!(message.contains("short of its byteLength"), "{message}");
-    // A byteLength past the memory reading may take, which reads a byte past it.
+    // A byteLength past the memory allowed reads a byte past it.
     let memory = length / 2;
     let (read, asked) = read_with(&longer, memory);
     let error = read.expect_err("a buffer past the memory");
@@ -1337,9 +1322,8 @@ fn a_buffers_file_is_read_no_further_than_its_byte_length_or_the_memory_left() {
     assert_eq!(asked, memory + 1);
 }
 
-/// The Fox's vertices, each where the skin pass moves it, in each pose its reach is found from,
-/// are within the box its leaves bound that pose by, which is little larger than the box round
-/// the vertices themselves.
+/// The Fox's vertices, as the skin pass moves them in each pose its reach is found from, lie
+/// within the box its leaves bound that pose by, little larger than the box round the vertices.
 #[test]
 fn a_skinned_meshs_leaves_hold_its_vertices_in_every_pose() {
     let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox/Fox.gltf");
@@ -1391,15 +1375,15 @@ fn a_skinned_meshs_leaves_hold_its_vertices_in_every_pose() {
         }
         bound = [bound[0].min(low), bound[1].max(high)];
     }
-    // Within a twentieth of its longest side, which the reach spares a tenth of each way.
+    // Within a twentieth of its longest side; the reach spares a tenth each way.
     let longest = (exact[1] - exact[0]).max_element();
     let past = (exact[0] - bound[0]).max(bound[1] - exact[1]).max_element();
     assert!(past < longest / 20.0, "{bound:?} round {exact:?}");
 }
 
-/// [`skinned`]'s model, as a GLB, with `clips` clips that each turn the child joint along 65
-/// keys, all from one pair of accessors, in place of its own; `parts` more parts, that place
-/// nothing; and `drawn` more nodes that draw its mesh, skinned by its skin.
+/// [`skinned`] as a GLB with `clips` clips (replacing its own) each turning the child joint along
+/// 65 keys from one pair of accessors, `parts` more parts placing nothing, and `drawn` more nodes
+/// drawing its mesh, skinned by its skin.
 fn many(clips: usize, parts: usize, drawn: usize) -> Vec<u8> {
     let (mut gltf, bin) = skinned();
     let mut view = Bin {
@@ -1434,11 +1418,10 @@ fn many(clips: usize, parts: usize, drawn: usize) -> Vec<u8> {
     glb(&gltf.to_string(), &view.bytes)
 }
 
-/// A small file of many clips and many parts, which would take the product of the poses its
-/// clips' keys make and its parts, each pose's 64 bytes a part, to find its skinned mesh's
-/// reach, as some 33 GB, reads within the memory reading may take; and what finding its reach
-/// holds counts against that memory, so that the least that reads the model with fewer clips
-/// fails, a byte less, as its skinned meshes' poses are bound.
+/// A small file of many clips and parts, whose product (poses from clip keys times parts, 64
+/// bytes each) would take some 33 GB, reads within the memory allowed. What finding the reach
+/// holds counts against it: the least memory that reads the model with fewer clips fails with a
+/// byte less, as its poses are bound.
 #[test]
 fn a_skinned_model_of_many_clips_and_parts_reaches_within_the_memory_reading_may_take() {
     let read_with =
@@ -1469,9 +1452,8 @@ fn a_skinned_model_of_many_clips_and_parts_reaches_within_the_memory_reading_may
     assert!(error.to_string().contains(poses), "{error}");
 }
 
-/// A small file of many clips and many nodes that draw a skinned mesh, whose poses would take
-/// minutes to bound, is refused as it would take more than the engine takes, before it poses
-/// any; with fewer, it reads.
+/// A small file of many clips and nodes drawing a skinned mesh, whose poses would take minutes to
+/// bound, is refused before posing any; with fewer, it reads.
 #[test]
 fn a_skinned_model_whose_poses_take_too_long_to_bound_is_refused() {
     let read_with = |model: Vec<u8>| {
@@ -1492,9 +1474,9 @@ fn a_skinned_model_whose_poses_take_too_long_to_bound_is_refused() {
 
 #[test]
 fn data_drawn_many_times_counts_each_time_against_the_memory_reading_may_take() {
-    // A mesh of `primitives` that share `vertices`, each holding a copy, drawn by `nodes`, each
-    // a part for each primitive: 30 copies of 3,000 vertices, 120 KB each; and 2,000 nodes of a
-    // mesh of 8 triangles, 648 bytes of parts each.
+    // A mesh of `primitives` sharing `vertices`, each holding a copy, drawn by `nodes`, each a
+    // part per primitive: 30 copies of 3,000 vertices, 120 KB each; and 2,000 nodes of a mesh of
+    // 8 triangles, 648 bytes of parts each.
     let model = |vertices: usize, primitives: usize, nodes: usize| {
         let mut bin = Bin::default();
         let positions = bin.view(&vec![0; vertices * 12], None);
@@ -1526,8 +1508,8 @@ fn data_drawn_many_times_counts_each_time_against_the_memory_reading_may_take() 
 
 #[test]
 fn images_that_share_a_source_each_count_against_the_memory_reading_may_take() {
-    // Four triangles, each sampling an image of its own, all four the same PNG: 1-bit gray, 256
-    // pixels square, a few hundred bytes that decode to 256 KiB of RGBA each.
+    // Four triangles, each sampling its own image, all the same PNG: 1-bit gray, 256 pixels
+    // square, a few hundred bytes that decode to 256 KiB of RGBA each.
     let mut png = Vec::new();
     let mut encoder = png::Encoder::new(&mut png, 256, 256);
     encoder.set_color(png::ColorType::Grayscale);
@@ -1566,16 +1548,14 @@ fn images_that_share_a_source_each_count_against_the_memory_reading_may_take() {
     assert!(error.to_string().contains("more than 1 MiB"), "{error}");
 }
 
-/// What reading holds on the way counts against the memory it may take, as it's about to be
-/// made, as well as what it holds once read: the indices as they're read, beside the
-/// primitive's copy, and the vertices of a primitive drawn flat, or parted for MikkTSpace's
-/// tangents, beside those they're made from, with MikkTSpace's tangent for each corner. A
-/// primitive's file holds a byte for each of its corners, which are made each a vertex of 64
-/// bytes, so that a gigabyte of file would otherwise take some 70 before it was counted.
+/// What reading holds on the way counts against the memory allowed, before it's made, as well as
+/// what it holds once read: indices beside the primitive's copy; vertices made flat or split for
+/// MikkTSpace beside the old; MikkTSpace's tangent per corner. A file holds a byte per corner,
+/// each made a vertex of 64 bytes: a gigabyte would otherwise take some 70 uncounted.
 #[test]
 fn what_reading_holds_on_the_way_counts_against_the_memory_it_may_take() {
-    // A triangle drawn 1,000 times, by indices of a byte each: flat, for want of normals; or
-    // with normals and a normal map, without tangents.
+    // A triangle drawn 1,000 times by indices of a byte: flat, for want of normals; or with
+    // normals and a normal map, without tangents.
     let model = |normal_map: bool| {
         let mut bin = Bin::default();
         let positions = bin.view(&floats(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]), None);
@@ -1608,8 +1588,8 @@ fn what_reading_holds_on_the_way_counts_against_the_memory_it_may_take() {
         }
         glb(&gltf.to_string(), &bin.bytes)
     };
-    // What a model holds once read: its parts, its primitives' vertices, indices and names,
-    // and its images' files and what they decode to.
+    // What a model holds once read: parts, primitives' vertices, indices and names, and images'
+    // files and what they decode to.
     let held = |imported: &Imported| {
         let primitives =
             (imported.primitives.iter()).map(|primitive| primitive.held() + primitive.name.len());

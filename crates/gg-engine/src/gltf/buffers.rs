@@ -16,8 +16,7 @@ const UNSIGNED_INT: u32 = 5125;
 pub(super) const FLOAT: u32 = 5126;
 
 impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
-    /// Accessor `index`, which `what` reads as attribute `semantic`, as [`floats`](Self::floats)
-    /// reads it, failing if it holds a number that isn't finite, which glTF doesn't allow.
+    /// Like [`floats`](Self::floats), but fails on a number that isn't finite: glTF forbids one.
     pub(super) fn attribute(
         &mut self,
         what: &str,
@@ -34,10 +33,10 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(count)
     }
 
-    /// Accessor `index`, which `what` reads as attribute `semantic`, once, all its elements'
-    /// components in order into `floats`: how many components each element has, and whether
-    /// they're all finite. glTF allows it if each element has a number of components in
-    /// `components`, and they're floats, or, if `normalized`, normalized unsigned bytes or shorts.
+    /// Reads accessor `index`, which `what` uses as attribute `semantic`, once, its components in
+    /// order into `floats`. Gives the components per element and whether all are finite. Allows
+    /// floats, or if `normalized`, normalized unsigned bytes or shorts, with a count in
+    /// `components`.
     pub(super) fn floats(
         &mut self,
         what: &str,
@@ -49,9 +48,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         self.floats_of(what, semantic, index, components, normalized, false)
     }
 
-    /// Accessor `index`, as [`floats`](Self::floats) reads it, of normalized signed bytes or
-    /// shorts too, if `signed`, each 1 at its most and -1 at its least and the one past it, as
-    /// glTF allows for an animation's rotations.
+    /// Like [`floats`](Self::floats), and with `signed`, normalized signed bytes or shorts (the
+    /// most is 1, the least and the one past it -1): glTF allows them for animation rotations.
     pub(super) fn floats_of(
         &mut self,
         what: &str,
@@ -88,7 +86,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         };
         if !self.floats.contains_key(&index) {
             let size = component.size();
-            // Checked first, so that a count past the bytes there are fails as that, then counted.
+            // Checked first, so a count past the bytes there are fails as that, then counted.
             self.accessor_bytes(index, accessor, count * size)?;
             let len = accessor.count as usize * count;
             self.memory.hold(len * size_of::<f32>())?;
@@ -117,15 +115,15 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok((count, self.floats[&index].1))
     }
 
-    /// Accessor `index`'s elements of `N` components, which [`floats`](Self::floats) read, copied
-    /// once the copy is counted.
+    /// Accessor `index`'s `N`-component elements, read by [`floats`](Self::floats), copied once
+    /// counted.
     pub(super) fn copied<const N: usize>(&mut self, index: u32) -> Result<Vec<[f32; N]>> {
         let floats = self.floats[&index].0.as_chunks::<N>().0;
         self.memory.copy(floats)
     }
 
-    /// Accessor `index`, which `what` reads as JOINTS_0: each vertex's four joints, of unsigned
-    /// bytes or shorts, as glTF allows.
+    /// Accessor `index`, which `what` reads as JOINTS_0: each vertex's four joints, as unsigned
+    /// bytes or shorts.
     pub(super) fn joints(&mut self, what: &str, index: u32) -> Result<Vec<[u16; 4]>> {
         let (model, gltf) = (self.model, self.gltf);
         let accessor = model.item(&gltf.accessors, "accessor", index)?;
@@ -144,7 +142,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 )));
             }
         };
-        // Checked first, so that a count past the bytes there are fails as that, then counted.
+        // Checked first, so a count past the bytes there are fails as that, then counted.
         self.accessor_bytes(index, accessor, 4 * size)?;
         self.memory
             .hold(accessor.count as usize * size_of::<[u16; 4]>())?;
@@ -159,8 +157,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             .collect())
     }
 
-    /// Accessor `index`, which `what` reads as its indices, once, into `indices`, checked to be
-    /// whole triangles, each of `vertices` vertices.
+    /// Reads accessor `index`, `what`'s indices, once, into `indices`. Checks whole triangles of
+    /// `vertices` vertices.
     pub(super) fn indices(&mut self, what: &str, index: u32, vertices: u32) -> Result<()> {
         let (model, gltf) = (self.model, self.gltf);
         let accessor = model.item(&gltf.accessors, "accessor", index)?;
@@ -187,7 +185,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             )));
         }
         if !self.indices.contains_key(&index) {
-            // Checked first, so that a count past the bytes there are fails as that, then counted.
+            // Checked first, so a count past the bytes there are fails as that, then counted.
             self.accessor_bytes(index, accessor, size)?;
             self.memory
                 .hold(accessor.count as usize * size_of::<u32>())?;
@@ -211,9 +209,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(())
     }
 
-    /// The bytes of accessor `index`'s elements, of `size` bytes each, from the first's start to the
-    /// last's end, and the stride from each to the next, once they're checked to be within its
-    /// buffer view, and that within its buffer.
+    /// Accessor `index`'s element bytes (`size` each), first start to last end, and the stride.
+    /// Checks they lie within its buffer view, and that within its buffer.
     fn accessor_bytes(
         &mut self,
         index: u32,
@@ -243,8 +240,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                  {view_index}'s stride of {stride}"
             )));
         }
-        // Checked before anything is allocated for the elements, so that a count far past the
-        // bytes there are fails rather than allocating for it.
+        // Before allocating, so a count far past the bytes there are fails instead.
         let end = (accessor.count - 1)
             .checked_mul(stride)
             .and_then(|start| start.checked_add(size))
@@ -261,7 +257,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         ))
     }
 
-    /// Buffer view `index`, and its bytes, once they're checked to be within its buffer.
+    /// Buffer view `index` and its bytes, which must lie within its buffer.
     pub(super) fn view(&mut self, index: u32) -> Result<(&'a json::BufferView, &[u8])> {
         let (model, gltf) = (self.model, self.gltf);
         let view = model.item(&gltf.buffer_views, "buffer view", index)?;
@@ -284,8 +280,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             let (model, gltf) = (self.model, self.gltf);
             let buffer = model.item(&gltf.buffers, "buffer", index)?;
             let bytes = match (&buffer.uri, self.bin) {
-                // No further into a file than its byteLength, nor than a byte past the memory
-                // reading may still take.
+                // No further than its byteLength, nor a byte past the memory still allowed.
                 (Some(uri), _) => {
                     let room =
                         (self.memory.most.saturating_sub(self.memory.held)).saturating_add(1);
@@ -299,7 +294,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     )));
                 }
             };
-            // Read for each buffer, as buffers that share a file each read it.
+            // Buffers sharing a file each read it, so each counts.
             if let Cow::Owned(bytes) = &bytes {
                 self.memory.hold(bytes.len())?;
             }
@@ -324,8 +319,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(&self.buffers[&index])
     }
 
-    /// The bytes that `uri`, `what`'s, names: a data URI's, or those of a file in the model's
-    /// folder, as far as `most` bytes.
+    /// The bytes `what`'s `uri` names: a data URI's, or a file's in the model's folder (up to
+    /// `most`).
     pub(super) fn uri(&self, what: &str, uri: &str, most: u64) -> Result<Vec<u8>> {
         let model = self.model;
         if uri
@@ -345,12 +340,11 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                  UTF-8"
             ))
         })?;
-        // Relative paths alone, as glTF has them: no scheme, drive or root, and no backslash,
-        // which Windows would take for a separator.
+        // Relative paths alone: no scheme, drive, root or backslash (a Windows separator).
         if path.starts_with('/') || path.contains(['\\', ':']) {
             return Err(model.bad(format!("{what}'s URI {uri:?} isn't a relative path")));
         }
-        // And none up a folder, so that a model reads its own folder's files alone.
+        // None up a folder: a model reads its own folder's files alone.
         if path.split('/').any(|segment| segment == "..") {
             return Err(model.bad(format!(
                 "{what}'s URI {uri:?} has a `..`, where a model reads files in its folder alone"
@@ -365,8 +359,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
     }
 }
 
-/// The type of an attribute's components that glTF allows: floats, unsigned bytes or shorts
-/// normalized to 0 to 1, or, for an animation's rotations, signed ones normalized to -1 to 1.
+/// The attribute component types glTF allows: floats, unsigned bytes or shorts normalized to 0 to
+/// 1, and for animation rotations, signed ones normalized to -1 to 1.
 #[derive(Clone, Copy)]
 enum Component {
     Float,
@@ -386,8 +380,8 @@ impl Component {
     }
 }
 
-/// Decodes base64 as RFC 4648 has it, with its padding, as data URIs hold it: `None` for a
-/// character outside its alphabet, or padding that's missing or out of place.
+/// Decodes padded base64 (RFC 4648), as data URIs hold it. `None` for a character outside its
+/// alphabet, or padding missing or misplaced.
 pub(crate) fn base64(text: &str) -> Option<Vec<u8>> {
     let text = text.as_bytes();
     if !text.len().is_multiple_of(4) {
@@ -418,8 +412,7 @@ pub(crate) fn base64(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Decodes a URI's percent escapes: `None` for a `%` not followed by two hex digits, or for what
-/// isn't UTF-8.
+/// Decodes a URI's percent escapes: `None` for a `%` without two hex digits, or non-UTF-8 output.
 pub(super) fn percent_decode(uri: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(uri.len());
     let mut rest = uri.as_bytes();
