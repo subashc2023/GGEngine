@@ -1,21 +1,43 @@
 use std::cell::Cell;
-use std::io::Read as _;
+use std::io::{self, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gg_api::{Client, LogEvents, Session};
-use gg_core::math::{Mat4, Vec3};
-use gg_renderer::Streaming;
-use serde_json::json;
+use gg_api::asset::AssetKind;
+use gg_api::{
+    Applied, AssetList, Captured, Client, EntityList, Framed, ListedOrphan, LogEvents, Picked,
+    Pulse, Request, SavedPrefab, Session, Snapshotted,
+};
+use gg_core::math::{DVec3, Mat4, Vec3, Vec4};
+use gg_renderer::{Streaming, Viewpoint};
+use serde_json::{Value, json};
+use subsecond::JumpTable;
+use tracing::Level;
 
 use super::*;
 
+use super::connection::{
+    Answer, HELLO_TIMEOUT, InFlight, MOST_SAYING_HELLO, granted, needs, note, read_hello,
+    same_token,
+};
+use super::files::{engine_named, prune};
+use super::parse::{MOST_STEPS, parse};
+use super::view::CAPTURE_WAIT;
+use super::world::listed;
+use crate::api::Waiting;
 use crate::args::Net;
 use crate::dirs::tests::Scratch;
+use crate::grant::Grant;
+use crate::grid::Plane;
 use crate::net::Lockstep;
 use crate::recording::Recorder;
+use crate::render_thread::{Extracted, Shot};
 use crate::scene_files::tests as scenes;
-use crate::{BoxCollider2D, Name, Sprite, Tick, Transform, Viewport};
+use crate::{
+    BoxCollider2D, EntityId, Event, Key, MouseButton, Name, PrefabRoot, Sprite, Tick, Transform,
+    Viewport,
+};
 
 /// A directory of captures or snapshots keeps the newest of those the engine named alone,
 /// and whatever else is in it: files a client named, others' kinds and directories.
