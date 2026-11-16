@@ -1,6 +1,6 @@
-//! Characters: entities that rapier's kinematic character controller moves at each step, as fast as
-//! their games ask, sliding along what they move into, climbing slopes and steps, and kept on the
-//! ground going down.
+//! Characters: entities that rapier's kinematic character controller moves each step at their
+//! games' velocity, sliding along what they hit, climbing slopes and steps, kept on the ground
+//! going down.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
@@ -24,49 +24,49 @@ use super::{
 use crate::physics::{Link, kept, unfinite};
 use crate::{Component, Entity, Tick, Transform, World};
 
-/// A character that 3D physics moves, at each tick a layer runs
-/// [`step_physics`](crate::step_physics) in, as its game asks, through rapier's kinematic character
-/// controller: as fast as `velocity` says, sliding along what it moves into, climbing slopes up to
-/// `max_slope` and steps up to `step_height`, and kept on the ground going down as far as `snap`.
-/// It moves as its entity's [`CapsuleCollider3D`], its body kinematic, which pushes what's dynamic
-/// in its way as it goes and stops for the rest, characters among them, but passes through what a
-/// [`Joint3D`](super::Joint3D) joins it to without colliding, sensors, and what its capsule's groups
-/// don't meet; a capsule that's a sensor pushes nothing, as nothing pushes it. A kinematic [`RigidBody3D`] it
-/// stands on, as a moving platform, a lift or a carousel, carries it as it goes and turns, and one
-/// moving into it pushes it before it. Its entity needs no
-/// [`RigidBody3D`]: one with one is moved as a body, and its controller does nothing, warned of
-/// once (`physics.not_character`), as is one without a `CapsuleCollider3D`; one under a parent
-/// isn't moved (`physics.child_body`), as a body under one isn't.
+/// A character that 3D physics moves, through rapier's kinematic character controller, in the
+/// ticks a layer runs [`step_physics`](crate::step_physics) in.
 ///
-/// Its state is the world's, as the rest of physics' is, so that replays and peers move it alike:
-/// `velocity`, which gravity pulls down while it's off the ground, and `grounded`, whether it
-/// stood on something after it last moved. Its entity's rotation is the game's to set, as which
-/// way it faces; physics moves its translation, and turns it only as a body it stands on turns
-/// about up, as a carousel turns what rides it.
+/// It goes at `velocity`, slides along what it hits, climbs slopes up to `max_slope` and steps up
+/// to `step_height`, and keeps to the ground going down as far as `snap`.
+///
+/// - It moves as its entity's [`CapsuleCollider3D`], its body kinematic. It pushes what's dynamic
+///   and stops for the rest, characters among them. It passes through what a
+///   [`Joint3D`](super::Joint3D) joins it to without colliding, sensors, and what its capsule's
+///   groups don't meet. A sensor capsule pushes nothing, as nothing pushes it.
+/// - A kinematic [`RigidBody3D`] it stands on (a platform, lift or carousel) carries it as it goes
+///   and turns; one moving into it pushes it before it.
+/// - Its entity needs no [`RigidBody3D`]: with one, it's moved as a body and the controller does
+///   nothing, as without a `CapsuleCollider3D`. Both are warned of once (`physics.not_character`).
+///   One under a parent isn't moved (`physics.child_body`).
+///
+/// Its state is the world's, so replays and peers move it alike: `velocity`, which gravity pulls
+/// down off the ground, and `grounded`. Its entity's rotation is the game's to set, as which way
+/// it faces; physics moves its translation, and turns it only as a body it stands on turns about
+/// up.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct CharacterController3D {
-    /// How fast it means to go, in units a second, which its game sets, as from its player's
-    /// input: across, as it walks, and up, as it jumps. Each step pulls it down by the world's
-    /// gravity, as much as `gravity` says, and stops its falling as it lands, and its rising as
-    /// something above it stops it; what's across stays as the game set it. Walking, it goes a
-    /// hundredth or so slower than this, as rapier's controller slides it along the ground.
+    /// How fast it means to go, in units a second, set by its game, as from player input: across
+    /// to walk, up to jump. Each step pulls it down by the world's gravity times `gravity`, stops
+    /// its fall as it lands and its rise at a ceiling; what's across stays as set. Walking, it goes
+    /// a hundredth or so slower, as rapier's controller slides it along the ground.
     pub velocity: Vec3,
     /// How much of the world's gravity, [`Physics3D::gravity`], pulls it down: 1 all of it, 0 none,
     /// as for something that flies.
     #[reflect(default = 1.0)]
     pub gravity: f32,
-    /// How steep a slope it climbs, from level, up to a quarter turn: steeper ones are walls, which
-    /// it slides along, and down if it stands on one. One past a quarter turn is taken as one.
+    /// How steep a slope it climbs, from level, up to a quarter turn. Steeper ones are walls: it
+    /// slides along them, and down if it stands on one. Values past a quarter turn count as one.
     #[reflect(degrees, min = 0.0, default = FRAC_PI_4)]
     pub max_slope: f32,
     /// How high a step it climbs onto as it walks into one, in units: none at 0.
     #[reflect(min = 0.0, default = 0.3)]
     pub step_height: f32,
-    /// How far below it the ground may fall away as it walks, in units, as down a slope or a step,
-    /// and it still keep to it rather than leave it: none at 0.
+    /// How far below it the ground may fall away as it walks, in units, as down a slope or step,
+    /// and it still keeps to it rather than leave it: none at 0.
     #[reflect(min = 0.0, default = 0.2)]
     pub snap: f32,
-    /// Whether it stood on something after it last moved, which a game reads, as to let it jump.
+    /// Whether it stood on something after it last moved. A game reads it, as to allow a jump.
     pub grounded: bool,
 }
 
@@ -84,9 +84,8 @@ impl Default for CharacterController3D {
 }
 
 impl CharacterController3D {
-    /// rapier's controller, as this one says.
     fn controller(&self) -> KinematicCharacterController {
-        // Compared rather than `min`ed, so that a slope that isn't a number climbs nothing.
+        // Compared rather than `min`ed, so a NaN slope climbs nothing.
         let slope = if self.max_slope < FRAC_PI_2 {
             self.max_slope
         } else {
@@ -95,10 +94,10 @@ impl CharacterController3D {
         let slope = if slope > 0.0 { slope } else { 0.0 };
         let autostep = (self.step_height > 0.0).then_some(CharacterAutostep {
             max_height: CharacterLength::Absolute(self.step_height.into()),
-            // The room it needs past a step's edge to climb onto it: rapier's own, half its width,
-            // leaves no room for stairs narrower than that, as a person's are.
+            // Room needed past a step's edge: rapier's default, half the width, rules out stairs
+            // as narrow as a person's.
             min_width: CharacterLength::Absolute(0.1),
-            // It pushes what's dynamic rather than climbing onto it.
+            // It pushes what's dynamic rather than climb it.
             include_dynamic_bodies: false,
         });
         KinematicCharacterController {
@@ -113,13 +112,11 @@ impl CharacterController3D {
     }
 }
 
-/// A character, its entity's, and what the last step left in the entity's components, or what they
-/// were as it took them in, as a body's link keeps them.
+/// A character with its entity's components as the last step left or took them.
 #[derive(Clone)]
 pub(super) struct Character {
     pub(super) entity: Entity,
     pub(super) body: RigidBodyHandle,
-    /// The collider of its entity's `CapsuleCollider3D`.
     pub(super) collider: ColliderHandle,
     pub(super) controller: CharacterController3D,
     pub(super) transform: Transform,
@@ -144,8 +141,8 @@ fn unmoved(world: &World, entity: Entity) -> Option<&'static str> {
 }
 
 impl Physics3D {
-    /// Takes out each character whose entity has gone, lost its controller, its capsule or its
-    /// `Transform`, been given a `RigidBody3D`, or come under a parent; the rest keep their order.
+    /// Takes out each character whose entity has gone, lost its controller, capsule or
+    /// `Transform`, gained a `RigidBody3D`, or come under a parent. The rest keep their order.
     pub(super) fn unlink_gone_characters(&mut self, world: &World) {
         let rapier = &mut self.rapier;
         self.characters.retain(|character| {
@@ -161,9 +158,9 @@ impl Physics3D {
         });
     }
 
-    /// Makes a character for each entity that has come to be one, in the order queries find them,
-    /// and takes in what changed of each that was, as bodies are found; warning once of each
-    /// entity with a controller that isn't one, as [`CharacterController3D`] says.
+    /// Makes a character for each entity that has come to be one, in query order, and takes in
+    /// what changed of each that was, as bodies are found. Warns once of each entity whose
+    /// controller doesn't make one.
     pub(super) fn find_characters(&mut self, world: &World) {
         let rapier = &mut self.rapier;
         let warned = &mut self.unmoved;
@@ -201,16 +198,16 @@ impl Physics3D {
         );
     }
 
-    /// Moves each character, in their order, as far as its controller lets it go toward where its
-    /// velocity takes it this step, against the colliders as the last step left them but those of
-    /// the bodies joined to it without colliding, as a [`Joint3D`](super::Joint3D)'s
-    /// `bodies_collide` says: its body goes there as rapier steps, pushing what's dynamic that it
-    /// hit on the way. One that stood on a kinematic body, as a moving platform or a lift, goes on
-    /// as far as that body carries it this step, against the rest; and a kinematic body moving into
-    /// one pushes it as far as it would go into it, against the rest, so that a platform rising
-    /// under it lifts it rather than passing through it. Writes what its own move left of its
-    /// controller into its entity's, as it changed: its velocity, pulled down by gravity and
-    /// stopped by the ground and by what's above it, and whether it's grounded.
+    /// Moves each character, in order, as far as its controller lets it go toward where its
+    /// velocity takes it this step, against the colliders as the last step left them, minus those
+    /// of bodies joined to it without colliding ([`Joint3D`](super::Joint3D) `bodies_collide`).
+    /// Its body goes there as rapier steps, pushing what's dynamic that it hit.
+    ///
+    /// - One on a kinematic body goes on as far as the body carries it, against the rest.
+    /// - A kinematic body moving into one pushes it as far as it would go into it, against the
+    ///   rest, so a rising platform lifts it rather than passing through.
+    ///
+    /// Writes its velocity and `grounded` into its entity's controller, as they changed.
     pub(super) fn move_characters(&mut self, world: &mut World) {
         self.hold_moving();
         for character in &mut self.characters.linked {
@@ -226,18 +223,16 @@ impl Physics3D {
         self.release_moving();
     }
 
-    /// Holds still the kinematic bodies that go by their velocities, keeping those in `moving`,
-    /// while there are characters to move.
+    /// Holds still the velocity-driven kinematic bodies, saving them in `moving`, while there are
+    /// characters.
     fn hold_moving(&mut self) {
         let step = Tick::DT.as_secs_f64();
-        // The kinematic bodies that go by their velocities, held still while the characters make
-        // their own moves, so that each moves against them as they are, and is carried and pushed
-        // by them after, alike whether it walks or stands: rapier's controller takes a kinematic
-        // body's motion into a move that hits it, but not into one that stands still. As it takes
-        // it, it sets what's left of the move along the body's normal to the body's motion there,
-        // which, at none, takes away the nudge off the surface that its slide along any other
-        // gives, and so holds it at the surface, walking nowhere; so they go up by that nudge
-        // meanwhile, as a slide along what's static leaves it.
+        // Held still while characters move, so each moves against them as they are and is
+        // carried and pushed after, alike walking or standing: rapier's controller takes a
+        // kinematic body's motion into a move that hits it, not into one that stands still. It
+        // then sets what's left of the move along the body's normal to the body's motion there.
+        // At none, that loses the nudge off the surface that a slide along anything else gives,
+        // holding it at the surface, walking nowhere. So the bodies go up by that nudge meanwhile.
         let held = &mut self.moving;
         held.clear();
         if !self.characters.linked.is_empty() {
@@ -254,7 +249,6 @@ impl Physics3D {
         }
     }
 
-    /// Gives the bodies [`hold_moving`](Self::hold_moving) held still their velocities back.
     fn release_moving(&mut self) {
         for &(by, linvel, angvel) in &self.moving {
             let body = &mut self.rapier.bodies[by];
@@ -263,7 +257,6 @@ impl Physics3D {
         }
     }
 
-    /// Writes where each character went into its entity's translation, as it changed.
     pub(super) fn write_back_characters(&mut self, world: &mut World) {
         for character in &mut self.characters.linked {
             let body = &self.rapier.bodies[character.body];
@@ -278,8 +271,7 @@ impl Physics3D {
     }
 }
 
-/// Moves `character` as [`Physics3D::move_characters`] says, against `rapier`'s sets, `held`
-/// the kinematic bodies held still, `gravity` the world's, its moves' hits kept in `hits`.
+/// Moves `character` as [`Physics3D::move_characters`] does, `held` the bodies held still.
 fn move_character(
     rapier: &mut Rapier,
     character: &mut Character,
@@ -299,19 +291,18 @@ fn move_character(
         ..
     } = rapier;
     let mut controller = character.controller;
-    // Gravity pulls it as it walks too, as rapier's controller keeps its gap from the
-    // ground so, though it slides it along a hundredth or so slower than it goes; without,
-    // a character on a large box sinks into it by some centimeters as the snaps miss it.
-    // Standing still, it moves by nothing, which rapier's controller snaps to the ground,
-    // and which leaves it unchanged, where gravity's push would leave it a little higher
-    // or lower each step.
+    // Gravity pulls it walking too, which keeps the controller's gap from the ground (it
+    // slides a hundredth or so slower). Without, a character on a large box sinks some
+    // centimeters as the snaps miss. Standing still, it moves by nothing, which the controller
+    // snaps to the ground and leaves unchanged; gravity would leave it a little higher or
+    // lower each step.
     let still = controller.velocity == Vec3::ZERO;
     let mut velocity = controller.velocity;
     if !(still && controller.grounded) {
         velocity += gravity * controller.gravity * dt;
     }
     let mut way = velocity * dt;
-    // A way that isn't finite, as from a velocity a game left so, goes nowhere.
+    // A non-finite way, from a velocity a game left so, goes nowhere.
     if !way.is_finite() {
         way = Vec3::ZERO;
     }
@@ -319,15 +310,13 @@ fn move_character(
     let collider = &colliders[character.collider];
     let shape = collider.shared_shape().clone();
     let on_body = collider.position_wrt_parent().copied();
-    // Where the capsule is now: its body's pose, which a move this tick changed, and its
-    // place on it, rather than where the last step left the collider.
+    // Its body's pose, which a move this tick changed, not where the last step left the collider.
     let at = *body.position() * on_body.unwrap_or(Pose::IDENTITY);
     let mass = collider.mass();
     let moving = controller.controller();
     let own = character.body;
-    // What a joint keeps it from colliding with, as rapier's contacts leave out but its
-    // queries don't: asked only of a character joined to something, so that the rest sweep
-    // as they did.
+    // What a joint keeps it from colliding with: rapier's contacts leave it out but its queries
+    // don't. Asked only of a character joined to something, so the rest sweep as before.
     let joined = impulse_joints.attached_joints(own).next().is_some();
     let apart = |_: ColliderHandle, other: &Collider| {
         let joined = other
@@ -335,7 +324,6 @@ fn move_character(
             .map(|other| impulse_joints.joints_between(own, other));
         !joined.is_some_and(|mut joints| joints.any(|(_, joint)| !joint.data.contacts_enabled))
     };
-    // What it moves against: not sensors, and only what its capsule's groups meet.
     let met = groups(character.capsule.membership, character.capsule.filter);
     let mut alone = QueryFilter::new()
         .exclude_rigid_body(own)
@@ -346,8 +334,7 @@ fn move_character(
     }
     let dispatcher = narrow_phase.query_dispatcher();
     let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, alone);
-    // The gap rapier's controller keeps from what it moves against, its default's, a
-    // hundredth of its height.
+    // The controller's default gap from what it moves against: a hundredth of the height.
     let gap = 0.01 * shape.compute_local_aabb().extents().y;
     let ground = if controller.grounded {
         let under = platform(&queries, &*shape, &at, gap);
@@ -355,7 +342,6 @@ fn move_character(
     } else {
         None
     };
-    // How fast what moves goes where the character's middle is.
     let speed_at = |&(by, linvel, angvel): &Moving, point: Vector| {
         linvel + angvel.cross(point - bodies[by].center_of_mass())
     };
@@ -363,18 +349,18 @@ fn move_character(
     let moved = moving.move_shape(step, &queries, &*shape, &at, vector(way), |hit| {
         hits.push(hit);
     });
-    // Carried and pushed by what moves it, swept against the rest: without stepping or
-    // snapping, which its own move did.
+    // Carried and pushed by what moves it, swept against the rest, without the stepping or
+    // snapping its own move did.
     let carried = KinematicCharacterController {
         autostep: None,
         snap_to_ground: None,
         ..moving
     };
     let mut total = moved.translation;
-    // Carried as the body it stands on goes this step, from its pose to the one its
-    // velocities reach, as rapier moves it: its middle where that takes the point of the
-    // body it's over, so that one turning carries it round, at the same distance from its
-    // axis, and its facing turned as far about up as the body turns.
+    // Carried as the body it stands on goes this step, from its pose to the one its velocities
+    // reach, as rapier moves it: its middle goes where that takes the body's point under it, so
+    // a turning body carries it round at the same distance from its axis, and turns its facing
+    // as far about up as the body turns.
     let mut turned = None;
     if let Some(&(under, linvel, angvel)) = ground {
         let body = &bodies[under];
@@ -415,7 +401,7 @@ fn move_character(
         if speed == Vector::ZERO || !speed.is_finite() {
             continue;
         }
-        // Only one near enough to reach it this step, as their boxes tell, is cast.
+        // Only a body near enough to reach it this step, by their boxes, is cast.
         let reach = shape
             .compute_aabb(&from)
             .loosened(speed.length() * step + gap);
@@ -426,8 +412,7 @@ fn move_character(
         if !near {
             continue;
         }
-        // How soon it would reach the character, in the character's frame, which it
-        // closes on as fast as it goes.
+        // How soon it reaches the character, in the character's frame.
         let on_it = |handle: ColliderHandle, other: &Collider| {
             other.parent() == Some(by) && (!joined || apart(handle, other))
         };
@@ -460,7 +445,6 @@ fn move_character(
         });
         total += went.translation;
     }
-    // A sensor's pushes nothing.
     if !character.capsule.sensor {
         let mut pushing = broad_phase.as_query_pipeline_mut(dispatcher, bodies, colliders, alone);
         let hits = &*hits;
@@ -494,14 +478,12 @@ fn move_character(
     }
 }
 
-/// A kinematic body that goes by its velocity, as a [`RigidBody3D`]'s does: its handle, and how
-/// fast it goes and turns this step.
+/// A velocity-driven kinematic body: handle, linear and angular velocity.
 pub(super) type Moving = (RigidBodyHandle, Vector, Vector);
 
-/// The kinematic body that `shape`, at `at`, stands on, of those `queries` sees: what a cast of the
-/// shape straight down meets within `gap`, the gap rapier's controller keeps from the ground, and
-/// as far again as its prediction of the ground reaches, if that's a kinematic body's that goes by
-/// its velocity.
+/// The velocity-driven kinematic body that `shape`, at `at`, stands on, if any: what a cast of the
+/// shape straight down meets within `gap`, the controller's gap from the ground, plus its ground
+/// prediction.
 fn platform(
     queries: &QueryPipeline<'_>,
     shape: &dyn Shape,
@@ -522,8 +504,6 @@ fn platform(
 }
 
 impl Character {
-    /// Makes `entity`'s character in `rapier`: a kinematic body where its transform is, moved by
-    /// where it's next put, and its capsule on it.
     fn make(rapier: &mut Rapier, world: &World, entity: Entity) -> Self {
         let controller = *world
             .get::<CharacterController3D>(entity)
@@ -552,16 +532,15 @@ impl Character {
         }
     }
 
-    /// Takes in what changed of its components since the last step left them, which the last
-    /// step didn't make: where it's put and how it's turned, which it moves from; its capsule; and
-    /// its controller, which the next move goes by.
+    /// Takes in what a game or edit changed since the last step: place and turn, capsule,
+    /// controller.
     fn take_changes(&mut self, rapier: &mut Rapier, world: &World) {
         let entity = self.entity;
         let controller = *world
             .get::<CharacterController3D>(entity)
             .expect("found with one");
         let transform = *world.get::<Transform>(entity).expect("found with one");
-        // What isn't finite is refused, as `Links` warns, and taken as it was.
+        // A non-finite value is refused, as `Links` warns, and kept as it was.
         let transform = kept(transform, self.transform);
         let capsule = *world.get::<CapsuleCollider3D>(entity).expect("not unmoved");
         let capsule = kept(capsule, self.capsule);
@@ -597,8 +576,7 @@ pub(super) mod tests {
     use super::*;
     use crate::BodyType;
 
-    /// A character, its capsule the default's, 2 units tall and half a unit in radius, its middle
-    /// at `at`.
+    /// A character with the default capsule, 2 units tall and 0.5 in radius, its middle at `at`.
     pub(in super::super) fn character(world: &mut World, at: Vec3) -> Entity {
         let at = Transform {
             translation: at.as_dvec3(),
@@ -644,14 +622,13 @@ pub(super) mod tests {
         controller.velocity = velocity;
     }
 
-    /// Where a character's middle rests on the floor's top, at y 0.5: its half height above it, and
-    /// the gap rapier's controller keeps, a hundredth of its height.
+    /// Where a character's middle rests on the floor's top, at y 0.5: its half height above, and
+    /// the controller's gap, a hundredth of its height.
     const ON_FLOOR: f32 = 0.5 + 1.0 + 0.02;
 
-    /// A character dropped onto a floor falls, pulled by gravity, lands on it, grounded, its
-    /// falling stopped; walks across it as fast as its velocity says, within the few hundredths
-    /// rapier's controller slides it along the ground slower, keeping to it; and, stopped, stays
-    /// where it stands, its components unchanged from step to step.
+    /// A character falls, lands grounded with its fall stopped, and walks at its velocity, within
+    /// the few hundredths the controller slides it slower. Stopped, it stays put, its components
+    /// unchanged from step to step.
     #[test]
     fn a_character_falls_lands_walks_and_stands() {
         let mut world = World::default();
@@ -702,8 +679,8 @@ pub(super) mod tests {
         }
     }
 
-    /// A character walking into a wall at a slant slides along it, as far as the part of its
-    /// velocity along the wall takes it, and no farther into it than its capsule lets it.
+    /// A character walking into a wall at a slant slides along it by the part of its velocity
+    /// along the wall, and no farther into it than its capsule allows.
     #[test]
     fn a_character_slides_along_walls() {
         let mut world = World::default();
@@ -725,9 +702,9 @@ pub(super) mod tests {
         assert!(at.z > 0.0, "slid along: {at}");
     }
 
-    /// A character walks through a sensor, which finds it, its overlap starting and stopping, and
-    /// through a wall in a group its capsule's filter leaves out, as casts pass through the sensor
-    /// but not the wall; and stops at a wall it meets.
+    /// A character walks through a sensor, which finds it (overlap starting, stopping), and
+    /// through a wall in a group its capsule's filter leaves out, though casts pass through only
+    /// the sensor. It stops at a wall it meets.
     #[test]
     fn a_character_walks_through_sensors_and_what_its_groups_dont_meet() {
         let mut world = World::default();
@@ -818,10 +795,9 @@ pub(super) mod tests {
         assert!(stopped.x < 0.5, "{stopped}");
     }
 
-    /// A character climbs onto a step no higher than its `step_height` as it walks into it, and not
-    /// onto a higher one, and walks off its edge onto the ground below, grounded at every step;
-    /// and walking down a slope, keeps to it within its `snap`, where one that doesn't snap
-    /// leaves it.
+    /// A character climbs a step within its `step_height`, not a higher one, and walks off its
+    /// edge grounded throughout. Down a slope it keeps to the ground within its `snap`; one that
+    /// doesn't snap leaves it.
     #[test]
     fn a_character_climbs_steps_and_keeps_to_the_ground() {
         let mut world = World::default();
@@ -868,8 +844,7 @@ pub(super) mod tests {
             "off the step: {down}"
         );
         assert_eq!(left, 0, "kept to the ground");
-        // Down a slope of 30 degrees, falling away faster than gravity takes a character down at
-        // first: one that snaps keeps to it, one that doesn't leaves it.
+        // A 30 degree slope falls away faster than gravity takes a character down at first.
         let mut world = World::default();
         floor(&mut world);
         let angle = to_radians(30.0);
@@ -903,8 +878,8 @@ pub(super) mod tests {
         assert!(left[0] == 0 && left[1] > 0, "ticks off the slope: {left:?}");
     }
 
-    /// A character given a velocity up leaves the ground, slows as gravity pulls it and comes back
-    /// down, landing where it left; and one rising into something above it stops rising there.
+    /// A character given an upward velocity leaves the ground, slows, and lands where it left; one
+    /// rising into a ceiling stops rising there.
     #[test]
     fn a_character_jumps_and_lands_and_stops_under_ceilings() {
         let mut world = World::default();
@@ -981,9 +956,9 @@ pub(super) mod tests {
         body.velocity = velocity;
     }
 
-    /// A character standing on a kinematic body is carried as it goes, grounded all the while and
-    /// where it stood on it: across, as a moving platform carries it, up, as a lift, and down; and
-    /// it walks on it as it would on the ground, as far again as the platform takes it.
+    /// A character standing on a kinematic body is carried across, up and down with it, grounded
+    /// all the while and where it stood. It walks on it as on the ground, as far again as the
+    /// platform takes it.
     #[test]
     fn a_character_rides_what_it_stands_on() {
         let mut world = World::default();
@@ -1024,10 +999,9 @@ pub(super) mod tests {
         );
     }
 
-    /// A character standing on a turning body, as a carousel, is carried round at the distance
-    /// from its axis that it stood at, over many turns, rather than drifting out as it would along
-    /// the body's velocity where it stands; and turns as far as the carousel does, facing as it
-    /// faced on it, grounded all the while.
+    /// A character on a carousel is carried round at its distance from the axis over many turns,
+    /// not drifting out along the body's velocity where it stands. It turns as far as the carousel
+    /// does and stays grounded.
     #[test]
     fn a_character_rides_a_carousel_round() {
         let mut world = World::default();
@@ -1062,8 +1036,7 @@ pub(super) mod tests {
         );
     }
 
-    /// Two characters on one moving platform are each carried as it goes, keeping where they
-    /// stood on it, and apart.
+    /// Two characters on one moving platform are each carried, keeping their places and apart.
     #[test]
     fn characters_ride_a_platform_together() {
         let mut world = World::default();
@@ -1083,10 +1056,9 @@ pub(super) mod tests {
         }
     }
 
-    /// A character a rising platform carries into a ceiling is crushed between them: it isn't
-    /// carried through the ceiling, nor left below the lift's top as the lift passes into it, and
-    /// stays finite; its middle between the lift's top and the ceiling's face, while the lift
-    /// goes on and once it stops.
+    /// A character a rising platform carries into a ceiling is crushed between them: finite, and
+    /// neither carried through the ceiling nor left below the lift's top, while the lift goes on
+    /// and once it stops.
     #[test]
     fn a_character_a_lift_carries_into_a_ceiling_stops_under_it() {
         let mut world = World::default();
@@ -1119,8 +1091,8 @@ pub(super) mod tests {
         between(&world);
     }
 
-    /// A character walking into a kinematic wall that moves toward it stops at the wall and is
-    /// pushed back before it, rather than passing into it.
+    /// A character walking into an oncoming kinematic wall is pushed back before it, not passed
+    /// into.
     #[test]
     fn a_character_walking_into_a_moving_wall_stops_before_it() {
         let mut world = World::default();
@@ -1147,9 +1119,9 @@ pub(super) mod tests {
         );
     }
 
-    /// A kinematic body moving into a character pushes it rather than passing through it: a wall
-    /// across the floor pushes one standing there along before it, and a platform rising under one
-    /// in the air, as a lift under one that doesn't fall, lifts it on its top.
+    /// A kinematic body moving into a character pushes it rather than passing through: a wall
+    /// pushes one standing in its way along before it, and a platform rising under one in the air
+    /// (gravity 0) lifts it on its top.
     #[test]
     fn kinematic_bodies_push_characters() {
         let mut world = World::default();
@@ -1192,8 +1164,8 @@ pub(super) mod tests {
     }
 
     /// An entity with a controller and a `RigidBody3D`, or without a `CapsuleCollider3D`, isn't a
-    /// character, warned of once: the first is moved as a body, the second not at all; and one
-    /// given a capsule is a character from the next step on.
+    /// character, warned of once: the first moves as a body, the second not at all. One given a
+    /// capsule is a character from the next step.
     #[test]
     fn controllers_move_only_characters() {
         let mut world = World::default();
@@ -1222,8 +1194,8 @@ pub(super) mod tests {
         assert!(controller(&world, shapeless).grounded);
     }
 
-    /// Characters walking about among crates, over a floor with a ramp and a step, turning as they
-    /// go: what the tests of exactness and the reference hash step.
+    /// Characters walking among crates over a floor with a ramp and a step, turning as they go:
+    /// what the exactness tests and the reference hash step.
     pub(in super::super) fn course(world: &mut World) -> Vec<Entity> {
         floor(world);
         let angle = to_radians(20.0);
@@ -1261,8 +1233,8 @@ pub(super) mod tests {
         walkers
     }
 
-    /// Turns each walker's velocity a little about Y, and has the first jump whenever it stands, as
-    /// a game's input would, at each step of `ticks`.
+    /// Each of `ticks` steps, turns each walker's velocity a little about Y and has the first jump
+    /// whenever it stands, as a game's input would.
     pub(in super::super) fn walk(world: &mut World, walkers: &[Entity], ticks: u32) {
         let turn = Quat::from_rotation_y(0.05);
         for _ in 0..ticks {
@@ -1280,8 +1252,8 @@ pub(super) mod tests {
         }
     }
 
-    /// A snapshot of a world whose characters are walking about and pushing crates, restored,
-    /// steps as the world it was taken from did, bit for bit, as does a copy.
+    /// A snapshot of a world of walking characters and crates, restored, steps bit for bit as the
+    /// world it came from did, as does a copy.
     #[test]
     fn a_snapshot_with_characters_steps_as_its_world_did() {
         let mut world = World::seeded(7);
@@ -1298,9 +1270,8 @@ pub(super) mod tests {
         assert_eq!(world.hash(), went, "restored");
     }
 
-    /// A world whose characters are walking about and pushing crates, saved whole to text as a
-    /// snapshot file holds it and loaded into a world of another process's making, steps as the
-    /// world it was saved from did, bit for bit.
+    /// A world whose characters walk and push crates, saved whole to text and loaded into another
+    /// process's world, steps as the world it was saved from did, bit for bit.
     #[test]
     #[cfg(feature = "dev")]
     fn a_world_saved_whole_with_characters_steps_as_it_did() {
@@ -1336,9 +1307,8 @@ pub(super) mod tests {
         assert_eq!(loaded.hash(), world.hash(), "stepped on");
     }
 
-    /// The world's hash after characters have walked the course for four seconds, which CI checks
-    /// on every platform: a difference on some platforms only is a bug in determinism, not a value
-    /// to change here.
+    /// The world's hash after characters walk the course for four seconds. CI checks it on every
+    /// platform: a difference on some alone is a determinism bug, not a value to change here.
     #[test]
     fn a_course_hashes_as_its_reference_says() {
         let mut world = World::seeded(7);

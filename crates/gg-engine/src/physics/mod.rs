@@ -1,9 +1,8 @@
-//! Physics, through rapier: bodies that it moves at the world's ticks, as their entities'
-//! components describe them, and joints that hold them together, in the XY plane ([`dim2`]) or in
-//! space ([`dim3`]), with characters and casts through the colliders in space; which entities'
-//! colliders touch and overlap ([`contacts`]); the world's resources that hold rapier's bodies,
-//! joints and contacts, which snapshots copy and snapshot files hold; and the colliders' outlines
-//! and the joints' lines, drawn where their entities draw.
+//! Physics, through rapier: bodies it moves at the world's ticks as their components describe
+//! them, and joints that hold them together, in the XY plane ([`dim2`]) or in space ([`dim3`]),
+//! with characters and casts in space. Also [`contacts`], the resources that hold rapier's state
+//! (snapshots copy it, snapshot files hold it), and colliders' outlines and joints' lines, drawn
+//! where their entities draw.
 //!
 //! rapier's builds are its `f64` ones, `rapier2d-f64` and `rapier3d-f64`, which the manifests name
 //! `rapier2d` and `rapier3d`. Bodies' positions go into rapier and come back as `f64`s, whole;
@@ -38,22 +37,26 @@ pub enum BodyType {
     /// By its velocity alone, which nothing it hits changes, pushing what's dynamic aside, as a
     /// moving platform does.
     Kinematic,
-    /// Not at all: it stays where its transform puts it, as a floor or a wall does.
+    /// Not at all: it stays where its transform puts it, as a floor or wall does.
     Static,
 }
 
-/// Steps `world`'s physics a tick, [`Tick::DT`](crate::Tick::DT), as a system a layer's tick runs,
-/// after what sets its bodies' velocities, such as scripts: 2D physics, then 3D. Each takes in what
-/// changed since its last step, making a body for each entity that has come to have a
-/// [`RigidBody2D`] or a [`RigidBody3D`] and a [`Transform`], in the order queries find them, and
-/// taking out each whose entity has gone or lost either; and takes a change to a body's components
-/// that the last step didn't make, a game's or an edit's, as where the body is, how fast it goes,
-/// how it moves or its colliders; then makes, changes or takes out the joint of each [`Joint2D`]
-/// and [`Joint3D`] as they say. Then it moves the bodies, and writes where each went and how fast
-/// into its components: a 2D body's translation across and up, its z as it was, and its rotation
-/// turned about Z as far as the body turned, so that what turns it otherwise stays; a 3D body's
-/// translation and rotation whole; and their velocities. A world is given a [`Physics2D`] or a
-/// [`Physics3D`] the first time it steps with a body of its kind and without one.
+/// Steps `world`'s physics a tick, [`Tick::DT`](crate::Tick::DT): 2D, then 3D. A system for a
+/// layer's tick, after what sets bodies' velocities, such as scripts.
+///
+/// Each dimension first takes in what changed since its last step:
+///
+/// - Bodies, made in query order for each entity that has come to have a [`RigidBody2D`] or
+///   [`RigidBody3D`] and a [`Transform`], and taken out where either is gone.
+/// - A game's or an edit's change to a body's components (place, velocity, how it moves, its
+///   colliders) that the last step didn't make.
+/// - Joints, from each [`Joint2D`] and [`Joint3D`].
+///
+/// Then it moves the bodies and writes where each went and how fast into its components. A 2D
+/// body's translation is x and y, its z as it was, and its rotation turned about Z as far as the
+/// body turned, so what turns it otherwise stays. A 3D body's translation and rotation are
+/// whole. A world gets a [`Physics2D`] or [`Physics3D`] the first time it steps with a body of
+/// its kind and none.
 pub fn step_physics(world: &mut World) {
     let _zone = gg_core::zone!();
     dim2::step(world);
@@ -63,27 +66,26 @@ pub fn step_physics(world: &mut World) {
 /// No link, in [`Links::by_slot`].
 const NONE: u32 = u32::MAX;
 
-/// Which of a world's entities a physics resource has bodies for, as 2D and 3D physics keep them
-/// alike: a link for each entity with a body's component and a [`Transform`], but those under a
-/// parent, whose transforms are in their parents' space, which it warns of once each and leaves
-/// where they are. A component that isn't finite, holding a NaN or an infinity, as a divide by
-/// zero gives, as its transform, its velocities or a collider's size, is refused, so that it
-/// doesn't spread through contacts to what its body touches: warned of once while it stays so, its
-/// body keeps the last it took that was, and an entity without one has none made until it is.
+/// Which of a world's entities a physics resource has bodies for, in 2D and 3D alike: a link per
+/// entity with a body's component and a [`Transform`]. Those under a parent (their transforms are
+/// in its space) are warned of once and left where they are.
+///
+/// A non-finite component (NaN or infinity) in a transform, velocity or collider size is
+/// refused, so it doesn't spread through contacts: warned of once while it stays so, its body
+/// keeps the last finite value, and an entity without a body gets none until it's finite.
 struct Links<L> {
-    /// A link to each body, in the order their entities came.
+    /// In the order their entities came.
     linked: Vec<L>,
     /// Each link's index in `linked`, by its entity's slot; `NONE` for none.
     by_slot: Vec<u32>,
-    /// The entities with bodies, as a step finds them, in memory kept from one step to the next.
+    /// A step's entities with bodies; the memory is kept between steps.
     found: Vec<Entity>,
-    /// The bodies under a parent, which aren't moved, warned of once each as they're found there.
+    /// The bodies under a parent, warned of.
     children: Vec<Entity>,
-    /// The entities whose transforms aren't finite, warned of once each while they stay so.
+    /// The entities with non-finite transforms, warned of.
     refused: Vec<Entity>,
 }
 
-/// A link of [`Links`], to its entity's body.
 trait Link {
     fn entity(&self) -> Entity;
 }
@@ -101,7 +103,7 @@ impl<L> Default for Links<L> {
 }
 
 impl<L: Clone> Clone for Links<L> {
-    /// A copy, without `found`'s memory, as no step carries anything in it over.
+    /// Leaves out `found`: no step carries anything in it over.
     fn clone(&self) -> Self {
         Self {
             linked: self.linked.clone(),
@@ -112,7 +114,7 @@ impl<L: Clone> Clone for Links<L> {
         }
     }
 
-    /// Copies `source` into the memory this one holds, keeping its own `found`.
+    /// Keeps this one's own `found`.
     fn clone_from(&mut self, source: &Self) {
         self.linked.clone_from(&source.linked);
         self.by_slot.clone_from(&source.by_slot);
@@ -122,9 +124,9 @@ impl<L: Clone> Clone for Links<L> {
 }
 
 impl<L: Link> Links<L> {
-    /// The links of a resource as a snapshot file held it: `linked`, an entity gone since its last
-    /// step [`Entity::DEAD`]'s, and `children`, the bodies it warned of, the transforms it refused
-    /// warned of again. Fails with an entity linked twice.
+    /// Links from a snapshot file: `linked` (an entity gone since its last step is
+    /// [`Entity::DEAD`]) and `children`, the bodies warned of. Refused transforms are warned of
+    /// again. Fails with an entity linked twice.
     fn new(linked: Vec<L>, children: Vec<Entity>) -> Result<Self, Entity> {
         let mut by_slot = Vec::new();
         for (index, link) in (0..).zip(&linked) {
@@ -149,7 +151,6 @@ impl<L: Link> Links<L> {
         })
     }
 
-    /// Keeps the links that `keep` keeps, in their order.
     fn retain(&mut self, keep: impl FnMut(&L) -> bool) {
         let before = self.linked.len();
         self.linked.retain(keep);
@@ -161,11 +162,10 @@ impl<L: Link> Links<L> {
         }
     }
 
-    /// Gives `link` each entity with a `B` and a [`Transform`], in the order queries find them,
-    /// with these links, to make its body or take in what changed of it: but those under a parent,
-    /// which it warns of once each, naming `B` as `name`; and those of which `unfinite` names a
-    /// component that isn't finite, which it warns of once while it stays so
-    /// (`physics.not_finite`), giving `link` those with a body, to take in the rest, and making none
+    /// Gives `link` each entity with a `B` and a [`Transform`], in query order, to make its body
+    /// or take in what changed. Not those under a parent, warned of once, naming `B` as `name`.
+    /// Those with a non-finite component, per `unfinite`, are warned of once while they stay so
+    /// (`physics.not_finite`): `link` gets those with a body, to take in the rest; none are made
     /// for those without.
     fn find<B: Component>(
         &mut self,
@@ -222,21 +222,19 @@ impl<L: Link> Links<L> {
         self.found = found;
     }
 
-    /// The link to `entity`'s body, if it has one.
     fn get(&self, entity: Entity) -> Option<&L> {
         let index = self.by_slot.get(entity.slot()).copied().unwrap_or(NONE);
         let link = self.linked.get(index as usize);
         link.filter(|link| link.entity() == entity)
     }
 
-    /// The link to `entity`'s body, if it has one, to change.
     fn get_mut(&mut self, entity: Entity) -> Option<&mut L> {
         let index = self.by_slot.get(entity.slot()).copied().unwrap_or(NONE);
         let link = self.linked.get_mut(index as usize);
         link.filter(|link| link.entity() == entity)
     }
 
-    /// Adds `link`, whose entity has none.
+    /// Adds `link`; its entity has none yet.
     fn push(&mut self, link: L) {
         let index = u32::try_from(self.linked.len()).expect("fewer than 2^32 bodies");
         let slot = link.entity().slot();
@@ -248,9 +246,8 @@ impl<L: Link> Links<L> {
     }
 }
 
-/// A component physics takes only while it's finite, as [`Links`] refuses one that isn't.
+/// A component physics takes only while finite, as [`Links`] refuses it otherwise.
 trait Finite: Copy {
-    /// Whether it holds no NaN or infinity, in any number physics takes of it.
     fn finite(&self) -> bool;
 }
 
@@ -265,8 +262,7 @@ impl Finite for Transform {
     }
 }
 
-/// The name of the first of `world`'s `entity`'s components, of type `C`, that isn't finite, if
-/// it has one that isn't.
+/// `name`, if `entity`'s `C` isn't finite.
 fn unfinite<C: Finite + Component>(
     world: &World,
     entity: Entity,
@@ -278,14 +274,12 @@ fn unfinite<C: Finite + Component>(
         .then_some(name)
 }
 
-/// `now`, a component as its entity holds it, if it's finite, or else `was`, what was taken of it
-/// last: so that a component that isn't finite is taken as it was, as [`Links`] refuses it.
+/// `now` if it's finite, else `was`, what was taken last, as [`Links`] refuses it.
 fn kept<C: Finite>(now: C, was: C) -> C {
     if now.finite() { now } else { was }
 }
 
-/// [`kept`], for a collider, which an entity may have or not: one that isn't finite is taken as it
-/// was, or as none where it had none.
+/// [`kept`], for a collider an entity may lack: a non-finite one is taken as it was, or as none.
 fn kept_collider<C: Finite>(now: Option<C>, was: Option<C>) -> Option<C> {
     match now {
         Some(now) if !now.finite() => was,
@@ -293,14 +287,13 @@ fn kept_collider<C: Finite>(now: Option<C>, was: Option<C>) -> Option<C> {
     }
 }
 
-/// Why a joint joins nothing: the code it's warned of with, and why, to say.
+/// Why a joint joins nothing: its warning code, and why.
 type Unjoined = (&'static str, String);
 
-/// The bodies a joint joins, whose fields name `named`, its `body_a` and `body_b`, each as `body_of`
-/// finds an entity's body, its handle and what else goes with it; or, where it joins nothing, why:
-/// a body it doesn't name, one gone, or one that physics doesn't move, as without a `body`, the name
-/// of a body's component, or under a parent (`physics.joint_no_body`); and one body named twice,
-/// as their handles alone tell (`physics.joint_one_body`).
+/// The bodies a joint's `body_a` and `body_b` (`named`) name, as `body_of` finds them: handle and
+/// what goes with it. Else why it joins nothing: a body not named, gone, or not moved by physics
+/// (no `body` component, or under a parent: `physics.joint_no_body`); or one body named twice,
+/// which only the handles tell (`physics.joint_one_body`).
 fn joined<H: Copy + PartialEq, S: Copy>(
     world: &World,
     named: [Option<Entity>; 2],
@@ -335,9 +328,8 @@ fn joined<H: Copy + PartialEq, S: Copy>(
     }
 }
 
-/// Warns that the joint `entity`'s `name`, its component's, joins nothing, as `unjoined` says why,
-/// unless `warned`, why it was last warned of, says so already: once for each reason, while it
-/// joins nothing, so that a joint that goes from one reason to another is warned of each.
+/// Warns that `entity`'s joint `name` joins nothing, as `unjoined` says, unless `warned` (why it
+/// was last warned of) already says so: once per reason.
 fn warn_unjoined(
     world: &World,
     entity: Entity,
@@ -357,22 +349,20 @@ fn warn_unjoined(
     *warned = Some(why);
 }
 
-/// The color colliders' outlines draw in, linear: a light green, as physics debuggers draw them,
-/// apart from the grid's darker green axis.
+/// The color of colliders' outlines, linear: a light green, apart from the grid's darker axis.
 const OUTLINE: Vec4 = Vec4::new(0.3, 1.0, 0.3, 1.0);
 
-/// The color joints' lines draw in, linear: an orange, apart from the colliders' green.
+/// The color of joints' lines, linear: an orange, apart from the colliders' green.
 const JOINT: Vec4 = Vec4::new(1.0, 0.55, 0.1, 1.0);
 
 /// How wide colliders' outlines draw, in points: pixels of a window at a scale of 1.
 const OUTLINE_WIDTH: f32 = 2.0;
 
-/// How many lines a circle's outline draws with, and each ring of a sphere's or a capsule's: round
-/// to within a pixel up to some 800 pixels across.
+/// Lines in a circle's outline, and in each ring of a sphere's or capsule's: round to within a
+/// pixel up to some 800 pixels across.
 const SEGMENTS: usize = 64;
 
-/// A circle a unit in radius around the origin, in the XY plane, from +X counterclockwise and back,
-/// as the ends of the lines its outline draws with.
+/// A unit circle around the origin in the XY plane, from +X counterclockwise and back.
 type Ring = [Vec3; SEGMENTS + 1];
 
 fn ring() -> Ring {
@@ -382,16 +372,16 @@ fn ring() -> Ring {
     })
 }
 
-/// A collider's outline, as what places its shape.
+/// A collider's outline, as the matrix that places its shape.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Outline {
-    /// The square a unit across around the origin, in its XY plane, a [`BoxCollider2D`]'s.
+    /// A [`BoxCollider2D`]'s: the unit square around the origin in its XY plane.
     Rect(Mat4),
-    /// The circle a unit in radius around the origin, in its XY plane, a [`CircleCollider2D`]'s.
+    /// A [`CircleCollider2D`]'s: the unit circle in its XY plane.
     Circle(Mat4),
-    /// The cube a unit across around the origin, a [`BoxCollider3D`]'s.
+    /// A [`BoxCollider3D`]'s: the unit cube around the origin.
     Cuboid(Mat4),
-    /// The sphere a unit in radius around the origin, a [`SphereCollider3D`]'s.
+    /// A [`SphereCollider3D`]'s: the unit sphere around the origin.
     Sphere(Mat4),
     /// A [`CapsuleCollider3D`]'s: what's within `radius` of the segment along Y from `-half` to
     /// `half`, which `placed` turns and moves.
@@ -403,16 +393,14 @@ enum Outline {
 }
 
 /// Draws into `draws` the outline of each 2D and 3D collider in `world` whose entity has a
-/// [`Transform`], 2 points wide in a window of `scale` pixels a point, where its entity draws this
-/// frame as `poses` has it, with the entity's ID, so that a pick of an outline finds its entity:
-/// the 2D colliders' first; then each joint's lines, as [`lines_between`] has them, with its own
-/// entity's ID, the 2D joints' first. Lines draw with the engine's line shader, which `shaders`
-/// adds the first time any do.
+/// [`Transform`], 2 points wide in a window of `scale` pixels a point, where `poses` draws its
+/// entity, with the entity's ID so a pick finds it: 2D colliders first. Then each joint's
+/// [`lines_between`], with its own entity's ID, 2D joints first. Lines use the engine's line
+/// shader, which `shaders` adds the first time any draw.
 ///
-/// They draw over the rest of the view but where an opaque mesh is nearer, as lines do, rather
-/// than nudged toward the camera. Sprites test depth without writing it, so an outline shows from
-/// behind a sprite as from in front; a joint inside its bodies' meshes shows only where they don't
-/// hide it.
+/// They draw over the view except where an opaque mesh is nearer, not nudged toward the camera.
+/// Sprites test depth without writing it, so an outline shows from behind a sprite as from in
+/// front; a joint inside its bodies' meshes shows only where they don't hide it.
 pub(crate) fn draw_colliders(
     world: &World,
     poses: &Poses<'_>,
@@ -450,11 +438,9 @@ pub(crate) fn draw_colliders(
     dim3::joint_lines(world, poses, &mut joined);
 }
 
-/// Gives `each` a joint's lines, in the world's space, with `id`, its entity's: from where its
-/// first body's entity draws, as `poses` has it in `world`, to its first anchor there, from there
-/// to its second, and from there to its second body's; `anchors` in each body's space, as
-/// [`Joint2D`] and [`Joint3D`] name them, and `bodies` its bodies. A joint draws none where either
-/// body is gone or has no [`Transform`], as it joins nothing there.
+/// Gives `each` a joint's lines in the world's space, with `id`, its entity's: from where `poses`
+/// draws its first body to its first anchor, second anchor, and second body. `anchors` are in
+/// each body's space. None where either body is gone or has no [`Transform`].
 fn lines_between(
     world: &World,
     poses: &Poses<'_>,
@@ -485,10 +471,9 @@ fn lines_between(
     }
 }
 
-/// Gives `each` the lines `outline` draws with, each as the matrix that places it and its ends in
-/// that matrix's space: a rect's none, as it draws as one. A sphere draws as its rings about each
-/// axis; a capsule as its rings where its caps meet its side, its side's lines along X and Z, and
-/// its caps' arcs across them.
+/// Gives `each` the lines `outline` draws with: the placing matrix and the ends in its space. A
+/// rect has none, as it draws as one. A sphere is three rings; a capsule has rings where the caps
+/// meet the side, the side's lines along X and Z, and the caps' arcs across them.
 fn lines(outline: Outline, ring: &Ring, mut each: impl FnMut(Mat4, Vec3, Vec3)) {
     // A line from each of `points` to the next, each where `at` puts it.
     let mut join = |placed: Mat4, points: &[Vec3], at: &dyn Fn(Vec3) -> Vec3| {
@@ -501,8 +486,7 @@ fn lines(outline: Outline, ring: &Ring, mut each: impl FnMut(Mat4, Vec3, Vec3)) 
         Outline::Rect(_) => {}
         Outline::Circle(placed) => join(placed, ring, &same),
         Outline::Cuboid(placed) => {
-            // Each corner of the cube by its bits, X's the lowest; each edge joins two corners
-            // whose bits differ in one.
+            // Each corner by its bits, X's the lowest; an edge joins corners differing in one.
             let corner = |bits: usize| {
                 let half = |bit: usize| if bits & bit == 0 { -0.5 } else { 0.5 };
                 Vec3::new(half(1), half(2), half(4))
@@ -556,11 +540,10 @@ mod tests {
     use crate::Context;
     use crate::render_thread::Extracted;
 
-    /// Lines and squares' outlines a layer draws go over the world's entities, though it draws them
-    /// before the world, with no entity's ID, and the colliders' outlines over them while they're
-    /// shown, 2 points wide in a window at a scale of 1, with their entities' IDs; and not while
-    /// they're hidden. A circle a layer draws goes before the world's entities, as its sprites do,
-    /// with no entity's ID either.
+    /// A layer's lines and squares go over the world's entities, though drawn before the world,
+    /// with no entity ID. Colliders' outlines go over them while shown (2 points wide at a scale
+    /// of 1, with their entities' IDs), not while hidden. A layer's circle goes before the
+    /// world's entities, as its sprites do, with no entity ID.
     #[test]
     fn lines_and_outlines_draw_over_the_world() {
         let mut cx = Context::seeded(3);
@@ -586,8 +569,8 @@ mod tests {
         assert!(!cx.colliders_shown(), "hidden at first");
         for shown in [false, true] {
             cx.set_colliders_shown(shown);
-            // The circle first on both sides, since the engine's shaders take their indices in the
-            // order they're first asked for.
+            // The circle first on both sides: the engine's shaders take indices in the order
+            // they're first asked for.
             cx.draw_circle(Mat4::IDENTITY, Circle::default());
             cx.draw_line(line.from, line.to, line.color, line.width);
             cx.draw_rect(square, line.color, 1.0);
@@ -608,7 +591,7 @@ mod tests {
         }
     }
 
-    /// The lines each shape's outline draws with, in the space its matrix places them in.
+    /// The lines of a shape's outline, in the space its matrix places them in.
     fn drawn(outline: Outline) -> Vec<(Vec3, Vec3)> {
         let mut found = Vec::new();
         lines(outline, &ring(), |placed, from, to| {
@@ -618,10 +601,9 @@ mod tests {
         found
     }
 
-    /// A cube's outline is its 12 edges, each a unit long between two of its corners; a sphere's,
-    /// its three rings about its axes, each point of them a unit from its middle; and a capsule's,
-    /// its two rings, its side's four lines and its caps' four arcs, each point of them as far from
-    /// its segment as its radius, and every side of it reached; a rect's draws as one.
+    /// A cube's outline is its 12 unit edges between corners; a sphere's, three rings about its
+    /// axes, every point a unit from the middle; a capsule's, two rings, four side lines and four
+    /// cap arcs, every point a radius from its segment, every side reached. A rect has none.
     #[test]
     fn outlines_draw_as_their_shapes_lines() {
         let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
@@ -656,9 +638,9 @@ mod tests {
         assert!(drawn(Outline::Rect(Mat4::IDENTITY)).is_empty());
     }
 
-    /// A joint naming one body twice joins nothing (`physics.joint_one_body`), found by the body's
-    /// handle alone, so that what goes with it, as a scale that isn't a number, which equals nothing,
-    /// can't make one body two.
+    /// A joint naming one body twice joins nothing (`physics.joint_one_body`), found by the
+    /// handle alone: what goes with it, as a NaN scale, which equals nothing, can't make one body
+    /// two.
     #[test]
     fn a_joint_naming_one_body_twice_joins_nothing_whatever_its_scale() {
         let mut world = World::default();
@@ -674,8 +656,7 @@ mod tests {
         assert!(twice.is_ok());
     }
 
-    /// A world is given each kind of physics' resource the first time it steps with a body of that
-    /// kind, and not before.
+    /// A world gets each kind's resource the first time it steps with a body of that kind.
     #[test]
     fn worlds_get_physics_of_the_kinds_of_bodies_they_have() {
         let mut world = World::default();

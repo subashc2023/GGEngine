@@ -1,5 +1,4 @@
-//! Casts through the world's 3D colliders: a ray, or a shape swept along a line, giving what it
-//! hits first.
+//! Casts through the world's 3D colliders: a ray, or a shape swept along a line.
 
 use gg_core::math::{DVec3, Quat, Vec3};
 use rapier3d::parry::query::ShapeCastOptions;
@@ -11,22 +10,21 @@ use rapier3d::prelude::{
 use super::{Physics3D, at, vector};
 use crate::{Entity, World};
 
-/// A cast through the world's 3D colliders: where it starts, which way it goes, how far, and an
-/// entity whose colliders it passes through, as a character's own as it looks about.
+/// A cast through the world's 3D colliders.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cast {
-    /// Where it starts, in the world's space, in `f64`, as positions are.
+    /// Where it starts, in the world's space, in `f64` as positions are.
     pub from: DVec3,
-    /// Which way it goes, of any length but none.
+    /// Which way it goes: any length but 0.
     pub toward: Vec3,
-    /// How far it goes, in units: without end at `f32::INFINITY`.
+    /// How far it goes, in units: unlimited at `f32::INFINITY`.
     pub max_distance: f32,
-    /// An entity whose colliders it passes through, if any.
+    /// An entity whose colliders it passes through, as a character's own, if any.
     pub exclude: Option<Entity>,
 }
 
 impl Cast {
-    /// A cast from `from` toward `toward`, without end, through every collider.
+    /// A cast from `from` toward `toward`, unlimited, through every collider.
     pub fn new(from: DVec3, toward: Vec3) -> Self {
         Self {
             from,
@@ -36,7 +34,7 @@ impl Cast {
         }
     }
 
-    /// This cast, going no farther than `max_distance`.
+    /// This cast, no farther than `max_distance`.
     pub fn within(self, max_distance: f32) -> Self {
         Self {
             max_distance,
@@ -44,8 +42,8 @@ impl Cast {
         }
     }
 
-    /// The unit vector of the way it goes, if it goes anywhere: none for a way of no length, a
-    /// start that isn't a point, or a distance that isn't 0 or more.
+    /// The unit direction, if it goes anywhere: none for a zero direction, a non-finite start, or
+    /// a distance that isn't 0 or more.
     fn way(&self) -> Option<Vec3> {
         let goes = self.max_distance >= 0.0 && self.from.is_finite();
         self.toward.try_normalize().filter(|_| goes)
@@ -60,23 +58,23 @@ impl Cast {
     }
 }
 
-/// A shape that [`World::cast_shape`] sweeps through the world, in the space of where it's cast
-/// from, as the colliders of the same names are, unscaled.
+/// A shape that [`World::cast_shape`] sweeps through the world, unscaled, in the space it's cast
+/// from, like the colliders of the same names.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape3D {
-    /// A box around its middle, as wide, tall and deep as `size`.
+    /// A box around its middle, `size` wide, tall and deep.
     Box { size: Vec3 },
     /// A sphere around its middle.
     Sphere { radius: f32 },
-    /// What's within `radius` of a segment along its Y through its middle, as tall as `height`
-    /// from the bottom of its lower cap to the top of its upper, a sphere where that's no more than
-    /// twice its radius.
+    /// What's within `radius` of a segment along Y through its middle, `height` tall from the
+    /// bottom of its lower cap to the top of its upper. A sphere where `height` is at most twice
+    /// `radius`.
     Capsule { height: f32, radius: f32 },
 }
 
 impl Shape3D {
-    /// What `f` gives of the shape as rapier's, of sizes of no less than 0, made where it's
-    /// given rather than allocated, as a script's cast allocates nothing.
+    /// What `f` gives of the shape as rapier's, with sizes of at least 0, made in place so a
+    /// script's cast allocates nothing.
     fn with<R>(self, f: impl FnOnce(&dyn Shape) -> R) -> R {
         let at_least_0 = |x: f32| f64::from(if x > 0.0 { x } else { 0.0 });
         match self {
@@ -93,15 +91,14 @@ impl Shape3D {
     }
 }
 
-/// What a cast hit first: the entity whose collider it was, where it hit, the way the collider's
-/// surface faces there, and how far along the cast that was.
+/// What a cast hit first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit3D {
+    /// The entity whose collider it was.
     pub entity: Entity,
-    /// Where it hit the collider, in the world's space, in `f64`, as positions are.
+    /// Where it hit, in the world's space, in `f64` as positions are.
     pub point: DVec3,
-    /// The unit vector out of the collider's surface where it hit: none where the cast started
-    /// inside it.
+    /// The unit vector out of the collider's surface there: none where the cast started inside.
     pub normal: Vec3,
     /// How far along the cast it hit, in units: 0 where it started inside the collider.
     pub distance: f32,
@@ -109,11 +106,10 @@ pub struct Hit3D {
 
 impl World {
     /// What a ray from `cast.from` toward `cast.toward` hits first of the world's 3D colliders,
-    /// within `cast.max_distance`, but sensors, those of `cast.exclude` and those of entities gone:
-    /// nothing
-    /// for a world that has never stepped 3D physics, for a way of no length, or for a distance
-    /// that isn't 0 or more. It sees the colliders where the last step of physics left them, and
-    /// none made since; a ray that starts inside one hits it there.
+    /// within `cast.max_distance`, skipping sensors, those of `cast.exclude` and those of entities
+    /// gone. Nothing for a world that has never stepped 3D physics, a zero direction, or a
+    /// distance that isn't 0 or more. It sees the colliders as the last step left them, none made
+    /// since; a ray that starts inside one hits it there.
     pub fn cast_ray(&self, cast: Cast) -> Option<Hit3D> {
         let physics = self.resource::<Physics3D>()?;
         let toward = cast.way()?;
@@ -128,9 +124,9 @@ impl World {
     }
 
     /// What `shape`, turned by `rotation` and swept from `cast.from` toward `cast.toward`, hits
-    /// first of the world's 3D colliders, as [`cast_ray`](Self::cast_ray) says: where its surface
-    /// first touches theirs, on the collider hit, as the shape is at `distance` along the way. A
-    /// shape that starts inside one hits it there.
+    /// first, as for [`cast_ray`](Self::cast_ray): `point` is where its surface first touches the
+    /// collider's, with the shape at `distance` along the way. A shape that starts inside one
+    /// hits it there.
     pub fn cast_shape(&self, shape: Shape3D, rotation: Quat, cast: Cast) -> Option<Hit3D> {
         let physics = self.resource::<Physics3D>()?;
         let toward = cast.way()?;
@@ -152,8 +148,8 @@ impl World {
 }
 
 impl Physics3D {
-    /// What `cast` gives, run against the colliders, but sensors and those of `exclude` and of
-    /// entities gone from `world`, as its hit, with the entity whose collider it hit.
+    /// Runs `cast` against the colliders, skipping sensors, `exclude`'s and those of entities
+    /// gone from `world`, and adds the entity hit.
     fn cast(
         &self,
         world: &World,
@@ -188,7 +184,7 @@ impl Physics3D {
     }
 }
 
-/// What a cast gives as it hits: the collider, where it hit, its surface's way there, and how far.
+/// What a cast gives on a hit: collider, point, normal, distance.
 type Cast3D = (ColliderHandle, DVec3, Vec3, f32);
 
 #[cfg(test)]
@@ -197,7 +193,7 @@ mod tests {
     use super::super::tests::{floor, step};
     use super::*;
 
-    /// A floor, its top at y 0.5, and a unit box on it around (0, 1, 0), stepped once.
+    /// A floor with its top at y 0.5 and a unit box on it around (0, 1, 0), stepped once.
     fn stepped() -> (World, Entity, Entity) {
         let mut world = World::default();
         let floor = floor(&mut world);
@@ -211,9 +207,8 @@ mod tests {
         (world, floor, boxed)
     }
 
-    /// A ray hits the nearest collider in its way, giving its entity, where, the surface's normal
-    /// there and how far; and passes through those of the entity it excludes, and stops short as
-    /// far as it goes. One that starts inside a collider hits it there.
+    /// A ray hits the nearest collider in its way, passes through its excluded entity's, and stops
+    /// short at its distance. One that starts inside a collider hits it there.
     #[test]
     fn rays_hit_the_nearest_collider() {
         let (world, floor, boxed) = stepped();
@@ -238,8 +233,8 @@ mod tests {
         assert_eq!((inside.entity, inside.distance), (boxed, 0.0));
     }
 
-    /// A sphere, a capsule and a box swept down hit the box's top as far down as their lowest
-    /// points reach it, where their surfaces touch; a turned box reaches as its corner does.
+    /// A sphere, capsule and box swept down hit the box's top where their lowest points touch it;
+    /// a turned box reaches as its corner does.
     #[test]
     fn shapes_hit_where_their_surfaces_touch() {
         let (world, _, boxed) = stepped();
@@ -281,9 +276,9 @@ mod tests {
         );
     }
 
-    /// A cast finds nothing in a world that has never stepped 3D physics, for a way of no length
-    /// or a distance that isn't a number; nor the colliders of an entity gone since the last step,
-    /// nor those made since, as a character's.
+    /// A cast finds nothing in a world that never stepped 3D physics, for a zero direction or a NaN
+    /// distance; nor the colliders of an entity gone since the last step, nor those made since,
+    /// as a character's.
     #[test]
     fn casts_find_only_what_the_last_step_left() {
         let empty = World::default();

@@ -1,5 +1,4 @@
-//! Joints: components that hold two bodies together, as rapier's impulse joints do, each a
-//! [`Joint3D`] on an entity of its own or on either body's, naming both.
+//! Joints: [`Joint3D`] components that hold two bodies together, as rapier's impulse joints do.
 
 use gg_core::math::Vec3;
 use rapier3d::prelude::{
@@ -13,99 +12,93 @@ use crate::draw::Poses;
 use crate::physics::{Link, joined, lines_between, warn_unjoined};
 use crate::{Component, Entity, Reflect, World, Writable};
 
-/// What a [`Joint3D`] lets the bodies it joins do, from where it holds them, its anchors and axis
-/// in each body's space.
+/// What a [`Joint3D`] lets its bodies do. Anchors and axis are in each body's space.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum JointKind3D {
-    /// Nothing: they move as one, turned alike.
+    /// Nothing: the bodies move as one, turned alike.
     #[default]
     Fixed,
-    /// Turn about its axis alone, as a hinge: between its limits while it's limited, and driven by
-    /// its motor.
+    /// A hinge: they turn about the axis alone. Limits and motor apply.
     Revolute,
-    /// Slide along its axis alone, turned alike, as a slider: between its limits while it's
-    /// limited, and driven by its motor.
+    /// A slider: they slide along the axis alone, turned alike. Limits and motor apply.
     Prismatic,
-    /// Turn every way about its anchors, held together there, as a ball joint.
+    /// A ball joint: they turn every way about their anchors, held together there.
     Spherical,
-    /// Anything but go further apart, at their anchors, than its length, as a rope lets them.
+    /// A rope: anything but the anchors going further apart than `length`.
     Rope,
-    /// Anything, their anchors pulled toward its length apart, as a spring pulls them, by its
-    /// stiffness and damping.
+    /// A spring: anything, the anchors pulled toward `length` apart by `stiffness` and `damping`.
     Spring,
 }
 
-/// A joint that holds two 3D bodies together, at each tick a layer runs
-/// [`step_physics`](crate::step_physics) in, as rapier's impulse joints do: `body_a` and `body_b`,
-/// each an entity that physics moves, a [`RigidBody3D`](super::RigidBody3D)'s or a character's,
-/// held at its anchor, in its space, scaled with it as its colliders are, and let move from there as
-/// its kind says. A joint is on an entity of its own or on either body's, and an entity has one, so
-/// that a body with several, as a chain's link has two, has them on entities of their own. Its
-/// frames are its anchors and its axis in each body's space, the axis turned with the body but not
-/// scaled, so that a fixed or a prismatic joint holds its bodies turned alike, whatever their
-/// scales, and a revolute's angle is 0 where they're turned alike. A prismatic joint's motor pushes
-/// its second body at its anchor, so that it drives one anchored at its middle hardest, as rapier's
-/// solver gives way to the turn a push from elsewhere makes. The bodies it joins don't collide with
-/// each other unless `bodies_collide` says so, a character's sweep passing through what it's joined
-/// to as their contacts do.
+/// Holds two 3D bodies together, as rapier's impulse joints do, in the ticks a layer runs
+/// [`step_physics`](crate::step_physics) in.
 ///
-/// One naming an entity that isn't a body physics moves, as one gone, one without a
-/// `RigidBody3D` or one under a parent, joins nothing, warned of once for each reason
-/// (`physics.joint_no_body`), as does one naming one body twice (`physics.joint_one_body`). A change
-/// to it is taken at the next step, as is a body made again; and its joint goes as it does, or its
-/// entity, or either body. An edit's delete of either body clears the field naming it, as
-/// [`Component::cleared`] says, so that it names nothing gone, which a scene wouldn't save.
+/// Each body is an entity that physics moves: a [`RigidBody3D`](super::RigidBody3D)'s or a
+/// character's. Its anchor is in its space, scaled with it as its colliders are. The joint sits on
+/// an entity of its own or on either body's; an entity has one.
+///
+/// - The axis turns with the body but isn't scaled, so a fixed or prismatic joint holds its bodies
+///   turned alike whatever their scales, and a revolute's angle is 0 where they're turned alike.
+/// - A prismatic motor pushes the second body at its anchor, so it drives one anchored at its
+///   middle hardest: rapier's solver gives way to the turn a push from elsewhere makes.
+/// - The bodies don't collide with each other unless `bodies_collide`. A character's sweep passes
+///   through what it's joined to as their contacts do.
+///
+/// A joint naming an entity that physics doesn't move (gone, without a `RigidBody3D`, or under a
+/// parent) joins nothing, warned of once per reason (`physics.joint_no_body`). So does one naming
+/// one body twice (`physics.joint_one_body`). A change, or a body made again, is taken at the next
+/// step; rapier's joint goes with the component, its entity or either body. An edit's delete of
+/// either body clears the field naming it ([`Component::cleared`]).
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Joint3D {
-    /// The first body it joins.
+    /// The first body.
     pub body_a: Option<Entity>,
-    /// The second body it joins.
+    /// The second body.
     pub body_b: Option<Entity>,
-    /// What it lets its bodies do.
+    /// What the joint lets its bodies do.
     pub kind: JointKind3D,
     /// Where it holds the first body, in its space.
     pub anchor_a: Vec3,
     /// Where it holds the second body, in its space.
     pub anchor_b: Vec3,
     /// The axis a revolute joint turns about and a prismatic one slides along, in each body's
-    /// space, turned with it but not scaled, made a unit: X for one of no length.
+    /// space, turned with it but not scaled, normalized: X if it has no length.
     #[reflect(default = Vec3::X)]
     pub axis: Vec3,
-    /// Whether a revolute or a prismatic joint keeps from `lower` to `upper`.
+    /// Whether a revolute or prismatic joint keeps within `lower` to `upper`.
     pub limited: bool,
-    /// The least a limited revolute joint turns, in radians, counterclockwise as its axis points
-    /// at the viewer, or a prismatic one slides along its axis, in units.
+    /// The least a limited revolute joint turns, in radians counterclockwise as its axis points at
+    /// the viewer, or a prismatic one slides along its axis, in units.
     pub lower: f32,
     /// The most a limited revolute joint turns, or a prismatic one slides.
     pub upper: f32,
-    /// How fast a revolute's or a prismatic's motor drives it, in radians or units a second, as
-    /// hard as `damping` says.
+    /// How fast a revolute or prismatic motor drives, in radians or units a second, as hard as
+    /// `damping` says.
     pub target_velocity: f32,
-    /// Where a revolute's or a prismatic's motor drives it to, in radians or units, as hard as
-    /// `stiffness` says.
+    /// Where a revolute or prismatic motor drives to, in radians or units, as hard as `stiffness`
+    /// says.
     pub target_position: f32,
-    /// How hard a motor pulls toward its target position, or a spring toward its length, for each
-    /// radian or unit it's away: a motor or a spring without stiffness or damping, as by default,
-    /// drives or pulls nothing. A motor's are accelerations, so that it drives a heavy body as it
-    /// does a light one; a spring's are forces, so that a heavy body stretches it further.
+    /// How hard a motor pulls toward its target position, or a spring toward its length, per
+    /// radian or unit away. A motor or spring with neither stiffness nor damping (the default)
+    /// drives or pulls nothing. A motor's are accelerations, so it drives a heavy body as a light
+    /// one; a spring's are forces, so a heavy body stretches it further.
     #[reflect(min = 0.0)]
     pub stiffness: f32,
-    /// How hard a motor holds to its target velocity, or a spring against its anchors' speed apart,
-    /// for each radian or unit a second it's off.
+    /// How hard a motor holds to its target velocity, or a spring against its anchors' speed
+    /// apart, per radian or unit a second off.
     #[reflect(min = 0.0)]
     pub damping: f32,
-    /// The most force, or torque, a motor or a spring drives it with: without limit at infinity, as
-    /// by default, and none at 0 or below.
+    /// The most force, or torque, a motor or spring drives with: infinity (the default) is
+    /// unlimited, 0 or below none.
     #[reflect(default = f32::INFINITY)]
     pub max_force: f32,
     /// How far apart a rope lets its anchors go, or a spring rests, in units.
     #[reflect(min = 0.0, default = 1.0)]
     pub length: f32,
-    /// Whether the bodies it joins collide with each other.
+    /// Whether its bodies collide with each other.
     pub bodies_collide: bool,
 }
 
-/// `body_a` and `body_b` are cleared by a delete of what they name.
 impl Component for Joint3D {
     fn cleared() -> &'static [&'static str] {
         &["body_a", "body_b"]
@@ -138,8 +131,7 @@ impl Default for Joint3D {
 }
 
 impl Joint3D {
-    /// rapier's joint, as this one says, between bodies whose entities are of `scales`, which scale
-    /// its anchors.
+    /// rapier's joint for bodies whose entities have `scales`, which scale the anchors.
     fn generic(&self, scales: [Vec3; 2]) -> GenericJoint {
         let locked = match self.kind {
             JointKind3D::Fixed => JointAxesMask::LOCKED_FIXED_AXES,
@@ -152,7 +144,7 @@ impl Joint3D {
             .local_anchor1(vector(self.anchor_a * scales[0]))
             .local_anchor2(vector(self.anchor_b * scales[1]))
             .contacts_enabled(self.bodies_collide);
-        // Compared, so that one that isn't a number drives with none either.
+        // Compared, so NaN drives with none.
         let max_force = if self.max_force > 0.0 {
             f64::from(self.max_force)
         } else {
@@ -164,15 +156,14 @@ impl Joint3D {
             _ => None,
         };
         if let Some(free) = free {
-            // Unscaled, as each frame's turn: scaled, a mirrored body's or one stretched across an
-            // axis off its own would frame it turned otherwise than its fellow, which the joint
-            // would turn it to.
+            // Unscaled: scaled, a mirrored or stretched body would frame a turn unlike its
+            // fellow's, and the joint would turn it there.
             let axis = vector(self.axis.try_normalize().unwrap_or(Vec3::X));
             built = built.local_axis1(axis).local_axis2(axis);
             if self.limited {
                 built = built.limits(free, [self.lower.into(), self.upper.into()]);
             }
-            // rapier's motor with neither drives as hard as it can toward nothing, which none means.
+            // rapier's motor with neither drives as hard as it can toward nothing.
             if self.stiffness > 0.0 || self.damping > 0.0 {
                 built = built
                     .set_motor(
@@ -185,9 +176,9 @@ impl Joint3D {
                     .motor_max_force(free, max_force);
             }
         }
-        // A rope and a spring are rapier's: the distance between their anchors, limited to the
-        // length, or driven toward it by a motor of forces, which, of neither stiffness nor damping,
-        // would hold them rigidly apart.
+        // The distance between the anchors, limited to the length (rope) or driven toward it by a
+        // force motor (spring). With neither stiffness nor damping that motor would hold them
+        // rigidly apart.
         match self.kind {
             JointKind3D::Rope => {
                 built = built
@@ -210,19 +201,17 @@ impl Joint3D {
     }
 }
 
-/// A joint, its entity's, and what it was made of as the last step left it, as a body's link keeps
-/// what it was made of: a change since is a game's or an edit's, which the next step takes.
+/// A joint as the last step left it: a change since is a game's or an edit's.
 #[derive(Clone)]
 pub(super) struct Jointed {
     pub(super) entity: Entity,
     /// rapier's joint, while it joins two bodies.
     pub(super) handle: Option<ImpulseJointHandle>,
-    /// The bodies rapier's joint joins, and their entities' scales, which its anchors are scaled
-    /// by.
+    /// The bodies rapier's joint joins, and their entities' scales, which scale its anchors.
     pub(super) bodies: [RigidBodyHandle; 2],
     pub(super) scales: [Vec3; 2],
     pub(super) joint: Joint3D,
-    /// Why it joins nothing, as it was last warned of, while it joins nothing.
+    /// Why it joins nothing, as last warned, while it joins nothing.
     pub(super) warned: Option<String>,
 }
 
@@ -232,7 +221,7 @@ impl Link for Jointed {
     }
 }
 
-/// A joint as a snapshot file holds it, as [`SavedLinked`](super::SavedLinked) holds a body.
+/// A joint in a snapshot file, like [`SavedLinked`](super::SavedLinked).
 #[derive(Serialize, Deserialize)]
 pub(super) struct SavedJoint {
     pub(super) entity: Option<u64>,
@@ -244,10 +233,9 @@ pub(super) struct SavedJoint {
 }
 
 impl Physics3D {
-    /// Takes out each joint whose entity has gone or lost its [`Joint3D`]; then, for each entity
-    /// with one, in the order queries find them, makes its joint, takes in what changed of it or of
-    /// its bodies, or takes it out where it joins nothing, warning of that once for each reason.
-    /// After the bodies and the characters are found, so that it joins those made this step.
+    /// Takes out each joint whose entity has gone or lost its [`Joint3D`]. Then, for each entity
+    /// with one, in query order, makes the joint, takes in what changed, or takes it out where it
+    /// joins nothing, warning once per reason. Runs after the bodies and characters are found.
     pub(super) fn join(&mut self, world: &World) {
         let joints = &mut self.rapier.impulse_joints;
         self.joints.retain(|jointed| {
@@ -291,8 +279,8 @@ impl Physics3D {
                 }
             };
             let (bodies, scales) = ([a, b], [scale_a, scale_b]);
-            // rapier's joint, if it still joins these bodies: a body taken out takes its joints
-            // with it, and one made again is another.
+            // rapier's joint, if it still joins these bodies: a body taken out takes its joints,
+            // and one made again is another.
             let held = jointed.handle.filter(|&handle| {
                 let held = joints.get(handle);
                 held.is_some_and(|held| [held.body1(), held.body2()] == bodies)
@@ -323,8 +311,7 @@ impl Physics3D {
         }
     }
 
-    /// The body of `entity`, a body's or a character's, if it has one, and its entity's scale, as
-    /// this step took it in.
+    /// The body of `entity`, a body's or a character's, and its scale as this step took it in.
     fn body_and_scale(&self, entity: Entity) -> Option<(RigidBodyHandle, Vec3)> {
         let body = (self.links.get(entity)).map(|linked| (linked.body, linked.transform.scale));
         body.or_else(|| {
@@ -334,11 +321,10 @@ impl Physics3D {
     }
 }
 
-/// Has rapier find the contacts between the colliders of `bodies`, in `rigid`, and the rest afresh
-/// at the next step, as a joint between them is made or lets them collide anew: it recycles a
-/// touching pair's contacts while the pair barely moves, past its check of whether a joint lets the
-/// pair's bodies collide, unless a collider changed otherwise than by moving, as one put back where
-/// it is on its body has.
+/// Has rapier find the contacts of `bodies`' colliders afresh at the next step, when a joint
+/// between them is made or starts letting them collide. rapier recycles a touching pair's contacts
+/// while the pair barely moves, skipping its joint check, unless a collider changed other than by
+/// moving, as one put back where it is has.
 fn recollide(rigid: &RigidBodySet, colliders: &mut ColliderSet, bodies: [RigidBodyHandle; 2]) {
     for body in bodies {
         for &collider in rigid[body].colliders() {
@@ -351,9 +337,8 @@ fn recollide(rigid: &RigidBodySet, colliders: &mut ColliderSet, bodies: [RigidBo
     }
 }
 
-/// Gives `each` the lines of each [`Joint3D`] in `world`, with its entity's ID, in the order queries
-/// find them, as [`lines_between`] has them: from its first body to its anchors and on to its
-/// second, where they draw this frame as `poses` has them.
+/// Gives `each` the [`lines_between`] of each [`Joint3D`] in `world`, with its entity's ID, in
+/// query order.
 pub(in crate::physics) fn joint_lines(
     world: &World,
     poses: &Poses<'_>,
@@ -413,9 +398,8 @@ mod tests {
         libm::atan2f(-x.z, x.x)
     }
 
-    /// A box welded beside a post stays there, turned as the post is; one hung from it by a ball
-    /// joint and pushed aside swings about the post's anchor, which its own stays at; and one on a
-    /// rope, dropped from nearer, falls until the rope is taut, no further than its length.
+    /// A welded box stays beside its post, turned as it is; one on a ball joint, pushed aside,
+    /// swings about the post's anchor; one on a rope falls until it's taut, no further.
     #[test]
     fn joints_hold_their_bodies_together() {
         let mut world = World::default();
@@ -477,9 +461,8 @@ mod tests {
         );
     }
 
-    /// A door hinged to a post turns no further than its limit as its motor drives it at a speed,
-    /// then, as its motor is given a target to turn to instead, turns there and holds: the step
-    /// after a change to its joint takes it.
+    /// A hinged door turns no further than its limit as its motor drives it at a speed, then,
+    /// given a target position instead, turns there and holds: the next step takes the change.
     #[test]
     fn a_revolute_joint_keeps_to_its_limits_and_its_motor_drives_it() {
         let mut world = World::default();
@@ -516,10 +499,9 @@ mod tests {
         );
     }
 
-    /// A joint goes as its component does, or as either body's entity goes, its body falling free
-    /// then; and one naming an entity gone or that isn't a body, or one body twice, joins nothing,
-    /// warned of once for each reason as it goes from one to the next, until it joins two bodies
-    /// again.
+    /// A joint goes with its component or either body's entity, the body falling free. One naming
+    /// an entity gone or not a body, or one body twice, joins nothing, warned of once per reason,
+    /// until it joins two bodies again.
     #[test]
     fn a_joint_goes_with_its_component_and_its_bodies() {
         let logged = crate::testing::logged();
@@ -595,10 +577,9 @@ mod tests {
     }
 
     /// An edit's delete of a jointed body clears the field of each joint naming it, as sets of the
-    /// same edit, so that the scene saves, where a field naming an entity gone would be refused
-    /// (`ecs.no_entity`): a joint on an entity of its own and one on the other body's, but not one
-    /// the delete takes with it. Undone, they name it again and join it as before; redone, they're
-    /// cleared again.
+    /// same edit, so the scene saves (a name of an entity gone is refused, `ecs.no_entity`): a
+    /// joint on its own entity and one on the other body's, not one the delete takes with it.
+    /// Undone, they name it again and join as before; redone, they're cleared again.
     #[test]
     fn a_delete_of_a_body_clears_the_joints_naming_it() {
         let mut world = World::default();
@@ -625,7 +606,7 @@ mod tests {
         let mut log = crate::Log::default();
         let delete = crate::Operation::Delete { entity: id };
         log.apply(&mut world, delete.clone()).expect("deleted");
-        // Shown as its author gave it, as the Inspector's undo names it.
+        // As its author gave it, as the Inspector's undo names it.
         assert_eq!(log.undoable(), Some(&[delete][..]));
         let named = |world: &World, joint: Entity| {
             let joint = world.get::<Joint3D>(joint).expect("kept");
@@ -655,8 +636,8 @@ mod tests {
         assert_eq!(named(&world, other), [None, Some(other)]);
     }
 
-    /// A spring without stiffness or damping, as by default, pulls nothing: a box hung 3 below a
-    /// post on one of length 1 falls as one beside it on no joint does.
+    /// A default spring pulls nothing: a box hung 3 below a post on one of length 1 falls as one
+    /// beside it on no joint does.
     #[test]
     fn a_spring_without_stiffness_or_damping_pulls_nothing() {
         let mut world = World::default();
@@ -674,9 +655,8 @@ mod tests {
         assert!((fell - fell_free).abs() < 1e-4, "{fell} {fell_free}");
     }
 
-    /// Two boxes resting on each other, welded at runtime by a joint whose bodies don't collide,
-    /// lose their contact at once, though rapier recycles a resting pair's contacts, and keep it
-    /// lost; and find it again as their joint lets them collide.
+    /// Two resting boxes welded at runtime by a non-colliding joint lose their contact at once,
+    /// though rapier recycles a resting pair's, and keep it lost until the joint lets them collide.
     #[test]
     fn a_joint_made_between_touching_bodies_parts_their_contacts() {
         let mut world = World::default();
@@ -713,8 +693,8 @@ mod tests {
         assert!(touching(&world), "colliding again");
     }
 
-    /// A character walks through a wall it's joined to by a joint whose bodies don't collide, as
-    /// its sweep leaves the wall out, where one not joined to its wall stops at it.
+    /// A character walks through a wall it's joined to by a non-colliding joint, its sweep leaving
+    /// the wall out; one not joined to its wall stops at it.
     #[test]
     fn a_character_passes_through_what_its_joined_to_without_colliding() {
         use super::super::CharacterController3D;
@@ -747,9 +727,9 @@ mod tests {
         assert!(x(stopped) < -0.5, "stopped at its wall: {}", x(stopped));
     }
 
-    /// A rig of each kind of joint, from a post: a chain of four boxes on revolute joints, a door
-    /// that a motor turns, a box that a motor slides between limits, a pendulum on a ball joint, a
-    /// box on a rope, one on a spring and one welded. Gives the motorized joints' entities.
+    /// One of each joint kind from a post: a chain of four boxes, a motor-turned door, a
+    /// motor-driven slider, a ball-joint pendulum, a rope, a spring, a weld. Gives the motorized
+    /// joints' entities.
     fn rig(world: &mut World) -> [Entity; 2] {
         let held = post(world, Vec3::new(0.0, 6.0, 0.0));
         let mut last = held;
@@ -829,17 +809,13 @@ mod tests {
         [turned, slid]
     }
 
-    /// A world of each kind of joint, moving, copied with nothing changed since its last step, and
-    /// with a joint changed, and saved whole to text as a snapshot file holds it and loaded into a
-    /// world of another process's making, steps as the world it came from did, bit for bit:
-    /// rapier's joints come back through its saved state, and a change to a joint since its last
-    /// step is taken by the next, as it would have been.
+    /// A moving world of every joint kind steps bit for bit as its copies do: one with nothing
+    /// changed since the last step, one with a joint changed, one saved and loaded elsewhere.
     #[test]
     fn a_world_with_joints_restored_steps_as_it_did() {
         let mut world = World::seeded(7);
         let [turned, _] = rig(&mut world);
         step(&mut world, 40);
-        // A copy taken between steps, with nothing changed since the last.
         let mut plain = world.clone();
         step(&mut plain, 20);
         step(&mut world, 20);
@@ -885,7 +861,7 @@ mod tests {
         }
     }
 
-    /// A revolute joint about Z from the middle of one unit box's right side to the next's left.
+    /// A revolute about Z from one unit box's right side to the next's left.
     fn hinge() -> Joint3D {
         Joint3D {
             kind: JointKind3D::Revolute,
@@ -896,8 +872,7 @@ mod tests {
         }
     }
 
-    /// A chain of four boxes hung level from a post, which swings down. Gives the post and the
-    /// hinges.
+    /// Four boxes hung level from a post swing down. Gives the post and the hinges.
     fn chain(world: &mut World) -> (Entity, [Entity; 4]) {
         let held = post(world, Vec3::new(0.0, 6.0, 0.0));
         let mut last = held;
@@ -910,7 +885,7 @@ mod tests {
         (held, hinges)
     }
 
-    /// Hangs a box from the left of `held`, a chain's post, by a hinge.
+    /// Hangs a box from the left of `held` by a hinge.
     fn hang_left(world: &mut World, held: Entity) {
         let hung = crate_at(world, Vec3::new(-2.0, 6.0, 0.0), Quat::IDENTITY);
         let other = Joint3D {
@@ -921,8 +896,8 @@ mod tests {
         join(world, held, hung, other);
     }
 
-    /// A world rolled back with `clone_from` to a snapshot from before a joint was made, or taken
-    /// out, steps as a copy of the snapshot does, bit for bit: rapier's workspace, which keeps the
+    /// A world rolled back with `clone_from` to a snapshot from before a joint was made or taken
+    /// out steps as a copy of the snapshot does, bit for bit: rapier's workspace, which keeps the
     /// joints it last solved, goes with the world it stepped.
     #[test]
     fn a_world_rolled_back_past_a_joints_making_or_going_steps_as_a_copy() {
@@ -952,10 +927,9 @@ mod tests {
         }
     }
 
-    /// Physics copied into memory kept from before a joint was made in it steps rapier as a copy of
-    /// it does, bit for bit, at rapier's own steps, without what a step takes in of the world first:
-    /// rapier keeps the joints it last solved in its workspace, which goes with the physics it
-    /// stepped, where a world's step would mask it, marking every body changed as it takes them in.
+    /// Physics rolled back past a joint's making steps rapier as a copy does, bit for bit, at
+    /// rapier's own steps: rapier keeps the joints it last solved in its workspace, which goes
+    /// with the physics it stepped. A world's step would mask it, marking every body changed.
     #[test]
     fn physics_copied_back_past_a_joints_making_steps_rapier_as_a_copy() {
         let mut world = World::seeded(7);
@@ -990,9 +964,8 @@ mod tests {
         }
     }
 
-    /// A joint's lines go from where its first body draws to its anchor there, on to its second's,
-    /// and to its second body, with the joint's entity's ID; and none of a joint that names a body
-    /// gone.
+    /// A joint's lines run from its first body to its anchor there, on to its second anchor, and
+    /// to its second body, with the joint's entity's ID; a joint naming a body gone has none.
     #[test]
     fn a_joints_lines_go_from_its_bodies_to_its_anchors() {
         let mut world = World::default();
@@ -1032,10 +1005,9 @@ mod tests {
         assert_eq!(found, want);
     }
 
-    /// The world's hash after physics has stepped the rig of each kind of joint, its motors driving,
-    /// over a floor, and a small fast ball with continuous collision fired at a thin wall, for four
-    /// seconds, which CI checks on every platform: a difference on some platforms only is a bug in
-    /// determinism, not a value to change here.
+    /// The world's hash after four seconds of the rig over a floor, its motors driving, and a
+    /// small fast ball with continuous collision fired at a thin wall. CI checks it on every
+    /// platform: a difference on some alone is a determinism bug, not a value to change here.
     #[test]
     fn joints_hash_as_their_reference_says() {
         let mut world = World::seeded(7);

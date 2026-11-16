@@ -1,7 +1,7 @@
-//! 3D physics: bodies that rapier moves at the world's ticks, as their entities' components
-//! describe them, characters that its character controller moves ([`character`]), casts through
-//! their colliders ([`query`]), and the world's resource that holds rapier's bodies and contacts,
-//! which snapshots copy and snapshot files hold.
+//! 3D physics: bodies rapier moves at the world's ticks as their entities' components describe
+//! them, characters its character controller moves ([`character`]), casts through their
+//! colliders ([`query`]), and the resource holding rapier's bodies and contacts, which snapshots
+//! copy and snapshot files hold.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,63 +38,61 @@ pub use joint::{Joint3D, JointKind3D};
 use joint::{Jointed, SavedJoint};
 pub use query::{Cast, Hit3D, Shape3D};
 
-/// A body that 3D physics moves, at each tick a layer runs [`step_physics`](crate::step_physics)
-/// in: its entity's [`Transform`]'s translation and rotation, and the velocities here, which each
-/// step reads and writes back. It collides as its entity's [`BoxCollider3D`], [`SphereCollider3D`]
-/// and [`CapsuleCollider3D`], whichever it has, which give a dynamic body its mass too, together
-/// where it has more than one; and [`Joint3D`]s hold it to other bodies. A body under a parent
-/// isn't moved, since its transform is in its parent's space (`physics.child_body`).
+/// A body 3D physics moves at each tick a layer runs [`step_physics`](crate::step_physics): its
+/// entity's [`Transform`] (translation, rotation) and the velocities here, which each step reads
+/// and writes back. It collides as its entity's [`BoxCollider3D`], [`SphereCollider3D`] and
+/// [`CapsuleCollider3D`], any or all, which also give a dynamic body its mass; [`Joint3D`]s hold
+/// it to other bodies. A body under a parent isn't moved: its transform is in its parent's space
+/// (`physics.child_body`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
 pub struct RigidBody3D {
-    /// How it moves: dynamic, by its velocity, which gravity and what it hits change; kinematic, by
-    /// its velocity alone, pushing what's dynamic aside, as a moving platform does; or static, not
-    /// at all, as a floor or a wall.
+    /// How it moves. Dynamic: by its velocity, which gravity and collisions change. Kinematic: by
+    /// its velocity alone, pushing dynamic bodies aside, like a moving platform. Static: not at
+    /// all, like a floor.
     pub body_type: BodyType,
-    /// Whether it never turns, as a character that stays upright: what sets its rotation still
-    /// turns it.
+    /// Whether it never turns, like an upright character; what sets its rotation still turns it.
     pub fixed_rotation: bool,
-    /// Whether a step that it goes fast in sweeps it along its way against what moves too, rapier's
-    /// continuous collision, so that it stops at a kinematic or dynamic body that it would
-    /// otherwise pass through between one step and the next, as a small fast ball passes through a
-    /// thin moving wall. Each dynamic body that goes fast is swept against what's static anyway,
-    /// and one with this against all but others with it, as rapier sweeps bullets, at some cost.
+    /// Whether a fast step sweeps it along its path against moving bodies too (rapier's continuous
+    /// collision), so a small fast ball stops at a thin kinematic or dynamic wall instead of
+    /// passing through between steps. Fast dynamic bodies are swept against static ones anyway;
+    /// this adds all bodies but others with it, like rapier's bullets, at some cost.
     pub continuous_collision: bool,
-    /// How fast it goes, in units a second.
+    /// Speed, in units per second.
     pub velocity: Vec3,
-    /// How fast it turns, about the axis it points along, in radians a second: counterclockwise as
-    /// seen from that axis's tip.
+    /// Turn rate about the axis it points along, in radians per second, counterclockwise seen
+    /// from the axis's tip.
     pub angular_velocity: Vec3,
 }
 
-/// The box a [`RigidBody3D`] on the same entity collides as, in the entity's space, so that it
-/// turns and scales with it: by default a unit cube.
+/// The box a [`RigidBody3D`] on the same entity collides as, in the entity's space, so it turns
+/// and scales with it. Default: a unit cube.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct BoxCollider3D {
-    /// Where its middle is, from its entity's origin.
+    /// Its middle, from the entity's origin.
     pub offset: Vec3,
-    /// How wide, tall and deep it is.
+    /// Width, height and depth.
     #[reflect(min = 0.0, default = Vec3::ONE)]
     pub size: Vec3,
-    /// Its mass a cubic unit, which a dynamic body's mass comes from.
+    /// Mass per cubic unit; a dynamic body's mass comes from it.
     #[reflect(min = 0.0, default = 1.0)]
     pub density: f32,
-    /// How much it holds back what slides along it: 0 not at all, as ice.
+    /// How much it resists sliding: 0 none, like ice.
     #[reflect(min = 0.0, default = 0.5)]
     pub friction: f32,
-    /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
+    /// Fraction of impact speed it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
-    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
-    /// [`World::contacts`](crate::World::contacts) has it, but pushes nothing and nothing pushes
-    /// it, characters moving through it as casts pass through it. Its density still weighs its body.
+    /// Whether it's a sensor, like a trigger zone: it finds overlaps
+    /// ([`World::contacts`](crate::World::contacts)) but pushes nothing and nothing pushes it;
+    /// characters move through it as casts pass through. Its density still weighs its body.
     #[reflect(default = false, hashed_when_set)]
     pub sensor: bool,
     /// The groups it's in, a bit for each of 32: all by default.
     #[reflect(default = u32::MAX, hashed_when_set)]
     pub membership: u32,
-    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
-    /// or overlap, only where each is in a group the other's filter has; a character moves
-    /// through what its capsule doesn't meet.
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch or
+    /// overlap only where each is in a group the other's filter has; a character moves through
+    /// what its capsule doesn't meet.
     #[reflect(default = u32::MAX, hashed_when_set)]
     pub filter: u32,
 }
@@ -115,8 +113,7 @@ impl Default for BoxCollider3D {
 }
 
 impl BoxCollider3D {
-    /// The collider it makes for an entity of `scale`: its size and its offset scaled, a mirrored
-    /// entity's box the same.
+    /// Size and offset scaled, mirrored entities alike.
     fn collider(&self, scale: Vec3) -> Collider {
         let half = (self.size * scale).abs() * 0.5;
         let shape = ColliderBuilder::cuboid(half.x.into(), half.y.into(), half.z.into());
@@ -136,36 +133,35 @@ impl BoxCollider3D {
 }
 
 /// The sphere a [`RigidBody3D`] on the same entity collides as, in the entity's space: around its
-/// offset, which turns and scales with the entity, its radius scaled by the largest of the entity's
-/// scales, since a sphere stays one however its entity stretches. By default half a unit, so that
-/// it's a unit across.
+/// offset, which turns and scales with the entity. The radius scales by the largest of the
+/// entity's scales, since a sphere stays one. Default: half a unit, a unit across.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct SphereCollider3D {
-    /// Where its middle is, from its entity's origin.
+    /// Its middle, from the entity's origin.
     pub offset: Vec3,
-    /// How far its surface is from its middle.
+    /// Distance from its middle to its surface.
     #[reflect(min = 0.0, default = 0.5)]
     pub radius: f32,
-    /// Its mass a cubic unit, which a dynamic body's mass comes from.
+    /// Mass per cubic unit; a dynamic body's mass comes from it.
     #[reflect(min = 0.0, default = 1.0)]
     pub density: f32,
-    /// How much it holds back what slides along it: 0 not at all, as ice.
+    /// How much it resists sliding: 0 none, like ice.
     #[reflect(min = 0.0, default = 0.5)]
     pub friction: f32,
-    /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
+    /// Fraction of impact speed it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
-    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
-    /// [`World::contacts`](crate::World::contacts) has it, but pushes nothing and nothing pushes
-    /// it, characters moving through it as casts pass through it. Its density still weighs its body.
+    /// Whether it's a sensor, like a trigger zone: it finds overlaps
+    /// ([`World::contacts`](crate::World::contacts)) but pushes nothing and nothing pushes it;
+    /// characters move through it as casts pass through. Its density still weighs its body.
     #[reflect(default = false, hashed_when_set)]
     pub sensor: bool,
     /// The groups it's in, a bit for each of 32: all by default.
     #[reflect(default = u32::MAX, hashed_when_set)]
     pub membership: u32,
-    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
-    /// or overlap, only where each is in a group the other's filter has; a character moves
-    /// through what its capsule doesn't meet.
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch or
+    /// overlap only where each is in a group the other's filter has; a character moves through
+    /// what its capsule doesn't meet.
     #[reflect(default = u32::MAX, hashed_when_set)]
     pub filter: u32,
 }
@@ -186,8 +182,7 @@ impl Default for SphereCollider3D {
 }
 
 impl SphereCollider3D {
-    /// The collider it makes for an entity of `scale`: its offset scaled, and its radius by the
-    /// largest of the scales.
+    /// Offset scaled, radius by the largest scale.
     fn collider(&self, scale: Vec3) -> Collider {
         let shape = ColliderBuilder::ball((self.radius * scale.abs().max_element()).into());
         let Self {
@@ -207,41 +202,40 @@ impl SphereCollider3D {
 
 /// The capsule a [`RigidBody3D`] on the same entity collides as, in the entity's space: what's
 /// within its radius of a segment along the entity's Y, a cylinder capped by half spheres, upright
-/// as a character stands; around its offset, which turns and scales with the entity, its height
-/// scaled by the entity's scale along Y, and its radius by the larger of its scales along X and Z,
-/// since it stays round however its entity stretches. One no taller than twice its radius is a
-/// sphere of that radius. By default 2 units tall and half a unit in radius, a person's size where
-/// a unit is a meter.
+/// like a standing character. It's around its offset, which turns and scales with the entity. Its
+/// height scales by the entity's scale along Y, its radius by the larger of its scales along X and
+/// Z, so it stays round. One no taller than twice its radius is a sphere of that radius. Default:
+/// 2 units tall and half a unit in radius, a person's size where a unit is a meter.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct CapsuleCollider3D {
-    /// Where its middle is, from its entity's origin.
+    /// Its middle, from the entity's origin.
     pub offset: Vec3,
-    /// How tall it is, from the bottom of its lower cap to the top of its upper.
+    /// Height from the bottom of its lower cap to the top of its upper.
     #[reflect(min = 0.0, default = 2.0)]
     pub height: f32,
-    /// How far its side is from the segment through its middle.
+    /// Distance from the segment through its middle to its side.
     #[reflect(min = 0.0, default = 0.5)]
     pub radius: f32,
-    /// Its mass a cubic unit, which a dynamic body's mass comes from.
+    /// Mass per cubic unit; a dynamic body's mass comes from it.
     #[reflect(min = 0.0, default = 1.0)]
     pub density: f32,
-    /// How much it holds back what slides along it: 0 not at all, as ice.
+    /// How much it resists sliding: 0 none, like ice.
     #[reflect(min = 0.0, default = 0.5)]
     pub friction: f32,
-    /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
+    /// Fraction of impact speed it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
-    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
-    /// [`World::contacts`](crate::World::contacts) has it, but pushes nothing and nothing pushes
-    /// it, characters moving through it as casts pass through it. Its density still weighs its body.
+    /// Whether it's a sensor, like a trigger zone: it finds overlaps
+    /// ([`World::contacts`](crate::World::contacts)) but pushes nothing and nothing pushes it;
+    /// characters move through it as casts pass through. Its density still weighs its body.
     #[reflect(default = false, hashed_when_set)]
     pub sensor: bool,
     /// The groups it's in, a bit for each of 32: all by default.
     #[reflect(default = u32::MAX, hashed_when_set)]
     pub membership: u32,
-    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
-    /// or overlap, only where each is in a group the other's filter has; a character moves
-    /// through what its capsule doesn't meet.
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch or
+    /// overlap only where each is in a group the other's filter has; a character moves through
+    /// what its capsule doesn't meet.
     #[reflect(default = u32::MAX, hashed_when_set)]
     pub filter: u32,
 }
@@ -263,7 +257,7 @@ impl Default for CapsuleCollider3D {
 }
 
 impl CapsuleCollider3D {
-    /// Its radius for an entity of `scale`, and how far its segment reaches each way of its middle.
+    /// Its radius for `scale`, and how far its segment reaches each way of its middle.
     pub(crate) fn shape(&self, scale: Vec3) -> (f32, f32) {
         let scale = scale.abs();
         let radius = self.radius * scale.x.max(scale.z);
@@ -272,8 +266,7 @@ impl CapsuleCollider3D {
         (radius, if half > 0.0 { half } else { 0.0 })
     }
 
-    /// The collider it makes for an entity of `scale`: its offset scaled, and its shape as
-    /// [`shape`](Self::shape) has it.
+    /// Offset scaled, shape per [`shape`](Self::shape).
     fn collider(&self, scale: Vec3) -> Collider {
         let (radius, half) = self.shape(scale);
         let shape = ColliderBuilder::capsule_y(half.into(), radius.into());
@@ -293,35 +286,34 @@ impl CapsuleCollider3D {
 }
 
 /// The triangles a [`RigidBody3D`] on the same entity collides as: those of the model its entity's
-/// [`ModelRoot`] names, each of the model's nodes' where the node is in the model, in the entity's
-/// space, so that they turn with it and scale along each axis as it does, as a level's floors and
-/// walls do. Triangles hold no volume, so it gives a body no mass, and suits static and kinematic
-/// bodies; a dynamic one takes its mass from its other colliders. One whose entity has no
-/// `ModelRoot`, or whose model has no triangles, as a model that didn't load, collides as nothing,
-/// warned of as it's made (`physics.no_surface`). Its outline isn't drawn, as its model shows where
-/// it is.
+/// [`ModelRoot`] names, each node's where it is in the model, in the entity's space, so they turn
+/// with it and scale along each axis as it does, like a level's floors and walls. Triangles hold
+/// no volume, so it gives a body no mass and suits static and kinematic bodies; a dynamic one
+/// takes its mass from its other colliders. An entity with no `ModelRoot`, or a model without
+/// triangles (as one that didn't load), collides as nothing, warned of when made
+/// (`physics.no_surface`). Its outline isn't drawn: its model shows where it is.
 ///
 /// A world saved whole holds its triangles whole, as rapier serializes them, at a cost DEFECTS.md
 /// weighs.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct MeshCollider3D {
-    /// How much it holds back what slides along it: 0 not at all, as ice.
+    /// How much it resists sliding: 0 none, like ice.
     #[reflect(min = 0.0, default = 0.5)]
     pub friction: f32,
-    /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
+    /// Fraction of impact speed it bounces back with: 0 none, 1 all.
     #[reflect(min = 0.0, max = 1.0)]
     pub restitution: f32,
-    /// Whether it's a sensor, as a trigger zone is: it finds what overlaps it, as
-    /// [`World::contacts`](crate::World::contacts) has it, but pushes nothing and nothing pushes
-    /// it, characters moving through it as casts pass through it.
+    /// Whether it's a sensor, like a trigger zone: it finds overlaps
+    /// ([`World::contacts`](crate::World::contacts)) but pushes nothing and nothing pushes it;
+    /// characters move through it as casts pass through.
     #[reflect(default = false, hashed_when_set)]
     pub sensor: bool,
     /// The groups it's in, a bit for each of 32: all by default.
     #[reflect(default = u32::MAX, hashed_when_set)]
     pub membership: u32,
-    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch,
-    /// or overlap, only where each is in a group the other's filter has; a character moves
-    /// through what its capsule doesn't meet.
+    /// The groups whose colliders it meets, a bit for each: all by default. Two colliders touch or
+    /// overlap only where each is in a group the other's filter has; a character moves through
+    /// what its capsule doesn't meet.
     #[reflect(default = u32::MAX, hashed_when_set)]
     pub filter: u32,
 }
@@ -339,9 +331,8 @@ impl Default for MeshCollider3D {
 }
 
 impl MeshCollider3D {
-    /// The collider it makes for `entity`, of `scale`, in `world`, with the surfaces of the model it
-    /// made it of, which a model read again replaces: none where the entity has no model, or its
-    /// model no triangles, which it warns of.
+    /// The collider for `entity` with the surfaces of the model it's made of (a model read again
+    /// replaces them): none, with a warning, if the entity has no model or it has no triangles.
     fn collider(
         &self,
         world: &World,
@@ -352,8 +343,7 @@ impl MeshCollider3D {
         let made = nodes.and_then(|nodes| {
             let (vertices, indices) = nodes.triangles();
             let vertices = vertices.into_iter().map(|at| vector(at * scale)).collect();
-            // Without topology or pseudo-normals, which would double what it holds and what a world
-            // saved whole writes of it.
+            // No topology or pseudo-normals: they'd double what it holds and a whole save writes.
             let shape =
                 ColliderBuilder::trimesh_with_flags(vertices, indices, TriMeshFlags::empty());
             let shape = shape.ok()?.mass_properties(MassProperties::default());
@@ -376,13 +366,11 @@ impl MeshCollider3D {
     }
 }
 
-/// The model `entity`'s [`ModelRoot`] names, if it has one.
 fn model_of(world: &World, entity: Entity) -> Option<crate::Model> {
     world.get::<ModelRoot>(entity).map(|root| root.0)
 }
 
-/// Whether `collider` holds the triangles of the model `entity`'s [`ModelRoot`] names, for an
-/// entity of `scale`, as [`MeshCollider3D`] makes them of it now, to the bit.
+/// Whether `collider` holds, to the bit, the triangles [`MeshCollider3D`] would now make.
 fn made_of(collider: &Collider, world: &World, entity: Entity, scale: Vec3) -> bool {
     let Some(mesh) = collider.shape().as_trimesh() else {
         return false;
@@ -399,13 +387,11 @@ fn made_of(collider: &Collider, world: &World, entity: Entity, scale: Vec3) -> b
             .all(|(&at, &held)| bits(vector(at * scale)) == bits(held))
 }
 
-/// The surfaces of the model `entity`'s [`ModelRoot`] names, as the world's assets hold them now.
 fn surfaces(world: &World, entity: Entity) -> Option<Arc<Vec<Surface>>> {
     let nodes = world.assets().nodes(model_of(world, entity)?)?;
     Some(Arc::clone(&nodes.surfaces))
 }
 
-/// A collider of `shape` around `offset`, of what a collider's component gives it.
 fn built(
     shape: ColliderBuilder,
     offset: Vec3,
@@ -420,9 +406,9 @@ fn built(
         .restitution(restitution.into())
 }
 
-/// `shape` with what a collider's component says of whether it's a sensor and which groups it
-/// meets: a sensor finds kinematic and static bodies too, characters among them, which rapier's
-/// default leaves to dynamic ones, but for a static body's sensor finding another static body.
+/// `shape` with a collider's sensor flag and groups. A sensor finds kinematic and static bodies
+/// too, characters among them (rapier's default: dynamic only), except that a static sensor
+/// doesn't find static bodies.
 fn met(shape: ColliderBuilder, sensor: bool, membership: u32, filter: u32) -> ColliderBuilder {
     let shape = shape
         .sensor(sensor)
@@ -435,7 +421,6 @@ fn met(shape: ColliderBuilder, sensor: bool, membership: u32, filter: u32) -> Co
     }
 }
 
-/// rapier's groups of a collider in the groups `membership` has, meeting those `filter` has.
 fn groups(membership: u32, filter: u32) -> InteractionGroups {
     InteractionGroups::new(
         Group::from_bits_retain(membership),
@@ -444,30 +429,30 @@ fn groups(membership: u32, filter: u32) -> InteractionGroups {
     )
 }
 
-/// The world's 3D physics, a [`Resource`](crate::Resource) that
-/// [`step_physics`](crate::step_physics) gives a world the first time it steps one with a
-/// [`RigidBody3D`] and without it, or that a game inserts first, with its gravity: rapier's bodies,
-/// colliders, joints and contacts, which each step carries on from, and each body's and joint's
-/// entity, so that a snapshot restored steps as its world did. A world cleared, or whose entities a
-/// scene replaced, keeps it, its bodies and joints going at the next step, as their entities have.
+/// The world's 3D physics, a [`Resource`](crate::Resource): rapier's bodies, colliders, joints and
+/// contacts, which each step continues from, and each body's and joint's entity, so a restored
+/// snapshot steps as its world did. [`step_physics`](crate::step_physics) adds it at the first step
+/// of a world with a [`RigidBody3D`] and none; a game may insert one first, with its gravity. A
+/// world cleared, or whose entities a scene replaced, keeps it; the next step follows the entities
+/// there.
 pub struct Physics3D {
-    /// Which way everything dynamic falls, and how much faster it goes each second, in units a
-    /// second: down along -Y at 9.81 by default, Earth's, as though a unit were a meter; and the
-    /// characters, as much as each's [`CharacterController3D::gravity`] says.
+    /// Which way dynamic bodies fall, and how fast they speed up, in units per second squared:
+    /// down along -Y at 9.81 by default, Earth's if a unit is a meter. Characters fall as much as
+    /// each's [`CharacterController3D::gravity`] says.
     pub gravity: Vec3,
     rapier: Rapier,
-    /// rapier's workspace, which a copy makes anew, since no step carries anything in it over.
+    /// rapier's workspace. A copy makes it anew: no step carries anything in it over.
     pipeline: PhysicsPipeline,
     links: Links<Linked>,
     characters: Links<Character>,
     joints: Links<Jointed>,
-    /// The entities with a `CharacterController3D` that aren't characters, as they lack a
-    /// `CapsuleCollider3D` or have a `RigidBody3D`, warned of once each.
+    /// Controllers whose entities aren't characters (no `CapsuleCollider3D`, or a `RigidBody3D`),
+    /// warned of once each.
     unmoved: Vec<Entity>,
-    /// What a character hit as it moved, a workspace as `pipeline` is.
+    /// What a character hit as it moved; a workspace like `pipeline`.
     hits: Vec<CharacterCollision>,
     /// The kinematic bodies that go by their velocities, with those velocities, which the
-    /// characters' moves hold them from meanwhile: a workspace too.
+    /// characters' moves hold them from meanwhile; a workspace too.
     moving: Vec<character::Moving>,
     pub(super) contacts: Contacts,
 }
@@ -487,15 +472,14 @@ struct Rapier {
     parameters: IntegrationParameters,
 }
 
-/// A body, its entity's, and what the last step left in the entity's components, or what they
-/// were as it took them in: a change to them since is a game's or an edit's, which the next step
-/// takes.
+/// An entity's body, with its components as the last step left them, or as it took them in. A
+/// change since is a game's or an edit's; the next step takes it.
 #[derive(Clone)]
 struct Linked {
     entity: Entity,
     body: RigidBodyHandle,
-    /// The colliders of its entity's `BoxCollider3D`, `SphereCollider3D`, `CapsuleCollider3D` and
-    /// `MeshCollider3D`, in that order, of those it has.
+    /// Colliders of its `BoxCollider3D`, `SphereCollider3D`, `CapsuleCollider3D` and
+    /// `MeshCollider3D`, in that order, for those it has.
     colliders: [Option<ColliderHandle>; 4],
     rigid_body: RigidBody3D,
     transform: Transform,
@@ -503,8 +487,8 @@ struct Linked {
     sphere_collider: Option<SphereCollider3D>,
     capsule_collider: Option<CapsuleCollider3D>,
     mesh_collider: Option<MeshCollider3D>,
-    /// The surfaces of the model its mesh collider was made of, which a model read again
-    /// replaces, its collider made again then.
+    /// Surfaces of the model its mesh collider was made of; a model read again replaces them, and
+    /// the collider is remade.
     surfaces: Option<Arc<Vec<Surface>>>,
 }
 
@@ -561,11 +545,10 @@ impl Clone for Physics3D {
         }
     }
 
-    /// Copies `source` into the memory this one holds, as far as rapier's types copy so, keeping
-    /// its own workspace for the characters, but not rapier's: its pipeline keeps the joints it last
-    /// solved and its solver's layout of them, by counts that the joint set copied brings back, so
-    /// that, kept, it would solve another world's joints, or ones gone, at the next step. A new one,
-    /// as a copy has, costs its workspace's memory made again as that step goes.
+    /// Copies `source` into this one's memory where rapier's types allow, keeping its own
+    /// character workspace but not rapier's: its pipeline keeps the joints it last solved and the
+    /// solver's layout for them, by counts the copied joint set restores, so kept it would solve
+    /// another world's or gone joints. A new one reallocates in the next step.
     fn clone_from(&mut self, source: &Self) {
         self.gravity = source.gravity;
         self.rapier.clone_from(&source.rapier);
@@ -578,12 +561,11 @@ impl Clone for Physics3D {
     }
 }
 
-/// What a snapshot file holds of [`Physics3D`], `R` its rapier's state, as its own or borrowed: its
-/// gravity; rapier's state, through rapier's own serialization, which carries on exactly; each body,
-/// each character and each joint, with its entity by its ID; and the bodies under a parent and the
-/// entities with a character's controller that aren't characters warned of, by their entities'
-/// IDs; and the contacts and their events. Text that lists no joints or contacts reads as having
-/// none, so that a world saved without them loads.
+/// What a snapshot file holds of [`Physics3D`] (`R`: rapier's state, owned or borrowed): gravity;
+/// rapier's state through its own serialization, which continues exactly; each body, character
+/// and joint with its entity's ID; IDs of entities warned of as children, or as controllers that
+/// aren't characters; contacts and events. Missing joints or contacts read as none, so a world
+/// saved without them loads.
 #[derive(Serialize, Deserialize)]
 struct SavedPhysics<R> {
     gravity: [f32; 3],
@@ -599,10 +581,9 @@ struct SavedPhysics<R> {
     contacts: SavedContacts,
 }
 
-/// A body as a snapshot file holds it: its entity's ID, none for an entity gone since the last step,
-/// which the next takes the body out for; its handles; and what the last step left in its entity's
-/// components, each as a recording's text writes values, so that a component whose type changed
-/// is matched to it as the component is.
+/// A body in a snapshot file: its entity's ID (none if gone since the last step, which the next
+/// takes the body out for); handles; the components as a recording's text writes values, so a
+/// changed component type is matched as the component is.
 #[derive(Serialize, Deserialize)]
 struct SavedLinked {
     entity: Option<u64>,
@@ -616,7 +597,6 @@ struct SavedLinked {
     mesh_collider: Option<String>,
 }
 
-/// A character as a snapshot file holds it, as [`SavedLinked`] holds a body.
 #[derive(Serialize, Deserialize)]
 struct SavedCharacter {
     entity: Option<u64>,
@@ -627,12 +607,11 @@ struct SavedCharacter {
     capsule: String,
 }
 
-/// Saved through rapier's own serialization, written as RON, so that a world restored in another
-/// process steps on as the one saved would have: its contacts' warm starts, its islands' sleep and
-/// its handles as they were, which bodies made again from their components would lose. A rapier of
-/// another version may not read it, which leaves physics out, to be made again from the entities,
-/// as does text whose bodies name a rigid body or a collider, or whose joints a joint, that its
-/// rapier's state doesn't hold as theirs (`physics.load`).
+/// Saved through rapier's own serialization as RON, so a world restored in another process steps
+/// on as the saved one would: contacts' warm starts, islands' sleep and handles stay, which bodies
+/// remade from components would lose. Text a different rapier version can't read, or whose bodies
+/// or joints name a rigid body, collider or joint its rapier state doesn't hold as theirs, leaves
+/// physics out, to be remade from the entities (`physics.load`).
 impl Saved for Physics3D {
     const NAME: &'static str = "Physics3D";
 
@@ -689,11 +668,10 @@ impl Saved for Physics3D {
         ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
     }
 
-    /// As [`save`](Saved::save), but without the bodies and characters of the entities `hides`
-    /// says, taken out of a copy as the next step of a world without those entities takes them
-    /// out, so that a client's world, which hasn't them, reads the bodies it sees alone, its rapier
-    /// as its own step would leave it. Their joints go as that step's would, the joints of the
-    /// bodies taken out with them.
+    /// Like [`save`](Saved::save), without the bodies and characters (and their joints) of
+    /// entities `hides` says, taken out of a copy as a world's next step without them would. A
+    /// client's world, which lacks them, reads only the bodies it sees, its rapier as its own step
+    /// leaves it.
     fn save_seen(&self, world: &World, hides: &dyn Fn(Entity) -> bool) -> Result<String> {
         let bodies = self.links.linked.iter().map(|linked| linked.entity);
         let characters = self
@@ -730,7 +708,6 @@ impl Saved for Physics3D {
             let id = id.and_then(EntityId::new);
             id.and_then(|id| world.entity(id)).unwrap_or(Entity::DEAD)
         };
-        /// The collider `text` writes, if it's given.
         fn collider<C: Component>(world: &World, text: Option<String>) -> Result<Option<C>> {
             let read = text.map(|text| world.component_from_text(&text));
             read.transpose()
@@ -767,10 +744,9 @@ impl Saved for Physics3D {
                 capsule: world.component_from_text(&character.capsule)?,
             });
         }
-        // What a step reaches by the links' handles, which text from elsewhere, a host's or a
-        // server's, may name otherwise than rapier's sets hold: each body there and linked once,
-        // naming its entity as its link does, which casts find it by, its colliders on it, and
-        // each entity linked once.
+        // A step reaches rapier by the links' handles, which text from elsewhere (a host or
+        // server) may name wrongly: each body must be there and linked once, name its entity as
+        // its link does (casts find it by that), have its colliders on it, each entity linked once.
         let refused = |entity: Entity, what: &str| {
             let who = world.id(entity);
             let who = who.map_or_else(|| "an entity gone".to_owned(), |id| format!("entity {id}"));
@@ -805,7 +781,7 @@ impl Saved for Physics3D {
                 return Err(refused(entity, what));
             }
         }
-        // A joint's handle, which a step reaches rapier's joint by: there, and linked once.
+        // A joint's handle must be in rapier's set, and linked once.
         let refused_joint = |entity: Entity, what: &str| {
             let who = world.id(entity);
             let who = who.map_or_else(|| "an entity gone".to_owned(), |id| format!("entity {id}"));
@@ -852,8 +828,8 @@ impl Saved for Physics3D {
     }
 }
 
-/// Steps `world`'s 3D physics a tick, as [`step_physics`](crate::step_physics) describes, giving it
-/// a [`Physics3D`] first if it has a [`RigidBody3D`] or a [`CharacterController3D`] and none.
+/// Steps `world`'s 3D physics a tick ([`step_physics`](crate::step_physics)), adding
+/// [`Physics3D`] first if there's a [`RigidBody3D`] or [`CharacterController3D`] and none.
 pub(super) fn step(world: &mut World) {
     if world.resource::<Physics3D>().is_none() {
         let bodies = world.query::<&RigidBody3D>().next().is_some();
@@ -866,9 +842,8 @@ pub(super) fn step(world: &mut World) {
 }
 
 impl Physics3D {
-    /// Takes in what changed, the joints after the bodies and the characters they join, moves the
-    /// characters as far as what they move into lets them, then steps rapier, which carries the
-    /// characters there, and writes back where everything went.
+    /// Takes in changes (joints after the bodies and characters they join), moves characters as
+    /// far as what they move into lets them, steps rapier, which carries them there, writes back.
     fn step(&mut self, world: &mut World) {
         self.unlink_gone(world);
         self.unlink_gone_characters(world);
@@ -897,7 +872,6 @@ impl Physics3D {
         self.write_back_characters(world);
     }
 
-    /// Steps rapier a tick, its bodies, characters and joints as they've been taken in.
     fn step_rapier(&mut self) {
         let Rapier {
             bodies,
@@ -928,8 +902,8 @@ impl Physics3D {
         );
     }
 
-    /// Takes out each body whose entity has gone, lost its `RigidBody3D` or its `Transform`, or
-    /// come under a parent; the rest keep their order.
+    /// Takes out each body whose entity is gone, lost its `RigidBody3D` or `Transform`, or came
+    /// under a parent; the rest keep their order.
     fn unlink_gone(&mut self, world: &World) {
         let rapier = &mut self.rapier;
         self.links.retain(|linked| {
@@ -944,23 +918,23 @@ impl Physics3D {
         });
     }
 
-    /// Writes where each body that moves went, how it's turned, and how fast it goes, into its
-    /// entity's components: each only as it changed, so that a body at rest, as one asleep, leaves
-    /// its entity's rows unchanged, which the renderer's scene would write to the GPU again.
+    /// Writes each moving body's position, turn and velocities into its entity's components,
+    /// each only if changed: a sleeping body leaves its rows unchanged, which the renderer's scene
+    /// would write to the GPU again.
     fn write_back(&mut self, world: &mut World) {
         for linked in &mut self.links.linked {
             let body = &self.rapier.bodies[linked.body];
             if body.body_type() == RigidBodyType::Fixed {
                 continue;
             }
-            // Its rotation and velocities are rapier's `f64`s, the components' `f32`s, which a step
-            // takes in only as they change from what was written.
+            // Rapier's rotation and velocities are `f64`, the components' `f32`: a step takes
+            // them in only once they change from what was written.
             let at = DVec3::from_array(body.translation().to_array());
             let turned = Quat::from_array(body.rotation().to_array().map(|x| x as f32));
             let velocity = Vec3::from_array(body.linvel().to_array().map(|x| x as f32));
             let angular_velocity = Vec3::from_array(body.angvel().to_array().map(|x| x as f32));
-            // The entity's components as this step took them in: as they are, but a transform
-            // refused, which stays as it was here, so that its NaNs aren't kept as taken.
+            // The components as this step took them in; a refused transform stays as it was, so
+            // its NaNs aren't kept.
             let (was, went) = (&linked.transform, &linked.rigid_body);
             if (at, turned) != (was.translation, was.rotation) {
                 let transform = world.get_mut::<Transform>(linked.entity);
@@ -980,25 +954,22 @@ impl Physics3D {
         }
     }
 
-    /// The contacts the last step left, as [`World::contacts`] says, 3D's alone.
+    /// 3D's alone of [`World::contacts`].
     pub fn contacts(&self) -> impl Iterator<Item = Contact> + '_ {
         self.contacts.touching()
     }
 
-    /// The contacts that started and stopped at the last step, as [`World::contact_events`] says,
-    /// 3D's alone.
+    /// 3D's alone of [`World::contact_events`].
     pub fn contact_events(&self) -> impl Iterator<Item = ContactEvent> + '_ {
         self.contacts.events()
     }
 
-    /// The body of `entity`, a body's or a character's, if it has one.
     fn body_of(&self, entity: Entity) -> Option<RigidBodyHandle> {
         let body = self.links.get(entity).map(|linked| linked.body);
         body.or_else(|| self.characters.get(entity).map(|character| character.body))
     }
 }
 
-/// Takes `body` out of `rapier`, with its colliders.
 fn remove_body(rapier: &mut Rapier, body: RigidBodyHandle) {
     rapier.bodies.remove(
         body,
@@ -1011,8 +982,8 @@ fn remove_body(rapier: &mut Rapier, body: RigidBodyHandle) {
     );
 }
 
-/// Each pair of colliders in `rapier` that touch, or overlap where either is a sensor, by their
-/// bodies' entities, and whether it's a sensor's, in rapier's order.
+/// Each touching (or, with a sensor, overlapping) pair of colliders, as their bodies' entities
+/// and whether a sensor's, in rapier's order.
 fn touching(rapier: &Rapier) -> impl Iterator<Item = (Entity, Entity, bool)> + '_ {
     let entity = |collider: ColliderHandle| {
         let body = rapier
@@ -1031,12 +1002,11 @@ fn touching(rapier: &Rapier) -> impl Iterator<Item = (Entity, Entity, bool)> + '
     pairs.filter_map(move |(a, b, sensor)| Some((entity(a)?, entity(b)?, sensor)))
 }
 
-/// What the body of `entity` holds as its user data, which casts and contacts find the entity by.
+/// Body user data: how casts and contacts find the entity.
 fn user_data(entity: Entity) -> u128 {
     u128::from(entity.to_bits())
 }
 
-/// Makes `entity`'s body in `rapier`, as its components say, and gives back its link.
 fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
     let rigid_body = *world.get::<RigidBody3D>(entity).expect("found with one");
     let transform = *world.get::<Transform>(entity).expect("found with one");
@@ -1082,11 +1052,11 @@ fn make_body(rapier: &mut Rapier, world: &World, entity: Entity) -> Linked {
     }
 }
 
-/// Takes in what changed of `linked`'s components since the last step left them, which the last
-/// step didn't make, into its body: waking it, so that it moves from there. A component that isn't
-/// finite is taken as it was, as [`Links`] refuses it. Its mesh collider is made again as its model
-/// is read again too, but for one a snapshot restored before its model's surfaces were there, which
-/// keeps the shape the snapshot had, and its contacts, as its model's come, if they make it.
+/// Takes into `linked`'s body what changed in its components since the last step left them,
+/// waking it. A component that isn't finite is taken as it was ([`Links`] refuses it). Its mesh
+/// collider is remade when its model is read again, except one restored from a snapshot before
+/// its model's surfaces were there: that keeps the snapshot's shape and contacts if the surfaces,
+/// once they come, make it.
 fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     let entity = linked.entity;
     let rigid_body = *world.get::<RigidBody3D>(entity).expect("found with one");
@@ -1141,9 +1111,8 @@ fn take_changes(rapier: &mut Rapier, linked: &mut Linked, world: &World) {
     let now = mesh_collider.and_then(|_| surfaces(world, entity));
     let remodeled = match (&now, &linked.surfaces) {
         (Some(now), Some(was)) => !Arc::ptr_eq(now, was),
-        // Restored with its shape, before its model's surfaces were there to make it of: kept,
-        // with its contacts, if it's the one they make, as the snapshot's run made it of them;
-        // made again of them if the model has changed since, as its file may have.
+        // Restored with its shape before its model's surfaces were there: kept, with its
+        // contacts, if they'd make it; remade if the model has changed since, as its file may.
         (Some(now), None) if meshed.is_some() => {
             let restored = meshed.and_then(|meshed| rapier.colliders.get(meshed));
             let same = restored.is_some_and(|it| made_of(it, world, entity, transform.scale));
@@ -1208,7 +1177,7 @@ impl Finite for MeshCollider3D {
     }
 }
 
-/// rapier's kind of body for `body_type`: kinematic by its velocity, as Box2D's kinematic bodies go.
+/// rapier's kind of body: kinematic by velocity, as Box2D's.
 fn body_type(body_type: BodyType) -> RigidBodyType {
     match body_type {
         BodyType::Dynamic => RigidBodyType::Dynamic,
@@ -1217,8 +1186,7 @@ fn body_type(body_type: BodyType) -> RigidBodyType {
     }
 }
 
-/// Takes the collider `handle` holds out of `rapier`, if it holds one, and puts `made` on `body` in
-/// its place, if it's given, as `handle`'s.
+/// Swaps the collider `handle` holds for `made`, on `body`.
 fn replace(
     rapier: &mut Rapier,
     handle: &mut Option<ColliderHandle>,
@@ -1241,14 +1209,11 @@ fn replace(
     });
 }
 
-/// Gives `each` the outline of each [`BoxCollider3D`], [`SphereCollider3D`] and
-/// [`CapsuleCollider3D`] in `world` whose entity has a [`Transform`], with the entity's ID, by
-/// table, then row: where its entity draws this frame as `poses` has it, between ticks and carried
-/// by its ancestors, as physics shapes it, a box sized and offset as its entity scales, a sphere
-/// around its offset so scaled, as large as its radius scaled by the largest of those scales, and a
-/// capsule around its offset so scaled, as tall and as wide as its entity's scales make it. It
-/// outlines a collider whether physics moves its entity or not, as it doesn't without a
-/// [`RigidBody3D`] or under a parent, so that what's being made shows as it's made.
+/// Gives `each` the outline and entity ID of each [`BoxCollider3D`], [`SphereCollider3D`] and
+/// [`CapsuleCollider3D`] on an entity with a [`Transform`], by table, then row. It sits where the
+/// entity draws this frame per `poses` (between ticks, carried by ancestors), shaped as physics
+/// shapes it. Outlined whether physics moves the entity or not (no [`RigidBody3D`], or under a
+/// parent), so what's being made shows.
 pub(super) fn outlines(world: &World, poses: &Poses<'_>, each: &mut impl FnMut(Outline, u64)) {
     let (Some(transform), boxed, round, capsuled) = (
         world.component::<Transform>(),
@@ -1300,8 +1265,7 @@ pub(super) fn outlines(world: &World, poses: &Poses<'_>, each: &mut impl FnMut(O
     }
 }
 
-/// `rotation` as rapier's, made a unit, as rapier's must be for its shapes to keep their sizes: no
-/// turn, where it has no length to make one of.
+/// `rotation` as rapier's, normalized so its shapes keep their sizes; no turn if it has no length.
 fn rotation(rotation: Quat) -> Rotation {
     let unit = Vec4::from(rotation).try_normalize();
     unit.map_or(Rotation::IDENTITY, |unit| {
@@ -1309,12 +1273,11 @@ fn rotation(rotation: Quat) -> Rotation {
     })
 }
 
-/// `v`, a component's, as rapier's, whose glam is another, of `f64`s.
+/// `v` as rapier's vector, whose glam is another, of `f64`s.
 fn vector(v: Vec3) -> Vector {
     Vector::from_array(v.as_dvec3().to_array())
 }
 
-/// `v`, a position, as rapier's.
 pub(super) fn at(v: DVec3) -> Vector {
     Vector::from_array(v.to_array())
 }
@@ -1349,7 +1312,6 @@ mod tests {
         world.spawn((at, RigidBody3D::default(), BoxCollider3D::default()))
     }
 
-    /// Steps `world`'s physics `ticks` times.
     pub(super) fn step(world: &mut World, ticks: u32) {
         for _ in 0..ticks {
             step_physics(world);
@@ -1365,8 +1327,8 @@ mod tests {
         a.angle_between(b) < 2e-3
     }
 
-    /// A box dropped onto a floor falls, lands and comes to rest on it, where it fell, unturned,
-    /// its scale as it was; the floor, static, stays where it is, its components as they were.
+    /// A dropped box falls, lands and rests on a floor where it fell, unturned, its scale
+    /// unchanged; the static floor stays as it was.
     #[test]
     fn a_box_falls_onto_a_floor_and_rests_on_it() {
         let mut world = World::default();
@@ -1397,9 +1359,8 @@ mod tests {
         );
     }
 
-    /// 1,000 km from the origin, a turned box falls onto a floor, tips and rests on it as one at
-    /// the origin does, every step of its way within a tenth of a millimeter, its quaternion's
-    /// parts within 1e-4, where `f32` would place it to the nearest 6 cm.
+    /// 1,000 km from the origin, a turned box falls, tips and rests as one at the origin does,
+    /// every step within 0.1 mm and its quaternion within 1e-4; `f32` would place it to 6 cm.
     #[test]
     fn far_from_the_origin_a_box_falls_and_rests_as_at_it() {
         let way = |offset: DVec3| {
@@ -1427,8 +1388,8 @@ mod tests {
             let turned = Vec4::from(near.rotation) - Vec4::from(far_at.rotation);
             most_turned = most_turned.max(turned.abs().max_element());
         }
-        // Its fall within a few nanometers; as it settles, rapier's contacts, which let it into the
-        // floor by up to 5 mm, rest it within a few hundredths of a millimeter of the first.
+        // The fall agrees within nanometers; settling, rapier's contacts (up to 5 mm into the
+        // floor) agree within hundredths of a millimeter.
         assert!(most_apart < 1e-4, "{most_apart}");
         assert!(most_turned < 1e-4, "{most_turned}");
         let rested = near.last().expect("stepped").translation;
@@ -1438,8 +1399,8 @@ mod tests {
         );
     }
 
-    /// A body at rest, asleep, leaves its entity's components unchanged as the steps go on, so that
-    /// what follows their changes, as the renderer's scene does, has nothing to do for it.
+    /// A sleeping body leaves its entity's components unchanged, so change followers (the
+    /// renderer's scene) have nothing to do for it.
     #[test]
     fn bodies_at_rest_change_nothing() {
         let mut world = World::default();
@@ -1470,13 +1431,12 @@ mod tests {
         }
     }
 
-    /// A component set to a NaN or an infinity is refused, warned of once while it stays so
-    /// (`physics.not_finite`), and doesn't reach rapier, where it would spread through contacts:
-    /// a body at rest whose transform isn't finite stays where it was, at rest, its neighbor
-    /// finite, through 30 steps that warn once, as does a character's; a falling body's goes on
-    /// falling from its last, writing where it goes over the refused value at the next step; a
-    /// velocity keeps the last that was, and a box's size the box it had. A body whose transform
-    /// isn't finite as it comes isn't made until it is.
+    /// A NaN or infinity in a component is refused, warned of once while it stays
+    /// (`physics.not_finite`), and never reaches rapier, where it would spread through contacts:
+    /// a resting body with such a transform stays put, its neighbor finite, through 30 steps (a
+    /// character likewise); a falling body keeps falling from its last finite transform,
+    /// written over the refused value at the next step; a velocity or box size keeps its last
+    /// finite value. A body with such a transform from the start isn't made until finite.
     #[test]
     fn what_isnt_finite_is_refused() {
         let logged = crate::testing::logged();
@@ -1532,7 +1492,7 @@ mod tests {
             taken.abs_diff_eq(DVec3::new(-1.0, 1.0, 2.0), 0.05),
             "{taken}"
         );
-        // Falling, its body's pose is written over the value refused.
+        // Falling, the body's pose is written over the refused value.
         let falling = crate_at(&mut world, Vec3::new(3.0, 6.0, 0.0), Quat::IDENTITY);
         step(&mut world, 8);
         world
@@ -1544,7 +1504,7 @@ mod tests {
         assert_eq!(warned(), 1);
         let fell = transform(&world, falling).translation;
         assert!(fell.is_finite() && fell.y < 6.0 && fell.y > 4.0, "{fell}");
-        // A velocity and a box's size, each kept as it was.
+        // A velocity and a box's size keep their last values.
         let rigid_body = world.get_mut::<RigidBody3D>(touching).expect("alive");
         rigid_body.velocity = Vec3::new(f32::NAN, 0.0, 0.0);
         world
@@ -1579,8 +1539,7 @@ mod tests {
         assert!(physics.links.get(unmade).is_some(), "made once it's finite");
     }
 
-    /// A pile of boxes, spheres and capsules in turn, turned and overlapping as they start, over a
-    /// floor.
+    /// Boxes, spheres and capsules in turn, turned and overlapping, over a floor.
     fn pile(world: &mut World) -> Vec<Entity> {
         floor(world);
         let mut bodies = Vec::new();
@@ -1608,10 +1567,8 @@ mod tests {
         bodies
     }
 
-    /// A snapshot of a world whose bodies are moving and touching, restored, steps as the world it
-    /// was taken from did, bit for bit, and so does a copy, though neither has rapier's workspace:
-    /// the world holds all that physics carries from one step to the next, which bodies made again
-    /// from their components alone lack.
+    /// A snapshot of moving, touching bodies, restored or copied, steps as its source did, bit for
+    /// bit: the world holds all physics carries between steps.
     #[test]
     fn a_snapshot_steps_as_its_world_did() {
         let mut world = World::seeded(7);
@@ -1632,11 +1589,8 @@ mod tests {
         assert_ne!(remade.hash(), went, "its bodies made again");
     }
 
-    /// A world whose bodies are moving and touching, saved whole to text as a snapshot file holds
-    /// it and loaded into a world of another process's making, steps as the world it was saved
-    /// from did, bit for bit: physics' bodies and contacts come back through its saved state, and a
-    /// change to a body's component since its last step is taken by the next, as it would have
-    /// been.
+    /// A world of moving, touching bodies, saved whole to text and loaded into another world,
+    /// steps as the saved one did, bit for bit; an edit since the last step is taken by the next.
     #[test]
     #[cfg(feature = "dev")]
     fn a_world_saved_whole_steps_as_it_did() {
@@ -1644,7 +1598,7 @@ mod tests {
         world.register_saved::<Physics3D>().expect("saved");
         let bodies = pile(&mut world);
         step(&mut world, 40);
-        // An edit since the last step, which the next takes.
+        // An edit since the last step.
         let pushed = world.get_mut::<RigidBody3D>(bodies[5]).expect("a body");
         pushed.velocity = Vec3::new(3.0, 1.0, -2.0);
         let mut text = String::new();
@@ -1670,11 +1624,9 @@ mod tests {
         assert_eq!(loaded.hash(), world.hash(), "stepped on");
     }
 
-    /// Physics written for a server's client's view, which hides some entities, holds none of
-    /// their bodies or characters, taken out of a copy; and leaves the client's rapier, in a world
-    /// without those entities, as physics written whole leaves it once the client's next step has
-    /// taken them out itself: stepped on, the two are alike, bit for bit, and the crate the client
-    /// sees falls as the server's does.
+    /// Physics saved for a client's view, which hides some entities, lacks their bodies and
+    /// characters; stepped on in a world without those entities it matches physics saved whole,
+    /// bit for bit, and the crate the client sees falls as the server's does.
     #[test]
     fn physics_seen_steps_on_as_physics_whole_does() {
         let mut world = World::seeded(3);
@@ -1734,9 +1686,9 @@ mod tests {
         assert_eq!(transform(&from_seen, near), transform(&world, near));
     }
 
-    /// Saved text whose bodies name what its rapier's state doesn't hold as theirs, as text from a
-    /// host or a server may, is refused (`physics.load`), rather than stepped into a panic: a rigid
-    /// body there's none of, another body's, a collider on another body, and an entity's second.
+    /// Text naming what its rapier state doesn't hold as the body's is refused (`physics.load`),
+    /// not stepped into a panic: a missing rigid body, another body's, another body's collider,
+    /// an entity's second.
     #[test]
     fn saved_bodies_naming_what_rapier_holds_not_are_refused() {
         let mut world = World::seeded(7);
@@ -1762,9 +1714,8 @@ mod tests {
         }
     }
 
-    /// The world's hash after physics has stepped a pile of boxes, spheres and capsules for four
-    /// seconds, which CI checks on every platform: a difference on some platforms only is a bug in
-    /// determinism, not a value to change here.
+    /// The world's hash after four seconds of a pile, checked by CI on every platform: a difference
+    /// on some platforms only is a determinism bug, not a value to change here.
     #[test]
     fn a_pile_hashes_as_its_reference_says() {
         let mut world = World::seeded(7);
@@ -1774,8 +1725,7 @@ mod tests {
         assert_eq!(content, 0xc7bb_d25c_50b2_cc7d, "{content:#018x}");
     }
 
-    /// What a game or an edit changes of a body's components between steps, the next step takes:
-    /// where it is and how it's turned, how fast it goes, how it moves, and its collider.
+    /// Changes between steps to a body's position, turn, velocity, type and collider reach it.
     #[test]
     fn changes_between_steps_reach_the_bodies() {
         let mut world = World::default();
@@ -1816,10 +1766,9 @@ mod tests {
         assert!(turned_as(rotation, turned), "{rotation:?}");
     }
 
-    /// A small ball going fast enough that a step carries it from one side of a thin kinematic wall
-    /// to the other passes through it, but one with continuous collision stops at it, and stays
-    /// this side, as does one given continuous collision between steps, from the next; and one
-    /// without stops at a thin static wall, as every fast body is swept against what's static.
+    /// A small ball fast enough to cross a thin kinematic wall in one step passes through it; one
+    /// with continuous collision stops at it, as does one given it between steps, from the next;
+    /// one without stops at a thin static wall, as every fast body is swept against static ones.
     #[test]
     fn continuous_collision_stops_what_a_step_would_carry_through_a_thin_wall() {
         let mut world = World::default();
@@ -1871,9 +1820,8 @@ mod tests {
         }
     }
 
-    /// A sphere is as large as its radius scaled by the largest of its entity's scales, and a
-    /// capsule as tall as its height scaled along Y and as wide as its radius scaled by the larger
-    /// of its scales along X and Z; and one no taller than twice its radius is a sphere of it.
+    /// A sphere's size is its radius times the largest scale; a capsule's height scales along Y
+    /// and its radius by the larger of X and Z; one no taller than twice its radius is a sphere.
     #[test]
     fn shapes_are_as_large_as_their_scales() {
         let mut world = World::default();
@@ -1905,16 +1853,15 @@ mod tests {
         };
         world.insert(short, short_capsule).expect("alive");
         step(&mut world, 240);
-        // The floor's top and each one's half height.
+        // Floor top plus each one's half height.
         for (entity, middle) in [(sphere, 2.0), (tall, 2.0), (short, 1.0)] {
             let y = transform(&world, entity).translation.y;
             assert!((y - middle).abs() < 0.02, "{y}, not {middle}");
         }
     }
 
-    /// A body collides as each of its colliders, and as each changes between steps: a box kept
-    /// upright on a sphere under it, as a foot, rests on the sphere, then on its box once the
-    /// sphere's taken away.
+    /// A body collides as each of its colliders, and as each changes: an upright box with a
+    /// sphere under it rests on the sphere, then on its box once the sphere's removed.
     #[test]
     fn a_body_collides_as_each_of_its_colliders() {
         let mut world = World::default();
@@ -1933,7 +1880,7 @@ mod tests {
         };
         let body = world.spawn((at, upright, BoxCollider3D::default(), foot));
         step(&mut world, 240);
-        // The floor's top, the sphere's radius, then its offset.
+        // Floor top, sphere radius, offset.
         let on_foot = transform(&world, body).translation.y;
         assert!((on_foot - 2.0).abs() < 0.02, "on its foot: {on_foot}");
         world.remove::<SphereCollider3D>(body).expect("alive");
@@ -1942,9 +1889,9 @@ mod tests {
         assert!((on_box - 1.0).abs() < 0.02, "on its box: {on_box}");
     }
 
-    /// A kinematic body goes by its velocity alone, gravity aside, pushing a dynamic box in its
-    /// way, and turns by its angular velocity; a dynamic box whose rotation is fixed doesn't tip
-    /// off the floor's edge, where one whose rotation isn't does.
+    /// A kinematic body moves by its velocity alone, pushing a dynamic box in its way, and turns
+    /// by its angular velocity; a dynamic box with fixed rotation doesn't tip off the floor's
+    /// edge, one without does.
     #[test]
     fn kinematic_bodies_push_and_turn_and_fixed_rotations_stay() {
         let mut world = World::default();
@@ -1976,7 +1923,7 @@ mod tests {
             pushing.abs_diff_eq(DVec3::new(-1.0, 1.0, 0.0), 1e-4),
             "{pushing}"
         );
-        // Pushed half a unit, a unit in front of the pusher, touching it.
+        // A unit ahead of the pusher: half each, touching.
         let ahead = transform(&world, pushed).translation.x;
         assert!((ahead - pushing.x - 1.0).abs() < 0.02, "{ahead}");
         let spun = transform(&world, spinner);
@@ -1999,8 +1946,8 @@ mod tests {
         assert_eq!(transform(&world, upright).rotation, Quat::IDENTITY);
     }
 
-    /// A body goes as its entity does, or as it loses its `RigidBody3D`, its entity staying as it
-    /// was; one under a parent isn't moved, and is warned of once.
+    /// A body goes with its entity, or when it loses its `RigidBody3D`, which stays as it was; one
+    /// under a parent isn't moved, and is warned of once.
     #[test]
     fn bodies_go_with_their_entities_and_stay_under_parents() {
         let mut world = World::default();
@@ -2025,11 +1972,10 @@ mod tests {
         assert_eq!(physics.links.children, [child], "warned once");
     }
 
-    /// Each collider's outline goes where its entity draws, with its entity's ID: a box sized and
-    /// offset as its entity scales; a sphere around its offset so scaled, as large as its radius
-    /// scaled by the largest of the scales; and a capsule around its offset so scaled, its height
-    /// scaled along Y and its radius by the larger of the scales along X and Z, turned as its
-    /// entity is; each of an entity with all three, in that order.
+    /// Outlines go where their entity draws, with its ID: a box sized and offset by the scale; a
+    /// sphere around its scaled offset, radius times the largest scale; a capsule around its
+    /// scaled offset, height scaled along Y, radius by the larger of X and Z, turned with the
+    /// entity; all three for an entity with all, in that order.
     #[test]
     fn colliders_outline_where_their_entities_draw() {
         let mut world = World::default();
@@ -2081,11 +2027,11 @@ mod tests {
         assert_eq!([first, second, third], [id; 3]);
         let near = |a: Vec3, b: Vec3| a.abs_diff_eq(b, 1e-5);
         let entitys = stretched.matrix();
-        // The box's corner: its offset and half its size, in its entity's space.
+        // The box's corner: offset plus half its size, in the entity's space.
         let corner = cube.transform_point3(Vec3::splat(0.5));
         let want = entitys.transform_point3(DVec3::new(1.0, 0.5, 0.75));
         assert!(near(corner, want.as_vec3()), "{corner} {want}");
-        // The sphere's middle, and its surface 0.75 times 2 from it, every way.
+        // The sphere's middle, and its surface 0.75 times 2 from it.
         let middle = sphere.transform_point3(Vec3::ZERO);
         assert!(near(
             middle,
@@ -2109,8 +2055,8 @@ mod tests {
         assert!(near(along, turned * Vec3::Y), "{along}");
     }
 
-    /// A context whose world has the level's model, a floor at y 0, and a static root of it at
-    /// `at` with a `MeshCollider3D`.
+    /// A context with the level's model, a floor at y 0, and a static root of it at `at` with a
+    /// `MeshCollider3D`.
     fn level_at(at: Transform) -> (crate::Context, Entity) {
         let mut cx = crate::Context::seeded(7);
         let (model, _) = crate::model::tests::added(&mut cx, "level", crate::model::tests::level());
@@ -2127,8 +2073,8 @@ mod tests {
         (cx, root)
     }
 
-    /// A box dropped onto a model's triangles rests on them, a character walks on them, and a ray
-    /// down hits them, giving the model's root; scaled, they're where its scale puts them.
+    /// A box dropped onto a model's triangles rests on them, a character walks on them, a ray down
+    /// hits them (giving the model's root); scaled, they follow the scale.
     #[test]
     fn bodies_and_characters_stand_on_a_models_triangles() {
         let (mut cx, root) = level_at(Transform::IDENTITY);
@@ -2163,8 +2109,8 @@ mod tests {
         assert!((hit.expect("within it").point.y - 1.0).abs() < 1e-5);
     }
 
-    /// A mesh collider whose entity has no model collides as nothing, which it warns of, and what
-    /// falls onto it falls through; one whose model is read again takes its new triangles.
+    /// A mesh collider without a model collides as nothing, with a warning; one whose model is
+    /// read again takes its new triangles.
     #[test]
     fn mesh_colliders_follow_their_models() {
         let (mut cx, root) = level_at(Transform::IDENTITY);
@@ -2193,8 +2139,7 @@ mod tests {
             .x = 30.0;
         step(world, 32);
         assert!(transform(world, dropped).translation.y < 0.0, "through it");
-        // The model read again, as a development run reads it as its file changes, its floor a
-        // unit higher.
+        // The model read again (its floor a unit higher), as when its file changes.
         #[cfg(feature = "dev")]
         {
             let ModelRoot(model) = *world.get::<ModelRoot>(root).expect("a root");
@@ -2216,11 +2161,10 @@ mod tests {
         }
     }
 
-    /// A world standing on a model's triangles, its physics saved to text and loaded before the
-    /// model's surfaces are there, as a snapshot restored while its model loads is, keeps the
-    /// triangles the text holds, and its contacts with them, as the surfaces come: it steps as the
-    /// world it was saved from does, bit for bit, where a collider made again of them would drop
-    /// its contacts' warm starts.
+    /// A world standing on a model's triangles, its physics saved and loaded before the model's
+    /// surfaces are there (a snapshot restored while its model loads), keeps the text's triangles
+    /// and contacts as the surfaces come: it steps like its source, bit for bit, where a collider
+    /// remade from them would drop its contacts' warm starts.
     #[test]
     fn a_mesh_collider_restored_before_its_model_keeps_its_shape() {
         let (mut cx, root) = level_at(Transform::IDENTITY);
@@ -2237,7 +2181,7 @@ mod tests {
         let physics = world.resource::<Physics3D>().expect("stepped");
         let text = physics.save(world).expect("saved");
         let mut loaded = Physics3D::load(&text, world).expect("loaded");
-        // As a load finds it while its model is still loading, without its surfaces.
+        // As a load finds it while its model loads, without surfaces.
         let restored = loaded.links.get_mut(root).expect("linked");
         assert!(restored.surfaces.is_some() && restored.colliders[3].is_some());
         restored.surfaces = None;
@@ -2248,8 +2192,8 @@ mod tests {
         assert_eq!(copy.hash(), world.hash());
         let physics = copy.resource::<Physics3D>().expect("stepped");
         assert!(physics.links.get(root).expect("linked").surfaces.is_some());
-        // One whose model changed while it was saved, as its file may have, is made again of the
-        // model's triangles as they are now: its floor a unit higher.
+        // A model changed since the save, as its file may, is remade from its triangles as they
+        // are now: its floor a unit higher.
         #[cfg(feature = "dev")]
         {
             let mut loaded = Physics3D::load(&text, world).expect("loaded");
@@ -2273,8 +2217,8 @@ mod tests {
         }
     }
 
-    /// A world standing on a model's triangles, its physics saved to text, which holds them whole,
-    /// and loaded, steps as it did, bit for bit.
+    /// A world on a model's triangles, saved to text (which holds them whole) and loaded, steps
+    /// as before, bit for bit.
     #[test]
     fn a_mesh_collider_saved_steps_as_it_did() {
         let (mut cx, _) = level_at(Transform::IDENTITY);
@@ -2300,7 +2244,6 @@ mod tests {
         assert_eq!(copy.hash(), world.hash());
     }
 
-    /// The contact events of each of `ticks` steps.
     fn events(world: &mut World, ticks: u32) -> Vec<Vec<ContactEvent>> {
         (0..ticks)
             .map(|_| {
@@ -2310,10 +2253,9 @@ mod tests {
             .collect()
     }
 
-    /// The contact events of the steps after a snapshot, of a pile falling through a sensor and a
-    /// character walking into it, restored, as a rollback restores it, copied, or saved to text
-    /// and loaded, are those the world it was taken from had at each, in the same order; and a
-    /// dynamic body falls through the sensor as it would without it.
+    /// After a snapshot of a pile falling through a sensor, and a character walking into it, is
+    /// restored (as a rollback does), copied, or saved and loaded, each step's contact events
+    /// match the source's, in order; a dynamic body falls through the sensor as without it.
     #[test]
     fn contact_events_are_alike_after_a_restore() {
         let mut world = World::seeded(7);
