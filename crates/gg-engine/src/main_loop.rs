@@ -1,7 +1,7 @@
-//! The main loop's turn, a frame's, which windowed and headless runs share: running the ticks of
-//! the simulation that the frame's time owes, at a fixed rate whatever the frame rate, updating
-//! the layers and having them draw their UI, and handing the frame to the render thread; headless
-//! runs, which render offscreen; and what a run reports as it has loaded and as it ends.
+//! The main loop's frame, which windowed and headless runs share: run the ticks the frame's time
+//! owes at a fixed rate whatever the frame rate, update the layers and have them draw their UI,
+//! and hand the frame to the render thread. Also headless runs, which render offscreen, and what a
+//! run reports as it has loaded and as it ends.
 
 use std::mem;
 use std::process::ExitCode;
@@ -28,21 +28,18 @@ use crate::render_thread::{Drawn, Render, RenderThread, TextureChanges};
 use crate::snapshot::Snapshot;
 use crate::{App, BUILD};
 
-/// Renders offscreen, without a window, at 1280 by 720 pixels or the size `--size` gives, as fast
-/// as the GPU allows, with a tick of the simulation each frame, so that a run of a set number of
-/// frames runs as many ticks on any machine. Frames render on the render thread, as a windowed
-/// run's do, the last as the run ends. `api` serves tools as each frame starts; while it has
-/// paused or stopped the simulation with nothing asked of the frames, each waits up to a tick's
-/// time for a request, rather than spinning. The run starts as [`start`] says, and ends at
-/// `--frames`, at Ctrl+C, or, under `--supervised`, as stdin ends. A server's client
-/// (`--connect`) steps its simulation in real time, its frames a tick apart, as its server's go,
-/// and so does a run given `--real-time`.
+/// Renders offscreen at 1280 by 720 or `--size`, as fast as the GPU allows, one tick per frame, so
+/// a set number of frames runs as many ticks on any machine.
 ///
-/// Embedded (`--embedded`), it steps the simulation in real time instead, as a windowed run does,
-/// with no UI, playing sound and keeping the pipeline cache as one does, and its view fills its
-/// image, at the size the client it's published to asks for:
-/// each frame then waits for the client to take it, as [`api::pace`] says, and until a client has
-/// it published, frames come a tick apart or more.
+/// `api` serves tools as each frame starts; while it has paused or stopped the simulation with
+/// nothing asked of the frames, each waits up to a tick for a request. The run starts as [`start`]
+/// says and ends at `--frames`, Ctrl+C, or, under `--supervised`, stdin's end. A server's client
+/// (`--connect`) and `--real-time` runs step in real time, frames a tick apart.
+///
+/// Embedded (`--embedded`), it also steps in real time, with no UI, playing sound and keeping the
+/// pipeline cache. Its view fills its image at the size its client asks for. Each frame waits for
+/// the client to take it ([`api::pace`]); until one has it published, frames come a tick apart or
+/// more.
 pub(crate) fn run_headless(
     app: &mut App,
     args: &Args,
@@ -50,13 +47,12 @@ pub(crate) fn run_headless(
     snapshot: Option<Snapshot>,
 ) -> Result<Ran> {
     let embedded = args.embedded;
-    // A client's ticks keep pace with its server's, in real time, and `--real-time` paces a
-    // headless run's so, as for an agent that watches it play, and a peer's, which then waits for
-    // the other's inputs as a windowed peer does, its ticks owed meanwhile.
+    // A client's ticks keep pace with its server's. `--real-time` paces a headless run so, for an
+    // agent watching it play; a peer then waits for the other's inputs, its ticks owed meanwhile.
     let real_time = embedded || args.real_time || matches!(args.net, Some(Net::Connect(_)));
     let [mut width, mut height] = args.size.unwrap_or([1280, 720]);
-    // An embedded run keeps the pipeline cache as a windowed run does, as a tool restarts it at
-    // each change it can't patch in; the rest keep none, as `pipeline_cache` says.
+    // An embedded run keeps the pipeline cache, as a tool restarts it at each change it can't patch
+    // in; the rest keep none (`pipeline_cache`).
     let pipelines = embedded
         .then(|| {
             pipeline_cache::path(app.name, std::env::consts::OS, |name| {
@@ -73,7 +69,7 @@ pub(crate) fn run_headless(
     // The device holds what it loaded of it.
     drop(cached);
     let mut render = RenderThread::start(renderer)?;
-    // An embedded run is the game a tool shows, as the editor plays it, which plays its sounds.
+    // An embedded run is the game a tool shows, as the editor plays it, sounds included.
     let mut cx = Context::of_run(None, app, embedded);
     api::debug(&api, &mut cx);
     let mut clock = Clock::default();
@@ -84,8 +80,8 @@ pub(crate) fn run_headless(
     };
     #[cfg(feature = "dev")]
     let egui = crate::egui_context();
-    // Headless runs neither read nor save the layout, so that they're reproducible, and have no
-    // window to frame.
+    // Headless runs neither read nor save the layout, to stay reproducible, and have no window to
+    // frame.
     #[cfg(feature = "dev")]
     let mut dock = Dock::new(
         None,
@@ -108,8 +104,8 @@ pub(crate) fn run_headless(
     );
     let rendered = started.and_then(|()| {
         while args.frames.is_none_or(|limit| handed < limit) {
-            // A frame its client takes waits for that instead, paused or stopped as much as
-            // playing, as `api::pace` says.
+            // A frame its client takes waits for that instead, paused, stopped or playing
+            // (`api::pace`).
             if !embedded || api::handing(&api).is_none() {
                 api::idle(&mut api, &stepper);
             }
@@ -140,7 +136,7 @@ pub(crate) fn run_headless(
                 time: Some(clock.elapsed().as_secs_f64()),
                 ..Default::default()
             });
-            // As a stopped script did, so that no frame's time counts the stop.
+            // So no frame's time counts a script's stop.
             if mem::take(&mut cx.paused) {
                 clock.resume();
             }
@@ -203,8 +199,7 @@ pub(crate) fn run_headless(
                 }
                 None => {}
             }
-            // Rather than spinning while a lockstep peer's inputs are on their way, its frames
-            // unpaced.
+            // Don't spin, unpaced, while a lockstep peer's inputs are on their way.
             if !real_time && app.stack.net_waits(stepper.ticks) {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -212,8 +207,7 @@ pub(crate) fn run_headless(
         }
         Ok(())
     });
-    // The last frame ends here, and the frame handed over last renders before the run's end is
-    // timed.
+    // The last frame ends here; the frame handed over last renders before the run's end is timed.
     cx.perf.finish(clock.since_last(Instant::now()));
     let (renderer, last) = render.stop();
     let rendered = rendered.and_then(|()| {
@@ -242,12 +236,11 @@ pub(crate) fn run_headless(
     ))
 }
 
-/// Runs a server (`--serve`): without a window, a GPU or the tool API, which looks at a run's
-/// frames, its frames a tick apart, each taking what its clients sent and running the ticks owed in
-/// real time, as [`Stack::net_turn`] and [`Stepper::step`] say, until `--frames` frames, Ctrl+C,
-/// stdin's end under `--supervised` or a layer's [`Context::exit`]. The layers load their assets,
-/// which nothing draws, and their ticks run, but not their updates, whose drawing nothing would
-/// take. The run starts as [`start`] says.
+/// Runs a server (`--serve`) with no window, GPU or tool API, which looks at frames. Frames come a
+/// tick apart, each taking what clients sent ([`Stack::net_turn`]) and running the ticks owed in
+/// real time ([`Stepper::step`]), until `--frames` frames, Ctrl+C, stdin's end under
+/// `--supervised` or a layer's [`Context::exit`]. Layers load their assets and run ticks, but not
+/// updates, as nothing takes their drawing. The run starts as [`start`] says.
 pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>) -> Result<Ran> {
     let mut cx = Context::of_run(None, app, false);
     let mut clock = Clock::default();
@@ -297,18 +290,19 @@ pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>)
     Ok(Ran::finish(None, frames, &clock, &stepper, perf, stopping))
 }
 
-/// Starts the run in `cx`, windowed or not: from `snapshot`'s world, at its ticks, if it's given
-/// one, rather than the one `stack`'s layers attach, stopped or playing as the snapshot's run was,
-/// as [`Stack::restore`] says, given whether a tool API `serves` the run, and paused if it was in a
-/// development build, which alone pauses, dropping it once it has;
-/// or else from the world the layers attach, stopped if `stopped` says so, as `--stopped` asks.
-/// In a development build it first scans the assets under the app's root, before the layers load,
-/// and has a thread watch them if the API serves the run, as `Context::start_assets` says, writing
-/// the ID files missing, and moving those renames left behind, if the API serves the run and it
-/// isn't a lockstep session's joiner, whose host alone writes them, and whose textures go by the
-/// names its host gives them, by their paths until the host's world comes. The snapshot's textures
-/// are then found where the run's database has their IDs, as after a rename, as
-/// `Snapshot::follow` says.
+/// Starts the run in `cx`, windowed or not.
+///
+/// With a `snapshot`, it starts from the snapshot's world at its ticks, not the world the layers
+/// attach, stopped or playing as the snapshot's run was ([`Stack::restore`], given whether a tool
+/// API `serves` the run), and paused if it was (development builds only). Without one, it starts
+/// from the attached world, stopped if `stopped` (`--stopped`).
+///
+/// A development build first scans the assets under the app's root, before the layers load
+/// (`Context::start_assets`), and has a thread watch them if the API serves the run. Then, unless
+/// the run joins a lockstep session, it writes the missing ID files and moves those renames left
+/// behind; a joiner's host alone writes them, and its textures go by its host's names, by path
+/// until the host's world comes. The snapshot's textures are found where the run's database has
+/// their IDs, as after a rename (`Snapshot::follow`).
 ///
 /// Fails as `Stack::restore` does.
 pub(crate) fn start(
@@ -323,7 +317,7 @@ pub(crate) fn start(
     let mut snapshot = snapshot;
     #[cfg(feature = "dev")]
     {
-        // Whether it hosts or plays alone, rather than joins.
+        // Hosts or plays alone, rather than joins.
         let own = stack.watches_files();
         cx.start_assets(serves, serves && own);
         if own && let Some(snapshot) = &mut snapshot {
@@ -332,8 +326,8 @@ pub(crate) fn start(
         if !own {
             cx.name_as([]);
         }
-        // Before the layers load, so that music they have play as they load waits for the run to
-        // play; the first frame follows a snapshot's run that plays all the same.
+        // Before the layers load, so music they play as they load waits for the run to play. A
+        // snapshot's playing run follows the same way from its first frame.
         let snapshot = snapshot.as_ref();
         let paused = snapshot.is_some_and(|snapshot| snapshot.paused);
         cx.follow_playback(
@@ -364,9 +358,8 @@ pub(crate) fn start(
     Ok(())
 }
 
-/// The most pixels a side of egui's textures may have, the most every device the engine runs on
-/// takes, which each pass's input tells egui: every window's alike, since egui makes its font atlas
-/// again for a pass whose limit isn't the last one's.
+/// The most pixels a side of egui's textures may have: what every supported device takes. Every
+/// window's pass says so alike, as egui remakes its font atlas when the limit changes.
 #[cfg(feature = "dev")]
 pub(crate) const MAX_TEXTURE_SIDE: usize = gg_renderer::MAX_TEXTURE_SIZE as usize;
 
@@ -374,35 +367,36 @@ pub(crate) const MAX_TEXTURE_SIDE: usize = gg_renderer::MAX_TEXTURE_SIZE as usiz
 #[cfg(feature = "dev")]
 pub(crate) type EguiPass<'a> = (&'a egui::Context, &'a mut Dock, egui::RawInput);
 
-/// What a pass of egui's that [`run_frame`] ran made: its output, and whether any layer draws UI,
-/// as [`Stack::ui`] says.
+/// A pass's output, and whether any layer draws UI ([`Stack::ui`]).
 #[cfg(feature = "dev")]
 pub(crate) type Passed = (egui::FullOutput, bool);
 
-/// What [`run_frame`] would run a pass of egui's with, of which a build without `dev`, which has
-/// no UI, has none: its frames run no pass.
+/// Never built: a build without `dev` runs no pass.
 #[cfg(not(feature = "dev"))]
 pub(crate) type EguiPass<'a> = (std::convert::Infallible, std::marker::PhantomData<&'a ()>);
 
-/// What a pass of egui's would make, of which a build without `dev` has none.
+/// Never built.
 #[cfg(not(feature = "dev"))]
 pub(crate) type Passed = std::convert::Infallible;
 
-/// The first half of a turn of the main loop: starts the frame, `dt` after the last, for Tracy and
-/// the frame's measure, takes what the session sent, as [`Stack::net_turn`] says, runs the ticks of
-/// the simulation that the time owes, as `stepper` steps it, a peer's a little less and a client's a
-/// little more or less, as [`Stack::paced`] says, those a lockstep peer's inputs have come for,
-/// copying where the world's entities are as each starts, updates the layers, draws the world after
-/// what they drew, as far on from where the last tick found it to where it left it as the frame is
-/// past the tick, a client's other players as [`Stack::interpolate`] says, and, given egui, the
-/// dock and egui's input in `ui`, adds the engine's settings, as [`frame_rate::settings`] does, and
-/// has the layers draw their UI, in the dock and with egui. Returns that pass's output, and whether
-/// any layer draws UI, as [`Stack::ui`] says. [`tessellate`] starts the second half, which hands
-/// what egui made of it to the render thread.
+/// The first half of a main-loop turn. In order, for a frame `dt` after the last:
 ///
-/// egui allocates as it lays out here, and as [`tessellate`] tessellates, so frames that run its
-/// pass allocate; the UI is a development overlay, and an app that draws none stops running it,
-/// as [`keeps_egui`] says. A build without `dev`, which has no UI, runs none.
+/// 1. Starts the frame, for Tracy and the frame's measure.
+/// 2. Takes what the session sent ([`Stack::net_turn`]).
+/// 3. Runs the ticks the time owes, as `stepper` steps them: a peer's a little fewer, a client's a
+///    little more or fewer ([`Stack::paced`]), and only those a lockstep peer's inputs have come
+///    for. Each copies where the world's entities are as it starts.
+/// 4. Updates the layers.
+/// 5. Draws the world after them, as far on from where the last tick found it to where it left it
+///    as the frame is past the tick, a client's other players by [`Stack::interpolate`].
+/// 6. Given egui, the dock and egui's input in `ui`, adds the engine's settings
+///    ([`frame_rate::settings`]) and has the layers draw their UI in the dock.
+///
+/// Returns that pass's output and whether any layer draws UI. [`tessellate`] starts the second
+/// half.
+///
+/// egui allocates here and in [`tessellate`], so frames running its pass allocate. An app that
+/// draws no UI stops running it ([`keeps_egui`]); a build without `dev` runs none.
 pub(crate) fn run_frame(
     stack: &mut Stack,
     cx: &mut Context,
@@ -421,7 +415,7 @@ pub(crate) fn run_frame(
     }
     cx.session = stack.session_status();
     let owed = stack.paced(dt);
-    // As the requests served before the frame left the run, before its ticks queue sounds.
+    // As the requests served before the frame left it, before its ticks queue sounds.
     cx.follow_playback(stepper.stopped(), stepper.paused());
     let tick = |tick: Tick| {
         if stack.net_waits(tick.number) {
@@ -431,7 +425,7 @@ pub(crate) fn run_frame(
         stack.tick(cx, tick)
     };
     stepper.step(owed, tick, || start.elapsed());
-    // A world edited while no tick runs has its cells come and go around the look's viewpoint.
+    // In a world edited while no tick runs, cells come and go around the look's viewpoint.
     if stepper.stopped() {
         cx.stream_stopped();
     }
@@ -453,13 +447,12 @@ pub(crate) fn run_frame(
     pass
 }
 
-/// Has the layers draw their UI in a pass of egui's, given egui, the dock and egui's input, as
-/// [`run_frame`] says.
+/// Has the layers draw their UI in a pass of egui's ([`run_frame`]).
 #[cfg(feature = "dev")]
 fn run_ui(stack: &mut Stack, cx: &mut Context, (egui, dock, input): EguiPass<'_>) -> Passed {
     let _zone = gg_core::zone!("egui");
     let mut layers_draw = false;
-    // egui may run the pass again in a frame, as it asks for one.
+    // egui may run the pass again in a frame, if it asks.
     let output = egui.run_ui(input, |root| {
         dock.begin(root);
         let mut ui = Ui::new(root, dock);
@@ -477,10 +470,10 @@ fn run_ui(_: &mut Stack, _: &mut Context, (never, _): EguiPass<'_>) -> Passed {
     match never {}
 }
 
-/// Whether egui runs from the next frame on, after a pass in which `layers_draw` says whether any
-/// of `stack`'s layers draw UI, in windows framed as `chrome` says. Once none does, the OS frames
-/// the windows, and the game's view isn't in `dock`'s panel, egui would show nothing, so it stops
-/// for the rest of the run: whether a layer draws UI is its type's, which no later frame changes.
+/// Whether egui runs from the next frame on, after a pass where `layers_draw` says whether any of
+/// `stack`'s layers draw UI. If none does, the OS frames the windows (`chrome`) and the game's view
+/// isn't in `dock`'s panel, egui would show nothing, so it stops for the run: whether a layer draws
+/// UI is its type's, which never changes.
 #[cfg(feature = "dev")]
 pub(crate) fn keeps_egui(stack: &Stack, layers_draw: bool, chrome: Chrome, dock: &Dock) -> bool {
     let keeps = layers_draw || chrome != Chrome::Os || dock.is_dockspace();
@@ -493,8 +486,8 @@ pub(crate) fn keeps_egui(stack: &Stack, layers_draw: bool, chrome: Chrome, dock:
     keeps
 }
 
-/// What the main window's pass drew in a frame, tessellated, for the render thread: nothing in a
-/// build without `dev`, which runs no pass.
+/// What the main window's pass drew, tessellated, for the render thread: nothing in a build
+/// without `dev`.
 pub(crate) struct MainUi {
     primitives: Vec<egui::ClippedPrimitive>,
     textures: TextureChanges,
@@ -502,7 +495,7 @@ pub(crate) struct MainUi {
 }
 
 impl MainUi {
-    /// Nothing, from a frame that ran no pass.
+    /// For a frame that ran no pass.
     pub(crate) fn none() -> Self {
         Self {
             primitives: Vec::new(),
@@ -512,9 +505,8 @@ impl MainUi {
     }
 }
 
-/// The second half of a turn of the main loop starts here, while the frame before renders:
-/// tessellates the UI the main window's pass drew, taking it and its texture changes from `output`,
-/// and returns it, and how long that took.
+/// The second half of a main-loop turn, while the frame before renders: tessellates the main
+/// window's UI, taking it and its texture changes from `output`. Returns it and the time taken.
 #[cfg(feature = "dev")]
 pub(crate) fn tessellate(
     egui: &egui::Context,
@@ -532,11 +524,10 @@ pub(crate) fn tessellate(
     (ui, start.elapsed())
 }
 
-/// Takes the renderer back from rendering the frame before, which this frame, having tessellated
-/// its own UI in `tessellated`, is measured with, and the answers to picks that came in as it
-/// rendered, which `cx` gives in place of the last, and what it left streaming to the GPU, which
-/// [`Context::streaming`] tells, logging `engine.loaded` once nothing is, as [`loaded`] says; and
-/// returns whether that frame presented: `None` if no frame was rendering.
+/// Takes the renderer back from rendering the frame before, measured with this frame's
+/// `tessellated` time. Gives `cx` the answers to picks that came in meanwhile, replacing the last,
+/// and what was left streaming to the GPU ([`Context::streaming`]), logging `engine.loaded` once
+/// nothing is ([`loaded`]). Returns whether that frame presented: `None` if none was rendering.
 pub(crate) fn take_back<R: Render>(
     render: &mut RenderThread<R>,
     cx: &mut Context,
@@ -559,10 +550,10 @@ pub(crate) fn take_back<R: Render>(
     rendered.map(|rendered| rendered.presented).transpose()
 }
 
-/// Logs `engine.loaded`, once a run, at the first frame back after which nothing is decoding or
-/// streaming once the layers have attached: the milliseconds since the engine `started`, the
-/// process's resident memory and its peak, and the GPU's own memory in use and its budget, as `gpu`
-/// gives them. Each count the OS or the GPU doesn't give is left out.
+/// Logs `engine.loaded` once a run, at the first frame back after the layers attach with nothing
+/// decoding or streaming: milliseconds since the engine `started`, the process's resident memory
+/// and peak, and the GPU's memory in use and budget (`gpu`). Counts the OS or GPU doesn't give are
+/// left out.
 fn loaded(started: Instant, gpu: Option<MemoryBudget>) {
     let memory = memory::resident();
     info!(
@@ -576,9 +567,8 @@ fn loaded(started: Instant, gpu: Option<MemoryBudget>) {
     );
 }
 
-/// Hands the frame over to the render thread: what the layers drew in the game's view, `view` in
-/// the main window's pixels, the UI in `ui` over it, and what the windows of their own drew, in
-/// `windows`.
+/// Hands the frame to the render thread: the layers' drawing in the game's view (`view`, in the
+/// main window's pixels), `ui` over it, and what the other windows drew (`windows`).
 pub(crate) fn hand_off<R: Render>(
     render: &mut RenderThread<R>,
     cx: &mut Context,
@@ -603,8 +593,8 @@ pub(crate) struct Clock {
 }
 
 impl Clock {
-    /// Starts a frame, and returns the time since the last one started; zero for the first, and
-    /// for the first after [`Clock::resume`].
+    /// Starts a frame; returns the time since the last, zero for the first and the first after
+    /// [`Clock::resume`].
     pub(crate) fn start_frame(&mut self) -> Duration {
         let now = Instant::now();
         let dt = self.last.map_or(Duration::ZERO, |last| now - last);
@@ -613,15 +603,13 @@ impl Clock {
         dt
     }
 
-    /// Has the next frame count from its own start, as the first does, across a pause in which no
-    /// frames run, such as while the window is minimized, as the pause starts and as it ends:
-    /// otherwise the layers would take the pause for one long frame, and so would the frame times.
+    /// Has the next frame count from its own start. Call as a pause without frames, such as a
+    /// minimized window, starts and ends; else the layers and frame times see one long frame.
     pub(crate) fn resume(&mut self) {
         self.last = None;
     }
 
-    /// The time since the first frame started, which egui's input gives as its time; zero before
-    /// it.
+    /// The time since the first frame started, which is egui's time; zero before it.
     #[cfg(any(feature = "dev", test))]
     fn elapsed(&self) -> Duration {
         self.first.map_or(Duration::ZERO, |first| first.elapsed())
@@ -635,22 +623,21 @@ impl Clock {
 }
 
 /// The most ticks a frame runs: 125 ms of the simulation. Past them, the simulation falls behind
-/// real time, rather than taking the frame rate down with it.
+/// real time instead of dragging the frame rate down.
 const MOST_TICKS: u64 = 8;
 
-/// Turns frames' time into the simulation's ticks, as many as the time owed holds, so that the
-/// simulation steps at its fixed rate whatever the frame rate; or, paused or stopped, as the tool
-/// API asks.
+/// Turns frames' time into as many ticks as it owes, so the simulation steps at its fixed rate
+/// whatever the frame rate; or, paused or stopped, as the tool API asks.
 #[derive(Default)]
 pub(crate) struct Stepper {
     /// The time not yet simulated: less than a tick, between frames.
     owed: Duration,
-    /// The ticks run, which number the next: the world's, which go back as the tool API's `stop`
+    /// The world's ticks run, which number the next. They go back when the tool API's `stop`
     /// brings back the world as edited.
     pub(crate) ticks: u64,
-    /// The ticks the run has run, in whichever world, since it started.
+    /// The ticks the run has run, in whichever world.
     ticked: u64,
-    /// Whether the run started from a snapshot, rather than from the world its layers attached.
+    /// Whether the run started from a snapshot.
     #[cfg_attr(
         not(feature = "dev"),
         allow(dead_code, reason = "only the tool API asks")
@@ -660,19 +647,18 @@ pub(crate) struct Stepper {
     dropped: u64,
     /// One tick every frame, whatever its time.
     lockstep: bool,
-    /// Set while the tool API has paused the simulation, whose frames then run only the ticks
-    /// `steps` asks for, and draw the world as the last tick left it.
+    /// Set while the tool API has paused the simulation: frames run only `steps` ticks and draw
+    /// the world as the last tick left it.
     paused: bool,
-    /// Set while the tool API has stopped the simulation, whose frames then run no ticks, and draw
-    /// the world as edits leave it. Only development builds stop.
+    /// Set while the tool API has stopped the simulation: frames run no ticks and draw the world
+    /// as edits leave it. Development builds only.
     stopped: bool,
     /// The ticks still to run while paused, at most [`MOST_TICKS`] a frame.
     steps: u64,
 }
 
 impl Stepper {
-    /// A tick every frame, as headless runs step, so that a run of a set number of frames runs as
-    /// many ticks, however fast its frames are.
+    /// A tick every frame, as headless runs step.
     fn lockstep() -> Self {
         Self {
             lockstep: true,
@@ -680,43 +666,44 @@ impl Stepper {
         }
     }
 
-    /// Numbers the ticks on from `ticks`, those a snapshot that the run starts from had run.
+    /// Numbers the ticks on from the starting snapshot's `ticks`.
     pub(crate) fn start_at(&mut self, ticks: u64) {
         self.ticks = ticks;
         self.restored = true;
     }
 
-    /// Numbers the ticks on from `ticks`, those of a world that took the world's place as the run
-    /// went on, as a lockstep joiner's world gives way to its host's, or the world as edited comes
-    /// back at the tool API's `stop`, owing no time.
+    /// Numbers the ticks on from `ticks`, a world that replaced the world mid-run: a joiner's
+    /// giving way to its host's, or the world as edited returning at `stop`. Owes no time.
     pub(crate) fn jump_to(&mut self, ticks: u64) {
         self.ticks = ticks;
         self.owed = Duration::ZERO;
     }
 
-    /// The ticks the run has run, in whichever world, since it started.
+    /// The ticks the run has run, in whichever world.
     pub(crate) fn ran(&self) -> u64 {
         self.ticked
     }
 
-    /// Whether the run started afresh, from the world its layers attached, and hasn't ticked
-    /// since: what they queued as they attached is still to apply, at its first tick. A run
-    /// restored from a snapshot attached nothing.
+    /// Whether the run started from the layers' attached world and hasn't ticked, so what they
+    /// queued as they attached applies at its first tick. A snapshot's run attached nothing.
     #[cfg(feature = "dev")]
     pub(crate) fn fresh(&self) -> bool {
         !self.restored && self.ticked == 0
     }
 
-    /// Runs, through `tick`, the ticks owed by a frame `dt` after the last, numbered on from the
-    /// last: one for each whole tick the time owed holds, at most [`MOST_TICKS`], and no more once
-    /// `took`, the time the frame's ticks have taken so far, is longer than the time they've
-    /// simulated, so that a simulation slower than real time slows down rather than spending every
-    /// frame catching up. The whole ticks not run are dropped, and the fraction of one left over
-    /// carries to the next frame. In lockstep, exactly one. Paused, those the steps asked for,
-    /// whatever the time, as many as the time they take allows, the rest left for the next frame.
-    /// A tick that `tick` doesn't run, returning `false`, as one waiting for a lockstep peer's
-    /// inputs, stops the frame's ticks, and those owed are owed still, up to [`MOST_TICKS`] of them,
-    /// rather than dropped. Stopped, none, owing no time and dropping none. Returns how many ran.
+    /// Runs through `tick` the ticks a frame `dt` after the last owes, numbered on from the last.
+    /// Returns how many ran.
+    ///
+    /// - Normally, one per whole tick owed, at most [`MOST_TICKS`], and none more once `took`
+    ///   (the frame's ticks' time so far) exceeds the time they've simulated, so a slow simulation
+    ///   slows down instead of catching up every frame. Whole ticks not run are dropped; the
+    ///   fraction carries to the next frame.
+    /// - In lockstep, exactly one.
+    /// - Paused, the steps asked for, whatever the time, as many as their time allows; the rest
+    ///   wait for the next frame.
+    /// - If `tick` returns `false` (waiting for a lockstep peer's inputs), the frame's ticks stop
+    ///   and those owed stay owed, up to [`MOST_TICKS`].
+    /// - Stopped, none, owing and dropping none.
     pub(crate) fn step(
         &mut self,
         dt: Duration,
@@ -763,38 +750,35 @@ impl Stepper {
         ran
     }
 
-    /// How far the frame is past its last tick, as a fraction of a tick, from 0 to less than 1,
-    /// which the world draws that far on from where the tick found it to where it left it; 1 in
-    /// lockstep, so that a headless frame draws its tick as it leaves the world, and while paused
-    /// or stopped, so that a frame draws the world as the tool API reads it.
+    /// How far the frame is past its last tick, from 0 to less than 1 of a tick; the world draws
+    /// that far on from where the tick found it to where it left it. 1 in lockstep, and while
+    /// paused or stopped, so a frame draws the world as its tick left it or the tool API reads it.
     fn alpha(&self) -> f32 {
         if self.lockstep || self.paused || self.stopped {
             return 1.0;
         }
-        // Past a tick while waiting for a lockstep peer, which draws the last tick as it left it.
+        // Past a tick while waiting for a lockstep peer: draws the last tick as it left it.
         (self.owed.as_nanos() as f64 / Tick::DT.as_nanos() as f64).min(1.0) as f32
     }
 
-    /// The simulation's time, in seconds, as a frame draws the world `alpha` of the way on from
-    /// where the latest tick found it to where it left it: 0 before any tick. It goes by the
-    /// world's ticks, so it stops while the simulation does, and a replay's frames draw at the
-    /// times its run's did.
+    /// The simulation's time in seconds as a frame draws the world `alpha` of the way through the
+    /// latest tick; 0 before any. It goes by the world's ticks, so it stops with the simulation and
+    /// a replay's frames draw at their run's times.
     fn time(&self, alpha: f32) -> f32 {
         let ticks = (self.ticks as f64 - 1.0 + f64::from(alpha)).max(0.0);
         (ticks * Tick::DT.as_secs_f64()) as f32
     }
 
-    /// Pauses the simulation, as the tool API's `pause` asks: frames run no ticks but those
-    /// [`step_by`](Self::step_by) asks for, and the time they take isn't owed.
+    /// Pauses the simulation (the tool API's `pause`): frames run only the ticks
+    /// [`step_by`](Self::step_by) asks for, and their time isn't owed.
     #[cfg(feature = "dev")]
     pub(crate) fn pause(&mut self) {
         self.paused = true;
         self.owed = Duration::ZERO;
     }
 
-    /// Runs the simulation in real time again, dropping the steps not yet run, as the tool API's
-    /// `resume` asks. The first frame after owes only its own time, so that the simulation doesn't
-    /// catch up with the pause.
+    /// Runs in real time again (the tool API's `resume`), dropping unrun steps. The first frame
+    /// after owes only its own time, so the simulation doesn't catch up with the pause.
     #[cfg(feature = "dev")]
     pub(crate) fn resume(&mut self) {
         self.paused = false;
@@ -802,8 +786,7 @@ impl Stepper {
         self.owed = Duration::ZERO;
     }
 
-    /// Pauses the simulation, and has the frames from the next run `ticks` more ticks, as the tool
-    /// API's `step` asks.
+    /// Pauses and has the next frames run `ticks` more (the tool API's `step`).
     #[cfg(feature = "dev")]
     pub(crate) fn step_by(&mut self, ticks: u64) {
         self.pause();
@@ -815,15 +798,13 @@ impl Stepper {
         self.paused
     }
 
-    /// The ticks still to run while paused.
     #[cfg(feature = "dev")]
     pub(crate) fn steps(&self) -> u64 {
         self.steps
     }
 
-    /// Stops the simulation, as the tool API's `stop` asks: frames run no ticks, whatever their
-    /// time, and the steps not yet run are dropped, until [`play`](Self::play). A pause lasts
-    /// across it.
+    /// Stops the simulation (the tool API's `stop`): frames run no ticks, whatever their time, and
+    /// unrun steps are dropped, until [`play`](Self::play). A pause lasts across it.
     #[cfg(feature = "dev")]
     pub(crate) fn stop(&mut self) {
         self.stopped = true;
@@ -831,8 +812,8 @@ impl Stepper {
         self.steps = 0;
     }
 
-    /// Runs the simulation again after [`stop`](Self::stop), as the tool API's `play` asks: in
-    /// real time, or paused if it was, the first frame after owing only its own time.
+    /// Runs the simulation again after [`stop`](Self::stop) (the tool API's `play`): in real time,
+    /// or paused if it was, the first frame owing only its own time.
     #[cfg(feature = "dev")]
     pub(crate) fn play(&mut self) {
         self.stopped = false;
@@ -863,22 +844,21 @@ pub(crate) fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
 /// What a run did, reported when it ends.
 pub(crate) struct Ran {
     frames: u64,
-    /// The ticks the simulation ran in the run, in whichever world: past a snapshot's, in a run
-    /// restored from one.
+    /// The ticks run, in whichever world; past a snapshot's, if restored from one.
     ticks: u64,
-    /// The whole ticks the frames' time held that they didn't run, which the simulation fell
-    /// behind by.
+    /// The whole ticks the frames' time held that they didn't run: how far the simulation fell
+    /// behind.
     ticks_dropped: u64,
-    /// How the run was validated, the GPU it rendered on, and the GPU's own memory in use as the
-    /// run ended, before the renderer let go of its own: none for a server, which renders nothing.
+    /// How the run was validated, its GPU, and the GPU's memory in use as it ended, before the
+    /// renderer let go. None for a server, which renders nothing.
     validation: Option<Validation>,
     gpu: Option<String>,
     gpu_memory: Option<u64>,
-    /// What the frames' arenas held as the run ended, and the most a frame took of its own.
+    /// What the frames' arenas held as the run ended, and the most a frame took.
     arenas: Arenas,
-    /// The GPU memory the frames' own images, the view's among them, were in as the run ended.
+    /// The GPU memory the frames' own images, the view's among them, held as the run ended.
     transient_bytes: u64,
-    /// The most of the process's memory that was resident, if the OS says.
+    /// The most resident memory, if the OS says.
     memory_peak: Option<u64>,
     /// When its first frame started, if one did.
     first_frame_at: Option<Instant>,
@@ -887,11 +867,10 @@ pub(crate) struct Ran {
 }
 
 impl Ran {
-    /// Shuts the renderer down first, so that what validation reports on the way, such as
-    /// objects left undestroyed, counts too, once it has told what of the GPU's memory is in use
-    /// and what the frames' arenas hold, given one: a server's run has none. `stopping` is when the
-    /// run began to end, after its last frame rendered, `stepper` what stepped its simulation, and
-    /// `perf` what it measured of its frames, the last of them finished.
+    /// Shuts the renderer down, if any (a server has none), after reading the GPU's memory in use
+    /// and the frames' arenas, so validation's reports on the way, such as objects left
+    /// undestroyed, count too. `stopping` is when the run began to end, after its last frame
+    /// rendered; `perf` is what it measured of its frames, the last finished.
     pub(crate) fn finish(
         renderer: Option<Renderer>,
         frames: u64,
@@ -928,11 +907,9 @@ impl Ran {
         }
     }
 
-    /// Logs how long the run's frames took, and what memory it held, then how it ended:
-    /// `engine.perf`, whose times are in milliseconds, comes first, so that a run that fails
-    /// validation has it too, and one that `failed`, as a layer ends one through
-    /// [`Context::fail`], which logged why. `started` is when the engine started, and `args` how it
-    /// ran.
+    /// Logs `engine.perf` (times in milliseconds) first, so a run that fails validation, or
+    /// `failed` through [`Context::fail`] (which logged why), has it too; then how the run ended.
+    /// `started` is when the engine started.
     pub(crate) fn report(self, started: Instant, args: &Args, failed: bool) -> ExitCode {
         let perf = &self.perf;
         info!(
@@ -986,7 +963,7 @@ impl Ran {
             validated = self.validated(),
             "Frame times"
         );
-        // A frame past `--frames` is refused, but a window closed early ends a run before it.
+        // A frame past `--frames` is refused, but an early window close ends a run before it.
         if let Some(frame) = args.capture
             && self.frames < frame.get()
         {
@@ -1018,8 +995,7 @@ impl Ran {
         ExitCode::SUCCESS
     }
 
-    /// Whether the run ran under Vulkan's validation layer: a server's, which renders nothing,
-    /// didn't.
+    /// Whether the run ran under Vulkan's validation layer; a server's didn't.
     fn validated(&self) -> bool {
         self.validation.as_ref().is_some_and(Validation::enabled)
     }
@@ -1043,11 +1019,10 @@ pub(crate) mod tests {
         render_thread,
     };
 
-    /// Spawns a red sprite as it attaches, and draws a sprite of its own each update, and another
-    /// on the canvas, 100 units across, 50 left of and below the view's top right.
+    /// Spawns a red sprite as it attaches, draws one each update, and another on the canvas, 100
+    /// units across, 50 left of and below the view's top right.
     struct Drawer;
 
-    /// Where [`Drawer`]'s sprite on the canvas is from the view's top right.
     fn top_right() -> Mat4 {
         Mat4::from_translation(Vec3::new(-50.0, -50.0, 0.0)) * Mat4::from_scale(Vec3::splat(100.0))
     }
@@ -1071,16 +1046,15 @@ pub(crate) mod tests {
         }
     }
 
-    /// Spawns two sprites as it attaches: the slider, at x 0, which moves 1 in x at each tick, and
-    /// the jumper, at x 10, which jumps 90 at tick 3, resetting its interpolation; and spawns one
-    /// at x 5 at tick 2. Each has a z of its own, so that they draw in that order.
+    /// Spawns two sprites as it attaches: the slider, at x 0, moving 1 in x each tick, and the
+    /// jumper, at x 10, jumping 90 at tick 3 and resetting its interpolation; and spawns one at x 5
+    /// at tick 2. Each has its own z, so they draw in that order.
     #[derive(Default)]
     struct Slider {
         slider: Option<Entity>,
         jumper: Option<Entity>,
     }
 
-    /// Where [`Slider`]'s sprites are: at `x`, and at their own `z`.
     fn slid(x: f32, z: f32) -> Transform {
         Transform {
             translation: Vec3::new(x, 0.0, z).as_dvec3(),
@@ -1119,7 +1093,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Runs a frame `dt` after the last, of a 640 by 360 view, and returns what it drew.
+    /// Runs a frame of a 640 by 360 view; returns what it drew.
     fn drawn(stack: &mut Stack, cx: &mut Context, dt: Duration, stepper: &mut Stepper) -> Draws {
         assert!(run_frame(stack, cx, dt, stepper, None).is_none());
         let mut frame = render_thread::Extracted::default();
@@ -1131,9 +1105,7 @@ pub(crate) mod tests {
         frame.draws
     }
 
-    /// What [`Slider`]'s sprites in `world` draw as: the slider at `slider`, the jumper at
-    /// `jumper`, and the one spawned at tick 2, once it's spawned, each with its entity's ID,
-    /// found by its z.
+    /// What [`Slider`]'s sprites draw as, each with its entity's ID, found by z.
     fn slider_draws(world: &World, slider: f32, jumper: f32, spawned: bool) -> Draws {
         let id = |z: f32| {
             let mut placed = world.query::<(Entity, &Transform)>();
@@ -1158,8 +1130,8 @@ pub(crate) mod tests {
         want
     }
 
-    /// Spawns an entity as it attaches, which it turns a quarter turn a second at each tick, and
-    /// notes each tick it gets.
+    /// Spawns an entity as it attaches, turns it a quarter turn a second each tick, and notes each
+    /// tick.
     pub(crate) struct Turner(pub(crate) Rc<RefCell<Vec<Tick>>>);
 
     impl Layer for Turner {
@@ -1176,7 +1148,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Notes its ticks and its updates, in the order they come.
+    /// Notes its ticks and updates in order.
     struct Order(Rc<RefCell<Vec<String>>>);
 
     impl Layer for Order {
@@ -1209,7 +1181,7 @@ pub(crate) mod tests {
             stack.attach(&mut cx);
             let mut stepper = Stepper::default();
             for dt in frames {
-                // A frame without time, as the first is and the first after a pause, runs no tick.
+                // A frame without time, as the first and the first after a pause, runs no tick.
                 for dt in [Duration::ZERO, dt] {
                     stepper.step(dt, |tick| stack.tick(&mut cx, tick), || Duration::ZERO);
                 }
@@ -1229,7 +1201,7 @@ pub(crate) mod tests {
     fn a_frame_runs_at_most_8_ticks_keeping_the_fraction() {
         let mut stepper = Stepper::default();
         let fast = || Duration::ZERO;
-        // 64.32 ticks' time: 8 run, the other 56 whole ticks are dropped, and 5 ms is left over.
+        // 64.32 ticks' time: 8 run, 56 are dropped, 5 ms is left.
         assert_eq!(stepper.step(Duration::from_millis(1005), |_| true, fast), 8);
         assert_eq!(stepper.dropped, 56);
         // A whole tick, with the 5 ms.
@@ -1262,8 +1234,8 @@ pub(crate) mod tests {
         assert_eq!(stepper.dropped, 2 * (MOST_TICKS - 1));
     }
 
-    /// A tick waiting for a lockstep peer stops the frame's ticks, and the time owed stays owed,
-    /// up to 8 ticks of it, drawn as the last tick left the world, for the frames once it comes.
+    /// A tick waiting for a lockstep peer stops the frame's ticks; time owed stays owed up to 8
+    /// ticks, drawn as the last tick left the world.
     #[test]
     fn ticks_waiting_for_a_peer_stay_owed() {
         let mut stepper = Stepper::default();
@@ -1280,8 +1252,8 @@ pub(crate) mod tests {
         assert_eq!((stepper.ticks, stepper.dropped), (2 + MOST_TICKS, 0));
     }
 
-    /// A frame draws the world at the simulation's time, part of the way through the latest tick
-    /// as the world draws, from 0 before any; in lockstep, at the latest tick's end.
+    /// A frame draws the world at the simulation's time: part way through the latest tick, 0
+    /// before any, at its end in lockstep.
     #[test]
     fn frames_draw_the_world_at_the_simulations_time() {
         let fast = || Duration::ZERO;
@@ -1296,9 +1268,8 @@ pub(crate) mod tests {
         assert_eq!(lockstep.time(lockstep.alpha()), 3.0 / 64.0);
     }
 
-    /// Paused, frames run only the ticks asked for, at most 8 a frame, whatever their time, and
-    /// draw the world as the last tick left it; resumed, the pause is owed nothing, and the steps
-    /// not yet run are dropped.
+    /// Paused, frames run only the ticks asked for, at most 8 a frame, and draw the world as the
+    /// last tick left it. Resumed, the pause is owed nothing and unrun steps are dropped.
     #[cfg(feature = "dev")]
     #[test]
     fn a_paused_simulation_runs_only_the_steps_asked_for() {
@@ -1329,9 +1300,8 @@ pub(crate) mod tests {
         assert_eq!(stepper.alpha(), 0.0);
     }
 
-    /// Stopped, frames run no ticks, whatever their time or the steps asked for, owing none and
-    /// dropping none, and draw the world as the tool API reads it; played, the stop is owed
-    /// nothing; and the ticks the run has run count those of a world `stop` takes back.
+    /// Stopped, frames run no ticks, owing and dropping none, and draw the world as the tool API
+    /// reads it. Played, the stop is owed nothing. The run's ticks count a world `stop` takes back.
     #[cfg(feature = "dev")]
     #[test]
     fn a_stopped_simulation_runs_no_ticks() {
@@ -1350,19 +1320,18 @@ pub(crate) mod tests {
         assert_eq!(stepper.step(Tick::DT / 2, |_| true, fast), 0);
         assert_eq!(stepper.alpha(), 0.5);
         assert_eq!(stepper.step(Tick::DT / 2, |_| true, fast), 1);
-        // As `stop` brings back a world as edited at tick 0.
+        // As `stop` brings back the world as edited, at tick 0.
         stepper.jump_to(0);
         assert_eq!((stepper.ticks, stepper.ran()), (0, 3));
     }
 
     /// A development build's run scans the assets under its root as it starts, before its layers
-    /// load: one that serves the tool API writes the ID files missing; one that doesn't, or that
-    /// joins a lockstep session, whose host writes them, writes none, and warns of each asset
-    /// without one.
+    /// load. One serving the tool API writes the missing ID files; one that doesn't, or joins a
+    /// lockstep session whose host writes them, writes none and warns of each asset without one.
     #[cfg(feature = "dev")]
     #[test]
     fn a_run_writes_missing_id_files_as_it_starts_only_if_it_serves_the_api() {
-        /// Notes, as it loads, whether the ID file at its path is there.
+        /// Notes, as it loads, whether the ID file exists.
         struct Looks(std::path::PathBuf, Rc<Cell<Option<bool>>>);
 
         impl Layer for Looks {
@@ -1376,13 +1345,13 @@ pub(crate) mod tests {
         std::fs::write(scratch.0.join("a.png"), "").expect("an asset");
         let meta = scratch.0.join("a.png.meta");
         let logged = crate::testing::logged();
-        // Whether the run serves the API and whether it joins, the one that writes last.
+        // Whether the run serves the API and whether it joins; the writing case is last.
         for (serves, joins) in [(false, false), (true, true), (true, false)] {
             let found = Rc::new(Cell::new(None));
             let mut stack = Stack::default();
             stack.push_layer(Looks(meta.clone(), Rc::clone(&found)));
             if joins {
-                // It connects as it first turns, which this run never does.
+                // It connects at its first turn, which this run never takes.
                 let join =
                     crate::args::Net::Join(crate::args::Toward::Address("127.0.0.1:9".to_owned()));
                 let code = crate::net::TESTED;
@@ -1434,8 +1403,8 @@ pub(crate) mod tests {
         assert_eq!(*calls.borrow(), ["tick 0", "update", "tick 1", "update"]);
     }
 
-    /// A stopped run's frames, which run no tick, bring a world's cells in around the look's
-    /// viewpoint, as the editor's camera is.
+    /// A stopped run's frames bring a world's cells in around the look's viewpoint, as the editor's
+    /// camera is.
     #[cfg(feature = "dev")]
     #[test]
     fn a_stopped_runs_frames_bring_cells_in_around_the_look() {
@@ -1473,8 +1442,8 @@ pub(crate) mod tests {
         let mut stepper = Stepper::default();
         let (cx, dt, stepper) = (&mut cx, clock.start_frame(), &mut stepper);
         assert!(run_frame(&mut stack, cx, dt, stepper, None).is_none());
-        // The layer's sprite, of no entity, then the scene's place and the world's, with its
-        // entity's ID, which the scene's place keeps from joining the layer's run.
+        // The layer's sprite, of no entity, then the world's with its entity's ID, which keeps the
+        // scene's place from joining the layer's run.
         let world = cx.world();
         let red_one = world.query::<(Entity, &Sprite)>().next();
         let (red_one, _) = red_one.expect("the sprite the layer spawned");
@@ -1497,7 +1466,7 @@ pub(crate) mod tests {
         let scale = Mat4::from_scale(Vec3::new(1.0 / 3.0, 1.0 / 3.0, 1.0));
         canvas.push_sprite(anchor * scale * top_right(), Sprite::default());
         assert_eq!(frame.canvas, canvas);
-        // The context's buffers and those the frame's draws come back in all start empty.
+        // The context's buffers and those the frame's draws return in all start empty.
         for _ in 0..2 {
             cx.extract(&mut frame, viewport);
             assert!(
@@ -1507,8 +1476,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Spawns a camera as it attaches, and sets a viewpoint of its own as it updates while `own`
-    /// says to.
+    /// Spawns a camera as it attaches, and sets its own viewpoint in updates while `own`.
     struct Overlooker {
         own: Rc<Cell<bool>>,
     }
@@ -1555,9 +1523,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// The view sees from the default without a camera; through the world's camera, as it draws
-    /// the world, in frames no layer sets a viewpoint; and from a layer's viewpoint in the frame
-    /// it sets it, that frame alone.
+    /// The view sees from the default without a camera; through the world's camera in frames where
+    /// no layer sets a viewpoint; and from a layer's viewpoint in the frame it sets it, that frame
+    /// alone.
     #[test]
     fn the_view_sees_from_a_layers_viewpoint_for_its_frame_and_else_through_the_worlds_camera() {
         let viewport = Viewport {
@@ -1586,11 +1554,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// Frames between ticks draw the world on its way between them, from where the latest tick
-    /// found it to where it left it, as far as they're past the tick: frames a quarter of a tick
-    /// apart, and two and a half, which run two ticks or three, each copying the world as it
-    /// starts. A frame before the first tick draws the world as it attached; an entity reset at a
-    /// tick, and one spawned at one, draw where the tick left them.
+    /// Frames between ticks draw the world part way from where the latest tick found it to where it
+    /// left it. Pinned for frames a quarter tick apart and two and a half (two or three ticks). A
+    /// frame before the first tick draws the world as attached; an entity reset or spawned at a
+    /// tick draws where it left them.
     #[test]
     fn frames_draw_between_the_ticks_around_them() {
         let mut stack = Stack::default();
@@ -1600,16 +1567,16 @@ pub(crate) mod tests {
         let mut stepper = Stepper::default();
         let quarters = iter::repeat_n(Tick::DT / 4, 16);
         let dts = quarters.chain(iter::repeat_n(Tick::DT * 5 / 2, 3));
-        // How far each frame is past its last tick: a quarter more each frame, from the fourth,
-        // whose tick is the first; then half a tick, none and half.
+        // How far each frame is past its last tick: a quarter more each frame from the fourth,
+        // whose tick is the first; then half, none, half.
         let alphas = [0.0; 3]
             .into_iter()
             .chain((0..13).map(|frame| (frame % 4) as f32 / 4.0));
         let alphas = alphas.chain([0.5, 0.0, 0.5]);
         for (frame, (dt, alpha)) in (1..).zip(dts.zip(alphas)) {
             let draws = drawn(&mut stack, &mut cx, dt, &mut stepper);
-            // Each tick moves the slider 1. The frames two and a half ticks apart run two ticks or
-            // three, or fewer on a machine that stalls them past their time, as the stepper counts.
+            // Each tick moves the slider 1. Frames 2.5 ticks apart run two or three, fewer on a
+            // stalled machine; the stepper counts.
             let slider = match stepper.ticks {
                 0 => 0.0,
                 ticks => (ticks - 1) as f32 + alpha,
@@ -1622,8 +1589,7 @@ pub(crate) mod tests {
         stack.detach(&mut cx);
     }
 
-    /// A headless frame, in lockstep, draws the world as its tick left it, bit for bit, as though
-    /// nothing drew between ticks.
+    /// A lockstep headless frame draws the world as its tick left it, bit for bit.
     #[test]
     fn a_headless_frame_draws_the_tick_it_ran() {
         let mut stack = Stack::default();
