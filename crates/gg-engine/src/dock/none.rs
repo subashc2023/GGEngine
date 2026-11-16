@@ -1,9 +1,7 @@
-//! What a build without `dev`, which has no UI, has of the dock: the items games name, so that a
-//! game's code, its layers' `ui` among it, compiles unchanged in both builds and draws nothing in
-//! this one. [`Ui`] is a type no value of which exists, with a development build's methods and
-//! their signatures, which never run: the engine never calls [`Layer::ui`](crate::Layer::ui), as
-//! it has nothing to call it with. [`Docked`] is a development build's, which
-//! [`App::dock`](crate::App::dock) takes and ignores.
+//! A build without `dev`: the dock items games name, so game code, layers' `ui` included, compiles
+//! unchanged and draws nothing. [`Ui`] has no values and `dev`'s signatures; its methods never run,
+//! as the engine has no `Ui` to give [`Layer::ui`](crate::Layer::ui). [`Docked`] is `dev`'s, and
+//! [`App::dock`](crate::App::dock) ignores it.
 
 use std::convert::Infallible;
 use std::fmt::Debug;
@@ -18,11 +16,10 @@ mod docked;
 
 pub use docked::Docked;
 
-/// What layers draw their UI through, in [`Layer::ui`](crate::Layer::ui), in a development build;
-/// in this one, which has no UI, a type no value of which can exist.
+/// What [`Layer::ui`](crate::Layer::ui) draws through. Here no value can exist.
 pub struct Ui<'a> {
     never: Infallible,
-    /// What a development build's holds for `'a`: egui's UI and the dock.
+    /// Stands for what `dev`'s holds for `'a`: egui's UI and the dock.
     _ui: PhantomData<&'a mut egui::Ui>,
 }
 

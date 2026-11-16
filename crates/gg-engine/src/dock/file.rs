@@ -1,5 +1,5 @@
-//! The layout's files: where they live, the app's own and those the user saves by name, and
-//! reading and writing them as RON.
+//! The layout files, the app's own and those saved by name: where they live, read and written as
+//! RON.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -10,33 +10,31 @@ use gg_core::{Error, Result};
 use super::tree::Layout;
 use crate::dirs::{self, Kind};
 
-/// The most characters a layout's name has.
+/// The most characters in a layout's name.
 const NAME: usize = 64;
 
-/// The names Windows keeps for devices, whatever their case: a file of one is the device. Its
-/// superscript digits count as digits.
+/// Names Windows reserves for devices, in any case: a file so named is the device. Superscript
+/// digits count as digits.
 const DEVICES: [&str; 30] = [
     "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
     "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
     "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
 ];
 
-/// The file an app's layout is saved in, in the OS's directory for per-user state, which
-/// [`dirs::dir`] says: `os` is [`std::env::consts::OS`], and `var` reads the environment. `None`
-/// without the variables.
+/// The app's layout file, in the OS's per-user state directory ([`dirs::dir`]). `os` is
+/// [`std::env::consts::OS`]; `var` reads the environment. `None` without the variables.
 pub(crate) fn path(app: &str, os: &str, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     Some(dirs::dir(app, Kind::State, os, var)?.join("layout.ron"))
 }
 
-/// Reads the layout saved at `path`, of a dockspace whose view panel `view` names if there's one:
-/// a new layout if there's no file, and an `engine.dock_layout` error if it can't be read or
-/// doesn't hold a layout of that kind.
+/// Reads the layout at `path`; `view` names a dockspace's view panel, if any. No file gives a new
+/// layout; an unreadable file, or one that isn't a layout of that kind, an `engine.dock_layout`
+/// error.
 pub(crate) fn load(path: &Path, view: Option<&'static str>) -> Result<Layout> {
     Ok(read(path, view)?.unwrap_or_else(|| Layout::new(view)))
 }
 
-/// Reads the layout saved as `name` beside the app's layout file at `path`, as [`load`] reads that
-/// one, but for an error if there's none.
+/// Like [`load`] for the layout saved as `name` beside `path`, but no file is an error.
 pub(crate) fn load_named(path: &Path, name: &str, view: Option<&'static str>) -> Result<Layout> {
     let path = named(path, name);
     read(&path, view)?.ok_or_else(|| {
@@ -45,8 +43,8 @@ pub(crate) fn load_named(path: &Path, name: &str, view: Option<&'static str>) ->
     })
 }
 
-/// What [`load`] reads: `None` if there's no file. A view's panel closed opens, since nothing else
-/// shows the game.
+/// What [`load`] reads: `None` without a file. A closed view panel opens: nothing else shows the
+/// game.
 fn read(path: &Path, view: Option<&'static str>) -> Result<Option<Layout>> {
     let message = format!("can't read the dock's layout from {}", path.display());
     let bytes = match dirs::read_file(path, u64::MAX) {
@@ -65,8 +63,7 @@ fn read(path: &Path, view: Option<&'static str>) -> Result<Option<Layout>> {
     Ok(Some(layout))
 }
 
-/// Writes `layout` to `path`, as [`dirs::write`] does, so that a crash while writing leaves the
-/// last layout whole.
+/// Writes `layout` to `path` like [`dirs::write`]: a crash leaves the last layout whole.
 pub(crate) fn save(path: &Path, layout: &Layout) -> Result<()> {
     let error = |e: io::Error| {
         let message = format!("can't save the dock's layout to {}", path.display());
@@ -77,15 +74,14 @@ pub(crate) fn save(path: &Path, layout: &Layout) -> Result<()> {
     dirs::write(path, text.as_bytes()).map_err(error)
 }
 
-/// Saves `layout` as `name` beside the app's layout file at `path`, as [`save`] does: in place of
-/// the layout saved under that name, whatever its case, whose name it keeps, as Windows' and
-/// macOS's file systems keep a file's.
+/// Like [`save`], as `name` beside `path`. It replaces a layout of that name in any case, keeping
+/// the old spelling, like Windows' and macOS's file systems.
 pub(crate) fn save_named(path: &Path, name: &str, layout: &Layout) -> Result<()> {
     let saved = names(path)?.into_iter().find(|saved| same(saved, name));
     save(&named(path, saved.as_deref().unwrap_or(name)), layout)
 }
 
-/// Deletes the layout saved as `name` beside the app's layout file at `path`.
+/// Deletes the layout saved as `name` beside `path`.
 pub(crate) fn delete_named(path: &Path, name: &str) -> Result<()> {
     let path = named(path, name);
     fs::remove_file(&path).map_err(|e| {
@@ -94,8 +90,7 @@ pub(crate) fn delete_named(path: &Path, name: &str) -> Result<()> {
     })
 }
 
-/// The names of the layouts saved beside the app's layout file at `path`, alphabetically: none
-/// before one is.
+/// The names of the layouts saved beside `path`, alphabetically; none before the first save.
 pub(crate) fn names(path: &Path) -> Result<Vec<String>> {
     let dir = layouts(path);
     let error = |e: io::Error| {
@@ -111,7 +106,7 @@ pub(crate) fn names(path: &Path) -> Result<Vec<String>> {
     for entry in entries {
         let entry = entry.map_err(error)?;
         let path = entry.path();
-        // The files the dock saves, whose names a layout's can be, rather than one being written.
+        // Only files the dock saves, not one being written.
         if entry.file_type().map_err(error)?.is_file()
             && path.extension() == Some(OsStr::new("ron"))
             && let Some(stem) = path.file_stem().and_then(OsStr::to_str)
@@ -124,9 +119,9 @@ pub(crate) fn names(path: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// The name `typed` for a layout, trimmed: 1 to 64 letters, digits, spaces, `-` and `_`, and not
-/// one Windows keeps for a device, on any OS, since layouts move between machines. An
-/// `engine.bad_layout_name` error says why not.
+/// `typed`, trimmed, as a layout name: 1 to 64 letters, digits, spaces, `-` and `_`, and not a
+/// Windows device name, on any OS, as layouts move between machines. Otherwise an
+/// `engine.bad_layout_name` error says why.
 pub(crate) fn name(typed: &str) -> Result<&str> {
     let name = typed.trim();
     let refused = |why: String| Err(Error::new("engine.bad_layout_name", why));
@@ -156,19 +151,18 @@ pub(crate) fn name(typed: &str) -> Result<&str> {
     Ok(name)
 }
 
-/// Whether two layouts' names are the same name, without case, as Windows' and macOS's file
-/// systems compare them.
+/// Whether two names match ignoring case, like Windows' and macOS's file systems.
 fn same(a: &str, b: &str) -> bool {
     let a = a.chars().flat_map(char::to_lowercase);
     a.eq(b.chars().flat_map(char::to_lowercase))
 }
 
-/// The directory of the layouts saved by name, beside the app's layout file at `path`.
+/// The directory of named layouts, beside `path`.
 fn layouts(path: &Path) -> PathBuf {
     path.with_file_name("layouts")
 }
 
-/// The file of the layout saved as `name`, beside the app's layout file at `path`.
+/// The file of layout `name`, beside `path`.
 fn named(path: &Path, name: &str) -> PathBuf {
     layouts(path).join(format!("{name}.ron"))
 }
@@ -234,7 +228,7 @@ mod tests {
         layout.renumber();
         loaded.renumber();
         assert_eq!(loaded, layout);
-        // It has no central area, which a game's layout needs.
+        // It has no central area, which a game's needs.
         let error = load(&file, None).expect_err("a game's dock can't use it");
         assert_eq!(error.code(), "engine.dock_layout");
     }
@@ -272,7 +266,7 @@ mod tests {
         save(&file, &layout).expect("the layout is saved");
         let loaded = load(&file, view).expect("the layout loads");
         assert_eq!(loaded.closed, ["Stats"]);
-        // A file from before panels closed, and one that closes the view, which shows anyway.
+        // A file from before panels closed; one closing the view, which shows anyway.
         for (closed, loads) in [
             ("", vec![]),
             (r#"closed: ["View", "Stats"],"#, vec!["Stats"]),
@@ -306,7 +300,7 @@ mod tests {
         for name in ["wide", "Tall", "narrow"] {
             save_named(&file, name, &wide).expect("the layout is saved");
         }
-        // Beside the app's own, which isn't one of them, nor is a file being written.
+        // The app's own layout and a file being written aren't named layouts.
         save(&file, &Layout::new(None)).expect("the layout is saved");
         fs::write(dir.0.join("layouts/half.ron.new"), "").expect("the file is written");
         let listed = |names: &[&str]| Some(names.iter().map(|&name| name.to_owned()).collect());
@@ -315,7 +309,7 @@ mod tests {
         loaded.renumber();
         wide.renumber();
         assert_eq!(loaded, wide);
-        // Saved under a name that's taken, whatever its case, it replaces that layout.
+        // A taken name, in any case, replaces that layout.
         save_named(&file, "WIDE", &Layout::new(None)).expect("the layout is saved");
         assert_eq!(names(&file).ok(), listed(&["narrow", "Tall", "wide"]));
         let replaced = load_named(&file, "wide", None).expect("the layout loads");

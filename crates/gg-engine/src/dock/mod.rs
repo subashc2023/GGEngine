@@ -1,7 +1,6 @@
-//! Docking: panels that layers show, which the user arranges in tabs and splits around the
-//! central area, tears off into windows of their own, and closes and opens again, and the layouts
-//! they make, which the user saves and loads by name. In development builds alone, as `dev` has
-//! the UI: a build without it has `none.rs` in its place.
+//! Docking: panels layers show. Users arrange them in tabs and splits around the central area,
+//! tear them into windows, close and reopen them, and save layouts by name. Only `dev` builds have
+//! it; others have `none.rs`.
 
 mod docked;
 mod file;
