@@ -1,6 +1,5 @@
-//! Agents at the ticks: each plans its path over the navmesh as its destination or the navmesh
-//! changes, heads for its path's next corner, and steers round its neighbors, its velocity going to
-//! what moves it.
+//! Agents at the ticks: each plans its path when its destination or the navmesh changes, heads
+//! for the next corner, and steers round neighbors, its velocity going to what moves it.
 
 use gg_core::math::{Vec2, Vec3};
 use tracing::{debug, warn};
@@ -13,13 +12,12 @@ use super::{NavAgent, Navigation};
 use crate::ecs::mix64;
 use crate::{CharacterController3D, Entity, EntityId, RigidBody3D, Tick, Transform, World};
 
-/// How far apart in height agents are on different floors, as they're kept from each other only
-/// on the same one, where the world has no navmesh to say how tall an agent is.
+/// How far apart in height agents are on different floors, with no navmesh to say how tall an
+/// agent is. Agents avoid each other only on the same floor.
 const FLOOR_APART: f32 = 2.0;
 
-/// An agent as a tick finds it: its entity and that entity's ID, where it is, the velocity it
-/// chose at the last tick, across, its radius and speed, and the velocities it prefers and
-/// chooses at this one.
+/// An agent as a tick finds it, with the velocities (across) it chose at the last tick, prefers
+/// at this one and chooses at this one.
 #[derive(Clone, Copy)]
 struct Mover {
     entity: Entity,
@@ -32,9 +30,9 @@ struct Mover {
     chosen: Vec2,
 }
 
-/// What agents' steps work in, kept from one tick to the next so that they allocate nothing once
-/// they have room: the agents, by their entities' IDs; an agent's neighbors, each by its distance
-/// squared, its ID and its place among the agents; and avoidance's lines.
+/// What agents' steps work in, kept between ticks so they allocate nothing once they have room:
+/// the agents by ID; an agent's neighbors as (distance squared, ID, place among the agents); and
+/// avoidance's lines.
 #[derive(Default)]
 pub(super) struct Crowd {
     movers: Vec<Mover>,
@@ -42,8 +40,7 @@ pub(super) struct Crowd {
     lines: Lines,
 }
 
-/// A number of `value`'s that's a speed or a radius: none for one that's negative or isn't a
-/// number.
+/// `value` as a speed or radius: 0 if negative or not a number.
 fn size_of(value: f32) -> f32 {
     if value.is_finite() && value > 0.0 {
         value
@@ -52,17 +49,16 @@ fn size_of(value: f32) -> f32 {
     }
 }
 
-/// What an agent's path is planned from, as [`NavAgent::planned`] holds it: the fingerprint of the
-/// navmesh and its destination's bits, mixed; never 0, which stands for no plan.
+/// [`NavAgent::planned`]: the navmesh's fingerprint mixed with the destination's bits; never 0,
+/// which stands for no plan.
 pub(super) fn plan_key(fingerprint: u64, to: Vec3) -> u64 {
     let [x, y, z] = to.to_array().map(|at| u64::from(at.to_bits()));
     mix64(mix64(fingerprint ^ x) ^ ((y << 32) | z)).max(1)
 }
 
-/// Steps `navigation`'s agents in `world` a tick: each with a [`NavAgent`] and a [`Transform`],
-/// by their entities' IDs, but those under a parent, warned of once each; each plans and heads for
-/// its next corner, then each steers round its neighbors, and then each velocity goes to what moves
-/// its agent.
+/// Steps `navigation`'s agents a tick: those with a [`NavAgent`] and a [`Transform`], by ID,
+/// except those under a parent (warned of once each). Each plans and heads for its next corner,
+/// then each steers round its neighbors, then each velocity goes to what moves its agent.
 pub(super) fn step(navigation: &mut Navigation, world: &mut World) {
     let Navigation {
         mesh,
@@ -133,17 +129,17 @@ pub(super) fn step(navigation: &mut Navigation, world: &mut World) {
     }
 
     let apart = mesh.map_or(FLOOR_APART, |mesh| mesh.height);
-    // Room for every agent, so that it grows only as agents come.
+    // Room for every agent, so it grows only as agents come.
     near.clear();
     near.reserve(movers.len());
-    // Every pair of agents, O(n²): some 0.2 ms a tick for 100 agents in a release build, and a
-    // ceiling at some hundreds, past which a grid of cells as wide as the neighbors' range, filled
-    // each tick, would find each agent's in time linear in the agents.
+    // Every pair, O(n²): some 0.2 ms a tick for 100 agents in a release build; the ceiling is
+    // some hundreds. Past it, a grid of cells as wide as the neighbors' range, filled each tick,
+    // would find neighbors in linear time.
     for i in 0..movers.len() {
         let me = movers[i];
         near.clear();
         for (j, other) in movers.iter().enumerate() {
-            // Compared so, as a height that isn't a number is on no floor of its own.
+            // Compared so: a height that isn't a number is on no floor.
             let same_floor = (other.position.y - me.position.y).abs() < apart;
             if j == i || !same_floor {
                 continue;
@@ -163,7 +159,7 @@ pub(super) fn step(navigation: &mut Navigation, world: &mut World) {
             side,
         };
         let neighbors = near.iter().map(|&(_, id, j)| {
-            // The way along X it leaves a neighbor in its very place, by their IDs' order.
+            // Which way along X to leave a neighbor in the very same place, by ID order.
             let side = if me.id < id { 1.0 } else { -1.0 };
             disc(&movers[j as usize], side)
         });
@@ -176,21 +172,22 @@ pub(super) fn step(navigation: &mut Navigation, world: &mut World) {
     }
 }
 
-/// How many corners each agent's path holds room for as it's first planned, so that steady ticks
-/// planning paths of no more allocate nothing: a path of more grows its vector once.
+/// How many corners each agent's path has room for when first planned, so steady ticks planning
+/// paths of no more allocate nothing. A longer path grows its vector once.
 const ROOM: usize = 16;
 
-/// Plans `agent`'s path afresh where what it was planned from changed, its destination or the
-/// navmesh, of `fingerprint`, from where `mover` is, and again at each tick while it has a
-/// destination but no path, as where it started off the navmesh, falling or knocked off, which
-/// costs a search a tick; moves it on past each corner it has come within reach of, its radius or a
-/// tick's way, whichever is farther, standing on the corner's floor, or from which the next is in
-/// sight over the navmesh on the floor it's on, so that one pushed aside, as round others, doesn't
-/// go back for a corner it no longer needs, and none takes a floor over or under its way for its
-/// own; and returns the velocity it prefers, across: toward its next corner at its speed, slowing
-/// to reach its last within a tick, and none once it's within its stopping distance of it, on its
-/// floor, or without a path. One that comes over a corner on another floor, as an agent pushed off
-/// a platform it was crossing does, plans its path again at the next tick, from where it is.
+/// Plans `agent`'s path from where `mover` is if its destination or the navmesh (`fingerprint`)
+/// changed, and each tick while it has a destination but no path (it started off the navmesh,
+/// falling or knocked off), costing a search a tick.
+///
+/// Moves it past each corner within reach (its radius or a tick's way, whichever is farther) while
+/// standing on the corner's floor, or from which the next is in sight on its floor. So one pushed
+/// aside doesn't go back for a corner it no longer needs, and none takes a floor over or under its
+/// way for its own.
+///
+/// Returns the preferred velocity, across: toward the next corner at its speed, slowing to reach
+/// the last within a tick; none within its stopping distance of it, on its floor, or without a
+/// path. One coming over a corner on another floor (pushed off a platform) plans again next tick.
 fn head(
     agent: &mut NavAgent,
     mover: &Mover,
@@ -229,7 +226,7 @@ fn head(
     } else {
         mover.speed * dt
     };
-    // Whether the agent stands on a corner's floor: always, without a navmesh to say.
+    // Whether the agent stands on a corner's floor: always without a navmesh.
     let on = |corner: Vec3| mesh.is_none_or(|mesh| mesh.stands(mover.position, corner.y));
     let mut corner = (agent.corner as usize).min(last);
     let floor = mesh.and_then(|mesh| Some((mesh, mesh.floor_under(mover.position)?)));
@@ -254,7 +251,7 @@ fn head(
     }
     let arrived = corner == last && distance <= agent.stopping_distance && on(target);
     agent.arrived = arrived;
-    // Compared so, as a way that isn't a number goes nowhere.
+    // Compared so: a way that isn't a number goes nowhere.
     let away = distance > 0.0;
     if arrived || !away {
         return Vec2::ZERO;
@@ -267,10 +264,9 @@ fn head(
     way * (speed / distance)
 }
 
-/// Gives the velocity `mover` chose to its agent's [`NavAgent::velocity`], and to what moves it:
-/// across, to its [`CharacterController3D`]'s velocity, if it has one, or else to its
-/// [`RigidBody3D`]'s, what's up left to physics; or else to its [`Transform`], moved by it along
-/// the navmesh, as [`walk`] says. Each is written only where it changes.
+/// Gives the velocity `mover` chose to its [`NavAgent::velocity`] and to what moves it, across: its
+/// [`CharacterController3D`]'s velocity, else its [`RigidBody3D`]'s (the rest is physics'), else
+/// its [`Transform`], moved along the navmesh by [`walk`]. Each is written only if it changes.
 fn apply(world: &mut World, mesh: Option<&NavMesh>, mover: &Mover) {
     let entity = mover.entity;
     let chosen = mover.chosen;
@@ -314,10 +310,10 @@ fn apply(world: &mut World, mesh: Option<&NavMesh>, mover: &Mover) {
 }
 
 /// Where an agent at `at` that nothing else moves goes by `step` across: along the navmesh, its
-/// height rising and falling with the floor it stands on, and kept to the mesh, going where the
-/// step would take it off to the mesh's nearest point there, within the step's length, on a floor
-/// it steps onto, as sliding along the mesh's edge, or staying where it is where there's none;
-/// and straight on, at its height, where it stands on no floor of the mesh, or there's none.
+/// height following the floor, and kept to the mesh. A step off the mesh goes to the mesh's
+/// nearest point within the step's length on a floor it steps onto (sliding along the edge), or
+/// stays put if there's none. Without a floor under it, or a mesh, it goes straight on at its
+/// height.
 fn walk(mesh: Option<&NavMesh>, at: Vec3, step: Vec2) -> Vec3 {
     let there = Vec3::new(at.x + step.x, at.y, at.z + step.y);
     let Some((mesh, floor)) = mesh.and_then(|mesh| Some((mesh, mesh.floor_under(at)?))) else {

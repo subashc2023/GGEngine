@@ -66,8 +66,8 @@ fn near(a: f32, b: f32, within: f32) -> bool {
     (a - b).abs() <= within
 }
 
-/// A floor bakes walkable as one rectangle, but for its edge, eroded by the agent's radius rounded
-/// up to whole cells: 2 of a quarter for a radius of a half, 4 for a radius of 1.
+/// A floor bakes as one rectangle, its edge eroded by the agent's radius rounded up to whole
+/// cells: 2 of a quarter for a radius of a half, 4 for 1.
 #[test]
 fn a_floor_bakes_walkable_but_its_edge_eroded_by_the_radius() {
     for (radius, edge) in [(0.5, 4.5), (1.0, 4.0)] {
@@ -96,7 +96,7 @@ fn a_floor_bakes_walkable_but_its_edge_eroded_by_the_radius() {
     }
 }
 
-/// A wall across a floor splits it in two: each side's points join, and no path crosses.
+/// A wall across a floor splits it: each side's points join, and no path crosses.
 #[test]
 fn no_path_joins_the_sides_of_a_wall() {
     let mut world = World::default();
@@ -116,8 +116,8 @@ fn no_path_joins_the_sides_of_a_wall() {
     assert_eq!(across_left.map(|corners| corners.len()), Some(1));
 }
 
-/// A step no higher than the agent climbs joins the floor it stands on, and one higher doesn't,
-/// though its top is walkable.
+/// A step within the agent's climb joins its floor; a higher one doesn't, though its top is
+/// walkable.
 #[test]
 fn steps_join_their_floor_up_to_the_climb() {
     for (height, joined) in [(0.2, true), (0.6, false)] {
@@ -140,7 +140,7 @@ fn steps_join_their_floor_up_to_the_climb() {
     }
 }
 
-/// A ramp no steeper than the agent's slope is walked, up from the floor, and a steeper one isn't.
+/// A ramp within the agent's slope is walked up from the floor; a steeper one isn't.
 #[test]
 fn slopes_steeper_than_the_agents_arent_walked() {
     for (degrees, walked) in [(20.0f32, true), (60.0, false)] {
@@ -164,8 +164,8 @@ fn slopes_steeper_than_the_agents_arent_walked() {
     }
 }
 
-/// A platform over a floor holds a cell over each of the floor's beneath it, with room to stand
-/// under it, and points find the floor they stand on; a lower one leaves no room beneath.
+/// A platform over a floor leaves both floors' cells, with room to stand under it, and points
+/// find the floor they stand on; a lower platform leaves no room beneath.
 #[test]
 fn a_floor_over_a_floor_holds_both() {
     let mut world = World::default();
@@ -212,7 +212,7 @@ fn a_floor_over_a_floor_holds_both() {
     assert!(!on(&mesh, Vec3::new(0.0, 0.5, 0.0)));
 }
 
-/// How near, across, the segment from `a` to `b` comes to the box from `min` to `max`.
+/// How near, across, segment `a` to `b` comes to the box `min` to `max`.
 fn clearance(a: Vec2, b: Vec2, (min, max): (Vec2, Vec2)) -> f32 {
     let points = (0..=64).map(|i| a.lerp(b, i as f32 / 64.0));
     points
@@ -220,9 +220,8 @@ fn clearance(a: Vec2, b: Vec2, (min, max): (Vec2, Vec2)) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
-/// A path goes round a wall's end, through the corners the funnel pulls it taut to, every point of
-/// it at least the agent's radius from the wall, past its end; and over open floor goes straight,
-/// its only corner its end.
+/// A path goes round a wall's end through the funnel's corners, every point at least the agent's
+/// radius from the wall; over open floor it goes straight, its only corner its end.
 #[test]
 fn paths_go_round_walls_by_the_funnels_corners() {
     let mut world = World::default();
@@ -261,8 +260,8 @@ fn paths_go_round_walls_by_the_funnels_corners() {
     assert_eq!(open.map(|corners| corners.len()), Some(1));
 }
 
-/// The way between two points is in sight over the mesh where it crosses none of a wall's eroded
-/// cells, nor cuts the corner of one, and out of sight where it does, or leaves the mesh.
+/// A way is in sight over the mesh if it crosses none of a wall's eroded cells and cuts no corner
+/// of one; out of sight if it does, or leaves the mesh.
 #[test]
 fn sight_over_the_mesh_stops_at_walls() {
     let mut world = World::default();
@@ -294,8 +293,8 @@ fn sight_over_the_mesh_stops_at_walls() {
     );
 }
 
-/// A path's ends off the mesh snap to its nearest point within the agent's height, and farther off
-/// find no path; a start above the floor, as an agent's middle is, stands on it.
+/// A path's ends off the mesh snap to its nearest point within the agent's height; farther off
+/// finds no path. A start above the floor, as an agent's middle is, stands on it.
 #[test]
 fn ends_off_the_mesh_snap_to_it_within_reach() {
     let mut world = World::default();
@@ -325,7 +324,7 @@ fn a_world_without_a_volume_finds_no_path() {
     assert_eq!(world.find_path(Vec3::ZERO, Vec3::X), None);
 }
 
-/// An agent at `at` heading for `to`, which nothing but navigation moves.
+/// An agent at `at` heading for `to`, moved by navigation alone.
 fn walker(world: &mut World, at: Vec3, to: Vec3) -> Entity {
     let placed = Transform {
         translation: at.as_dvec3(),
@@ -339,8 +338,8 @@ fn walker(world: &mut World, at: Vec3, to: Vec3) -> Entity {
     world.spawn((placed, agent))
 }
 
-/// Two agents heading straight at each other steer round each other, never nearer than their radii
-/// together, and each arrives where it was going, its velocity none there.
+/// Two agents heading straight at each other steer round, never nearer than their radii together,
+/// and each arrives, its velocity none there.
 #[test]
 fn agents_head_on_keep_apart_and_arrive() {
     let mut world = World::seeded(3);
@@ -374,9 +373,8 @@ fn agents_head_on_keep_apart_and_arrive() {
     }
 }
 
-/// The navmesh's polygons and the agents' paths draw while they're shown, and not while they're
-/// hidden, as at first: each polygon's outline, and each agent's way through the corners it has left
-/// and the mark of its destination.
+/// The navmesh's polygons and agents' paths draw while shown, not while hidden (as at first): each
+/// polygon's outline, each agent's way through its corners left, and its destination's mark.
 #[test]
 fn the_navmesh_and_paths_draw_while_shown() {
     use gg_renderer::Viewport;
@@ -428,8 +426,8 @@ fn the_navmesh_and_paths_draw_while_shown() {
     assert_eq!(drawn[1] - drawn[0], outlined + corners + 4, "{drawn:?}");
 }
 
-/// Moving a wall bakes the navmesh again, under another fingerprint, and the agent heading past it
-/// plans its path again, the other way round; the same entities bake the same navmesh.
+/// Moving a wall bakes again, under another fingerprint, and the agent heading past it plans again,
+/// the other way round; the same entities bake the same navmesh.
 #[test]
 fn moving_a_collider_bakes_again_and_replans() {
     let mut world = World::seeded(5);
@@ -474,9 +472,9 @@ fn moving_a_collider_bakes_again_and_replans() {
     assert_eq!(*again, *mesh, "baked alike from the same entities");
 }
 
-/// The step of a reference world's navmesh in which the agents walk: a floor of 16 square, three
-/// boxes in the way, one turned, a step up to a block's top and a ramp up to a platform; and eight
-/// characters, each crossing to the far side, two of them up to the platform and the block's top.
+/// The reference world: a floor 16 square, three boxes in the way (one turned), a step up to a
+/// block's top and a ramp up to a platform; eight characters each cross to the far side, two up
+/// to the platform and the block's top.
 fn crossing(world: &mut World) -> Vec<Entity> {
     floor(world, 16.0);
     let blocks = [
@@ -531,7 +529,7 @@ fn crossing(world: &mut World) -> Vec<Entity> {
     agents
 }
 
-/// Steps `world`'s navigation, then its physics, `ticks` times, as a game's tick does.
+/// Steps navigation then physics `ticks` times, as a game's tick does.
 fn run(world: &mut World, ticks: u32) {
     for _ in 0..ticks {
         step_navigation(world);
@@ -539,10 +537,9 @@ fn run(world: &mut World, ticks: u32) {
     }
 }
 
-/// A snapshot of a world whose characters are walking round each other, restored, steps as the
-/// world it was taken from did, bit for bit, sharing its navmesh; and so does one restored without
-/// navigation's resource, as from a snapshot file, which bakes the navmesh again and keeps the
-/// agents' paths, planned on a navmesh of the same fingerprint.
+/// A snapshot of a world of walking characters, restored, steps as its world did, bit for bit,
+/// sharing its navmesh. So does one restored without navigation's resource, as from a snapshot
+/// file: it bakes again and keeps the agents' paths, planned on a navmesh of the same fingerprint.
 #[test]
 fn a_snapshot_steps_as_its_world_did_and_bakes_again_without_its_navmesh() {
     let mut world = World::seeded(7);
@@ -565,9 +562,9 @@ fn a_snapshot_steps_as_its_world_did_and_bakes_again_without_its_navmesh() {
     assert_eq!(baked_again.hash(), went, "baked again");
 }
 
-/// A world whose characters are walking, saved whole to text as a snapshot file holds it and loaded
-/// into a world of another process's making, steps as the world it was saved from did, bit for bit:
-/// the file holds no navmesh, which the loaded world bakes again as it first steps.
+/// A world of walking characters, saved whole to text as a snapshot file holds it and loaded into
+/// another process's world, steps as the saved one did, bit for bit. The file holds no navmesh;
+/// the loaded world bakes it at its first step.
 #[test]
 #[cfg(feature = "dev")]
 fn a_world_saved_whole_steps_as_it_did() {
@@ -602,10 +599,10 @@ fn a_world_saved_whole_steps_as_it_did() {
     assert_eq!(loaded.hash(), world.hash(), "stepped on");
 }
 
-/// The world's hash after eight characters have crossed a floor among boxes, up a step and a ramp,
-/// round each other, for eight seconds, navigation and physics stepping: a reference CI checks on
-/// every platform, as the bake, the paths and avoidance must give the same bits everywhere. A
-/// difference on some platforms only is a bug in determinism, not a value to change here.
+/// The world's hash after eight characters cross a floor among boxes, up a step and a ramp, round
+/// each other, for eight seconds of navigation and physics: a reference CI checks on every
+/// platform, as the bake, paths and avoidance must give the same bits everywhere. A difference on
+/// some platforms only is a determinism bug, not a value to change here.
 #[test]
 fn navigation_hashes_as_its_reference_says() {
     let logged = crate::testing::logged();
@@ -642,9 +639,9 @@ fn stacked(world: &mut World) {
     volume(world, Vec3::new(0.0, 2.0, 0.0), Vec3::new(22.0, 8.0, 22.0));
 }
 
-/// An agent on the ground sent onto a platform over it walks round to the ramp and up it, and
-/// arrives on the platform: no corner on it counts as in sight from the ground under it, nor as
-/// reached or arrived at from there.
+/// An agent on the ground sent onto a platform over it walks round to the ramp, up it, and arrives
+/// on the platform: no corner on it counts as in sight, reached or arrived at from the ground
+/// under it.
 #[test]
 fn agents_take_no_floor_over_or_under_their_way_for_their_own() {
     let mut world = World::seeded(8);
@@ -683,8 +680,8 @@ fn agents_take_no_floor_over_or_under_their_way_for_their_own() {
     );
 }
 
-/// Agents spawned in one place, at rest, part, each the way the order of their IDs gives, rather
-/// than staying in one another.
+/// Agents spawned in one place, at rest, part, each the way ID order gives, instead of staying in
+/// one another.
 #[test]
 fn agents_in_one_place_part() {
     let mut world = World::seeded(4);
@@ -710,8 +707,8 @@ fn agents_in_one_place_part() {
     }
 }
 
-/// An agent whose path can't be planned, as one falling from above the navmesh by more than its
-/// height, plans it again as it lands, and walks it.
+/// An agent whose path can't be planned, falling from above the navmesh by more than its height,
+/// plans again as it lands, and walks it.
 #[test]
 fn a_plan_that_fails_is_tried_again_as_the_agent_lands() {
     let mut world = World::seeded(6);
@@ -750,9 +747,9 @@ fn a_plan_that_fails_is_tried_again_as_the_agent_lands() {
     assert!(Vec2::new(at.x - to.x, at.z - to.z).length() < 0.2, "{at}");
 }
 
-/// A world saved whole and loaded finds a path before navigation steps as the world it was saved
-/// from does after, baking its navmesh for the search; and so does a world that keeps another
-/// world's navmesh through the load, as a load keeps what the file doesn't hold.
+/// A world saved whole and loaded finds a path before navigation steps as the saved one does
+/// after, baking its navmesh for the search. So does a world that keeps another world's navmesh
+/// through the load, which keeps what the file doesn't hold.
 #[test]
 #[cfg(feature = "dev")]
 fn a_world_loaded_whole_finds_paths_before_it_steps_as_it_did() {
@@ -799,9 +796,8 @@ fn a_world_loaded_whole_finds_paths_before_it_steps_as_it_did() {
     assert_eq!(stale.find_path(from, to), Some(path));
 }
 
-/// A volume whose columns, counted, would overflow is refused, as is one of more levels than a
-/// span's height counts below the mark of an eroded span; one of the most levels bakes, a floor at
-/// its very top kept.
+/// A volume whose columns would overflow when counted is refused, as is one of more levels than
+/// fit below an eroded span's mark; one of the most levels bakes, a floor at its top kept.
 #[test]
 fn volumes_too_large_are_refused_without_overflowing() {
     let settings = |max: Vec3, cell_size: f32| bake::Settings {

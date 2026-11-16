@@ -1,5 +1,5 @@
-//! Paths over a navmesh: A* over its polygons, from portal to portal, then the funnel algorithm,
-//! which pulls the path through the portals taut to the corners where it turns.
+//! Paths over a navmesh: A* over its polygons, portal to portal, then the funnel algorithm to
+//! pull the path taut through the portals to the corners where it turns.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -9,13 +9,13 @@ use gg_core::math::{Vec2, Vec3};
 use super::bake::across;
 use super::mesh::NavMesh;
 
-/// No polygon or portal, as a search's links hold it.
+/// No polygon or portal, in a search's links.
 const NONE: u32 = u32::MAX;
 
-/// What a path search works in, kept from one to the next, as an agent's are, so that a search
-/// allocates nothing once it's sized to its navmesh: each polygon's best cost so far, where the
-/// search entered it, the polygon and portal it came through, and the searches it was seen and
-/// closed in; the open polygons by their estimated costs; and the path's portals and gates.
+/// What a path search works in, kept between searches so one allocates nothing once sized to its
+/// navmesh. Per polygon: its best cost so far, where the search entered it, the polygon and portal
+/// it came through, and the searches it was seen and closed in. Also the open polygons by
+/// estimated cost, and the path's portals and gates.
 #[derive(Default)]
 pub(super) struct Search {
     cost: Vec<f32>,
@@ -24,7 +24,7 @@ pub(super) struct Search {
     via: Vec<u32>,
     seen: Vec<u32>,
     closed: Vec<u32>,
-    /// The search under way, which `seen` and `closed` are stamped with, so that a search starts
+    /// The search under way, which `seen` and `closed` are stamped with, so a search starts
     /// without clearing them.
     stamp: u32,
     open: BinaryHeap<Open>,
@@ -55,16 +55,15 @@ impl PartialOrd for Open {
 }
 
 impl Ord for Open {
-    /// Reversed, so that the heap gives the least estimate first, and of those the least polygon,
-    /// whatever order they came in.
+    /// Reversed, so the heap gives the least estimate first, then the least polygon, whatever
+    /// order they came in.
     fn cmp(&self, other: &Self) -> Ordering {
         let by_estimate = other.estimate.total_cmp(&self.estimate);
         by_estimate.then(other.polygon.cmp(&self.polygon))
     }
 }
 
-/// A gate the funnel passes through, its ends as seen from behind it, left and right, and the
-/// polygon past it.
+/// A gate the funnel passes through: its ends seen from behind, and the polygon past it.
 #[derive(Clone, Copy, Debug)]
 struct Gate {
     left: Vec2,
@@ -73,8 +72,8 @@ struct Gate {
 }
 
 impl Search {
-    /// Sizes the search to `mesh`, for a search to start in it without allocating: once, as it's
-    /// first searched, and again after a bake.
+    /// Sizes the search to `mesh` so searching allocates nothing: at the first search and after a
+    /// bake.
     pub(super) fn fit(&mut self, mesh: &NavMesh) {
         let count = mesh.polygons.len();
         if self.cost.len() != count {
@@ -93,7 +92,7 @@ impl Search {
             .reserve((count + 2).saturating_sub(self.gates.len()));
     }
 
-    /// Starts a search: a new stamp, the stamps cleared as they come round again.
+    /// Starts a search: a new stamp, the stamps cleared when they wrap.
     fn start(&mut self, mesh: &NavMesh) {
         self.fit(mesh);
         self.stamp = self.stamp.wrapping_add(1);
@@ -106,8 +105,8 @@ impl Search {
     }
 }
 
-/// Twice the signed area of the triangle `a`, `b`, `c`, as the funnel algorithm's `triarea2`:
-/// positive where `c` turns clockwise from `b` about `a`, with X across and Z down.
+/// The funnel algorithm's `triarea2`: twice the signed area of triangle `a`, `b`, `c`, positive
+/// where `c` turns clockwise from `b` about `a`, with X across and Z down.
 fn triarea2(a: Vec2, b: Vec2, c: Vec2) -> f32 {
     let (ab, ac) = (b - a, c - a);
     ac.x * ab.y - ab.x * ac.y
@@ -119,11 +118,11 @@ fn same(a: Vec2, b: Vec2) -> bool {
 }
 
 impl NavMesh {
-    /// The point of portal `portal` that makes the way from `from` through it to `to` shortest,
-    /// across, at the floor of the polygon it leads to there: where the line from `from` to `to`
-    /// crosses the portal's, or to `to` mirrored across it where both are on one side, held to the
-    /// portal's ends; so that a search's costs follow the taut path, as a portal's middle, Detour's
-    /// choice, doesn't across a long rectangle.
+    /// The point of portal `portal` that makes the way from `from` through it to `to` shortest, at
+    /// the floor of the polygon it leads to: where the line from `from` to `to` crosses the
+    /// portal's, or to `to` mirrored across it if both are on one side, held to the portal's ends.
+    /// A search's costs then follow the taut path, as a portal's middle (Detour's choice) doesn't
+    /// across a long rectangle.
     fn entry(&self, portal: u32, from: Vec2, to: Vec2) -> Vec3 {
         let portal = self.portals[portal as usize];
         let (a, b) = (self.corner(portal.a), self.corner(portal.b));
@@ -147,11 +146,10 @@ impl NavMesh {
         Vec3::new(at.x, self.floor_in(portal.to, at), at.y)
     }
 
-    /// Writes into `corners`, in place of what it held, the corners of the shortest path over the
-    /// mesh from `from` to `to`, as their polygons and portals run, each a point on the mesh, past
-    /// `from`, the last `to`: each end on the mesh where it is, or else snapped to the mesh's
-    /// nearest point within the agent's height, as [`nearest`](Self::nearest) finds it. Returns
-    /// whether a path joins them, `corners` left empty where none does.
+    /// Replaces `corners` with those of the shortest path over the mesh from `from` to `to`:
+    /// points on the mesh, past `from`, the last `to`. Each end is on the mesh where it is, else
+    /// snapped to its nearest point within the agent's height ([`nearest`](Self::nearest)).
+    /// Returns whether a path joins them; `corners` is empty if not.
     pub(super) fn find_path(
         &self,
         search: &mut Search,
@@ -173,11 +171,10 @@ impl NavMesh {
         true
     }
 
-    /// Searches from polygon `start`, at `from`, for polygon `goal`, at `to`, by A*, as Detour's
-    /// `findPath` does: a polygon is entered at the point of its portal [`entry`](Self::entry)
-    /// finds from where its parent was entered, the cost of the way there from that point, and the
-    /// estimate of what's left the way from there to `to`. Leaves the path's portals in the
-    /// search's chain, and returns whether one joins them.
+    /// A* from polygon `start`, at `from`, to polygon `goal`, at `to`, as Detour's `findPath`. A
+    /// polygon is entered at its portal's [`entry`](Self::entry) point from where its parent was
+    /// entered; the cost is the way there from that point, the estimate the way on to `to`. Leaves
+    /// the path's portals in the search's chain; returns whether a path joins them.
     fn search(&self, search: &mut Search, start: u32, from: Vec3, goal: u32, to: Vec3) -> bool {
         search.start(self);
         let stamp = search.stamp;
@@ -245,10 +242,10 @@ impl NavMesh {
     }
 
     /// Pulls the path the search's chain of portals makes, from `from` in polygon `start` to `to`
-    /// in polygon `goal`, taut, writing its corners after `from` into `corners`: the funnel
-    /// algorithm, as Mikko Mononen's "Simple Stupid Funnel Algorithm" (2010), each portal's ends
-    /// taken left and right as seen from the middle of the polygon it leads out of. Each corner is
-    /// at the floor of the polygon past its portal, and the last is `to`.
+    /// in polygon `goal`, taut, writing its corners after `from` into `corners`. It's Mikko
+    /// Mononen's "Simple Stupid Funnel Algorithm" (2010), each portal's ends taken left and right
+    /// as seen from the middle of the polygon it leads out of. Each corner is at the floor of the
+    /// polygon past its portal; the last is `to`.
     fn funnel(
         &self,
         search: &mut Search,
@@ -303,8 +300,7 @@ impl NavMesh {
                     right = gate.right;
                     right_at = i;
                 } else {
-                    // The right side crossed the left: the left is a corner, which the funnel
-                    // starts again from.
+                    // The right side crossed the left: the left is a corner; restart from it.
                     push(left, gates[left_at].polygon);
                     apex = left;
                     right = left;

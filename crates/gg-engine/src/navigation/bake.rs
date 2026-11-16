@@ -1,48 +1,49 @@
 //! Baking: the walkable surfaces of the world's static 3D colliders, as a navmesh. Their triangles
-//! are voxelized into a heightfield, columns of solid spans; the spans an agent stands on are kept,
-//! by the slope of the surface on top, the headroom above and the steps between neighbors; the
-//! walkable area is eroded by the agent's radius; and the cells left are joined into rectangles,
-//! each a convex polygon whose edges shared with its neighbors' are portals.
+//! are voxelized into a heightfield (columns of solid spans). The spans an agent stands on are
+//! kept, by the slope of the surface on top, the headroom above and the steps between neighbors.
+//! The walkable area is eroded by the agent's radius. The cells left are joined into rectangles,
+//! each a convex polygon whose edges shared with neighbors' are portals.
 //!
-//! Recast's pipeline is the reference as far as the erosion (Mikko Mononen's recastnavigation:
-//! `Recast/Source/RecastRasterization.cpp`, `RecastFilter.cpp`, `RecastContour.cpp`'s neighbors and
-//! `RecastArea.cpp`'s `rcErodeWalkableArea`), but that a collider's convex shape is voxelized as a
-//! solid, a span from its lowest point in a column to its highest, so that a wall standing in a floor
-//! leaves no floor inside it, and that spans merge with the flag of the higher top, or of either
-//! where their tops are within a step. Recast's regions, contours and polygon mesh give way to
-//! rectangles of cells, each the best anchored at the first cell left, as [`partition`] says: they
-//! stay correct across slopes, steps and floors over floors, since each cell keeps its own floor
-//! and a rectangle holds only cells joined to their neighbors, at the cost of more polygons than
-//! Recast makes where walls cross the grid's axes, whose staircase of cells splits into slivers,
-//! and of paths that bend at a rectangle's corner where a larger polygon would let them run
-//! straight.
+//! Recast's pipeline (Mikko Mononen's recastnavigation: `Recast/Source/RecastRasterization.cpp`,
+//! `RecastFilter.cpp`, `RecastContour.cpp`'s neighbors and `RecastArea.cpp`'s
+//! `rcErodeWalkableArea`) is the reference as far as the erosion, except:
+//!
+//! - A collider's convex shape is voxelized as a solid, a span from its lowest point in a column
+//!   to its highest, so a wall standing in a floor leaves no floor inside it.
+//! - Spans merge with the flag of the higher top, or of either if their tops are within a step.
+//!
+//! Recast's regions, contours and polygon mesh give way to rectangles of cells, each the best
+//! anchored at the first cell left ([`partition`]). They stay correct across slopes, steps and
+//! floors over floors, since each cell keeps its own floor and a rectangle holds only cells joined
+//! to their neighbors. The cost: more polygons than Recast makes where walls cross the grid's
+//! axes, whose staircase of cells splits into slivers, and paths that bend at a rectangle's corner
+//! where a larger polygon would let them run straight.
 
 use gg_core::math::{Vec2, Vec3, libm};
 use gg_core::{Error, Result};
 
 use super::mesh::{Cell, NavMesh, Polygon, Portal};
 
-/// No span, open span or polygon, as a link holds it.
+/// No span, open span or polygon, in a link.
 const NONE: u32 = u32::MAX;
 
-/// The most columns a heightfield has: 2^22, about 512 units square at cells of 0.25, so that a
-/// bake's memory, some 4 bytes a column and 12 a span, stays within tens of megabytes.
+/// The most columns: 2^22, about 512 units square at cells of 0.25, keeping a bake's memory (some 4
+/// bytes a column, 12 a span) to tens of megabytes.
 const MAX_COLUMNS: u64 = 1 << 22;
 
-/// The most levels a heightfield counts its spans' heights in: a span's top reaches one past
-/// them, and the level past that, `u16::MAX`, marks an open span the erosion took away.
+/// The most levels. A span's top reaches one past; `u16::MAX` marks an open span erosion took away.
 const MAX_LEVELS: u64 = u16::MAX as u64 - 2;
 
-/// The ways to a column's neighbors, along X and Z, as Recast numbers them: -X, +Z, +X, -Z.
+/// The ways to a column's neighbors along X and Z, numbered as Recast does: -X, +Z, +X, -Z.
 const WAYS: [(i32, i32); 4] = [(-1, 0), (0, 1), (1, 0), (0, -1)];
 
-/// The fraction of a cell's area under which a convex shape's triangle in it counts for nothing, as
-/// a vertical side does, which covers none: so that a box whose side lies on a column's edge doesn't
+/// The fraction of a cell's area under which a convex shape's triangle in it counts for nothing,
+/// as a vertical side, which covers none. A box whose side lies on a column's edge then doesn't
 /// fill the column beside it.
 const SLIVER: f32 = 1e-3;
 
-/// What a bake takes: the heightfield's bounds and cells, and the agent's size, in the world's
-/// units, the slope it climbs in radians.
+/// What a bake takes: the heightfield's bounds and cells, and the agent's size, in world units;
+/// the slope it climbs in radians.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Settings {
     pub(super) min: Vec3,
@@ -55,17 +56,16 @@ pub(super) struct Settings {
     pub(super) max_slope: f32,
 }
 
-/// A collider's triangles in the world's space, as a bake takes them: bounding a convex solid,
-/// which is voxelized whole, or a surface, as a mesh collider's are, voxelized one triangle at a
-/// time, each its own span, as Recast's are. A solid's triangles wind counterclockwise as seen from
-/// outside it, and a surface's as seen from where it's walked on.
+/// A collider's triangles in world space: bounding a convex solid, voxelized whole, or a surface
+/// (a mesh collider's), voxelized a triangle at a time, each its own span, as Recast's are. A
+/// solid's triangles wind counterclockwise seen from outside it, a surface's seen from where it's
+/// walked on.
 pub(super) struct Shape {
     pub(super) triangles: Vec<[Vec3; 3]>,
     pub(super) solid: bool,
 }
 
-/// The heightfield's grid: its lowest corner, its cells' sizes across and up and their inverses,
-/// its columns along X and Z, and the levels its spans' heights are counted in up to its top.
+/// The heightfield's grid: cell sizes across (`size`) and up (`height`), with inverses.
 struct Grid {
     min: Vec3,
     size: f32,
@@ -75,14 +75,14 @@ struct Grid {
     width: u32,
     depth: u32,
     levels: u16,
-    /// How tall it is, from its lowest corner to its top.
+    /// Its height from its lowest corner to its top.
     top: f32,
 }
 
 impl Grid {
-    /// The grid of `settings`, failing with `navigation.bad_volume` for bounds, cells or an agent
+    /// The grid of `settings`. Fails with `navigation.bad_volume` for bounds, cells or an agent
     /// that aren't numbers or have no size, and with `navigation.too_large` for more than
-    /// [`MAX_COLUMNS`] columns or [`MAX_LEVELS`] levels, counted without overflowing however many.
+    /// [`MAX_COLUMNS`] columns or [`MAX_LEVELS`] levels, counted without overflowing.
     fn new(settings: &Settings) -> Result<Self> {
         let Settings {
             min,
@@ -105,7 +105,7 @@ impl Grid {
             let message = "its agent's radius, height, climb and slope are none of them negative";
             return Err(Error::new("navigation.bad_volume", message));
         }
-        // Saturating, as a cast does past the integer's range, and as the product does.
+        // Saturating, like a cast past the integer's range, and the product.
         let cells = |extent: f32, size: f32| libm::ceilf(extent / size) as u64;
         let width = cells(max.x - min.x, cell_size).max(1);
         let depth = cells(max.z - min.z, cell_size).max(1);
@@ -130,8 +130,8 @@ impl Grid {
         })
     }
 
-    /// The levels of a span from `low` to `high` above the grid's lowest corner, as Recast snaps
-    /// them, down and up, at least one apart; nothing for one wholly below or above the grid.
+    /// The levels of a span from `low` to `high` above the grid's lowest corner, snapped down and
+    /// up as Recast does, at least one apart; nothing if wholly below or above the grid.
     fn levels_of(&self, low: f32, high: f32) -> Option<(u16, u16)> {
         if high < 0.0 || low > self.top {
             return None;
@@ -144,13 +144,13 @@ impl Grid {
         Some((min as u16, max as u16))
     }
 
-    /// The level a height `high` above the lowest corner snaps up to, as a span's top does.
+    /// The level height `high` above the lowest corner snaps up to, as a span's top does.
     fn level_of(&self, high: f32) -> i32 {
         (high * self.inverse_height).ceil() as i32
     }
 
-    /// The range of columns, along `axis`'s, that `low` to `high` along it cross, clamped to the
-    /// grid's; nothing for a range wholly outside it.
+    /// The columns `low` to `high` along an axis (starting at `min`, `cells` long) cross, clamped
+    /// to the grid; nothing if wholly outside it.
     fn columns(&self, low: f32, high: f32, min: f32, cells: u32) -> Option<(u32, u32)> {
         let first = ((low - min) * self.inverse).floor();
         let last = ((high - min) * self.inverse).floor();
@@ -167,8 +167,8 @@ impl Grid {
     }
 }
 
-/// A span of solid in a column of the heightfield: from level `min` to `max`, whether its top is
-/// walkable, and the next span up, in its pool.
+/// A span of solid in a column: from level `min` to `max`, whether its top is walkable, and the
+/// next span up, in its pool.
 #[derive(Clone, Copy)]
 struct Span {
     min: u16,
@@ -177,8 +177,8 @@ struct Span {
     next: u32,
 }
 
-/// The heightfield: each column's spans, from the lowest up, linked in a pool, as Recast keeps
-/// them, the spans merged away free for those after.
+/// The heightfield: each column's spans, lowest up, linked in a pool as Recast keeps them; spans
+/// merged away are free for later ones.
 struct Heightfield {
     heads: Vec<u32>,
     spans: Vec<Span>,
@@ -194,8 +194,8 @@ impl Heightfield {
         }
     }
 
-    /// Adds a span from `min` to `max` to column `column`, merged with each it overlaps or touches:
-    /// its top walkable as the higher top's, or as either's where the tops are within `climb`.
+    /// Adds a span from `min` to `max` to column `column`, merged with each it overlaps or touches.
+    /// Its top is walkable as the higher top is, or as either is if the tops are within `climb`.
     fn add(&mut self, column: usize, mut min: u16, mut max: u16, mut walkable: bool, climb: u16) {
         let mut before = NONE;
         let mut at = self.heads[column];
@@ -250,7 +250,7 @@ impl Heightfield {
         }
     }
 
-    /// Column `column`'s spans, from the lowest up, by their indices.
+    /// Column `column`'s span indices, lowest up.
     fn column(&self, column: usize) -> impl Iterator<Item = u32> + '_ {
         let mut at = self.heads[column];
         std::iter::from_fn(move || {
@@ -263,11 +263,11 @@ impl Heightfield {
     }
 }
 
-/// The most vertices a triangle clipped to a column has: 3, and one more for each of the four cuts,
-/// with room to spare for rounding's.
+/// The most vertices a triangle clipped to a column has: 3, one more per cut (four), and room
+/// for rounding's.
 const CLIPPED: usize = 12;
 
-/// A polygon clipped from a triangle, its vertices and how many.
+/// A polygon clipped from a triangle.
 #[derive(Clone, Copy)]
 struct Clipped {
     vertices: [Vec3; CLIPPED],
@@ -292,8 +292,8 @@ impl Clipped {
     }
 }
 
-/// Divides convex polygon `polygon` where its coordinate `axis` is `at`: into what's at or before
-/// it and what's at or after it, a vertex on the line going to both, as Recast's `dividePoly`.
+/// Recast's `dividePoly`: divides convex `polygon` at coordinate `axis` = `at`; a vertex on the
+/// line goes to both sides.
 fn divide(polygon: &Clipped, at: f32, axis: usize) -> (Clipped, Clipped) {
     let (mut before, mut after) = (Clipped::EMPTY, Clipped::EMPTY);
     let vertices = polygon.vertices();
@@ -324,7 +324,7 @@ fn divide(polygon: &Clipped, at: f32, axis: usize) -> (Clipped, Clipped) {
     (before, after)
 }
 
-/// The area polygon `polygon` covers across, in the XZ plane.
+/// The area `polygon` covers in the XZ plane.
 fn area(polygon: &Clipped) -> f32 {
     let vertices = polygon.vertices();
     let mut twice = 0.0;
@@ -335,11 +335,10 @@ fn area(polygon: &Clipped) -> f32 {
     twice.abs() * 0.5
 }
 
-/// Clips `triangle` to each column of `grid` it crosses, as Recast's `rasterizeTri` does, row by row
-/// along Z and then column by column along X, and gives `each` each column's X and Z, the least and
-/// greatest heights of the triangle in it above the grid's lowest corner, whether below or above
-/// the grid, and the area it covers there. A triangle with a vertex that isn't a number gives
-/// nothing.
+/// Clips `triangle` to each column of `grid` it crosses, as Recast's `rasterizeTri`, row by row
+/// along Z then column by column along X. Gives `each` the column's X and Z, the triangle's least
+/// and greatest heights in it above the grid's lowest corner (even below or above the grid), and
+/// the area it covers there. A triangle with a vertex that isn't a number gives nothing.
 fn rasterize(grid: &Grid, triangle: &[Vec3; 3], each: &mut impl FnMut(u32, u32, f32, f32, f32)) {
     if !triangle.iter().all(|vertex| vertex.is_finite()) {
         return;
@@ -347,9 +346,8 @@ fn rasterize(grid: &Grid, triangle: &[Vec3; 3], each: &mut impl FnMut(u32, u32, 
     let [a, b, c] = *triangle;
     let (low, high) = bounds(a, b);
     let (low, high) = (bounds(low, c).0, bounds(high, c).1);
-    // The first and last rows, or columns, the triangle's bounds cross, from the one before the
-    // grid's first, so that the first cut leaves out what's before the grid; nothing for bounds
-    // wholly outside it.
+    // The first and last rows (or columns) the triangle's bounds cross, starting one before the
+    // grid's first so the first cut leaves out what's before the grid; nothing if wholly outside.
     let range = |low: f32, high: f32, min: f32, cells: u32| {
         let first = ((low - min) * grid.inverse).floor();
         let last = ((high - min) * grid.inverse).floor();
@@ -408,8 +406,8 @@ fn rasterize(grid: &Grid, triangle: &[Vec3; 3], each: &mut impl FnMut(u32, u32, 
     }
 }
 
-/// Whether a triangle's surface is one an agent walks on: facing up no steeper than the slope
-/// whose cosine is `walkable`, as it winds.
+/// Whether a triangle faces up (by its winding) no steeper than the slope whose cosine is
+/// `walkable`.
 fn walkable(triangle: &[Vec3; 3], walkable: f32) -> bool {
     let [a, b, c] = *triangle;
     let normal = (b - a).cross(c - a);
@@ -417,8 +415,8 @@ fn walkable(triangle: &[Vec3; 3], walkable: f32) -> bool {
     length > 0.0 && normal.y / length >= walkable
 }
 
-/// What a convex solid holds in a column as its triangles are clipped to it: its least and
-/// greatest heights there, and the greatest of its walkable surfaces'.
+/// What a convex solid holds in a column: its least and greatest heights there, and the greatest
+/// of its walkable surfaces'.
 #[derive(Clone, Copy)]
 struct Extent {
     low: f32,
@@ -434,10 +432,10 @@ impl Extent {
     };
 }
 
-/// Voxelizes `shape` into `field` on `grid`: a solid's triangles as one span a column, from its
-/// lowest point there to its highest, cut to the grid's height, its top walkable if a walkable
-/// surface of it reaches within `climb` of it inside the grid; a surface's as a span for each
-/// triangle in each column, as Recast's are.
+/// Voxelizes `shape` into `field` on `grid`. A solid is one span a column, from its lowest point
+/// there to its highest, cut to the grid's height; its top is walkable if a walkable surface of it
+/// reaches within `climb` of it inside the grid. A surface is a span per triangle per column, as
+/// Recast's.
 fn voxelize(
     grid: &Grid,
     field: &mut Heightfield,
@@ -463,7 +461,7 @@ fn voxelize(
         }
         return;
     }
-    // The columns the solid's bounds cross, which its extents are kept for.
+    // The columns the solid's bounds cross, whose extents are kept.
     let corners = shape.triangles.iter().flatten();
     let (low, high) = corners.fold(
         (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
@@ -501,7 +499,7 @@ fn voxelize(
         let Some((min, max)) = grid.levels_of(extent.low, extent.high) else {
             continue;
         };
-        // A top above the grid is out of the volume, and walked by none of its agents.
+        // A top above the grid is out of the volume: no agent walks it.
         let walked = grid.level_of(extent.walked);
         let walks = extent.walked > f32::NEG_INFINITY
             && extent.high <= grid.top
@@ -512,7 +510,7 @@ fn voxelize(
 }
 
 /// An open span, a walkable floor and the space above it: its floor's level, the level of the
-/// solid above it, and the open span it joins on each way, as [`WAYS`] numbers them, if any.
+/// solid above, and the open span it joins on each way ([`WAYS`]), if any.
 #[derive(Clone, Copy)]
 struct Open {
     floor: u16,
@@ -520,8 +518,8 @@ struct Open {
     links: [u32; 4],
 }
 
-/// The heightfield's open spans, each column's from the lowest up, where they start in `opens` by
-/// column, and the grid's size.
+/// The heightfield's open spans, each column's lowest up; `starts` is where each column's start in
+/// `opens`.
 struct Compact {
     width: u32,
     depth: u32,
@@ -530,21 +528,21 @@ struct Compact {
 }
 
 impl Compact {
-    /// The open spans of column `x`, `z`, by their indices.
+    /// The open span indices of column (`x`, `z`).
     fn column(&self, x: u32, z: u32) -> std::ops::Range<u32> {
         let at = (z * self.width + x) as usize;
         self.starts[at]..self.starts[at + 1]
     }
 
-    /// What open span `open` joins on way `way`, if any.
+    /// The open span `open` joins on way `way`, if any.
     fn link(&self, open: u32, way: usize) -> Option<u32> {
         let link = self.opens[open as usize].links[way];
         (link != NONE).then_some(link)
     }
 }
 
-/// The open spans over `field`'s walkable tops, each joined to the one beside it on each way that
-/// an agent of `height` levels steps onto, within `climb` levels, with its headroom between them.
+/// The open spans over `field`'s walkable tops, each joined, on each way, to the one an agent of
+/// `height` levels steps onto within `climb` levels, with its headroom between them.
 fn compact(grid: &Grid, field: &Heightfield, height: u16, climb: u16) -> Compact {
     let (width, depth) = (grid.width, grid.depth);
     let mut starts = Vec::with_capacity((width * depth) as usize + 1);
@@ -600,10 +598,10 @@ fn compact(grid: &Grid, field: &Heightfield, height: u16, climb: u16) -> Compact
     compact
 }
 
-/// Erodes `compact`'s walkable area by `radius` cells, as Recast's `rcErodeWalkableArea` does: each
-/// open span's distance from the area's edge, where a span lacks a neighbor, by two passes of a
-/// chamfer that counts 2 a step along an axis and 3 across a diagonal, and those nearer the edge
-/// than the radius taken away, their links with them.
+/// Erodes `compact`'s walkable area by `radius` cells, as Recast's `rcErodeWalkableArea`. Each
+/// open span's distance from the area's edge (a span lacking a neighbor) comes from two chamfer
+/// passes, 2 a step along an axis and 3 across a diagonal. Spans nearer the edge than the radius
+/// are taken away, their links with them.
 fn erode(compact: &mut Compact, radius: u16) {
     let count = compact.opens.len();
     let mut distance = vec![u16::MAX; count];
@@ -658,7 +656,7 @@ fn erode(compact: &mut Compact, radius: u16) {
             }
         }
     }
-    // An open span taken away is marked by a floor no level reaches.
+    // A span taken away gets a floor no level reaches.
     for (open, keep) in compact.opens.iter_mut().zip(kept) {
         if !keep {
             open.floor = u16::MAX;
@@ -666,8 +664,7 @@ fn erode(compact: &mut Compact, radius: u16) {
     }
 }
 
-/// Bakes the navmesh of `shapes`, in the order given, as `settings` says: failing as
-/// [`Grid::new`] does for settings it can't.
+/// Bakes the navmesh of `shapes`, in the order given, per `settings`. Fails as [`Grid::new`] does.
 pub(super) fn bake(settings: &Settings, shapes: &[Shape]) -> Result<NavMesh> {
     let grid = Grid::new(settings)?;
     let levels = |extent: f32, round: fn(f32) -> f32| {
@@ -704,10 +701,9 @@ pub(super) fn bake(settings: &Settings, shapes: &[Shape]) -> Result<NavMesh> {
     Ok(partition(&grid, &compact, settings))
 }
 
-/// Recast's filters of what an agent stands on, as `rcFilterLowHangingWalkableObstacles` and
-/// `rcFilterWalkableLowHeightSpans`: a span that isn't walkable whose top is within `climb` of a
-/// walkable top just below it becomes walkable, as a curb does; and a walkable span with less than
-/// `height` of room above it isn't.
+/// Recast's `rcFilterLowHangingWalkableObstacles` and `rcFilterWalkableLowHeightSpans`: a span
+/// that isn't walkable, with its top within `climb` of a walkable top just below, becomes walkable
+/// (a curb); a walkable span with less than `height` of room above isn't.
 fn filter(field: &mut Heightfield, climb: u16, height: u16) {
     for column in 0..field.heads.len() {
         let mut below: Option<(bool, u16)> = None;
@@ -739,16 +735,16 @@ fn filter(field: &mut Heightfield, climb: u16, height: u16) {
     }
 }
 
-/// Joins `compact`'s open spans left into rectangles, the navmesh's polygons, in order by Z, then
-/// X, then floor: each the best anchored at the first span left, by its area times its shorter
-/// side, its rows down along Z each as wide along X as its spans join each other and the row
-/// before's, from the anchor's column, the first row's width narrowing as the rows go; with each
-/// run of an edge that its spans join another polygon's on, a portal.
+/// Joins `compact`'s open spans into rectangles, the navmesh's polygons, in order by Z, then X,
+/// then floor. Each is the best anchored at the first span left, scored by area times shorter
+/// side. Its rows run down along Z, each as wide along X as its spans join each other and the
+/// row before's, from the anchor's column; the first row's width narrows as rows go. Each run of
+/// an edge whose spans join another polygon's is a portal.
 fn partition(grid: &Grid, compact: &Compact, settings: &Settings) -> NavMesh {
     let kept = |open: u32| compact.opens[open as usize].floor != u16::MAX;
     let mut owner = vec![NONE; compact.opens.len()];
     let mut polygons = Vec::new();
-    // Each polygon's open spans, row by row, where each polygon's start.
+    // Each polygon's open spans row by row, and where each starts.
     let mut held = Vec::new();
     let mut starts = Vec::new();
     // The rows tried from an anchor, each as wide as the first, and how wide each joins.
@@ -771,8 +767,8 @@ fn partition(grid: &Grid, compact: &Compact, settings: &Settings) -> NavMesh {
                 let first = tried.len();
                 widths.clear();
                 widths.push(first);
-                // The best so far, its area times its shorter side, so that a squarer rectangle
-                // goes before a strip of the same area, and its rows and width.
+                // The best so far (score, rows, width). Area times shorter side puts a squarer
+                // rectangle before a strip of the same area.
                 let score = |rows: usize, width: usize| rows * width * rows.min(width);
                 let mut best = (score(1, first), 1, first);
                 loop {
@@ -829,8 +825,8 @@ fn partition(grid: &Grid, compact: &Compact, settings: &Settings) -> NavMesh {
         let cells = &held[starts[index] as usize..starts[index + 1] as usize];
         let (width, depth) = (polygon.width, polygon.depth);
         let at = |i: u32, j: u32| cells[(j * width + i) as usize];
-        // Each edge, as the way out of it, and its cells along it with their grid corners: -X,
-        // +Z, +X, -Z, each from its lowest corner.
+        // Each edge (-X, +Z, +X, -Z) as the way out of it, with its length in cells, from its
+        // lowest corner.
         let (x, z) = (polygon.x, polygon.z);
         let edges: [(usize, u32); 4] = [(0, depth), (1, width), (2, depth), (3, width)];
         for (way, length) in edges {
@@ -902,12 +898,12 @@ fn partition(grid: &Grid, compact: &Compact, settings: &Settings) -> NavMesh {
     }
 }
 
-/// The triangles of a box, counterclockwise as seen from outside it: as wide, tall and deep as
-/// `half` twice, around `middle` in its own space, which `place` takes to the world's.
+/// The triangles of a box, counterclockwise seen from outside: twice `half` across, around
+/// `middle` in its own space, which `place` takes to the world's.
 pub(super) fn cuboid(half: Vec3, middle: Vec3, place: impl Fn(Vec3) -> Vec3) -> Vec<[Vec3; 3]> {
     let mut triangles = Vec::with_capacity(12);
     for axis in 0..3 {
-        // The face's other two axes, in turn after it, so that `u` cross `v` points along it.
+        // The face's other two axes, in turn after it, so `u` cross `v` points along it.
         let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
         for side in [-1.0, 1.0] {
             let corner = |a: f32, b: f32| {
@@ -935,21 +931,21 @@ pub(super) fn cuboid(half: Vec3, middle: Vec3, place: impl Fn(Vec3) -> Vec3) -> 
     triangles
 }
 
-/// How many segments a sphere's or a capsule's rings have, and how many bands its latitudes make,
-/// pole to pole: fine enough that a sphere's top is within some 2% of its radius of a cell's.
+/// Segments per ring and latitude bands, pole to pole, of a sphere or capsule: fine enough that a
+/// sphere's top is within some 2% of its radius of a cell's.
 const SEGMENTS: usize = 16;
 const BANDS: usize = 8;
 
-/// The triangles of a capsule, counterclockwise as seen from outside it: what's within `radius` of
-/// the segment along Y from `-half` to `half` around `middle` in its own space, which `place` takes
-/// to the world's; a sphere at a `half` of 0.
+/// The triangles of a capsule, counterclockwise seen from outside: within `radius` of the segment
+/// along Y from `-half` to `half` around `middle` (`place` takes it to world space). A `half` of 0
+/// is a sphere.
 pub(super) fn capsule(
     radius: f32,
     half: f32,
     middle: Vec3,
     place: impl Fn(Vec3) -> Vec3,
 ) -> Vec<[Vec3; 3]> {
-    // Each ring, from the bottom up, the equator twice, below and above the segment's middle.
+    // Each ring, bottom up; the equator twice, below and above the segment's middle.
     let mut rings: Vec<[Vec3; SEGMENTS]> = Vec::with_capacity(BANDS + 2);
     for band in 0..=BANDS + 1 {
         let (latitude, lift) = if band <= BANDS / 2 {
@@ -988,8 +984,8 @@ pub(super) fn across(at: Vec3) -> Vec2 {
     Vec2::new(at.x, at.z)
 }
 
-/// The least of `a` and `b`, and the greatest, along each axis: compared, as `min` and `max` leave a
-/// zero's sign to the platform.
+/// The least and greatest of `a` and `b` along each axis, compared: `min` and `max` leave a zero's
+/// sign to the platform.
 pub(super) fn bounds(a: Vec3, b: Vec3) -> (Vec3, Vec3) {
     let least = |a: f32, b: f32| if b < a { b } else { a };
     let most = |a: f32, b: f32| if b > a { b } else { a };

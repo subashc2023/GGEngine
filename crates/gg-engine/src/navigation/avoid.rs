@@ -1,39 +1,38 @@
 //! Avoidance: an agent's velocity chosen among those that keep it clear of each neighbor for a
 //! while, by optimal reciprocal collision avoidance (van den Berg, Guy, Lin and Manocha,
-//! "Reciprocal n-Body Collision Avoidance", 2011): each neighbor's velocity obstacle bounds a
-//! half-plane of the velocities, the agent taking half of what each pair must change, and a small
-//! linear program finds the velocity nearest the one it prefers in all of them, or, where none is,
-//! the one least deep in them. Ported from RVO2's `Agent.cpp` (`computeNewVelocity` and
-//! `linearProgram1` to `3`), agents alone, as the navmesh and physics keep them from walls, in the
-//! plain arithmetic and square roots of `f32`, which give the same bits on every platform.
+//! "Reciprocal n-Body Collision Avoidance", 2011). Each neighbor's velocity obstacle bounds a
+//! half-plane of velocities, the agent taking half of what each pair must change. A small linear
+//! program finds the velocity nearest the preferred one inside all of them, or, if none is, the
+//! one least deep in them.
+//!
+//! Ported from RVO2's `Agent.cpp` (`computeNewVelocity`, `linearProgram1` to `3`), for agents
+//! alone (the navmesh and physics keep them from walls), in plain `f32` arithmetic and square
+//! roots, which give the same bits on every platform.
 
 use gg_core::math::Vec2;
 
 use crate::Tick;
 
-/// How far ahead, in seconds, an agent keeps clear of its neighbors: farther sees them sooner, and
+/// How far ahead, in seconds, an agent keeps clear of its neighbors. Farther sees them sooner and
 /// turns earlier and more widely.
 pub(super) const TIME_HORIZON: f32 = 1.5;
 
-/// The most neighbors an agent steers round, the nearest, as RVO2's `maxNeighbors`: so that what a
-/// tick does for each agent in a crowd stays bounded, and avoidance's lines fit the room they're
-/// given as they're first drawn.
+/// The most neighbors an agent steers round, the nearest, as RVO2's `maxNeighbors`. It bounds a
+/// tick's work per agent in a crowd, and avoidance's lines fit the room they first get.
 pub(super) const MAX_NEIGHBORS: usize = 10;
 
-/// How near parallel two lines are taken as parallel, RVO2's `RVO_EPSILON`.
+/// How near parallel two lines count as parallel, RVO2's `RVO_EPSILON`.
 const EPSILON: f32 = 0.000_01;
 
-/// How far to its right an agent among neighbors nudges the velocity it prefers, as a share of it,
-/// about a degree: so that two heading straight at each other part rather than stopping face to
-/// face, where ORCA's half-planes, perfectly symmetric, leave them no way round. RVO2's examples
-/// perturb the preferred velocities at random, which peers wouldn't agree on; one nudge for every
-/// agent keeps them to the right of each other, as traffic keeps.
+/// How far to its right, as a share of it (about a degree), an agent among neighbors nudges its
+/// preferred velocity, so two heading straight at each other part instead of stopping face to
+/// face (ORCA's half-planes are perfectly symmetric). RVO2's examples perturb at random, which
+/// peers wouldn't agree on; one nudge for all keeps agents to the right of each other.
 const NUDGE: f32 = 0.02;
 
-/// An agent as avoidance sees it, across: where it is, how fast it goes, how far round it it keeps
-/// others, and, as a neighbor, which way along X the agent it's a neighbor of leaves it where
-/// they're in one place, 1 or -1, as the order of their entities' IDs gives, so that two agents in
-/// one place part, each its own way.
+/// An agent as avoidance sees it, across. As a neighbor, `side` is 1 or -1: which way along X the
+/// agent it's a neighbor of leaves it if they're in one place, by entity ID order, so two agents
+/// in one place part, each its own way.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Disc {
     pub(super) position: Vec2,
@@ -49,8 +48,8 @@ pub(super) struct Line {
     direction: Vec2,
 }
 
-/// What avoidance works in, kept from one agent and tick to the next, so that it allocates nothing
-/// once it has room: each neighbor's line, and the lines the third program projects.
+/// What avoidance works in, kept between agents and ticks so it allocates nothing once it has
+/// room: each neighbor's line, and the lines the third program projects.
 #[derive(Default)]
 pub(super) struct Lines {
     lines: Vec<Line>,
@@ -63,11 +62,10 @@ fn det(a: Vec2, b: Vec2) -> f32 {
 }
 
 impl Lines {
-    /// The velocity `agent` takes, no faster than `max_speed`, nearest `preferred`, nudged to its
-    /// right among neighbors, of those that keep it clear of each of `neighbors` for
-    /// [`TIME_HORIZON`], each taking half of what keeping clear needs, as RVO2's
-    /// `computeNewVelocity`; or, where none does, the one that comes least deep among them. One that
-    /// isn't a number is none.
+    /// The velocity `agent` takes (RVO2's `computeNewVelocity`): at most `max_speed`, nearest
+    /// `preferred` (nudged to its right among neighbors), among those keeping it clear of each of
+    /// `neighbors` for [`TIME_HORIZON`], each taking half of what that needs; if none does, the
+    /// least deep in them. Not a number is none.
     pub(super) fn velocity(
         &mut self,
         agent: Disc,
@@ -117,9 +115,8 @@ impl Lines {
                     u = direction * relative_velocity.dot(direction) - relative_velocity;
                 }
             } else {
-                // Collision: projected on the cut-off circle of a tick, so that they part within
-                // one. Where nothing tells which way, as agents in one place at rest, the way
-                // their order gives.
+                // Collision: projected on the cut-off circle of a tick, so they part within one.
+                // Where nothing tells which way, as agents in one place at rest, ID order does.
                 let w = relative_velocity - relative_position * inverse_step;
                 let w_length = w.length();
                 let unit = if w_length > 0.0 {
@@ -160,9 +157,9 @@ impl Lines {
     }
 }
 
-/// Solves the one-dimensional linear program on line `line` of `lines`, bounded by the lines before
-/// it and the circle of `radius`, as RVO2's `linearProgram1`: the point of it nearest `optimum`, or
-/// farthest along `optimum` where `direction` says, into `result`. Returns whether it has one.
+/// RVO2's `linearProgram1`: the point on `lines[line]`, bounded by the lines before it and the
+/// circle of `radius`, nearest `optimum` (farthest along it if `direction`), into `result`.
+/// Returns whether there is one.
 fn program1(
     lines: &[Line],
     line: usize,
@@ -191,7 +188,7 @@ fn program1(
             continue;
         }
         let t = numerator / denominator;
-        // Compared rather than `min`ed and `max`ed, whose zeros' signs std leaves to the platform.
+        // Compared, not `min`ed and `max`ed: std leaves their zeros' signs to the platform.
         if denominator >= 0.0 {
             if t < t_right {
                 t_right = t;
@@ -223,10 +220,9 @@ fn program1(
     true
 }
 
-/// Solves the two-dimensional linear program of `lines` within the circle of `radius`, as RVO2's
-/// `linearProgram2`: the point nearest `optimum`, or farthest along it where `direction` says, into
-/// `result`. Returns the number of lines it satisfied before one it couldn't, all of them where it
-/// satisfied every one.
+/// RVO2's `linearProgram2`: the point within the circle of `radius` on the good side of `lines`,
+/// nearest `optimum` (farthest along it if `direction`), into `result`. Returns how many lines it
+/// satisfied before one it couldn't; all of them if every one.
 fn program2(
     lines: &[Line],
     radius: f32,
@@ -243,7 +239,7 @@ fn program2(
     };
     for (i, line) in lines.iter().enumerate() {
         if det(line.direction, line.point - *result) > 0.0 {
-            // It isn't on the line's side that keeps clear: the best on the line instead.
+            // Not on the side that keeps clear: the best on the line instead.
             let before = *result;
             if !program1(lines, i, radius, optimum, direction, result) {
                 *result = before;
@@ -254,10 +250,9 @@ fn program2(
     lines.len()
 }
 
-/// Solves the three-dimensional linear program of `lines` from line `failed` on, as RVO2's
-/// `linearProgram3`, where the two-dimensional one found no velocity on every line's side: the
-/// velocity least deep past any of them, within the circle of `radius`, into `result`, projecting
-/// the lines before each into `projected`.
+/// RVO2's `linearProgram3`, for when the 2D program found no velocity on every line's side: from
+/// line `failed` on, the velocity within the circle of `radius` least deep past any line, into
+/// `result`, projecting the lines before each into `projected`.
 fn program3(
     lines: &[Line],
     projected: &mut Vec<Line>,
@@ -293,7 +288,7 @@ fn program3(
         let before = *result;
         let toward = Vec2::new(-line.direction.y, line.direction.x);
         if program2(projected, radius, toward, true, result) < projected.len() {
-            // Only rounding fails it, as the result is within its bounds by what came before.
+            // Only rounding fails it: the result is within its bounds by what came before.
             *result = before;
         }
         distance = det(line.direction, line.point - *result);
@@ -304,8 +299,8 @@ fn program3(
 mod tests {
     use super::*;
 
-    /// Two agents heading straight at each other, each preferring its way, step aside each by half,
-    /// keeping clear for the whole time they pass, and both get by; one alone keeps its preference.
+    /// Two agents heading straight at each other each step aside by half, stay clear while they
+    /// pass, and both get by; one alone keeps its preference.
     #[test]
     fn two_agents_head_on_pass_each_other_clear() {
         let dt = Tick::DT.as_secs_f32();

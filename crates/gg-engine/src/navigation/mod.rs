@@ -1,13 +1,12 @@
-//! Navigation: a navmesh baked from the world's static 3D colliders, as a [`NavMeshVolume`] says,
-//! over which paths are found ([`World::find_path`]), and agents that walk them to their
-//! destinations, steering round each other ([`NavAgent`]); stepped by [`step_navigation`] at the
-//! ticks a layer runs it in, its state the agents' components and the world's [`Navigation`], which
-//! snapshots copy and a run restored from a snapshot file bakes again; and its lines, the navmesh's
-//! polygons and the agents' paths, drawn where they are.
+//! Navigation: a navmesh baked from the world's static 3D colliders ([`NavMeshVolume`]), paths
+//! found over it ([`World::find_path`]), and agents that walk them, steering round each other
+//! ([`NavAgent`]). [`step_navigation`] steps it. Its state is the agents' components and the
+//! world's [`Navigation`]: snapshots copy it, and a run restored from a snapshot file bakes again.
+//! The navmesh's polygons and the agents' paths draw as lines.
 //!
-//! It gives the same bits on every platform, which the reference hash in `tests.rs` checks: plain
-//! `f32` arithmetic and square roots, libm's cosine and sine, comparisons rather than `min` and
-//! `max`, whose zeros' signs are the platform's, and everything ordered by entities' IDs.
+//! Bits are the same on every platform, as the reference hash in `tests.rs` checks: plain `f32`
+//! arithmetic and square roots, libm's cosine and sine, comparisons instead of `min` and `max`
+//! (their zeros' signs are the platform's), and everything ordered by entity IDs.
 
 mod agents;
 mod avoid;
@@ -37,38 +36,40 @@ use bake::{Settings, Shape, bounds};
 use mesh::NavMesh;
 use path::Search;
 
-/// What the world's navmesh is baked from, and for what size of agent: the static 3D colliders, as
-/// physics has them, inside a box around its entity's origin, in its entity's space, so that it
-/// moves, turns and scales with its entity, the bake taking the box that bounds it along the
-/// world's axes. Their surfaces are voxelized into cells `cell_size` across and `cell_height` tall;
-/// the cells an agent stands on are kept, those whose surface is no steeper than `max_slope`, with
-/// `agent_height` of room above, joined to their neighbors where the step between them is no
-/// higher than `agent_climb`; and the walkable area is eroded by `agent_radius`, so that a path
-/// keeps an agent's middle that far from walls and edges. Finer cells find narrower ways, and bake
-/// slower. A volume of more than 4,194,304 columns or 65,533 levels isn't baked
-/// (`navigation.too_large`), nor one without a size (`navigation.bad_volume`). The world bakes one navmesh, from the volume of the
-/// least ID, warning of the others (`navigation.volumes`).
+/// What the world's navmesh is baked from, for what size of agent: the static 3D colliders, as
+/// physics has them, inside a box around its entity's origin. The box is in its entity's space and
+/// moves, turns and scales with it; the bake uses the box bounding it along the world's axes.
+///
+/// Surfaces are voxelized into cells `cell_size` across and `cell_height` tall. Cells are kept
+/// where an agent can stand: a surface no steeper than `max_slope`, `agent_height` of room above,
+/// neighbors joined where the step is at most `agent_climb`. The area is eroded by `agent_radius`,
+/// so a path keeps an agent's middle that far from walls and edges. Finer cells find narrower
+/// ways and bake slower.
+///
+/// A volume of more than 4,194,304 columns or 65,533 levels isn't baked (`navigation.too_large`),
+/// nor one without a size (`navigation.bad_volume`). The world bakes one navmesh, from the volume
+/// of the least ID, and warns of the others (`navigation.volumes`).
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct NavMeshVolume {
-    /// How wide, tall and deep its box is.
+    /// Width, height and depth of its box.
     #[reflect(min = 0.0, default = Vec3::new(20.0, 8.0, 20.0))]
     pub size: Vec3,
     /// How far from walls and edges an agent's middle stays, in units.
     #[reflect(min = 0.0, default = 0.5)]
     pub agent_radius: f32,
-    /// How much room above a floor an agent needs to stand there, in units.
+    /// Room above a floor an agent needs to stand there, in units.
     #[reflect(min = 0.0, default = 2.0)]
     pub agent_height: f32,
-    /// How high a step an agent climbs, in units.
+    /// The highest step an agent climbs, in units.
     #[reflect(min = 0.0, default = 0.3)]
     pub agent_climb: f32,
-    /// How steep a slope an agent climbs, from level: steeper ones aren't walked.
+    /// The steepest slope an agent climbs, from level; steeper ones aren't walked.
     #[reflect(degrees, min = 0.0, default = FRAC_PI_4)]
     pub max_slope: f32,
-    /// How wide and deep the heightfield's cells are, in units.
+    /// Width and depth of the heightfield's cells, in units.
     #[reflect(min = 0.01, default = 0.25)]
     pub cell_size: f32,
-    /// How tall the heightfield's cells are, in units: the floors' heights are their multiples.
+    /// Height of the heightfield's cells, in units: floor heights are its multiples.
     #[reflect(min = 0.01, default = 0.1)]
     pub cell_height: f32,
 }
@@ -87,50 +88,52 @@ impl Default for NavMeshVolume {
     }
 }
 
-/// An agent that walks the world's navmesh to its `destination`, at each tick a layer runs
-/// [`step_navigation`] in: it plans its path as its destination or the navmesh changes, from where
-/// its [`Transform`] is to its destination, each snapped to the navmesh within the agent's height
-/// of the volume, and again at each tick while it has a destination and no path, as while it falls
-/// onto the navmesh; heads for its path's next corner, past each it comes within its radius of on
-/// the corner's floor, or from which the next is in sight over the navmesh on its own, planning
-/// again where it comes over a corner on another floor; and slows to stop within
-/// `stopping_distance` of the last, on its floor, coming back to it where it's pushed off; and
-/// steers round the agents near it, by ORCA, each giving way half as much as two need. The
-/// velocity it chooses goes, across, to its entity's [`CharacterController3D`](crate::CharacterController3D),
-/// which then slides it along walls and up steps and slopes, or else to its [`RigidBody3D`],
-/// gravity and what's up left to physics, or else to its transform, which moves along the navmesh,
-/// its height following the floor, kept to the mesh. An agent under a parent isn't moved
-/// (`navigation.child_agent`), and without a [`NavMeshVolume`] in the world it stands
-/// (`navigation.no_volume`). Its entity's rotation is the game's to set, as from `velocity`.
+/// An agent that walks the world's navmesh to its `destination`, as [`step_navigation`] steps it.
 ///
-/// Its path is its state, as the rest of the simulation's is, so that snapshots, replays and peers
-/// go alike: `corners`, `corner`, `planned`, `arrived` and `velocity` are the steps', which code,
-/// scripts and tools read, and steer it by setting its destination, speed and the rest.
+/// - It plans its path from its [`Transform`] when its destination or the navmesh changes, and
+///   each tick while it has a destination and no path (as while falling onto the navmesh). Both
+///   ends snap to the navmesh within the agent's height of the volume.
+/// - It heads for the next corner, passing each once within its radius of it on its floor, or
+///   once the next is in sight over the navmesh. Coming over a corner on another floor, it plans
+///   again.
+/// - It slows to stop within `stopping_distance` of the last corner, on its floor, and returns if
+///   pushed off.
+/// - It steers round near agents by ORCA, each giving way half as much as two need.
+///
+/// Its velocity, across, goes to its [`CharacterController3D`](crate::CharacterController3D),
+/// which slides it along walls and up steps and slopes; else its [`RigidBody3D`] (gravity is
+/// physics'); else its transform, moved along the navmesh, its height following the floor. An
+/// agent under a parent isn't moved (`navigation.child_agent`). Without a [`NavMeshVolume`] it
+/// stands (`navigation.no_volume`). Its rotation is the game's to set, as from `velocity`.
+///
+/// Its path is simulation state, so snapshots, replays and peers go alike. The steps write
+/// `corners`, `corner`, `planned`, `arrived` and `velocity`; code, scripts and tools read them
+/// and steer the agent by setting its destination, speed and the rest.
 #[derive(Debug, PartialEq, Component)]
 pub struct NavAgent {
-    /// Where it's going, a point on the navmesh or near it; none to stand where it is.
+    /// Where it's going, a point on or near the navmesh; none to stand where it is.
     pub destination: Option<Vec3>,
     /// How fast it walks, in units a second.
     #[reflect(min = 0.0, default = 3.5)]
     pub speed: f32,
-    /// How far round it other agents keep, in units, and how near a corner of its path it comes
+    /// How far round it other agents keep, in units; also how near a corner of its path it comes
     /// before heading for the next.
     #[reflect(min = 0.0, default = 0.5)]
     pub radius: f32,
     /// How near its destination, across, counts as there.
     #[reflect(min = 0.0, default = 0.1)]
     pub stopping_distance: f32,
-    /// Whether it's within its stopping distance of its destination, as of the last step.
+    /// Whether it was within its stopping distance of its destination at the last step.
     pub arrived: bool,
     /// The velocity it chose at the last step, across, in units a second.
     pub velocity: Vec3,
-    /// The corners of its path, each a point on the navmesh, the last its destination snapped to
-    /// it; none without a destination or a path to it.
+    /// The corners of its path, points on the navmesh, the last its destination snapped to it;
+    /// none without a destination or a path to it.
     pub corners: Vec<Vec3>,
-    /// The corner it heads for, of `corners`.
+    /// The index in `corners` it heads for.
     pub corner: u32,
-    /// What its path was planned from, the navmesh's fingerprint and its destination mixed, which
-    /// plans it again as either changes; 0 for none.
+    /// What its path was planned from: the navmesh's fingerprint mixed with its destination. It
+    /// plans again when either changes; 0 for none.
     pub planned: u64,
 }
 
@@ -160,9 +163,8 @@ impl Clone for NavAgent {
         agent
     }
 
-    /// Copies `source` into the memory this one holds, its corners into its vector, so that a
-    /// snapshot taken into a world kept from before allocates nothing for it while its path is no
-    /// longer.
+    /// Copies `source` into this one's memory, its corners into its vector, so a snapshot into a
+    /// kept world allocates nothing unless its path grew.
     fn clone_from(&mut self, source: &Self) {
         let corners = std::mem::take(&mut self.corners);
         *self = Self { corners, ..*source };
@@ -170,31 +172,30 @@ impl Clone for NavAgent {
     }
 }
 
-/// The world's navigation, a [`Resource`](crate::Resource) that [`step_navigation`] gives a world
-/// the first time it steps one with a [`NavMeshVolume`] or a [`NavAgent`]: the navmesh, baked from
-/// what's inside the volume, and a fingerprint of what it was baked from, the volume and each
-/// static body's transform and colliders by its entity's ID, which bakes it again as it changes and
-/// which agents' paths are planned on. Snapshots share the navmesh with the world they're taken
-/// from; snapshot files don't hold it, as a bake from the same entities and assets makes the same
-/// navmesh, bit for bit, so that a run restored from one bakes it again as it first steps, under
-/// the fingerprint its agents planned on.
+/// The world's navigation, a [`Resource`](crate::Resource) [`step_navigation`] gives a world with
+/// a [`NavMeshVolume`] or a [`NavAgent`] at its first step. It holds the navmesh and a fingerprint
+/// of what it was baked from: the volume and each static body's transform and colliders, by
+/// entity ID. A changed fingerprint bakes again; agents' paths are planned on it.
+///
+/// Snapshots share the navmesh with their world. Snapshot files don't hold it: the same entities
+/// and assets bake the same navmesh, bit for bit, so a restored run bakes it at its first step,
+/// under the fingerprint its agents planned on.
 #[derive(Default)]
 pub struct Navigation {
     mesh: Option<Arc<NavMesh>>,
     fingerprint: u64,
-    /// The entity of the volume the navmesh was baked from, which its lines are picked as.
+    /// The entity of the volume the navmesh was baked from; its lines are picked as it.
     volume: Option<EntityId>,
-    /// The surfaces of the models that mesh colliders were made of, as their models' were when
-    /// last seen, each with the hash of its triangles, which the fingerprint takes.
+    /// The surfaces of the models mesh colliders were made of, as last seen, each with its
+    /// triangles' hash, which the fingerprint takes.
     surfaces: Vec<(Arc<Vec<Surface>>, u64, bool)>,
-    /// The agents under a parent, which aren't moved, warned of once each.
+    /// The agents under a parent, warned of once each.
     children: Vec<Entity>,
-    /// Whether it warned that agents have destinations in a world without a volume, since it last
-    /// had one; and that it has more than one.
+    /// Whether it warned of destinations with no volume since it last had one, and of several
+    /// volumes.
     alone: bool,
     volumes: bool,
-    /// What a path search and agents' steps work in, which a copy makes anew, as no step carries
-    /// anything in them over.
+    /// What searches and agents' steps work in. Nothing carries over, so a copy makes them anew.
     search: Search,
     crowd: Crowd,
 }
@@ -214,7 +215,7 @@ impl Clone for Navigation {
         }
     }
 
-    /// Copies `source` into the memory this one holds, keeping its own workspaces.
+    /// Copies `source` into this one's memory, keeping its own workspaces.
     fn clone_from(&mut self, source: &Self) {
         self.mesh.clone_from(&source.mesh);
         self.fingerprint = source.fingerprint;
@@ -226,27 +227,23 @@ impl Clone for Navigation {
     }
 }
 
-/// Steps `world`'s navigation a tick, as a system a layer's tick runs, after what sets its agents'
-/// destinations, such as scripts, and before physics, which moves its characters as their agents
-/// set: brings the navmesh up to date, baking it again if what it's baked from has changed since,
-/// as a world restored from a snapshot file has none yet, logging `Navmesh baked` with its polygons
-/// and how long it took, then each [`NavAgent`] plans, heads for its next corner and steers round
-/// the rest, as it says. A world is given a [`Navigation`] the first time it steps, or searches,
-/// with a [`NavMeshVolume`] or an agent and without one.
+/// Steps `world`'s navigation a tick: brings the navmesh up to date, then each [`NavAgent`] plans,
+/// heads for its next corner and steers round the rest. A layer's tick runs it after what sets
+/// destinations (such as scripts) and before physics, which moves characters as their agents set.
 pub fn step_navigation(world: &mut World) {
     let _zone = gg_core::zone!();
     refresh(world);
     world.resource_scope(|world, navigation: &mut Navigation| agents::step(navigation, world));
 }
 
-/// Brings `world`'s navmesh up to date with what it's baked from: bakes it again if that has
-/// changed since it was baked, as a world restored from a snapshot file has no navmesh yet and a
-/// world loaded whole may keep one of another world, logging `Navmesh baked` with its polygons and
-/// how long it took. Gives the world a [`Navigation`] if it has none and has a [`NavMeshVolume`]
-/// or a [`NavAgent`]. Searches and steps go through it, so that what a path is planned on is what
-/// the world's static colliders give, whichever came first after a load, as peers that loaded the
-/// world at different times must agree; and a client's copy of the server's world, which it's taken
-/// back to as it corrects, so that it holds the resources the client's world does.
+/// Brings `world`'s navmesh up to date: bakes again if what it's baked from changed, logging
+/// `Navmesh baked` with its polygons and the time taken. A world restored from a snapshot file has
+/// no navmesh yet; one loaded whole may keep another world's. Gives the world a [`Navigation`] if
+/// it has none and has a [`NavMeshVolume`] or a [`NavAgent`].
+///
+/// Searches and steps go through it, so a path is planned on what the static colliders give now,
+/// whichever came first after a load: peers that loaded at different times must agree. So must a
+/// client's copy of the server's world, which holds the resources the client's does.
 pub(crate) fn refresh(world: &mut World) {
     if world.resource::<Navigation>().is_none() {
         let volumes = world.query::<&NavMeshVolume>().next().is_some();
@@ -273,8 +270,7 @@ impl Navigation {
         }
     }
 
-    /// The entity of the world's volume, the one of the least ID, warning once while it has
-    /// another.
+    /// The world's volume, the one of the least ID; warns once while there's another.
     fn volume_of(&mut self, world: &World) -> Option<Entity> {
         let mut volumes = world.query::<(Entity, &NavMeshVolume)>();
         let first = volumes.next().map(|(entity, _)| entity)?;
@@ -300,10 +296,9 @@ impl Navigation {
         Some(chosen.1)
     }
 
-    /// The fingerprint of what the navmesh is baked from in `world`, with `volume`: the volume's
-    /// ID, where its entity is and its fields, and each static body's ID, transform and colliders,
-    /// a mesh collider by the hash of its model's triangles, summed, so that the order they're
-    /// found in counts for nothing; never 0, which stands for no navmesh.
+    /// The fingerprint of what the navmesh is baked from: the volume's ID, pose and fields, and
+    /// each static body's ID, transform and colliders (a mesh collider by its model's triangles'
+    /// hash). Bodies' hashes are summed, so find order counts for nothing. Never 0 (no navmesh).
     fn fingerprint(&mut self, world: &World, volume: Entity) -> u64 {
         let floats = |mut hash: u64, floats: &[f32]| {
             for float in floats {
@@ -363,8 +358,8 @@ impl Navigation {
         mix64(volume_hash ^ statics).max(1)
     }
 
-    /// The hash of the triangles of the model `entity`'s [`ModelRoot`] names, as its model's
-    /// surfaces are now, hashed once for each time they're read; 0 for none.
+    /// The hash of the triangles of `entity`'s [`ModelRoot`]'s model, as they are now, hashed once
+    /// per read of the surfaces; 0 for none.
     fn surface_hash(&mut self, world: &World, entity: Entity) -> u64 {
         let model = world.get::<ModelRoot>(entity).map(|root| root.0);
         let Some(nodes) = model.and_then(|model| world.assets().nodes(model)) else {
@@ -394,17 +389,16 @@ impl Navigation {
     }
 }
 
-/// `rotation` made a unit, as physics makes its bodies', so that shapes keep their sizes: none,
-/// where it has no length.
+/// `rotation` normalized as physics does bodies', so shapes keep their sizes; identity if it has
+/// no length.
 fn unit(rotation: Quat) -> Quat {
     let unit = Vec4::from(rotation).try_normalize();
     unit.map_or(Quat::IDENTITY, Quat::from_vec4)
 }
 
-/// Bakes the navmesh of `world`'s static colliders inside `volume`'s box, as [`NavMeshVolume`]
-/// says, each body's in the order of their entities' IDs, so that the same entities bake the same
-/// navmesh whatever order queries find them in; logging the bake, or warning of a volume it can't
-/// bake.
+/// Bakes the navmesh of `world`'s static colliders inside `volume`'s box, bodies in entity ID
+/// order, so the same entities bake the same navmesh whatever order queries find them in. Logs
+/// the bake, or warns of a volume it can't bake.
 fn bake_from(world: &World, volume: Entity) -> Option<NavMesh> {
     let _zone = gg_core::zone!();
     let started = Instant::now();
@@ -471,10 +465,9 @@ fn bake_from(world: &World, volume: Entity) -> Option<NavMesh> {
     }
 }
 
-/// The shapes of `entity`'s colliders, a static body's, as a bake takes them, in the world's space
-/// as physics places them: its box, sphere and capsule as solids, scaled and offset as physics
-/// scales them, and its mesh collider's triangles as a surface, wound the other way where its
-/// entity is mirrored, so that a floor still faces up.
+/// The shapes of a static body's colliders for a bake, in world space as physics places them:
+/// box, sphere and capsule as solids, scaled and offset as physics does, and the mesh collider's
+/// triangles as a surface, wound the other way if mirrored, so a floor still faces up.
 fn shapes_of(world: &World, entity: Entity) -> Vec<Shape> {
     let transform = *world.get::<Transform>(entity).expect("found with one");
     let (rotation, scale) = (unit(transform.rotation), transform.scale);
@@ -522,15 +515,15 @@ fn shapes_of(world: &World, entity: Entity) -> Vec<Shape> {
 }
 
 impl World {
-    /// The corners of the shortest path over the world's navmesh from `from` to `to`: points on the
-    /// navmesh where the path turns, past `from`, the last `to`; each end on the navmesh where it
-    /// is, as where an agent's middle is above its floor, or else snapped to the navmesh's nearest
-    /// point within the agent's height of the [`NavMeshVolume`]. The navmesh is brought up to date
-    /// first, as [`step_navigation`] does, so that a search sees what the world's static colliders
-    /// give now, in a world restored from a snapshot file before navigation has stepped as after,
-    /// at the cost of a fingerprint of them a search, and a bake where they changed. Nothing for a
-    /// world without a volume, for an end off the navmesh by more than that, or where no path joins
-    /// them.
+    /// The corners of the shortest path over the world's navmesh from `from` to `to`: points where
+    /// it turns, past `from`, the last `to`. An end is on the navmesh where it is (an agent's
+    /// middle above its floor), else snapped to the nearest point within the agent's height.
+    ///
+    /// The navmesh is brought up to date first, so a search sees what the static colliders give
+    /// now, even in a world restored from a snapshot file before navigation stepped. That costs a
+    /// fingerprint per search, and a bake if they changed.
+    ///
+    /// Nothing for a world without a volume, an end farther off the navmesh, or no path.
     pub fn find_path(&mut self, from: Vec3, to: Vec3) -> Option<Vec<Vec3>> {
         refresh(self);
         let found = self.resource_scope(|_, navigation: &mut Navigation| {
@@ -544,34 +537,32 @@ impl World {
     }
 }
 
-/// The navmesh `world`'s navigation holds, by its address, which tells one kept from one baked
-/// again: for tests.
+/// The navmesh `world` holds, by address, to tell one kept from one baked again.
 #[cfg(test)]
 pub(crate) fn navmesh_of(world: &World) -> Option<usize> {
     let mesh = world.resource::<Navigation>()?.mesh.as_ref()?;
     Some(Arc::as_ptr(mesh) as usize)
 }
 
-/// The color the navmesh's polygons draw in, linear: a sky blue, apart from colliders' green.
+/// Polygons' linear color: sky blue, apart from colliders' green.
 const POLYGONS: Vec4 = Vec4::new(0.1, 0.55, 1.0, 1.0);
 
-/// The color agents' paths draw in, linear: an amber, over the navmesh's blue.
+/// Paths' linear color: amber, over the blue.
 const PATHS: Vec4 = Vec4::new(1.0, 0.5, 0.05, 1.0);
 
-/// How wide the navmesh's and the paths' lines draw, in points, as colliders' outlines do.
+/// Line width in points, as colliders' outlines.
 const WIDTH: f32 = 2.0;
 
-/// How far above the floors the lines draw, so that they show over the meshes they lie on.
+/// How far above floors lines draw, to show over their meshes.
 const LIFT: Vec3 = Vec3::new(0.0, 0.04, 0.0);
 
-/// How far each way of an agent's destination its mark reaches, in units.
+/// How far each way of a destination its mark reaches, in units.
 const MARK: f32 = 0.2;
 
-/// Draws into `draws` the world's navmesh, each polygon's outline along its cells' floors, picked as
-/// its volume's entity, and each agent's path from where its entity draws this frame, as `poses`
-/// has it, through the corners it has left, its destination marked by a diamond, picked as the
-/// agent's: each line 2 points wide in a window of `scale` pixels a point, a little above the
-/// floor. Lines draw with the engine's line shader, which `shaders` adds the first time any do.
+/// Draws the navmesh (each polygon's outline along its cells' floors, picked as the volume's
+/// entity) and each agent's path from where `poses` has it through the corners it has left, its
+/// destination marked by a diamond, picked as the agent. Lines are [`WIDTH`] points wide at
+/// `scale` pixels a point, a little above the floor. `shaders` adds the line shader on first use.
 pub(crate) fn draw_navigation(
     world: &World,
     poses: &Poses<'_>,
@@ -640,9 +631,9 @@ pub(crate) fn draw_navigation(
     }
 }
 
-/// Gives `each` the lines polygon `polygon` of `mesh` is outlined with: along each edge, from grid
-/// corner to grid corner at the floors of the cells along it, between two cells halfway between
-/// their floors, a run whose height rises evenly as one line, as over a flat floor or a ramp.
+/// Gives `each` the lines outlining polygon `polygon`: along each edge from grid corner to grid
+/// corner, at the cells' floors (halfway between two cells' floors between them). A run rising
+/// evenly, as a flat floor or ramp, is one line.
 fn outline(mesh: &NavMesh, polygon: u32, mut each: impl FnMut(Vec3, Vec3)) {
     let rect = mesh.polygons[polygon as usize];
     let floor = |x: u32, z: u32| {
@@ -657,8 +648,7 @@ fn outline(mesh: &NavMesh, polygon: u32, mut each: impl FnMut(Vec3, Vec3)) {
         )
     };
     let (x, z, width, depth) = (rect.x, rect.z, rect.width, rect.depth);
-    // Each edge, -X, +Z, +X and -Z: how many cells long, its cell at a step along it, and its grid
-    // corner there.
+    // Each edge, -X, +Z, +X and -Z: its length in cells, its cell and grid corner at a step.
     for edge in 0..4 {
         let length = if edge % 2 == 0 { depth } else { width };
         let cell = |k: u32| match edge {
@@ -673,7 +663,7 @@ fn outline(mesh: &NavMesh, polygon: u32, mut each: impl FnMut(Vec3, Vec3)) {
             2 => [x + width, z + k],
             _ => [x + k, z],
         };
-        // Twice the floor at each grid corner along the edge, in levels, so that halves are whole.
+        // Twice the floor at each grid corner along the edge, in levels, so halves are whole.
         let twice = |k: u32| {
             let below = |k: u32| {
                 let (x, z) = cell(k);
