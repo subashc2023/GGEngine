@@ -5,7 +5,9 @@
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use gg_core::math::{DVec3, Quat, Vec3};
-use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
+use rapier3d::control::{
+    CharacterAutostep, CharacterCollision, CharacterLength, KinematicCharacterController,
+};
 use rapier3d::parry::bounding_volume::BoundingVolume;
 use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::pipeline::QueryPipeline;
@@ -210,16 +212,24 @@ impl Physics3D {
     /// controller into its entity's, as it changed: its velocity, pulled down by gravity and
     /// stopped by the ground and by what's above it, and whether it's grounded.
     pub(super) fn move_characters(&mut self, world: &mut World) {
-        // The components' `f32`s, and rapier's `f64`s.
-        let (dt, step) = (Tick::DT.as_secs_f32(), Tick::DT.as_secs_f64());
-        let Rapier {
-            bodies,
-            colliders,
-            broad_phase,
-            narrow_phase,
-            impulse_joints,
-            ..
-        } = &mut self.rapier;
+        self.hold_moving();
+        for character in &mut self.characters.linked {
+            move_character(
+                &mut self.rapier,
+                character,
+                &self.moving,
+                self.gravity,
+                &mut self.hits,
+                world,
+            );
+        }
+        self.release_moving();
+    }
+
+    /// Holds still the kinematic bodies that go by their velocities, keeping those in `moving`,
+    /// while there are characters to move.
+    fn hold_moving(&mut self) {
+        let step = Tick::DT.as_secs_f64();
         // The kinematic bodies that go by their velocities, held still while the characters make
         // their own moves, so that each moves against them as they are, and is carried and pushed
         // by them after, alike whether it walks or stands: rapier's controller takes a kinematic
@@ -234,7 +244,7 @@ impl Physics3D {
             let nudge =
                 Vector::Y * (KinematicCharacterController::default().normal_nudge_factor / step);
             for linked in &self.links.linked {
-                let body = &mut bodies[linked.body];
+                let body = &mut self.rapier.bodies[linked.body];
                 if body.body_type() == RigidBodyType::KinematicVelocityBased {
                     held.push((linked.body, body.linvel(), body.angvel()));
                     body.set_linvel(nudge, false);
@@ -242,209 +252,12 @@ impl Physics3D {
                 }
             }
         }
-        let held = &*held;
-        for character in &mut self.characters.linked {
-            let mut controller = character.controller;
-            // Gravity pulls it as it walks too, as rapier's controller keeps its gap from the
-            // ground so, though it slides it along a hundredth or so slower than it goes; without,
-            // a character on a large box sinks into it by some centimeters as the snaps miss it.
-            // Standing still, it moves by nothing, which rapier's controller snaps to the ground,
-            // and which leaves it unchanged, where gravity's push would leave it a little higher
-            // or lower each step.
-            let still = controller.velocity == Vec3::ZERO;
-            let mut velocity = controller.velocity;
-            if !(still && controller.grounded) {
-                velocity += self.gravity * controller.gravity * dt;
-            }
-            let mut way = velocity * dt;
-            // A way that isn't finite, as from a velocity a game left so, goes nowhere.
-            if !way.is_finite() {
-                way = Vec3::ZERO;
-            }
-            let body = &bodies[character.body];
-            let collider = &colliders[character.collider];
-            let shape = collider.shared_shape().clone();
-            let on_body = collider.position_wrt_parent().copied();
-            // Where the capsule is now: its body's pose, which a move this tick changed, and its
-            // place on it, rather than where the last step left the collider.
-            let at = *body.position() * on_body.unwrap_or(Pose::IDENTITY);
-            let mass = collider.mass();
-            let moving = controller.controller();
-            let own = character.body;
-            // What a joint keeps it from colliding with, as rapier's contacts leave out but its
-            // queries don't: asked only of a character joined to something, so that the rest sweep
-            // as they did.
-            let joined = impulse_joints.attached_joints(own).next().is_some();
-            let apart = |_: ColliderHandle, other: &Collider| {
-                let joined = other
-                    .parent()
-                    .map(|other| impulse_joints.joints_between(own, other));
-                !joined
-                    .is_some_and(|mut joints| joints.any(|(_, joint)| !joint.data.contacts_enabled))
-            };
-            // What it moves against: not sensors, and only what its capsule's groups meet.
-            let met = groups(character.capsule.membership, character.capsule.filter);
-            let mut alone = QueryFilter::new()
-                .exclude_rigid_body(own)
-                .exclude_sensors()
-                .groups(met);
-            if joined {
-                alone = alone.predicate(&apart);
-            }
-            let dispatcher = narrow_phase.query_dispatcher();
-            let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, alone);
-            // The gap rapier's controller keeps from what it moves against, its default's, a
-            // hundredth of its height.
-            let gap = 0.01 * shape.compute_local_aabb().extents().y;
-            let ground = if controller.grounded {
-                let under = platform(&queries, &*shape, &at, gap);
-                under.and_then(|under| held.iter().find(|(by, ..)| *by == under))
-            } else {
-                None
-            };
-            // How fast what moves goes where the character's middle is.
-            let speed_at = |&(by, linvel, angvel): &Moving, point: Vector| {
-                linvel + angvel.cross(point - bodies[by].center_of_mass())
-            };
-            self.hits.clear();
-            let hits = &mut self.hits;
-            let moved = moving.move_shape(step, &queries, &*shape, &at, vector(way), |hit| {
-                hits.push(hit);
-            });
-            // Carried and pushed by what moves it, swept against the rest: without stepping or
-            // snapping, which its own move did.
-            let carried = KinematicCharacterController {
-                autostep: None,
-                snap_to_ground: None,
-                ..moving
-            };
-            let mut total = moved.translation;
-            // Carried as the body it stands on goes this step, from its pose to the one its
-            // velocities reach, as rapier moves it: its middle where that takes the point of the
-            // body it's over, so that one turning carries it round, at the same distance from its
-            // axis, and its facing turned as far about up as the body turns.
-            let mut turned = None;
-            if let Some(&(under, linvel, angvel)) = ground {
-                let body = &bodies[under];
-                let was = *body.position();
-                let velocities = RigidBodyVelocity { linvel, angvel };
-                let will = velocities.integrate(step, &was, &body.local_center_of_mass());
-                let middle = (Pose::from_translation(total) * at).translation;
-                let way = will.transform_point(was.inverse_transform_point(middle)) - middle;
-                let turn = will.rotation * was.rotation.inverse();
-                let yaw = Quat::from_xyzw(0.0, turn.y as f32, 0.0, turn.w as f32);
-                turned = (yaw.length() > 0.0)
-                    .then(|| yaw.normalize())
-                    .filter(|yaw| yaw.is_finite() && *yaw != Quat::IDENTITY);
-                if way != Vector::ZERO && way.is_finite() {
-                    let beside = |handle: ColliderHandle, other: &Collider| {
-                        other.parent() != Some(under) && (!joined || apart(handle, other))
-                    };
-                    let filter = QueryFilter::new()
-                        .exclude_rigid_body(own)
-                        .exclude_sensors()
-                        .groups(met)
-                        .predicate(&beside);
-                    let queries =
-                        broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
-                    let from = Pose::from_translation(total) * at;
-                    let went = carried.move_shape(step, &queries, &*shape, &from, way, |hit| {
-                        hits.push(hit);
-                    });
-                    total += went.translation;
-                }
-            }
-            for pusher in held {
-                let by = pusher.0;
-                if ground.is_some_and(|(under, ..)| *under == by) {
-                    continue;
-                }
-                let from = Pose::from_translation(total) * at;
-                let speed = speed_at(pusher, from.translation);
-                if speed == Vector::ZERO || !speed.is_finite() {
-                    continue;
-                }
-                // Only one near enough to reach it this step, as their boxes tell, is cast.
-                let reach = shape
-                    .compute_aabb(&from)
-                    .loosened(speed.length() * step + gap);
-                let near = bodies[by].colliders().iter().any(|&collider| {
-                    let collider = colliders.get(collider);
-                    collider.is_some_and(|it| it.compute_aabb().intersects(&reach))
-                });
-                if !near {
-                    continue;
-                }
-                // How soon it would reach the character, in the character's frame, which it
-                // closes on as fast as it goes.
-                let on_it = |handle: ColliderHandle, other: &Collider| {
-                    other.parent() == Some(by) && (!joined || apart(handle, other))
-                };
-                let filter = QueryFilter::new()
-                    .exclude_sensors()
-                    .groups(met)
-                    .predicate(&on_it);
-                let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
-                let toward = ShapeCastOptions {
-                    max_time_of_impact: step,
-                    target_distance: gap,
-                    stop_at_penetration: false,
-                    compute_impact_geometry_on_penetration: true,
-                };
-                let Some((_, hit)) = queries.cast_shape(&from, -speed, &*shape, toward) else {
-                    continue;
-                };
-                let beside = |handle: ColliderHandle, other: &Collider| {
-                    other.parent() != Some(by) && (!joined || apart(handle, other))
-                };
-                let filter = QueryFilter::new()
-                    .exclude_rigid_body(own)
-                    .exclude_sensors()
-                    .groups(met)
-                    .predicate(&beside);
-                let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
-                let push = speed * (step - hit.time_of_impact);
-                let went = carried.move_shape(step, &queries, &*shape, &from, push, |hit| {
-                    hits.push(hit);
-                });
-                total += went.translation;
-            }
-            // A sensor's pushes nothing.
-            if !character.capsule.sensor {
-                let mut pushing =
-                    broad_phase.as_query_pipeline_mut(dispatcher, bodies, colliders, alone);
-                let hits = &self.hits;
-                moving.solve_character_collision_impulses(step, &mut pushing, &*shape, mass, hits);
-            }
-            let body = &mut bodies[character.body];
-            body.set_next_kinematic_translation(body.translation() + total);
-            if let Some(yaw) = turned {
-                let facing = yaw * character.transform.rotation;
-                body.set_next_kinematic_rotation(rotation(facing));
-                let transform = world.get_mut::<Transform>(character.entity);
-                let transform = transform.expect("linked this step: alive, with one");
-                transform.rotation = facing;
-                character.transform.rotation = facing;
-            }
-            let went = Vec3::from_array(moved.translation.to_array().map(|x| x as f32));
-            if moved.grounded && velocity.y < 0.0 {
-                velocity.y = 0.0;
-            } else if way.y > 0.0 && went.y < way.y {
-                // Something above it took some of the way up, if not all.
-                velocity.y = went.y / dt;
-            }
-            controller.velocity = velocity;
-            controller.grounded = moved.grounded;
-            if controller != character.controller {
-                let kept = world.get_mut::<CharacterController3D>(character.entity);
-                let kept = kept.expect("linked this step: alive, with one");
-                kept.velocity = controller.velocity;
-                kept.grounded = controller.grounded;
-                character.controller = *kept;
-            }
-        }
+    }
+
+    /// Gives the bodies [`hold_moving`](Self::hold_moving) held still their velocities back.
+    fn release_moving(&mut self) {
         for &(by, linvel, angvel) in &self.moving {
-            let body = &mut bodies[by];
+            let body = &mut self.rapier.bodies[by];
             body.set_linvel(linvel, false);
             body.set_angvel(angvel, false);
         }
@@ -462,6 +275,222 @@ impl Physics3D {
                 character.transform.translation = at;
             }
         }
+    }
+}
+
+/// Moves `character` as [`Physics3D::move_characters`] says, against `rapier`'s sets, `held`
+/// the kinematic bodies held still, `gravity` the world's, its moves' hits kept in `hits`.
+fn move_character(
+    rapier: &mut Rapier,
+    character: &mut Character,
+    held: &[Moving],
+    gravity: Vec3,
+    hits: &mut Vec<CharacterCollision>,
+    world: &mut World,
+) {
+    // The components' `f32`s, and rapier's `f64`s.
+    let (dt, step) = (Tick::DT.as_secs_f32(), Tick::DT.as_secs_f64());
+    let Rapier {
+        bodies,
+        colliders,
+        broad_phase,
+        narrow_phase,
+        impulse_joints,
+        ..
+    } = rapier;
+    let mut controller = character.controller;
+    // Gravity pulls it as it walks too, as rapier's controller keeps its gap from the
+    // ground so, though it slides it along a hundredth or so slower than it goes; without,
+    // a character on a large box sinks into it by some centimeters as the snaps miss it.
+    // Standing still, it moves by nothing, which rapier's controller snaps to the ground,
+    // and which leaves it unchanged, where gravity's push would leave it a little higher
+    // or lower each step.
+    let still = controller.velocity == Vec3::ZERO;
+    let mut velocity = controller.velocity;
+    if !(still && controller.grounded) {
+        velocity += gravity * controller.gravity * dt;
+    }
+    let mut way = velocity * dt;
+    // A way that isn't finite, as from a velocity a game left so, goes nowhere.
+    if !way.is_finite() {
+        way = Vec3::ZERO;
+    }
+    let body = &bodies[character.body];
+    let collider = &colliders[character.collider];
+    let shape = collider.shared_shape().clone();
+    let on_body = collider.position_wrt_parent().copied();
+    // Where the capsule is now: its body's pose, which a move this tick changed, and its
+    // place on it, rather than where the last step left the collider.
+    let at = *body.position() * on_body.unwrap_or(Pose::IDENTITY);
+    let mass = collider.mass();
+    let moving = controller.controller();
+    let own = character.body;
+    // What a joint keeps it from colliding with, as rapier's contacts leave out but its
+    // queries don't: asked only of a character joined to something, so that the rest sweep
+    // as they did.
+    let joined = impulse_joints.attached_joints(own).next().is_some();
+    let apart = |_: ColliderHandle, other: &Collider| {
+        let joined = other
+            .parent()
+            .map(|other| impulse_joints.joints_between(own, other));
+        !joined.is_some_and(|mut joints| joints.any(|(_, joint)| !joint.data.contacts_enabled))
+    };
+    // What it moves against: not sensors, and only what its capsule's groups meet.
+    let met = groups(character.capsule.membership, character.capsule.filter);
+    let mut alone = QueryFilter::new()
+        .exclude_rigid_body(own)
+        .exclude_sensors()
+        .groups(met);
+    if joined {
+        alone = alone.predicate(&apart);
+    }
+    let dispatcher = narrow_phase.query_dispatcher();
+    let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, alone);
+    // The gap rapier's controller keeps from what it moves against, its default's, a
+    // hundredth of its height.
+    let gap = 0.01 * shape.compute_local_aabb().extents().y;
+    let ground = if controller.grounded {
+        let under = platform(&queries, &*shape, &at, gap);
+        under.and_then(|under| held.iter().find(|(by, ..)| *by == under))
+    } else {
+        None
+    };
+    // How fast what moves goes where the character's middle is.
+    let speed_at = |&(by, linvel, angvel): &Moving, point: Vector| {
+        linvel + angvel.cross(point - bodies[by].center_of_mass())
+    };
+    hits.clear();
+    let moved = moving.move_shape(step, &queries, &*shape, &at, vector(way), |hit| {
+        hits.push(hit);
+    });
+    // Carried and pushed by what moves it, swept against the rest: without stepping or
+    // snapping, which its own move did.
+    let carried = KinematicCharacterController {
+        autostep: None,
+        snap_to_ground: None,
+        ..moving
+    };
+    let mut total = moved.translation;
+    // Carried as the body it stands on goes this step, from its pose to the one its
+    // velocities reach, as rapier moves it: its middle where that takes the point of the
+    // body it's over, so that one turning carries it round, at the same distance from its
+    // axis, and its facing turned as far about up as the body turns.
+    let mut turned = None;
+    if let Some(&(under, linvel, angvel)) = ground {
+        let body = &bodies[under];
+        let was = *body.position();
+        let velocities = RigidBodyVelocity { linvel, angvel };
+        let will = velocities.integrate(step, &was, &body.local_center_of_mass());
+        let middle = (Pose::from_translation(total) * at).translation;
+        let way = will.transform_point(was.inverse_transform_point(middle)) - middle;
+        let turn = will.rotation * was.rotation.inverse();
+        let yaw = Quat::from_xyzw(0.0, turn.y as f32, 0.0, turn.w as f32);
+        turned = (yaw.length() > 0.0)
+            .then(|| yaw.normalize())
+            .filter(|yaw| yaw.is_finite() && *yaw != Quat::IDENTITY);
+        if way != Vector::ZERO && way.is_finite() {
+            let beside = |handle: ColliderHandle, other: &Collider| {
+                other.parent() != Some(under) && (!joined || apart(handle, other))
+            };
+            let filter = QueryFilter::new()
+                .exclude_rigid_body(own)
+                .exclude_sensors()
+                .groups(met)
+                .predicate(&beside);
+            let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
+            let from = Pose::from_translation(total) * at;
+            let went = carried.move_shape(step, &queries, &*shape, &from, way, |hit| {
+                hits.push(hit);
+            });
+            total += went.translation;
+        }
+    }
+    for pusher in held {
+        let by = pusher.0;
+        if ground.is_some_and(|(under, ..)| *under == by) {
+            continue;
+        }
+        let from = Pose::from_translation(total) * at;
+        let speed = speed_at(pusher, from.translation);
+        if speed == Vector::ZERO || !speed.is_finite() {
+            continue;
+        }
+        // Only one near enough to reach it this step, as their boxes tell, is cast.
+        let reach = shape
+            .compute_aabb(&from)
+            .loosened(speed.length() * step + gap);
+        let near = bodies[by].colliders().iter().any(|&collider| {
+            let collider = colliders.get(collider);
+            collider.is_some_and(|it| it.compute_aabb().intersects(&reach))
+        });
+        if !near {
+            continue;
+        }
+        // How soon it would reach the character, in the character's frame, which it
+        // closes on as fast as it goes.
+        let on_it = |handle: ColliderHandle, other: &Collider| {
+            other.parent() == Some(by) && (!joined || apart(handle, other))
+        };
+        let filter = QueryFilter::new()
+            .exclude_sensors()
+            .groups(met)
+            .predicate(&on_it);
+        let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
+        let toward = ShapeCastOptions {
+            max_time_of_impact: step,
+            target_distance: gap,
+            stop_at_penetration: false,
+            compute_impact_geometry_on_penetration: true,
+        };
+        let Some((_, hit)) = queries.cast_shape(&from, -speed, &*shape, toward) else {
+            continue;
+        };
+        let beside = |handle: ColliderHandle, other: &Collider| {
+            other.parent() != Some(by) && (!joined || apart(handle, other))
+        };
+        let filter = QueryFilter::new()
+            .exclude_rigid_body(own)
+            .exclude_sensors()
+            .groups(met)
+            .predicate(&beside);
+        let queries = broad_phase.as_query_pipeline(dispatcher, bodies, colliders, filter);
+        let push = speed * (step - hit.time_of_impact);
+        let went = carried.move_shape(step, &queries, &*shape, &from, push, |hit| {
+            hits.push(hit);
+        });
+        total += went.translation;
+    }
+    // A sensor's pushes nothing.
+    if !character.capsule.sensor {
+        let mut pushing = broad_phase.as_query_pipeline_mut(dispatcher, bodies, colliders, alone);
+        let hits = &*hits;
+        moving.solve_character_collision_impulses(step, &mut pushing, &*shape, mass, hits);
+    }
+    let body = &mut bodies[character.body];
+    body.set_next_kinematic_translation(body.translation() + total);
+    if let Some(yaw) = turned {
+        let facing = yaw * character.transform.rotation;
+        body.set_next_kinematic_rotation(rotation(facing));
+        let transform = world.get_mut::<Transform>(character.entity);
+        let transform = transform.expect("linked this step: alive, with one");
+        transform.rotation = facing;
+        character.transform.rotation = facing;
+    }
+    let went = Vec3::from_array(moved.translation.to_array().map(|x| x as f32));
+    if moved.grounded && velocity.y < 0.0 {
+        velocity.y = 0.0;
+    } else if way.y > 0.0 && went.y < way.y {
+        // Something above it took some of the way up, if not all.
+        velocity.y = went.y / dt;
+    }
+    controller.velocity = velocity;
+    controller.grounded = moved.grounded;
+    if controller != character.controller {
+        let kept = world.get_mut::<CharacterController3D>(character.entity);
+        let kept = kept.expect("linked this step: alive, with one");
+        kept.velocity = controller.velocity;
+        kept.grounded = controller.grounded;
+        character.controller = *kept;
     }
 }
 
