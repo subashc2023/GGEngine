@@ -1,5 +1,4 @@
-//! The running games: finding them by their session files, talking to them, and reading their
-//! logs.
+//! The running games: finding them by session file, calling them, reading their logs.
 
 use std::fs;
 use std::io::Write as _;
@@ -12,16 +11,15 @@ use serde_json::{Map, Value, json};
 
 use crate::{build, runs};
 
-/// How long a connection to a game may take: it's on the loopback, where only one that has ended
-/// takes any time, refusing it.
+/// On the loopback only an ended game's refusal takes time.
 const CONNECT: Duration = Duration::from_secs(2);
 
-/// How long each `logs` that follows a game's events waits for them to come, in milliseconds.
+/// How long each following `logs` waits for events, in milliseconds.
 const FOLLOWING_MS: u64 = 1_000;
 
-/// Which running game to talk to, how long to wait for its answers, the client to say hello as,
-/// the author of the edits it applies, the capabilities its connection is kept to, every one
-/// without them, and the project whose games alone it reaches, by its manifest's path, inside one.
+/// Which game to call, how long to wait, the client name (the author of its edits), the
+/// capabilities to keep the connection to (`None`: all), and inside a project its manifest's path,
+/// whose games alone are reached.
 #[derive(Clone)]
 pub(crate) struct Pick {
     pub(crate) pid: Option<u32>,
@@ -32,9 +30,6 @@ pub(crate) struct Pick {
     pub(crate) project: Option<PathBuf>,
 }
 
-/// The session files of the games built in the workspace, as [`sessions_in`] its target directory
-/// finds them; with `project`, a manifest's path, only those of the project's games, as [`scoped`]
-/// says, in the target directory cargo names from the project's directory.
 fn session_files(project: Option<&Path>) -> Result<Vec<(PathBuf, Session)>, Failure> {
     let sessions = sessions_in(&build::target_dir(project.and_then(Path::parent))?);
     Ok(match project {
@@ -43,10 +38,8 @@ fn session_files(project: Option<&Path>) -> Result<Vec<(PathBuf, Session)>, Fail
     })
 }
 
-/// The sessions of `sessions` whose games name the project manifest at `manifest`, comparing the
-/// paths canonical, as one may be named in another form, such as Windows' `\\?\` one, or through a
-/// link: none that names no project, as a game's whose engine is older than projects, or one that
-/// isn't there.
+/// The sessions naming the project manifest at `manifest`, by canonical path: a game may name it
+/// in another form, as Windows' `\\?\`, or through a link. One naming no project is dropped.
 fn scoped(sessions: Vec<(PathBuf, Session)>, manifest: &Path) -> Vec<(PathBuf, Session)> {
     let Ok(manifest) = fs::canonicalize(manifest) else {
         return Vec::new();
@@ -61,8 +54,7 @@ fn scoped(sessions: Vec<(PathBuf, Session)>, manifest: &Path) -> Vec<(PathBuf, S
         .collect()
 }
 
-/// The session files in the `sessions` directory of each profile of target directory `target`:
-/// cargo's, as `target/debug`, and those of a target's directory in it, where dx builds, as
+/// The session files of each profile of `target`: cargo's, as `target/debug`, dx's, as
 /// `target/x86_64-pc-windows-msvc/desktop-dev`.
 fn sessions_in(target: &Path) -> Vec<(PathBuf, Session)> {
     let dirs = |dir: &Path| fs::read_dir(dir).into_iter().flatten().flatten();
@@ -74,9 +66,8 @@ fn sessions_in(target: &Path) -> Vec<(PathBuf, Session)> {
     sessions.collect()
 }
 
-/// Connects to the game that `session`, read from the file at `path`, names, as `client`, kept
-/// to `grant`, if it's given, removing the file if the game has ended, which a crash or a kill
-/// leaves it behind for.
+/// Connects to `session`'s game; removes its file at `path` if the game ended (a crash or kill
+/// leaves it).
 fn connect_to(
     path: &Path,
     session: &Session,
@@ -93,14 +84,12 @@ fn connect_to(
     }
 }
 
-/// Connects to each game of `sessions`, each read from its file, as `client`, kept to `grant`, as
-/// [`connect_to`] does, and returns those that answered, each with its session, warning of each
-/// whose revision of the tool API isn't gg's, as [`warn_protocol`] does. One that fails
-/// otherwise than by having ended is left out if another answers, as a file that a kill left naming
-/// a port that another game, or another process, has since been given fails, which then mustn't
-/// fail every command; its file stays, as its game may yet answer.
+/// Connects to each of `sessions` ([`connect_to`]), warning of other API revisions
+/// ([`warn_protocol`]). A game failing otherwise than by ending is left out if another answers,
+/// its file kept: a kill's file may name a port another process now has, which mustn't fail every
+/// command.
 ///
-/// Fails as the first that failed so did, if none answered.
+/// Fails as the first that failed, if none answered.
 fn answering(
     sessions: impl IntoIterator<Item = (PathBuf, Session)>,
     client: &str,
@@ -125,17 +114,13 @@ fn answering(
     }
 }
 
-/// Warns `gg.protocol` of the session file at `path` if the game `session`, read from it, speaks
-/// another revision of the tool API than this gg does, as [`protocol_drift`] says.
+/// Warns `gg.protocol` if the game's tool API revision isn't [`gg_api::PROTOCOL`].
 pub(crate) fn warn_protocol(path: &Path, session: &Session) {
     if let Some(message) = protocol_drift(session) {
         crate::warn("gg.protocol", &message, path);
     }
 }
 
-/// What's amiss if the game `session` names speaks another revision of the tool API than this gg's,
-/// [`gg_api::PROTOCOL`], as one built against another revision of the engine may; `None` if it's
-/// this gg's.
 fn protocol_drift(session: &Session) -> Option<String> {
     let theirs = match session.protocol {
         Some(theirs) if theirs == gg_api::PROTOCOL => return None,
@@ -154,11 +139,11 @@ fn protocol_drift(session: &Session) -> Option<String> {
     ))
 }
 
-/// Connects to the running game `pick` picks, waiting for its answers as long as it says.
+/// Connects to the running game `pick` picks.
 ///
-/// Fails with `gg.no_game` if none runs that it picks, but while a `gg run` that runs it says why
-/// none answers, as [`runs::down`] says, with `gg.rebuilding`, `gg.build_failed`, `gg.waiting` or
-/// `gg.starting`; `gg.which_game` if more than one does; and as [`answering`] does.
+/// Fails with `gg.no_game` if none runs, unless a `gg run` says why ([`runs::down`]:
+/// `gg.rebuilding`, `gg.build_failed`, `gg.waiting`, `gg.starting`);
+/// `gg.which_game` if several do; and as [`answering`] does.
 pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
     let picked = session_files(pick.project.as_deref())?
         .into_iter()
@@ -215,9 +200,8 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
     Ok(client)
 }
 
-/// Which of `sessions` is the host, if they're the two peers of one lockstep session, a host and a
-/// joiner of one app, which are reached through the host, whose edits and patches both peers apply;
-/// `None` for any others, more than one of which is a choice to make.
+/// The host of two peers of one lockstep session (host and joiner of one app): both apply its
+/// edits and patches. `None` for others.
 fn host_of(sessions: &[&Session]) -> Option<usize> {
     let [a, b] = sessions else {
         return None;
@@ -227,21 +211,20 @@ fn host_of(sessions: &[&Session]) -> Option<usize> {
     peers.then_some(if a.player == Some(0) { 0 } else { 1 })
 }
 
-/// Sends `method` with `params` to the game `pick` picks, and returns what it answers.
+/// Sends `method` with `params` to the game `pick` picks.
 ///
-/// Fails as the call does; an answer that didn't come in time saying what the game waits for, if
-/// it waits for something, as a script stopped in it: [`waits`] says.
+/// Fails as the call does; a late answer says what the game waits for ([`waits`]).
 pub(crate) fn call(pick: &Pick, method: &str, params: Value) -> Result<Box<RawValue>, Failure> {
     let answered = connect(pick)?.call(method, params);
     answered.map_err(|failure| waits(pick, method, failure))
 }
 
-/// What the API's `Shown` is for `given`, a name or an object: the name of one of its unit variants,
-/// as `roughness`, stays a string; any other string is an image's debug name, which may hold
-/// spaces, as `view depth`, and becomes `{"image": NAME}`; an object of an `image` alone is kept.
+/// The API's `Shown` for `given`: a unit variant's name, as `roughness`, stays a string; any other
+/// string is an image's debug name, as `view depth`, and becomes `{"image": NAME}`; an object of
+/// an `image` alone is kept.
 ///
-/// Fails with `gg.args` for an empty name, one of more than [`gg_api::MOST_IMAGE_NAME`] bytes, and
-/// anything that is neither a string nor such an object.
+/// Fails with `gg.args` for an empty name, one over [`gg_api::MOST_IMAGE_NAME`] bytes, or
+/// anything else.
 pub(crate) fn shown(given: &Value) -> Result<Value, Failure> {
     let args = |message: String| Failure::new("gg.args", message);
     let name = match (given, serde_json::from_value::<Shown>(given.clone())) {
@@ -264,13 +247,10 @@ pub(crate) fn shown(given: &Value) -> Result<Value, Failure> {
     Ok(json!({"image": name}))
 }
 
-/// Captures with `params`, those of `capture`, as each of `shows`, as [`shown`] gives them, shows,
-/// in order: one capture if there are none or one, as the game answers it; with several, all of
-/// one world, as they're taken on one connection, the game paused for them if it plays, and
-/// running again once they're taken, or have failed. Each answer is a `Captured`.
+/// Captures with `params` once per show of `shows` ([`shown`]'s). Several are all of one world:
+/// one connection, the game paused if it plays, resumed after. Each answer is a `Captured`.
 ///
-/// Fails as the call does; the first capture that fails, after which none is taken, or else
-/// `resume`.
+/// Fails as the call does; the first capture that fails, or else `resume`; none follows it.
 pub(crate) fn captures(
     pick: &Pick,
     params: Value,
@@ -292,14 +272,12 @@ pub(crate) fn captures(
     }
 }
 
-/// `params` with `show` in it.
 fn with_show(params: &Value, show: &Value) -> Value {
     let mut params = params.clone();
     params["show"] = show.clone();
     params
 }
 
-/// [`captures`] of several shows, sending each request through `call`, as [`while_paused`] does.
 fn captured_together(
     call: impl FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
     params: &Value,
@@ -312,16 +290,15 @@ fn captured_together(
     })
 }
 
-/// `answers` as one JSON array, as the game wrote each.
+/// `answers` as one JSON array, each as written.
 pub(crate) fn joined(answers: &[Box<RawValue>]) -> String {
     let answers: Vec<&str> = answers.iter().map(|answer| answer.get()).collect();
     format!("[{}]", answers.join(","))
 }
 
-/// `failure`, `method`'s, saying what the game `pick` picks waits for, as its `ping` answers on a
-/// connection of its own, if it's `api.timeout` and the game waits for a script that has stopped, a
-/// file dialog or its window menu, which hold its main thread, rather than that it may be hung;
-/// else as it is.
+/// `failure`, `method`'s, with what the game waits for (its `ping` says, on a new connection) if
+/// it's `api.timeout` and a stopped script, file dialog or window menu holds the main thread,
+/// not a hang; else as it is.
 pub(crate) fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
     if failure.code != "api.timeout" {
         return failure;
@@ -343,9 +320,8 @@ pub(crate) fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
     Failure::new(failure.code, message)
 }
 
-/// The running games, those of the project whose manifest is at `project` alone, as an array: each
-/// one's app, process, address, engine, player, project, log, the frames it has run, and what it
-/// waits for, if anything.
+/// The running games, of the project at `project` alone: session fields, frames run, and what each
+/// waits for.
 ///
 /// Fails as [`answering`] does, and as a game's ping fails.
 pub(crate) fn sessions(project: Option<&Path>) -> Result<Value, Failure> {
@@ -367,12 +343,11 @@ pub(crate) fn sessions(project: Option<&Path>) -> Result<Value, Failure> {
     Ok(Value::Array(games))
 }
 
-/// Prints the events the game `pick` picks keeps at `level` and more severe, as the API's `logs`
-/// reads them, each its JSON log's line, from the oldest to the last logged as the first answer
-/// came; and with `follow`, then each as it's logged, until the game ends, or stdout does, as when
-/// piped into `head`.
+/// Prints the game's events at `level` and above, as JSON log lines, oldest first up to the last
+/// logged at the first answer; with `follow`, then each as logged, until the game or stdout ends,
+/// as with `head`.
 ///
-/// Fails as [`connect`] does, and as the calls fail, but for the game's ending while it follows.
+/// Fails as [`connect`] and the calls do, but not for the game ending while it follows.
 pub(crate) fn logs(pick: &Pick, level: &str, follow: bool) -> Result<(), Failure> {
     let mut client = connect(pick)?;
     let mut read: LogEvents = client.call_as("logs", json!({"level": level}))?;
@@ -404,29 +379,27 @@ pub(crate) fn logs(pick: &Pick, level: &str, follow: bool) -> Result<(), Failure
     }
 }
 
-/// Prints the events `read` read, each its line; returns whether stdout took them, as it doesn't
-/// once it's piped into a `head` that has ended.
+/// Prints `read`'s events; whether stdout took them, as it doesn't after a `head` ends.
 fn printed(read: &LogEvents) -> bool {
     let mut out = std::io::stdout().lock();
     (read.events.iter()).all(|event| writeln!(out, "{}", event.get()).is_ok())
 }
 
-/// The lines of `text` that end in a line break: a log's, but for a last line still being written.
+/// All lines but a last one still being written.
 fn whole_lines(text: &str) -> impl Iterator<Item = &str> {
     text.split_inclusive('\n')
         .filter_map(|line| line.strip_suffix('\n'))
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
 }
 
-/// The events of the JSON log at `log`, each as it was written, but for the lines that aren't one.
+/// The events of the JSON log at `log`.
 pub(crate) fn events(log: &Path) -> Vec<Map<String, Value>> {
     let text = fs::read_to_string(log).unwrap_or_default();
     let events = whole_lines(&text).filter_map(|line| serde_json::from_str(line).ok());
     events.collect()
 }
 
-/// `event` as `gg` reports it: its level, code, message and fields, without where and when it was
-/// logged.
+/// `event` without where and when it was logged.
 pub(crate) fn trimmed(mut event: Map<String, Value>) -> Value {
     for place in [
         "timestamp",
@@ -443,8 +416,7 @@ pub(crate) fn trimmed(mut event: Map<String, Value>) -> Value {
     Value::Object(event)
 }
 
-/// The log, in `dir`, of the run in process `pid`: the latest, should the OS have given another
-/// run that ID before.
+/// The latest log in `dir` of process `pid`, as the OS may reuse an ID.
 pub(crate) fn log_of(dir: &Path, pid: u32) -> Option<PathBuf> {
     let ending = format!("-{pid}.jsonl");
     let logs = fs::read_dir(dir).into_iter().flatten().flatten();
@@ -466,8 +438,6 @@ mod tests {
 
     use super::*;
 
-    /// Writes the session file of a game in process `pid`, of the project whose manifest is at
-    /// `project`, if any, in `dir`.
     fn write_session(dir: &Path, pid: u32, project: Option<PathBuf>) {
         fs::create_dir_all(dir).expect("a directory");
         let session = Session {
@@ -486,7 +456,6 @@ mod tests {
         fs::write(dir.join(Session::file_name("Sandbox", pid)), text).expect("written");
     }
 
-    /// The process IDs of `sessions`, in order.
     fn pids(sessions: Vec<(PathBuf, Session)>) -> Vec<u32> {
         let mut pids: Vec<u32> = sessions
             .into_iter()
@@ -496,7 +465,7 @@ mod tests {
         pids
     }
 
-    /// Games cargo built, and one dx built, which builds for its target, are all found.
+    /// Games cargo built, and one dx built for its target, are all found.
     #[test]
     fn sessions_are_found_in_cargos_profiles_and_in_those_of_dxs_target() {
         let target = std::env::temp_dir().join(format!("gg-sessions-{}", std::process::id()));
@@ -510,8 +479,7 @@ mod tests {
         assert_eq!(pids, [1, 2, 3]);
     }
 
-    /// Inside a project, its games' sessions alone are found, by its manifest's path in whatever
-    /// form each names it: not another project's, nor a game's that names none.
+    /// Inside a project, only its games' sessions are found, by its manifest's path in any form.
     #[test]
     fn sessions_are_scoped_to_their_project() {
         let root = std::env::temp_dir().join(format!("gg-scoped-{}", std::process::id()));
@@ -537,8 +505,7 @@ mod tests {
         assert!(none.is_empty());
     }
 
-    /// The two peers of one lockstep session are reached through the host; any other games, more
-    /// than one, are a choice to make, as two hosts, a host and another app's joiner, or three.
+    /// Two peers of one lockstep session go through the host; other games are a choice.
     #[test]
     fn a_lockstep_sessions_peers_alone_are_reached_through_the_host() {
         let session = |pid: u32, app: &str, player: Option<u8>| Session {
@@ -572,8 +539,7 @@ mod tests {
         }
     }
 
-    /// A game that speaks gg's revision of the tool API passes; one of another, or of none, as an
-    /// older engine's, is told, naming the game and both revisions.
+    /// A game of another tool API revision, or none (an older engine), is told, naming both.
     #[test]
     fn a_game_of_another_revision_of_the_tool_api_is_told() {
         let session = |protocol| Session {
@@ -604,9 +570,7 @@ mod tests {
         );
     }
 
-    /// Serves the API's `hello` on the loopback as a game does, on a thread for each connection,
-    /// welcoming a client that gives `token` and refusing any other with `api.unauthorized`, while
-    /// the tests run; and returns where.
+    /// Serves `hello` on the loopback, refusing a token but `token` with `api.unauthorized`.
     fn serving(token: &'static str) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
         let address = listener.local_addr().expect("its address");
@@ -635,10 +599,9 @@ mod tests {
         address
     }
 
-    /// A session whose game fails otherwise than by having ended, as one whose file a kill left
-    /// naming a port another game has since been given, which refuses its token, is left out while
-    /// another answers, and its file kept; alone, its failure is the command's. One whose game has
-    /// ended goes, with its file.
+    /// A game failing otherwise than by ending, as a kill's file naming another game's port, is
+    /// left out while another answers, its file kept; alone, its failure is the command's. An
+    /// ended game goes, with its file.
     #[test]
     fn a_session_that_fails_fails_a_command_only_if_no_other_answers() {
         let dir = std::env::temp_dir().join(format!("gg-answering-{}", std::process::id()));
@@ -683,15 +646,15 @@ mod tests {
         assert!(none.is_empty());
     }
 
-    /// A unit variant's name stays a string, any other name is an image's, spaces and all, and an
-    /// object of an image is kept; an empty or long name, or what isn't one, is refused.
+    /// A variant's name stays a string, any other is an image's; an empty or long name, or a
+    /// non-name, is refused.
     #[test]
     fn a_show_is_a_variant_or_an_images_name() {
         for (given, want) in [
             (json!("roughness"), json!("roughness")),
             (json!("surface_normal"), json!("surface_normal")),
             (json!("view depth"), json!({"image": "view depth"})),
-            // The newtype variant's own name is a name like any other, not a variant.
+            // The newtype variant's own name is a name, not a variant.
             (json!("image"), json!({"image": "image"})),
             (
                 json!({"image": "view depth"}),
@@ -716,8 +679,8 @@ mod tests {
         }
     }
 
-    /// Runs [`captured_together`] against a game that is `paused` or not, and that fails its
-    /// capture of `fail`, if any: the requests it got, and what the call gave.
+    /// The requests a game `paused` or not gets from [`captured_together`], and the result; it
+    /// fails its capture of `fail`.
     fn together(
         paused: bool,
         fail: Option<&str>,
@@ -747,8 +710,8 @@ mod tests {
         (got, result)
     }
 
-    /// Several captures of a playing game pause it, and run it again once they're taken, or one
-    /// has failed, putting the failure first; of a paused game, they leave it paused.
+    /// Several captures of a playing game pause it and resume it after, or after one fails; of a
+    /// paused game, they leave it paused.
     #[test]
     fn several_captures_are_taken_paused_and_the_game_resumes_if_it_played() {
         let (got, result) = together(false, None);

@@ -1,5 +1,4 @@
-//! `gg probe`: the numbers of what shading takes and makes at one pixel of a game's view, as
-//! gg-api's [`probe`](gg_api::probe) reads them, printed as JSON.
+//! `gg probe`: what shading takes and makes at one pixel of a game's view, as JSON.
 
 use gg_api::Failure;
 #[cfg(test)]
@@ -16,9 +15,9 @@ pub(crate) use gg_api::probe::SHADING;
 
 use crate::game::{self, Pick};
 
-/// `at`, a pixel of the view, `[x, y]` from its top left.
+/// `at`, a pixel `[x, y]` from the view's top left.
 ///
-/// Fails with `gg.args` for a number that isn't finite or is negative.
+/// Fails with `gg.args` for a number not finite or negative.
 pub(crate) fn pixel(at: [f64; 2]) -> Result<[f64; 2], Failure> {
     if at.iter().all(|axis| axis.is_finite() && *axis >= 0.0) {
         return Ok(at);
@@ -27,10 +26,9 @@ pub(crate) fn pixel(at: [f64; 2]) -> Result<[f64; 2], Failure> {
     Err(Failure::new("gg.args", message))
 }
 
-/// What shading took and made at pixel `at` of the view of the game `pick` picks, as the game's
-/// view shows it, or its own with `own`, as [`gg_api::probe::probe`] reads it, as JSON.
+/// Probes pixel `at` of the game's view, or its own with `own`.
 ///
-/// Fails as the calls do, and with `api.protocol` for an answer that isn't what the API says.
+/// Fails as the calls do, and with `api.protocol` for an answer the API doesn't define.
 pub(crate) fn run(pick: &Pick, at: [f64; 2], own: bool) -> Result<Value, Failure> {
     let mut client = game::connect(pick)?;
     let call = |method: &str, params: Value| {
@@ -39,7 +37,7 @@ pub(crate) fn run(pick: &Pick, at: [f64; 2], own: bool) -> Result<Value, Failure
     probed(call, at, own)
 }
 
-/// [`run`], sending each request through `call`.
+/// [`run`] through `call`.
 fn probed(
     call: impl FnMut(&str, Value) -> Result<Box<RawValue>, Failure>,
     at: [f64; 2],
@@ -48,8 +46,6 @@ fn probed(
     gg_api::probe::probe(call, at, own).map(|probe| printed(&probe))
 }
 
-/// The answer of a probe of pixel `at`, as [`gg_api::probe::decode`] reads it from `captured`,
-/// `picked` and `looked`, as JSON.
 #[cfg(test)]
 fn decode(
     captured: &[Captured; CAPTURES],
@@ -60,7 +56,7 @@ fn decode(
     printed(&gg_api::probe::decode(captured, at, picked, looked))
 }
 
-/// `probe` as JSON, its fields in the order of their names, as `gg` prints it.
+/// `probe` as JSON, fields in name order.
 fn printed(probe: &gg_api::probe::Probe) -> Value {
     serde_json::to_value(probe).expect("a probe always serializes")
 }
@@ -69,7 +65,7 @@ fn printed(probe: &gg_api::probe::Probe) -> Value {
 mod tests {
     use super::*;
 
-    /// A capture's answer at a pixel of bytes `pixel`, of a view 4 pixels by 2.
+    /// A capture of a 4 by 2 view.
     fn captured(pixel: Option<[u8; 4]>) -> Captured {
         Captured {
             path: None,
@@ -94,7 +90,7 @@ mod tests {
         serde_json::from_value(look).expect("a look")
     }
 
-    /// The probe of captures whose pixels are `bytes`, in the order `decode` has them.
+    /// The probe of captures of `bytes`, in `decode`'s order.
     fn probe_of(bytes: [Option<[u8; 4]>; CAPTURES], looked: &Looked) -> Value {
         let captured = bytes.map(captured);
         let picked = Picked {
@@ -109,13 +105,12 @@ mod tests {
         assert!((value - want).abs() <= tolerance, "{value} isn't {want}");
     }
 
-    /// Each field reads its bytes as the `Shown` docs say: sRGB colors as linear, normals from -1
-    /// to 1, values over 255 from red, lights as the sRGB bytes they are; the depth as reversed
-    /// depth, and the distance from the perspective's near plane.
+    /// Each field reads its bytes as the `Shown` docs say: sRGB colors as linear, normals in -1
+    /// to 1, scalars from red, lights as sRGB bytes, depth reversed, distance from the near plane.
     #[test]
     fn a_probe_reads_each_part_as_its_bytes_say() {
         let mut bytes = [Some([0, 0, 0, 255]); CAPTURES];
-        // The view, then each part of shading in order, then the depth.
+        // The view, shading's parts, the depth.
         bytes[0] = Some([10, 20, 30, 255]);
         bytes[1] = Some([188, 255, 0, 255]);
         bytes[2] = Some([128, 255, 0, 255]);
@@ -130,7 +125,7 @@ mod tests {
         bytes[11] = Some([56, 0, 255, 255]);
         bytes[12] = Some([7, 8, 9, 255]);
         bytes[13] = Some([10, 11, 12, 255]);
-        // Half the way from the near plane's white to black: 2^-12 of its depth.
+        // Halfway from the near plane's white to black: 2^-12 of its depth.
         let half: f64 = 255.0 * (1.0 - 12.0 / 24.0);
         bytes[CAPTURES - 1] = Some([half.round() as u8, 0, 0, 255]);
         let perspective = Projection::Perspective {
@@ -151,7 +146,7 @@ mod tests {
         close(&probe["surface_normal"][0], -1.0, 1e-9);
         close(&probe["surface_normal"][1], 0.0, 0.005);
         close(&probe["surface_normal"][2], 1.0, 1e-9);
-        // Their value is red's alone.
+        // Red alone.
         close(&probe["metallic"], 1.0, 1e-9);
         close(&probe["roughness"], 0.2, 1e-9);
         close(&probe["occlusion"], 0.4, 1e-9);
@@ -159,13 +154,12 @@ mod tests {
         assert_eq!(probe["direct_light"], json!([0, 0, 0]));
         assert_eq!(probe["sky_light"], json!([1, 2, 3]));
         assert_eq!(probe["reflection"], json!([4, 5, 6]));
-        // A dielectric's 0.04, sRGB's byte 56, in red.
+        // A dielectric's 0.04: sRGB byte 56, in red.
         close(&probe["specular_color"][0], 0.04, 0.001);
         close(&probe["specular_color"][2], 1.0, 1e-9);
         assert_eq!(probe["diffuse_light"], json!([7, 8, 9]));
         assert_eq!(probe["specular_light"], json!([10, 11, 12]));
-        // Byte 128 of 255 is half of the way, 2^-12 of the depth, a little off from the 12 it
-        // rounds from.
+        // Byte 128 of 255: 2^-12 of the depth, a little off from the 12 it rounds.
         let depth = probe["depth"].as_f64().expect("a depth");
         assert!((1.0 / 4096.0..1.0 / 3800.0).contains(&depth), "{depth}");
         close(&probe["distance"], 0.1 / depth, 1e-4);
@@ -180,8 +174,8 @@ mod tests {
         );
     }
 
-    /// A depth byte of 255 is the near plane's, whose distance is the near plane; 0 is where nothing
-    /// drew, with none; and an orthographic view, or none seen, has no distance at all.
+    /// Depth 255 is the near plane, at its distance; 0, nothing drawn, has none; an orthographic
+    /// view, or none seen, has none.
     #[test]
     fn a_depth_has_a_distance_where_something_drew_in_a_perspective() {
         let perspective = Projection::Perspective {
@@ -210,8 +204,7 @@ mod tests {
         }
     }
 
-    /// A pixel outside the view is `null` in every value, the view's size and the entity still
-    /// answered.
+    /// A pixel outside the view is `null` in every value; the size and entity still answer.
     #[test]
     fn a_pixel_outside_the_view_has_no_values() {
         let probe = probe_of([None; CAPTURES], &looked(None));
@@ -222,9 +215,8 @@ mod tests {
         assert_eq!(probe["size"], json!([4, 2]));
     }
 
-    /// A probe sends a capture of the pixel for the view, each part of shading and the depth, then a
-    /// pick and a look, through one paused world, and answers what they decode to; and its pixel
-    /// can't be negative or not finite.
+    /// A probe captures the view, shading's parts and the depth, then picks and looks, in one
+    /// paused world; its pixel can't be negative or not finite.
     #[test]
     fn a_probe_captures_picks_and_looks_in_one_paused_world() {
         let mut got = Vec::new();

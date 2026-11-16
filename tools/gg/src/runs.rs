@@ -1,10 +1,6 @@
-//! What a `gg run` tells of itself as it runs, in a file of its own in the target directory, beside
-//! its lock, which a thread of its own writes again every so often, and removes as the run ends: what
-//! it's doing, as building, rebuilding or running the game, the game's processes, whether the code
-//! they run holds every edit to the sources it watches, and the last build's or patch's failure,
-//! until one succeeds. gg's other commands, and `gg mcp`'s tools, read it while no game answers,
-//! so that an agent tells a rebuild under way from one that failed, and `wait` waits on it until
-//! the code of the edits saved before it runs.
+//! What a `gg run` tells of itself: a file in the target directory, beside its lock, rewritten
+//! every [`WRITE`] and removed as the run ends. Other commands and `gg mcp`'s tools read it while
+//! no game answers, to tell a rebuild under way from one that failed; `wait` waits on it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,33 +15,30 @@ use serde_json::{Value, json};
 use crate::build;
 use crate::game::Pick;
 
-/// How often the file is written, at most, and how often `wait` reads it.
+/// How often the file is written, and `wait` reads it.
 const WRITE: Duration = Duration::from_millis(200);
 
-/// How long since the file was last written it's taken for the run's: a `gg run` that was killed
-/// leaves its file, which then goes stale.
+/// A file unwritten for this long is a killed run's.
 const STALE: Duration = Duration::from_secs(5);
 
-/// How long `wait` waits for a run's file to come, for at most its timeout, as from a `gg run` just
-/// started in the background, which writes it once cargo says where the target directory is.
+/// How long `wait` waits for a just-started `gg run`'s file, within its timeout: written once
+/// cargo names the target directory.
 const GRACE: Duration = Duration::from_secs(5);
 
-/// What a `gg run` is doing, as its file tells.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct State {
-    /// `building`, the first build; `starting`, as the game's processes start, before each serves;
-    /// `running`, as each serves; `changed`, as the sources have changed, before the run acts on it;
-    /// `patching`; `rebuilding`; `restarting`, rebuilt, as the game stops to start again from the
-    /// new build; `stopping`; or `waiting`, the game having ended, for a change to rebuild it.
+    /// `building`, the first build; `starting`, before each process serves; `running`, each
+    /// serves; `changed`, sources changed, not yet acted on; `patching`; `rebuilding`;
+    /// `restarting`, rebuilt, the game stopping to start anew; `stopping`; or `waiting`, the game
+    /// ended, for a change to rebuild it.
     pub(crate) phase: &'static str,
-    /// Why, as the run's own events say it, if it's said.
+    /// Why, as the run's events say.
     pub(crate) why: Option<String>,
-    /// The game's processes.
     pub(crate) pids: Vec<u32>,
-    /// Whether the code they run holds every edit to the sources the run watches, as of its last
-    /// look at them; `None` while it watches none.
+    /// Whether the game's code holds every edit to the watched sources, as of the last look;
+    /// `None` while none are watched.
     pub(crate) current: Option<bool>,
-    /// The failure of the last build or patch, until one succeeds or an edit undoes what failed.
+    /// The last build's or patch's failure, until one succeeds or an edit undoes it.
     pub(crate) error: Option<Failure>,
 }
 
@@ -61,12 +54,11 @@ impl State {
     }
 }
 
-/// The file of the `gg run` of `package` in target directory `target`.
 pub(crate) fn path(target: &Path, package: &str) -> PathBuf {
     target.join(format!("gg-run-{package}.json"))
 }
 
-/// Milliseconds since the Unix epoch, as the file gives times, wherever it's read.
+/// Milliseconds since the Unix epoch, the file's unit.
 pub(crate) fn now_ms() -> u64 {
     let since = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
     since.map_or(0, |since| {
@@ -74,8 +66,8 @@ pub(crate) fn now_ms() -> u64 {
     })
 }
 
-/// A `gg run`'s file, written by a thread of its own as [`tell`](Self::tell) changes it and every
-/// [`WRITE`] while it doesn't, and removed as this drops.
+/// A run's file, written by a thread on each [`tell`](Self::tell) and every [`WRITE`]; removed on
+/// drop.
 pub(crate) struct Told {
     path: PathBuf,
     shared: Arc<Mutex<Value>>,
@@ -84,8 +76,8 @@ pub(crate) struct Told {
 }
 
 impl Told {
-    /// Starts telling, at `path`, of the run of `package` in process `gg`, in the project whose
-    /// manifest is `project`, if it's in one, `state`.
+    /// Starts telling `state` at `path`, of `package`'s run in process `gg`, in the project at
+    /// `project`, if any.
     pub(crate) fn start(
         path: PathBuf,
         gg: u32,
@@ -116,7 +108,7 @@ impl Told {
         }
     }
 
-    /// Tells `state`, as of the run's look at the sources at `looked`, ms since the Unix epoch.
+    /// Tells `state`, as of the look at the sources at `looked` (ms since the epoch).
     pub(crate) fn tell(&self, state: &State, looked: u64) {
         if let Ok(mut told) = self.shared.lock() {
             fill(&mut told, state, looked);
@@ -134,7 +126,6 @@ impl Drop for Told {
     }
 }
 
-/// Fills `told`, a run's file's object, with `state`, as of a look at `looked`.
 fn fill(told: &mut Value, state: &State, looked: u64) {
     let error = (state.error.as_ref())
         .map(|failure| json!({"code": failure.code, "message": failure.message}));
@@ -146,9 +137,8 @@ fn fill(told: &mut Value, state: &State, looked: u64) {
     told["looked"] = json!(looked);
 }
 
-/// Writes `told` at `path` whole, through a file beside it renamed over it, so that a reader never
-/// reads half of it; one that can't be written, as while Windows has a reader hold it, is written
-/// next time.
+/// Writes `told` through a file beside `path` renamed over it, so that a reader never reads half.
+/// A write that fails, as while Windows has a reader hold the file, is redone next time.
 fn write(path: &Path, told: &Value) {
     let mut writing = path.as_os_str().to_owned();
     writing.push(".writing");
@@ -158,9 +148,8 @@ fn write(path: &Path, told: &Value) {
     }
 }
 
-/// The files of the `gg run`s in target directory `target` that still run, as their files' being
-/// written within [`STALE`] says, those of the project whose manifest is `project` alone if it's
-/// given, comparing the paths canonical.
+/// The files of the runs in `target` written within [`STALE`], of `project` alone if given, by
+/// canonical path.
 fn runs_in(target: &Path, project: Option<&Path>) -> Vec<Value> {
     let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
     let project = project.map(canonical);
@@ -188,10 +177,9 @@ fn runs_in(target: &Path, project: Option<&Path>) -> Vec<Value> {
     ours.collect()
 }
 
-/// The run `pick` reaches the game of, as its project and `--pid` choose: the one there is, if
-/// there's one; none of several, which `--pid` alone tells apart by their games' processes.
+/// The only run of `pick`'s project and `--pid`; none of several.
 ///
-/// Fails with `gg.cargo` if cargo can't say where the target directory is.
+/// Fails with `gg.cargo` if cargo can't name the target directory.
 fn picked(pick: &Pick) -> Result<Option<Value>, Failure> {
     let target = build::target_dir(pick.project.as_deref().and_then(Path::parent))?;
     let mut runs = runs_in(&target, pick.project.as_deref());
@@ -206,17 +194,19 @@ fn picked(pick: &Pick) -> Result<Option<Value>, Failure> {
     })
 }
 
-/// Why no game answers `pick`, if a `gg run` that runs it says so, as a failure with a code of its
-/// own: `gg.rebuilding`, while it builds the game, or has built it and starts it again;
-/// `gg.build_failed`, while the game, having ended, waits for a change to rebuild it after a build
-/// that failed, with that build's errors; `gg.waiting`, while it waits so for another reason; and
-/// `gg.starting`, as the game's processes start or stop. `None` if none does, or several.
+/// Why no game answers `pick`, if its `gg run` says:
+///
+/// - `gg.rebuilding`: it builds the game or starts it again.
+/// - `gg.build_failed`: the game ended after a failed build, with its errors.
+/// - `gg.waiting`: it waits for another reason.
+/// - `gg.starting`: the processes start or stop.
+///
+/// `None` if no run, or several, do.
 pub(crate) fn down(pick: &Pick) -> Option<Failure> {
     let told = picked(pick).ok()??;
     Some(down_as(&told))
 }
 
-/// The failure that `told`, a run's file, gives while no game answers, as [`down`] says.
 fn down_as(told: &Value) -> Failure {
     let phase = told["state"].as_str().unwrap_or_default();
     let error = &told["error"];
@@ -246,18 +236,19 @@ fn down_as(told: &Value) -> Failure {
     Failure::new(code, message)
 }
 
-/// Waits until the game of the `gg run` `pick` reaches runs the code of every edit to the sources it
-/// watches saved before this was called, for at most `timeout`, and returns the run's file as it
-/// says so: once the run has looked at the sources since, and the game's processes serve, patched
-/// or rebuilt with them, or with nothing to patch; or, for a run that watches no sources, as its
-/// game serves.
+/// Waits, for at most `timeout`, until `pick`'s game runs every edit to the watched sources saved
+/// before this call; returns the run's file. That holds once the run has looked at the sources
+/// since and the processes serve, patched or rebuilt; with none watched, once the game serves.
 ///
-/// Fails with `gg.build_failed` if the patch or the rebuild of an edit fails, with rustc's errors,
-/// the game running its code as it was, or not at all; `gg.waiting` if the game ended and waits
-/// for a change to rebuild it; `gg.no_run` if no `gg run` runs the game, its file not there within
-/// [`GRACE`] of the call, nor once it's been, as when the run ends meanwhile;
-/// `gg.which_run` if more than one does, which `--pid` tells apart; `gg.timeout` if the code isn't
-/// running within `timeout`; and `gg.cargo` if cargo can't say where the target directory is.
+/// # Errors
+///
+/// - `gg.build_failed`: an edit's patch or rebuild failed, with rustc's errors; the game runs its
+///   old code, or none.
+/// - `gg.waiting`: the game ended and waits for a change to rebuild it.
+/// - `gg.no_run`: no run: no file within [`GRACE`] of the call, or gone since.
+/// - `gg.which_run`: several do; `--pid` tells them apart.
+/// - `gg.timeout`: the code isn't running within `timeout`.
+/// - `gg.cargo`: cargo can't name the target directory.
 pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
     let target = build::target_dir(pick.project.as_deref().and_then(Path::parent))?;
     let (asked, start) = (now_ms(), Instant::now());
@@ -303,8 +294,7 @@ pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
     }
 }
 
-/// What `told`, a run's file, says of a wait that started at `asked`, ms since the Unix epoch:
-/// `None` while it waits on, as it does until the run has looked at the sources since.
+/// The wait's end, from `told`, for a wait started at `asked` (ms since the epoch); else `None`.
 fn waited(told: &Value, asked: u64) -> Option<Result<Value, Failure>> {
     if told["looked"].as_u64().unwrap_or(0) < asked {
         return None;
@@ -341,8 +331,7 @@ mod tests {
         }
     }
 
-    /// A run's file tells what it's doing as it changes, reads back while it's written and goes as
-    /// the run ends; one left stale, as by a run that was killed, isn't read.
+    /// A run's file follows its state, goes as the run ends; a stale one isn't read.
     #[test]
     fn a_runs_file_tells_what_it_does_until_it_ends() {
         let dir = std::env::temp_dir().join(format!("gg-runs-{}", std::process::id()));
@@ -380,7 +369,7 @@ mod tests {
         assert!(other.is_empty() && !gone && left.is_empty());
     }
 
-    /// No game's answering says what its run does, with a code of its own, and the build's errors.
+    /// A game down says what its run does, with the build's errors.
     #[test]
     fn a_game_down_says_what_its_run_does() {
         let told = |phase: &str, error: Value| json!({"gg": 7, "state": phase, "why": null, "error": error});
@@ -414,13 +403,11 @@ mod tests {
         assert!(down(&pick(Some(PathBuf::from("/nowhere/project.ron")))).is_none());
     }
 
-    /// A wait for a run whose file isn't there gives it a moment to come, within its timeout, then
-    /// fails with `gg.no_run`.
+    /// A wait for a missing file gives it a moment, then fails with `gg.no_run`.
     #[test]
     fn a_wait_without_a_run_waits_for_its_file_a_moment() {
-        // A project in gg's own directory, which holds none, so that no run's is it, as that of the
-        // `gg run` the editor keeps going for its project; the directory is in the workspace, so
-        // that cargo names its target directory.
+        // gg's directory holds no project, so the editor's run isn't it; it's in the workspace,
+        // so cargo names its target directory.
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("project.ron");
         // Two of the pauses between its looks for the file.
         let timeout = WRITE * 2;
@@ -431,16 +418,15 @@ mod tests {
         assert!(start.elapsed() >= timeout && start.elapsed() < GRACE * 2);
     }
 
-    /// A wait goes on until the run has looked at the sources since it started, then ends as the
-    /// game runs their code, or as their build failed.
+    /// A wait goes on until the run looks at the sources, then ends on their code or failed build.
     #[test]
     fn a_wait_ends_once_the_edits_code_runs_or_fails() {
         let told = |phase: &str, looked: u64, current: Option<bool>, error: Value| json!({"gg": 7, "state": phase, "looked": looked, "current": current, "error": error});
         let failed = json!({"code": "gg.build", "message": "error: expected `;`"});
         let at = |told: Value| waited(&told, 100).map(|waited| waited.map_err(|f| f.code));
-        // Looked at before the wait started, whatever it said then.
+        // Looked before the wait started: waits on.
         assert!(at(told("running", 99, Some(true), Value::Null)).is_none());
-        // Since: an edit seen and not yet acted on, or being patched or rebuilt, waits on.
+        // Since: an edit unacted on, patching or rebuilding waits on.
         for phase in [
             "changed",
             "patching",
@@ -457,7 +443,7 @@ mod tests {
             at(told("running", 100, Some(true), Value::Null)),
             Some(Ok(_))
         ));
-        // A run that watches nothing has its game's serving end it.
+        // A run that watches nothing ends when its game serves.
         assert!(matches!(
             at(told("running", 100, None, Value::Null)),
             Some(Ok(_))
