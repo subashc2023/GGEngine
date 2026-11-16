@@ -1,8 +1,6 @@
-//! What `tools/cook` takes from the engine to write a game's package, so that what it cooks is what
-//! the engine makes of each file as a run loads it: the package's [`Writer`]; a font baked and a
-//! shader compiled, as a run's add makes them; a texture's image and a model read as a run reads
-//! them, and the mip levels of a model's images made as a frame makes them; and a model as a run
-//! from a package reads it, cooked. Not for games.
+//! What `tools/cook` takes from the engine to write a game's package, so its output is what a run
+//! makes of each file: the package's [`Writer`], and fonts, shaders, textures, models and mip
+//! levels made, and cooked models read, as a run does. Not for games.
 
 use std::path::Path;
 
@@ -17,16 +15,15 @@ pub use crate::image::{Compressed, Format, Image, decode_ktx2};
 use crate::package::Files;
 pub use crate::package::{Kind, Writer};
 
-/// Font `name`'s file at `path`, baked as [`Context::add_font`](crate::Context::add_font) bakes it,
-/// on the job system's threads, which [`start_jobs`](crate::start_jobs) starts, as a game's package
-/// holds it.
+/// Font `name`'s file at `path`, baked as [`Context::add_font`](crate::Context::add_font) bakes
+/// it, on the threads [`start_jobs`](crate::start_jobs) starts.
 ///
 /// Fails as `add_font` does.
 pub fn bake_font(name: &str, path: &Path) -> Result<Vec<u8>> {
     Ok(crate::font::bake(name, path)?.bytes())
 }
 
-/// What a UI's node names, which a run loads with the UI.
+/// What a UI's node names; a run loads it with the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiAsset {
     Font,
@@ -34,10 +31,9 @@ pub enum UiAsset {
 }
 
 /// UI `name`'s file at `path`, read and checked as [`Context::add_ui`](crate::Context::add_ui)
-/// reads it, as a package holds it: as it is; and each font and texture its nodes name, once, as
-/// they name it: by its asset ID, a model's image by its model's name and its place in it, as
-/// `5f3c9a1e07b2d846#0`, or by its path from the asset root, which the cooker finds in the package
-/// as a run from it would, so that the package holds no UI a run would refuse.
+/// reads it: the file as is, and each font and texture its nodes name, once, as named: by asset
+/// ID (a model's image by model name and index, `5f3c9a1e07b2d846#0`) or by path from the asset
+/// root. The cooker finds them in the package as a run would, so it holds no UI a run refuses.
 ///
 /// Fails as `add_ui` does for a file that doesn't read or isn't a UI's.
 pub fn read_ui(name: &str, path: &Path) -> Result<ReadUi> {
@@ -63,7 +59,7 @@ pub fn read_ui(name: &str, path: &Path) -> Result<ReadUi> {
     Ok(ReadUi { bytes, named })
 }
 
-/// A UI's file as [`read_ui`] reads it: its bytes, and what its nodes name.
+/// A UI's file as [`read_ui`] reads it: bytes and the names in its nodes.
 pub struct ReadUi {
     pub bytes: Vec<u8>,
     pub named: Vec<(UiAsset, String)>,
@@ -74,9 +70,8 @@ pub fn is_id(name: &str) -> bool {
     crate::assets::is_id(name)
 }
 
-/// The path from the asset root `root` of the file a run from a package finds by `name`, a path
-/// from the root, as a package names its entries: `/` between its parts, its `.` and `..` taken
-/// away as written; `None` for an absolute path, or one outside the root.
+/// The package entry name for `name`, a path from asset root `root`: parts joined by `/`, `.` and
+/// `..` resolved as written. `None` for an absolute path or one outside the root.
 pub fn within(root: &Path, name: &str) -> Option<String> {
     let path = Path::new(name);
     let prefixed = matches!(
@@ -90,58 +85,54 @@ pub fn within(root: &Path, name: &str) -> Option<String> {
 }
 
 /// Game shader `name`'s file at `path`, compiled to SPIR-V as
-/// [`Context::add_shader`](crate::Context::add_shader) compiles it, as a game's package holds it,
-/// with the files it read, its own first, then those it includes. A run checks it against the
-/// contract for its types as it adds it.
+/// [`Context::add_shader`](crate::Context::add_shader) does, with the files it read: its own
+/// first, then its includes. Unlike a run, this skips the types' contract check.
 ///
-/// Fails as `add_shader` does but for the contract.
+/// Fails as `add_shader` does, but for the contract.
 pub fn compile_shader(name: &str, path: &Path) -> Result<(Vec<u8>, Vec<std::path::PathBuf>)> {
     gg_renderer::compile_shader(name, path)
 }
 
-/// Texture `name`'s file at `path`, a PNG or a JPEG, decoded to RGBA8 as
-/// [`Context::add_texture`](crate::Context::add_texture) decodes it, its header and its pixels
-/// alike, so that a package holds no texture whose pixels a run would warn of.
+/// Texture `name`'s file at `path`, a PNG or JPEG, decoded to RGBA8 as
+/// [`Context::add_texture`](crate::Context::add_texture) does, pixels included, so a package
+/// holds no texture a run would warn of.
 ///
-/// Fails as `add_texture` does for a file whose header doesn't read, and with
-/// `engine.bad_texture` for one whose pixels don't decode, of which a run warns.
+/// Fails as `add_texture` does for an unreadable header, and with `engine.bad_texture` for
+/// pixels that don't decode (a run warns).
 pub fn read_image(name: &str, path: &Path) -> Result<Image> {
     let image = crate::image::load_image(name, path, &Files::default())?;
     crate::image::decode_texture(name, path, image)
 }
 
-/// Model `name`'s file at `path`, and the files it names, read as
-/// [`Context::add_model`](crate::Context::add_model) reads them, its images decoded to RGBA8 and its
-/// primitives of one level.
+/// Model `name`'s file at `path` and the files it names, read as
+/// [`Context::add_model`](crate::Context::add_model) does: images in RGBA8, primitives of one
+/// level.
 ///
-/// Fails as `add_model` does for a model that doesn't read, and with `engine.bad_model` for one
-/// whose image doesn't decode, of which a run warns.
+/// Fails as `add_model` does for an unreadable model, and with `engine.bad_model` for an image
+/// that doesn't decode (a run warns).
 pub fn read_model(name: &str, path: &Path) -> Result<Imported> {
     let (mut imported, _) = crate::gltf::read_listing(name, path, &Files::default())?;
     imported.decode_images(name, path)?;
     Ok(imported)
 }
 
-/// What image `image` of `model` holds, and so how it gets its mip levels and how it's compressed,
-/// as a run gives them: a map of data, its levels averaging its values; or colors, weighted by alpha
-/// where a masked or blended material samples them, and plainly averaged where opaque ones alone
-/// do.
+/// What image `image` of `model` holds, which decides its mips and compression as in a run: a
+/// data map (averaged levels), or colors (alpha-weighted if a masked or blended material samples
+/// them, else plainly averaged).
 pub fn texels(model: &Imported, image: usize) -> Texels {
     crate::model::texels(&model.primitives, image)
 }
 
-/// `primitive`'s vertices, model `name`'s, as glTF has them, packed as a run packs them, with its
-/// indices, of `levels` among them, as a game's package holds them; without meshlets, which the
-/// cooker cuts.
+/// Model `name`'s `primitive`: glTF vertices packed as a run packs them, with indices (`levels`
+/// among them). Meshlets are left to the cooker.
 ///
-/// Fails as `add_model` does for vertices that don't pack, with `engine.bad_model`.
+/// Fails with `engine.bad_model`, as `add_model` does, for vertices that don't pack.
 pub fn pack(name: &str, primitive: &Primitive, levels: Vec<Lod>) -> Result<ModelMesh> {
     crate::model::pack(name, primitive, levels)
 }
 
-/// `image`'s RGBA8, then the rest of its full chain of mip levels, smallest last, made as `texels`
-/// say, as a frame makes a texture's that the cooker hasn't made; its first level alone for
-/// [`Mipmaps::None`].
+/// `image`'s RGBA8 then the rest of its mip chain, smallest last, made as `texels` say and as a
+/// frame makes a texture's the cooker hasn't. [`Mipmaps::None`] gives the first level alone.
 ///
 /// # Panics
 ///
@@ -153,16 +144,16 @@ pub fn levels(image: &Image, texels: Texels) -> Vec<u8> {
     pixels
 }
 
-/// `model`, model `name`, as a game's package holds it, cooked, as a run from the package reads it
-/// in place of its files: its images given as `images`, each one's KTX2, in their order, in place
-/// of those `model` has, and each primitive's mesh as [`pack`] packed it and the cooker cut it.
+/// `model` (named `name`) cooked as a run from a package reads it instead of its files:
+/// `images` (each one's KTX2, in order) replace `model`'s, and each primitive's mesh is as
+/// [`pack`] packed and the cooker cut it.
 ///
-/// Fails as `add_model` does for a mesh that doesn't hold together, as a run checks each it adds,
-/// with `engine.bad_model`, so that a package holds none that a run refuses.
+/// Fails with `engine.bad_model`, as `add_model` does, for a mesh that doesn't hold together.
 ///
 /// # Panics
 ///
-/// If `images` aren't as many as `model`'s, or a primitive hasn't its mesh.
+/// - `images` aren't as many as `model`'s.
+/// - A primitive has no mesh.
 pub fn model_bytes(name: &str, model: &Imported, images: &[Vec<u8>]) -> Result<Vec<u8>> {
     for primitive in &model.primitives {
         let mesh =
@@ -172,11 +163,11 @@ pub fn model_bytes(name: &str, model: &Imported, images: &[Vec<u8>]) -> Result<V
     Ok(crate::cooked::encode(model, images))
 }
 
-/// Model `name`'s cooked `bytes`, read back as a run from a game's package reads them, its images
-/// decoded to BC7 as the loader decodes them, for checking what the cooker wrote.
+/// Model `name`'s cooked `bytes` read back as a run does (images decoded to BC7), to check what
+/// the cooker wrote.
 ///
-/// Fails with `engine.bad_model` for bytes that don't read as a cooked model, or whose image
-/// doesn't decode.
+/// Fails with `engine.bad_model` for bytes that aren't a cooked model or whose image doesn't
+/// decode.
 pub fn read_cooked_model(name: &str, bytes: &[u8]) -> Result<Imported> {
     let path = Path::new(name);
     let mut imported = crate::cooked::decode(name, path, bytes)?;

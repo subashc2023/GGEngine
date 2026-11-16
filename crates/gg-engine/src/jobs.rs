@@ -1,21 +1,20 @@
-//! The job system: rayon-core's pool of threads, which a tick's systems hand their rows to through
-//! [`join`], with the thread that runs the ticks as the pool's first thread, so that it works
-//! through the jobs too as it waits for them. Outside the pool, as on tests' threads and in a run
-//! on one thread, jobs run one after another on the thread that calls.
+//! The job system: rayon-core's thread pool, which a tick's systems hand rows to through
+//! [`join`]. The ticks' thread is the pool's first, so it runs jobs while it waits. Outside the
+//! pool (tests' threads, a one-thread run) jobs run in turn on the calling thread.
 
 use std::num::NonZeroUsize;
 
 use gg_core::{Error, Result};
 
-/// Starts the pool of `threads` threads, the calling thread, which runs the ticks, as its first;
-/// with one thread, starts none. Fails with `engine.threads` if the threads can't start, or a pool
-/// was started before in the process.
+/// Starts a pool of `threads` threads, the calling thread (which runs the ticks) the first; with
+/// one thread, starts none. Fails with `engine.threads` if the threads can't start, or a pool was
+/// started before in the process.
 ///
-/// Each thread allocates the first time it looks for a job to steal, as crossbeam-epoch records
-/// it, and on macOS the first time it sleeps for want of one, as std there makes the mutex and the
-/// condition variable it sleeps on: the pool's other threads in its first ticks, and the calling
-/// thread at the first tick that keeps it waiting long, which may come at any time. rayon-core
-/// doesn't say when a thread has slept, so nothing here can make them sooner.
+/// Each thread allocates the first time it looks for a job to steal (crossbeam-epoch records it),
+/// and on macOS the first time it sleeps for want of one (std makes the mutex and condition
+/// variable then): the other threads in the first ticks, the calling thread at the first tick
+/// that keeps it waiting long, at any time. rayon-core doesn't say when a thread has slept, so
+/// nothing here can do it sooner.
 pub fn start(threads: NonZeroUsize) -> Result<()> {
     if threads.get() == 1 {
         return Ok(());
@@ -36,9 +35,8 @@ pub fn start(threads: NonZeroUsize) -> Result<()> {
     Ok(())
 }
 
-/// Runs `a` and `b`: on a thread of the pool, `b` is offered to its other threads while this one
-/// runs `a`, and runs here after `a` if none took it; on any other thread, `a` then `b` run on it,
-/// in that order.
+/// Runs `a` and `b`. On a pool thread, `b` is offered to the others while this one runs `a`, and
+/// runs here after `a` if none took it. On any other thread, `a` then `b` run on it, in that order.
 pub(crate) fn join<A, B, RA, RB>(a: A, b: B) -> (RA, RB)
 where
     A: FnOnce() -> RA + Send,
@@ -49,14 +47,14 @@ where
     if rayon_core::current_thread_index().is_some() {
         rayon_core::join(a, b)
     } else {
-        // Not through rayon-core's own pool, which a call from outside every pool would start.
+        // Not rayon-core's own pool, which a call from outside every pool would start.
         (a(), b())
     }
 }
 
-/// Runs `f` on a pool of `threads` threads of its own, for tests that run the simulation on more
-/// than one: a thread of it runs `f`, whose jobs it joins as the ticks' thread does. Each call
-/// starts its threads, and allocates.
+/// Runs `f` on a pool of `threads` threads of its own, for tests of multi-threaded simulation. A
+/// pool thread runs `f`, joining its jobs as the ticks' thread does. Each call starts threads and
+/// allocates.
 #[doc(hidden)]
 pub fn on_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
     assert!(threads > 0, "a pool has a thread at least");

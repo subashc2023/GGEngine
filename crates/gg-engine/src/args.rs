@@ -13,64 +13,57 @@ use crate::net::Code;
 #[derive(Debug, PartialEq)]
 pub(crate) struct Args {
     pub(crate) headless: bool,
-    /// Whether the run is embedded in the tool that started it, such as the editor: offscreen, in
-    /// real time, its view published to the tool through the tool API, as it asks.
+    /// Offscreen in real time, its view published through the tool API to the tool (such as the
+    /// editor) that started it.
     pub(crate) embedded: bool,
-    /// Whether the run ends once stdin ends, as it does as the supervisor that holds it, such as
-    /// `gg run`, ends, however it ends.
+    /// The run ends once stdin ends, as when its supervisor (`gg run`) ends.
     pub(crate) supervised: bool,
-    /// Whether a headless run paces its ticks to real time, its frames a tick apart, rather than
-    /// running a tick each frame as fast as it can.
+    /// A headless run ticks in real time instead of a tick a frame as fast as it can.
     pub(crate) real_time: bool,
     pub(crate) frames: Option<u64>,
-    /// A headless run's view, its width and height in pixels, if not 1280 by 720.
+    /// A headless run's view in pixels, if not 1280 by 720.
     pub(crate) size: Option<[u32; 2]>,
-    /// The frame captured through RenderDoc, counting from 1.
+    /// The frame captured through RenderDoc, from 1.
     pub(crate) capture: Option<NonZeroU64>,
     pub(crate) gpu: Option<String>,
     pub(crate) validation: bool,
     pub(crate) vsync: bool,
-    /// The most frames a second a windowed run renders, as
-    /// [`Context::set_max_fps`](crate::Context::set_max_fps) says, if capped.
+    /// A windowed run's cap ([`Context::set_max_fps`](crate::Context::set_max_fps)).
     pub(crate) max_fps: Option<NonZeroU32>,
-    /// The threads the simulation's jobs run on, the main thread among them.
+    /// Threads for the simulation's jobs, the main thread among them.
     pub(crate) threads: NonZeroUsize,
-    /// Where the run is recorded: its seed, its layers' commands and the world's hash at each tick.
+    /// Where the run is recorded: its seed, layers' commands and the world's hash each tick.
     pub(crate) record: Option<PathBuf>,
-    /// The recording replayed, without a window or a GPU, in place of a run.
+    /// The recording replayed, without a window or GPU, instead of a run.
     pub(crate) replay: Option<PathBuf>,
-    /// Where the replay stops, to write the world as it is there.
+    /// Where the replay stops to write the world.
     pub(crate) dump: Option<Dump>,
-    /// Whether each tick runs again, on a copy of the world taken as it started, a replay's too.
+    /// Each tick, a replay's too, runs again on a copy of the world from its start.
     pub(crate) sync_test: bool,
-    /// Whether a development build serves the tool API.
+    /// A development build serves the tool API.
     pub(crate) api: bool,
-    /// The snapshot the run starts from, in place of the world its layers would attach.
+    /// The snapshot to start from, instead of the world the layers attach.
     pub(crate) restore: Option<PathBuf>,
-    /// Whether a run that doesn't start from a snapshot starts stopped, its world the world as
-    /// edited, until the tool API's `play`.
+    /// Without a snapshot, start stopped, the world as edited, until the tool API's `play`.
     pub(crate) stopped: bool,
-    /// The session the run hosts, joins, serves or connects to, if it's networked, and its code,
-    /// which a host or a server not given one makes.
+    /// The session the run hosts, joins, serves or connects to; a host or server makes a code if
+    /// not given one.
     pub(crate) net: Option<Net>,
     pub(crate) code: Option<Code>,
-    /// The relay the sessions the game hosts and joins from its own UI meet through, as
-    /// [`Context::host`](crate::Context::host) says, in place of the one its project names:
-    /// `--relay` given without a session flag.
+    /// The relay for sessions started from the game's UI ([`Context::host`](crate::Context::host)),
+    /// instead of its project's: `--relay` without a session flag.
     pub(crate) relay: Option<String>,
-    /// Whether the session's peers predict each other's inputs, rolling back where a prediction
-    /// missed, rather than waiting for them.
+    /// Peers predict inputs and roll back on a miss, instead of waiting.
     pub(crate) rollback: bool,
-    /// What the links do to the packets the run receives, as a slow link would.
+    /// What the links do to received packets.
     pub(crate) link: Option<Conditions>,
-    /// The folder of the mods the run runs, in place of those installed.
+    /// The mods folder, instead of the installed mods.
     pub(crate) mods: Option<PathBuf>,
-    /// The game's package the run reads the files under its asset root from.
+    /// The package the run reads its asset root's files from.
     pub(crate) package: Option<PathBuf>,
 }
 
-/// A networked session's end a run takes, and where it finds the others, as given: a lockstep
-/// session's host or joiner, or a server or its client.
+/// A run's end of a networked session: a lockstep host or joiner, or a server or its client.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Net {
     Host(Listen),
@@ -79,8 +72,8 @@ pub(crate) enum Net {
     Connect(Toward),
 }
 
-/// Where a host or a server takes its joiners or clients from: the address it listens at, the
-/// relay it registers its session's room at, as `--relay` says, or both; one at least.
+/// Where a host or server takes joiners or clients from: its listen address, the relay it
+/// registers its room at, or both; one at least.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Listen {
     pub(crate) address: Option<String>,
@@ -98,17 +91,17 @@ impl Listen {
     }
 }
 
-/// Where a joiner or a client finds its host or server: at its address, or through a relay, by
-/// the session's room there, which its code gives.
+/// Where a joiner or client finds its host or server: its address, or the session's room (from
+/// its code) at a relay.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Toward {
     Address(String),
     Relay(String),
 }
 
-/// What `--link` has a peer's link do to what it receives, as a slow link would: hold each packet
-/// `latency`, and up to `jitter` more, which may reorder them, and lose `loss` of them, from 0 up
-/// to 1; and hold what comes on the session's stream `latency`, in order, losing none, as TCP does.
+/// What `--link` does to what a peer receives: holds each packet `latency` plus up to `jitter`
+/// (may reorder) and loses `loss` of them, 0 up to 1. The session's stream is held `latency` in
+/// order, losing none, as TCP does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Conditions {
     pub(crate) latency: Duration,
@@ -116,7 +109,7 @@ pub(crate) struct Conditions {
     pub(crate) loss: f64,
 }
 
-/// The session flag a run was given, before `--relay`, which may come after it, is known.
+/// The session flag given, kept until `--relay`, which may follow it, is known.
 #[derive(Clone, Copy)]
 enum End {
     Host,
@@ -136,15 +129,14 @@ impl End {
     }
 }
 
-/// Where a replay stops to write the world: once its layers have attached, or after a tick.
+/// Where a replay stops to write the world.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Dump {
     Attach,
     Tick(u64),
 }
 
-/// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
-/// refuses.
+/// The run flags a replay refuses: it renders, records and serves nothing.
 const NOT_REPLAYED: [&str; 24] = [
     "--record",
     "--restore",
@@ -294,7 +286,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
     };
     // The first flag given that a replay refuses.
     let mut not_replayed = None;
-    // The session flag given, and its address, if it was given one; and the relay.
+    // The session flag, its address if given, and the relay.
     let mut session: Option<(End, Option<String>)> = None;
     let mut relay = None;
     let mut args = args.into_iter().peekable();
@@ -307,8 +299,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_owned())),
             _ => (arg.as_str(), None),
         };
-        // A session flag's address, which may be left out, as it is where the next argument is
-        // another flag.
+        // A session flag's address; left out where the next argument is another flag.
         let address = |value: &mut Option<String>, args: &mut std::iter::Peekable<_>| {
             value.take().or_else(|| {
                 let next = args.peek().and_then(|next: &OsString| next.to_str());
@@ -368,7 +359,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         )));
     }
     parsed.net = match session {
-        // The relay of the sessions the game hosts and joins from its own UI.
+        // The relay for sessions started from the game's own UI.
         None => {
             parsed.relay = relay;
             None
@@ -399,8 +390,8 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
     Ok(Some(parsed))
 }
 
-/// Takes `flag` into `parsed` if it's one of `--help`'s options, its value read through
-/// `value_of`; returns whether it was.
+/// Takes `flag` into `parsed` if it's one of `--help`'s options, reading its value with
+/// `value_of`. Returns whether it was.
 fn option(
     parsed: &mut Args,
     flag: &str,
@@ -465,7 +456,7 @@ fn option(
     Ok(true)
 }
 
-/// Takes `flag` into `parsed` if it's one of development builds', as `option` takes an option.
+/// Like `option`, for development flags.
 fn development(
     parsed: &mut Args,
     flag: &str,
@@ -474,14 +465,14 @@ fn development(
     match flag {
         "--no-api" => parsed.api = false,
         "--stopped" => parsed.stopped = true,
-        // The last given, which `gg run` gives after the game's own.
+        // The last wins: `gg run` gives it after the game's own.
         "--restore" => parsed.restore = Some(value_of(flag)?.into()),
         _ => return Ok(false),
     }
     Ok(true)
 }
 
-/// Takes `flag` into `parsed` if it's one of determinism's, as `option` takes an option.
+/// Like `option`, for determinism's flags.
 fn determinism(
     parsed: &mut Args,
     flag: &str,
@@ -508,8 +499,8 @@ fn determinism(
     Ok(true)
 }
 
-/// Takes `flag` into `parsed` if it's one of networking's, but the session flags `parse` takes, as
-/// `option` takes an option: `--relay`'s into `relay`.
+/// Like `option`, for networking flags but the session flags `parse` takes; `--relay` goes into
+/// `relay`.
 fn networking(
     parsed: &mut Args,
     relay: &mut Option<String>,
@@ -529,7 +520,7 @@ fn networking(
             })?);
         }
         "--relay" => *relay = Some(value_of(flag)?),
-        // Not echoed in its error, as it's a session's key, or nearly.
+        // Not echoed in its error: it's nearly a session's key.
         "--code" => {
             parsed.code = Some(value_of(flag)?.parse().map_err(|why| {
                 bad(format!(
@@ -543,8 +534,7 @@ fn networking(
     Ok(true)
 }
 
-/// Fails at the first of `parsed`'s flags that another rules out, or that needs one it hasn't, in
-/// the order a run given several of them meets them.
+/// Fails at the first flag another rules out or that lacks one it needs, in the order met.
 fn check(parsed: &Args) -> Result<()> {
     if parsed.restore.is_some() && parsed.record.is_some() {
         return Err(bad(
@@ -706,8 +696,8 @@ fn bad(message: String) -> Error {
     Error::new("engine.args", message)
 }
 
-/// What `--size`'s `text` says, as `320x180` does: a width and a height in pixels, each from 1 to
-/// the largest side a texture takes on every device.
+/// Parses `--size`'s `text`, as `320x180`: width and height in pixels, each from 1 to the largest
+/// texture side every device takes.
 fn sides(text: &str) -> Option<[u32; 2]> {
     let (width, height) = text.split_once('x')?;
     let side = |text: &str| {
@@ -718,8 +708,8 @@ fn sides(text: &str) -> Option<[u32; 2]> {
     Some([side(width)?, side(height)?])
 }
 
-/// What `--link`'s `text` says, as `100,20,5` does: the whole milliseconds each packet is held,
-/// the most more, and the percent lost, from 0 to less than 100, which would lose them all.
+/// Parses `--link`'s `text`, as `100,20,5`: whole milliseconds held, up to this many more, and
+/// the percent lost, from 0 to under 100 (100 would lose all).
 fn conditions(text: &str) -> Option<Conditions> {
     let mut parts = text.split(',');
     let mut millis = || parts.next()?.parse().ok().map(Duration::from_millis);
@@ -763,7 +753,6 @@ mod tests {
             Some(60)
         );
         assert_eq!(args.size, None);
-        // A window's frames go uncapped unless capped.
         assert_eq!(args.max_fps, None);
         for args in [&["--max-fps", "60"][..], &["--max-fps=60"]] {
             let max_fps = parse_strs(args).unwrap().unwrap().max_fps;
@@ -773,7 +762,7 @@ mod tests {
             let args = parse_strs(&["--headless", "--size", size]);
             assert_eq!(args.unwrap().unwrap().size, Some(expected), "{size}");
         }
-        // A CPU for each but the render thread's.
+        // A CPU each but the render thread's.
         let cpus = std::thread::available_parallelism().unwrap().get();
         assert_eq!(
             parse_strs(&[]).unwrap().unwrap().threads.get(),
@@ -782,7 +771,7 @@ mod tests {
         for args in [&["--threads", "3"][..], &["--threads=3"]] {
             assert_eq!(parse_strs(args).unwrap().unwrap().threads.get(), 3);
         }
-        // The last frame of a run of a set number of frames may be captured.
+        // The last frame of a counted run may be captured.
         for args in [
             &["--capture", "3"][..],
             &["--capture=3"],
@@ -791,23 +780,20 @@ mod tests {
             let capture = parse_strs(args).unwrap().unwrap().capture;
             assert_eq!(capture, NonZeroU64::new(3), "{args:?}");
         }
-        // A replay runs on as many threads as it's given: the ticks go the same way on any.
+        // A replay takes any thread count: ticks go the same on any.
         let args = parse_strs(&["--replay", "run.recording", "--threads", "1"]);
         assert_eq!(args.unwrap().unwrap().threads, NonZeroUsize::MIN);
         let args = parse_strs(&["--record=run.recording", "--headless"])
             .unwrap()
             .unwrap();
         assert_eq!(args.record, Some(PathBuf::from("run.recording")));
-        // Development builds serve the tool API unless told not to.
         assert!(args.api);
-        // A headless run ticks as fast as it can unless it's paced to real time.
         assert!(!args.real_time);
         let paced = parse_strs(&["--headless", "--real-time"]).unwrap().unwrap();
         assert!(paced.headless && paced.real_time);
-        // Counting its frames as they come.
         let paced = parse_strs(&["--headless", "--real-time", "--frames", "60"]);
         assert_eq!(paced.unwrap().unwrap().frames, Some(60));
-        // A peer's too, which plays as a windowed one does.
+        // Peers too.
         for peer in [["--host", "0.0.0.0:7700"], ["--join", "127.0.0.1:7700"]] {
             let code = ["--code", "7KQ2-9XMB-4TZD-P0WH"];
             let paced = parse_strs(&[&["--headless", "--real-time"][..], &peer, &code].concat());
@@ -815,7 +801,7 @@ mod tests {
             assert!(paced.real_time && paced.net.is_some(), "{peer:?}");
         }
         assert!(!parse_strs(&["--no-api"]).unwrap().unwrap().api);
-        // A run embedded in a tool publishes its view through the API, which only they serve.
+        // An embedded run publishes through the API, which only development builds serve.
         let embedded = parse_strs(&["--embedded"]).map(|args| args.unwrap().embedded);
         let expected = if cfg!(feature = "dev") {
             Ok(true)
@@ -823,17 +809,15 @@ mod tests {
             Err("engine.args")
         };
         assert_eq!(embedded.map_err(|error| error.code()), expected);
-        // So does a run started stopped, which only the API plays; and given a snapshot, as `gg
-        // run` gives one after the game's own arguments, it goes on as the snapshot's run was.
+        // So does a stopped start (only the API plays), also with the snapshot `gg run` gives.
         let stopped = parse_strs(&["--stopped", "--restore", "a.snapshot"]);
         let stopped = stopped.map(|args| args.unwrap().stopped);
         assert_eq!(stopped.map_err(|error| error.code()), expected);
-        // The last snapshot given, which `gg run` gives after the game's own arguments.
+        // The last snapshot wins.
         let args = parse_strs(&["--restore", "a.snapshot", "--restore=b.snapshot"]);
         let restore = args.unwrap().unwrap().restore;
         assert_eq!(restore, Some(PathBuf::from("b.snapshot")));
-        // A run ends as its supervisor does, which gives every game it runs `--supervised`, a
-        // replay too, which ends at its end alone.
+        // `gg run` gives every game `--supervised`, a replay too, which still ends at its end.
         assert!(!parse_strs(&[]).unwrap().unwrap().supervised);
         for args in [
             &["--supervised"][..],
@@ -844,7 +828,7 @@ mod tests {
         }
         let host = parse_strs(&["--host", "0.0.0.0:7700"]).unwrap().unwrap();
         assert_eq!(host.net, Some(Net::Host(Listen::at("0.0.0.0:7700"))));
-        // Which makes its code, unless it's given one, as a joiner is, read as written.
+        // A host makes a code unless given one; a joiner's is read as written.
         assert_eq!(host.code, None);
         let code = "7KQ2-9XMB-4TZD-P0WH".parse::<Code>().unwrap();
         let join = ["--join=127.0.0.1:7700", "--restore", "a.snapshot", "--code"];
@@ -858,7 +842,7 @@ mod tests {
         }
         let host = parse_strs(&["--host", "0.0.0.0:7700", "--code=7KQ2-9XMB-4TZD-P0WH"]);
         assert_eq!(host.unwrap().unwrap().code, Some(code));
-        // Either peer predicts, over a link that holds and loses its packets.
+        // Either peer predicts, over a link.
         let args = [
             "--join",
             "127.0.0.1:7700",
@@ -877,7 +861,7 @@ mod tests {
         assert_eq!(join.link, Some(link));
         let host = parse_strs(&["--host", "0.0.0.0:7700"]).unwrap().unwrap();
         assert_eq!((host.rollback, host.link), (false, None));
-        // A server and its client, each over a link of its own.
+        // A server and its client each have a link.
         let serve = parse_strs(&["--serve", "0.0.0.0:7700", "--link", "100,20,5"]);
         let serve = serve.unwrap().unwrap();
         assert_eq!(serve.net, Some(Net::Serve(Listen::at("0.0.0.0:7700"))));
@@ -892,7 +876,6 @@ mod tests {
         let toward = Toward::Address("127.0.0.1:7700".to_owned());
         assert_eq!(connect.net, Some(Net::Connect(toward)));
         assert!(connect.headless && connect.link.is_some());
-        // A run's ticks run again, and a replay's.
         assert!(!parse_strs(&[]).unwrap().unwrap().sync_test);
         for args in [
             &["--sync-test"][..],
@@ -937,9 +920,8 @@ mod tests {
         }
     }
 
-    /// `--relay` with each session flag: a host or a server at the relay alone, or at its address
-    /// too, the address left out where the next argument is another flag; a joiner or a client
-    /// through the relay alone.
+    /// `--relay` with each session flag: a host or server at the relay alone or with an address
+    /// (left out before another flag); a joiner or client through the relay alone.
     #[test]
     fn a_session_meets_through_a_relay() {
         let relay = Some("relay.example.com:7800".to_owned());
@@ -1081,8 +1063,7 @@ mod tests {
             &["--serve", "0.0.0.0:7700", "--headless", "--size", "320x180"],
             &["--stopped", "--serve", "0.0.0.0:7700"],
             &["--stopped", "--connect", "127.0.0.1:7700"],
-            // A joiner or a client needs its session's code, a code is a session's, and it's 16
-            // of its symbols.
+            // A joiner or client needs the code; only sessions take one; it's 16 symbols.
             &["--join", "127.0.0.1:7700"],
             &["--connect", "127.0.0.1:7700"],
             &["--code", "7KQ2-9XMB-4TZD-P0WH"],

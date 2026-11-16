@@ -1,6 +1,6 @@
-//! Gamepads, through gilrs: the only code that names it. What the layers see of a pad goes through
-//! `Pads`, which knows nothing of gilrs: its dead zones, a stick's and a trigger's moves as one
-//! event, and the focus rule.
+//! Gamepads, through gilrs: the only code that names it. Layers see pads through `Pads`, which
+//! knows nothing of gilrs and owns the dead zones, stick and trigger moves as one event, and the
+//! focus rule.
 
 use std::mem;
 use std::time::{Duration, Instant};
@@ -12,16 +12,15 @@ use tracing::{info, warn};
 
 use crate::{Event, Pad, PadButton, Stick, Trigger};
 
-/// How far from rest a stick or a trigger has to go to count, and how far counts as all the way,
-/// for a worn stick to still reach it: Microsoft's dead zone for the pads Windows.Gaming.Input
-/// reads, which gilrs gives them too.
+/// How far from rest a stick or trigger must go to count, and how far counts as all the way (so a
+/// worn stick still reaches it): Microsoft's dead zone for the pads Windows.Gaming.Input reads,
+/// which gilrs gives them too.
 const DEAD_ZONE: f32 = 0.1;
 const FULL: f32 = 0.9;
-/// How long after the main window gains focus what the pads do starts to count: long enough for
-/// gilrs's threads, which read the pads every 8 ms on Windows.Gaming.Input and every 10 on XInput,
-/// to have read them in focus, since Windows gives pads to the focused window alone, so that what's
-/// held as focus comes back waits for its next press. A backend slower than that to read them
-/// again would have it count at once.
+/// How long after the main window gains focus the pads' input starts to count: long enough for
+/// gilrs's threads (reading every 8 ms on Windows.Gaming.Input, 10 on XInput) to have read the
+/// pads in focus, since Windows gives pads to the focused window alone. So what's held as focus
+/// returns waits for its next press. A backend slower than that would count it at once.
 const SETTLE: Duration = Duration::from_millis(40);
 
 /// The gamepads of a windowed run. Headless runs and replays have none.
@@ -33,14 +32,13 @@ pub(crate) struct Gamepads {
 }
 
 impl Gamepads {
-    /// Starts gilrs, or logs why it couldn't and goes on without pads; `focused` is whether the
-    /// main window has focus.
+    /// Starts gilrs, or logs why not and goes on without pads. `focused`: the main window has
+    /// focus.
     pub(crate) fn open(focused: bool) -> Self {
         let _zone = gg_core::zone!();
-        // Without gilrs's filters, whose dead zone differs by backend, since the engine applies its
-        // own; and without its state kept as events come, since the D-pad's filter that `poll` runs
-        // reads that state, which `update` then has to write after it. No force feedback, which
-        // would start a thread of its own.
+        // No gilrs filters: their dead zone differs by backend, and the engine applies its own.
+        // No state kept as events come: the D-pad filter `poll` runs reads it, so `update` must
+        // write it after. No force feedback: it starts a thread.
         let built = GilrsBuilder::new()
             .with_default_filters(false)
             .set_update_state(false)
@@ -56,7 +54,7 @@ impl Gamepads {
                 return Self::default();
             }
         };
-        // The pads gilrs found as it started, which some backends report as connected too.
+        // Pads found at start, which some backends also report as connected.
         for (id, pad) in gilrs.gamepads() {
             info!(
                 pad = usize::from(id),
@@ -74,7 +72,7 @@ impl Gamepads {
         }
     }
 
-    /// Gives `emit` what the pads did since the last poll, as the layers see it.
+    /// Emits what the pads did since the last poll.
     pub(crate) fn poll(&mut self, mut emit: impl FnMut(Event<'static>)) {
         let Some(gilrs) = &mut self.gilrs else {
             return;
@@ -94,18 +92,18 @@ impl Gamepads {
         self.pads.moved(Instant::now(), &mut emit);
     }
 
-    /// Tells the pads that the main window gained or lost focus, before the layers are told.
+    /// The main window gained or lost focus; call before the layers hear.
     pub(crate) fn focus(&mut self, focused: bool, mut emit: impl FnMut(Event<'static>)) {
         self.pads.focus(focused, Instant::now(), &mut emit);
     }
 
-    /// For the main window restored from being minimized, while no frame polled the pads.
+    /// The main window was restored from minimized, with no frame polling the pads.
     pub(crate) fn restored(&mut self, mut emit: impl FnMut(Event<'static>)) {
         self.pads.restored(Instant::now(), &mut emit);
     }
 }
 
-/// One of gilrs's events in the engine's names, or `None` for what the engine doesn't name.
+/// A gilrs event in the engine's names; `None` for the unnamed.
 fn reading(gilrs: &Gilrs, id: GamepadId, event: EventType) -> Option<Reading> {
     let pad = Pad(usize::from(id));
     Some(match event {
@@ -136,8 +134,8 @@ fn reading(gilrs: &Gilrs, id: GamepadId, event: EventType) -> Option<Reading> {
     })
 }
 
-/// gilrs's names for the buttons, whose `LeftTrigger` is the bumper and `LeftTrigger2` the trigger.
-/// C and Z, which few pads have, have no name.
+/// gilrs's button names: its `LeftTrigger` is the bumper, `LeftTrigger2` the trigger. C and Z,
+/// which few pads have, have none.
 fn pad_button(button: Button) -> Option<PadButton> {
     Some(match button {
         Button::South => PadButton::South,
@@ -161,8 +159,8 @@ fn pad_button(button: Button) -> Option<PadButton> {
     })
 }
 
-/// A stick's axis, 0 across and 1 up. A D-pad left as a hat, and the Z axes some Linux drivers
-/// report the triggers as (gilrs #200), have none.
+/// A stick's axis: 0 across, 1 up. A D-pad left as a hat, and the Z axes some Linux drivers
+/// report triggers as (gilrs #200), have none.
 fn stick_axis(axis: Axis) -> Option<(Stick, usize)> {
     Some(match axis {
         Axis::LeftStickX => (Stick::Left, 0),
@@ -173,33 +171,30 @@ fn stick_axis(axis: Axis) -> Option<(Stick, usize)> {
     })
 }
 
-/// A pad's reading, in the engine's names.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Reading {
     Button(Pad, PadButton, bool),
-    /// One of a stick's two axes, 0 across and 1 up, from -1 to 1.
+    /// One of a stick's axes (0 across, 1 up), -1 to 1.
     Stick(Pad, Stick, usize, f32),
     Trigger(Pad, Trigger, f32),
     Connected(Pad),
     Disconnected(Pad),
 }
 
-/// What the layers see of the pads: each reading through its dead zone, a stick's and a trigger's
-/// moves at their last reading, once a poll and before each of its pad's button events, so that a
-/// press sees the moves that came before it; and nothing out of focus, on every platform, as
-/// Windows gives pads to the focused window alone where Linux and macOS give them to any.
+/// What layers see of the pads: readings through the dead zone; a stick's or trigger's moves at
+/// their last reading, once a poll and before each of its pad's button events, so a press sees
+/// the moves before it; and nothing out of focus on any platform (Windows gives pads to the
+/// focused window alone, Linux and macOS to any).
 #[derive(Debug, Default)]
 struct Pads {
-    /// From when what the pads do counts: `SETTLE` after the main window gained focus, or `None`
-    /// while it hasn't.
+    /// When input starts to count: `SETTLE` after the main window gained focus; `None` while
+    /// unfocused.
     counts_from: Option<Instant>,
     /// Whether it counts, as of the last poll.
     counting: bool,
-    /// Each pad's controls, by its number, from its first reading.
+    /// Each pad's controls by number, from its first reading.
     pads: Vec<Controls>,
 }
-
-/// A pad's buttons, sticks and triggers, in their orders.
 #[derive(Debug, Default, Clone)]
 struct Controls {
     buttons: [Control; PadButton::ALL.len()],
@@ -218,21 +213,20 @@ impl Controls {
     }
 }
 
-/// One of a pad's buttons, sticks or triggers: a button's 0 or 1 in `x`, or a trigger's travel, or
-/// a stick's place.
+/// A button (0 or 1 in `x`), trigger (travel in `x`) or stick (position).
 #[derive(Debug, Default, Clone, Copy)]
 struct Control {
-    /// As the pad last read, before the dead zone.
+    /// Before the dead zone.
     read: Vec2,
     /// As the layers last saw it.
     shown: Vec2,
-    /// Away from rest as what the pads do began to count again, so not seen until it has rested.
+    /// Away from rest as input began to count: unseen until it has rested.
     muted: bool,
 }
 
 impl Control {
-    /// Shows the layers the control as it is, giving that if it changed: at rest while what the
-    /// pads do doesn't count, and while it's muted.
+    /// Shows the layers the control, returning the value if it changed. At rest while input
+    /// doesn't count and while muted.
     fn show(&mut self, counting: bool) -> Option<Vec2> {
         let value = dead_zone(self.read);
         self.muted &= value != Vec2::ZERO;
@@ -248,9 +242,9 @@ impl Control {
     }
 }
 
-/// A reading through the dead zone, which is round, so that a stick near an axis doesn't snap onto
-/// it, and scaled, so that it goes from exactly 0 at its edge to 1 at `FULL`, and stops there. A
-/// trigger's travel is across, and a button's 0 or 1 stays as it is.
+/// A reading through the dead zone: round, so a stick near an axis doesn't snap onto it, and
+/// scaled from exactly 0 at its edge to 1 at `FULL`, where it stops. A trigger's travel is across;
+/// a button's 0 or 1 is unchanged.
 fn dead_zone(read: Vec2) -> Vec2 {
     let length = read.length();
     if length <= DEAD_ZONE {
@@ -283,7 +277,7 @@ impl Pads {
             Reading::Trigger(pad, trigger, value) => {
                 self.controls(pad).triggers[trigger as usize].read.x = value;
             }
-            // gilrs starts a pad connected again afresh, even one it had.
+            // gilrs starts a reconnected pad afresh, even one it had.
             Reading::Connected(pad) | Reading::Disconnected(pad) => {
                 self.let_go(pad, emit);
                 *self.controls(pad) = Controls::default();
@@ -291,9 +285,9 @@ impl Pads {
         }
     }
 
-    /// Ends a poll at `now`: gives the layers each stick and trigger that moved since they last saw
-    /// it, at its last reading, once what the pads do counts. As it starts to count, what's away
-    /// from rest is muted, and counts once it has rested, as a key counts from its next press.
+    /// Ends a poll at `now`: emits each stick and trigger that moved since last seen, at its last
+    /// reading, once input counts. As counting starts, what's away from rest is muted until it has
+    /// rested, as a key counts from its next press.
     fn moved(&mut self, now: Instant, emit: &mut impl FnMut(Event<'static>)) {
         if !self.counting && self.counts_from.is_some_and(|from| now >= from) {
             self.counting = true;
@@ -332,7 +326,7 @@ impl Pads {
         }
     }
 
-    /// Lets go of whatever the layers saw of `pad` away from rest.
+    /// Lets go of what of `pad` the layers saw away from rest.
     fn let_go(&mut self, pad: Pad, emit: &mut impl FnMut(Event<'static>)) {
         let Some(controls) = self.pads.get_mut(pad.0) else {
             return;
@@ -369,9 +363,9 @@ impl Pads {
         }
     }
 
-    /// Losing focus lets go of everything, and nothing counts until `SETTLE` after it's gained
-    /// again, at `now`; meanwhile what the pads did out of focus, which gilrs may still hold, and
-    /// what they do just after, read and count for nothing.
+    /// Losing focus lets go of everything. Nothing counts until `SETTLE` after focus returns, at
+    /// `now`: what the pads did out of focus (which gilrs may still hold) and just after is
+    /// ignored.
     fn focus(&mut self, focused: bool, now: Instant, emit: &mut impl FnMut(Event<'static>)) {
         if focused {
             self.counts_from.get_or_insert(now + SETTLE);
@@ -384,8 +378,8 @@ impl Pads {
         }
     }
 
-    /// For the main window restored from being minimized, at `now`, after frames that didn't poll
-    /// the pads: what they did meanwhile counts for nothing, as though out of focus.
+    /// The main window was restored at `now` after unpolled frames: what the pads did meanwhile is
+    /// ignored, as out of focus.
     fn restored(&mut self, now: Instant, emit: &mut impl FnMut(Event<'static>)) {
         if self.counts_from.is_some() {
             self.focus(false, now, emit);
@@ -393,7 +387,6 @@ impl Pads {
         }
     }
 
-    /// `pad`'s controls, which it has from its first reading.
     fn controls(&mut self, pad: Pad) -> &mut Controls {
         if self.pads.len() <= pad.0 {
             self.pads.resize_with(pad.0 + 1, Controls::default);
@@ -414,7 +407,6 @@ mod tests {
         (read - value).length() < 1e-6
     }
 
-    /// Pads in focus since `t`.
     fn pads(t: Instant) -> Pads {
         Pads {
             counts_from: Some(t),
@@ -423,7 +415,6 @@ mod tests {
         }
     }
 
-    /// The events `readings` give, read in one poll that ends at `at`.
     fn poll(pads: &mut Pads, at: Instant, readings: &[Reading]) -> Vec<Event<'static>> {
         let mut events = Vec::new();
         let mut emit = |event| events.push(event);
@@ -457,7 +448,7 @@ mod tests {
         // Round: (0.07, 0.07) is less than 0.1 from rest.
         assert_eq!(dead_zone(Vec2::new(0.07, 0.07)), Vec2::ZERO);
         assert_eq!(dead_zone(Vec2::new(0.0, -DEAD_ZONE)), Vec2::ZERO);
-        // A quarter and half of the way from its edge to all the way, along an axis or across.
+        // Scaled from edge to full, along an axis or across.
         assert!(near(dead_zone(Vec2::new(0.0, 0.3)), Vec2::new(0.0, 0.25)));
         assert!(near(dead_zone(Vec2::new(0.3, -0.4)), Vec2::new(0.3, -0.4)));
         for full in [Vec2::new(0.0, FULL), Vec2::new(-0.95, 0.0)] {
@@ -499,7 +490,7 @@ mod tests {
                 stick(A, Stick::Right, Vec2::NEG_Y),
             ]
         );
-        // What hasn't moved, or moves only within the dead zone, gives nothing.
+        // What hasn't moved, or moves within the dead zone, gives nothing.
         let still = [
             Reading::Button(A, PadButton::South, true),
             Reading::Stick(A, Stick::Right, 1, -1.0),
@@ -517,7 +508,7 @@ mod tests {
             Reading::Button(A, PadButton::South, true),
         ];
         poll(&mut pads, t, &held);
-        // Losing focus lets go, before the layers hear of it.
+        // Losing focus lets go.
         assert_eq!(
             focus(&mut pads, false, t),
             [
@@ -532,20 +523,20 @@ mod tests {
             Reading::Stick(A, Stick::Left, 0, 0.5),
         ];
         assert_eq!(poll(&mut pads, t, &away), NONE);
-        // Just after focus comes back nothing counts either, as gilrs reads the pads again: a frame
-        // polls before it has, then West, pressed while away, is read.
+        // Nothing counts just after focus returns either: a frame polls before gilrs rereads
+        // the pads, then West, pressed while away, is read.
         let back = t + Duration::from_secs(1);
         assert_eq!(focus(&mut pads, true, back), NONE);
         assert_eq!(poll(&mut pads, back, &[]), NONE);
         let late = [Reading::Button(A, PadButton::West, true)];
         assert_eq!(poll(&mut pads, back + SETTLE / 2, &late), NONE);
-        // Then what's away from rest stays muted while it's held, and as it moves.
+        // What's away from rest stays muted while held and moving.
         let moving = [
             Reading::Stick(A, Stick::Left, 0, 0.8),
             Reading::Button(A, PadButton::East, false),
         ];
         assert_eq!(poll(&mut pads, back + SETTLE, &moving), NONE);
-        // Back at rest, and away again: seen.
+        // Back at rest and away again: seen.
         let again = [
             Reading::Stick(A, Stick::Left, 0, 0.0),
             Reading::Button(A, PadButton::South, false),
@@ -572,7 +563,7 @@ mod tests {
         let mut let_go = Vec::new();
         pads.restored(t, &mut |event| let_go.push(event));
         assert_eq!(let_go, [button(A, PadButton::South, false)]);
-        // What the frames that didn't poll would have read, and what's held as it's read.
+        // What the unpolled frames would have read.
         let meanwhile = [
             Reading::Button(A, PadButton::South, false),
             Reading::Button(A, PadButton::North, true),
@@ -608,7 +599,7 @@ mod tests {
             },
         ];
         assert_eq!(poll(&mut pads, t, &[Reading::Disconnected(A)]), let_go);
-        // Back, and held again, and connected again over it, as gilrs restarts a pad it had.
+        // Back and held again, then connected again over it, as gilrs restarts a known pad.
         poll(&mut pads, t, &[Reading::Connected(A)]);
         poll(&mut pads, t, &held[..2]);
         assert_eq!(poll(&mut pads, t, &[Reading::Connected(A)]), let_go);

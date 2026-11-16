@@ -1,6 +1,6 @@
-//! How long frames take: the engine's own measure of every frame, which [`PerfPanel`] shows in
-//! development builds and each run that doesn't end in an error sums up as it ends, in its
-//! `engine.perf` event. It's always on, and costs a few reads of the clock a frame.
+//! The engine's own frame timing. [`PerfPanel`] shows it in development builds, and each run that
+//! doesn't end in an error sums it up in its `engine.perf` event. Always on: a few clock reads a
+//! frame.
 
 use std::time::Duration;
 
@@ -11,61 +11,55 @@ use crate::render_thread::Rendered;
 #[cfg(feature = "dev")]
 use crate::{Context, Ui};
 
-/// How many frames the percentiles cover: the last 16,384, 68 s at 240 fps, while means and
-/// maxima cover the whole run. They take 1,280 KiB, from the first frame measured.
+/// Frames the percentiles cover: the last 16,384, 68 s at 240 fps. Means and maxima cover the
+/// whole run. They take 1,280 KiB, from the first frame measured.
 const KEPT: usize = 16_384;
 
-/// How many frames the Performance panel's graph shows at the fewest, given a pixel for each: its
-/// bars are as many whole pixels wide as leave room for that many, and more frames fill the rest.
+/// The fewest frames the graph shows, at a pixel each: bars are as many whole pixels wide as still
+/// leave room for that many.
 #[cfg(feature = "dev")]
 const GRAPHED: usize = 240;
 
-/// One frame, in nanoseconds: its time on the main thread, from its start to the next frame's, and
-/// the parts of it; and the render it took back, the frame before's, which ran beside it on the
-/// render thread.
+/// One frame in nanoseconds: its main-thread time, from its start to the next frame's, in parts,
+/// and the render it took back (the frame before's), which ran beside it on the render thread.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Sample {
     pub(crate) frame: u64,
-    /// The simulation's ticks, each with the copy of the world drawing takes as it starts.
+    /// Ticks, each with the world copy drawing takes.
     pub(crate) ticks: u64,
-    /// The layers' updates, and drawing the world, between its ticks.
+    /// Layer updates and drawing the world, between ticks.
     pub(crate) update: u64,
-    /// The UI: the layers' and egui's, and tessellating it.
+    /// Layers' and egui's UI, with tessellation.
     pub(crate) ui: u64,
     /// Waiting for the render thread to finish the frame before.
     pub(crate) handoff: u64,
-    /// Waiting, as it ended, for the next frame to be due under the frame-rate cap, as
-    /// [`Context::set_max_fps`](crate::Context::set_max_fps) says.
+    /// Waiting for the next frame to be due under
+    /// [`Context::set_max_fps`](crate::Context::set_max_fps).
     pub(crate) limit: u64,
-    /// Rendering the frame before, with its submission and present, but not its waits.
+    /// Rendering the frame before, with submission and present, without its waits.
     pub(crate) render: u64,
-    /// Its waits: for the GPU to finish an earlier frame, and for the display to let go of an
-    /// image.
+    /// The render's waits for the GPU and for the display to release an image.
     pub(crate) wait: u64,
-    /// Of the render, copying the game's view into the memory of the client it's published to.
+    /// Of the render, copying the game's view to the client it's published to.
     pub(crate) publish: u64,
-    /// The time on the GPU of the frame whose timestamps that render read, two before it, from
-    /// its first pass's beginning to its last's end; 0 where none came back.
+    /// GPU time, first pass's start to last's end, of the frame two before; 0 where none came back.
     pub(crate) gpu: u64,
     /// Instanced draws in the game's view.
     pub(crate) draws: u64,
-    /// The meshes they drew.
     pub(crate) instances: u64,
-    /// Those meshes' triangles.
     pub(crate) triangles: u64,
 }
 
 impl Sample {
-    /// The rest of the frame but its wait for the cap: what happens between frames, such as making
-    /// the swapchains of torn-off windows and tessellating their UI, polling the gamepads, and the
-    /// OS's events.
+    /// The frame minus its wait for the cap: what happens between frames (torn-off windows,
+    /// gamepad polling, OS events).
     #[cfg(any(feature = "dev", test))]
     pub(crate) fn other(&self) -> u64 {
         let parts = self.ticks + self.update + self.ui + self.handoff + self.limit;
         self.frame.saturating_sub(parts)
     }
 
-    /// Sets each field to `f` of it and `other`'s.
+    /// Sets each field to `f` of its and `other`'s.
     fn merge(&mut self, other: &Sample, f: impl Fn(u64, u64) -> u64) {
         self.frame = f(self.frame, other.frame);
         self.ticks = f(self.ticks, other.ticks);
@@ -83,11 +77,10 @@ impl Sample {
     }
 }
 
-/// The frames of a run so far. The main loop tells it when each frame starts and how its parts
-/// went; a frame is measured once the next one starts, or the run ends, with the render it took
-/// back. A frame that took none back, as the first doesn't, isn't measured; and the first that did
-/// isn't measured with the rest, since that render made the pipelines and copied the first meshes
-/// and textures to the GPU, which it waited for.
+/// A run's frames so far. The main loop reports each frame's start and parts; a frame is measured
+/// once the next starts or the run ends, with the render it took back. A frame that took none back
+/// (the first) isn't measured. The first that did is kept apart, since its render made the
+/// pipelines and uploaded the first meshes and textures.
 #[derive(Default)]
 pub(crate) struct Perf {
     /// The frames measured, the oldest overwritten once there are `KEPT`.
@@ -106,15 +99,14 @@ pub(crate) struct Perf {
 }
 
 impl Perf {
-    /// A frame starts, `dt` after the last one did, which is then measured. A zero `dt`, the
-    /// first frame's or the first's after a pause, drops the last frame instead, since its time
-    /// would count the pause.
+    /// A frame starts `dt` after the last, which is then measured. A zero `dt` (the first frame's,
+    /// or the first after a pause) drops the last frame instead: its time would count the pause.
     pub(crate) fn start_frame(&mut self, dt: Duration) {
         self.end(dt);
         self.pending = Some(Sample::default());
     }
 
-    /// The frame's ticks took `ticks`, its updates and drawing its world `update`, and its UI `ui`.
+    /// Records the frame's ticks, update and UI times.
     pub(crate) fn ran(&mut self, ticks: Duration, update: Duration, ui: Duration) {
         if let Some(sample) = &mut self.pending {
             sample.ticks = nanos(ticks);
@@ -123,9 +115,8 @@ impl Perf {
         }
     }
 
-    /// The frame tessellated its UI in `tessellate`, then waited `handoff` for the render thread to
-    /// finish the frame before, which went as `rendered` says. A frame that took no render back,
-    /// or whose render presented nothing or failed, isn't measured.
+    /// Records tessellation, the wait `handoff` for the render thread, and that render. A frame
+    /// with no render back, or one that presented nothing or failed, isn't measured.
     pub(crate) fn rendered(
         &mut self,
         tessellate: Duration,
@@ -150,19 +141,19 @@ impl Perf {
         }
     }
 
-    /// The frame under way waited `limit`, as it ended, for the next to be due under the cap.
+    /// Records the wait for the cap.
     pub(crate) fn limited(&mut self, limit: Duration) {
         if let Some(sample) = &mut self.pending {
             sample.limit = nanos(limit);
         }
     }
 
-    /// The run ends, `last` after the last frame started, which is then measured.
+    /// The run ends `last` after the last frame started, which is measured.
     pub(crate) fn finish(&mut self, last: Duration) {
         self.end(last);
     }
 
-    /// Measures the frame under way, which took `time`, unless that's zero.
+    /// Measures the frame under way, which took `time`, unless zero.
     fn end(&mut self, time: Duration) {
         let Some(mut sample) = self.pending.take() else {
             return;
@@ -188,20 +179,20 @@ impl Perf {
         self.max.merge(&sample, u64::max);
     }
 
-    /// The frames kept, newest first.
+    /// Kept frames, newest first.
     #[cfg(any(feature = "dev", test))]
     pub(crate) fn recent(&self) -> impl Iterator<Item = &Sample> {
         let (newer, older) = self.kept.split_at(self.next);
         newer.iter().rev().chain(older.iter().rev())
     }
 
-    /// The run's frames summed up, in milliseconds.
+    /// The run summed up, in milliseconds.
     pub(crate) fn summary(&self) -> Summary {
         let stats = |field: fn(&Sample) -> u64| {
             let kept = self.kept.iter().map(field).collect();
             Stats::of(kept, field(&self.sum), self.measured, field(&self.max))
         };
-        // Of the frames whose GPU time came back alone.
+        // Frames with GPU time only.
         let gpu = {
             let kept = self.kept.iter().map(|s| s.gpu).filter(|&gpu| gpu > 0);
             Stats::of(
@@ -232,13 +223,13 @@ impl Perf {
     }
 }
 
-/// A run's frames summed up, in milliseconds, which its `engine.perf` event logs; `None` where no
-/// frame was measured.
+/// A run summed up in milliseconds, as its `engine.perf` event logs it; `None` where no frame was
+/// measured.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Summary {
-    /// The frames measured, which the means and maxima cover.
+    /// The frames measured: what means and maxima cover.
     pub(crate) measured: u64,
-    /// The frames the percentiles cover: the last of those measured, up to `KEPT`.
+    /// What percentiles cover: the last of those, up to `KEPT`.
     pub(crate) percentile_frames: usize,
     pub(crate) first_frame: Option<f64>,
     pub(crate) frame: Stats,
@@ -250,7 +241,7 @@ pub(crate) struct Summary {
     pub(crate) render: Stats,
     pub(crate) wait: Stats,
     pub(crate) publish: Stats,
-    /// Of the frames whose GPU time came back, which the percentiles, mean and maximum cover.
+    /// Over the frames whose GPU time came back alone.
     pub(crate) gpu: Stats,
     pub(crate) draws_max: u64,
     pub(crate) instances_max: u64,
@@ -268,8 +259,8 @@ pub(crate) struct Stats {
 }
 
 impl Stats {
-    /// The percentiles of `kept`, nanoseconds of the frames kept, and the mean of `count` frames
-    /// that took `sum` in all, the longest `max`; none of them if no frame was measured.
+    /// Percentiles of `kept` (nanoseconds), and the mean of `count` frames totaling `sum`, longest
+    /// `max`. All `None` if no frame was measured.
     fn of(mut kept: Vec<u64>, sum: u64, count: u64, max: u64) -> Self {
         if count == 0 || kept.is_empty() {
             return Self::default();
@@ -299,10 +290,9 @@ fn nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// The Performance panel, which an app adds as an overlay, `.overlay(gg_engine::PerfPanel)`: the
-/// last second's frame time and rate, a graph of the last frames split into their parts, and
-/// where the last second's time went, as the engine measures them. In a build without `dev`, which
-/// has no UI, it's a layer that does nothing.
+/// The Performance panel: `.overlay(gg_engine::PerfPanel)`. Shows the last second's frame time
+/// and rate, a graph of recent frames by part, and where the second went. Does nothing without
+/// `dev` (no UI).
 pub struct PerfPanel;
 
 #[cfg(feature = "dev")]
@@ -319,13 +309,12 @@ impl Layer for PerfPanel {
 #[cfg(not(feature = "dev"))]
 impl Layer for PerfPanel {}
 
-/// How a part of a frame's time is read from its sample.
+/// Reads a part's time from a sample.
 #[cfg(feature = "dev")]
 type Time = fn(&Sample) -> u64;
 
-/// A part of a frame the panel shows: its name, short, so that the times beside it fit a narrow
-/// panel, what it is, which its name's tooltip says, how it's read from a sample, and its color in
-/// the graph, on a light background and on a dark one.
+/// A part of a frame the panel shows: short name (times beside it must fit a narrow panel),
+/// tooltip, reading, and graph color on light and dark backgrounds.
 #[cfg(feature = "dev")]
 struct Part {
     name: &'static str,
@@ -346,11 +335,10 @@ impl Part {
     }
 }
 
-/// The parts of a frame on the main thread, as the graph stacks them from the bottom: the work,
-/// then the wait, in gray, while the main thread idles. Each color stays apart from its neighbors'
-/// for the common color blindnesses, protanopia and deuteranopia, on egui's light and dark
-/// backgrounds, which puts the UI between the ticks and the updates: UI's orange beside Other's
-/// amber isn't. A new one needs checking for that again.
+/// The main thread's parts, stacked from the bottom: work, then the wait in gray. Neighbors'
+/// colors stay distinct under protanopia and deuteranopia on egui's light and dark backgrounds,
+/// hence UI between Ticks and Update (UI's orange beside Other's amber isn't). Recheck on adding
+/// a part.
 #[cfg(feature = "dev")]
 const PARTS: [Part; 5] = [
     Part {
@@ -390,9 +378,8 @@ const PARTS: [Part; 5] = [
     },
 ];
 
-/// What the render thread spent on the frame before each frame, beside it, and the GPU on a frame
-/// two before that, each with its name and what it is: the panel lists them, but the graph
-/// doesn't stack them on the main thread's parts, which they overlap.
+/// The render thread's time on the frame before and the GPU's on the frame two before. The panel
+/// lists them; the graph doesn't stack them, as they overlap the main thread's parts.
 #[cfg(feature = "dev")]
 const RENDERING: [(&str, &str, Time); 3] = [
     (
@@ -412,16 +399,13 @@ const RENDERING: [(&str, &str, Time); 3] = [
     ),
 ];
 
-/// What the frame's row is, which its name's tooltip says.
 #[cfg(feature = "dev")]
 const FRAME_TIP: &str = "The whole frame on the main thread, from its start to the next's";
 
-/// What the cap's row is, which its name's tooltip says.
 #[cfg(feature = "dev")]
 const LIMIT_TIP: &str = "The main thread waiting for the next frame to be due under the frame rate limit, which the \
      graph leaves empty";
 
-/// The sum and the maximum of some times.
 #[cfg(feature = "dev")]
 #[derive(Clone, Copy, Default)]
 struct Total {
@@ -443,8 +427,8 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
         ui.label("No frames measured yet");
         return;
     };
-    // The text covers the last second, which reads steadier than the last frame at high frame
-    // rates; the graph shows each frame.
+    // The text covers the last second, steadier than the last frame at high rates; the graph
+    // shows each frame.
     let mut frames = 0;
     let mut frame = Total::default();
     let mut parts = [Total::default(); PARTS.len()];
@@ -501,18 +485,17 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
         });
 }
 
-/// The last frames' times as bars, newest at the right, each split into its parts and scaled to
-/// twice their mean, so that one long frame doesn't flatten the rest; longer frames are cut off,
-/// under a line in the text's color. A frame's wait for the cap is left empty above its bar. While
-/// the pointer is over the graph, the graph holds still, and shows the parts of the frame under
-/// the pointer.
+/// Recent frames as bars, newest right, split into parts and scaled to twice their mean so one
+/// long frame doesn't flatten the rest; longer ones are cut off under a text-colored line. The
+/// wait for the cap is left empty above a bar. Hovering holds the graph still and shows the
+/// hovered frame's parts.
 #[cfg(feature = "dev")]
 fn graph(perf: &Perf, ui: &mut egui::Ui) {
     let size = egui::vec2(ui.available_width(), 64.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let bars = Bars::new(rect, ui.pixels_per_point());
-    // The frames measured since the pointer came over the graph, which it skips to hold the ones it
-    // showed then, until the ring would overwrite them: 68 s at 240 fps.
+    // Frames measured since the pointer came over: skipped, to hold the ones shown then, until
+    // the ring would overwrite them (68 s at 240 fps).
     let held = if response.hovered() {
         ui.data_mut(|data| {
             let since = data.get_temp_mut_or_insert_with(response.id, || perf.measured);
@@ -534,7 +517,7 @@ fn graph(perf: &Perf, ui: &mut egui::Ui) {
     });
     // At least a millisecond high.
     let top = (2.0 * sum / count).max(1e6);
-    // One mesh, which egui doesn't anti-alias: that would blur bars this thin into one another.
+    // One mesh, which egui doesn't anti-alias: that would blur thin bars together.
     let mut mesh = egui::Mesh::default();
     for (i, sample) in frames().enumerate() {
         let mut bottom = rect.bottom();
@@ -569,7 +552,7 @@ fn graph(perf: &Perf, ui: &mut egui::Ui) {
     if let Some(i) = response.hover_pos().and_then(|pointer| bars.at(pointer.x))
         && let Some(sample) = frames().nth(i)
     {
-        // Around the bar, so on the panel's painter, which the graph's edges don't clip.
+        // Drawn on the panel's painter: the graph's clip would cut the outline.
         let hovered = egui::Rect::from_x_y_ranges(bars.across(i), rect.y_range());
         let stroke = (1.0, visuals.strong_text_color());
         ui.painter()
@@ -578,15 +561,14 @@ fn graph(perf: &Perf, ui: &mut egui::Ui) {
     }
 }
 
-/// Where the graph's bars go: each a whole number of pixels wide, and at least one, since without
-/// anti-aliasing, a bar between pixels would change width as it scrolls, or not show at all.
+/// The graph's bars, each at least one whole pixel wide: unanti-aliased, a bar between pixels
+/// would change width as it scrolls, or vanish.
 #[cfg(feature = "dev")]
 struct Bars {
     /// The newest bar's right edge, in points.
     right: f32,
-    /// Each bar's width, in points.
+    /// Bar width, in points.
     width: f32,
-    /// How many fit.
     count: usize,
 }
 
@@ -602,21 +584,19 @@ impl Bars {
         }
     }
 
-    /// Where the `i`th newest frame's bar is across.
+    /// The `i`th newest bar's x range.
     fn across(&self, i: usize) -> std::ops::RangeInclusive<f32> {
         let right = self.right - i as f32 * self.width;
         right - self.width..=right
     }
 
-    /// Which bar is at `x` across, as how many newer ones there are, if any.
+    /// The bar at `x`, as its count of newer ones.
     fn at(&self, x: f32) -> Option<usize> {
         let i = ((self.right - x) / self.width).floor();
         (0.0..self.count as f32).contains(&i).then_some(i as usize)
     }
 }
 
-/// A frame's instanced draws, the meshes they drew and those meshes' triangles, as the panel shows
-/// them.
 #[cfg(feature = "dev")]
 fn draws_text(sample: &Sample) -> String {
     let Sample {
@@ -628,7 +608,6 @@ fn draws_text(sample: &Sample) -> String {
     format!("{draws} draws of {instances} instances, {triangles} triangles")
 }
 
-/// One frame's time, its parts', the render thread's and its draws, for the graph's tooltip.
 #[cfg(feature = "dev")]
 fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
     egui::Grid::new("performance frame").show(ui, |ui| {
@@ -652,9 +631,8 @@ fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
     ui.label(draws_text(sample));
 }
 
-/// A row's first two cells: a square of `color`, its part's in the graph, and its name, whose
-/// label it returns; a row the graph doesn't stack, such as the frame's, the parts summed up, has
-/// no square.
+/// A row's first two cells: a `color` square (none for rows the graph doesn't stack) and the name,
+/// whose label it returns.
 #[cfg(feature = "dev")]
 fn row_name(ui: &mut egui::Ui, color: Option<egui::Color32>, name: &str) -> egui::Response {
     if let Some(color) = color {
@@ -666,9 +644,8 @@ fn row_name(ui: &mut egui::Ui, color: Option<egui::Color32>, name: &str) -> egui
     ui.label(name)
 }
 
-/// `nanos` in milliseconds, to the microsecond, as the panel shows it: after a figure space for
-/// each of the three digits before the point that it hasn't, each as wide as a digit, so that a
-/// column of times lines up at the point, and holds still as they change.
+/// `nanos` in milliseconds to the microsecond, padded with figure spaces (digit-wide) for the
+/// missing digits before the point, so a column lines up at the point and holds still.
 #[cfg(feature = "dev")]
 fn millis_text(nanos: f64) -> String {
     format!("{:\u{2007}>7.3} ms", nanos / 1e6)
@@ -682,8 +659,7 @@ mod tests {
 
     const MS: Duration = Duration::from_millis(1);
 
-    /// A render of the frame before, which took `render`, `wait` of it waiting, drew `drawn`, and
-    /// `presented` or not.
+    /// A render of `render`, `wait` of it waiting.
     fn rendered(render: Duration, wait: Duration, drawn: DrawCounts, presented: bool) -> Rendered {
         Rendered {
             presented: Ok(presented),
@@ -695,8 +671,7 @@ mod tests {
         }
     }
 
-    /// Runs frames of `times` milliseconds each, with nothing in them, each taking back a render
-    /// that presented, then ends the run.
+    /// Runs empty presented frames of `times` milliseconds, then ends.
     fn run(times: &[u64]) -> Perf {
         let mut perf = Perf::default();
         let mut dt = Duration::ZERO;
@@ -726,7 +701,6 @@ mod tests {
         assert_eq!(frame.mean, Some(50.5));
     }
 
-    /// `first`, then `rest`.
     fn iter_first(first: u64, rest: impl IntoIterator<Item = u64>) -> Vec<u64> {
         std::iter::once(first).chain(rest).collect()
     }
@@ -760,13 +734,13 @@ mod tests {
             let render = rendered(MS, Duration::ZERO, drew, presented);
             perf.rendered(Duration::ZERO, Duration::ZERO, Some(&render));
         };
-        // The first frame takes no render back, so the next is the first measured.
+        // The first frame has no render, so the next is the first measured.
         perf.start_frame(Duration::ZERO);
         perf.rendered(Duration::ZERO, Duration::ZERO, None);
         perf.start_frame(5 * MS);
         present(&mut perf, true);
         perf.start_frame(10 * MS);
-        // Then a pause: the window is restored, and the frame before it is dropped.
+        // A pause (window restored) drops the frame before it.
         present(&mut perf, true);
         perf.start_frame(Duration::ZERO);
         // A frame whose render presented nothing.
@@ -796,7 +770,7 @@ mod tests {
         };
         perf.rendered(MS, 5 * MS, Some(&rendered(10 * MS, 4 * MS, drew, true)));
         perf.start_frame(30 * MS);
-        // Waits outlasting the render they're in round down to no rendering.
+        // Waits outlasting their render leave no rendering.
         let waits = rendered(MS, 4 * MS, none, true);
         perf.rendered(Duration::ZERO, Duration::ZERO, Some(&waits));
         perf.finish(5 * MS);
@@ -827,7 +801,7 @@ mod tests {
                 },
             ]
         );
-        // The render thread's parts ran beside the main thread's.
+        // Render parts overlap the main thread's, so `other` ignores them.
         assert_eq!(newest[1].other(), ms(18));
         let summary = perf.summary();
         let maxima = (summary.draws_max, summary.instances_max);
@@ -843,7 +817,6 @@ mod tests {
         perf.start_frame(MS);
         perf.ran(MS, MS, MS);
         perf.rendered(Duration::ZERO, MS, Some(&presented));
-        // As the frame ends, before the next starts.
         perf.limited(12 * MS);
         perf.start_frame(17 * MS);
         perf.finish(MS);
@@ -854,7 +827,7 @@ mod tests {
         assert_eq!(perf.summary().limit.max, Some(12.0));
     }
 
-    /// The GPU's times are of the frames whose times came back alone, as the first frames' don't.
+    /// GPU times cover only the frames they came back for; the first frames' don't.
     #[test]
     fn gpu_times_cover_the_frames_they_came_back_for() {
         let mut perf = Perf::default();
@@ -875,7 +848,7 @@ mod tests {
         }
         perf.finish(MS);
         let summary = perf.summary();
-        // The first frame isn't measured; of the four that are, two had GPU times come back.
+        // Of four measured, two had GPU times.
         assert_eq!(summary.measured, 4);
         let gpu = summary.gpu;
         assert_eq!(
@@ -887,7 +860,7 @@ mod tests {
 
     #[test]
     fn percentiles_cover_the_last_frames_kept_and_the_rest_the_whole_run() {
-        // Ten long frames, then enough short ones to push them out.
+        // Ten long frames, then enough short ones to push them out of the percentiles.
         let times = iter_first(
             1,
             [1000; 10].into_iter().chain(std::iter::repeat_n(1, KEPT)),
@@ -906,7 +879,7 @@ mod tests {
     #[test]
     fn bars_are_whole_pixels_and_fill_the_graph() {
         let whole = |points: f32, ppp: f32| (points * ppp - (points * ppp).round()).abs() < 1e-3;
-        // Fewer pixels than frames, at 1.25 pixels a point, and room for bars two pixels wide.
+        // Fewer pixels than frames; 1.25 pixels a point; room for two-pixel bars.
         for (width, ppp) in [(100.0, 1.0), (300.0, 1.25), (575.0, 1.0)] {
             let rect = egui::Rect::from_min_size(egui::pos2(10.3, 0.0), egui::vec2(width, 64.0));
             let bars = Bars::new(rect, ppp);
@@ -927,8 +900,8 @@ mod tests {
     #[cfg(feature = "dev")]
     #[test]
     fn hovering_over_a_bar_holds_the_graph_and_shows_its_frame() {
-        // Twenty frames measured, the sixth newest with 42 draws of 4,200 instances of 2 triangles
-        // and the rest with one of 100.
+        // Twenty frames: the sixth newest has 42 draws of 4,200 instances, the rest one draw of
+        // 100.
         let mut perf = Perf::default();
         let frame = |perf: &mut Perf, draws| {
             let drew = DrawCounts {
@@ -950,8 +923,8 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
         let mut graph: Option<egui::Rect> = None;
         let mut texts = Vec::new();
-        // A pass to lay the panel out, then the pointer over the sixth newest bar, and passes past
-        // egui's tooltip delay, each a frame later.
+        // A layout pass, the pointer over the sixth newest bar, then passes past egui's tooltip
+        // delay.
         for pass in 0..4 {
             let mut events = Vec::new();
             if let (1, Some(rect)) = (pass, graph) {
@@ -981,7 +954,7 @@ mod tests {
     #[cfg(feature = "dev")]
     #[test]
     fn the_top_line_averages_the_last_second() {
-        // 2 ms frames, then a 12 ms one: the last second is the newest 495 frames, 1,000 ms.
+        // 2 ms frames then a 12 ms one: the last second is the newest 495 frames.
         let times = iter_first(1, std::iter::repeat_n(2, 1000).chain([12]));
         let perf = run(&times);
         let ctx = crate::egui_context();
@@ -999,15 +972,13 @@ mod tests {
         // Not the last frame's 12.00 ms, nor the whole run's 2.01.
         let line = "2.02 ms a frame, 495 fps, 0 draws of 0 instances, 0 triangles";
         assert!(texts.iter().any(|text| text == line), "{texts:?}");
-        // The frames' mean and their most below, each with figure spaces for the digits before
-        // the point it hasn't, which line them up at the point.
+        // The mean and the maximum, padded with figure spaces to line up at the point.
         for time in ["\u{2007}\u{2007}2.020 ms", "\u{2007}12.000 ms"] {
             assert!(texts.iter().any(|text| text == time), "{time}: {texts:?}");
         }
     }
 
-    /// Finds in `shapes`, a pass's output, the graph, the one shape filled in `background`, and the
-    /// texts.
+    /// Finds the graph (the one shape filled in `background`) and the texts in a pass's `shapes`.
     #[cfg(feature = "dev")]
     fn find(
         shapes: &[egui::epaint::ClippedShape],

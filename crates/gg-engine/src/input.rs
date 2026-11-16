@@ -2,16 +2,15 @@
 
 use crate::{Event, Key, MouseButton};
 
-/// What's held down and where the cursor is, as of the last event the layers were sent.
+/// What's held and where the cursor is, as of the last event the layers were sent.
 ///
-/// It follows those events, so a press the UI kept doesn't count, and a key pressed and released
-/// between two frames never shows as held: layers that need every press take them from events.
-/// Losing focus lets go of everything, since not every platform reports the releases that happen
-/// while the window is out of focus; a key already down as the window regains focus counts from its
-/// next press, or from its first repeat.
+/// It follows those events: a press the UI kept doesn't count, and a key pressed and released
+/// between two frames never shows as held. Layers needing every press take them from events.
+/// Losing focus lets go of everything, since not every platform reports releases while
+/// unfocused. A key already down as focus returns counts from its next press or first repeat.
 #[derive(Debug, Default)]
 pub struct Input {
-    /// Lists rather than sets, since few keys and buttons are held at once.
+    /// Lists, not sets: few are held at once.
     keys: Vec<Key>,
     buttons: Vec<MouseButton>,
     cursor: Option<[f64; 2]>,
@@ -23,8 +22,8 @@ impl Input {
         self.keys.contains(&key)
     }
 
-    /// Whether the key that shortcuts such as copy and paste hold is down: Cmd on macOS, either
-    /// [`Key::SuperLeft`] or [`Key::SuperRight`], and Ctrl elsewhere.
+    /// Whether the shortcut modifier (copy, paste) is down: Cmd on macOS ([`Key::SuperLeft`] or
+    /// [`Key::SuperRight`]), Ctrl elsewhere.
     pub fn command_down(&self) -> bool {
         let [left, right] = if cfg!(target_os = "macos") {
             [Key::SuperLeft, Key::SuperRight]
@@ -39,9 +38,8 @@ impl Input {
         self.buttons.contains(&button)
     }
 
-    /// Where the cursor is, in physical pixels from the window's top left; `None` while it's
-    /// outside the window, and in headless runs. A drag that leaves the window can go on
-    /// reporting the cursor beyond its edges.
+    /// The cursor in physical pixels from the window's top left; `None` outside the window and in
+    /// headless runs. A drag leaving the window can keep reporting it beyond the edges.
     pub fn cursor(&self) -> Option<[f64; 2]> {
         self.cursor
     }
@@ -61,8 +59,8 @@ impl Input {
     }
 }
 
-/// Adds `item` to `held` when it's pressed and removes it when it's released. A held key's
-/// repeats are presses too, and a release can come without its press.
+/// Adds `item` to `held` on press, removes it on release. A held key's repeats are presses; a
+/// release can come without its press.
 fn hold<T: PartialEq>(held: &mut Vec<T>, item: T, pressed: bool) {
     let at = held.iter().position(|held| *held == item);
     match (pressed, at) {

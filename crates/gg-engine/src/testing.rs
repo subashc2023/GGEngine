@@ -1,7 +1,6 @@
-//! What tests share: the shapes a pass of egui paints, among which the UI's tests find what they
-//! drew, in development builds, which have the UI; the codes of the events logged, which tests of
-//! what warns, or logs what it did, read; and the lock that keeps tests that load cores for seconds
-//! from running beside those that pace themselves by the clock.
+//! What tests share: the shapes an egui pass paints (development builds, which have the UI), the
+//! codes of logged events, and the lock that keeps core-hungry tests from running beside
+//! clock-paced ones.
 
 use std::fmt;
 use std::sync::mpsc::Sender;
@@ -15,8 +14,7 @@ use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{self, Layer};
 
-/// The shapes `shapes`, a pass's output, paint, in the order they're painted: each shape a
-/// [`Shape::Vec`] holds in its place.
+/// The shapes a pass's `shapes` paint, in painting order, each [`Shape::Vec`] flattened in place.
 #[cfg(feature = "dev")]
 pub(crate) fn painted(shapes: &[ClippedShape]) -> Vec<&Shape> {
     fn add<'a>(shape: &'a Shape, painted: &mut Vec<&'a Shape>) {
@@ -36,22 +34,21 @@ pub(crate) fn painted(shapes: &[ClippedShape]) -> Vec<&Shape> {
     painted
 }
 
-/// What keeps a test that loads cores for seconds from running beside those that run peers, a
-/// server and its clients, or a link, which pace themselves by the clock and allow a busy machine
-/// only so much: [`real_time`] keeps it shared, [`alone`] alone. It guards no data, so a test that
-/// panicked keeping it leaves it as usable as before.
+/// Keeps core-hungry tests from running beside clock-paced ones (peers, a server and its clients,
+/// a link), which tolerate a busy machine only so far. [`real_time`] holds it shared, [`alone`]
+/// exclusive. It guards no data, so a panic while holding it leaves it usable.
 static REAL_TIME: RwLock<()> = RwLock::new(());
 
-/// Kept for its whole run by a test that runs peers, a server and its clients, or a link: such
-/// tests run beside each other and the rest, but never beside one keeping [`alone`]. Taken once, as
-/// the test starts: a second, while another test waits for [`alone`], may wait for good.
+/// Held for a whole test of peers, a server and its clients, or a link. These run beside each
+/// other and the rest, never beside [`alone`]. Take it once, at the start: a second take, while
+/// another test waits for [`alone`], may wait for good.
 pub(crate) fn real_time() -> RwLockReadGuard<'static, ()> {
     REAL_TIME.read().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Kept for its whole run by a test that loads cores for seconds, as a 3D world's physics and
-/// animation do in a debug build: it runs beside no test keeping [`real_time`], whose threads it
-/// would starve, on a hosted runner of few cores, past what they allow.
+/// Held for a whole test that loads cores for seconds (a 3D world's physics and animation in a
+/// debug build). It runs beside no [`real_time`] test: on a runner of few cores it would starve
+/// their threads.
 pub(crate) fn alone() -> RwLockWriteGuard<'static, ()> {
     REAL_TIME.write().unwrap_or_else(PoisonError::into_inner)
 }
@@ -81,19 +78,19 @@ impl Visit for Code {
     fn record_debug(&mut self, _: &Field, _: &dyn fmt::Debug) {}
 }
 
-/// The codes of the events logged on a thread while it's kept, as [`logged`] starts it: the
-/// receiver first, so that the guards drop after it, the later set first.
+/// The codes of events logged on a thread while it's held, from [`logged`]. The receiver is first
+/// so the guards drop after it, the later set first.
 pub(crate) struct Logged {
     pub(crate) codes: std::sync::mpsc::Receiver<String>,
     _codes: tracing::subscriber::DefaultGuard,
     _other: tracing::subscriber::DefaultGuard,
 }
 
-/// Has the code of each event logged on this thread go to the [`Logged`] it returns, while that's
-/// kept, whichever other tests log the same events from their threads meanwhile. Two dispatchers
-/// stay registered, so that tracing-core combines every live one's interest in a callsite another
-/// thread registers first, where with one registered it would ask that thread's alone, which has
-/// none, and keep the callsite off for good (tracing-core 0.1.36's `has_just_one`).
+/// Sends the code of each event logged on this thread to the returned [`Logged`] while it's held,
+/// whatever other tests log from their threads. Two dispatchers stay registered so tracing-core
+/// combines every live one's interest in a callsite another thread registers first. With one it
+/// would ask that thread's dispatcher alone, which has none, and keep the callsite off for good
+/// (tracing-core 0.1.36's `has_just_one`).
 pub(crate) fn logged() -> Logged {
     use tracing_subscriber::layer::SubscriberExt;
 

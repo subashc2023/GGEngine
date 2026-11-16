@@ -1,18 +1,18 @@
-//! Capabilities: what a mod's scripts and a tool API connection may do, as ARCHITECTURE.md's Game
-//! code and Agents and tools describe.
+//! Capabilities: what a mod's scripts and a tool API connection may do (ARCHITECTURE.md's Game
+//! code and Agents and tools).
 
 use std::fmt;
 use std::str::FromStr;
 
 use gg_core::{Error, Result};
 
-/// What a mod's scripts or a tool API connection may do: `read` or `write` the world, whole, or the
-/// components of one type, as `read:Shard` names it; or one of the tool API's own, by its name,
-/// `play`, `input`, `view`, `scene`, `snapshot`, `debug`, `patch`, `files`, `note` or `quit`. A mod
-/// may ask for `read` and `write` alone.
+/// What a mod's scripts or a tool API connection may do: `read` or `write` the whole world or one
+/// type's components (`read:Shard`), or one of the tool API's own: `play`, `input`, `view`,
+/// `scene`, `snapshot`, `debug`, `patch`, `files`, `note` or `quit`. A mod may ask for `read` and
+/// `write` alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Capability {
-    /// Of the world's components, those of the type it names alone, or all.
+    /// The components of the named type alone, or all.
     Read(Option<String>),
     Write(Option<String>),
     /// Plays, stops, pauses and steps.
@@ -27,9 +27,9 @@ pub enum Capability {
     Snapshot,
     /// Debugs the scripts.
     Debug,
-    /// Applies patches of the game's code, which run code the client gives.
+    /// Applies patches of the game's code, which run client-given code.
     Patch,
-    /// Writes a capture or a snapshot where a request names.
+    /// Writes a capture or snapshot where a request names.
     Files,
     /// Logs a client's notes.
     Note,
@@ -52,8 +52,8 @@ const OWN: [(&str, Capability); 10] = [
 ];
 
 impl Capability {
-    /// Whether having `self` lets one do what `other` lets: it's `other`, or `read` or `write` of
-    /// the whole world where `other` is of a type's.
+    /// Whether `self` allows all `other` does: it is `other`, or whole-world `read` or `write`
+    /// where `other` is one type's.
     pub fn covers(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Read(None), Self::Read(_)) | (Self::Write(None), Self::Write(_)) => true,
@@ -61,7 +61,7 @@ impl Capability {
         }
     }
 
-    /// Whether it's `read` or `write`, which a mod may ask for.
+    /// Whether it's `read` or `write`: all a mod may ask for.
     pub fn of_the_world(&self) -> bool {
         matches!(self, Self::Read(_) | Self::Write(_))
     }
@@ -72,8 +72,7 @@ impl FromStr for Capability {
 
     /// Reads a capability as [`Display`](fmt::Display) writes it.
     ///
-    /// Fails with `grant.unknown` for a name that's none, or a type's name after `read:` or
-    /// `write:` that's empty.
+    /// Fails with `grant.unknown` for an unknown name or an empty type after `read:`/`write:`.
     fn from_str(name: &str) -> Result<Self> {
         let unknown = || {
             let own = OWN.map(|(name, _)| name).join(", ");
@@ -114,13 +113,13 @@ impl fmt::Display for Capability {
     }
 }
 
-/// Capabilities granted, as a mod's manifest asks for them, a game grants mods at most, and a tool
-/// API connection is kept to.
+/// Capabilities granted: asked by a mod's manifest, the most a game grants mods, what a tool API
+/// connection is kept to.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Grant(Vec<Capability>);
 
 impl Grant {
-    /// Every capability: what a tool API connection has unless its `hello` names fewer.
+    /// Every capability: a tool API connection's unless its `hello` names fewer.
     pub fn all() -> Self {
         let own = OWN.map(|(_, capability)| capability);
         Self(
@@ -131,10 +130,10 @@ impl Grant {
         )
     }
 
-    /// The capabilities `names` name, as a mod's manifest and the tool API's `hello` write them,
-    /// such as `["read", "write:Sprite"]`.
+    /// The capabilities `names` name, as a mod's manifest and the tool API's `hello` write them
+    /// (`["read", "write:Sprite"]`).
     ///
-    /// Fails as a capability's name is read, with `grant.unknown`.
+    /// Fails with `grant.unknown`, as reading a capability does.
     pub fn parse<S: AsRef<str>>(names: impl IntoIterator<Item = S>) -> Result<Self> {
         let names = names.into_iter();
         names
@@ -143,17 +142,17 @@ impl Grant {
             .map(Self)
     }
 
-    /// Whether it lets one do what `capability` lets.
+    /// Whether it allows all `capability` does.
     pub fn has(&self, capability: &Capability) -> bool {
         self.0.iter().any(|granted| granted.covers(capability))
     }
 
-    /// Whether it lets one read the components of type `component`.
+    /// Whether it allows reading `component`.
     pub fn reads(&self, component: &str) -> bool {
         self.has(&Capability::Read(Some(component.to_owned())))
     }
 
-    /// Whether it lets one write them.
+    /// Whether it allows writing `component`.
     pub fn writes(&self, component: &str) -> bool {
         self.has(&Capability::Write(Some(component.to_owned())))
     }
@@ -169,7 +168,7 @@ impl Grant {
 }
 
 impl fmt::Display for Grant {
-    /// Its capabilities, between commas, as `gg --grant` takes them; `nothing` for none.
+    /// Comma-separated, as `gg --grant` takes them; `nothing` for none.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.is_empty() {
             return f.write_str("nothing");

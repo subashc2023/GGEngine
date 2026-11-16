@@ -1,18 +1,18 @@
-//! The process's memory as the OS counts it, which a run logs as it has loaded and as it ends: how
-//! much of it is resident, and the most that has been.
+//! The process's resident memory as the OS counts it, now and at its peak. A run logs it once
+//! loaded and as it ends.
 
-/// The process's resident memory, now and at its most so far, in bytes: each `None` where the OS
-/// doesn't say, as when its call fails or on an OS this reads neither on.
+/// The process's resident memory now and at its peak, in bytes. Each is `None` where the OS
+/// doesn't say: its call fails, or this OS isn't read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Resident {
     pub(crate) now: Option<u64>,
     pub(crate) peak: Option<u64>,
 }
 
-/// The process's resident memory, as [`Resident`] says: on Windows its working set and the most it
-/// has been, through `K32GetProcessMemoryInfo`; on Linux `/proc/self/status`'s `VmRSS` and
-/// `VmHWM`; on macOS `proc_pid_rusage`'s resident size and `getrusage`'s most resident. It asks the
-/// OS, so a run reads it as it has loaded and as it ends, never each frame.
+/// The process's resident memory: on Windows the working set and peak
+/// (`K32GetProcessMemoryInfo`); on Linux `/proc/self/status`'s `VmRSS` and `VmHWM`; on macOS
+/// `proc_pid_rusage`'s resident size and `getrusage`'s maximum. It asks the OS: read it once
+/// loaded and at the end, never each frame.
 pub(crate) fn resident() -> Resident {
     #[cfg(target_os = "windows")]
     {
@@ -33,7 +33,7 @@ pub(crate) fn resident() -> Resident {
     }
 }
 
-/// The working set's size and its peak, as `K32GetProcessMemoryInfo` gives them.
+/// The working set's size and peak.
 #[cfg(target_os = "windows")]
 fn working_set() -> Resident {
     use windows_sys::Win32::System::ProcessStatus::{
@@ -41,11 +41,11 @@ fn working_set() -> Resident {
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-    // SAFETY: the counters are integers, of which zeros are valid values.
+    // SAFETY: the counters are integers; zeros are valid.
     let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
     let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    // SAFETY: the current process's pseudo handle needs no closing, and the call writes no more
-    // than `size` bytes, the counters' own, into them.
+    // SAFETY: the current process's pseudo handle needs no closing; the call writes at most `size`
+    // bytes, the counters' own, into them.
     let read = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
     if read == 0 {
         return Resident::default();
@@ -56,8 +56,8 @@ fn working_set() -> Resident {
     }
 }
 
-/// The resident memory and its peak that `text`, of `/proc/self/status`, gives, in bytes: its
-/// `VmRSS` and `VmHWM` lines, each a number of kibibytes and `kB`.
+/// The resident memory and peak in bytes from `/proc/self/status`'s `text`: its `VmRSS` and
+/// `VmHWM` lines, each kibibytes then `kB`.
 #[cfg(any(target_os = "linux", test))]
 fn status(text: &str) -> Resident {
     let field = |name: &str| {
@@ -73,19 +73,18 @@ fn status(text: &str) -> Resident {
     }
 }
 
-/// The resident size, as `proc_pid_rusage` gives it, and its peak, as `getrusage` does, which on
-/// macOS counts bytes, where Linux's counts kibibytes.
+/// The resident size from `proc_pid_rusage` and its peak from `getrusage`, which counts bytes on
+/// macOS (kibibytes on Linux).
 #[cfg(target_os = "macos")]
 fn rusage() -> Resident {
-    // SAFETY: the usage is integers, of which zeros are valid values.
+    // SAFETY: the usage is integers; zeros are valid.
     let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
-    // SAFETY: for this process, by its ID, and `RUSAGE_INFO_V2`, the call writes a
-    // `rusage_info_v2` where its buffer points, which the C API's `rusage_info_t *` is cast from.
+    // SAFETY: for this process and `RUSAGE_INFO_V2`, the call writes a `rusage_info_v2` where its
+    // buffer points; the C API's `rusage_info_t *` is cast from it.
     let now = unsafe {
         libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V2, (&raw mut info).cast())
     };
-    // SAFETY: the usage is integers and times, which are integers too, of which zeros are valid
-    // values.
+    // SAFETY: the usage is integers and times (integers too); zeros are valid.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: the call writes this process's usage into `usage`, a `rusage`.
     let peak = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
@@ -99,8 +98,8 @@ fn rusage() -> Resident {
 mod tests {
     use super::*;
 
-    /// Linux's status gives the resident size and its peak in kibibytes, which come out in bytes;
-    /// a line missing, or one that doesn't read, gives none.
+    /// Linux's status gives kibibytes, which come out as bytes; a missing or unreadable line gives
+    /// none.
     #[test]
     fn linux_status_gives_the_resident_size_and_its_peak() {
         let text = "Name:\tgg-player\nVmPeak:\t  912340 kB\nVmHWM:\t  204800 kB\n\
@@ -119,7 +118,7 @@ mod tests {
         assert_eq!(status(""), Resident::default());
     }
 
-    /// The OS this runs on says how much of the process is resident, the peak at least as much.
+    /// The peak is at least the current size.
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_os_says_how_much_is_resident() {
