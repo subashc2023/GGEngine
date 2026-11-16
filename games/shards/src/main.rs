@@ -1,26 +1,31 @@
-//! Shards, the engine's first demo: two players, each a disc in an arena, steering about, dashing
-//! into each other, and collecting the shards that turn up where the match's own random numbers put
-//! them, first to ten. Run alone, the keys steer player 0; or networked, in lockstep, a run given
-//! `--host <address>` steering player 0 and one given `--join <address>` player 1, each with its own
-//! keys; or as clients of a run given `--serve <address>`, each given `--connect <address>` steering
-//! the player the server gives it, each disc its player's [`Owner`], a joiner and a client given
-//! the session's `--code` too, which its host or server prints; or each given `--relay <address>`,
-//! a relay that `gg-relay` runs, in place of the joiner's or client's address, for runs behind
-//! routers. The arena's walls are its
-//! scene file, `scenes/arena.ron`, which a development build
-//! applies as it's saved; its shards spin by a Luau script, `scripts/spin.luau`, which it reloads as
-//! it's saved, and the mods installed run, which may read the world and write sprites, as its
-//! sample, `mods/rainbow`, given `--mods mods`, cycles the shards' colors; its floor is its shader,
-//! `shaders/floor.slang`, which it reloads as it's saved; its scores are text in its font,
-//! `fonts/Inter-Bold.ttf`, on the view's canvas, in its top corners; Escape or a pad's Start opens
-//! its menu there, over the match, which goes on meanwhile:
-//! Resume; New match, a command that both lockstep peers apply; and Quit; its sounds,
-//! `sounds/*.wav`, play as a disc dashes, following it, as a shard is collected, where it was, as a
-//! match is won, and as the menu's focus moves and an item is chosen; and its music,
-//! `music/match.ogg`, loops from the start, quieter while the menu's open.
+//! Shards, the engine's first demo: two players, each a disc in an arena, steer, dash into each
+//! other and collect shards, first to ten. The match's own random numbers place the shards.
+//!
+//! Alone, the keys steer player 0. Networked, each run's keys steer its own player:
+//!
+//! - in lockstep, a run given `--host <address>` is player 0, and one given `--join <address>`
+//!   player 1;
+//! - as clients of a run given `--serve <address>`, each run given `--connect <address>` steers
+//!   the player the server gives it, each disc its player's [`Owner`].
+//!
+//! A joiner or client also takes the session's `--code`, which its host or server prints. Behind
+//! routers, each run takes `--relay <address>`, a relay `gg-relay` runs, a joiner or client in
+//! place of its address.
+//!
+//! What it shows:
+//!
+//! - its walls, the scene `scenes/arena.ron`, which development builds apply as it's saved;
+//! - the shards' spin, `scripts/spin.luau`, and the floor, `shaders/floor.slang`, each reloading
+//!   as it's saved;
+//! - mods, which read the world and write sprites: given `--mods mods`, `mods/rainbow` cycles the
+//!   shards' colors;
+//! - scores as text in `fonts/Inter-Bold.ttf` on the view's canvas;
+//! - a menu, from Escape or a pad's Start, over the match, which goes on meanwhile;
+//! - sounds, `sounds/*.wav`, placed where they happen, and music, `music/match.ogg`, quieter under
+//!   the menu.
 
-// A build without `dev`, as it ships, opens no console window on Windows: its JSON log still
-// records the run, and what it prints still reaches a process it's piped to, as a tool's or CI's.
+// A build without `dev`, as it ships, opens no console on Windows. Its JSON log still records the
+// run, and output piped to a tool or CI still arrives.
 #![cfg_attr(not(feature = "dev"), windows_subsystem = "windows")]
 
 use std::fmt::Write as _;
@@ -42,8 +47,7 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, with the engine's Performance, Entities and Inspector panels: what `main` runs, and
-/// what its recordings replay.
+/// The game, as `main` runs it and its recordings replay it.
 fn app() -> App {
     let app = App::new("Shards")
         .project(env!("CARGO_MANIFEST_DIR"))
@@ -64,22 +68,19 @@ const COLORS: [[f32; 3]; 2] = [[0.15, 0.55, 1.0], [1.0, 0.45, 0.1]];
 /// Where each player starts, and goes back to as a match is won.
 const STARTS: [Vec2; 2] = [Vec2::new(-5.0, 0.0), Vec2::new(5.0, 0.0)];
 
-/// How far across a player's disc is.
 const PLAYER_SIZE: f32 = 0.8;
 
-/// How far across a shard is, corner to corner.
+/// Corner to corner.
 const SHARD_SIZE: f32 = 0.5;
 
 /// How many shards the arena holds at once.
 const SHARDS: usize = 3;
 
-/// How fast a player goes, in units a second, and how much of the way from how fast it goes to
-/// that it gets each second.
+/// A player's speed, in units a second, and the share of the way to it that it gains each second.
 const SPEED: f32 = 6.0;
 const GRIP: f32 = 8.0;
 
-/// A dash: how many times faster a player goes, for how many ticks, and how many ticks until the
-/// next.
+/// A dash: how many times faster a player goes, for how many ticks, and the ticks until the next.
 const DASH_SPEED: f32 = 2.5;
 const DASH_TICKS: u32 = 10;
 const DASH_EVERY: u32 = 64;
@@ -92,35 +93,34 @@ const FLOOR_Z: f32 = 0.0;
 const SHARD_Z: f32 = 0.2;
 const PLAYER_Z: f32 = 0.3;
 
-/// The scores on the canvas, in its units: how far they are from the view's top corners, and how
-/// tall a score's em is and its matches won's, below it.
+/// The scores, in canvas units: their inset from the view's top corners, and the em of a score
+/// and of its matches won, below it.
 const HUD_INSET: f32 = 40.0;
 const SCORE_SIZE: f32 = 80.0;
 const WINS_SIZE: f32 = 32.0;
 
-/// The menu's items, top to bottom, and what each says.
+/// Top to bottom.
 const ITEMS: [(Item, &str); 3] = [
     (Item::Resume, "RESUME"),
     (Item::NewMatch, "NEW MATCH"),
     (Item::Quit, "QUIT"),
 ];
 
-/// The menu on the canvas, in its units from the view's middle: how large each item's button is,
-/// across and up, how far above the middle the first's middle is, and how far below it each next
-/// one's is; and its title's middle.
+/// The menu, in canvas units from the view's middle: each button's size, the first item's middle
+/// above the view's, the step down to each next, and the title's middle.
 const BUTTON: Vec2 = Vec2::new(440.0, 84.0);
 const FIRST_ITEM: f32 = 50.0;
 const ITEM_STEP: f32 = 104.0;
 const TITLE: f32 = 180.0;
 
-/// The music: how long it takes to fade in as the game loads; and how loud it is while the menu's
-/// open, about -9 dB, and how long it takes to get there and back.
+/// The music's fade in as the game loads, its volume under the menu (about -9 dB), and how long
+/// it takes to get there and back.
 const MUSIC_FADE_IN: Duration = Duration::from_secs(2);
 const MUSIC_UNDER_MENU: f32 = 0.35;
 const MUSIC_DUCK: Duration = Duration::from_millis(300);
 
-/// A player's disc: which player steers it, which way it's steered, and its dash, the ticks left
-/// of it and until the next.
+/// A player's disc: which player steers it, its heading, and the ticks left of its dash and until
+/// the next.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 struct Player {
     index: u8,
@@ -129,15 +129,15 @@ struct Player {
     cooldown: u32,
 }
 
-/// A shard to collect, and how far it has turned.
+/// A shard to collect, and its turn.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 struct Shard {
     #[reflect(degrees)]
     angle: f32,
 }
 
-/// The match: each player's shards and matches won, and the state of the random numbers that place
-/// the shards, which the world holds, so that every peer, replay and restored run places them alike.
+/// The match: each player's shards and matches won, and the state of the random numbers placing
+/// shards. The world holds it, so every peer, replay and restored run places them alike.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 struct Match {
     scores: [u32; 2],
@@ -145,33 +145,26 @@ struct Match {
     random: u64,
 }
 
-/// What the players' keys and pads do, queued as commands for the next tick, each naming its
-/// player, which a recording and a lockstep peer keep.
+/// What the players' keys and pads do, applied at the next tick, each naming its player.
+/// Recordings and lockstep peers keep them.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 enum Command {
     /// Has the player go this way, until the next.
     Steer { player: u8, heading: Vec2 },
     /// Has the player dash, if it can.
     Dash { player: u8 },
-    /// Starts a match afresh, for both players, as the menu's New match chooses.
+    /// Starts a match afresh for both players: the menu's New match.
     NewMatch,
 }
 
-/// What the keys and pads do: in the match, steer and dash; in the menu, move up and down its items
-/// and choose one; and open and close it.
+/// What the keys and pads do, as [`Shards::new`] binds them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
-    /// W, A, S and D, the arrows, the left stick and the D-pad.
     Steer,
-    /// Space and South.
     Dash,
-    /// Escape and Start.
     Menu,
-    /// W, the up arrow and the D-pad's up.
     Up,
-    /// S, the down arrow and the D-pad's down.
     Down,
-    /// Enter, Space and South.
     Choose,
 }
 
@@ -186,8 +179,7 @@ enum Item {
     Quit,
 }
 
-/// A corner of the floor's square, which `shaders/floor.slang` reads: its position in the square's
-/// own space, and where it is across the square, from 0 to 1.
+/// A corner of the floor's square, laid out as `shaders/floor.slang` reads it.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Corner {
@@ -195,9 +187,8 @@ struct Corner {
     uv: Vec2,
 }
 
-/// What the floor's shader draws it in, as `shaders/floor.slang` reads it: its color and its
-/// lines', in linear RGBA; how many cells it's crossed into, across and down; and how many pixels
-/// wide its lines are.
+/// The floor's look, laid out as `shaders/floor.slang` reads it: its color and its lines', linear
+/// RGBA; its cells across and down; and its lines' width, in pixels.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Floor {
@@ -208,8 +199,7 @@ struct Floor {
     pad: f32,
 }
 
-/// The game's sounds, from its `sounds` folder: a disc's dash; a shard collected; a match won; and
-/// the menu's focus moving, and an item chosen.
+/// The game's sounds, from `sounds/`.
 #[derive(Clone, Copy)]
 struct Sounds {
     dash: Sound,
@@ -219,30 +209,27 @@ struct Sounds {
     choose: Sound,
 }
 
-/// The game's layer: it builds the arena as it attaches, applies each player's commands at each
-/// tick, steering the discs, which 2D physics moves, and collecting the shards they touch; and
-/// draws the floor, the scores and the menu between ticks. An asset or script of its own, or its
-/// start scene, that doesn't load ends the run with its error, through [`Context::fail`].
+/// The game's layer. An asset or script of its own, or the start scene, that doesn't load ends the
+/// run, through [`Context::fail`].
 struct Shards {
     /// The player this run's keys steer: 0, unless it joined a lockstep session or a server gave
     /// it another.
     player: u8,
     actions: Actions<Act>,
     commands: Vec<Command>,
-    /// The item of the menu that has the focus, while it's open: this run's own, as a lockstep
-    /// peer's is its own.
+    /// The menu's focused item, while it's open. It's this run's own, as each lockstep peer's is.
     menu: Option<usize>,
-    /// The floor's square and shader, once the game loads.
+    /// Once loaded.
     floor: Option<(Mesh<Corner>, Shader<Corner, Floor>)>,
-    /// The font the scores are drawn in, once the game loads.
+    /// The scores', once loaded.
     font: Option<Font>,
-    /// The game's sounds, once it loads.
+    /// Once loaded.
     sounds: Option<Sounds>,
-    /// The game's scripts: the shards' spin.
+    /// The shards' spin.
     scripts: Scripts,
-    /// The mods the player installed, once the game loads.
+    /// The installed mods, once loaded.
     mods: Option<Mods>,
-    /// The scores' text, written again in its memory each frame.
+    /// The scores' text, rewritten in place each frame.
     text: String,
 }
 
@@ -295,8 +282,8 @@ impl Shards {
         }
     }
 
-    /// Loads the game's floor, font, sounds, music and script, and the mods installed. Fails with
-    /// the first of the game's own that doesn't load, as a shader that doesn't compile.
+    /// Loads the game's assets and script, and the installed mods. Fails with the first of the
+    /// game's own that doesn't load, as a shader that doesn't compile.
     fn load_game(&mut self, cx: &mut Context) -> Result<(), Error> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let shader = cx.add_shader("floor", root.join("shaders/floor.slang"), Blend::Opaque)?;
@@ -336,12 +323,12 @@ impl Layer for Shards {
     }
 
     fn attach(&mut self, cx: &mut Context) {
-        // A run that ends as it loads builds no arena, whose shards' spin the script declares.
+        // A run ending as it loads builds no arena: the script declares the shards' spin.
         if cx.exiting() {
             return;
         }
         self.player = cx.player().unwrap_or(0);
-        // The arena, watched as the game runs, in development builds, which apply its saves.
+        // Development builds watch the arena and apply its saves.
         if let Err(error) = cx.load_start_scene() {
             cx.fail(error);
             return;
@@ -349,8 +336,8 @@ impl Layer for Shards {
         build(cx.world_mut());
     }
 
-    /// Takes back which player this run steers, which a joiner's world, the host's, and a client's,
-    /// the server's, don't say, and lets go of what may have been held as the world was taken.
+    /// Takes back which player this run steers, which the world a joiner or client takes from its
+    /// host or server doesn't say. Lets go of what was held as the world was taken.
     fn restored(&mut self, cx: &mut Context) {
         self.player = cx.player().unwrap_or(0);
         let player = self.player;
@@ -438,7 +425,7 @@ impl Layer for Shards {
     }
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-        // Queued now, rather than at the next update, so that the next tick applies them.
+        // Queued now, not at the next update, so the next tick applies them.
         let Self {
             player,
             actions,
@@ -486,7 +473,7 @@ impl Layer for Shards {
         let resumed = matches!(chosen, Some(Item::Resume | Item::NewMatch));
         if resumed || toggled && menu.is_some() {
             *menu = None;
-            // As the keys and sticks are held now, which the disc let go of as the menu opened.
+            // As the keys and sticks are held now: the disc let go as the menu opened.
             let heading = actions.axis2(Act::Steer);
             commands.push(Command::Steer { player, heading });
         } else if toggled {
@@ -494,8 +481,7 @@ impl Layer for Shards {
             let heading = Vec2::ZERO;
             commands.push(Command::Steer { player, heading });
         }
-        // This run's own, as its menu is: a choice, or the menu opening, closing or moving its
-        // focus.
+        // This run's own, as its menu is.
         if let Some(sounds) = sounds {
             if chosen.is_some() {
                 cx.play_sound(sounds.choose, Place::Nowhere);
@@ -514,8 +500,8 @@ impl Layer for Shards {
     }
 }
 
-/// Registers the game's components with `world`, so that its scene and the tool API know them
-/// before any entity has one.
+/// Registers the game's components, so its scene and the tool API know them before any entity has
+/// one.
 fn register(world: &mut World) {
     let registered = world.register::<Player>().and_then(|()| {
         world.register::<Shard>()?;
@@ -524,8 +510,8 @@ fn register(world: &mut World) {
     registered.expect("the game's components describe themselves");
 }
 
-/// Builds what the arena's scene doesn't hold: the camera, the match, the players at their starts
-/// and the first shards, without gravity, as the arena is seen from above.
+/// Builds what the arena's scene doesn't hold: the camera, the match, the players and the first
+/// shards. No gravity, as the arena is seen from above.
 fn build(world: &mut World) {
     let mut physics = Physics2D::default();
     physics.gravity = Vec2::ZERO;
@@ -636,8 +622,8 @@ fn unit(random: &mut u64) -> f32 {
     (z >> 40) as f32 / (1 << 24) as f32
 }
 
-/// Sets each player's velocity, `dt` on, toward its heading at its speed, faster while it dashes,
-/// counting its dash down.
+/// Moves each player's velocity, over `dt`, toward its heading at its speed, faster while it
+/// dashes, and counts its dash down.
 fn steer(world: &mut World, dt: Duration) {
     let dt = dt.as_secs_f32();
     for (player, body) in world.query_mut::<(&mut Player, &mut RigidBody2D)>() {
@@ -659,10 +645,9 @@ fn steer(world: &mut World, dt: Duration) {
     }
 }
 
-/// Gives each shard a player touches to that player, placing it again, and, at the shard that wins
-/// a match, gives the match to its player and starts another, the players back at their starts,
-/// the rest touched that tick left where they are; playing `sounds`' chime where each was, and
-/// their fanfare for the match.
+/// Scores each shard a player touches and places it again, chiming `sounds`' collect where it was.
+/// The shard that wins a match gives it to its player and starts another, with the players back at
+/// their starts, the rest touched that tick left, and `sounds`' fanfare.
 fn collect(world: &mut World, sounds: Option<Sounds>) {
     let players: Vec<(u8, Vec2)> = world
         .query::<(&Player, &Transform)>()
@@ -718,10 +703,9 @@ fn to_starts(world: &mut World) {
     }
 }
 
-/// Draws the match's scores on the canvas, in `font`, writing each text into `text`: each player's
-/// shards in its color in the view's top corner on its side, and below them the matches it has won,
-/// each growing from its corner toward the middle, where the arena's Target says how many shards
-/// win a match.
+/// Draws each player's shards, and its matches won below them, in its color in the top corner on
+/// its side, growing toward the middle, where the arena's Target says how many shards win. Each
+/// text is written into `text`.
 fn draw_scores(cx: &mut Context, found: &Match, font: Font, text: &mut String) {
     for (index, &color) in COLORS.iter().enumerate() {
         let (corner, inward) = if index == 0 {
@@ -750,7 +734,7 @@ fn draw_scores(cx: &mut Context, found: &Match, font: Font, text: &mut String) {
     }
 }
 
-/// Draws, at the view's bottom, in `font`, the keys that open the menu.
+/// Draws the keys that open the menu at the view's bottom.
 fn draw_hint(cx: &mut Context, font: Font) {
     let style = TextStyle {
         font: Some(font),
@@ -763,8 +747,8 @@ fn draw_hint(cx: &mut Context, font: Font) {
     canvas.draw_text(at, "ESC / START: MENU", &style);
 }
 
-/// Draws the menu in the view's middle, in `font`: a dark panel, its title, and each item's button,
-/// the one with the focus, `focus`, lit in `lit`, linear RGB.
+/// Draws the menu in the view's middle: a dark panel, its title, and each item's button, `focus`'s
+/// lit in `lit`, linear RGB.
 fn draw_menu(cx: &mut Context, font: Font, focus: usize, lit: [f32; 3]) {
     let mut canvas = cx.canvas([Align::Center; 2]);
     let rect = |middle: Vec2, size: Vec2| {
@@ -800,12 +784,12 @@ fn draw_menu(cx: &mut Context, font: Font, focus: usize, lit: [f32; 3]) {
     }
 }
 
-/// Where the middle of the menu's item `index` is on the canvas, from the view's middle.
+/// Item `index`'s middle on the canvas, from the view's middle.
 fn item_middle(index: usize) -> Vec2 {
     Vec2::new(0.0, FIRST_ITEM - ITEM_STEP * index as f32)
 }
 
-/// The menu's item whose button is at `at` on the canvas, from the view's middle, if one's is.
+/// The item whose button is at `at` on the canvas, from the view's middle.
 fn item_at(at: Vec2) -> Option<usize> {
     let over = |index| (at - item_middle(index)).abs().cmple(BUTTON / 2.0).all();
     (0..ITEMS.len()).find(|&index| over(index))

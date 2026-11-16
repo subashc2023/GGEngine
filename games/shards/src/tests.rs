@@ -7,8 +7,8 @@ use gg_engine::cook::Kind;
 
 use super::*;
 
-/// The game as it attaches, the project's as the app is, so that the world's hash doesn't depend on
-/// where the repository is, its world's IDs drawn from `seed`.
+/// The game as it attaches, rooted at its project as the app is, so the world's hash doesn't depend
+/// on where the repository is. IDs are drawn from `seed`.
 fn attached(seed: u64) -> (Context, Shards) {
     let cx = Context::seeded(seed).project(env!("CARGO_MANIFEST_DIR"));
     let mut cx = cx.expect("the project reads");
@@ -37,9 +37,9 @@ fn scene(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The sample mod, `mods/rainbow`, runs with what the game grants mods, giving each shard its
-/// `Rainbow` and turning its color through the hues; a mod that asks for more than the game grants
-/// is refused, and the game runs without it.
+/// The sample mod, `mods/rainbow`, runs with what the game grants, giving each shard a `Rainbow`
+/// that turns its color through the hues. A mod asking for more is refused, and the game runs
+/// without it.
 #[test]
 fn the_sample_mod_cycles_the_shards_colors_and_a_greedy_one_is_refused() {
     let game = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -75,7 +75,7 @@ fn the_sample_mod_cycles_the_shards_colors_and_a_greedy_one_is_refused() {
         .map(|(entity, _)| entity)
         .collect();
     assert_eq!(shards.len(), SHARDS);
-    // A turn of a quarter a second, once a tick: the greedy mod, which would turn it too, refused.
+    // A quarter turn a second, once a tick: the greedy mod, which would turn it too, was refused.
     let hue = 0.25 * 16.0 * Tick::DT.as_secs_f64();
     let colored = Vec4::new(1.0, (hue * 6.0) as f32, 0.0, 1.0);
     for shard in shards {
@@ -89,8 +89,7 @@ fn the_sample_mod_cycles_the_shards_colors_and_a_greedy_one_is_refused() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// The game's project's manifest is canonical, writing back to its own bytes, and starts the game
-/// in the arena.
+/// The manifest is canonical, writing back to its own bytes, and starts the game in the arena.
 #[test]
 fn the_project_is_canonical_and_starts_in_the_arena() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -100,9 +99,9 @@ fn the_project_is_canonical_and_starts_in_the_arena() {
     assert_eq!(project.start_path(dir), scene("arena.ron"));
 }
 
-/// Each texture and model under the game's asset root has its ID file beside it, committed with
-/// it, each holding an ID of its own, and no ID file is left without its asset, so that every
-/// checkout gives each asset the ID the repository holds, rather than its runs writing others.
+/// Each texture and model under the game's asset root has a committed ID file beside it, each ID
+/// its own, and no ID file lacks its asset. So every checkout gives each asset the repository's ID,
+/// rather than its runs writing others.
 #[test]
 fn every_asset_has_its_id_file_beside_it() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -131,9 +130,9 @@ fn every_asset_has_its_id_file_beside_it() {
     assert!(found.unread.is_empty(), "{:?}", found.unread);
 }
 
-/// The arena's scene loads, with the textures and the model it names, and saves to its own bytes,
-/// so that a type of the game's that changes under it fails here; its crystal's root spawns the
-/// model's two nodes, which the scene doesn't hold.
+/// The arena's scene loads, with the textures and model it names, and saves to its own bytes, so a
+/// game type changing under it fails here. Its crystal's root spawns the model's two nodes, which
+/// the scene doesn't hold.
 #[test]
 fn the_arena_saves_as_it_is() {
     let path = scene("arena.ron");
@@ -148,9 +147,8 @@ fn the_arena_saves_as_it_is() {
     assert_eq!(nodes, 2, "the crystal and its splinter");
 }
 
-/// The game builds the arena, both players at their starts and its shards, apart from the players;
-/// a player touching a shard scores it, the shard turning up elsewhere, and the match's tenth wins
-/// it, the players going back to their starts.
+/// The game builds both players at their starts, and shards apart from them. A touched shard scores
+/// and turns up elsewhere; the tenth wins the match, sending the players back to their starts.
 #[test]
 fn a_touched_shard_scores_and_turns_up_elsewhere() {
     let (mut cx, mut shards) = attached(0x5eed);
@@ -194,8 +192,8 @@ fn a_touched_shard_scores_and_turns_up_elsewhere() {
     assert!(player_at(world, 0).distance(STARTS[0]) < 0.2);
 }
 
-/// The ticks queue the game's sounds: a dash on its disc, but none while it cools down; and a
-/// shard collected, where it was, with the fanfare for the match it wins.
+/// Ticks queue the game's sounds: a dash on its disc, none while it cools down; a collect where the
+/// shard was; and the fanfare for a match won.
 #[test]
 fn the_ticks_queue_the_games_sounds() {
     let (mut cx, mut shards) = attached(0x5eed);
@@ -227,9 +225,9 @@ fn the_ticks_queue_the_games_sounds() {
     assert_eq!(queued, won);
 }
 
-/// The keys and the left stick queue steers and dashes for the run's own player, as they come, so
-/// that the frame's ticks apply them: player 0 alone, and the joiner's for player 1; and a tick
-/// steers only the player its commands name.
+/// Keys and the left stick queue steers and dashes for the run's own player as they come, so the
+/// frame's ticks apply them: player 0 alone, player 1 as the joiner. A tick steers only the player
+/// its commands name.
 #[test]
 fn the_keys_queue_commands_for_the_runs_own_player() {
     let (mut cx, mut shards) = attached(0x5eed);
@@ -281,11 +279,10 @@ fn the_keys_queue_commands_for_the_runs_own_player() {
     assert_eq!(player_at(world, 0), STARTS[0]);
 }
 
-/// Escape opens the menu over the match, letting go of the disc's steer, and while it's open the
-/// keys move its focus, round from either end, and choose, rather than steer and dash: Enter
-/// chooses New match, which queues a new match and closes it, and Space Resume, which closes it
-/// without a dash, each closing steering the disc again as the keys are held; Escape opens it and
-/// closes it; and Quit asks the run to end.
+/// Escape opens the menu, letting go of the disc's steer. While it's open, the keys move its focus,
+/// wrapping at either end, and choose, rather than steer and dash. Enter on New match queues one
+/// and closes the menu; Space on Resume closes it without a dash; each closing steers the disc as
+/// the keys are held. Escape also closes it, and Quit asks the run to end.
 #[test]
 fn the_menu_takes_the_keys_while_its_open() {
     let (mut cx, mut shards) = attached(0x5eed);
@@ -302,7 +299,7 @@ fn the_menu_takes_the_keys_while_its_open() {
             );
         }
     };
-    // Held throughout, so that each opening lets go of its steer and each closing takes it up.
+    // Held throughout, so each opening lets go of its steer and each closing takes it up.
     let _ = shards.event(&mut cx, &key(Key::KeyD, true));
     press(&mut shards, &mut cx, Key::Escape);
     assert_eq!(shards.menu, Some(0));
@@ -344,8 +341,8 @@ fn the_menu_takes_the_keys_while_its_open() {
     assert!(cx.exiting(), "Quit ends the run");
 }
 
-/// The music plays from the game's load, quieter while the menu's open, and as loud as it is once
-/// it closes.
+/// The music plays from the game's load, quieter while the menu's open, and full again once it
+/// closes.
 #[test]
 fn the_music_plays_quieter_under_the_menu() {
     let (mut cx, mut shards) = attached(0x5eed);
@@ -365,8 +362,7 @@ fn the_music_plays_quieter_under_the_menu() {
     }
 }
 
-/// A new match puts both players back at their starts, at rest, and every score and match won at
-/// 0.
+/// A new match puts both players at their starts, at rest, and every score and win at 0.
 #[test]
 fn a_new_match_starts_afresh() {
     let (mut cx, mut shards) = attached(0x5eed);
@@ -387,8 +383,7 @@ fn a_new_match_starts_afresh() {
     }
 }
 
-/// The cursor finds each of the menu's items over its button, to its corners, and none beside them
-/// or between them.
+/// The cursor finds each item over its button, to its corners, and none beside or between them.
 #[test]
 fn the_menu_finds_the_item_under_the_cursor() {
     for index in 0..ITEMS.len() {
@@ -403,8 +398,8 @@ fn the_menu_finds_the_item_under_the_cursor() {
     assert_eq!(item_at((item_middle(0) + item_middle(1)) / 2.0), None);
 }
 
-/// A world restored from a snapshot simulates as it did from there, through steers, dashes, bumps
-/// and shards collected: the game keeps nothing of the match but in the world.
+/// A world restored from a snapshot simulates as before, through steers, dashes, bumps and
+/// collections: the game keeps the match in the world alone.
 #[test]
 fn a_restored_world_simulates_as_before() {
     let (mut cx, mut shards) = attached(0x5eed);
@@ -429,9 +424,9 @@ fn a_restored_world_simulates_as_before() {
     assert_eq!(parted.map(|tick| 64 + tick), None, "the first tick to part");
 }
 
-/// The commands a script queues before tick `number`, what both players' keys would, as `world`
-/// stands: every 8 ticks, player 0 steers for the nearest shard, and player 1 for player 0, each
-/// dashing now and then, so that they collect shards and bump into each other.
+/// Queues what both players' keys might before tick `number`, as `world` stands. Every 8 ticks,
+/// player 0 steers for the nearest shard and player 1 for player 0, dashing now and then, so they
+/// collect shards and bump.
 fn script(shards: &mut Shards, world: &World, number: u64) {
     if !number.is_multiple_of(8) {
         return;
@@ -460,11 +455,9 @@ fn script(shards: &mut Shards, world: &World, number: u64) {
     }
 }
 
-/// The game's simulation, run without a GPU from a seed through the commands of a script, hashes at
-/// its attach and at each tick as its reference says: the same in one run as in the next, on four
-/// threads as on one, in a debug build as in a release one, and on every platform, as determinism,
-/// and so lockstep, needs. `GG_UPDATE_REFERENCES=1` writes the reference again, after a change
-/// meant to change the simulation or what the hash reads.
+/// The game's simulation, run without a GPU from a seed through a script's commands, hashes at
+/// attach and each tick as its reference says. Determinism, and so lockstep, needs it the same run
+/// to run, on four threads as on one, in debug and release builds, and on every platform.
 #[test]
 fn the_simulation_gives_its_reference_hashes() {
     let run = simulate();
@@ -502,9 +495,8 @@ fn the_simulation_gives_its_reference_hashes() {
     assert_eq!(run.len(), reference.lines().count(), "{}", path.display());
 }
 
-/// The game's simulation from a seed, as lines of the world's hash, its content then its layout:
-/// one after it attaches, and one at each of 512 ticks, between which the script queues what both
-/// players' keys would.
+/// The game's simulation from a seed, as lines of the world's hash, content then layout: one after
+/// attach, and one at each of 512 ticks, between which the script queues commands.
 fn simulate() -> Vec<String> {
     let (mut cx, mut shards) = attached(0x5eed);
     let hashed = |at: &dyn std::fmt::Display, world: &World| format!("{at} {}", world.hash());
@@ -523,12 +515,9 @@ fn simulate() -> Vec<String> {
     lines
 }
 
-/// The live recording, `tests/references/live.recording`, of a windowed run steered by its keys,
-/// edited through the tool API and its scene file saved, replays without a GPU to the hashes it
-/// recorded, as determinism needs, in a debug build as in a release one and on every platform.
-/// `GG_UPDATE_REFERENCES=1` writes its hashes again, after a change meant to change the simulation
-/// or what the hash reads; a change to a command's type that its lines no longer read as needs a new
-/// recording.
+/// The live recording, of a windowed run steered by its keys, edited through the tool API and its
+/// scene file saved, replays without a GPU to its hashes, in debug and release builds and on every
+/// platform. Shards' AGENTS.md says which changes need a new recording instead.
 #[test]
 fn the_live_recording_replays_to_its_hashes() {
     let path = live_recording();
@@ -557,10 +546,8 @@ fn live_recording() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/references/live.recording")
 }
 
-/// The game's package, as `tools/cook` cooks it, holds what its runs load, but its mods: its scene,
-/// script, sounds and music as they are, its texture compressed, its model cooked, its font baked
-/// and its shader compiled, its assets by their IDs; and the live recording replays from it to its
-/// hashes, as a build without `dev` runs from it.
+/// The game's package, as `tools/cook` cooks it, holds what its runs load but its mods, its assets
+/// by their IDs. The live recording replays from it to its hashes, as a build without `dev` runs.
 #[test]
 fn the_live_recording_replays_from_the_games_package() {
     if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
@@ -602,9 +589,9 @@ fn the_live_recording_replays_from_the_games_package() {
     let _ = fs::remove_dir_all(dir);
 }
 
-/// A copy of the live recording whose first steer goes another way goes another way at that
-/// command's tick, and the first difference between the two worlds there is the heading of the
-/// player it steers, as a desync between two peers would be named.
+/// A copy of the live recording whose first steer goes another way diverges at that command's
+/// tick, and the worlds' first difference is the steered player's heading, as a desync between
+/// peers would be named.
 #[test]
 fn a_forced_divergence_names_its_tick_entity_and_field() {
     // Its hashes are being written again, by the test above.
