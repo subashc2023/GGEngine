@@ -8,17 +8,17 @@ use super::Scripts;
 use super::host::bad;
 use super::{bytecode, hooks};
 
-/// The functions of `math` whose precision is the platform's, which libm's take the place of: the
-/// compiler is told they aren't builtins, which it would otherwise call the C library's for.
+/// The `math` functions whose precision is the platform's, which libm's replace. The compiler is
+/// told they aren't builtins, or it would call the C library's.
 const LIBM: [&str; 14] = [
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "exp", "log",
     "log10", "pow",
 ];
 
-/// The compiler of scripts: at optimization level 1, whatever a script asks, with libm's math in
-/// place of the builtins the C library's would be, the library functions whose integer arguments
-/// are checked called as they're checked, and Luau's full debug information, the names of locals
-/// and upvalues among it, which the debugger shows, as [`Scripts`] says.
+/// The scripts' compiler: optimization level 1 whatever a script asks; libm's math in place of
+/// builtins the C library's would be; the library functions with checked integer arguments called
+/// as checked; and full debug information, local and upvalue names included, which the debugger
+/// shows ([`Scripts`]).
 pub(super) fn compiler() -> Compiler {
     let libm = LIBM.map(|name| format!("math.{name}"));
     Compiler::new()
@@ -27,15 +27,17 @@ pub(super) fn compiler() -> Compiler {
         .set_disabled_builtins(libm.into_iter().chain(hooks::not_builtins()))
 }
 
-/// Checks that `text` compiles, as a script loads it, as [`compiled`] says.
+/// Checks that `text` compiles as [`compiled`] does.
 #[cfg(feature = "dev")]
 pub(crate) fn compiles(path: &str, text: &str) -> Result<()> {
     compiled(path, text).map(drop)
 }
 
-/// `text`, the script at `path`'s, compiled: refused as [`check`] refuses it; as it doesn't
-/// compile, `script.bad`, where the message is the compiler's; or, `script.state`, if one of its
-/// functions assigns a local of its chunk, as [`Scripts`] says.
+/// The bytecode of `text`, the script at `path`'s, unless it's refused:
+///
+/// - as [`check`] refuses it;
+/// - `script.bad`, with the compiler's message, if it doesn't compile;
+/// - `script.state` if a function assigns a local of its chunk ([`Scripts`]).
 pub(super) fn compiled(path: &str, text: &str) -> Result<Vec<u8>> {
     check(text).map_err(|error| {
         let message = format!("{path}:{error}");
@@ -60,15 +62,14 @@ pub(super) fn compiled(path: &str, text: &str) -> Result<Vec<u8>> {
     Ok(bytecode)
 }
 
-/// Checks what the compiler doesn't of `text`, a script's: that it uses no `^`, with
-/// `script.pow`, and sets nothing of how it compiles, with `script.header`, either error's message
-/// starting with the line it's on, then `: `. Strings, comments, and the text of interpolated
-/// strings are skipped.
+/// Checks what the compiler doesn't of the script `text`: no `^` (`script.pow`) and nothing set
+/// of how it compiles (`script.header`). Either message starts with its line, then `: `. Strings,
+/// comments and interpolated strings' text are skipped.
 pub(super) fn check(text: &str) -> Result<()> {
     let bytes = text.as_bytes();
     let mut line = 1;
     let mut i = 0;
-    // The braces opened in each interpolated string's expression we're in, the innermost last.
+    // The braces opened in each interpolated string's expression we're in, innermost last.
     let mut nested: Vec<u32> = Vec::new();
     // Whether we're in an interpolated string's text, outside its braces.
     let mut quoted = false;
@@ -163,7 +164,7 @@ pub(super) fn check(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// The level of the long bracket that opens at `at`, `[[` being 0 and `[==[` 2, if one does.
+/// The level of the long bracket opening at `at` (`[[` is 0, `[==[` 2), if one does.
 fn long_bracket(bytes: &[u8], at: usize) -> Option<usize> {
     if bytes.get(at) != Some(&b'[') {
         return None;
@@ -172,8 +173,8 @@ fn long_bracket(bytes: &[u8], at: usize) -> Option<usize> {
     (bytes.get(at + 1 + level) == Some(&b'[')).then_some(level)
 }
 
-/// Where the long string or comment of `level` that opens at `at` ends, past its close, counting
-/// its lines into `line`.
+/// Where the long string or comment of `level` opening at `at` ends, past its close, adding its
+/// lines to `line`.
 fn skip_long(bytes: &[u8], at: usize, level: usize, line: &mut usize) -> usize {
     let mut i = at + level + 2;
     while i < bytes.len() {

@@ -1,9 +1,9 @@
-//! Luau's hooks, which mlua reaches through its raw API alone: the interrupt, which keeps each call
-//! into a script to its budget and, in development builds, stops there as a pause asks; and, in
-//! development builds, breakpoints, steps, and the stack a stop reads. The engine's side of each,
-//! what to do, is [`super`]'s; this module reads and sets what it needs of Luau's state, as it
-//! reads a function's upvalues for [`super`]'s check of what a script's chunk keeps, and as it
-//! checks the integers Luau's libraries read, as [`CHECKED`] says.
+//! Luau's hooks, reached through mlua's raw API alone: the interrupt, which holds each call into a
+//! script to its budget (and, in development builds, stops it on a pause), and, in development
+//! builds, breakpoints, steps and the stack a stop reads. What to do at each is [`super`]'s.
+//!
+//! It also reads function upvalues for [`super`]'s check of what a chunk keeps, and checks the
+//! integers Luau's libraries read ([`CHECKED`]).
 
 use std::ffi::{CStr, c_int};
 #[cfg(feature = "dev")]
@@ -17,24 +17,23 @@ use mlua::{Function, Lua, Value, Variadic, ffi};
 
 use super::Interrupt;
 
-/// How a library function makes an integer of a number argument: by a C cast, undefined past the
-/// integer type's range, where x86-64 and ARM64 give other integers, and NaN others again, as
-/// Luau's `luai_num2int` and `luai_num2unsigned` cast.
+/// How a library function makes an integer of a number: a C cast (Luau's `luai_num2int` and
+/// `luai_num2unsigned`), undefined past the type's range. x86-64 and ARM64 give other integers,
+/// and NaN others again.
 #[derive(Clone, Copy)]
 enum Cast {
-    /// To an `int`, as `luaL_checkinteger` casts, a string converted to a number first.
+    /// To `int`, as `luaL_checkinteger`; a string is converted to a number first.
     Int,
-    /// To a `long long`, as `luaL_checkunsigned` casts before it keeps the low 32 bits, a string
-    /// converted to a number first.
+    /// To `long long`, as `luaL_checkunsigned` before it keeps the low 32 bits; a string is
+    /// converted first.
     Long,
-    /// A number, but not a string, to a `long long`, as `string.pack`'s integer options cast, whose
-    /// string options read strings.
+    /// To `long long`, as `string.pack`'s integer options; a string isn't converted.
     LongNumber,
 }
 
 impl Cast {
-    /// Whether `n` casts alike everywhere: it's finite, and within the type's range once its
-    /// fraction is cut.
+    /// Whether `n` casts alike everywhere: finite, and within the type's range once its fraction
+    /// is cut.
     fn defined(self, n: f64) -> bool {
         match self {
             Self::Int => n > -2_147_483_649.0 && n < 2_147_483_648.0,
@@ -47,19 +46,18 @@ impl Cast {
 
 /// What of its arguments a [`Checked`] function reads as integers.
 enum Reads {
-    /// Those `at` gives, by position from 1, each as its cast says, and those from the position
-    /// `rest` gives on; once there are as many arguments as `least`, as `table.insert`'s second is
-    /// its value when there are two.
+    /// The arguments at `at` (positions from 1) and from `rest`'s position on, each with its cast;
+    /// only with `least` arguments (`table.insert`'s second is a value when there are two).
     Args {
         at: &'static [(c_int, Cast)],
         rest: Option<(c_int, Cast)>,
         least: c_int,
     },
-    /// What `string.format`'s format string says, as [`formatted`] reads it.
+    /// What `string.format`'s format string says ([`formatted`]).
     Format,
 }
 
-/// The arguments at `at`, as [`Reads::Args`] says.
+/// The arguments at `at` ([`Reads::Args`]).
 const fn at(at: &'static [(c_int, Cast)]) -> Reads {
     Reads::Args {
         at,
@@ -68,7 +66,7 @@ const fn at(at: &'static [(c_int, Cast)]) -> Reads {
     }
 }
 
-/// Every argument from `from` on, cast as `cast`, as [`Reads::Args`] says.
+/// Every argument from `from` on, cast as `cast` ([`Reads::Args`]).
 const fn from(from: c_int, cast: Cast) -> Reads {
     Reads::Args {
         at: &[],
@@ -77,9 +75,8 @@ const fn from(from: c_int, cast: Cast) -> Reads {
     }
 }
 
-/// A library function whose integer arguments are checked before it runs: its library, `None` for
-/// a global; its name; what it reads as integers; and whether the compiler may still call it as a
-/// builtin, whose fast path, Luau's own, casts no number to an integer.
+/// A library function whose integer arguments are checked before it runs. `library` is `None` for
+/// a global. `builtin`: the compiler may still call it as one (its fast path casts nothing).
 struct Checked {
     library: Option<&'static CStr>,
     name: &'static CStr,
@@ -96,12 +93,12 @@ const fn checked(library: Option<&'static CStr>, name: &'static CStr, reads: Rea
     }
 }
 
-/// The library functions scripts reach that cast a number argument to an integer, each of which
-/// refuses, as an error does, an argument that wouldn't cast alike everywhere, as [`Cast::defined`]
-/// says, as a script that raises to a power is refused: the rest of the ones that cast are their
-/// iterators, which [`super::Scripts`] lists. Luau's compiler calls none of them as a builtin, a
-/// fast path that would go past the check, but `table.insert` and `tonumber`, whose fast paths take
-/// only the calls that cast nothing.
+/// The library functions scripts reach that cast a number to an integer. Each fails on an
+/// argument that wouldn't cast alike everywhere ([`Cast::defined`]), as `^` is refused. The other
+/// casting functions are iterators, which [`super::Scripts`] lists.
+///
+/// The compiler calls none as a builtin (its fast path would skip the check), except
+/// `table.insert` and `tonumber`, whose fast paths take only calls that cast nothing.
 static CHECKED: [Checked; 64] = [
     Checked {
         builtin: true,
@@ -203,8 +200,8 @@ static CHECKED: [Checked; 64] = [
     checked(Some(c"buffer"), c"writeu8", at(&[(2, Int), (3, Long)])),
 ];
 
-/// The names of the [`CHECKED`] functions that Luau's compiler mustn't call as builtins, as
-/// `library.name`, or a global's name.
+/// The names (`library.name`, or a global's) of the [`CHECKED`] functions not to compile as
+/// builtins.
 pub(super) fn not_builtins() -> impl Iterator<Item = String> {
     CHECKED
         .iter()
@@ -218,16 +215,16 @@ pub(super) fn not_builtins() -> impl Iterator<Item = String> {
         })
 }
 
-/// Has each of the [`CHECKED`] functions in `lua`'s libraries check its integer arguments, as a C
-/// function of its name in its place, which calls it.
+/// Replaces each [`CHECKED`] function in `lua`'s libraries with a C closure ([`refusing`]) that
+/// checks its integer arguments and then calls it.
 ///
-/// Fails if one of them isn't in its library as a C function.
+/// Fails if one isn't a C function in its library.
 pub(super) fn check_integers(lua: &Lua) -> mlua::Result<()> {
-    // SAFETY: `exec_raw` runs the closure on a state of `lua`'s VM, with an empty stack, which it
-    // keeps to the values below, a library's table, a function and a number, as
-    // `lua_rawcheckstack` makes room for, and returns the place of a function that isn't there, or
-    // nothing; the closure made in each function's place holds the function and its place in
-    // `CHECKED`, a static, as its upvalues, and its name, a static string, which Luau keeps.
+    // SAFETY: `exec_raw` runs the closure on a state of `lua`'s VM with an empty stack. The
+    // closure keeps to three values (library table, function, number), for which
+    // `lua_rawcheckstack` makes room, and returns the index of a function that isn't there, or
+    // nothing. Each closure made holds the function and its index in `CHECKED`, a static, as
+    // upvalues, and a static name, which Luau keeps.
     let missing = unsafe {
         lua.exec_raw::<Option<u32>>((), |state| {
             ffi::lua_rawcheckstack(state, 3);
@@ -262,15 +259,13 @@ pub(super) fn check_integers(lua: &Lua) -> mlua::Result<()> {
     }
 }
 
-/// A [`CHECKED`] function in its library's place: refuses, as an error does, an argument it reads
-/// as an integer that wouldn't cast alike everywhere, and otherwise runs it, in its place, on the
-/// same arguments, as though it had been called. Its upvalues are the function and its place in
-/// `CHECKED`.
+/// A [`CHECKED`] function's replacement: fails on an integer argument that wouldn't cast alike
+/// everywhere, else calls the function. Its upvalues are the function and its index in `CHECKED`.
 unsafe extern "C-unwind" fn refusing(state: *mut ffi::lua_State) -> c_int {
-    // SAFETY: Luau calls the closure `check_integers` made with its two upvalues, the second a
-    // place in `CHECKED`; the function it calls is a library's, which reads no upvalue of its own,
-    // and so runs in the closure's frame as in its own. An error raised leaves nothing of Rust's
-    // that needs dropping in this frame.
+    // SAFETY: Luau calls the closure `check_integers` made, with its two upvalues, the second an
+    // index in `CHECKED`. The function it calls is a library's and reads no upvalue of its own, so
+    // it runs in the closure's frame as in its own. An error raised leaves nothing of Rust's in
+    // this frame that needs dropping.
     unsafe {
         let index = ffi::lua_tonumberx(state, ffi::lua_upvalueindex(2), std::ptr::null_mut());
         let Some(checked) = CHECKED.get(index as usize) else {
@@ -300,8 +295,8 @@ unsafe extern "C-unwind" fn refusing(state: *mut ffi::lua_State) -> c_int {
     }
 }
 
-/// The first of the arguments that `at` and `rest` give, as [`Reads::Args`] says, that wouldn't
-/// cast alike everywhere, and why.
+/// The first argument of `at` and `rest` ([`Reads::Args`]) that wouldn't cast alike everywhere,
+/// and why.
 ///
 /// # Safety
 ///
@@ -335,8 +330,7 @@ unsafe fn args(
     }
 }
 
-/// Argument `arg` as the number a library reads it as, cast as `cast`, if there's one, and it's
-/// one.
+/// Argument `arg` as the number a library reads it as under `cast`, if it is one.
 ///
 /// # Safety
 ///
@@ -356,14 +350,18 @@ unsafe fn number(state: *mut ffi::lua_State, arg: c_int, cast: Cast) -> Option<f
     }
 }
 
-/// The first argument `string.format`'s format string, its first argument, has it write otherwise
-/// on another platform, and why: one it casts to an integer, `%c` to an `int`, `%d` and `%i` to a
-/// `long long`, and `%o`, `%u`, `%x` and `%X` to a `long long` if it's negative or an `unsigned
-/// long long`, that wouldn't cast alike everywhere; or one it writes as a float, `%e`, `%E`, `%f`,
-/// `%g` and `%G`, that isn't finite, which C libraries write each their own way. The format string
-/// is read as Luau's `str_format` reads it, a conversion's flags, width and precision skipped.
-/// Each argument `%*` writes as `tostring` would is put in its place as the scripts' `tostring`
-/// writes it, as [`named`] says, where Luau's would write its address.
+/// The first `string.format` argument that would be written differently on another platform, and
+/// why:
+///
+/// - an integer conversion's argument that doesn't cast alike everywhere: `%c` casts to `int`,
+///   `%d` and `%i` to `long long`, `%o`, `%u`, `%x` and `%X` to `long long` if negative, else
+///   `unsigned long long`;
+/// - a float conversion's (`%e`, `%E`, `%f`, `%g`, `%G`) argument that isn't finite: C libraries
+///   write it each their own way.
+///
+/// The format string is read as Luau's `str_format` does, skipping flags, width and precision.
+/// A `%*` argument is first replaced by what the scripts' `tostring` writes ([`named`]); Luau's
+/// would write an address.
 ///
 /// # Safety
 ///
@@ -446,18 +444,18 @@ unsafe fn formatted(state: *mut ffi::lua_State) -> Option<(c_int, String)> {
     }
 }
 
-/// Puts in argument `arg`'s place, if it's a table or userdata without a `__tostring` metamethod,
-/// a function, a thread or a buffer, its type's name, or userdata's metatable's `__type`, if it's
-/// a string, as the scripts' `tostring` writes it, which [`super`]'s `written` says why of: Luau's
-/// own, which `string.format`'s `%*` calls, writes its address.
+/// Replaces argument `arg`, if it's a table or userdata without `__tostring`, a function, a
+/// thread or a buffer, with what the scripts' `tostring` writes: userdata's metatable's `__type`
+/// if a string, else its type's name. Luau's own, which `%*` calls, writes the address;
+/// [`super`]'s `written` says why that's replaced.
 ///
 /// # Safety
 ///
 /// `state` runs a C function.
 unsafe fn named(state: *mut ffi::lua_State, arg: c_int) {
-    // SAFETY: as the caller promises; `arg` is checked to be one of its arguments, `lua_rawcheckstack`
-    // makes room for the metafield `luaL_getmetafield` pushes, which is popped, or, a `__type`
-    // string, takes the argument's place, as does a static string Luau's own type names are.
+    // SAFETY: as the caller promises; `arg` is checked to be one of its arguments;
+    // `lua_rawcheckstack` makes room for the metafield `luaL_getmetafield` pushes, which is popped
+    // or, a `__type` string, takes the argument's place, as does a type name, a static string.
     unsafe {
         if arg > ffi::lua_gettop(state) {
             return;
@@ -496,8 +494,8 @@ unsafe fn named(state: *mut ffi::lua_State, arg: c_int) {
 /// Installs the hooks in `lua`'s VM.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // SAFETY: `exec_raw` runs the closure on a state of `lua`'s VM, whose callbacks every state of
-    // the VM shares; mlua sets none of these but the interrupt, as `Lua::set_interrupt` asks, which
-    // the engine never calls.
+    // the VM shares. mlua sets only the interrupt, through `Lua::set_interrupt`, which the engine
+    // never calls.
     unsafe {
         lua.exec_raw::<()>((), |state| {
             let callbacks = ffi::lua_callbacks(state);
@@ -511,10 +509,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     }
 }
 
-/// Luau's interrupt, which comes at each call and each turn of a loop: counts against the budget of
-/// the call into a script it comes in, failing the call past it, and stops there if a pause is
-/// asked, as [`super::interrupted`] says. The GC's own, which come as it collects, count for
-/// nothing.
+/// Luau's interrupt, at each call and each loop turn: counts against the budget of the call into a
+/// script it comes in, failing the call past it, and stops there if a pause is asked
+/// ([`super::interrupted`]). The GC's interrupts, during collection, count for nothing.
 unsafe extern "C-unwind" fn interrupt(state: *mut ffi::lua_State, gc: c_int) {
     if gc >= 0 {
         return;
@@ -525,8 +522,8 @@ unsafe extern "C-unwind" fn interrupt(state: *mut ffi::lua_State, gc: c_int) {
         // SAFETY: Luau calls the interrupt with the state that runs, between its instructions.
         Interrupt::Pause => unsafe { stop(state, StopReason::Pause) },
         Interrupt::Over => {
-            // SAFETY: as above; the error unwinds to the call into the script, which mlua catches,
-            // and nothing of Rust's that needs dropping is left in this frame as it's raised.
+            // SAFETY: as above. The error unwinds to the call into the script, which mlua catches;
+            // nothing of Rust's that needs dropping is left in this frame when it's raised.
             unsafe {
                 let (script, line) = position(state);
                 let message = guarded(|| super::over_budget(&script, line));
@@ -540,15 +537,15 @@ unsafe extern "C-unwind" fn interrupt(state: *mut ffi::lua_State, gc: c_int) {
     }
 }
 
-/// Luau's hook as a breakpoint's line is reached: stops there.
+/// Luau's hook at a breakpoint's line: stops there.
 #[cfg(feature = "dev")]
 unsafe extern "C-unwind" fn debugbreak(state: *mut ffi::lua_State, _: *mut ffi::lua_Debug) {
     // SAFETY: Luau calls the hook with the state that runs, at the breakpoint's instruction.
     unsafe { stop(state, StopReason::Breakpoint) }
 }
 
-/// Luau's hook before each instruction while the state steps: stops where the step under way ends,
-/// as [`super::stepped`] says.
+/// Luau's hook before each instruction while the state steps: stops where the step ends
+/// ([`super::stepped`]).
 #[cfg(feature = "dev")]
 unsafe extern "C-unwind" fn debugstep(state: *mut ffi::lua_State, ar: *mut ffi::lua_Debug) {
     // SAFETY: Luau calls the hook with the state that runs, before an instruction, and `ar` with
@@ -562,7 +559,7 @@ unsafe extern "C-unwind" fn debugstep(state: *mut ffi::lua_State, ar: *mut ffi::
     }
 }
 
-/// Stops the script `state` runs, for `why`, there, as [`super::stopped`] says.
+/// Stops the script `state` runs here, for `why` ([`super::stopped`]).
 ///
 /// # Safety
 ///
@@ -577,14 +574,14 @@ unsafe fn stop(state: *mut ffi::lua_State, why: StopReason) {
     }
 }
 
-/// The script and the line the function `state` runs is at, as a stop or an error names them.
+/// The script and line the running function is at, as a stop or an error names them.
 ///
 /// # Safety
 ///
 /// `state` runs, stopped between two instructions in a hook.
 unsafe fn position(state: *mut ffi::lua_State) -> (String, u32) {
-    // SAFETY: as the caller promises; `ar` is Luau's to fill, and its strings live as long as the
-    // function, which runs.
+    // SAFETY: as the caller promises. `ar` is Luau's to fill; its strings live as long as the
+    // running function.
     unsafe {
         let mut ar = std::mem::zeroed::<ffi::lua_Debug>();
         if ffi::lua_getinfo(state, 0, c"sl".as_ptr(), &mut ar) == 0 {
@@ -595,7 +592,7 @@ unsafe fn position(state: *mut ffi::lua_State) -> (String, u32) {
     }
 }
 
-/// A function of the stack where a script has stopped, as [`frames`] reads it.
+/// A function of the stack where a script stopped ([`frames`]).
 #[cfg(feature = "dev")]
 pub(super) struct Frame {
     pub(super) function: String,
@@ -605,7 +602,7 @@ pub(super) struct Frame {
     pub(super) upvalues: Vec<(String, Seen)>,
 }
 
-/// A value a stop reads, without calling into Luau, as a metamethod would be.
+/// A value a stop reads without calling into Luau (no metamethods).
 #[cfg(feature = "dev")]
 pub(super) enum Seen {
     Nil,
@@ -614,14 +611,14 @@ pub(super) enum Seen {
     Vector([f32; 4]),
     /// At most [`gg_api::MOST_SHOWN`] bytes of it.
     String(String),
-    /// Light userdata's bits: an entity's, a field's handle's, or `gg.entity`'s.
+    /// Light userdata's bits: an entity's, a field handle's or `gg.entity`'s.
     Handle(u64),
     /// Any other kind, by its name.
     Other(&'static str),
 }
 
-/// The stack of the script `state` runs, from the function it runs to the call into the script,
-/// Luau's functions alone, each with its locals and upvalues.
+/// The stack of the script `state` runs, from the running function to the call into the script:
+/// Luau functions only, with their locals and upvalues.
 ///
 /// # Safety
 ///
@@ -629,11 +626,11 @@ pub(super) enum Seen {
 #[cfg(feature = "dev")]
 unsafe fn frames(state: *mut ffi::lua_State) -> Vec<Frame> {
     let mut frames = Vec::new();
-    // SAFETY: as the caller promises. Each value read is pushed, read and popped, the function
+    // SAFETY: as the caller promises. Each value read is pushed, read and popped, a function
     // whose upvalues are read popped after them; `ar`'s strings live as long as their function,
     // which is on the stack.
     unsafe {
-        // The function and a value, at most.
+        // At most the function and a value.
         ffi::lua_rawcheckstack(state, 2);
         for level in 0.. {
             let mut ar = mem::zeroed::<ffi::lua_Debug>();
@@ -690,15 +687,15 @@ unsafe fn frames(state: *mut ffi::lua_State) -> Vec<Frame> {
     frames
 }
 
-/// The value at the top of `state`'s stack, read without calling into Luau.
+/// The value at the top of the stack, read without calling into Luau.
 ///
 /// # Safety
 ///
 /// `state`'s stack holds a value.
 #[cfg(feature = "dev")]
 unsafe fn seen(state: *mut ffi::lua_State) -> Seen {
-    // SAFETY: as the caller promises; each read is of the type `lua_type` says, which converts
-    // nothing, and the string's bytes live while it's on the stack.
+    // SAFETY: as the caller promises. Each read is of the type `lua_type` gives and converts
+    // nothing; the string's bytes live while it's on the stack.
     unsafe {
         match ffi::lua_type(state, -1) {
             ffi::LUA_TNIL => Seen::Nil,
@@ -732,15 +729,14 @@ unsafe fn seen(state: *mut ffi::lua_State) -> Seen {
     }
 }
 
-/// Sets, or clears if not `on`, a breakpoint at `line` of `chunk`, a script's chunk, or the next line
-/// with code after it, in the chunk or the functions it holds, and returns the line it's at; `None`
-/// if there's none.
+/// Sets, or clears if not `on`, a breakpoint at `line` of a script's `chunk`, or at the next line
+/// with code, in the chunk or its functions. Returns the line it's at, or `None` if there's none.
 #[cfg(feature = "dev")]
 pub(super) fn breakpoint(lua: &Lua, chunk: &Function, line: u32, on: bool) -> Option<u32> {
     let line = c_int::try_from(line).ok()?;
     let mut placed = -1;
     // SAFETY: `exec_raw` runs the closure with `chunk`, a function Luau compiled, alone on the
-    // stack, which `lua_breakpoint` reads it from; it may run inside a hook, as Luau allows.
+    // stack, where `lua_breakpoint` reads it; Luau allows this inside a hook.
     let ran = unsafe {
         lua.exec_raw::<()>(chunk, |state| {
             placed = ffi::lua_breakpoint(state, 1, line, c_int::from(on));
@@ -750,12 +746,12 @@ pub(super) fn breakpoint(lua: &Lua, chunk: &Function, line: u32, on: bool) -> Op
     u32::try_from(placed).ok()
 }
 
-/// The values `function`'s upvalues hold, in order; of a C function's, the coroutines and buffers
-/// alone, as `coroutine.wrap`'s hold its coroutine, while mlua's functions hold its own values.
+/// The values `function`'s upvalues hold, in order. A C function's are only coroutines and
+/// buffers (`coroutine.wrap` holds its coroutine); mlua's functions hold values of its own.
 pub(super) fn upvalues(lua: &Lua, function: &Function) -> mlua::Result<Variadic<Value>> {
-    // SAFETY: `exec_raw` runs the closure with `function` alone on the stack, and returns what the
-    // stack holds after, which is each upvalue `lua_getupvalue` pushed and kept once the function
-    // is gone.
+    // SAFETY: `exec_raw` runs the closure with `function` alone on the stack and returns what the
+    // stack holds after: each upvalue `lua_getupvalue` pushed and kept, once the function is
+    // removed.
     unsafe {
         lua.exec_raw(function, |state| {
             let c = ffi::lua_iscfunction(state, 1) != 0;
@@ -774,12 +770,12 @@ pub(super) fn upvalues(lua: &Lua, function: &Function) -> mlua::Result<Variadic<
     }
 }
 
-/// Has the VM's main thread, which runs the scripts, enter the calls into them stepping, calling
-/// [`debugstep`] before each instruction, or not: Luau steps only in a call it entered so.
+/// Sets whether the VM's main thread, which runs the scripts, enters calls into them stepping
+/// ([`debugstep`] before each instruction). Luau steps only in a call it entered so.
 #[cfg(feature = "dev")]
 pub(super) fn singlestep(lua: &Lua, on: bool) {
     // SAFETY: `exec_raw` runs the closure on a state of `lua`'s VM, from which `lua_mainthread`
-    // finds the main thread; between calls into scripts, which it runs.
+    // finds the main thread; it runs between calls into scripts.
     let _ = unsafe {
         lua.exec_raw::<()>((), |state| {
             ffi::lua_singlestep(ffi::lua_mainthread(state), c_int::from(on));
@@ -787,8 +783,8 @@ pub(super) fn singlestep(lua: &Lua, on: bool) {
     };
 }
 
-/// Runs `f`, the engine's side of a hook, ending the process if it panics, as a broken invariant
-/// does, its message printed: a panic would unwind into Luau's C++, which doesn't expect one.
+/// Runs `f`, the engine's side of a hook, aborting the process if it panics (a broken invariant,
+/// message printed): a panic would unwind into Luau's C++, which doesn't expect one.
 fn guarded<R>(f: impl FnOnce() -> R) -> R {
     panic::catch_unwind(panic::AssertUnwindSafe(f)).unwrap_or_else(|_| process::abort())
 }

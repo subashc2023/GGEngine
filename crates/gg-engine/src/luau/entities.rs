@@ -1,23 +1,22 @@
-//! What scripts make and unmake: `gg.spawn`, `gg.despawn`, `gg.add` and `gg.remove`, which change
-//! the world's entities and their components at once, as Rust code's calls do, and `gg.alive`, as
-//! [`Scripts`](super::Scripts) says.
+//! `gg.spawn`, `gg.despawn`, `gg.add`, `gg.remove` and `gg.alive` (docs/LUAU.md; see also
+//! [`Scripts`](super::Scripts)). Changes apply at once, as Rust code's calls do.
 //!
-//! A script's tick runs for each entity in a list made as its pass starts, not over a query that
-//! holds the world, so a change made as scripts run is safe at once: an entity despawned, or
-//! without the component, by the time its turn comes is passed over, as Rust's
-//! [`run_scripts`](crate::run_scripts) passes it over. What a VM's scripts give entities as they
-//! run, an entity spawned with a script's component or given one, or given one riding on a
-//! component it gained so, ticks first as that VM's scripts next run, at the next tick, whichever
-//! of its passes comes later: so that when it starts doesn't go by the order of the scripts' names.
-//! Another VM's scripts that run later in the tick, a mod's after the game's or another mod's,
-//! tick it as they run, as their passes list it, in the order the layers run them, which is the
-//! same on every peer. Their chunks change nothing of the world, entity, field, tween, clip or
-//! parameter, as a chunk runs again as a lockstep joiner or a run restored from a snapshot loads it
-//! (`script.loading`).
+//! A script's tick runs over a list of entities made as its pass starts, not over a query holding
+//! the world, so changes made as scripts run are safe. An entity despawned, or without the
+//! component, by its turn is passed over, as [`run_scripts`](crate::run_scripts) does.
 //!
-//! Each change allocates, as Rust's by name do: a script spawns and despawns as Rust code does,
-//! not at every tick in the thousands. Its errors are the engine's, with their codes, naming the
-//! entity, by its ID while it's alive and else by its handle, and the component.
+//! Entities a VM's scripts spawn with, or give, a script's component (or one riding on a component
+//! so gained) tick first at that VM's next run, the next tick, whichever pass comes later, so
+//! their start doesn't depend on the order of the scripts' names. Another VM's scripts that run
+//! later in the tick (a mod's, after the game's or another mod's) tick it as their passes list it,
+//! in the order the layers run them, the same on every peer.
+//!
+//! A chunk changes nothing of the world (entity, field, tween, clip, parameter): it runs again as a
+//! lockstep joiner or a run restored from a snapshot loads it (`script.loading`).
+//!
+//! Each change allocates, so scripts spawn and despawn as Rust code does, not by the thousand per
+//! tick. Errors are the engine's, with their codes, naming the entity (by ID while alive, else by
+//! handle) and component.
 
 use gg_core::{Error, Result};
 use mlua::{LightUserData, Lua, Table, Value as Lua_};
@@ -29,7 +28,7 @@ use crate::grant::Capability;
 use crate::reflect::{Ident, Reflect, Value, list};
 use crate::{Entity, PrefabRoot, Transform, World};
 
-/// Adds the functions this module serves to `gg`, the scripts' table of the engine's functions.
+/// Adds this module's functions to `gg`.
 pub(super) fn register(lua: &Lua, gg: &Table) -> mlua::Result<()> {
     gg.raw_set("spawn", lua.create_function(spawn)?)?;
     gg.raw_set("despawn", lua.create_function(despawn)?)?;
@@ -39,29 +38,24 @@ pub(super) fn register(lua: &Lua, gg: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Whether the VM's scripts gave `entity` component `id` as they ran this time, as the module
-/// says: spawned it, gave it the component, or one riding on a component it gained so. A lookup or
-/// two in a set, which is empty but where scripts change entities.
+/// Whether the VM's scripts gave `entity` component `id` in this run (the module doc's rule):
+/// spawned it, added it, or added one riding on a component gained so. At most two set lookups; the
+/// set is empty except where scripts change entities.
 pub(super) fn fresh(shared: &Shared, entity: Entity, id: ComponentId) -> bool {
     let fresh = shared.fresh.borrow();
     !fresh.is_empty() && (fresh.contains(&(entity, None)) || fresh.contains(&(entity, Some(id))))
 }
 
-/// Notes that `entity` was given `rider`, a script's component riding on `on`, as the scripts ran,
-/// which is fresh as `on` is.
+/// Notes that `entity` was given `rider`, riding on `on`, so it is fresh if `on` is.
 pub(super) fn rides(shared: &Shared, entity: Entity, on: ComponentId, rider: ComponentId) {
     if fresh(shared, entity, on) {
         shared.fresh.borrow_mut().insert((entity, Some(rider)));
     }
 }
 
-/// `gg.spawn(components, options)`: spawns an entity with `components`, a table of each component
-/// type's name to a table of its fields' values by name, those not given at their defaults, and
-/// returns it. `options`' `parent` makes it the last of that entity's children, and its `prefab`,
-/// a prefab's ID or path, spawns that prefab's instance with it as its root, the components given
-/// in place of the prefab's and its `Transform` the identity if it's not given. A mod's scripts
-/// spawn only if it may write some type, an entity of components they may write alone; one
-/// without components, under a parent or of a prefab only if it may write the whole world.
+/// `gg.spawn(components, options)`. With a `prefab`, the components given replace the prefab's, and
+/// `Transform` is the identity if not given. A mod needs `write` of some type and of each type it
+/// gives; with no components, a `parent` or a `prefab`, `write` of the whole world.
 fn spawn(_: &Lua, (components, options): (Lua_, Lua_)) -> mlua::Result<Lua_> {
     shared(|shared| {
         ticking(shared, "spawns")?;
@@ -153,8 +147,8 @@ fn spawn(_: &Lua, (components, options): (Lua_, Lua_)) -> mlua::Result<Lua_> {
     })
 }
 
-/// `gg.despawn(entity)`: despawns `entity` and its descendants, as [`World::despawn`] does; for a
-/// mod's scripts only if it may write the whole world, as they take every component of each.
+/// `gg.despawn(entity)`, as [`World::despawn`]. A mod needs `write` of the whole world: it takes
+/// every component of each entity.
 fn despawn(_: &Lua, entity: Lua_) -> mlua::Result<()> {
     shared(|shared| {
         ticking(shared, "despawns")?;
@@ -174,8 +168,7 @@ fn despawn(_: &Lua, entity: Lua_) -> mlua::Result<()> {
     })
 }
 
-/// `gg.add(entity, component, fields)`: gives `entity` a `component`, which it hasn't, its fields
-/// those in `fields` by name, and the rest at their defaults.
+/// `gg.add(entity, component, fields)`: fields not in `fields` take their defaults.
 fn add(_: &Lua, (entity, component, fields): (Lua_, Lua_, Lua_)) -> mlua::Result<()> {
     shared(|shared| {
         ticking(shared, "gives components")?;
@@ -199,7 +192,7 @@ fn add(_: &Lua, (entity, component, fields): (Lua_, Lua_, Lua_)) -> mlua::Result
     })
 }
 
-/// `gg.remove(entity, component)`: takes `entity`'s `component` away.
+/// `gg.remove(entity, component)`.
 fn remove(_: &Lua, (entity, component): (Lua_, Lua_)) -> mlua::Result<()> {
     shared(|shared| {
         ticking(shared, "takes components away")?;
@@ -215,8 +208,8 @@ fn remove(_: &Lua, (entity, component): (Lua_, Lua_)) -> mlua::Result<()> {
     })
 }
 
-/// `gg.alive(entity)`: whether `entity` is in the world, which a handle held to an entity
-/// despawned since isn't, as no other entity in its slot is it; false for `gg.entity` and nil.
+/// `gg.alive(entity)`: false for `gg.entity`, nil, and a handle to a despawned entity, which no
+/// later entity in its slot equals.
 fn alive(_: &Lua, entity: Lua_) -> mlua::Result<bool> {
     shared(|shared| {
         let entity = match entity {
@@ -228,18 +221,18 @@ fn alive(_: &Lua, entity: Lua_) -> mlua::Result<bool> {
     })
 }
 
-/// The error of `code` that `message` says, as a script's call fails with it.
+/// The error of `code` with `message`.
 fn fail(code: &'static str, message: String) -> mlua::Error {
     mlua::Error::external(Error::new(code, message))
 }
 
-/// The error, `script.bad_argument`, that a call's argument `what` is `got`, where it's `expected`.
+/// `script.bad_argument`: argument `what` is `got`, not `expected`.
 fn argument(what: &str, expected: &str, got: &Lua_) -> mlua::Error {
     let message = format!("{what} is {expected}, not a {}", got.type_name());
     fail("script.bad_argument", message)
 }
 
-/// The entity a call's argument `what`, `value`, is, as [`target`] finds it.
+/// The entity argument `what`, `value`, is, as [`target`].
 ///
 /// Fails with `script.bad_argument` for a value that isn't light userdata, and as `target` does.
 fn entity_arg(what: &str, value: Lua_) -> mlua::Result<Entity> {
@@ -249,9 +242,9 @@ fn entity_arg(what: &str, value: Lua_) -> mlua::Result<Entity> {
     }
 }
 
-/// The table a call's argument `what`, `value`, is, or none for nil.
+/// The table argument `what` is, or none for nil.
 ///
-/// Fails with `script.bad_argument` for a value of another kind.
+/// Fails with `script.bad_argument` for another kind.
 fn table_arg(what: &str, value: Lua_) -> mlua::Result<Option<Table>> {
     match value {
         Lua_::Nil => Ok(None),
@@ -260,9 +253,9 @@ fn table_arg(what: &str, value: Lua_) -> mlua::Result<Option<Table>> {
     }
 }
 
-/// The name a call's argument `what`, `value`, is.
+/// The name argument `what` is.
 ///
-/// Fails with `script.bad_argument` for a value that isn't a string, or isn't UTF-8.
+/// Fails with `script.bad_argument` for a value that isn't a UTF-8 string.
 fn name_arg(what: &str, value: &Lua_) -> mlua::Result<String> {
     let name = match value {
         Lua_::String(name) => name.to_str().ok().map(|name| name.to_owned()),
@@ -271,8 +264,8 @@ fn name_arg(what: &str, value: &Lua_) -> mlua::Result<String> {
     name.ok_or_else(|| argument(what, "a component type's name", value))
 }
 
-/// Fails with `script.loading` as a script's chunk runs, where a script's call that `does`
-/// changes no entity, as the module says, refusing the script loading.
+/// Fails with `script.loading` if a chunk is running, where a call that `does` something is
+/// refused (the module doc says why), and refuses the script loading.
 pub(super) fn ticking(shared: &Shared, does: &str) -> mlua::Result<()> {
     let mut loading = shared.loading.borrow_mut();
     let Some(loading) = loading.as_mut() else {
@@ -287,7 +280,7 @@ pub(super) fn ticking(shared: &Shared, does: &str) -> mlua::Result<()> {
     Err(fail("script.loading", message))
 }
 
-/// Fails with `mod.ungranted` unless the scripts may write `component`, which `what` it needs.
+/// Fails with `mod.ungranted` unless the scripts may write `component`, for `what`.
 fn writes(shared: &Shared, component: &str, what: &str) -> mlua::Result<()> {
     if shared.may(component).1 {
         return Ok(());
@@ -299,10 +292,9 @@ fn writes(shared: &Shared, component: &str, what: &str) -> mlua::Result<()> {
     ))
 }
 
-/// The entity `data` is, which a script gives a call to change it.
+/// The entity `data` is, for a call that changes it.
 ///
-/// Fails with `ecs.no_entity` for `gg.entity`, which is none, and with `reflect.wrong_kind` for a
-/// field's handle.
+/// Fails with `ecs.no_entity` for `gg.entity` and `reflect.wrong_kind` for a field's handle.
 fn target(data: LightUserData) -> mlua::Result<Entity> {
     if bits(data) == 0 {
         let message = "`gg.entity` is no entity, but a field's default of none".to_owned();
@@ -314,9 +306,8 @@ fn target(data: LightUserData) -> mlua::Result<Entity> {
     })
 }
 
-/// A spawn's `components`, each a type's name and the values of its fields that it gives, as
-/// [`fields_in`] reads them, in the order of the names, so that what a spawn refuses first is the
-/// same whatever order Luau holds its table in.
+/// A spawn's `components`: each type's name and its fields ([`fields_in`]), sorted by name so what
+/// a spawn refuses first doesn't depend on Luau's table order.
 fn components_in(components: Option<Table>) -> mlua::Result<Vec<(String, Fields)>> {
     let mut given = Vec::new();
     for pair in components.iter().flat_map(Table::pairs::<Lua_, Lua_>) {
@@ -345,10 +336,10 @@ fn components_in(components: Option<Table>) -> mlua::Result<Vec<(String, Fields)
     Ok(given)
 }
 
-/// The values a script gives a component's fields, each by the field's name.
+/// A script's values for a component's fields, by name.
 type Fields = Vec<(String, Lua_)>;
 
-/// The values `fields` gives `component`'s fields, each by its name, in the order of the names.
+/// `fields`' values for `component`'s fields, sorted by name (as [`components_in`]).
 fn fields_in(component: &str, fields: Option<Table>) -> mlua::Result<Fields> {
     let mut given = Vec::new();
     for pair in fields.iter().flat_map(Table::pairs::<Lua_, Lua_>) {
@@ -366,16 +357,18 @@ fn fields_in(component: &str, fields: Option<Table>) -> mlua::Result<Fields> {
     Ok(given)
 }
 
-/// A `component` of `world`'s, at its default, as [`World::default_of`] makes it, but for
-/// `fields`, each a field's name and the script's value it takes in place of its default, of the
-/// kinds a script's handles reach. A type without a default, as one of an entity's field that's
-/// no option is, is made of the fields given and the others' defaults.
+/// A `component` at its default ([`World::default_of`]), but with `fields` (name and script value)
+/// in place of the defaults. A type without a default, such as one with a non-option entity field,
+/// is made of the fields given and the others' defaults. Bounds are checked as it's built.
 ///
-/// Fails with `reflect.unknown_type` for no component type of its name, and `reflect.read_only`
-/// for one the world keeps, as [`World::unlinked_type`] says; with `reflect.no_field` for a field
-/// the type hasn't; with `reflect.wrong_kind` for a field of a kind scripts don't reach, or a value
-/// of another kind, as [`value_of`] does; with `reflect.no_default` for a field not given that has
-/// no default; and as `default_of` does otherwise. Its bounds are checked as it's built.
+/// Fails with:
+/// - `reflect.unknown_type` for no such type, `reflect.read_only` for one the world keeps
+///   ([`World::unlinked_type`]);
+/// - `reflect.no_field` for a field the type hasn't;
+/// - `reflect.wrong_kind` for a field scripts don't reach, or a value of another kind
+///   ([`value_of`]);
+/// - `reflect.no_default` for a field not given that has no default;
+/// - what `default_of` fails with, otherwise.
 fn made(world: &World, component: &str, fields: &[(String, Lua_)]) -> Result<Value> {
     let id = world.unlinked_type(component)?;
     let described = world.fields_of(id);
@@ -456,7 +449,7 @@ mod tests {
     use crate::grant::Grant;
     use crate::{Component, Context};
 
-    /// A Rust component that scripts give and take, with a field of a kind they don't reach.
+    /// A component scripts give and take, with a field of a kind they don't reach.
     #[derive(Clone, Component)]
     struct Body {
         mass: f32,
@@ -466,15 +459,15 @@ mod tests {
         label: String,
     }
 
-    /// A Rust component without a default, as its entity's field has none.
+    /// A component without a default: its entity field has none.
     #[derive(Clone, Component)]
     struct Follow {
         target: Entity,
         gap: f32,
     }
 
-    /// Lays a `Kid` under its entity at each tick, given a `Body` whose fields it sets, some as it
-    /// spawns it and one after.
+    /// Spawns a `Kid` under its entity each tick, with a `Body` whose fields it sets, some at the
+    /// spawn and one after.
     const HATCH: &str = r#"
 local Body = gg.component("Body")
 local Hatch = gg.declare("Hatch", { laid = 0 })
@@ -492,8 +485,7 @@ end
 return Hatch
 "#;
 
-    /// Takes its entity's `Body` away at its first tick, gives it another at its second, and
-    /// despawns it at its third.
+    /// Removes its entity's `Body` at tick 1, adds one at tick 2, despawns at tick 3.
     const KID: &str = r#"
 local Kid = gg.declare("Kid", { age = 0 })
 
@@ -512,8 +504,8 @@ end
 return Kid
 "#;
 
-    /// A context whose project's root is `dir`, with `Body` registered, and a host that has loaded
-    /// `scripts`, each a path in `dir` and a text, which it writes there.
+    /// A context rooted at `dir` with `Body` and `Follow` registered, and a host that has loaded
+    /// `scripts` (path in `dir`, text), written there first.
     fn loaded(dir: &Scratch, scripts: &[(&str, &str)]) -> (Context, Scripts) {
         fs::create_dir_all(dir.0.join("scripts")).expect("a directory");
         let mut cx = Context::seeded(1).root(&dir.0);
@@ -528,7 +520,7 @@ return Kid
         (cx, host)
     }
 
-    /// Runs `text` in `host`'s VM, given `args`, with `world` lent, as a tick runs.
+    /// Runs `text` in `host`'s VM with `args` and `world` lent, as a tick does.
     fn call<R: FromLuaMulti>(
         host: &mut Host,
         world: &mut World,
@@ -542,7 +534,7 @@ return Kid
         })
     }
 
-    /// The code of the engine's error that `ran` failed with.
+    /// The code of the engine error `ran` failed with.
     fn code<R>(ran: mlua::Result<R>) -> &'static str {
         let Err(error) = ran else {
             panic!("refused");
@@ -551,17 +543,17 @@ return Kid
         code.unwrap_or_else(|| panic!("an engine's error: {error}"))
     }
 
-    /// The handle of `entity`, as a script holds it.
+    /// `entity`'s handle.
     fn held(entity: Entity) -> LightUserData {
         handle(entity.to_bits())
     }
 
-    /// The entity a script returned.
+    /// The entity a handle a script returned is.
     fn entity(data: LightUserData) -> Entity {
         Entity::from_bits(bits(data)).expect("an entity")
     }
 
-    /// Each entity of `world`, with its ID, in the order queries find them.
+    /// Each entity with its ID, in query order.
     fn ids(world: &World) -> Vec<(Entity, String)> {
         let entities = world.entities(None).expect("listed");
         entities
@@ -569,9 +561,9 @@ return Kid
             .collect()
     }
 
-    /// A script spawns an entity under another with components whose fields it gives and sets
-    /// after, takes one away, gives one, and despawns it, at once; what it spawns, or gives a
-    /// script's component, ticks first at the next tick, whichever script's pass comes later.
+    /// Spawn (with fields, one set after), remove, add and despawn take effect at once. What a
+    /// script spawns or gives a script's component ticks first at the next tick, whichever pass
+    /// comes later.
     #[test]
     fn a_script_spawns_gives_takes_away_and_despawns() {
         let dir = Scratch::new("luau-entities");
@@ -607,8 +599,8 @@ return Kid
         assert_eq!(world.children(hatch).expect("alive").count(), 3);
     }
 
-    /// A component riding on one a script gave an entity is given it as its pass comes, but ticks
-    /// first at the next tick, as the one it rides on does.
+    /// A component riding on one a script gave is added as its pass comes, but ticks first at the
+    /// next tick, like the one it rides on.
     #[test]
     fn a_rider_on_what_a_script_gave_starts_at_the_next_tick() {
         let dir = Scratch::new("luau-entities-rider");
@@ -635,9 +627,9 @@ return Kid
         assert_eq!(rode, Value::F64(1.0));
     }
 
-    /// Spawns, gives, takes away and despawns from scripts go alike on a world run again from a
-    /// copy, as rollback runs it, and on a copy run beside it, as a SyncTest runs it: the same
-    /// entities, in the same slots, of the same IDs, and the same hash.
+    /// Script spawns, adds, removes and despawns go alike on a world run again from a copy (as
+    /// rollback does) and on a copy run beside it (as a SyncTest does): same entities, slots, IDs
+    /// and hash.
     #[test]
     fn what_scripts_spawn_and_despawn_goes_alike_when_ticks_run_again() {
         let dir = Scratch::new("luau-entities-again");
@@ -667,10 +659,9 @@ return Kid
         assert!(cx.world().difference(&copy).is_none());
     }
 
-    /// A spawn takes a prefab, spawning its instance under the entity it returns, which takes the
-    /// `Transform` given; and a parent, of whose children it's the last. Despawning the parent
-    /// despawns them all, and a handle held to one of them is found to be of none, as a field's
-    /// read through it fails, `ecs.no_entity`.
+    /// A spawn takes a prefab (its instance goes under the returned entity, which takes the given
+    /// `Transform`) and a parent (it's the last child). Despawning the parent despawns all, and a
+    /// field read through a held handle fails with `ecs.no_entity`.
     #[test]
     fn a_spawn_takes_a_prefab_and_a_parent() {
         let dir = Scratch::new("luau-entities-prefab");
@@ -708,8 +699,8 @@ return Kid
         assert_eq!(code(read), "ecs.no_entity");
     }
 
-    /// A script reads a translation, `f64`, as a vector, `f32`, its nearest, and sets one from a
-    /// vector as it is: 1,000 km out, to the nearest 6 cm, as LUAU.md says.
+    /// A `f64` translation reads as the nearest `f32` vector and a vector sets it as is: 1,000 km
+    /// out, to the nearest 6 cm (docs/LUAU.md).
     #[test]
     fn a_script_reads_and_sets_a_far_translation_as_a_vector() {
         let dir = Scratch::new("luau-entities-far");
@@ -731,8 +722,8 @@ return Kid
         assert_eq!(set.translation, DVec3::new(1_000_000.312_5, 0.5, 2.0));
     }
 
-    /// What a script's call to change the world's entities refuses, it refuses with the engine's
-    /// error and its code, naming the entity and the component, and changing nothing.
+    /// A refused entity change fails with the engine's error and code, naming the entity and
+    /// component, and changes nothing.
     #[test]
     fn what_a_script_s_changes_refuse_fails_with_a_code() {
         let dir = Scratch::new("luau-entities-refused");
@@ -828,8 +819,8 @@ return Kid
         assert!(error.to_string().contains(&gone.to_string()), "{error}");
     }
 
-    /// A component type without a default, as one with an entity's field that's no option is, is
-    /// given made of the fields a script gives and the others' defaults.
+    /// A type without a default (a non-option entity field) is made of the fields given and the
+    /// others' defaults.
     #[test]
     fn a_component_without_a_default_is_made_of_the_fields_given() {
         let dir = Scratch::new("luau-entities-no-default");
@@ -851,8 +842,8 @@ return Kid
         assert_eq!((follow.target, follow.gap), (follower, 0.0));
     }
 
-    /// A script's chunk changes no entity, as it runs again as a lockstep joiner or a restored run
-    /// loads it: one that does is refused, `script.loading`.
+    /// A chunk that changes an entity is refused, `script.loading`: it runs again on a lockstep
+    /// joiner or restored run.
     #[test]
     fn a_script_s_chunk_spawns_nothing() {
         let dir = Scratch::new("luau-entities-chunk");
@@ -865,9 +856,9 @@ return Kid
         assert_eq!(cx.world().entities(None).expect("listed").count(), 0);
     }
 
-    /// A mod's scripts spawn and despawn as its grant lets them: only if it may write some type, an
-    /// entity with the components they may write; one without any, under a parent or of a prefab,
-    /// and a despawn, only if they may write the whole world.
+    /// A mod spawns and despawns as its grant lets it: `write` of some type for an entity with
+    /// components it may write; `write` of the whole world for one without, under a parent or of a
+    /// prefab, and for a despawn.
     #[test]
     fn a_mod_s_scripts_change_entities_as_its_grant_lets_them() {
         let mut world = World::default();
@@ -909,9 +900,8 @@ return Kid
         }
     }
 
-    /// A script's chunk writes nothing at all, not only entities and components: a field, a tween,
-    /// a clip and a parameter are refused too, `script.loading`, as each runs again as a lockstep
-    /// joiner or a restored run loads the chunk.
+    /// A chunk writes nothing: fields, tweens, clips and parameters are refused too,
+    /// `script.loading`, for the same reason as entities.
     #[test]
     fn a_script_s_chunk_writes_no_field_tween_clip_or_parameter() {
         let dir = Scratch::new("luau-entities-chunk-writes");
@@ -941,8 +931,8 @@ return Kid
         host.load(&mut cx, &path).expect("loads");
     }
 
-    /// The errors of `gg.play` and `gg.set_param` keep their engine codes, as a tick's
-    /// `script.error` names them as its `cause`.
+    /// `gg.play` and `gg.set_param` errors keep their engine codes, which a tick's `script.error`
+    /// names as its `cause`.
     #[test]
     fn play_and_set_param_keep_the_codes_of_the_engine_s_errors() {
         let dir = Scratch::new("luau-entities-play-codes");
@@ -965,8 +955,8 @@ return Kid
         }
     }
 
-    /// A mod's field read or write that its grant doesn't allow fails as a tick runs with
-    /// `mod.ungranted`, as the other refusals do, where it was text only.
+    /// A mod's field read or write its grant doesn't allow fails with `mod.ungranted` at run time,
+    /// like the other refusals, not as text only.
     #[test]
     fn a_field_read_or_written_ungranted_fails_with_its_code() {
         let mut world = World::default();
@@ -1004,8 +994,8 @@ return Kid
         assert_eq!(code(ran), "mod.ungranted", "a type it has no grant on");
     }
 
-    /// `gg.quat.from_axis_angle` takes an axis of any length as its direction, and refuses one that
-    /// is none: `script.bad_argument`.
+    /// `gg.quat.from_axis_angle` takes an axis of any length as a direction and refuses a
+    /// non-direction with `script.bad_argument`.
     #[test]
     fn an_axis_angle_rotation_normalizes_its_axis_and_refuses_one_that_is_none() {
         let mut host = Host::new(None).expect("Luau starts");

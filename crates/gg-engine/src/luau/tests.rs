@@ -24,7 +24,7 @@ struct Mover {
     at: Vec3,
     turn: Quat,
     target: Option<Entity>,
-    /// Of a kind scripts don't reach, which has no handle.
+    /// A kind scripts can't reach: no handle.
     label: String,
 }
 
@@ -68,8 +68,8 @@ end
 return Spin
 "#;
 
-/// A context whose project's root is `dir`, with `Mover` registered, and a host that has
-/// loaded `scripts`, each a path in `dir` and a text, which it writes there.
+/// A context rooted at `dir` with `Mover` registered, and a host that has loaded `scripts` (path
+/// in `dir`, text), writing each there.
 fn loaded(dir: &Scratch, scripts: &[(&str, &str)]) -> (Context, Scripts) {
     fs::create_dir_all(dir.0.join("scripts")).expect("a directory");
     let mut cx = Context::seeded(1).root(&dir.0);
@@ -184,10 +184,9 @@ fn scripts_go_without_what_would_run_otherwise_on_another_platform_or_in_another
     assert_eq!(log, Some(Value::F64(libm::log(10.0) / libm::log(3.0))));
 }
 
-/// The library functions that make an integer of a number fail at one past the integer's range,
-/// or that isn't finite, which platforms cast otherwise, called as functions or as methods, and
-/// `string.format` at one its conversion would cast so or write as a float that isn't finite;
-/// within the range they work as Luau's own, `table.insert`'s value however large.
+/// Library functions that make an integer of a number fail on one out of range or not finite
+/// (platforms cast these differently), as functions or methods; so does `string.format`'s
+/// conversion. In range they work as Luau's own; `table.insert`'s value may be any size.
 #[test]
 fn library_functions_refuse_numbers_that_platforms_make_other_integers_of() {
     let dir = Scratch::new("luau-integers");
@@ -278,7 +277,7 @@ fn a_script_that_doesn_t_declare_its_component_as_a_script_does_is_refused() {
     assert_eq!(refused("unknown", unknown).code(), "script.bad");
 }
 
-/// Steps a mover by its own field `by`, of `fields`, and by `step`.
+/// Steps a mover by its own field `by` (declared in `fields`) times `step`.
 fn stepper(step: u32, fields: &str) -> String {
     format!(
         "local Mover = gg.component(\"Mover\")\n\
@@ -290,7 +289,7 @@ fn stepper(step: u32, fields: &str) -> String {
     )
 }
 
-/// Copies a stepper's `by` into its mover's speed, through a handle of another script's field.
+/// Copies a stepper's `by` into its mover's speed, through a handle to another script's field.
 const COPY: &str = "local Mover = gg.component(\"Mover\")\n\
         local Step = gg.component(\"Step\")\n\
         local Copy = gg.declare(\"Copy\", {})\n\
@@ -299,7 +298,7 @@ const COPY: &str = "local Mover = gg.component(\"Mover\")\n\
         end\n\
         return Copy\n";
 
-/// Reloads the script `scripts/step.luau` as an edit does, its text now `text`.
+/// Reloads `scripts/step.luau` with `text`, as an edit does.
 fn reload(cx: &mut Context, text: impl Into<String>) -> Result<Done> {
     let edit = Edit::Script {
         path: "scripts/step.luau".to_owned(),
@@ -325,8 +324,8 @@ fn a_reload_runs_from_the_next_tick_its_components_keeping_the_fields_it_keeps()
     host.run(cx.world_mut());
     let steps = |cx: &Context| cx.world().get::<Mover>(mover).expect("a mover").steps;
     assert_eq!(steps(&cx), 55);
-    // `gone` dropped, `on` of another kind, `added` added, and `by`'s default changed, which
-    // now sorts second: the other script's handle of it finds it there.
+    // `gone` dropped, `on` changed kind, `added` added; `by` now sorts second, where the other
+    // script's handle must find it.
     let fields = "by = 2, on = 7, added = vector.create(1, 2, 3)";
     reload(&mut cx, stepper(100, fields)).expect("reloaded");
     let world = cx.world();
@@ -342,8 +341,8 @@ fn a_reload_runs_from_the_next_tick_its_components_keeping_the_fields_it_keeps()
     assert_eq!(steps(&cx), 555);
     let speed = cx.world().get::<Mover>(mover).expect("a mover").speed;
     assert_eq!(speed, 5.0);
-    // Refused: one that doesn't compile, one that renames its component, and one of a script
-    // no layer loaded; the script runs as it did.
+    // Refused: a script that doesn't compile, one renaming its component, and one no layer
+    // loaded. The script runs as before.
     let refused = |result: Result<Done>| result.expect_err("refused").code().to_owned();
     assert_eq!(refused(reload(&mut cx, "local = ")), "script.bad");
     let renamed = stepper(1, "by = 1").replace("\"Step\"", "\"Stride\"");
@@ -357,9 +356,9 @@ fn a_reload_runs_from_the_next_tick_its_components_keeping_the_fields_it_keeps()
     assert_eq!(steps(&cx), 1055);
 }
 
-/// A reload that moves its type's fields reaches the handles of them that every other VM holds,
-/// another layer's or a mod's, as it reaches its own: each finds its field where it is now, and
-/// one of a field gone fails as an error does.
+/// A reload that moves its type's fields reaches the handles every other VM holds (another
+/// layer's, a mod's) as it reaches its own: each finds its field where it is now, and one to a
+/// field gone fails.
 #[test]
 fn a_reload_reaches_the_handles_other_vms_hold_of_its_fields() {
     let dir = Scratch::new("luau-reload-elsewhere");
@@ -390,8 +389,8 @@ fn a_reload_reaches_the_handles_other_vms_hold_of_its_fields() {
     assert_eq!(speed(&cx), 1.0, "its field gone");
 }
 
-/// A world from before a reload that changed the fields, as `stop` brings back, holds them as
-/// they are now once it's back; and so do the components an undo puts back.
+/// A world from before a reload that changed fields, which `stop` brings back, holds them as they
+/// are now once back; so do components an undo restores.
 #[cfg(feature = "dev")]
 #[test]
 fn what_comes_back_from_before_a_reload_holds_its_fields_as_they_are_now() {
@@ -429,7 +428,7 @@ fn what_comes_back_from_before_a_reload_holds_its_fields_as_they_are_now() {
     assert_eq!(steps, 4);
 }
 
-/// Counts a mover's steps, through a local, after a comment, so that a breakpoint asked at the
+/// Counts a mover's steps through a local, after a comment, so a breakpoint asked at the
 /// comment's line takes the function's.
 const COUNTED: &str = "local Mover = gg.component(\"Mover\")\n\
         local Step = gg.declare(\"Step\", { by = 1, forever = false })\n\
@@ -444,8 +443,8 @@ const COUNTED: &str = "local Mover = gg.component(\"Mover\")\n\
         \n\
         return Step\n";
 
-/// A context whose project's root is `dir` with two movers stepped by [`COUNTED`], whose
-/// scripts `debugger` debugs, and its host.
+/// A context rooted at `dir` with two movers stepped by [`COUNTED`], debugged by `debugger`, and
+/// its host.
 #[cfg(feature = "dev")]
 fn debugged(dir: &Scratch, debugger: &Arc<Debugger>) -> (Context, Scripts, [Entity; 2]) {
     let (mut cx, host) = loaded(dir, &[("scripts/step.luau", COUNTED)]);
@@ -458,7 +457,7 @@ fn debugged(dir: &Scratch, debugger: &Arc<Debugger>) -> (Context, Scripts, [Enti
     (cx, host, movers)
 }
 
-/// What a stop's frame holds as `name`, a local's.
+/// What a stop's frame holds in the local `name`.
 #[cfg(feature = "dev")]
 fn local(stop: &gg_api::Stop, name: &str) -> serde_json::Value {
     let locals = &stop.frames[0].locals;
@@ -466,9 +465,9 @@ fn local(stop: &gg_api::Stop, name: &str) -> serde_json::Value {
     found.map_or(serde_json::Value::Null, |local| local.value.clone())
 }
 
-/// A script stops at a breakpoint inside its tick, which waits there, with its stack and locals,
-/// until it's told to go on: a step over goes to its next line, a step out from the tick to the
-/// next entity's, and a continue to the next stop; the ticks then end as they would have.
+/// A script stops at a breakpoint in its tick and waits, with stack and locals, until told to go
+/// on: step over goes to the next line, step out to the next entity's tick, continue to the next
+/// stop. The ticks then end as they would have.
 #[cfg(feature = "dev")]
 #[test]
 fn a_script_stops_at_a_breakpoint_and_steps_over_and_out_until_it_goes_on() {
@@ -541,8 +540,8 @@ fn a_script_stops_at_a_breakpoint_and_steps_over_and_out_until_it_goes_on() {
     assert_eq!(refused.code(), "script.not_stopped");
 }
 
-/// A pause asked stops the next line a script runs, its tick's first; and one asked while a call
-/// runs, as an interrupt in it finds.
+/// A pause stops at the next line a script runs, its tick's first; one asked during a call is
+/// found by an interrupt in it.
 #[cfg(feature = "dev")]
 #[test]
 fn a_pause_stops_the_next_line_a_script_runs() {
@@ -567,15 +566,15 @@ fn a_pause_stops_the_next_line_a_script_runs() {
     let id = cx.world().id(movers[0]).expect("alive").to_string();
     assert_eq!(local(&stop, "entity"), serde_json::json!(id));
     assert_eq!(debugger.answer(std::time::Duration::ZERO).stops, 1);
-    // Asked again, an interrupt in a call that runs finds it.
+    // Asked again, an interrupt in a running call finds it.
     debugger.act(DebugAction::Pause).expect("asked");
     let shared = &host.host.borrow().shared;
     let interrupt = lent(shared, cx.world_mut(), interrupted);
     assert!(matches!(interrupt, Interrupt::Pause));
 }
 
-/// A breakpoint takes the next line with code from the line asked, kept for a script that hasn't
-/// loaded until it does, and is placed again in its new functions as it reloads.
+/// A breakpoint takes the next line with code from the line asked, is kept for a script until it
+/// loads, and is placed again in its new functions on reload.
 #[cfg(feature = "dev")]
 #[test]
 fn a_breakpoint_takes_the_next_line_with_code_and_follows_its_script_as_it_reloads() {
@@ -601,7 +600,7 @@ fn a_breakpoint_takes_the_next_line_with_code_and_follows_its_script_as_it_reloa
     host.load(&mut cx, &path).expect("the script loads");
     let scripts = debugger.answer(std::time::Duration::ZERO).scripts;
     assert_eq!(scripts, ["scripts/step.luau"]);
-    // The comment's line takes the function's, which the chunk sets.
+    // The comment's line takes the function's, set by the chunk.
     assert_eq!(
         placed(&debugger),
         [(3, Some(5)), (9, Some(9)), (12, Some(12)), (13, None)]
@@ -613,8 +612,8 @@ fn a_breakpoint_takes_the_next_line_with_code_and_follows_its_script_as_it_reloa
     );
 }
 
-/// A call into a script that never returns fails once it's past its budget, saying where it
-/// was, and the game goes on: a tick, the others running as they do, and a chunk as it loads.
+/// A call into a script that never returns fails past its budget, saying where, and the game goes
+/// on: for a tick, the others run; for a chunk, as it loads.
 #[test]
 fn a_call_into_a_script_that_never_returns_fails_past_its_budget() {
     let dir = Scratch::new("luau-budget");
@@ -642,7 +641,7 @@ fn a_call_into_a_script_that_never_returns_fails_past_its_budget() {
         message.contains("scripts/refused.luau:1: the call into the script ran past its budget"),
         "{message}"
     );
-    // A loop that ends, of many turns, runs.
+    // A loop of many turns that ends runs.
     let looped = "local n = 0\nfor i = 1, 100000 do n += 1 end\n\
             return gg.declare(\"Looped\", { n = n })";
     let (cx, _host) = loaded(
@@ -655,9 +654,9 @@ fn a_call_into_a_script_that_never_returns_fails_past_its_budget() {
     );
 }
 
-/// No script code runs outside a call into a script, where alone its budget holds: a chunk is
-/// told from what it returns by identity, its tables' `__eq`, which never returns, uncalled, and
-/// a script's function called outside any call into a script fails at its first interrupt.
+/// No script code runs outside a call into a script, the only place its budget holds. A chunk is
+/// checked against what it returns by identity, so its tables' `__eq` (which never returns) isn't
+/// called; a script's function called outside any call fails at its first interrupt.
 #[test]
 fn no_script_code_runs_outside_a_call_into_a_script() {
     let eq = "local mt = { __eq = function() while true do end end }\n\
@@ -682,10 +681,9 @@ fn no_script_code_runs_outside_a_call_into_a_script() {
     );
 }
 
-/// A script's write is refused as `World::set_field` refuses one, with its code, the field left
-/// as it was: of a number outside its field's bounds, a collider's density below 0, or that
-/// isn't finite there; and of `Parent`, which the world keeps, and of whose field, a tuple
-/// struct's, no script finds a handle anyway.
+/// A script's write is refused as `World::set_field` refuses it, with its code, the field left
+/// as it was: a number out of the field's bounds (a collider's density below 0, or not finite),
+/// and `Parent`, which the world keeps.
 #[test]
 fn a_script_s_write_is_refused_as_a_field_set_by_name_is() {
     let dir = Scratch::new("luau-checked");
@@ -779,7 +777,7 @@ fn a_declared_component_copies_hashes_and_saves_as_a_rust_one_does() {
     assert_eq!(whole(&changed), whole(world));
 }
 
-/// Declares `name`, after `chunk`, whose tick runs `tick` then sets its mover's steps to 7.
+/// Declares `name` after `chunk`; its tick runs `tick`, then sets its mover's steps to 7.
 fn keeper(name: &str, chunk: &str, tick: &str) -> String {
     format!(
         "local Mover = gg.component(\"Mover\")\n{chunk}\n\
@@ -789,12 +787,11 @@ fn keeper(name: &str, chunk: &str, tick: &str) -> String {
     )
 }
 
-/// A script's chunk keeps nothing that changes: a script whose functions assign a local of its
-/// chunk, directly or through a function between, or whose chunk keeps a coroutine or a
-/// buffer, is refused, `script.state`, saying where; once its chunk has run, its tables and its
-/// globals are frozen, which a tick that writes them fails at; and the metatable entities share
-/// is frozen as the chunk runs. A function may assign its own locals, and its enclosing
-/// function's.
+/// A chunk keeps nothing that changes. Refused with `script.state`, saying where: a function
+/// assigning a chunk local (directly or through another function), or a chunk keeping a coroutine
+/// or buffer. Once it has run, its tables and globals are frozen, so a tick writing them fails, and
+/// so is the metatable entities share. A function may assign its own and its enclosing
+/// function's locals.
 #[test]
 fn a_script_keeps_its_state_in_its_components() {
     let between = "local count = 0\n\
@@ -863,8 +860,8 @@ fn a_script_keeps_its_state_in_its_components() {
     assert_eq!(angle, 1.0);
 }
 
-/// A component that rides on another is given to each entity with that one, at its defaults,
-/// as the scripts run, before its tick.
+/// A component riding on another is given to each entity with that one, at its defaults, as the
+/// scripts run, before its tick.
 #[test]
 fn a_component_riding_on_another_is_given_to_each_entity_with_it() {
     let dir = Scratch::new("luau-on");
@@ -896,8 +893,8 @@ fn a_component_riding_on_another_is_given_to_each_entity_with_it() {
     }
 }
 
-/// A string pattern that backtracks without end fails past its call's budget, as Luau's matcher
-/// comes to the interrupt.
+/// A string pattern that backtracks without end fails past its call's budget, when Luau's matcher
+/// reaches the interrupt.
 #[test]
 fn a_pattern_that_backtracks_fails_past_its_budget() {
     let text = "local a = string.rep(\"a\", 40)\n\
@@ -907,8 +904,8 @@ fn a_pattern_that_backtracks_fails_past_its_budget() {
     assert!(error.to_string().contains("ran past its budget"), "{error}");
 }
 
-/// Casts a ray, a sphere and a box down, and a ray past what the first hit, keeping what each
-/// found in its own fields.
+/// Casts a ray, sphere and box down, and a ray past the first hit, keeping each result in its own
+/// fields.
 const LOOK: &str = r#"
 local Look = gg.declare("Look", {
     hit = gg.entity,
@@ -941,9 +938,9 @@ end
 return Look
 "#;
 
-/// A script casts through the world's 3D colliders, as code does: what a ray hits first, its
-/// entity, where, the surface's normal and how far; past an entity it names; and a sphere, a
-/// box and a capsule swept down, nil where it hits nothing within its distance.
+/// A script casts through the world's 3D colliders as code does: a ray's first hit (entity,
+/// point, normal, distance), a ray past a named entity, and a swept sphere, box and capsule (nil
+/// on no hit within the distance).
 #[test]
 fn a_script_casts_through_the_world_s_colliders() {
     use crate::{BodyType, BoxCollider3D, RigidBody3D, Transform, step_physics};
@@ -998,9 +995,8 @@ end
 return Drive
 "#;
 
-/// A script sets the target of a joint's motor through the joint's fields, as it sets any
-/// component's, and the steps after drive the joint by it: a door hinged about Y turns
-/// counterclockwise, as seen from above, at the script's speed once its motor has it going.
+/// A script sets a joint motor's target through the joint's fields, and later steps drive the
+/// joint by it: a door hinged about Y turns counterclockwise from above at the script's speed.
 #[test]
 fn a_script_drives_a_joints_motor_through_its_fields() {
     use crate::{
@@ -1052,9 +1048,9 @@ fn a_script_drives_a_joints_motor_through_its_fields() {
     );
 }
 
-/// Sends its agent across the floor, and finds a path there, keeping its corners' count and its
-/// end's X, whether its agent had a destination, and whether a path off the floor is found; the
-/// next tick, its agent's destination there, stops it.
+/// Sends its agent across the floor and finds a path, keeping the corner count, the end's X,
+/// whether the agent had a destination, and whether a path off the floor is found. Next tick,
+/// seeing a destination, it stops the agent.
 const STEER: &str = r#"
 local NavAgent = gg.component("NavAgent")
 local Steer = gg.declare("Steer", { corners = -1, last = 0, had = true, missed = false })
@@ -1075,8 +1071,8 @@ end
 return Steer
 "#;
 
-/// A script steers an agent by its destination, a vector or nil, and finds paths over the
-/// world's navmesh, as code does: an array of corners, the last the end, or nil off it.
+/// A script steers an agent by its destination (a vector or nil) and finds paths over the world's
+/// navmesh as code does: an array of corners ending at the end, or nil off the mesh.
 #[test]
 fn a_script_steers_an_agent_and_finds_paths() {
     use crate::{
@@ -1121,9 +1117,9 @@ fn a_script_steers_an_agent_and_finds_paths() {
     assert_eq!(destination(cx.world()), None);
 }
 
-/// Starts its entity's tweens at its first tick: its scale, eased in; its own size, looping
-/// after a wait; and its rotation; and counts the tweens refused, of a scale to a number, a
-/// curve and an option there are none of, and seconds less than none.
+/// Starts its entity's tweens at its first tick: scale, eased in; its own size, looping after a
+/// wait; and rotation. Counts the tweens refused: a scale to a number, a nonexistent curve or
+/// option, and negative seconds.
 const PULSE: &str = r#"
 local Transform = gg.component("Transform")
 local Pulse = gg.declare("Pulse", { started = false, size = 1, refused = 0 })
@@ -1153,9 +1149,9 @@ end
 return Pulse
 "#;
 
-/// A script tweens its entity's fields, Rust's and its own, from what they hold, with the
-/// curve, ease, playback and wait it names, as code does; and a tween it can't start is refused
-/// where it asks, starting nothing.
+/// A script tweens its entity's fields, Rust's and its own, from their values, with the curve,
+/// ease, playback and wait it names, as code does. A tween it can't start is refused where asked,
+/// starting nothing.
 #[test]
 fn a_script_tweens_its_entity_s_fields() {
     use crate::{Transform, Tweens, step_animation};
@@ -1178,7 +1174,7 @@ fn a_script_tweens_its_entity_s_fields() {
     let tweens = &world.get::<Tweens>(pulsing).expect("tweens").0;
     assert_eq!(tweens.len(), 3, "{tweens:?}");
     let transform = *world.get::<Transform>(pulsing).expect("placed");
-    // A quarter second, half of the scale's, eased in: a quarter of the way.
+    // A quarter second is half the scale's duration, eased in: a quarter of the way.
     assert_eq!(transform.scale, Vec3::splat(1.25));
     assert_eq!(field("size"), Value::F64(1.0), "waiting");
     run(cx.world_mut(), 16);
@@ -1193,9 +1189,8 @@ fn a_script_tweens_its_entity_s_fields() {
     assert_eq!(tweens.len(), 2, "the scale's ended");
 }
 
-/// Sets its entity's state machine's speed to its own at each tick, and at its first, pulls its
-/// trigger and sets its bool, counting what's refused: a parameter there's none of, a number
-/// for a bool, and a string.
+/// Sets its entity's state machine's speed to its own each tick, and at its first pulls a trigger
+/// and sets a bool. Counts the refusals: a missing parameter, a number for a bool, a string.
 const PACE: &str = r#"
 local Pace = gg.declare("Pace", { speed = 2.5, started = false, refused = 0 })
 
@@ -1222,8 +1217,8 @@ end
 return Pace
 "#;
 
-/// A script sets its entity's state machine's parameters, a float by a number and a trigger and
-/// a bool by a boolean, as code does; and one it can't set is refused where it asks.
+/// A script sets its entity's state machine's parameters as code does (a float by a number, a
+/// trigger or bool by a boolean); one it can't set is refused where asked.
 #[test]
 fn a_script_sets_its_entity_s_state_machine_s_parameters() {
     use crate::{AnimationParam, AnimationStates, ParamValue};
@@ -1252,16 +1247,16 @@ fn a_script_sets_its_entity_s_state_machine_s_parameters() {
     assert_eq!(machine.param("grounded"), Some(ParamValue::Bool(false)));
     let refused = world.get_field(pacing, "Pace", "refused");
     assert_eq!(refused.expect("a field"), Value::F64(3.0));
-    // A call refused for its value keeps no name; those past the checks are kept, the missing
-    // parameter's among them.
+    // A call refused for its value keeps no name; those past the checks are kept, including the
+    // missing parameter's.
     let host = host.host.borrow();
     let params = host.shared.params.borrow();
     let kept: Vec<&str> = params.iter().map(|(_, name)| name.as_str()).collect();
     assert_eq!(kept, ["speed", "pounce", "grounded", "height"]);
 }
 
-/// Sets 70 parameters of its entity's state machine at its first tick, each by a name of its
-/// own, more than a VM keeps.
+/// Sets 70 parameters of its entity's state machine at its first tick, each by its own name:
+/// more than a VM keeps.
 const MANY: &str = r#"
 local Many = gg.declare("Many", { done = false })
 
@@ -1278,7 +1273,7 @@ end
 return Many
 "#;
 
-/// A script sets parameters by names past the most its VM keeps, as it sets those it keeps.
+/// Names past the most a VM keeps set their parameters too.
 #[test]
 fn names_past_those_a_vm_keeps_set_their_parameters_too() {
     use crate::{AnimationParam, AnimationStates, ParamValue};
@@ -1305,8 +1300,8 @@ fn names_past_those_a_vm_keeps_set_their_parameters_too() {
     assert_eq!(host.host.borrow().shared.params.borrow().len(), PARAMS);
 }
 
-/// Writes what `tostring` and `string.format`'s `%*` write of a table, a function, a thread
-/// and a buffer, and of a table with a `__tostring` metamethod, as defaults of its own.
+/// Keeps what `tostring` and `string.format`'s `%*` write of a table, function, thread, buffer
+/// and a table with `__tostring`, as defaults of its own.
 const SHOWN: &str = r#"
 local mine = setmetatable({}, { __tostring = function() return "mine" end })
 return gg.declare("Shown", {
@@ -1320,9 +1315,9 @@ return gg.declare("Shown", {
 })
 "#;
 
-/// A script's `tostring` and `string.format`'s `%*` write a table, a function, a thread or a
-/// buffer by its type's name, the same in every run and on every peer, where Luau's write its
-/// address; and a table with a `__tostring` metamethod, and an entity, as Luau's do.
+/// A script's `tostring` and `string.format`'s `%*` write a table, function, thread or buffer by
+/// type name (Luau writes an address), so every run and peer agrees. A table with `__tostring`
+/// and an entity write as Luau's do.
 #[test]
 fn tostring_writes_what_holds_an_address_by_its_type_alone() {
     let dir = Scratch::new("luau-tostring");
@@ -1340,7 +1335,7 @@ fn tostring_writes_what_holds_an_address_by_its_type_alone() {
     assert_eq!(default(world, "Shown", "entity"), Some(Value::Bool(true)));
 }
 
-/// Userdata of a type that names itself, by `__type`.
+/// Userdata that names its type by `__type`.
 struct Typed;
 
 impl mlua::UserData for Typed {
@@ -1349,7 +1344,7 @@ impl mlua::UserData for Typed {
     }
 }
 
-/// Userdata of a type that writes itself, by `__tostring`.
+/// Userdata that writes itself by `__tostring`.
 struct Shown;
 
 impl mlua::UserData for Shown {
@@ -1358,8 +1353,8 @@ impl mlua::UserData for Shown {
     }
 }
 
-/// Userdata is written as Luau's `tostring` writes it, by its `__tostring` metamethod, if it
-/// has one, or else by its `__type`, by `tostring` and by `string.format`'s `%*` alike.
+/// `tostring` and `string.format`'s `%*` write userdata as Luau's `tostring` does: by its
+/// `__tostring`, else its `__type`.
 #[test]
 fn userdata_is_written_by_its_tostring_or_its_type() {
     let lua = Host::vm().expect("Luau starts");
@@ -1378,8 +1373,8 @@ fn userdata_is_written_by_its_tostring_or_its_type() {
     }
 }
 
-/// A printed line past [`PRINTED`] bytes is cut there, at a character's start, saying so and
-/// how long it was, however long the strings it's given; one within them is printed whole.
+/// A printed line past [`PRINTED`] bytes is cut there, at a character's start, saying so and how
+/// long it was; a shorter one prints whole.
 #[test]
 fn a_printed_line_is_cut_at_a_few_kilobytes() {
     let lua = Host::vm().expect("Luau starts");
@@ -1398,11 +1393,11 @@ fn a_printed_line_is_cut_at_a_few_kilobytes() {
     assert_eq!(printed(&short), "0.25\ttable\tgg.entity");
 }
 
-/// Declares a component of two fields, whose handles a VM makes as it loads.
+/// Declares a component of two fields, whose handles a VM makes on load.
 const PAIR: &str = "return gg.declare(\"Pair\", { a = 0, b = 0 })\n";
 
-/// Iterates a table keyed by the handles of `Mover`'s fields, and keeps the order it found them
-/// in as a default of its own.
+/// Iterates a table keyed by the handles of `Mover`'s fields, keeping the order found as a
+/// default of its own.
 const ORDER: &str = r#"
 local Mover = gg.component("Mover")
 local keys = {
@@ -1416,9 +1411,9 @@ end
 return gg.declare("Order", { order = order })
 "#;
 
-/// The handles of a component's fields are the same in every VM, whatever handles it made
-/// before, as a lockstep host's VM, which has loaded and reloaded scripts as it ran, and its
-/// joiner's, which starts afresh, make others first: so that a table they key iterates alike.
+/// A component's field handles are the same in every VM, whatever handles it made before: a
+/// lockstep host's VM has loaded and reloaded scripts, its joiner's starts afresh. A table keyed
+/// by them iterates alike.
 #[test]
 fn the_handles_of_fields_are_the_same_whatever_a_vm_made_before() {
     let order = |name: &str, scripts: &[(&str, &str)]| {

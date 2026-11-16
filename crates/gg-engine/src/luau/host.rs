@@ -32,12 +32,12 @@ use crate::ecs::{ComponentId, Kind};
 use crate::reflect::{Ident, Value, list};
 use crate::{Tick, World};
 
-/// The least garbage a VM gathers before a set point collects it, as [`Host::collect`] says, which
-/// a VM whose live heap is larger lets grow to its size.
+/// The least garbage a VM gathers before a set point collects it; see [`Host::collect`]. A VM with
+/// a larger live heap lets it grow to that size.
 const LEAST_GARBAGE: usize = 1 << 20;
 
-/// The globals scripts go without: what reads the clock, the VM's own state or its garbage, what
-/// loads code or files, and what would let a script's chunk change how others' are compiled.
+/// The globals scripts go without: what reads the clock, the VM's state or garbage, what loads code
+/// or files, and what would let a chunk change how others are compiled.
 const REMOVED: [&str; 7] = [
     "collectgarbage",
     "gcinfo",
@@ -49,8 +49,8 @@ const REMOVED: [&str; 7] = [
 ];
 
 impl Host {
-    /// A VM for scripts, with the globals [`Scripts`] says: a game's, or, held to what `held` and
-    /// `limit` say, a mod's.
+    /// A VM for scripts with the globals [`Scripts`] says: a game's, or a mod's when `held` and
+    /// `limit` (its memory) are given.
     ///
     /// Fails with `script.vm` if Luau can't start, as for want of memory.
     pub(super) fn new(held: Option<(Held, usize)>) -> Result<Self> {
@@ -97,7 +97,7 @@ impl Host {
         for name in REMOVED {
             globals.raw_remove(name)?;
         }
-        // Both write as Luau's `tostring` does, but for what holds an address, as `written` says.
+        // Both write as Luau's `tostring` does, except what holds an address (see `written`).
         let luau: Function = globals.raw_get("tostring")?;
         let to = luau.clone();
         let print = move |lua: &Lua, values: Variadic<Lua_>| print(lua, &to, &values);
@@ -128,7 +128,7 @@ impl Host {
         math.raw_set("atan2", atan2)?;
         let pow = lua.create_function(|_, (x, y): (f64, f64)| Ok(libm::pow(x, y)))?;
         math.raw_set("pow", pow)?;
-        // As Luau's own, but libm's: base 2 and 10 by their own functions.
+        // Luau's `log` on libm; bases 2 and 10 use their own functions.
         let log = lua.create_function(|_, (x, base): (f64, Option<f64>)| {
             Ok(match base {
                 None => libm::log(x),
@@ -146,7 +146,7 @@ impl Host {
         entities.raw_set("__index", lua.create_function(read)?)?;
         entities.raw_set("__newindex", lua.create_function(write)?)?;
         entities.raw_set("__tostring", lua.create_function(describe)?)?;
-        // Shared by every script's entities, as Luau's sandbox freezes its libraries' and vectors'.
+        // Shared by every script's entities; read-only like Luau's sandboxed libraries and vectors.
         entities.set_readonly(true);
         lua.set_type_metatable::<LightUserData>(Some(entities));
 
@@ -191,17 +191,18 @@ impl Host {
         globals.raw_set("gg", gg)?;
         lua.sandbox(true)?;
         hooks::install(&lua)?;
-        // Collected at set points alone, as [`collect`](Self::collect) does: Luau paces its own
-        // collections by the clock.
+        // Collected at set points alone ([`collect`](Self::collect)): Luau's own pacing uses the
+        // clock.
         lua.gc_stop();
         Ok(lua)
     }
 
-    /// A set point, between calls into the scripts: collects the VM's garbage, whole, `now`, or
-    /// once it holds as much as its [`goal`](Self::goal), which is then what it holds alive and as
-    /// much again, or [`LEAST_GARBAGE`] more if that's more, but no more than halfway to its limit.
-    /// A collection's pause grows with what the VM holds alive, which collecting in steps would
-    /// spread, once a game's scripts hold enough that it shows.
+    /// A set point, between calls into the scripts: collects the VM's garbage in full, `now` or
+    /// once it holds as much as its [`goal`](Self::goal). The next goal is the live heap plus as
+    /// much again, or plus [`LEAST_GARBAGE`] if more, but at most halfway to the VM's limit.
+    ///
+    /// A collection's pause grows with the live heap. Collecting in steps would spread it, once a
+    /// game's scripts hold enough for it to show.
     fn collect(&mut self, now: bool) {
         if !now && self.lua.used_memory() < self.goal {
             return;
@@ -209,20 +210,19 @@ impl Host {
         let _zone = gg_core::zone!();
         // It fails only as a finalizer would, and scripts make none.
         let _ = self.lua.gc_collect();
-        // A collection sets Luau's own pace again.
+        // A collection restarts Luau's own pacing.
         self.lua.gc_stop();
         let alive = self.lua.used_memory();
         let goal = alive + alive.max(LEAST_GARBAGE);
         self.goal = (self.limit).map_or(goal, |limit| goal.min(alive.midpoint(limit.max(alive))));
     }
 
-    /// Loads the script at `name`, a path from the project's root, whose text is `text`, in
-    /// `world`, and returns the name of the component type it declares, as [`Scripts::load`]
-    /// says.
+    /// Loads the script `text` at `name`, a path from the project's root, and returns the component
+    /// type name it declares, as [`Scripts::load`] says.
     pub(super) fn load(&mut self, world: &mut World, name: &str, text: String) -> Result<String> {
         let chunk = self.run_chunk(world, name, &text, None);
         self.resolve(world);
-        // A set point, so that what a weak table the chunk keeps holds is alike everywhere.
+        // A set point, so a weak table the chunk keeps holds the same everywhere.
         self.collect(true);
         let chunk = chunk?;
         #[cfg(feature = "dev")]
@@ -262,8 +262,8 @@ impl Host {
             return;
         }
         match self.resolved {
-            // Its types changed in place, as another VM's script reloads, whose fields may be
-            // elsewhere now, or gone.
+            // Its types changed in place, as when another VM's script reloads: fields may have
+            // moved or gone.
             Some((serial, revision)) if serial == world.serial() => {
                 if revision != world.types_revision() {
                     self.resolve(world);
@@ -300,8 +300,8 @@ impl Host {
                 };
                 shared.world.borrow().list_with(id, &mut list);
                 for &entity in &list {
-                    // Gone, or without the component, since the list was made; or given it as the
-                    // scripts ran, as `entities` says.
+                    // Gone or stripped of the component since the list was made, or given it as the
+                    // scripts ran (see `entities`).
                     if !shared.world.borrow().has(entity, id) || entities::fresh(shared, entity, id)
                     {
                         continue;
@@ -317,7 +317,7 @@ impl Host {
                     {
                         let world = shared.world.borrow();
                         let entity = world.id(entity).map(|id| id.to_string());
-                        // The engine's own error's code, as of a despawned entity reached.
+                        // The engine's own error code, e.g. a despawned entity reached.
                         let cause = error.downcast_ref::<Error>().map(Error::code);
                         warn!(
                             code = "script.error",
@@ -337,8 +337,8 @@ impl Host {
         self.collect(false);
     }
 
-    /// Reloads the script loaded at `path`, its text now `text`, in `world`, as [`Hosts::reload`]
-    /// says; nothing changes if its text is as it was.
+    /// Reloads the script at `path` with `text`, as [`Hosts::reload`] says; unchanged text changes
+    /// nothing.
     pub(super) fn reload(&mut self, world: &mut World, path: &str, text: String) -> Result<()> {
         let at = self.loaded(path).expect("the script at `path` has loaded");
         if self.scripts[at].text == text {
@@ -346,7 +346,7 @@ impl Host {
         }
         let declared = self.scripts[at].component.clone();
         let chunk = self.run_chunk(world, path, &text, Some(&declared));
-        // Its handles found again, as the chunk ran, and the fields as they are now.
+        // Handles found again, as the chunk ran, and the fields as they are now.
         self.resolve(world);
         self.collect(true);
         let chunk = chunk?;
@@ -368,16 +368,14 @@ impl Host {
         Ok(())
     }
 
-    /// Has the types that the scripts declare in `world` hold their fields as the scripts declare
-    /// them, each that doesn't, as a world from before a reload doesn't, declared again, as a
-    /// reload declares it; and finds again the types and fields the handles name, as
-    /// [`resolve`](Self::resolve) does.
+    /// Redeclares, as a reload does, each type the scripts declare in `world` whose fields differ
+    /// from the scripts' (a world from before a reload), then [`resolve`](Self::resolve)s.
     pub(super) fn migrate(&mut self, world: &mut World) {
         for script in &self.scripts {
             let Some(id) = world.component_named(&script.component) else {
                 continue;
             };
-            // A Rust type of its name, which the script then doesn't run for.
+            // A Rust type has the name; the script doesn't run for it.
             if world
                 .declared(id)
                 .is_none_or(|known| known.declares(&script.fields))
@@ -394,9 +392,8 @@ impl Host {
         self.resolve(world);
     }
 
-    /// Runs the chunk of the script at `path`, whose text is `text`, in `world`, which it may
-    /// declare its component in, as its first load does, or declare again with other fields; or,
-    /// reloading, where it declared `before`.
+    /// Runs the chunk of the script `text` at `path`. It may declare its component in `world`, or
+    /// declare it again with other fields; reloading, `before` is where it declared.
     fn run_chunk(
         &mut self,
         world: &mut World,
@@ -415,7 +412,7 @@ impl Host {
         });
         let (lua, shared) = (&self.lua, &self.shared);
         let ran = lent(shared, world, || {
-            // The engine's compiler's, from the text, which is all a script may be.
+            // Only the engine's compiler's bytecode, from the text, is accepted.
             let chunk = lua.load(&bytecode[..]).set_name(format!("={path}"));
             let chunk = chunk
                 .set_mode(ChunkMode::Binary)
@@ -495,9 +492,9 @@ impl Host {
         })
     }
 
-    /// A script's own globals, which read the VM's where it has none of its own, as Luau's sandbox
-    /// gives each thread: safe, so that the compiler's imports and builtins go fast, which the
-    /// VM's being read-only keeps true.
+    /// A script's own globals, falling back to the VM's, as Luau's sandbox gives each thread. It is
+    /// safe-env, so the compiler's imports and builtins go fast; the VM's read-only globals keep
+    /// that true.
     fn environment(&self) -> mlua::Result<Table> {
         let env = self.lua.create_table()?;
         let meta = self.lua.create_table()?;
@@ -508,9 +505,9 @@ impl Host {
         Ok(env)
     }
 
-    /// Finds again in `world` the component types that the handles and the scripts name, and the
-    /// handles' fields, by name, as another world, restored or loaded, may give them other ids,
-    /// and a type declared again its fields other places.
+    /// Finds again by name in `world` the component types the handles and scripts name, and the
+    /// handles' fields: another world, restored or loaded, may give other ids, and a redeclared
+    /// type other field places.
     fn resolve(&mut self, world: &World) {
         for field in self.shared.fields.get_mut() {
             let found = world.component_named(&field.component).and_then(|id| {
@@ -535,9 +532,9 @@ impl Host {
     }
 }
 
-/// Freezes what a script's chunk keeps once it has run, as [`Scripts`] says: every table that
-/// `env`, its globals, and `component`, its component's table, reach, through tables' keys, values
-/// and metatables and functions' upvalues, `env` and `component` among them.
+/// Freezes what a script's chunk keeps once it has run, as [`Scripts`] says: every table reachable
+/// from `env` (its globals) and `component` (its component's table) through keys, values,
+/// metatables and function upvalues, those two included.
 ///
 /// Fails with `script.state` if they reach a coroutine or a buffer.
 fn settle(lua: &Lua, path: &str, env: &Table, component: &Table) -> Result<()> {
@@ -580,8 +577,8 @@ fn settle(lua: &Lua, path: &str, env: &Table, component: &Table) -> Result<()> {
     Ok(())
 }
 
-/// Runs `f` with `world` lent to the functions Luau calls, in place of `shared`'s, which it takes
-/// back after, even as a panic unwinds.
+/// Runs `f` with `world` lent to the functions Luau calls in place of `shared`'s, taken back
+/// after, even when a panic unwinds.
 pub(super) fn lent<R>(shared: &Shared, world: &mut World, f: impl FnOnce() -> R) -> R {
     struct Back<'a> {
         world: &'a mut World,
@@ -597,12 +594,12 @@ pub(super) fn lent<R>(shared: &Shared, world: &mut World, f: impl FnOnce() -> R)
     SHARED.set(shared, f)
 }
 
-/// The error that the script at `path` failed as Luau says, `script.bad`.
+/// The `script.bad` error for the script at `path` failing as Luau says.
 pub(super) fn bad(path: &str, error: &mlua::Error) -> Error {
     Error::new("script.bad", format!("{path}: {error}"))
 }
 
-/// The error that the script at `path` doesn't return the component it declared.
+/// The `script.bad` error for the script at `path` not returning the component it declared.
 fn returns(path: &str, component: &str) -> Error {
     Error::new(
         "script.bad",
@@ -610,8 +607,7 @@ fn returns(path: &str, component: &str) -> Error {
     )
 }
 
-/// The doc of the component type the script at `path` declares, a game's or, as `held` says, a
-/// mod's, which names its mod, as no game's script's doc does.
+/// The doc of the component type the script at `path` declares. A mod's (`held`) names its mod.
 pub(super) fn doc(held: Option<&Held>, path: &str) -> String {
     match held {
         Some(held) => format!("Declared by mod `{}`'s `{path}`.", held.name),
@@ -619,9 +615,8 @@ pub(super) fn doc(held: Option<&Held>, path: &str) -> String {
     }
 }
 
-/// Declares `component`, type `id` of `world`, which the script at `path` declared, again, of
-/// `fields`, as [`Scripts`] says: logs the fields added and dropped, and warns, `script.field_reset`,
-/// of those whose kinds changed.
+/// Declares `component` (type `id`, from the script at `path`) again with `fields`, as [`Scripts`]
+/// says. Logs fields added and dropped; warns `script.field_reset` of kinds changed.
 ///
 /// Fails as [`World::redeclare`] does, changing nothing.
 fn redeclare(

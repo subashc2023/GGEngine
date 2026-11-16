@@ -13,13 +13,14 @@ use super::{Held, Host};
 use crate::grant::Grant;
 use crate::{Context, World};
 
-/// The memory a mod's VM may hold, past which an allocation fails as an error does.
+/// The most memory a mod's VM may hold; past it an allocation fails as an error.
 const MEMORY: usize = 64 << 20;
 
-/// A layer's mods: scripts a player installs, which run as a game's own scripts do, as
-/// [`Scripts`](super::Scripts) says, but each mod's in a VM of its own, held to what it may do.
+/// A layer's mods: scripts a player installs. They run like a game's own
+/// [`Scripts`](super::Scripts), each mod in a VM of its own. docs/LUAU.md's Mods and The sandbox
+/// sections are the reference.
 ///
-/// A mod is a folder holding a manifest, `mod.ron`, and the scripts it lists, as source:
+/// A mod is a folder holding `mod.ron` and the scripts it lists, as source:
 ///
 /// ```ron
 /// (
@@ -31,46 +32,41 @@ const MEMORY: usize = 64 << 20;
 /// )
 /// ```
 ///
-/// A windowed run's installed mods are those in `mods` in its game's per-user folder, where its
-/// dock keeps its layout; a run given `--mods <DIR>` has those in that folder in their place; and
-/// a replay runs its recording's. [`load`](Self::load) loads them, in the order of their names,
-/// refusing, warning, a mod whose manifest or a script doesn't load, that's for another game, or
-/// that asks for more than the game grants, which then runs without it; and
+/// A windowed run's installed mods are those in `mods` in the game's per-user folder. A run given
+/// `--mods <DIR>` has that folder's instead; a replay runs its recording's. [`load`](Self::load)
+/// loads them in name order, warning of each it refuses; the game runs without it.
 /// [`run`](Self::run) runs them where the layer's tick chooses.
 ///
-/// A mod asks for `read` and `write`, of the whole world or of the component types they name, as
-/// `read:Shard` and `write:Sprite`, which its scripts are kept to: `gg.component` refuses a type
-/// they may neither read nor write, `mod.ungranted`, and reading or writing a field fails as an
-/// error does, unless they may; the types the mod's scripts declare are its own, and none another
-/// script declared, the game's or another mod's, which they're refused. A mod reaches the
-/// game's entities through a component of its own that rides on one of the game's, as
-/// `gg.declare`'s `on` names it.
+/// A mod asks for `read` and `write`, of the whole world or of named component types
+/// (`read:Shard`), and its scripts are kept to them: `gg.component` refuses a type they may
+/// neither read nor write (`mod.ungranted`), and a field access fails unless allowed. Types a mod
+/// declares are its own; a name another script declared is refused. A mod reaches the game's
+/// entities through a component of its own riding on one of the game's (`gg.declare`'s `on`).
 ///
-/// A game registers its component types before it loads mods, since a mod may declare any name
-/// that's free: once a world has loaded mods, whatever's installed, it refuses a Rust type's
-/// registration, `ecs.registered_late`, and so a spawn of a type that hasn't registered panics.
+/// A game registers its component types before loading mods, since a mod may declare any free
+/// name. Once a world has loaded mods, whatever is installed, it refuses a Rust type's
+/// registration (`ecs.registered_late`), and a spawn of an unregistered type panics.
 ///
-/// Each mod's VM holds at most 64 MiB, past which an allocation fails as an error does, at the same
-/// allocation on every platform for runs that went alike; its calls in a tick share one budget of a
-/// million of Luau's interrupts, past which they fail until the next tick; and it prints at most 32
-/// lines a second of ticks, warning, `mod.unprinted`, of those past them.
+/// Each mod's VM holds at most 64 MiB, failing at the same allocation on every platform for runs
+/// that went alike. Its calls in a tick share one budget of a million Luau interrupts, past which
+/// they fail until the next tick. It prints at most 32 lines a second of ticks; `mod.unprinted`
+/// warns of the rest.
 ///
-/// A run's mods go whole in its snapshots and its recording, so that a lockstep joiner runs its
-/// host's in place of its own, and a replay its recording's, whatever is installed, each granted
-/// no more than its own game grants; a run restored from a snapshot loads those installed.
+/// A run's mods go whole into its snapshots and recording, so a lockstep joiner runs its host's
+/// and a replay its recording's, each granted no more than its own game grants. A run restored
+/// from a snapshot loads those installed.
 pub struct Mods {
     set: Rc<RefCell<Set>>,
 }
 
-/// A mod as it travels in a snapshot or a recording: its manifest's text, and its scripts', each
-/// its path in its folder and its text, in the order its manifest lists them.
+/// A mod as it travels in a snapshot or a recording: its manifest's text, and its scripts' (path in
+/// its folder, text) in manifest order.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ModText {
     pub(crate) manifest: String,
     pub(crate) scripts: Vec<(String, String)>,
 }
 
-/// A mod's manifest, `mod.ron`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -81,45 +77,45 @@ struct Manifest {
     scripts: Vec<String>,
 }
 
-/// What a [`Mods`] holds: the game's name, the most it grants any mod, and the mods that loaded, in
-/// the order of their names.
+/// What a [`Mods`] holds: the game's name, the most it grants any mod, and the loaded mods in name
+/// order.
 struct Set {
     game: String,
     limits: Grant,
     mods: Vec<Loaded>,
 }
 
-/// A mod that has loaded: as it came, and what runs its scripts.
 struct Loaded {
     text: ModText,
     name: String,
     host: Host,
 }
 
-/// A run's mods, which its context keeps: where they come from, and the [`Mods`] its layers loaded,
-/// which a lockstep joiner's take reaches.
+/// A run's mods, kept in its context: where they come from, and the [`Mods`] its layers loaded,
+/// which a lockstep joiner's [`take`](Self::take) reaches.
 #[derive(Default)]
 pub(crate) struct RunMods {
-    /// The game's name, which a mod's manifest names it for.
+    /// The game's name, which a mod's manifest must name.
     pub(crate) game: String,
-    /// The folder the run's installed mods are in, if it reads any.
+    /// The folder of the run's installed mods, if it reads any.
     pub(crate) dir: Option<PathBuf>,
-    /// The mods a replay's recording gives, which it runs in place of those installed.
+    /// A replay's recorded mods, run in place of those installed.
     pub(crate) recorded: Option<Vec<ModText>>,
     sets: Vec<Weak<RefCell<Set>>>,
 }
 
 impl Mods {
-    /// Loads the run's mods, as [`Mods`] says, in `cx`'s world, which their scripts declare their
-    /// components in, each granted what it asks for if `limits` grants that, warning of each it
-    /// refuses: `mod.unreadable`, of one whose files can't be read; `mod.bad`, of one whose
-    /// manifest doesn't read as one, whose script's path isn't a `.luau` file's inside its folder,
-    /// that asks for a capability of the tool API's, or whose name another mod has;
-    /// `grant.unknown`, of one that asks for a capability there's none of; `mod.wrong_game`, of
-    /// another game's; `mod.ungranted`, of one that asks for more than `limits`, or whose script
-    /// reaches past what it asks for as its chunk runs; `reflect.name_taken`, of one whose script
-    /// declares a component type that another script, the game's or another mod's, declared; and
-    /// as a script's load fails.
+    /// Loads the run's mods into `cx`'s world, where their scripts declare their components. Each
+    /// is granted what it asks for if `limits` allows. Warns of each it refuses:
+    ///
+    /// - `mod.unreadable`: files that can't be read.
+    /// - `mod.bad`: a manifest that doesn't read, a script path that isn't a `.luau` file inside
+    ///   its folder, a capability of the tool API's, or a name another mod has.
+    /// - `grant.unknown`: a capability that doesn't exist.
+    /// - `mod.wrong_game`: another game's mod.
+    /// - `mod.ungranted`: more than `limits`, or a chunk reaching past what it asked for.
+    /// - `reflect.name_taken`: a declared component type another script declared.
+    /// - A script's load failing.
     pub fn load(cx: &mut Context, limits: Grant) -> Self {
         let texts = match &cx.mods.recorded {
             Some(recorded) => recorded.clone(),
@@ -137,8 +133,7 @@ impl Mods {
         Self { set }
     }
 
-    /// Runs each mod's scripts, as [`Scripts::run`](super::Scripts::run) runs a game's, the mods in
-    /// the order of their names.
+    /// Runs each mod's scripts like [`Scripts::run`](super::Scripts::run), the mods in name order.
     pub fn run(&mut self, world: &mut World) {
         for loaded in &mut self.set.borrow_mut().mods {
             loaded.host.run(world);
@@ -147,8 +142,7 @@ impl Mods {
 }
 
 impl Set {
-    /// Loads the mods `texts` hold, in the order of their names, in `world`, as [`Mods::load`]
-    /// says.
+    /// Loads `texts`' mods in name order, as [`Mods::load`] says.
     fn load(&mut self, world: &mut World, texts: Vec<ModText>) {
         world.mods_loaded();
         let mut read = Vec::new();
@@ -180,7 +174,7 @@ impl Set {
         }
     }
 
-    /// Loads the mod `text` holds, whose manifest is `manifest`, in `world`.
+    /// Loads the mod `text` holds, whose manifest is `manifest`.
     fn load_one(&self, world: &mut World, manifest: &Manifest, text: ModText) -> Result<Loaded> {
         let name = &manifest.name;
         let bad = |what: String| Error::new("mod.bad", format!("mod `{name}`: {what}"));
@@ -238,7 +232,7 @@ impl Set {
 }
 
 impl RunMods {
-    /// The mods the run's layers loaded, as they came.
+    /// The mods the run's layers loaded, as they came, without duplicates.
     pub(crate) fn applied(&self) -> Vec<ModText> {
         let mut applied: Vec<ModText> = Vec::new();
         for set in self.sets.iter().filter_map(Weak::upgrade) {
@@ -251,9 +245,8 @@ impl RunMods {
         applied
     }
 
-    /// Has each of the run's [`Mods`] run `mods` in place of those it loaded, unless they're those,
-    /// as [`Mods::load`] loads them, in `world`: a lockstep joiner's, as its host's come with its
-    /// world.
+    /// Has each of the run's [`Mods`] run `mods` in place of those it loaded, unless they're the
+    /// same. A lockstep joiner's: its host's mods come with its world.
     pub(crate) fn take(&self, world: &mut World, mods: &[ModText]) {
         for set in self.sets.iter().filter_map(Weak::upgrade) {
             let mut set = set.borrow_mut();
@@ -266,7 +259,7 @@ impl RunMods {
     }
 }
 
-/// The manifest `text`, a `mod.ron`'s, gives.
+/// Reads the manifest in `text`, a `mod.ron`'s.
 ///
 /// Fails with `mod.bad` if it isn't one.
 fn manifest(text: &str) -> Result<Manifest> {
@@ -278,8 +271,8 @@ fn manifest(text: &str) -> Result<Manifest> {
     })
 }
 
-/// Whether `path`, a script's in a mod's manifest, is a `.luau` file's inside the mod's folder,
-/// relative to it, separated by `/`, as every platform reads it.
+/// Whether `path`, a script's in a manifest, is a `.luau` file inside the mod's folder: relative,
+/// `/`-separated, so every platform reads it alike.
 fn inside(path: &str) -> bool {
     let path = Path::new(path);
     !path.as_os_str().is_empty()
@@ -292,10 +285,10 @@ fn inside(path: &str) -> bool {
             .is_some_and(|extension| extension == "luau")
 }
 
-/// The mods installed in `dir`, each a folder of its own holding its `mod.ron` and its scripts, in
-/// the order of their folders' names, warning, `mod.unreadable`, of each whose files can't be read,
-/// and, `mod.bad`, of each whose manifest doesn't read as one or names a script outside its
-/// folder; none if `dir` isn't there.
+/// The mods installed in `dir`, one folder each, in folder-name order; none if `dir` isn't there.
+///
+/// Warns `mod.unreadable` of a mod whose files can't be read, and `mod.bad` of one whose manifest
+/// doesn't read or names a script outside its folder.
 fn installed(dir: &Path) -> Vec<ModText> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
@@ -350,8 +343,7 @@ mod tests {
     use crate::dirs::tests::Scratch;
     use crate::reflect::Value;
 
-    /// What the mods' scripts reach: a count, and a mark that only a grant of the whole world's
-    /// writes reach.
+    /// What the mods' scripts reach: a count, and a mark only a whole-world write grant reaches.
     #[derive(Clone, Component)]
     struct Counter {
         count: u32,
@@ -366,7 +358,7 @@ mod tests {
         end\n\
         return Counting\n";
 
-    /// Writes mod `name` in `dir`, asking for `capabilities`, of `script`, for game `game`.
+    /// Writes mod `name` of `script` in `dir`, for `game`, asking for `capabilities`.
     fn install(dir: &Path, name: &str, game: &str, capabilities: &str, script: &str) {
         let folder = dir.join(name);
         fs::create_dir_all(&folder).expect("a directory");
@@ -378,8 +370,8 @@ mod tests {
         fs::write(folder.join(format!("{name}.luau")), script).expect("written");
     }
 
-    /// A context of game `Modded` whose installed mods are in `dir`, with `Counter` registered and
-    /// `counters` of them.
+    /// A context of game `Modded` with mods installed in `dir`, `Counter` registered and `counters`
+    /// spawned.
     fn modded(dir: &Path, counters: usize) -> (Context, Vec<crate::Entity>) {
         let mut cx = Context::seeded(1);
         cx.mods.game = "Modded".to_owned();
@@ -400,11 +392,10 @@ mod tests {
             .collect()
     }
 
-    /// Mods load in the order of their names, each held to what it asks for and the game grants: a
-    /// mod that asks for more is refused, `mod.ungranted`, as are another game's, one asking for a
-    /// capability of the tool API's, one whose chunk reaches a type it isn't granted, and one that
-    /// declares another mod's component type; one whose
-    /// tick writes what it isn't granted fails there, warning, and the game goes on.
+    /// Mods load in name order, each held to what it asks for and the game grants. Refused:
+    /// asking for more (`mod.ungranted`), another game's, a tool API capability, a chunk reaching
+    /// an ungranted type, and another mod's component type. A tick writing what it isn't granted
+    /// fails there with a warning, and the game goes on.
     #[test]
     fn mods_load_held_to_what_they_ask_for_and_the_game_grants() {
         let logged = crate::testing::logged();
@@ -450,10 +441,9 @@ mod tests {
         );
     }
 
-    /// A mod's calls in a tick share one budget, past which they fail until the next tick; its
-    /// prints past 32 a second of ticks go unprinted; and its allocations past its memory fail, the
-    /// next tick's going on. The memory its VM holds, after a script that allocates as it loads, is
-    /// alike on every platform.
+    /// A mod's calls in a tick share one budget until the next tick; prints past 32 a second of
+    /// ticks go unprinted; allocations past its memory fail, and the next tick goes on. The memory
+    /// its VM holds after loading a script that allocates is alike on every platform.
     #[test]
     fn a_mod_is_held_to_its_budget_its_prints_and_its_memory() {
         let dir = Scratch::new("mods-limits");
@@ -487,8 +477,8 @@ mod tests {
             let held = host.shared.held.as_ref().expect("a mod's");
             (held.unprinted.get(), host.lua.used_memory())
         };
-        // A reference, which a change to Luau or mlua may change, as it changes the objects' sizes
-        // or what a VM makes as it starts, but a platform never does.
+        // A reference: a Luau or mlua change may move it (object sizes, a VM's startup), a
+        // platform never.
         assert_eq!(
             held(&mods).1,
             509_288,
@@ -523,12 +513,12 @@ mod tests {
         assert_eq!(counts(&cx), [3, 4, 2]);
     }
 
-    /// Once a world has loaded mods, a Rust type that hasn't registered is refused, as is an
-    /// insert of it, whether or not a mod declared its name, in the world and in its copies, while
-    /// those that registered before go on as ever.
+    /// Once a world has loaded mods, registering a Rust type or inserting an unregistered one is
+    /// refused, whether or not a mod declared its name, in the world and its copies. Types
+    /// registered before go on as ever.
     #[test]
     fn a_type_that_registers_after_mods_load_is_refused_whatever_is_installed() {
-        /// A type the game registers late, whose name a mod declares.
+        /// A type the game registers late; a mod declares its name.
         #[derive(Clone, Component)]
         struct Late {
             at: u32,
@@ -552,15 +542,15 @@ mod tests {
             world
                 .insert(counters[0], counter)
                 .expect("registered before");
-            // A copy taken before into the world's memory, of the same types without a mod's.
+            // A copy taken before, cloned into the world, has the same types without a mod's.
             let mut copy = before.clone();
             copy.clone_from(cx.world());
             assert_eq!(late(&mut copy), Err("ecs.registered_late"), "{installed}");
         }
     }
 
-    /// A lockstep joiner's mods, taking its host's, run those in their place; the same mods, as
-    /// they came, stay as they are.
+    /// A lockstep joiner taking its host's mods runs those in place of its own; taking the same
+    /// mods again changes nothing.
     #[test]
     fn a_joiner_runs_its_host_s_mods_in_place_of_its_own() {
         let dir = Scratch::new("mods-joiner");
@@ -588,10 +578,9 @@ mod tests {
         assert_eq!(counted.count, 10);
     }
 
-    /// A mod's script casts through the world's colliders, and finds paths over its navmesh, only if
-    /// its mod may read the whole world, as where each collider is tells of every entity with one:
-    /// one granted a type's reads alone fails at its cast or its path, warning, and the game goes
-    /// on.
+    /// A mod's script casts rays and finds paths only if its mod may read the whole world, since a
+    /// collider's position tells of every entity with one. A mod granted one type's reads fails at
+    /// its cast or path with a warning, and the game goes on.
     #[test]
     fn a_mod_casts_and_finds_paths_only_reading_the_whole_world() {
         let logged = crate::testing::logged();
@@ -645,7 +634,7 @@ mod tests {
     }
 
     /// A mod's script tweens a field only if its mod may write `Tweens`, which hold the tween, as
-    /// well as the field: one without fails at its tween, warning, and the game goes on.
+    /// well as the field. One without fails at its tween with a warning, and the game goes on.
     #[test]
     fn a_mod_tweens_only_writing_tweens() {
         let logged = crate::testing::logged();

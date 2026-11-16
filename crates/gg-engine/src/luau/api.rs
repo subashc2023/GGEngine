@@ -17,13 +17,13 @@ use crate::grant::Capability;
 use crate::reflect::{Reflect, Value};
 use crate::{Cast, Curve, Ease, Hit3D, ParamValue, Playback, Shape3D, Tween, TweenValue, World};
 
-/// The most bytes of a line a script prints, past which it's cut, saying so: so that a mod's
-/// lines, each up to as many bytes as its VM may hold, can't fill the log.
+/// The most bytes of a printed line, past which it's cut, saying so. Without it a mod's lines,
+/// each up to its VM's memory, could fill the log.
 pub(super) const PRINTED: usize = 4096;
 
-/// `print(...)`: logs what it's given, as `tostring` writes each, between tabs, cut at
-/// [`PRINTED`] bytes, as [`printed`] cuts it; a mod's, naming it, unless it has printed as much as
-/// it may this second of ticks, as [`Mods`] says. `luau` is Luau's own `tostring`.
+/// `print(...)`: logs its arguments as `tostring` writes each, between tabs, cut by [`printed`]. A
+/// mod's lines name it and stop once it has printed its share of a second of ticks ([`Mods`]).
+/// `luau` is Luau's own `tostring`.
 pub(super) fn print(lua: &Lua, luau: &Function, values: &[Lua_]) -> mlua::Result<()> {
     shared(|shared| {
         if shared.held.as_ref().is_some_and(|held| !held.prints()) {
@@ -38,10 +38,9 @@ pub(super) fn print(lua: &Lua, luau: &Function, values: &[Lua_]) -> mlua::Result
     })
 }
 
-/// The line `print` logs of `values`: each as `tostring` writes it, as [`written`] says, `luau`
-/// being Luau's own, between tabs, but cut at [`PRINTED`] bytes, at a character's start, saying so
-/// and how many bytes the line had; of a string past them, only as many of its bytes as fit are
-/// read.
+/// The line `print` logs of `values`: each as [`written`] writes it, between tabs, cut at
+/// [`PRINTED`] bytes at a character's start, saying so and how many bytes the line had. Of a
+/// string past them, only the bytes that fit are read.
 pub(super) fn printed(lua: &Lua, luau: &Function, values: &[Lua_]) -> mlua::Result<String> {
     let mut line = String::new();
     let mut bytes = 0;
@@ -70,15 +69,12 @@ pub(super) fn printed(lua: &Lua, luau: &Function, values: &[Lua_]) -> mlua::Resu
     Ok(line)
 }
 
-/// `tostring(value)`: as `luau`, Luau's own, writes it, a `__tostring` metamethod's text where it
-/// has one, but a table, function, thread, buffer or userdata without one by its type's name
-/// alone, as `table`, or userdata by its metatable's `__type`, if it's a string, where Luau's writes
-/// its address, which differs from run to run and from peer to peer, so that a script whose state
-/// took it would desync them. Not a count of the objects in the order the VM made them, which
-/// would be the same within a run: a lockstep joiner's VM, or a run restored from a snapshot,
-/// starts afresh, having made none of those its host's did before, and a tick run again, as
-/// rollback runs it, makes them again. The rest Luau's writes, as its builtin, which takes nil,
-/// booleans, numbers and strings, writes them where it can, alike.
+/// `tostring(value)`: as `luau`, Luau's own, writes it, with two differences. A table, function,
+/// thread, buffer or userdata without a `__tostring` is written as its type's name (a userdata's
+/// metatable `__type`, if a string), not Luau's address, which differs between runs and peers and
+/// would desync a script whose state took it. Not a count of objects in creation order either: a
+/// lockstep joiner's VM or a run restored from a snapshot starts afresh, and a tick run again, as
+/// rollback does, creates them again. Nil, booleans, numbers and strings are Luau's own.
 pub(super) fn written(lua: &Lua, luau: &Function, value: Lua_) -> mlua::Result<LuaString> {
     let has = |field: &Lua_| !field.is_nil();
     let name = match &value {
@@ -106,23 +102,20 @@ pub(super) fn written(lua: &Lua, luau: &Function, value: Lua_) -> mlua::Result<L
     }
 }
 
-/// The end of each cast's arguments, as a script gives them: where it starts, which way it goes,
-/// how far, none without end, and an entity whose colliders it passes through, if any but
-/// `gg.entity`.
+/// The tail of each cast's arguments: from, toward, distance (none: no end) and the entity whose
+/// colliders it passes through (`gg.entity` or none: no one).
 type CastArgs = (Vector, Vector, Option<f64>, Option<LightUserData>);
 
-/// What a cast gives a script: the entity it hit, where, the way the surface faces there and how
-/// far along the cast, or nil for each, as it hit nothing.
+/// What a cast gives a script: the entity hit, the point, the surface normal and the distance, or
+/// four nils for no hit.
 type CastHit = (Lua_, Lua_, Lua_, Lua_);
 
-/// `gg.cast_ray(from, toward, distance, exclude)`: what a ray hits first of the world's 3D
-/// colliders, as [`World::cast_ray`] says.
+/// `gg.cast_ray(from, toward, distance, exclude)`: [`World::cast_ray`].
 pub(super) fn cast_ray(_: &Lua, args: CastArgs) -> mlua::Result<CastHit> {
     cast(args, |world, cast| world.cast_ray(cast))
 }
 
-/// `gg.cast_sphere(radius, from, toward, distance, exclude)`: what a sphere swept along a line hits
-/// first, as [`World::cast_shape`] says.
+/// `gg.cast_sphere(radius, from, toward, distance, exclude)`: [`World::cast_shape`] of a sphere.
 pub(super) fn cast_sphere(_: &Lua, (radius, args): (f64, CastArgs)) -> mlua::Result<CastHit> {
     let shape = Shape3D::Sphere {
         radius: radius as f32,
@@ -132,8 +125,8 @@ pub(super) fn cast_sphere(_: &Lua, (radius, args): (f64, CastArgs)) -> mlua::Res
     })
 }
 
-/// `gg.cast_box(size, rotation, from, toward, distance, exclude)`: what a box, turned, swept along
-/// a line hits first, as [`World::cast_shape`] says.
+/// `gg.cast_box(size, rotation, from, toward, distance, exclude)`: [`World::cast_shape`] of a
+/// turned box.
 pub(super) fn cast_box(
     _: &Lua,
     (size, rotation, args): (Vector, Vector, CastArgs),
@@ -146,8 +139,8 @@ pub(super) fn cast_box(
     })
 }
 
-/// `gg.cast_capsule(height, radius, rotation, from, toward, distance, exclude)`: what a capsule,
-/// upright along its Y and turned, swept along a line hits first, as [`World::cast_shape`] says.
+/// `gg.cast_capsule(height, radius, rotation, from, toward, distance, exclude)`:
+/// [`World::cast_shape`] of a capsule upright along its Y, turned.
 pub(super) fn cast_capsule(
     _: &Lua,
     (height, radius, rotation, args): (f64, f64, Vector, CastArgs),
@@ -161,8 +154,8 @@ pub(super) fn cast_capsule(
     })
 }
 
-/// What `run` hits of the world scripts reach with the cast `args` give, for a script: a mod's
-/// only if it may read the whole world, as where each collider is tells of every entity with one.
+/// What `run` hits with the cast `args` give. A mod needs `read` of the whole world: where each
+/// collider is tells of every entity with one.
 fn cast(
     (from, toward, distance, exclude): CastArgs,
     run: impl FnOnce(&World, Cast) -> Option<Hit3D>,
@@ -192,15 +185,13 @@ fn cast(
     })
 }
 
-/// The most parameters' names a VM keeps for `gg.set_param`, as [`Shared`]'s `params` says: as many
-/// as a game's state machines name many times over, few enough that searching them in turn costs
-/// little, and that a script's names, which past them it may give without end, hold little.
+/// The most parameter names a VM keeps for `gg.set_param` ([`Shared`]'s `params`). Far more than a
+/// game's state machines name, few enough that a linear search is cheap and that names a script
+/// gives without end hold little.
 pub(super) const PARAMS: usize = 64;
 
-/// `gg.find_path(from, to)`: the corners of the shortest path over the world's navmesh from `from`
-/// to `to`, as [`World::find_path`] says, as an array of vectors, or nil where no path joins them;
-/// for a mod's script only if its mod may read the whole world, as the navmesh tells where every
-/// static collider is.
+/// `gg.find_path(from, to)`: [`World::find_path`]'s corners as an array of vectors, or nil. A mod
+/// needs `read` of the whole world: the navmesh tells where every static collider is.
 pub(super) fn find_path(lua: &Lua, (from, to): (Vector, Vector)) -> mlua::Result<Lua_> {
     shared(|shared| {
         shared.needs(
@@ -219,12 +210,11 @@ pub(super) fn find_path(lua: &Lua, (from, to): (Vector, Vector)) -> mlua::Result
     })
 }
 
-/// What a script gives `gg.tween`: the entity, the handle of its field, where the field goes, in
-/// how many seconds, and the table of the rest, if any.
+/// What a script gives `gg.tween`: the entity, its field's handle, the target, the seconds and
+/// the options table, if any.
 type TweenArgs = (LightUserData, Lua_, Lua_, f64, Option<Table>);
 
-/// `gg.tween(entity, field, to, seconds, options)`: starts a tween of `entity`'s field whose handle
-/// is `field` from what it holds to `to`, as the scripts' doc says.
+/// `gg.tween(entity, field, to, seconds, options)`: docs/LUAU.md.
 pub(super) fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> mlua::Result<()> {
     shared(|shared| {
         entities::ticking(shared, "starts tweens")?;
@@ -318,8 +308,7 @@ pub(super) fn tween(_: &Lua, (entity, key, to, seconds, options): TweenArgs) -> 
     })
 }
 
-/// `gg.play(entity, clip, fade)`: has `entity`, a model's root, play its clip `clip`, cross-fading
-/// over `fade` seconds, or at once without them, as the scripts' doc says.
+/// `gg.play(entity, clip, fade)`: docs/LUAU.md.
 pub(super) fn play(
     _: &Lua,
     (entity, clip, fade): (LightUserData, String, Option<f64>),
@@ -343,8 +332,7 @@ pub(super) fn play(
     })
 }
 
-/// `gg.set_param(entity, name, value)`: sets parameter `name` of `entity`'s state machine to
-/// `value`, a number or a boolean, as the scripts' doc says.
+/// `gg.set_param(entity, name, value)`: docs/LUAU.md.
 pub(super) fn set_param(
     _: &Lua,
     (entity, name, value): (LightUserData, LuaString, Lua_),
@@ -401,16 +389,16 @@ pub(super) fn set_param(
     })
 }
 
-/// The smallest of an axis' components, in absolute value, that is one: below it, a rotation's
-/// axis is no direction.
+/// The least absolute component an axis needs: below it, a rotation's axis is no direction.
 const AXIS_LEAST: f32 = 1e-6;
 
-/// `axis`, of the rotation of `angle` radians that `gg.quat.from_axis_angle` makes, as a unit
-/// vector: scaled by its largest component first, so that an axis of huge components doesn't
-/// overflow as its length is found.
+/// `axis` of `gg.quat.from_axis_angle`'s rotation by `angle` radians, as a unit vector. It's scaled
+/// by its largest component first, so huge components don't overflow as its length is found.
 ///
-/// Fails with `script.bad_argument` for an axis of a component that isn't finite, or of none past
-/// [`AXIS_LEAST`], and for an angle that isn't finite.
+/// # Errors
+///
+/// `script.bad_argument` for an axis with a non-finite component or none past [`AXIS_LEAST`], and
+/// for a non-finite angle.
 pub(super) fn unit_axis(axis: Vec3, angle: f64) -> mlua::Result<Vec3> {
     let refuse =
         |message: String| mlua::Error::external(Error::new("script.bad_argument", message));

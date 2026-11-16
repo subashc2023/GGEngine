@@ -1,5 +1,5 @@
-//! Luau scripts: components that scripts declare, which act, each for the entity it's on, at its
-//! layer's ticks, as [`Scripts`] says; and mods, scripts a player installs, as [`Mods`] says.
+//! Luau scripts: components that scripts declare, which act for the entity they're on at their
+//! layer's ticks ([`Scripts`]); and mods, scripts a player installs ([`Mods`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -35,8 +35,8 @@ mod contacts;
 mod debugger;
 mod entities;
 mod fields;
-// Luau's hooks, its interrupt and its debugger's, which mlua reaches through its raw API alone:
-// this module alone may use unsafe code for them.
+// Luau's interrupt and debugger hooks, which mlua reaches only through its raw API: this module
+// alone may use unsafe code.
 #[allow(unsafe_code)]
 mod hooks;
 mod host;
@@ -51,51 +51,40 @@ pub(crate) use debugger::Debugger;
 pub use mods::Mods;
 pub(crate) use mods::{ModText, RunMods};
 
-// An entity's 64 bits are a script's light userdata, a pointer's.
+// A script's light userdata, a pointer, holds an entity's 64 bits.
 const _: () = assert!(
     usize::BITS == 64,
     "scripts hold an entity's 64 bits in a pointer"
 );
 
 scoped_tls::scoped_thread_local! {
-    /// What scripts reach as they run or load, which the functions Luau calls find here.
+    /// What scripts reach as they run or load, for the functions Luau calls.
     static SHARED: Shared
 }
 
-/// The most of Luau's interrupts, which come at each call and each turn of a loop, that a call into
-/// a script, a tick or a chunk as it loads, takes before it fails, as [`Scripts`] says: far more
-/// than a tick's work takes, and few enough that a loop that never ends fails soon, even in a debug
-/// build.
+/// The most Luau interrupts (one per call and loop turn) a call into a script takes before it
+/// fails, as [`Scripts`] says. Far above a tick's work, yet a loop that never ends fails soon, even
+/// in a debug build.
 const BUDGET: u32 = 1_000_000;
 
-/// A layer's Luau scripts. It loads each from a file in the layer's `load`, with the component
-/// type the script declares, which entities have to run it; runs them where the layer's tick
-/// chooses, each script's tick once for each entity with its component, in the order queries find
-/// them, the scripts in the order of their components' names; and, in a development build, reloads
-/// one as its file is saved, between ticks, through an edit that a recording keeps and a replay
-/// applies there, and that both peers of a lockstep session apply at one tick. The VM stays on the
-/// thread that made it, which runs the ticks.
+/// A layer's Luau scripts, loaded from files in the layer's `load`. docs/LUAU.md is the reference
+/// for what scripts can do; this says what the Rust side guarantees.
 ///
-/// A reload may change the component's fields, but not its name: each component of it keeps the
-/// fields of a name and a kind it had, the rest taking their defaults; and a world from before,
-/// as the tool API's `stop` brings back, does so as it comes back, as do the components an undo
-/// puts back. A changed default reaches the components added after. An undo doesn't take a reload
-/// back: saving the file as it was does, the fields the reload dropped coming back at their
-/// defaults.
+/// A script declares a component type. Where the layer's tick chooses, [`run`](Self::run) runs
+/// each script's `tick` once per entity with its component, in query order, the scripts in the
+/// order of their components' names. The VM stays on the thread that made it, which runs the ticks.
 ///
-/// A script is a component: its file declares one with `gg.declare`, its fields' names and their
-/// defaults, numbers, bools, vectors, or `gg.entity` for an entity, none by default; and a `tick`
-/// that runs for each entity that has it, given the entity and the tick's length in seconds. It
-/// reaches components' fields, Rust's and scripts', by handles, `gg.component("Shard").angle`, and
-/// its own's, `Spin.speed`, which an entity reads and writes as `entity[Shard.angle]`: a number,
-/// a bool, a vector, a quaternion as a vector, or an entity, nil for an entity or a vector a field
-/// may hold none of. A write that [`World::set_field`]
-/// would refuse, such as of a number outside the field's bounds, fails as an error does. It keeps
-/// its state in its components, as a game keeps its in the world, since no snapshot, reload or peer
-/// joining keeps what its chunk's locals hold: once its chunk has run, every table the chunk keeps,
-/// its globals among them, is frozen, and a script is refused, `script.state`, whose functions
-/// assign a local of its chunk, as its compiled bytecode shows, or whose chunk keeps a coroutine or
-/// a buffer.
+/// In a development build, a saved file reloads between ticks, through an edit that a recording
+/// keeps and a replay applies there, and that both peers of a lockstep session apply at one tick.
+/// A reload may change fields, not the name: each component keeps the fields whose name and kind it
+/// had, the rest taking their defaults. A restored world and components an undo puts back migrate
+/// alike. A changed default reaches only components added after. An undo doesn't take a reload
+/// back; saving the file as it was does, dropped fields returning at their defaults.
+///
+/// A script keeps state in its components: no snapshot, reload or joining peer keeps a chunk's
+/// locals. Once the chunk has run, every table it keeps, globals included, is frozen.
+/// `script.state` refuses a script whose functions assign a local of its chunk, as its bytecode
+/// shows, or whose chunk keeps a coroutine or a buffer.
 ///
 /// ```lua
 /// local Shard = gg.component("Shard")
@@ -108,61 +97,49 @@ const BUDGET: u32 = 1_000_000;
 /// return Spin
 /// ```
 ///
-/// `gg.declare`'s third argument, `{ on = "Shard" }`, has the component ride on another: each
-/// entity with a `Shard` is given its own, at its defaults, as the scripts run, before its tick.
-///
-/// A tick changes the world's entities at once, as Rust code does, by their components' type
-/// names: `gg.spawn`, `gg.despawn`, `gg.add`, `gg.remove` and `gg.alive`, whose arguments are in
-/// docs/LUAU.md. What these give an entity, or the entity they spawn, starts the VM's scripts on it
-/// at the next tick, though another VM's that run later in the tick, a mod's, run them as they
-/// come; a chunk calls none of them, nor `gg.tween`, `gg.play`, `gg.set_param` or writes a field
-/// (`script.loading`), as it runs again as a lockstep joiner loads it; and they fail with the engine's errors and codes, such as `ecs.no_entity` for an
-/// entity despawned, as a field read or written through a handle to one fails too, and
-/// `script.bad_argument` for an argument of another kind. A mod's scripts give and take the
-/// components they may write, and spawn only if they may write some type, an entity of components
-/// they may write; one without components, under a parent or of a prefab, and a despawn, only if
-/// they may write the whole world.
+/// `gg.spawn`, `gg.despawn`, `gg.add`, `gg.remove` and `gg.alive` change the world at once. What
+/// they give an entity, or spawn, starts this VM's scripts on it at the next tick; another VM's
+/// scripts that run later in the tick, a mod's, run them as they come. A chunk calls none of them,
+/// nor `gg.tween`, `gg.play` or `gg.set_param`, and writes no field (`script.loading`): it runs
+/// again as a lockstep joiner loads it. Failures keep the engine's codes, such as `ecs.no_entity`
+/// for a despawned entity and `script.bad_argument` for an argument of another kind.
 ///
 /// `gg.quat`, the casts, `gg.find_path`, `gg.tween`, `gg.play` and `gg.set_param` do as
 /// [`World::cast_ray`], [`World::cast_shape`], [`World::find_path`], [`World::tween`],
-/// [`World::play`] and [`World::set_param`] do, for the entity they're given, and what a mod's
-/// scripts need of each is as docs/LUAU.md lists, which is the reference of everything scripts
-/// reach, each `gg` function's arguments, results and errors among it. A call that sets
-/// `gg.set_param`'s parameter allocates nothing once its VM has been given its name, among the
-/// first 64 names it's given.
+/// [`World::play`] and [`World::set_param`] do. A `gg.set_param` call allocates nothing once its VM
+/// has been given the parameter's name, among the first 64 it's given.
 ///
-/// Scripts run alike on every platform, as the simulation must. Luau's C++ fuses no
-/// multiplication into an addition, as `.cargo/config.toml` builds it. The functions of `math`
-/// whose precision is the platform's are libm's, which the compiler is told aren't builtins: it
-/// would call the C library's in their place. A script that uses `^`, which calls the platform's
-/// `pow` past any hook, or that sets how it compiles, with `--!optimize` or `--!native`, is
-/// refused. The library functions that make an integer of a number, by a C cast that's undefined
-/// past the integer's range, where platforms differ, as `string.sub`'s positions, `bit32`'s and
-/// `buffer`'s arguments are, fail as an error does at a number past that range or that isn't
-/// finite, before they run, as does `string.format` at a number its conversion would cast so, or
-/// write as a float that isn't finite, which C libraries write each their own way; but for the
-/// iterators that `ipairs` and `utf8.codes` return, which a script that calls one itself gives a
-/// number unchecked. `math.random`, whose state the VM holds outside the world and seeds from the
-/// clock, isn't there, nor are `os`, `debug`, `collectgarbage`, `gcinfo`, `getfenv`, `setfenv`,
-/// `loadstring`, `newproxy`, `require` and `vector.angle`. And an entity is light userdata, its 64
-/// bits, which tables hash and compare by them rather than by an address, and whose metatable is
-/// frozen. The VM collects its garbage at set points, after a chunk runs and after the ticks once
-/// the scripts have allocated as much as the VM holds alive, rather than when Luau's clock paces
-/// it, so that what a weak table holds is alike everywhere.
+/// Scripts run alike on every platform, as the simulation must (docs/LUAU.md's sandbox lists what
+/// is gone or checked):
 ///
-/// Each call into a script, a tick or its chunk as it loads, takes at most a million of Luau's
-/// interrupts, which come at each call and each turn of a loop, past which it fails, alike on every
-/// platform, so that a loop that never ends fails rather than hanging the game. No script code runs
-/// outside such a call: the engine checks what a chunk returns and keeps without calling its
-/// metamethods.
+/// - Luau's C++ is built, by `.cargo/config.toml`, to fuse no multiplication into an addition.
+/// - The `math` functions whose precision is the platform's are libm's. The compiler is told they
+///   aren't builtins, or it would call the C library's.
+/// - `^` calls the platform's `pow` past any hook, so it's refused, as are `--!optimize` and
+///   `--!native`.
+/// - Library functions that cast a number to an integer in C, undefined past its range where
+///   platforms differ, fail as an error before they run at a number past it or not finite. So does
+///   `string.format` at a number its conversion would cast so, or write as a non-finite float,
+///   which C libraries write each their own way. Not checked: the iterators `ipairs` and
+///   `utf8.codes` return, if a script calls one itself.
+/// - `math.random`'s state is outside the world, seeded from the clock: it's gone.
+/// - An entity is light userdata of its 64 bits, which tables hash and compare by, not an address.
+/// - The VM collects garbage at set points, not by Luau's clock: after a chunk runs, and after
+///   ticks once the scripts have allocated as much as the VM holds alive. So weak tables hold
+///   alike everywhere.
 ///
-/// A development build that serves the tool API debugs the scripts through it, as gg-api's `debug`
-/// says: breakpoints, by a script's path and a line, a pause and steps. A script stops inside its
-/// tick, the main thread waiting there until a client has it go on; it runs slower while the
-/// debugger is armed, a breakpoint placed or a pause or a step asked, and does nothing otherwise.
+/// Each call into a script (a tick, or a chunk as it loads) takes at most a million of Luau's
+/// interrupts, alike on every platform, so a loop that never ends doesn't hang the game. No script
+/// code runs outside such a call: the engine checks what a chunk returns and keeps without calling
+/// its metamethods.
+///
+/// A development build that serves the tool API debugs scripts through it, as gg-api's `debug`
+/// says. A script stops inside its tick, the main thread waiting until a client resumes it. It runs
+/// slower while the debugger is armed (a breakpoint placed, a pause or a step asked), and is
+/// untouched otherwise.
 pub struct Scripts {
-    /// Shared with the context of the run, which reloads and migrates through it, as edits and
-    /// restores reach the world between ticks, where the layer's tick reaches it alone.
+    /// Shared with the run's context, which reloads and migrates through it between ticks, when
+    /// only the layer's tick reaches the world.
     host: Rc<RefCell<Host>>,
 }
 
@@ -172,18 +149,17 @@ struct Host {
     shared: Shared,
     /// In the order of their components' names.
     scripts: Vec<Loaded>,
-    /// The world whose component types the handles name, by its serial, and those types, by their
-    /// revision, which a script's reload in another VM moves on, as it declares its type again.
+    /// The world (its serial) whose component types the handles name, and their revision, which
+    /// another VM's reload moves on by declaring its type again.
     resolved: Option<(u64, u64)>,
-    /// The memory the VM may hold, if it's held to a limit, as a mod's is.
+    /// The VM's memory limit, a mod's.
     limit: Option<usize>,
-    /// What the VM may hold before the next set point collects its garbage.
+    /// What the VM may hold before the next set point collects garbage.
     goal: usize,
 }
 
-/// What a mod's scripts are held to, as [`Mods`] says: the mod's name; its grant; the component
-/// types its scripts declared, which are its own; and its prints, those left to it this second of
-/// ticks and those it went without, with the ticks of the second.
+/// What a mod's scripts are held to ([`Mods`]). `own`: the component types its scripts declared.
+/// `prints` is what's left this second of ticks, `unprinted` what it went without.
 struct Held {
     name: String,
     grant: Grant,
@@ -193,7 +169,7 @@ struct Held {
     ticks: Cell<u32>,
 }
 
-/// The most lines a mod prints a second of ticks, past which its prints go unprinted.
+/// The most lines a mod prints a second of ticks.
 const PRINTS: u32 = 32;
 
 /// The ticks of a second.
@@ -211,7 +187,7 @@ impl Held {
         }
     }
 
-    /// Whether a print prints, as it's the mod's this second of ticks, counting it.
+    /// Counts a print, and says whether it prints.
     fn prints(&self) -> bool {
         let left = self.prints.get();
         if left == 0 {
@@ -221,8 +197,8 @@ impl Held {
         left > 0
     }
 
-    /// Counts a tick of the mod's, after which, as a second of them ends, its prints start again,
-    /// warning of those that went unprinted, `mod.unprinted`.
+    /// Counts a tick. As a second of them ends, prints start again and a warning,
+    /// `mod.unprinted`, counts those that went unprinted.
     fn ticked(&self) {
         let ticks = self.ticks.get() + 1;
         self.ticks.set(ticks % TICKS_A_SECOND);
@@ -243,9 +219,9 @@ impl Held {
     }
 }
 
-/// The hosts of the layers' scripts, which a context reloads a script through as an edit asks, and
-/// migrates a world it brings back through, as [`Scripts`] says; and the run's debugger, which it
-/// gives each, in a run that serves the tool API.
+/// The layers' script hosts, which a context reloads scripts and migrates a restored world
+/// through, as [`Scripts`] says; and the run's debugger, given to each, if the run serves the tool
+/// API.
 #[derive(Default)]
 pub(crate) struct Hosts {
     hosts: Vec<Weak<RefCell<Host>>>,
@@ -253,37 +229,32 @@ pub(crate) struct Hosts {
     debugger: Option<Arc<Debugger>>,
 }
 
-/// What the functions Luau calls and its hooks reach: the world, lent in place of the one kept here
-/// as scripts run or load, what the handles of fields name, the budget of the call into a script
-/// running, what a mod's scripts are held to, and what the VM keeps for the debugger.
+/// What the functions Luau calls and its hooks reach. `world` is lent in place of the one kept
+/// here as scripts run or load.
 struct Shared {
     world: RefCell<World>,
     /// In the order of their handles' bits.
     fields: RefCell<Vec<FieldRef>>,
-    /// The script loading, while one is.
     loading: RefCell<Option<Loading>>,
-    /// The interrupts left to the call into a script that runs, of its [`BUDGET`], or, a mod's, to
-    /// its calls this tick.
+    /// The interrupts left of the running call's [`BUDGET`], or, a mod's, of its calls this tick.
     budget: Cell<u32>,
     /// `None` for a game's own scripts, which reach everything.
     held: Option<Held>,
-    /// The parameters' names that scripts have given `gg.set_param` in calls it took, the first
-    /// [`PARAMS`] of them, each the Luau string, held so that its address stays its own, and its
-    /// text: so that a call that names one again, as calls at each tick do, finds its text by the
-    /// address of the string Luau interned, where reading a Luau string's text through mlua
-    /// allocates, as a call naming one past them does.
+    /// The first [`PARAMS`] names scripts gave `gg.set_param`: the Luau string (held so its
+    /// address stays its own) and its text. A call naming one again finds the text by the interned
+    /// string's address; reading a Luau string's text through mlua allocates.
     params: RefCell<Vec<(LuaString, String)>>,
-    /// What the scripts gave entities as they ran this time, which no tick runs for until they run
-    /// again, as [`entities`] says: each entity they spawned, with `None`, and each component they
-    /// gave one, with its type, and those riding on it. A set, never iterated, so its order counts
-    /// for nothing, and cleared in place, so it allocates only as it holds more than ever before.
+    /// What the scripts gave entities this run, which no tick runs for until they run again
+    /// ([`entities`]): each spawned entity with `None`, each given component with its type and
+    /// those riding on it. Never iterated, so its order counts for nothing; cleared in place, so it
+    /// allocates only as it outgrows its past.
     fresh: RefCell<HashSet<(Entity, Option<ComponentId>)>>,
     #[cfg(feature = "dev")]
     hooked: debugger::Hooked,
 }
 
 impl Shared {
-    /// Whether the scripts may read, and may write, the components of type `component`: a mod's,
+    /// Whether the scripts may read, and may write, components of type `component`: a mod's may
     /// those its grant names and its own.
     fn may(&self, component: &str) -> (bool, bool) {
         match &self.held {
@@ -293,9 +264,8 @@ impl Shared {
         }
     }
 
-    /// Fails with `mod.ungranted` unless the scripts are a game's, or their mod is granted
-    /// `capability`, which `what` needs. Both are made for a mod's alone, so that a game's calls
-    /// allocate nothing for them.
+    /// Fails with `mod.ungranted` unless the scripts are a game's or their mod has `capability`,
+    /// which `what` needs. Both are made for a mod's alone, so a game's calls allocate nothing.
     fn needs(
         &self,
         capability: impl FnOnce() -> Capability,
@@ -312,19 +282,17 @@ impl Shared {
     }
 }
 
-/// What an interrupt does, as [`interrupted`] says.
 enum Interrupt {
     Go,
     /// Fails the call, past its budget.
     Over,
-    /// Stops there, as a pause asks.
     #[cfg(feature = "dev")]
     Pause,
 }
 
-/// Counts an interrupt against the budget of the call into a script that runs, which fails past it,
-/// and, in a development build, stops there if a pause is asked, as [`Scripts`] says. Script code
-/// that runs outside any call into a script, where it would have no budget, fails at once.
+/// Counts an interrupt against the running call's budget, which fails past it, and, in a
+/// development build, stops there if a pause is asked. Script code outside any call into a script,
+/// with no budget, fails at once.
 fn interrupted() -> Interrupt {
     if !SHARED.is_set() {
         return Interrupt::Over;
@@ -343,8 +311,8 @@ fn interrupted() -> Interrupt {
     })
 }
 
-/// The error of a call into a script that ran past its budget at `line` of `script`, or, a mod's,
-/// past its mod's for the tick; or of script code that ran there outside any call into a script.
+/// The error of a call that ran past its budget (a mod's: its mod's for the tick) at `line` of
+/// `script`, or of script code that ran there outside any call into a script.
 fn over_budget(script: &str, line: u32) -> String {
     if !SHARED.is_set() {
         return format!(
@@ -364,8 +332,8 @@ fn over_budget(script: &str, line: u32) -> String {
     )
 }
 
-/// Whether the step under way ends at `line`, at `depth` of the stack, and why it stops there if it
-/// does, as [`debugger::Hooked::stepped`] says.
+/// Why the step under way stops at `line`, at stack `depth`, if it does:
+/// [`debugger::Hooked::stepped`].
 #[cfg(feature = "dev")]
 fn stepped(line: c_int, depth: c_int) -> Option<StopReason> {
     if !SHARED.is_set() {
@@ -374,8 +342,8 @@ fn stepped(line: c_int, depth: c_int) -> Option<StopReason> {
     SHARED.with(|shared| shared.hooked.stepped(line, depth))
 }
 
-/// Has the script that runs stop where `frames` says, at `depth` of the stack, for `why`, until a
-/// client of the debugger says what it does next, as [`debugger::Hooked::stop`] says.
+/// Stops the running script at `frames`, stack `depth`, for `why`, until a debugger client says
+/// what next: [`debugger::Hooked::stop`].
 #[cfg(feature = "dev")]
 fn stopped(why: StopReason, depth: c_int, frames: Vec<hooks::Frame>) {
     if !SHARED.is_set() {
@@ -387,14 +355,14 @@ fn stopped(why: StopReason, depth: c_int, frames: Vec<hooks::Frame>) {
     });
 }
 
-/// A field a handle names: field `name` of component type `component`, which holds `ty`; and
-/// whether the scripts may read it and write it, as [`Shared::may`] says.
+/// A field a handle names: field `name` of component type `component`, holding `ty`, and whether
+/// the scripts may read and write it ([`Shared::may`]).
 struct FieldRef {
-    /// The bits of its handle, as [`handle_of`] gives them.
+    /// The bits of its handle, from [`handle_of`].
     handle: u32,
     component: Ident,
-    /// The type's id in the world scripts last ran in, and the field's index there; `None` if it
-    /// has no such type, or no such field, there.
+    /// The type's id in the world scripts last ran in, and the field's index there; `None` if that
+    /// world has no such type or field.
     id: Option<ComponentId>,
     index: u32,
     name: Ident,
@@ -415,18 +383,18 @@ enum Field {
     Vec2,
     Vec3,
     Vec4,
-    /// An f64 vector, as an entity's translation: a script's vector, whose f32s step 2 mm 16 km
-    /// from the origin, as LUAU.md says.
+    /// An f64 vector, as a translation: a script's f32 vector, stepping 2 mm 16 km from the origin
+    /// (docs/LUAU.md).
     DVec3,
     Quat,
     Entity,
     MaybeEntity,
-    /// A vector or none, as a [`NavAgent`](crate::NavAgent)'s destination is: nil for none.
+    /// A vector or nil, as a [`NavAgent`](crate::NavAgent)'s destination.
     MaybeVec3,
 }
 
 impl Field {
-    /// What a field of type `ty` holds, if it's one that scripts reach.
+    /// The kind of a field of type `ty`, if scripts reach it.
     fn of(ty: &Type) -> Option<Self> {
         Some(match ty {
             Type::Bool => Self::Bool,
@@ -446,7 +414,6 @@ impl Field {
     }
 }
 
-/// A script that has loaded.
 struct Loaded {
     /// Its path from the project's root, which a reload names it by.
     path: String,
@@ -455,30 +422,28 @@ struct Loaded {
     component: String,
     fields: Vec<(Ident, Kind, Value)>,
     id: Option<ComponentId>,
-    /// The component type it rides on, as `gg.declare`'s `on` names it, and its id there.
+    /// The type it rides on (`gg.declare`'s `on`) and its id there.
     on: Option<String>,
     on_id: Option<ComponentId>,
     tick: Option<Function>,
-    /// Its chunk, as [`Chunk`] says, which a development build's debugger keeps in its place.
+    /// Its [`Chunk`]'s function, which a development build's debugger keeps instead.
     #[cfg(not(feature = "dev"))]
     chunk: Function,
     /// Whether it has failed since it last loaded, which warns once.
     failed: bool,
 }
 
-/// The script loading: its path, the component it declared before, if it's reloading, and what it
-/// declares.
 struct Loading {
     path: String,
+    /// The component it declared before, if it's reloading.
     before: Option<String>,
     declared: Option<Declaring>,
-    /// Why it's refused, if a function it called refused it.
+    /// Why a function it called refused it.
     refused: Option<Error>,
 }
 
-/// The component type a script loading declared: its id, its name, the script's table, its
-/// fields, whether they're other than the world's type of its name has, which the world's type
-/// takes once the script has loaded, and the type it rides on.
+/// The component type a loading script declared. `changed`: its fields differ from the world's
+/// type of that name, which takes them once the script has loaded.
 struct Declaring {
     id: ComponentId,
     component: String,
@@ -488,9 +453,8 @@ struct Declaring {
     on: Option<String>,
 }
 
-/// A script's chunk, run: the component it declared, its fields, the type it rides on, its tick,
-/// and the chunk, which lives as long as the script, so that its VM holds as much in every build: a
-/// development build's debugger keeps it, placing breakpoints in it, and the script any other's.
+/// A script's chunk, run. Its function lives as long as the script in every build, so the VM holds
+/// as much in all: a development build's debugger keeps it to place breakpoints.
 struct Chunk {
     component: String,
     fields: Vec<(Ident, Kind, Value)>,
@@ -501,7 +465,7 @@ struct Chunk {
 }
 
 impl Scripts {
-    /// A VM for scripts, with the globals [`Scripts`] says.
+    /// A VM for scripts.
     ///
     /// Fails with `script.vm` if Luau can't start, as for want of memory.
     pub fn new() -> Result<Self> {
@@ -510,19 +474,20 @@ impl Scripts {
         })
     }
 
-    /// Loads the script at `path`, declaring the component type it declares in `cx`'s world, and
-    /// returns that type's name, which an entity is given to run the script, as
-    /// [`World::add_default`] gives it. A development build watches its file, reloading it as it's
-    /// saved, as [`Scripts`] says, but in a run that reads its game's package, as
-    /// [`App::project`](crate::App::project) says, which reads it there. A script loaded again, at
-    /// the same path, takes its own place.
+    /// Loads the script at `path`, declaring its component type in `cx`'s world, and returns the
+    /// type's name, which [`World::add_default`] takes to give an entity the script. A development
+    /// build reloads the file as it's saved ([`Scripts`]), unless the run reads its game's package
+    /// ([`App::project`](crate::App::project)), which holds it. Loading the same path again takes
+    /// the script's own place.
     ///
-    /// Fails with `script.unreadable` if the file can't be read, isn't a regular file or isn't
-    /// UTF-8; `script.pow` and
-    /// `script.header` for a script refused as [`Scripts`] says; `script.bad` for one that
-    /// doesn't compile, that fails as its chunk runs, or that returns other than the component it
-    /// declares, as `gg.declare` returns it; `reflect.name_taken` for a component type another has;
-    /// and as declaring it does.
+    /// # Errors
+    ///
+    /// - `script.unreadable`: the file can't be read, isn't a regular file or isn't UTF-8.
+    /// - `script.pow`, `script.header`: refused as [`Scripts`] says.
+    /// - `script.bad`: it doesn't compile, fails as its chunk runs, or returns other than the
+    ///   component `gg.declare` returned.
+    /// - `reflect.name_taken`: another has the component type.
+    /// - Any error of declaring the type.
     pub fn load(&mut self, cx: &mut Context, path: impl AsRef<Path>) -> Result<String> {
         let path = path.as_ref();
         let name = crate::assets::name_of(cx.root.as_deref(), path).to_string();
@@ -548,16 +513,16 @@ impl Scripts {
         Ok(component)
     }
 
-    /// Runs each script's tick once for each entity with its component, as [`Scripts`] says. A
-    /// script that fails warns once, `script.error`, until it reloads, and runs on for the other
-    /// entities. Allocates nothing that the scripts themselves don't.
+    /// Runs each script's tick once per entity with its component, as [`Scripts`] says. A failing
+    /// script warns `script.error` once until it reloads, and runs on for the other entities.
+    /// Allocates nothing the scripts don't.
     pub fn run(&mut self, world: &mut World) {
         self.host.borrow_mut().run(world);
     }
 }
 
 impl Hosts {
-    /// Keeps `host`, unless it's kept already, giving it the run's debugger, if it has one.
+    /// Keeps `host` unless kept already, giving it the run's debugger if any.
     fn add(&mut self, host: &Rc<RefCell<Host>>) {
         self.hosts.retain(|kept| kept.strong_count() > 0);
         if !self
@@ -577,7 +542,7 @@ impl Hosts {
         self.hosts.iter().filter_map(Weak::upgrade)
     }
 
-    /// Has `debugger` debug the scripts of the run, each host's, from those loaded already.
+    /// Has `debugger` debug every host's scripts, those loaded already included.
     #[cfg(feature = "dev")]
     pub(crate) fn debug(&mut self, debugger: Arc<Debugger>) {
         for host in self.hosts() {
@@ -586,8 +551,8 @@ impl Hosts {
         self.debugger = Some(debugger);
     }
 
-    /// Places the breakpoints again in each host's scripts, if they've changed since they were
-    /// last placed, as a frame starts, between ticks.
+    /// Places the breakpoints again in each host's scripts if they've changed, as a frame starts,
+    /// between ticks.
     #[cfg(feature = "dev")]
     pub(crate) fn place(&self) {
         for host in self.hosts() {
@@ -595,8 +560,7 @@ impl Hosts {
         }
     }
 
-    /// Whether a script has stopped since this last answered, so that no frame's time counts the
-    /// stop.
+    /// Whether a script has stopped since this last answered, so no frame's time counts the stop.
     #[cfg(feature = "dev")]
     pub(crate) fn took_stop(&self) -> bool {
         self.debugger
@@ -610,13 +574,15 @@ impl Hosts {
         false
     }
 
-    /// Reloads the script at `path`, its text now `text`, in `world`, through the host that loaded
-    /// it, between ticks, as an edit asks: it runs from the next tick, and its component's fields
-    /// change, as [`Scripts`] says. Logs `Script reloaded`, or why it's refused, the script running
-    /// as it did.
+    /// Reloads the script at `path` with `text` in `world`, through the host that loaded it,
+    /// between ticks, as an edit asks. It runs from the next tick; fields change as [`Scripts`]
+    /// says. Logs `Script reloaded`, or why it's refused, the script running as it did.
     ///
-    /// Fails with `script.unknown` if no layer loaded a script at `path`; `script.renamed` for one
-    /// that declares another component; and as a script's load fails otherwise.
+    /// # Errors
+    ///
+    /// - `script.unknown`: no layer loaded a script at `path`.
+    /// - `script.renamed`: it declares another component.
+    /// - Any other failure of a script's load.
     pub(crate) fn reload(&self, world: &mut World, path: &str, text: String) -> Result<()> {
         let host = self
             .hosts()
@@ -638,16 +604,16 @@ impl Hosts {
         reloaded
     }
 
-    /// Has the types that the scripts declare in `world`, which has been restored or brought back,
-    /// hold their fields as the scripts declare them now, as [`Scripts`] says.
+    /// Has the types the scripts declare in `world`, restored or brought back, hold their fields
+    /// as the scripts declare them now ([`Scripts`]).
     pub(crate) fn migrate(&self, world: &mut World) {
         for host in self.hosts() {
             host.borrow_mut().migrate(world);
         }
     }
 
-    /// Each script loaded, its path and its text as last applied, which a lockstep host's world
-    /// goes to its joiner with.
+    /// Each script loaded: its path and its text as last applied. A lockstep host sends them with
+    /// its world to its joiner.
     pub(crate) fn applied(&self) -> Vec<(String, String)> {
         let mut applied = Vec::new();
         for host in self.hosts() {
@@ -658,9 +624,9 @@ impl Hosts {
         applied
     }
 
-    /// Reloads each of `scripts`, each a path and a text, as [`reload`](Self::reload) does, those
-    /// whose texts are as they were staying as they are: a lockstep joiner's, as they come with its
-    /// host's world, which it runs in place of its own files'.
+    /// Reloads each of `scripts` (path, text) as [`reload`](Self::reload) does; those whose text
+    /// is unchanged stay. A lockstep joiner runs its host's, which come with the host's world, in
+    /// place of its own files'.
     pub(crate) fn take(&self, world: &mut World, scripts: &[(String, String)]) {
         for (path, text) in scripts {
             let _ = self.reload(world, path, text.clone());
@@ -668,19 +634,19 @@ impl Hosts {
     }
 }
 
-/// The error that a mod's scripts aren't granted what `capability` names, which `what` needs.
+/// The message that a mod isn't granted `capability`, which `what` needs.
 fn ungranted(capability: &str, what: &str) -> String {
     format!("the mod isn't granted `{capability}`, which {what} needs")
 }
 
-/// [`ungranted`] as the error a script's call fails with, `mod.ungranted`, so that a tick's
-/// `script.error` names it as its `cause`.
+/// [`ungranted`] as the `mod.ungranted` error a script's call fails with, which a tick's
+/// `script.error` names as its `cause`.
 fn denied(capability: &str, what: &str) -> mlua::Error {
     let message = ungranted(capability, what);
     mlua::Error::external(Error::new("mod.ungranted", message))
 }
 
-/// What the functions Luau calls reach, as they run only as scripts run or load.
+/// Runs `f` on what the functions Luau calls reach; they run only as scripts run or load.
 fn shared<R>(f: impl FnOnce(&Shared) -> mlua::Result<R>) -> mlua::Result<R> {
     if !SHARED.is_set() {
         return Err(mlua::Error::runtime(

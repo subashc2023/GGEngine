@@ -1,6 +1,6 @@
-//! Keeps docs/LUAU.md, the reference of what scripts and mods reach, from drifting: each key of
-//! the `gg` table, in a game's VM and a mod's, and each diagnostic code that these files name for
-//! a script, has an entry in it, and it names no `gg` function that isn't there.
+//! Keeps docs/LUAU.md from drifting: it has an entry for each key of the `gg` table (in a game's
+//! VM and a mod's) and each diagnostic code these files name for a script, and names no `gg`
+//! function that isn't there.
 
 use std::collections::BTreeSet;
 
@@ -12,7 +12,7 @@ use crate::grant::Grant;
 /// docs/LUAU.md, the reference.
 const REFERENCE: &str = include_str!("../../../../docs/LUAU.md");
 
-/// The sources whose diagnostic codes a script or a mod's load can see.
+/// The sources whose diagnostic codes a script or mod load can see.
 const SOURCES: [&str; 9] = [
     include_str!("mod.rs"),
     include_str!("api.rs"),
@@ -25,7 +25,7 @@ const SOURCES: [&str; 9] = [
     include_str!("../grant.rs"),
 ];
 
-/// The name of each key of `gg`, `gg.quat`'s as `quat.identity`, in `host`'s VM.
+/// Each key of `gg` in `host`'s VM, `gg.quat`'s as `quat.identity`.
 fn keys(host: &Host) -> BTreeSet<String> {
     let gg: Table = host.lua.globals().get("gg").expect("the gg table");
     let mut keys = BTreeSet::new();
@@ -42,7 +42,7 @@ fn keys(host: &Host) -> BTreeSet<String> {
     keys
 }
 
-/// The names that `text` gives `gg`, as `gg.spawn` or `gg.quat.rotate`, without the `gg.`.
+/// The names `text` gives `gg` (`gg.spawn`, `gg.quat.rotate`), without the `gg.`.
 fn mentioned(text: &str) -> BTreeSet<String> {
     let name = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
     let mut found = BTreeSet::new();

@@ -32,7 +32,7 @@ pub(super) fn entity_of(data: LightUserData) -> mlua::Result<Entity> {
     })
 }
 
-/// The field of `fields`, in the order of their handles' bits, that `key` is the handle of.
+/// The field of `fields` (sorted by handle bits) that `key` is the handle of.
 pub(super) fn field_of<'f>(fields: &'f [FieldRef], key: &Lua_) -> mlua::Result<&'f FieldRef> {
     let at = match key {
         &Lua_::LightUserData(data) if bits(data) >> 32 == 0 => {
@@ -50,17 +50,17 @@ pub(super) fn field_of<'f>(fields: &'f [FieldRef], key: &Lua_) -> mlua::Result<&
     })
 }
 
-/// The handle of field `name` of component type `id`, named `component`, which is its field `index`
-/// and holds `ty`, and which the scripts may read and write as `may` says: the one `fields` has, or
-/// one made, kept in the order of their handles' bits.
+/// The handle of field `name`, field `index` of component type `id` (named `component`), holding
+/// `ty`; `may` is whether scripts may read and write it. Finds it in `fields`, kept in the order
+/// of handle bits, or makes it.
 ///
-/// Its bits are the low 32, never 0, which no entity's are, as [`Entity::to_bits`] says, and are
-/// those of the field itself, as [`hashed`] gives them: not its place among the handles the VM
-/// made before, which would go by what the VM ran, so that a table the handles key, which Luau
-/// orders by their bits' hashes, iterates alike in a lockstep host's VM, which may have loaded and
-/// reloaded scripts as it ran, and in its joiner's, which starts afresh, as in a run restored from
-/// a snapshot and in a replay. Two fields whose hashes are the same, about one pair in 2^32, take
-/// the next bits free in the order the VM made them, which alone goes by what it ran.
+/// The bits are the low 32, never 0 (no entity's are, see [`Entity::to_bits`]), and come from the
+/// field itself ([`hashed`]), not from its place among the handles the VM made before. That place
+/// would depend on what the VM ran, so a table keyed by handles, which Luau orders by their
+/// hashes, would iterate differently in a lockstep host's VM (which may have loaded and reloaded
+/// scripts), its joiner's, a run restored from a snapshot and a replay. Two fields whose hashes
+/// collide, about one pair in 2^32, take the next free bits in the order the VM made them, which
+/// alone depends on what it ran.
 pub(super) fn handle_of(
     fields: &mut Vec<FieldRef>,
     component: &str,
@@ -96,8 +96,8 @@ pub(super) fn handle_of(
     handle(u64::from(bits))
 }
 
-/// A hash of field `name` of the component type named `component`, which holds `ty`: 32-bit
-/// FNV-1a, of the names' bytes, each ended by a 0, which no name holds, and of what it holds.
+/// 32-bit FNV-1a of the component's and field's names, each ended by a 0 (no name holds one), and
+/// of `ty`.
 fn hashed(component: &str, name: &str, ty: Field) -> u32 {
     let held = match ty {
         Field::Bool => 0,
@@ -120,9 +120,8 @@ fn hashed(component: &str, name: &str, ty: Field) -> u32 {
     })
 }
 
-/// `gg.component(name)`: a table of the handles of component type `name`'s fields, by name, those
-/// of the kinds scripts reach; for a mod's scripts, of a type they may read or write, as
-/// [`Shared::may`] says, or a refusal, `mod.ungranted`, of the script loading.
+/// `gg.component(name)`. A mod's scripts need [`Shared::may`] to allow it, else the script
+/// loading is refused with `mod.ungranted`.
 pub(super) fn component(lua: &Lua, name: LuaString) -> mlua::Result<Table> {
     shared(|shared| {
         let world = shared.world.borrow();
@@ -150,8 +149,7 @@ pub(super) fn component(lua: &Lua, name: LuaString) -> mlua::Result<Table> {
     })
 }
 
-/// A table of the handles of `fields`, each a name and a type, of component type `id`, which is
-/// named `name`: its fields, in their order.
+/// A table of the handles of `fields` (name and type) of component type `id`, named `name`.
 fn handles<'f>(
     lua: &Lua,
     shared: &Shared,
@@ -173,12 +171,10 @@ fn handles<'f>(
     Ok(table)
 }
 
-/// `gg.declare(name, fields, options)`: declares the component type the script loading is, `name`,
-/// of `fields`, each a name and a default, riding on the type `options`' `on` names, if it names
-/// one, as [`Scripts`] says, and returns the script's table, of its fields' handles, which its tick
-/// goes in. A script loading again declares the type it declared, its fields as they were or
-/// otherwise, which the type takes once it has loaded. A mod's scripts' types are their own, and
-/// a type they ride on is one they may read.
+/// `gg.declare(name, fields, options)` (see [`Scripts`]): declares the script loading's component
+/// type and returns its table of handles, where the tick goes. A script loading again declares the
+/// type it did, its fields changed or not; the type takes them once the load succeeds. A mod's
+/// types are its own, and a type they ride on must be readable by it.
 pub(super) fn declare(
     lua: &Lua,
     (name, fields, options): (LuaString, Table, Option<Table>),
@@ -314,7 +310,7 @@ pub(super) fn declare(
     })
 }
 
-/// `entity[field]`: the field whose handle is `key`, of `entity`.
+/// `entity[key]`.
 pub(super) fn read(_: &Lua, (entity, key): (LightUserData, Lua_)) -> mlua::Result<Lua_> {
     shared(|shared| {
         let entity = entity_of(entity)?;
@@ -332,7 +328,7 @@ pub(super) fn read(_: &Lua, (entity, key): (LightUserData, Lua_)) -> mlua::Resul
     })
 }
 
-/// `entity[field] = value`: sets the field whose handle is `key`, of `entity`, to `value`.
+/// `entity[key] = value`.
 pub(super) fn write(
     _: &Lua,
     (entity, key, value): (LightUserData, Lua_, Lua_),
@@ -363,7 +359,7 @@ pub(super) fn describe(_: &Lua, data: LightUserData) -> mlua::Result<String> {
     })
 }
 
-/// The id of the component type `field` is of, in the world scripts run in.
+/// The id of `field`'s component type in the world scripts run in.
 pub(super) fn missing(field: &FieldRef) -> mlua::Result<ComponentId> {
     field.id.ok_or_else(|| {
         mlua::Error::runtime(format!(
@@ -373,8 +369,8 @@ pub(super) fn missing(field: &FieldRef) -> mlua::Result<ComponentId> {
     })
 }
 
-/// The error that `field` of `entity` can't be reached in `world`, as `error` says, of its code,
-/// such as `ecs.no_entity` for an entity despawned.
+/// The error that `field` of `entity` can't be reached, keeping `error`'s code (`ecs.no_entity`
+/// for a despawned entity).
 pub(super) fn reaching(
     world: &World,
     entity: Entity,
@@ -392,14 +388,14 @@ pub(super) fn reaching(
     ))
 }
 
-/// How diagnostics name `entity` of `world`: by its ID while it's alive, and else by its handle.
+/// How diagnostics name `entity`: by its ID while alive, else by its handle.
 pub(super) fn named(world: &World, entity: Entity) -> String {
     world
         .id(entity)
         .map_or(entity.to_string(), |id| id.to_string())
 }
 
-/// The value of `field`, which holds `ty`, as a script reads it: without allocating.
+/// `field`, which holds `ty`, as a script reads it. Doesn't allocate.
 fn to_lua(field: &dyn Reflect, ty: Field) -> Lua_ {
     if ty == Field::MaybeEntity {
         let any: &dyn Any = field;
@@ -432,8 +428,8 @@ fn to_lua(field: &dyn Reflect, ty: Field) -> Lua_ {
     }
 }
 
-/// Sets field `index` of `entity`'s component `id`, which holds `ty`, to `value`, a script's,
-/// refused as [`World::field_to_set`] says: without allocating, but to fail.
+/// Sets field `index` of `entity`'s component `id`, which holds `ty`, to a script's `value`.
+/// Refusals are [`World::field_to_set`]'s. Allocates only to fail.
 pub(super) fn set(
     world: &mut World,
     (entity, id, index): (Entity, ComponentId, u32),
@@ -470,12 +466,12 @@ pub(super) fn set(
     }
 }
 
-/// `value`, a script's, as a field that holds `ty` takes it, as reflection's value: nil for an
-/// option's none. The bounds of the field aren't checked, which setting it or building its
-/// component does.
+/// A script's `value` as reflection's value for a field holding `ty`; nil is an option's none.
+/// The field's bounds aren't checked: setting it or building its component does.
 ///
-/// Fails with `reflect.wrong_kind` for a value of another kind, and `reflect.out_of_range` for a
-/// number that isn't an integer, or is negative, where the field holds an integer, or none.
+/// Fails with:
+/// - `reflect.wrong_kind` for a value of another kind;
+/// - `reflect.out_of_range` for an integer field given a non-integer or, if unsigned, a negative.
 pub(super) fn value_of(ty: Field, value: &Lua_) -> Result<Value> {
     let number = || match *value {
         Lua_::Number(x) => Ok(x),
@@ -521,7 +517,7 @@ pub(super) fn value_of(ty: Field, value: &Lua_) -> Result<Value> {
     })
 }
 
-/// The error that `value`, a script's, is of another kind than `expected`.
+/// `reflect.wrong_kind`: `value` isn't `expected`.
 fn wrong(expected: &str, value: &Lua_) -> Error {
     Error::new(
         "reflect.wrong_kind",
@@ -529,7 +525,7 @@ fn wrong(expected: &str, value: &Lua_) -> Error {
     )
 }
 
-/// The vector `value` is, as [`value_of`] takes one.
+/// The vector `value` is.
 fn vector_in(value: &Lua_) -> Result<Vector> {
     match *value {
         Lua_::Vector(v) => Ok(v),
@@ -537,7 +533,7 @@ fn vector_in(value: &Lua_) -> Result<Vector> {
     }
 }
 
-/// The entity `value` is, as [`value_of`] takes one.
+/// The entity `value` is.
 fn entity_in(value: &Lua_) -> Result<Entity> {
     match *value {
         Lua_::LightUserData(data) => {
@@ -547,17 +543,17 @@ fn entity_in(value: &Lua_) -> Result<Entity> {
     }
 }
 
-/// `v`'s X, Y and Z, as a script's vector holds a point or a direction.
+/// `v`'s X, Y and Z.
 pub(super) fn vec3_of(v: Vector) -> Vec3 {
     Vec3::new(v.x(), v.y(), v.z())
 }
 
-/// `v` as a script holds a point or a direction, its W 0.
+/// `v` as a script's vector, W 0.
 pub(super) fn vector3_of(v: Vec3) -> Vector {
     Vector::new(v.x, v.y, v.z, 0.0)
 }
 
-/// `q` as a script holds it, a vector: `x`, `y`, `z` and `w`.
+/// `q` as a script's vector `(x, y, z, w)`.
 pub(super) fn vector_of(q: Quat) -> Vector {
     Vector::new(q.x, q.y, q.z, q.w)
 }

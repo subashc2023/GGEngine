@@ -1,8 +1,8 @@
-//! What a script's compiled bytecode shows of it: whether one of its functions assigns a local of
-//! its chunk, which [`Scripts`](super::Scripts) refuses. It reads the bytecode as Luau's loader does,
-//! `luau_load` in luau0-src's `VM/src/lvmload.cpp`, the opcodes, their lengths and the capture
-//! types as `Common/include/Luau/Bytecode.h` and `BytecodeUtils.h` give them: a Luau upgrade that
-//! changes them fails the script tests, which every script's load reads through here.
+//! Whether a script's compiled bytecode has a function assign a local of its chunk, which
+//! [`Scripts`](super::Scripts) refuses. It reads the bytecode as Luau's loader does (`luau_load` in
+//! luau0-src's `VM/src/lvmload.cpp`), with the opcodes, their lengths and the capture types of
+//! `Common/include/Luau/Bytecode.h` and `BytecodeUtils.h`. A Luau upgrade that changes them fails
+//! the script tests, since every script's load reads through here.
 
 /// Opcodes, by their values in `LuauOpcode`.
 const SETUPVAL: u8 = 10;
@@ -10,17 +10,17 @@ const NEWCLOSURE: u8 = 19;
 const DUPCLOSURE: u8 = 64;
 const CAPTURE: u8 = 70;
 
-/// The opcodes followed by an auxiliary word, as `getOpLength` says: GETGLOBAL, SETGLOBAL,
-/// GETIMPORT, GETTABLEKS, SETTABLEKS and NAMECALL; the six JUMPIFs from JUMPIFEQ; NEWTABLE,
-/// SETLIST, FORGLOOP, FASTCALL3, LOADKX, FASTCALL2 and FASTCALL2K; the four JUMPXEQKs; and
-/// GETUDATAKS, SETUDATAKS, NAMECALLUDATA, NEWCLASSMEMBER, CALLFB, CMPPROTO and NEWCLASS.
+/// The opcodes followed by an auxiliary word (`getOpLength`): GETGLOBAL, SETGLOBAL, GETIMPORT,
+/// GETTABLEKS, SETTABLEKS and NAMECALL; the six JUMPIFs from JUMPIFEQ; NEWTABLE, SETLIST, FORGLOOP,
+/// FASTCALL3, LOADKX, FASTCALL2 and FASTCALL2K; the four JUMPXEQKs; and GETUDATAKS, SETUDATAKS,
+/// NAMECALLUDATA, NEWCLASSMEMBER, CALLFB, CMPPROTO and NEWCLASS.
 const WITH_AUX: [u8; 30] = [
     7, 8, 12, 15, 16, 20, 27, 28, 29, 30, 31, 32, 53, 55, 58, 60, 66, 74, 75, 77, 78, 79, 80, 83,
     84, 85, 86, 87, 88, 90,
 ];
 
-/// A capture's types, by their values in `LuauCaptureType`: of a register, by value or by
-/// reference, or of the function's own upvalue.
+/// The capture type, by its value in `LuauCaptureType`, of a function's own upvalue; the others
+/// capture a register, by value or by reference.
 const CAPTURE_UPVAL: u8 = 2;
 
 /// Constants' kinds, by their values in `LuauBytecodeTag`.
@@ -53,13 +53,13 @@ pub(super) struct Assigned {
 struct Proto {
     upvalues: usize,
     code: Vec<u32>,
-    /// The functions its closure constants make, each its constant's index and the function's.
+    /// Its closure constants' functions: the constant's index and the function's.
     closures: Vec<(usize, usize)>,
-    /// The functions it makes, by their index among its own.
+    /// The functions it makes, by index among its own.
     children: Vec<usize>,
-    /// Its upvalues' names, as indexes of the string table from 1, 0 for none.
+    /// Its upvalues' names, as string-table indexes from 1; 0 for none.
     names: Vec<u32>,
-    /// Its instructions' lines: the gap's log2, each's offset and each gap's line.
+    /// Its instructions' lines: the gap's log2, each instruction's offset, each gap's line.
     lines: Option<(u8, Vec<u8>, Vec<i32>)>,
 }
 
@@ -73,13 +73,14 @@ impl Proto {
     }
 }
 
-/// The first place a function of the chunk that `bytecode` holds, as Luau's compiler wrote it,
-/// assigns a local of the chunk, by an upvalue that is it or that a function between them took from
-/// it: `None` if none does. The chunk's own code may assign them, as it runs once, and a function
-/// may assign its own locals, and its enclosing functions', but for the chunk's.
+/// The first place a function in `bytecode` (Luau's compiler's) assigns a local of the chunk,
+/// through an upvalue that is it or that a function between them took from it; `None` if none
+/// does. The chunk's own code may assign them, as it runs once, and a function may assign its own
+/// locals and its enclosing functions', but not the chunk's.
 ///
-/// Fails, saying why, for bytecode it can't read, which no compiler of the Luau the engine builds
-/// writes.
+/// # Errors
+///
+/// Why it can't read the bytecode, which no compiler of the Luau the engine builds writes.
 pub(super) fn assigned(bytecode: &[u8]) -> Result<Option<Assigned>, String> {
     let mut read = Reader {
         bytes: bytecode,
@@ -118,8 +119,8 @@ pub(super) fn assigned(bytecode: &[u8]) -> Result<Option<Assigned>, String> {
         }
     }
     let main = read.var()? as usize;
-    // Whether each upvalue of each function is a local of the chunk, found as the function that
-    // makes it is scanned, from the chunk down.
+    // Whether each function's upvalues are locals of the chunk, found as the function that makes
+    // it is scanned, from the chunk down.
     let mut chunk_locals: Vec<Option<Vec<bool>>> = (0..protos.len()).map(|_| None).collect();
     let main_proto = protos.get(main).ok_or("no chunk's function")?;
     chunk_locals[main] = Some(vec![false; main_proto.upvalues]);
@@ -226,8 +227,7 @@ impl<'b> Reader<'b> {
         Err("a varint of more than 64 bits".to_owned())
     }
 
-    /// A function, as the loader's loop over the proto table reads one of `version`, whose type
-    /// information is of `types`.
+    /// A function of `version` with type information `types`, as the loader's proto loop reads it.
     fn proto(&mut self, version: u8, types: u8) -> Result<Proto, String> {
         let _stack = self.byte()?;
         let _params = self.byte()?;
@@ -321,7 +321,7 @@ impl<'b> Reader<'b> {
                 self.var()?;
             }
         }
-        // The cost model's, of an inlinable function.
+        // An inlinable function's cost model.
         if version >= 12 && flags & (1 << 3) != 0 {
             self.var64()?;
         }

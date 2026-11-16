@@ -1,18 +1,10 @@
-//! What scripts read of physics' contacts, as [`World::contacts`](crate::World::contacts) and
-//! [`World::contact_events`](crate::World::contact_events) have them, 2D's then 3D's, each in their
-//! order, by their entities' IDs, so that every peer and replay reads them alike:
+//! `gg.contacts` and `gg.contact_events` (docs/LUAU.md): scripts' view of
+//! [`World::contacts`](crate::World::contacts) and
+//! [`World::contact_events`](crate::World::contact_events).
 //!
-//! - `gg.contacts(entity)`, an array of a table for each entity whose colliders touch `entity`'s
-//!   as the last step of physics left them, `{ other = entity, sensor = bool }`, `sensor` true
-//!   where either collider is a sensor, which overlaps rather than pushes;
-//! - `gg.contact_events(entity)`, an array of a table for each contact of `entity`'s that started
-//!   or stopped at that step, `{ other = entity, sensor = bool, started = bool }`, which a script's
-//!   tick reads at the tick after, as scripts run before physics. An entity gone since is in the
-//!   events of its contacts stopping.
-//!
-//! A collider's `sensor`, `membership` and `filter` are its component's fields, which scripts reach
-//! as they reach any, as `entity[gg.component("BoxCollider2D").sensor] = true`. A mod's scripts read
-//! contacts only if it may read the whole world, as they tell where other entities are.
+//! The lists keep those methods' order, 2D's then 3D's, each by entity ID, so every peer and replay
+//! reads them alike. A mod's scripts need `read` of the whole world: contacts tell where other
+//! entities are.
 
 use mlua::{LightUserData, Lua, Table, Value as Lua_};
 
@@ -28,7 +20,7 @@ pub(super) fn install(lua: &Lua, gg: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `gg.contacts(entity)`: a table for each contact of `entity`'s that the last step left.
+/// `gg.contacts(entity)`.
 fn contacts(lua: &Lua, entity: LightUserData) -> mlua::Result<Table> {
     listed(lua, entity, |world, each| {
         for contact in world.contacts() {
@@ -38,8 +30,7 @@ fn contacts(lua: &Lua, entity: LightUserData) -> mlua::Result<Table> {
     })
 }
 
-/// `gg.contact_events(entity)`: a table for each contact of `entity`'s that started or stopped at
-/// the last step.
+/// `gg.contact_events(entity)`.
 fn contact_events(lua: &Lua, entity: LightUserData) -> mlua::Result<Table> {
     listed(lua, entity, |world, each| {
         for event in world.contact_events() {
@@ -49,11 +40,10 @@ fn contact_events(lua: &Lua, entity: LightUserData) -> mlua::Result<Table> {
     })
 }
 
-/// What gives each contact, and whether it started if it's an event's, to the callback it's given.
+/// Calls back with each contact, and `started` for an event's.
 type Each<'a> = dyn FnMut(Contact, Option<bool>) -> mlua::Result<()> + 'a;
 
-/// An array of a table for each contact of `entity`'s that `list` gives of the world scripts
-/// reach, in its order: for a mod's scripts, only if the mod may read the whole world.
+/// An array of a table for each contact of `entity`'s that `list` gives, in its order.
 fn listed(
     lua: &Lua,
     entity: LightUserData,
@@ -80,7 +70,7 @@ fn listed(
     })
 }
 
-/// A contact's table, `{ other = entity, sensor = bool }`, and `started` if it's an event's.
+/// A contact's table: `other` and `sensor`, and `started` for an event's.
 fn table(lua: &Lua, other: Entity, sensor: bool, started: Option<bool>) -> mlua::Result<Table> {
     let table = lua.create_table_with_capacity(0, 3)?;
     table.raw_set("other", Lua_::LightUserData(handle(other.to_bits())))?;
@@ -102,8 +92,8 @@ mod tests {
     use crate::reflect::Value;
     use crate::{BodyType, BoxCollider2D, Context, RigidBody2D, Transform, step_physics};
 
-    /// Makes its entity's box a sensor, and counts what enters and leaves it and what's in it, and
-    /// keeps the last to enter.
+    /// Makes its box a sensor, counts what enters, leaves and is inside, and keeps the last to
+    /// enter.
     const ZONE: &str = r#"
 local Box = gg.component("BoxCollider2D")
 local Zone = gg.declare("Zone", { entered = 0, left = 0, inside = 0, last = gg.entity, solid = false })
@@ -125,10 +115,9 @@ end
 return Zone
 "#;
 
-    /// A script makes its entity's collider a sensor through the collider's field, and reads its
-    /// contacts and their events at the ticks after the steps that made them: a box falling through
-    /// it enters it, is inside it awhile, and leaves it, an overlap rather than a contact, and lands
-    /// on the floor below.
+    /// A script makes its collider a sensor through its field and reads contacts and events at the
+    /// ticks after the steps that made them: a box falling through enters, is inside awhile, leaves
+    /// (an overlap, not a push), and lands on the floor below.
     #[test]
     fn a_script_reads_what_enters_and_leaves_its_sensor() {
         let dir = Scratch::new("luau-contacts");
