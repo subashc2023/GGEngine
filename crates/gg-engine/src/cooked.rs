@@ -84,188 +84,21 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         "a cooked model holds each of its images"
     );
     let mut bytes = Vec::new();
-    let count = |bytes: &mut Vec<u8>, count: usize| {
-        let count = u32::try_from(count).expect("a count of 32 bits");
-        bytes.extend_from_slice(&count.to_le_bytes());
-    };
-    let floats = |bytes: &mut Vec<u8>, floats: &[f32]| {
-        for float in floats {
-            bytes.extend_from_slice(&float.to_le_bytes());
-        }
-    };
-    let index = |bytes: &mut Vec<u8>, index: Option<usize>| {
-        let index = index.map_or(NONE, |index| {
-            u32::try_from(index).expect("an index of 32 bits")
-        });
-        bytes.extend_from_slice(&index.to_le_bytes());
-    };
-    let string = |bytes: &mut Vec<u8>, string: &str| {
-        count(bytes, string.len());
-        bytes.extend_from_slice(string.as_bytes());
-    };
     count(&mut bytes, imported.ignored.len());
     for ignored in &imported.ignored {
         string(&mut bytes, ignored);
     }
     count(&mut bytes, imported.parts.len());
     for part in &imported.parts {
-        string(&mut bytes, part.name.as_deref().unwrap_or(""));
-        let Transform {
-            translation,
-            rotation,
-            scale,
-        } = part.transform;
-        // A model's parts are near its root, where `f32` holds.
-        floats(&mut bytes, &translation.as_vec3().to_array());
-        floats(&mut bytes, &rotation.to_array());
-        floats(&mut bytes, &scale.to_array());
-        index(&mut bytes, part.parent);
-        index(&mut bytes, part.primitive);
-        index(&mut bytes, part.skin);
-        let Some(light) = &part.light else {
-            bytes.push(0);
-            continue;
-        };
-        bytes.push(match light.kind {
-            LightKind::Directional => 1,
-            LightKind::Point => 2,
-            LightKind::Spot => 3,
-        });
-        floats(&mut bytes, &light.color.to_array());
-        floats(
-            &mut bytes,
-            &[
-                light.intensity,
-                light.range.unwrap_or(0.0),
-                light.inner_cone,
-                light.outer_cone,
-            ],
-        );
+        encode_part(&mut bytes, part);
     }
     count(&mut bytes, imported.primitives.len());
     for primitive in &imported.primitives {
         string(&mut bytes, &primitive.name);
         let mesh =
             (primitive.mesh.as_ref()).expect("a cooked model's primitives have their meshes");
-        let words = |bytes: &mut Vec<u8>, words: &[u32]| {
-            for word in words {
-                bytes.extend_from_slice(&word.to_le_bytes());
-            }
-        };
-        let Packing {
-            offset,
-            step,
-            uv_offset,
-            uv_scale,
-        } = mesh.packing;
-        floats(&mut bytes, &offset.to_array());
-        floats(&mut bytes, &[step]);
-        floats(&mut bytes, &uv_offset.to_array());
-        floats(&mut bytes, &uv_scale.to_array());
-        count(&mut bytes, mesh.vertices.len());
-        for vertex in &mesh.vertices {
-            for half in vertex.position {
-                bytes.extend_from_slice(&half.to_le_bytes());
-            }
-            let signed = [
-                vertex.sign,
-                vertex.normal[0],
-                vertex.normal[1],
-                vertex.tangent[0],
-            ];
-            for half in signed.into_iter().chain([vertex.tangent[1]]) {
-                bytes.extend_from_slice(&half.to_le_bytes());
-            }
-            for half in vertex.uv {
-                bytes.extend_from_slice(&half.to_le_bytes());
-            }
-            bytes.extend_from_slice(&vertex.color);
-        }
-        count(&mut bytes, mesh.indices.len());
-        words(&mut bytes, &mesh.indices);
-        count(&mut bytes, mesh.lods.levels.len());
-        for lod in &mesh.lods.levels {
-            words(&mut bytes, &[lod.start, lod.count]);
-            floats(&mut bytes, &[lod.error]);
-        }
-        floats(&mut bytes, &mesh.lods.center.to_array());
-        floats(&mut bytes, &[mesh.lods.radius]);
-        let meshlets = &mesh.meshlets;
-        count(&mut bytes, meshlets.meshlets.len());
-        for meshlet in &meshlets.meshlets {
-            let Meshlet {
-                vertices,
-                vertex_count,
-                triangles,
-                triangle_count,
-                center,
-                radius,
-                cone,
-            } = *meshlet;
-            words(
-                &mut bytes,
-                &[vertices, vertex_count, triangles, triangle_count],
-            );
-            floats(&mut bytes, &center.to_array());
-            floats(&mut bytes, &[radius]);
-            bytes.extend(cone.map(|byte| byte as u8));
-        }
-        count(&mut bytes, meshlets.vertices.len());
-        words(&mut bytes, &meshlets.vertices);
-        count(&mut bytes, meshlets.triangles.len());
-        bytes.extend_from_slice(&meshlets.triangles);
-        count(&mut bytes, meshlets.levels.len());
-        words(&mut bytes, meshlets.levels.as_flattened());
-        count(&mut bytes, mesh.skin.len());
-        for skinned in &mesh.skin {
-            for half in skinned.joints.into_iter().chain(skinned.weights) {
-                bytes.extend_from_slice(&half.to_le_bytes());
-            }
-        }
-        let material = &primitive.material;
-        floats(&mut bytes, &material.color);
-        match material.workflow {
-            Workflow::MetallicRoughness {
-                metallic,
-                roughness,
-            } => {
-                bytes.push(0);
-                floats(&mut bytes, &[metallic, roughness]);
-            }
-            Workflow::SpecularGlossiness {
-                specular,
-                glossiness,
-            } => {
-                bytes.push(1);
-                floats(&mut bytes, &specular.to_array());
-                floats(&mut bytes, &[glossiness]);
-            }
-        }
-        floats(
-            &mut bytes,
-            &[material.normal_scale, material.occlusion_strength],
-        );
-        floats(&mut bytes, &material.emissive);
-        for texture in material.textures {
-            index(&mut bytes, texture.map(|texture| texture.image));
-            let (nearest, wrap) = texture.map_or((false, Wrap::Repeat), |texture| {
-                (texture.nearest, texture.wrap)
-            });
-            let wrap = match wrap {
-                Wrap::Clamp => 0,
-                Wrap::Repeat => 1,
-                Wrap::Mirror => 2,
-            };
-            bytes.extend_from_slice(&[u8::from(nearest), wrap]);
-        }
-        let (alpha, cutoff) = match material.alpha {
-            AlphaMode::Opaque => (0, 0.0),
-            AlphaMode::Mask { cutoff } => (1, cutoff),
-            AlphaMode::Blend => (2, 0.0),
-        };
-        bytes.push(alpha);
-        floats(&mut bytes, &[cutoff]);
-        bytes.extend_from_slice(&[u8::from(material.double_sided), u8::from(material.unlit)]);
+        encode_mesh(&mut bytes, mesh);
+        encode_material(&mut bytes, &primitive.material);
     }
     count(&mut bytes, imported.skins.len());
     for skin in &imported.skins {
@@ -279,26 +112,7 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
     }
     count(&mut bytes, imported.clips.len());
     for clip in &imported.clips {
-        string(&mut bytes, &clip.name);
-        floats(&mut bytes, &[clip.duration]);
-        count(&mut bytes, clip.channels.len());
-        for channel in &clip.channels {
-            bytes.extend_from_slice(&channel.part.to_le_bytes());
-            bytes.push(match channel.path {
-                Moved::Translation => 0,
-                Moved::Rotation => 1,
-                Moved::Scale => 2,
-            });
-            bytes.push(match channel.interpolation {
-                Interpolation::Linear => 0,
-                Interpolation::Step => 1,
-                Interpolation::CubicSpline => 2,
-            });
-            count(&mut bytes, channel.times.len());
-            floats(&mut bytes, &channel.times);
-            count(&mut bytes, channel.values.len());
-            floats(&mut bytes, &channel.values);
-        }
+        encode_clip(&mut bytes, clip);
     }
     count(&mut bytes, images.len());
     for image in images {
@@ -306,6 +120,215 @@ pub(crate) fn encode(imported: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
         bytes.extend_from_slice(image);
     }
     bytes
+}
+
+/// Writes `part` as the format lays out each of the parts.
+fn encode_part(bytes: &mut Vec<u8>, part: &Part) {
+    string(bytes, part.name.as_deref().unwrap_or(""));
+    let Transform {
+        translation,
+        rotation,
+        scale,
+    } = part.transform;
+    // A model's parts are near its root, where `f32` holds.
+    floats(bytes, &translation.as_vec3().to_array());
+    floats(bytes, &rotation.to_array());
+    floats(bytes, &scale.to_array());
+    index(bytes, part.parent);
+    index(bytes, part.primitive);
+    index(bytes, part.skin);
+    let Some(light) = &part.light else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(match light.kind {
+        LightKind::Directional => 1,
+        LightKind::Point => 2,
+        LightKind::Spot => 3,
+    });
+    floats(bytes, &light.color.to_array());
+    floats(
+        bytes,
+        &[
+            light.intensity,
+            light.range.unwrap_or(0.0),
+            light.inner_cone,
+            light.outer_cone,
+        ],
+    );
+}
+
+/// Writes `mesh`, a primitive's as the cooker made it, as the format lays it out.
+fn encode_mesh(bytes: &mut Vec<u8>, mesh: &ModelMesh) {
+    let Packing {
+        offset,
+        step,
+        uv_offset,
+        uv_scale,
+    } = mesh.packing;
+    floats(bytes, &offset.to_array());
+    floats(bytes, &[step]);
+    floats(bytes, &uv_offset.to_array());
+    floats(bytes, &uv_scale.to_array());
+    count(bytes, mesh.vertices.len());
+    for vertex in &mesh.vertices {
+        for half in vertex.position {
+            bytes.extend_from_slice(&half.to_le_bytes());
+        }
+        let signed = [
+            vertex.sign,
+            vertex.normal[0],
+            vertex.normal[1],
+            vertex.tangent[0],
+        ];
+        for half in signed.into_iter().chain([vertex.tangent[1]]) {
+            bytes.extend_from_slice(&half.to_le_bytes());
+        }
+        for half in vertex.uv {
+            bytes.extend_from_slice(&half.to_le_bytes());
+        }
+        bytes.extend_from_slice(&vertex.color);
+    }
+    count(bytes, mesh.indices.len());
+    words(bytes, &mesh.indices);
+    count(bytes, mesh.lods.levels.len());
+    for lod in &mesh.lods.levels {
+        words(bytes, &[lod.start, lod.count]);
+        floats(bytes, &[lod.error]);
+    }
+    floats(bytes, &mesh.lods.center.to_array());
+    floats(bytes, &[mesh.lods.radius]);
+    let meshlets = &mesh.meshlets;
+    count(bytes, meshlets.meshlets.len());
+    for meshlet in &meshlets.meshlets {
+        let Meshlet {
+            vertices,
+            vertex_count,
+            triangles,
+            triangle_count,
+            center,
+            radius,
+            cone,
+        } = *meshlet;
+        words(bytes, &[vertices, vertex_count, triangles, triangle_count]);
+        floats(bytes, &center.to_array());
+        floats(bytes, &[radius]);
+        bytes.extend(cone.map(|byte| byte as u8));
+    }
+    count(bytes, meshlets.vertices.len());
+    words(bytes, &meshlets.vertices);
+    count(bytes, meshlets.triangles.len());
+    bytes.extend_from_slice(&meshlets.triangles);
+    count(bytes, meshlets.levels.len());
+    words(bytes, meshlets.levels.as_flattened());
+    count(bytes, mesh.skin.len());
+    for skinned in &mesh.skin {
+        for half in skinned.joints.into_iter().chain(skinned.weights) {
+            bytes.extend_from_slice(&half.to_le_bytes());
+        }
+    }
+}
+
+/// Writes `material`, a primitive's, as the format lays it out.
+fn encode_material(bytes: &mut Vec<u8>, material: &Material) {
+    floats(bytes, &material.color);
+    match material.workflow {
+        Workflow::MetallicRoughness {
+            metallic,
+            roughness,
+        } => {
+            bytes.push(0);
+            floats(bytes, &[metallic, roughness]);
+        }
+        Workflow::SpecularGlossiness {
+            specular,
+            glossiness,
+        } => {
+            bytes.push(1);
+            floats(bytes, &specular.to_array());
+            floats(bytes, &[glossiness]);
+        }
+    }
+    floats(bytes, &[material.normal_scale, material.occlusion_strength]);
+    floats(bytes, &material.emissive);
+    for texture in material.textures {
+        index(bytes, texture.map(|texture| texture.image));
+        let (nearest, wrap) = texture.map_or((false, Wrap::Repeat), |texture| {
+            (texture.nearest, texture.wrap)
+        });
+        let wrap = match wrap {
+            Wrap::Clamp => 0,
+            Wrap::Repeat => 1,
+            Wrap::Mirror => 2,
+        };
+        bytes.extend_from_slice(&[u8::from(nearest), wrap]);
+    }
+    let (alpha, cutoff) = match material.alpha {
+        AlphaMode::Opaque => (0, 0.0),
+        AlphaMode::Mask { cutoff } => (1, cutoff),
+        AlphaMode::Blend => (2, 0.0),
+    };
+    bytes.push(alpha);
+    floats(bytes, &[cutoff]);
+    bytes.extend_from_slice(&[u8::from(material.double_sided), u8::from(material.unlit)]);
+}
+
+/// Writes `clip` as the format lays out each of the clips.
+fn encode_clip(bytes: &mut Vec<u8>, clip: &Clip) {
+    string(bytes, &clip.name);
+    floats(bytes, &[clip.duration]);
+    count(bytes, clip.channels.len());
+    for channel in &clip.channels {
+        bytes.extend_from_slice(&channel.part.to_le_bytes());
+        bytes.push(match channel.path {
+            Moved::Translation => 0,
+            Moved::Rotation => 1,
+            Moved::Scale => 2,
+        });
+        bytes.push(match channel.interpolation {
+            Interpolation::Linear => 0,
+            Interpolation::Step => 1,
+            Interpolation::CubicSpline => 2,
+        });
+        count(bytes, channel.times.len());
+        floats(bytes, &channel.times);
+        count(bytes, channel.values.len());
+        floats(bytes, &channel.values);
+    }
+}
+
+/// Writes `count` in 32 bits.
+fn count(bytes: &mut Vec<u8>, count: usize) {
+    let count = u32::try_from(count).expect("a count of 32 bits");
+    bytes.extend_from_slice(&count.to_le_bytes());
+}
+
+/// Writes `floats`, each as its bits.
+fn floats(bytes: &mut Vec<u8>, floats: &[f32]) {
+    for float in floats {
+        bytes.extend_from_slice(&float.to_le_bytes());
+    }
+}
+
+/// Writes `index` in 32 bits, [`NONE`] for none.
+fn index(bytes: &mut Vec<u8>, index: Option<usize>) {
+    let index = index.map_or(NONE, |index| {
+        u32::try_from(index).expect("an index of 32 bits")
+    });
+    bytes.extend_from_slice(&index.to_le_bytes());
+}
+
+/// Writes `string` as its length, then its UTF-8.
+fn string(bytes: &mut Vec<u8>, string: &str) {
+    count(bytes, string.len());
+    bytes.extend_from_slice(string.as_bytes());
+}
+
+/// Writes `words`, each in 32 bits.
+fn words(bytes: &mut Vec<u8>, words: &[u32]) {
+    for word in words {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
 }
 
 /// Reads model `name`'s file at `path` as the game's package holds it, cooked, through `files`, as
