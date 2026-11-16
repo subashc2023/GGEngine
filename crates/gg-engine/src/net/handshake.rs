@@ -23,31 +23,27 @@ use crate::package::Files;
 /// How long a joiner waits between tries at connecting to its host.
 const RETRY: Duration = Duration::from_millis(250);
 
-/// How long a joiner through a relay waits between tries at finding its host there, as one that
-/// hasn't registered yet isn't; and how long a host waits before registering again at a relay it
-/// couldn't register at, or lost.
+/// How long a joiner waits between tries at finding its host at a relay, and a host before
+/// registering again at a relay it couldn't register at or lost.
 const UNHOSTED: Duration = Duration::from_secs(1);
 const REGISTER: Duration = Duration::from_secs(5);
 
-/// What a session's hello names the run's build by, so that a host or a server refuses a peer or a
-/// client of another build, whose simulation may go otherwise, as one rebuilt with an edit's
-/// would: the source its code is compiled from, as [`App::source`](crate::App::source) names it,
-/// and the package it reads.
+/// What a hello names the run's build by, so a host or server refuses a run of another build,
+/// whose simulation may differ: the source its code is compiled from
+/// ([`App::source`](crate::App::source)) and the package it reads.
 #[derive(Clone, Default)]
 pub(crate) struct Build {
-    /// The source's digest, as `App::source` names it.
     pub(crate) source: Option<&'static str>,
-    /// Where the run reads its files: its package, if it reads one.
+    /// The run's package, if it reads one.
     pub(crate) files: Files,
 }
 
 impl Build {
-    /// The build, as the hello names it: for an app that names its source, the source's digest
-    /// and the run's package's, as [`Package::digest`](crate::package::Package::digest) has it,
-    /// each 16 hex digits, `-` between them, as in `5c7cd8abeeed5f44-641dce7a72446a9c`, the
-    /// package's `-` for a run that reads its files from the disk, which the hello doesn't name;
-    /// for an app that names none, its executable's digest, as [`executable`] says, which builds
-    /// of one source on other OSes or machines don't share.
+    /// The build as the hello names it. With a source: its digest and the package's
+    /// ([`Package::digest`](crate::package::Package::digest)), each 16 hex digits, `-` between, as
+    /// in `5c7cd8abeeed5f44-641dce7a72446a9c`; the package's is `-` for files read from the disk.
+    /// Without one: the executable's digest ([`executable`]), which builds of one source on other
+    /// OSes or machines don't share.
     ///
     /// Fails with `net.build` if the package or the executable can't be read.
     pub(crate) fn name(&self) -> Result<String> {
@@ -68,18 +64,17 @@ impl Build {
     }
 }
 
-/// The digest of the run's executable's bytes, as 16 hex digits, read once a process, which names
-/// the build of an app that names no source, as [`Build::name`] says. Builds of one source on two
-/// OSes differ, and on two machines, as rustc writes the paths of the sources and the debug info's
-/// into the executable.
+/// The digest of the run's executable, 16 hex digits, read once per process: the build of an app
+/// with no source ([`Build::name`]). Builds of one source differ across OSes and machines, as
+/// rustc writes source and debug-info paths into the executable.
 ///
 /// Fails with `net.build` if the executable can't be read.
 pub(super) fn executable() -> Result<&'static str> {
     static BUILD: OnceLock<std::result::Result<String, String>> = OnceLock::new();
     let build = BUILD.get_or_init(|| {
         let _zone = gg_core::zone!();
-        // Linux's link to the executable, which reads even once its file is deleted, as a run's
-        // can be while it runs.
+        // Linux's link to the executable reads even once its file is deleted, as a running one's
+        // can be.
         let path = if cfg!(target_os = "linux") {
             PathBuf::from("/proc/self/exe")
         } else {
@@ -97,8 +92,8 @@ pub(super) fn executable() -> Result<&'static str> {
     })
 }
 
-/// What the hello says the engine is: its version and profile, and whether it's a development
-/// build, which applies patches and scene files' saves, as other builds don't.
+/// The engine as the hello names it: version, profile, and `dev` for a development build, which
+/// applies patches and scene files' saves other builds don't.
 pub(super) fn engine() -> String {
     let engine = crate::recording::engine();
     if cfg!(feature = "dev") {
@@ -108,8 +103,6 @@ pub(super) fn engine() -> String {
     }
 }
 
-/// The hello of a peer or a client that speaks `protocol`, of app `app`, build `build` and layers
-/// `layers`, whose packets come from its socket's `port`: as the stream's lines name it.
 pub(super) fn hello(protocol: &str, app: &str, build: &str, layers: &str, port: u16) -> String {
     format!(
         "hello\t{protocol}\t{app}\t{}\t{build}\t{layers}\t{port}\n",
@@ -117,9 +110,8 @@ pub(super) fn hello(protocol: &str, app: &str, build: &str, layers: &str, port: 
     )
 }
 
-/// Takes a hello, `line`, which [`hello`] writes: the port its packets come from, if it's of the
-/// protocol, app, engine, build and layers `ours` are, which `who` speaks for; or else why it's
-/// refused.
+/// The packets' port of a [`hello`], `line`, if its protocol, app, engine, build and layers are
+/// `ours` (`who` speaks for them); else why it's refused.
 pub(super) fn port_of(line: &str, ours: [&str; 5], who: &str) -> std::result::Result<u16, String> {
     let parts: Vec<&str> = line.split('\t').collect();
     let port = parts.get(6).and_then(|port| port.parse::<u16>().ok());
@@ -137,12 +129,11 @@ pub(super) fn port_of(line: &str, ours: [&str; 5], who: &str) -> std::result::Re
     }
 }
 
-/// Takes `what` where `at` says: listening at its address, on a thread of its own that accepts
-/// each connection, and registering at its relay, on another, as [`register`] says; returns where
-/// they come, each through its handshake keyed by `code`, as [`Accepted`] says, and the address
-/// listened at as the OS has it, which a test's port 0 picks.
+/// Takes `what` where `at` says: listens at its address on one thread and registers at its relay
+/// ([`register`]) on another. Returns where connections come ([`Accepted`]), each through its
+/// handshake keyed by `code`, and the address listened at, which a test's port 0 picks.
 ///
-/// Fails with `net.start` if it can't listen there, or start either thread.
+/// Fails with `net.start` if it can't listen there or start either thread.
 pub(super) fn listen(
     at: &Listen,
     what: &'static str,
@@ -194,8 +185,6 @@ pub(super) fn listen(
     Ok((accepted, listening))
 }
 
-/// Runs `handshake` on a thread of its own, so that a connection slow to say its part holds no
-/// other.
 fn handshake_on_its_own(handshake: impl FnOnce() + Send + 'static) {
     let spawned = thread::Builder::new()
         .name("gg-net-handshake".to_owned())
@@ -208,12 +197,11 @@ fn handshake_on_its_own(handshake: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// Registers the session's room, which `code` gives, at the relay at `relay`, for `what`, and takes
-/// each that comes for it, each through its handshake on a thread of its own, into `shaken`, until
-/// the session, which `kept` holds, is gone. Registers again [`REGISTER`] after the relay can't be
-/// reached, refuses it, as it does while a host it lost holds the room, or is lost: logged once
-/// each time, `net.relay`, until it's registered again. Notes in `heard` whether the room is
-/// registered, or why not.
+/// Registers the session's room at `relay`, for `what`, and takes each that comes for it, through
+/// its handshake on its own thread, into `shaken`, until the session `kept` holds is gone.
+/// Registers again [`REGISTER`] after the relay can't be reached, refuses the room (as while a
+/// host it lost holds it), or is lost, logging `net.relay` once each time. Notes in `heard` whether
+/// the room is registered, or why not.
 fn register(
     relay: &str,
     what: &str,
@@ -268,7 +256,7 @@ fn register(
     }
 }
 
-/// Sleeps `time`, in steps of 100 ms, while `kept`'s session lasts; returns whether it still does.
+/// Sleeps `time` in steps of 100 ms while `kept`'s session lasts; returns whether it does.
 fn sleep_while_kept(time: Duration, kept: &Weak<()>) -> bool {
     let wake = Instant::now() + time;
     while kept.strong_count() > 0 && Instant::now() < wake {
@@ -278,8 +266,8 @@ fn sleep_while_kept(time: Duration, kept: &Weak<()>) -> bool {
     kept.strong_count() > 0
 }
 
-/// What a session's relay last answered the thread that registers its room there, or comes for
-/// it, shared with that thread, for the session's status to say, as [`SessionPhase`] does.
+/// What the relay last answered the thread that registers the room or comes for it, for the
+/// session's status ([`SessionPhase`]).
 #[derive(Clone, Default)]
 pub(crate) struct Heard(Arc<Mutex<Answer>>);
 
@@ -296,30 +284,28 @@ impl Heard {
     }
 }
 
-/// What a relay answered, as [`Heard`] keeps it.
 #[derive(Clone, Default)]
 pub(crate) enum Answer {
     /// Nothing yet, or the session has no relay.
     #[default]
     Nothing,
-    /// The host's room is registered; or the joiner's, which its host holds, paired it.
+    /// The host's room is registered, or the joiner's was paired with its host.
     Hosted,
     /// The joiner's room, which no host holds yet.
     Unhosted,
-    /// The relay can't be reached, refused the room or lost it, saying why.
+    /// The relay can't be reached, or refused or lost the room, saying why.
     Unreachable(Arc<str>),
 }
 
-/// What a joiner or a client keeps while it looks for its host or server, as [`connect`] does:
-/// what tells the threads that connect it that the session is gone, which they end at, and what
-/// the relay last answered them.
+/// What a joiner or client keeps while it looks for its host or server ([`connect`]): what tells
+/// its threads the session is gone, and what the relay last answered.
 #[derive(Default)]
 pub(crate) struct Looking {
     session: Arc<()>,
     pub(super) heard: Heard,
 }
 
-/// The address `address` names, as `host:port` or `ip:port`, as [`preferred`] picks it.
+/// The address `address` names, as [`preferred`] picks it.
 ///
 /// Fails if it names none.
 pub(super) fn resolve(address: &str) -> io::Result<SocketAddr> {
@@ -330,16 +316,14 @@ pub(super) fn resolve(address: &str) -> io::Result<SocketAddr> {
     })
 }
 
-/// The first IPv4 address of `addresses`, else the first: a relay listens on IPv4 by default, and
-/// a link's socket follows its connection's family, so that a host name with an IPv6 address too,
-/// which a resolver may list first, would otherwise reach none.
+/// The first IPv4 address of `addresses`, else the first. A relay listens on IPv4 by default and a
+/// link's socket follows its connection's family, so a host name with an IPv6 address too, which a
+/// resolver may list first, would otherwise reach none.
 pub(super) fn preferred(addresses: &[SocketAddr]) -> Option<SocketAddr> {
     let v4 = addresses.iter().find(|address| address.is_ipv4());
     v4.or(addresses.first()).copied()
 }
 
-/// A connection whose handshake held: its stream, the keys it made, and, for one made through a
-/// relay, where the link's socket binds there; or why its handshake failed.
 pub(super) type Handshaken = io::Result<Shaken>;
 
 pub(super) struct Shaken {
@@ -348,37 +332,33 @@ pub(super) struct Shaken {
     pub(super) relayed: Option<Relayed>,
 }
 
-/// Where a link through a relay binds its socket: the relay's address, and the token the relay
-/// gave its end of the pair.
+/// Where a link through a relay binds its socket: the relay's address and its end's token.
 #[derive(Clone, Copy)]
 pub(super) struct Relayed {
     pub(super) relay: SocketAddr,
     pub(super) token: Token,
 }
 
-/// The connections a host or a server accepts, as [`listen`] gives them, each once its handshake
-/// has ended, which a thread of the connection's own runs, as the thread that accepts it starts
-/// it: so that one slow to say its part holds neither the main thread, nor another, nor a
-/// joiner's place before it has shown it holds the code, and a main thread busy awhile holds no
-/// joiner's handshake. And what tells the thread that accepts them that the session is gone, which
-/// it ends at as the next connection comes.
+/// The connections a host or server accepts ([`listen`]), each once its handshake has ended. Each
+/// runs on its own thread, so a slow connection holds neither the main thread, nor another
+/// connection, nor a joiner's place before it has shown it holds the code. Also tells the
+/// accepting thread the session is gone; it ends as the next connection comes.
 pub(super) struct Accepted {
     handshaken: Receiver<Handshaken>,
-    /// What the relay last answered the thread that registers the session's room, if it has one.
+    /// What the relay last answered the thread that registers the session's room, if any.
     pub(super) heard: Heard,
     _session: Arc<()>,
 }
 
 impl Accepted {
-    /// The next connection whose handshake has ended, if one has.
     pub(super) fn handshaken(&self) -> Option<Handshaken> {
         self.handshaken.try_recv().ok()
     }
 }
 
-/// Runs the handshake on `stream`, keyed by `code`, as the end that made the connection or,
-/// `accepted`, the end that took it, as [`secure::handshake`] says, waiting at most [`HELLO`]
-/// for the other end's part; returns the stream with the keys it made, and where it's `relayed`.
+/// Runs [`secure::handshake`] on `stream`, keyed by `code`, as the end that made the connection or,
+/// if `accepted`, took it, waiting at most [`HELLO`] for the other's part. Returns the stream with
+/// its keys, and where it's `relayed`.
 fn shake(
     mut stream: TcpStream,
     code: &Code,
@@ -402,13 +382,12 @@ fn shake(
     }
 }
 
-/// Connects to `what` where `toward` says, on a thread of its own, after `after`: to its address,
-/// trying again every [`RETRY`] until it does, or through its relay, coming for the room `code`
-/// gives there, again every [`UNHOSTED`] until its host takes it, as [`gg_relay::join`] says,
-/// noting each answer in `looking`'s [`Heard`], and logging as it starts through a relay, so that
-/// a join's time reads from its log. Then runs the handshake keyed by `code` on the connection, as
-/// [`shake`] does; returns where the connection comes, with its keys, or why its handshake failed.
-/// The thread ends, connecting no more, once `looking` is gone, as its session is.
+/// Connects to `what` where `toward` says, on its own thread, after `after`: to its address,
+/// retrying every [`RETRY`], or through its relay, coming for the room `code` gives, retrying every
+/// [`UNHOSTED`] until its host takes it ([`gg_relay::join`]). Each answer is noted in `looking`'s
+/// [`Heard`]; starting through a relay is logged, so a join's time reads from the log. Then runs
+/// the handshake ([`shake`]). Returns where the connection comes, with its keys, or why the
+/// handshake failed. The thread ends once `looking` is gone.
 pub(super) fn connect(
     toward: Toward,
     what: &'static str,

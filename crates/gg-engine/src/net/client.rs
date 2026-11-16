@@ -1,18 +1,20 @@
-//! A client of a server that owns the world (`--connect`), as
-//! [Networking](../../../../ARCHITECTURE.md#networking) describes, over the lines and packets
-//! [`server`](super::server) has: it starts from the server's world, as a lockstep joiner starts
-//! from its host's, as far ahead of the server as the way there and back and [`LEAD`] more, and
-//! runs its ticks on its own inputs alone, sending them for the server to apply at the same ticks,
-//! which predicts its own player exactly and the others as going on as their last commands had
-//! them; and each state that comes, the world after a tick of the server's, it reads into a world
-//! of its own, of the client's types and assets, compares with the world after that tick as it
-//! predicted it, by their hashes, and where they differ, takes its world back to the server's and
-//! runs the ticks after again, its inputs the server hasn't applied applying in them, those whose
-//! ticks have gone at the first, as the server would apply them. Its ticks run a little faster or
-//! slower than real time, so that its inputs come [`LEAD`] ticks before the server runs theirs, and
-//! catch up at once where they come more than [`LATE`] ticks late; and its frames draw the other
-//! players' entities, as [`Owner`] says, as the latest states have them, [`INTERPOLATION`] ticks
-//! behind.
+//! A client of a server that owns the world (`--connect`;
+//! [Networking](../../../../ARCHITECTURE.md#networking)), over the lines and packets
+//! [`server`](super::server) has. It starts from the server's world, as far ahead as the round
+//! trip and [`LEAD`] more, and runs its ticks on its own inputs alone, sending them for the server
+//! to apply at the same ticks. That predicts its own player exactly and the others as going on as
+//! their last commands had them.
+//!
+//! Each state that comes, the world after a server tick, is read into a world of its own (the
+//! client's types and assets) and its hash compared with the world after that tick as predicted.
+//! Where they differ, the client takes its world back to the server's and runs the ticks after
+//! again; its inputs the server hasn't applied apply in them, those whose ticks have gone at the
+//! first, as the server would apply them.
+//!
+//! Its ticks run a little faster or slower than real time so its inputs come [`LEAD`] ticks before
+//! the server runs theirs, and catch up at once where they come more than [`LATE`] ticks late. Its
+//! frames draw the other players' entities ([`Owner`]) as the latest states have them,
+//! [`INTERPOLATION`] ticks behind.
 //!
 //! A client's ticks allocate, for their inputs' text, the packets and the world's hash, and the
 //! states it takes, for their text and the other players' poses.
@@ -36,68 +38,62 @@ use crate::recording::text;
 use crate::{Entity, EntityId, Owner, Sound, Tick, Transform, World, WorldHash, interpolation};
 
 /// How many ticks before the server runs their tick the client's inputs aim to come: 31.25 ms, so
-/// that one lost, which the next packet carries again, or held by a link's jitter, still comes in
-/// time.
+/// an input lost (the next packet carries it again) or held by jitter still comes in time.
 pub(super) const LEAD: u64 = 2;
 
-/// How many ticks late the client's inputs may come, as a state says, before the client catches up
-/// at once, rather than at its pace: past the two or three a jittery link's have them late, short
-/// of the second or so a client that joins over a slow link starts behind, as the world's age and
-/// its loading aren't counted where it starts.
+/// How many ticks late the client's inputs may come, as a state says, before it catches up at once
+/// rather than at its pace: past the two or three a jittery link has them late, short of the
+/// second or so a client joining over a slow link starts behind (the world's age and loading
+/// aren't counted where it starts).
 pub(super) const LATE: i64 = 4;
 
-/// The most ticks a frame of a client catching up runs past those its time owes, so that its
-/// frames run fewer than the stepper's most at 30 frames a second, and it catches up a second
-/// behind in 16 frames.
+/// The most ticks a catching-up frame runs past those its time owes, so its frames run fewer than
+/// the stepper's most at 30 frames a second, and it catches up a second behind in 16 frames.
 const CATCH_UP: u64 = 4;
 
-/// The most ticks a client runs past the latest it has the server's state after, half a second's,
-/// after which it waits for the next state, as over a link slower than that it would.
+/// The most ticks a client runs past the latest state it has: half a second's. Then it waits for
+/// the next state.
 const WINDOW: u64 = 32;
 
-/// How many ticks behind the latest state come the frames draw the other players' entities: 78.125
-/// ms, so that past a state lost, or held by a link's jitter, they draw toward the one after, the
-/// states coming two ticks apart.
+/// How many ticks behind the latest state the frames draw the other players' entities: 78.125 ms,
+/// so past a state lost or held by jitter they draw toward the one after, states coming two ticks
+/// apart.
 const INTERPOLATION: f64 = 5.0;
 
 /// How many of the latest states' poses of the other players' entities the client keeps.
 const SAMPLES: usize = 16;
 
-/// How many states still coming the client gathers the parts of at once, the latest.
+/// How many of the latest states still coming the client gathers the parts of at once.
 const GATHERED: usize = 4;
 
 /// A client.
 pub(crate) struct Client {
-    /// Where the server is and the session's code, which it connects by, again each time it loses
-    /// the server.
+    /// Where the server is and the session's code: connects by them again each time it's lost.
     toward: Toward,
     code: Code,
     connecting: Option<Receiver<Handshaken>>,
     looking: Looking,
     pub(super) app: &'static str,
-    /// The run's build, as [`Build::name`](super::Build::name) names it, which the server's must
-    /// be.
+    /// The run's [build name](super::Build::name) and layers' names (bottom up): the server's must
+    /// match.
     build: String,
-    /// The layers' names, from the bottom up, which the server's must be.
     layers: String,
-    /// What `--link` has the link do to what comes, and the state of the random numbers it draws.
+    /// What `--link` has the link do, and the state of the random numbers it draws.
     pub(super) conditions: Option<Conditions>,
     pub(super) random: u64,
     link: Option<Link>,
-    /// When the hello went, until the server's world came, and the time between, the way to the
-    /// server and back; and when the world came.
+    /// When the hello went, until the server's world came; the round trip; and when the world came.
     hello: Option<Instant>,
     trip: Duration,
     came: Instant,
-    /// The server's world as it comes: the tick it's at, and its lines so far.
+    /// The server's world as it comes: its tick, and its lines so far.
     coming: Option<(u64, String)>,
-    /// The client's player, as the server's world gave it.
     pub(super) player: Option<u8>,
     /// The tick the server's world was at as it came.
     since: u64,
     /// The client's inputs, by tick, kept until the server has applied them; the layers whose
-    /// queues edit, whose commands the server alone applies, as a tick that the client runs again
-    /// would apply them again; and the next tick of the client's inputs.
+    /// queues edit (only the server applies their commands, as a tick run again would apply them
+    /// again); and the next tick of the client's inputs.
     ours: BTreeMap<u64, Inputs>,
     edits: Vec<usize>,
     tagged: u64,
@@ -105,43 +101,40 @@ pub(crate) struct Client {
     local: u64,
     /// The text of each of the latest [`KEPT`] states, by tick, whole, which a state is against.
     texts: BTreeMap<u64, String>,
-    /// The parts of the latest states still coming, by tick.
     parts: BTreeMap<u64, Parts>,
     /// The latest state whole, until it's taken between ticks.
     state: Option<Header>,
     /// The server's world, as the latest state taken has it.
     world: World,
-    /// The world's hash after each tick the client ran past the latest state taken, by tick.
+    /// The world's hash after each tick run past the latest state taken.
     hashes: BTreeMap<u64, WorldHash>,
-    /// The sounds each tick's runs played, past the latest state taken, by tick.
+    /// The sounds each tick's runs played, past the latest state taken.
     pub(super) played: BTreeMap<u64, Vec<Sound>>,
     /// How many ticks before the server ran their tick the client's inputs came, on average; how
-    /// many ticks the client owes still, catching up; and, once it has started to, or its world has
-    /// gone on from a state past its own ticks, the tick of its inputs the server applies once it's
-    /// there, until which its states say what came before.
+    /// many ticks it still owes, catching up; and, once it has started to, or its world has gone
+    /// on from a state past its own ticks, the tick of its inputs the server applies once it's
+    /// there: the states until then say what came before.
     pub(super) lead: f64,
     behind: u64,
     caught: Option<u64>,
-    /// The poses of the other players' entities in each of the latest states, oldest first, and
-    /// when the latest came; and where among the server's ticks the frames draw them, and what they
-    /// draw, the last frame's.
+    /// The poses of the other players' entities in each of the latest states, oldest first; when
+    /// the latest came; where among the server's ticks the frames draw them; and what the last
+    /// frame drew.
     samples: VecDeque<Sample>,
     arrived: Option<Instant>,
     clock: Option<f64>,
     drawn: Vec<(EntityId, Transform)>,
-    /// How many times the client corrected its world, how many ticks it ran again, the most at
-    /// once, and how many states it took; and its stalls, past its window, as [`Stalls`] says.
+    /// Corrections of its world; ticks run again; the most at once; states taken. Stalls, past its
+    /// window, are [`Stalls`].
     pub(super) corrected: [u64; 4],
     stalls: Stalls,
     /// Whether the latest state's world, read from its text, didn't hash as the server's did.
     desynced: bool,
-    /// When the client last sent its packets.
     sent: Option<Instant>,
-    /// What a packet is read into.
     buffer: Vec<u8>,
 }
 
-/// A state's line, as [`server`](super::server)'s states have it.
+/// A state's line ([`server`](super::server)).
 #[derive(Clone, Copy)]
 struct Header {
     tick: u64,
@@ -154,23 +147,22 @@ struct Header {
     size: usize,
 }
 
-/// The parts of a state that have come, by their numbers, of how many: kept as they come, so that
-/// a state's line, which anyone at the server's address can forge, holds no memory but what came.
+/// The parts of a state that have come, by number, of how many: kept as they come, so a state's
+/// line, which anyone at the server's address can forge, holds no memory but what came.
 struct Parts {
     of: usize,
     come: BTreeMap<usize, Vec<u8>>,
 }
 
-/// The poses of the other players' entities in a state, by their IDs, and the tick it's after.
+/// The poses of the other players' entities in a state, by ID, and the tick it's after.
 struct Sample {
     tick: u64,
     poses: Vec<(EntityId, Transform)>,
 }
 
 impl Client {
-    /// A client of the server `toward` finds, given the session's `code`, for app `app` of build
-    /// `build`, as [`Build::name`](super::Build::name) names it, whose layers are `layers`, from
-    /// the bottom up, which tries to connect to it in the background, until it does.
+    /// A client of the server `toward` finds, for app `app`, [build](super::Build::name) `build`
+    /// and `layers` (bottom up). Tries to connect in the background until it does.
     pub(crate) fn start(
         toward: &Toward,
         code: Code,
@@ -220,13 +212,12 @@ impl Client {
         }
     }
 
-    /// Whether the client has joined: it has the server's world, which it said it restored.
     fn joined(&self) -> bool {
         self.link.as_ref().is_some_and(|link| link.joined) && self.coming.is_none()
     }
 
     /// Whether tick `tick` can run: the client has joined, and the tick is within [`WINDOW`] of
-    /// the latest it has the server's state after, or of the server's world.
+    /// the latest state it has, or of the server's world.
     pub(crate) fn ready(&self, tick: u64) -> bool {
         let latest = self
             .texts
@@ -235,19 +226,18 @@ impl Client {
         self.joined() && tick < latest + WINDOW
     }
 
-    /// Notes that a tick waited, as it isn't [`ready`](Self::ready): once the client has joined,
-    /// past its window, which starts a stall, unless one has, which the next tick that runs ends.
+    /// Notes that a tick waited, as it isn't [`ready`](Self::ready). Once joined, past its window,
+    /// that starts a stall, unless one has; the next tick that runs ends it.
     pub(crate) fn waited(&mut self) {
         if self.joined() {
             self.stalls.waited(Instant::now());
         }
     }
 
-    /// Between ticks, as a frame starts: connects to the server, if the client hasn't, saying hello;
-    /// takes the lines read and the packets come since the last turn, those `--link` holds once
-    /// they're due, gathering each state's parts, and reading the latest whole; and returns the
-    /// server's world, once it has come whole. Sends the client's packets again a tick's time after
-    /// it last did, as a client waiting for a state does. Logs the server lost or refusing it.
+    /// Between ticks, as a frame starts: connects if it hasn't, saying hello; takes the lines and
+    /// packets come since the last turn (`--link` holds them until due), gathering each state's
+    /// parts and reading the latest whole; returns the server's world once it has come whole.
+    /// Sends its packets again a tick's time after it last did. Logs the server lost or refusing.
     pub(crate) fn turn(&mut self) -> Turn {
         let now = Instant::now();
         self.find(now);
@@ -286,9 +276,8 @@ impl Client {
         turn
     }
 
-    /// Connects to the server, in the background, if the client has no link, and says hello once
-    /// it has, at `now`; logs a handshake that didn't hold, refused, trying again after
-    /// [`REFUSED`].
+    /// Without a link, connects in the background and says hello. Logs a handshake that didn't
+    /// hold as refused and tries again after [`REFUSED`].
     fn find(&mut self, now: Instant) {
         if self.link.is_some() {
             return;
@@ -335,8 +324,8 @@ impl Client {
         }
     }
 
-    /// Takes `line`, from the server, at `now`; returns the server's world, the tick it's at and its
-    /// text, once its last line has come.
+    /// Takes `line` from the server. Returns the server's world, its tick and text, once its last
+    /// line has come.
     fn read(&mut self, line: &str, now: Instant) -> Option<(u64, String)> {
         if let Some((_, text)) = &mut self.coming {
             if text.len() + line.len() >= MAX_WORLD {
@@ -400,11 +389,11 @@ impl Client {
         None
     }
 
-    /// Once the server's world at tick `tick` is `world`, in the client's world's place: says it has
-    /// joined, and returns the tick the client goes on from, as far ahead as the way to the server
-    /// and back and [`LEAD`] more, at most half [`WINDOW`], so that its inputs come in time.
+    /// Once the server's world at tick `tick` is `world`, in the client's place: says it joined and
+    /// returns the tick to go on from, ahead by the round trip and [`LEAD`], at most half
+    /// [`WINDOW`], so its inputs come in time.
     pub(crate) fn restored(&mut self, tick: u64, world: &World) -> u64 {
-        // Of the client's types and assets, as the server's are, for each state to be read into.
+        // The client's types and assets, for each state to be read into.
         self.world.clone_from(world);
         self.since = tick;
         self.ours.clear();
@@ -429,10 +418,9 @@ impl Client {
         tick + ahead
     }
 
-    /// As tick `tick` starts: takes the queues' commands, each layer's by its index, written
-    /// against `world`, as the client's inputs for the tick, emptying them, and sends them, with
-    /// those the server hasn't said it applied, on the stream if they're too many bytes for a
-    /// packet.
+    /// As tick `tick` starts: empties the queues (each layer's, by index) into the client's inputs
+    /// for the tick, written against `world`, and sends them with those the server hasn't said it
+    /// applied, on the stream if too large for a packet.
     pub(crate) fn start_tick<'q>(
         &mut self,
         tick: u64,
@@ -453,7 +441,7 @@ impl Client {
             }
             queue.clear();
         }
-        // Each line, its tick and its layer, and the packet's first, at most.
+        // At most: each line's tick and layer, and the packet's first line.
         let lines = inputs
             .commands
             .iter()
@@ -474,8 +462,8 @@ impl Client {
     }
 
     /// What tick `tick` runs on: the client's inputs from the first the world doesn't hold to the
-    /// tick's, those of queues that edit aside, so that a tick run again after a correction applies
-    /// those whose ticks the server hadn't applied at the first.
+    /// tick's, those of queues that edit aside. So a tick run again after a correction applies
+    /// those the server hadn't applied at the first.
     pub(crate) fn inputs(&mut self, tick: u64) -> Merged {
         let mut merged = Merged::default();
         if self.local <= tick {
@@ -489,15 +477,13 @@ impl Client {
         merged
     }
 
-    /// Once tick `tick` has run, leaving `world`: keeps its hash, for the server's state after the
-    /// tick to be compared with.
     pub(crate) fn end_tick(&mut self, tick: u64, world: &World) {
         self.hashes.insert(tick, world.hash());
     }
 
-    /// Takes `packet`, a part of a state, which the client gathers while it's of a state after a
-    /// tick later than the latest whole, and the server can have run by `now`, reading a state
-    /// once it's whole. `None` for a packet that isn't one.
+    /// Takes `packet`, a part of a state, while the state is after a tick later than the latest
+    /// whole and the server can have run by `now`; reads the state once whole. `None` for a packet
+    /// that isn't one.
     fn read_packet(&mut self, packet: &[u8], now: Instant) -> Option<()> {
         let split = packet.iter().position(|&byte| byte == b'\n')?;
         let header = header(std::str::from_utf8(&packet[..split]).ok()?)?;
@@ -505,11 +491,11 @@ impl Client {
         if header.tick < self.since || latest.is_some_and(|latest| header.tick <= latest) {
             return Some(());
         }
-        // Past the ticks the server can have run, which go on in real time from its world's, as its
-        // clock has it, a 256th faster than this one's at most, since no sooner than the way there
-        // and back before its world came, and half a second's more: a packet from elsewhere, which
-        // the server's address alone vouches for, which would hold back the server's states until
-        // their ticks passed its.
+        // Past the ticks the server can have run: real time from its world's tick, by its clock, a
+        // 256th faster than this one's at most, since no sooner than the round trip before its
+        // world came, plus half a second. Such a packet is from elsewhere (only the server's
+        // address vouches for it) and would hold back the server's states until their ticks passed
+        // its.
         let ran = now.saturating_duration_since(self.came) + self.trip;
         let ran = (ran.as_secs_f64() / Tick::DT.as_secs_f64()) as u64;
         if header.tick > self.since + ran + ran / 256 + WINDOW {
@@ -541,9 +527,8 @@ impl Client {
         Some(())
     }
 
-    /// Reads the bytes of the state `header` heads, come whole at `now`, as the text of the world
-    /// after its tick, against the state it names, rebuilt whole, as [`rebuild`] says, as the
-    /// latest whole.
+    /// Reads the bytes of the state `header` heads, come whole at `now`: the text of the world
+    /// after its tick, against the state it names, [rebuilt](rebuild) whole as the latest whole.
     fn decode(&mut self, header: Header, bytes: Vec<u8>, now: Instant) {
         let tick = header.tick;
         let base = match header.base {
@@ -580,17 +565,16 @@ impl Client {
         }
     }
 
-    /// Between ticks, the next to run being `next`, `world` the client's: takes the latest state
-    /// whole, reading the server's world after its tick into the client's own copy, of `world`'s
-    /// assets, and logging `net.desync` if it doesn't hash as the server's did, as the state's text
-    /// then leaves out what the hash reads; keeps the other players' entities' poses there; and
-    /// returns the tick after the state's, for the client's world to be taken back to the server's
-    /// there, [`start_of`](Self::start_of), and the ticks from it to `next` run again, unless the
-    /// world the client predicted after that tick hashes as the server's.
+    /// Between ticks, `next` being the next to run: takes the latest state whole, reading the
+    /// server's world after its tick into the client's copy (of `world`'s assets). Logs
+    /// `net.desync` if it doesn't hash as the server's did: its text leaves out what the hash
+    /// reads. Keeps the other players' poses there. Returns the tick after the state's, for the
+    /// client's world to be taken back to the server's there ([`start_of`](Self::start_of)) and the
+    /// ticks to `next` run again, unless the prediction after that tick hashes as the server's.
     pub(crate) fn settle(&mut self, next: u64, world: &World) -> Option<u64> {
         let state = self.state.take()?;
         let tick = state.tick;
-        // As the client's layers have added since, which the text may name.
+        // The client's layers have added some since, which the text may name.
         self.world.share_assets(world.shared_assets());
         let lines = (1..).zip(self.texts.get(&tick)?.lines());
         if let Err(error) = self.world.load_whole(lines, true) {
@@ -602,9 +586,9 @@ impl Client {
             );
             return None;
         }
-        // The navmesh, which no state holds, kept up to date in the copy, so that the copy holds
-        // the resources the client's world does: a world taken back to one holding other types'
-        // copies them all, and a navmesh dropped there would be baked again at the next tick.
+        // No state holds the navmesh: keep it up to date in the copy so it holds the resources the
+        // client's world does. A world taken back to one copies them all, and a dropped navmesh
+        // would be baked again at the next tick.
         crate::navigation::refresh(&mut self.world);
         let hash = self.world.hash();
         if hash == state.hash {
@@ -623,12 +607,12 @@ impl Client {
         if tick < next {
             self.follow_lead(&state);
         } else {
-            // The client's world goes on from the state's, past its own ticks, as it had fallen
-            // behind: those ticks' inputs go out empty, as the server ran them without any of the
-            // client's, so that it doesn't wait for them, as it applies a client's inputs in their
-            // order; the ticks the client owes, catching up, are fewer by those gone past; and the
-            // states until the server applies its inputs from there say what came before, as
-            // `follow_lead` passes them over, unless a catch-up or a jump before already has them.
+            // The client fell behind: its world goes on from the state's, past its own ticks.
+            // Those ticks' inputs go out empty, as the server ran them without any of the client's,
+            // so it doesn't wait for them (it applies a client's inputs in order). The ticks owed,
+            // catching up, are fewer by those gone past. The states until the server applies its
+            // inputs from there say what came before, and `follow_lead` passes them over, unless a
+            // catch-up or a jump before already has them.
             for skipped in next..=tick {
                 self.ours.entry(skipped).or_default();
             }
@@ -646,13 +630,11 @@ impl Client {
     }
 
     /// Takes how early the client's latest inputs came, as `state` says, a state its world doesn't
-    /// go on from: into the average its pace follows, as [`pace`](Self::pace) says; or, if they
-    /// came more than [`LATE`] ticks late, as a client that joins over a slow link starts behind,
-    /// its world going on from the first state, past its own ticks, but no further, or one whose
-    /// frames stopped falls behind, has the client owe at once the ticks that would have them come
-    /// [`LEAD`] ticks early, which its frames pay, predicted. The states after, until the server has
-    /// applied the inputs it sends once it has caught up, a round trip or so, say what came before,
-    /// and are passed over.
+    /// go on from, into the average its [pace](Self::pace) follows. If they came more than [`LATE`]
+    /// ticks late (a client joining over a slow link starts behind, or one whose frames stopped
+    /// falls behind), it at once owes the ticks that would have them come [`LEAD`] ticks early,
+    /// which its frames pay, predicted. The states after, until the server has applied the inputs
+    /// sent once caught up (a round trip or so), say what came before and are passed over.
     fn follow_lead(&mut self, state: &Header) {
         if self.caught.is_some_and(|caught| state.next <= caught) {
             return;
@@ -662,8 +644,7 @@ impl Client {
             self.lead += (state.lead as f64 - self.lead) / 8.0;
             return;
         }
-        // At most a window's, as a client further behind is behind the server's states too, and
-        // goes on from them, as `settle` says.
+        // At most a window's: a client further behind goes on from the states, as in `settle`.
         let behind = ((LEAD as i64).saturating_sub(state.lead) as u64).min(WINDOW);
         (self.lead, self.behind, self.caught) = (LEAD as f64, behind, Some(self.tagged + behind));
         debug!(
@@ -672,14 +653,10 @@ impl Client {
         );
     }
 
-    /// The world as tick `tick`, which [`settle`](Self::settle) gave, starts: the server's after
-    /// the tick before.
     pub(crate) fn start_of(&self, _tick: u64) -> &World {
         &self.world
     }
 
-    /// Counts a correction from tick `from` to `next`, the next to run, the ticks between run
-    /// again.
     pub(crate) fn rolled_back(&mut self, from: u64, next: u64) {
         let ticks = next.saturating_sub(from);
         let [corrections, again, most, _] = &mut self.corrected;
@@ -690,7 +667,7 @@ impl Client {
     }
 
     /// Keeps the poses, in the server's world after tick `tick`, of the entities of players other
-    /// than the client's, as [`Owner`] says, and of their descendants.
+    /// than the client's ([`Owner`]) and their descendants.
     fn sample(&mut self, tick: u64) {
         let world = &self.world;
         let mut theirs: Vec<Entity> = (world.query::<(Entity, &Owner)>())
@@ -716,11 +693,10 @@ impl Client {
         }
     }
 
-    /// Where a frame `dt` after the last draws the other players' entities: each by its ID, as far
-    /// on between the two states about [`INTERPOLATION`] ticks behind the latest as that time is,
-    /// in the server's ticks, as the time since the latest came puts it, eased toward it from where
-    /// the last frame drew, so that a state's jitter doesn't show; as the latest has them past it,
-    /// and none before a state has come.
+    /// Where a frame `dt` after the last draws the other players' entities, by ID: between the two
+    /// states about [`INTERPOLATION`] ticks behind the latest, as far on as the time since the
+    /// latest came puts it in the server's ticks, eased from where the last frame drew so a state's
+    /// jitter doesn't show. Past the latest, as it has them; none before a state has come.
     pub(crate) fn interpolate(&mut self, dt: Duration) -> &[(EntityId, Transform)] {
         let Self {
             samples,
@@ -767,10 +743,10 @@ impl Client {
         drawn.as_slice()
     }
 
-    /// The time a frame `dt` after the last owes the client's ticks, once it has joined: a little
-    /// more or less, as its inputs came later or earlier than [`LEAD`] ticks before the server ran
-    /// their ticks, on average; and, while it catches up, as [`follow_lead`](Self::follow_lead)
-    /// says, up to [`CATCH_UP`] ticks' more of those it owes.
+    /// The time a frame `dt` after the last owes the client's ticks once joined: a little more or
+    /// less as its inputs came, on average, later or earlier than [`LEAD`] ticks before the
+    /// server's; while it catches up ([`follow_lead`](Self::follow_lead)), up to [`CATCH_UP`]
+    /// ticks' more of those it owes.
     pub(crate) fn pace(&mut self, dt: Duration) -> Duration {
         if !self.joined() {
             return dt;
@@ -781,9 +757,9 @@ impl Client {
         dt.mul_f64(1.0 + pace) + Tick::DT * paid as u32
     }
 
-    /// Sends the server the client's packets, once it has joined: the latest state it has, and its
-    /// inputs for each tick the server hasn't said it applied that didn't go on the stream, oldest
-    /// first, as many to a packet as fit [`MAX_PACKET_TEXT`], a tick's in one.
+    /// Sends the packets once joined ([`server`](super::server)): the latest state it has and the
+    /// unapplied inputs that didn't go on the stream, oldest first, as many as fit
+    /// [`MAX_PACKET_TEXT`], a tick's in one.
     fn send_packets(&mut self) {
         let joined = self.joined();
         let Some(link) = self.link.as_mut().filter(|_| joined) else {
@@ -810,9 +786,8 @@ impl Client {
         self.sent = Some(Instant::now());
     }
 
-    /// Loses the server, as `why` says, logging what the link sent and took, as [`Link::ended`]
-    /// says, and ending the stall going on, if one is: the client's world stands still until it has
-    /// the server's world again.
+    /// Loses the server for `why`, logging the link ([`Link::ended`]) and ending any stall. The
+    /// world stands still until it has the server's again.
     pub(crate) fn lose(&mut self, why: &str) {
         if let Some(link) = self.link.take() {
             warn!(code = "net.lost", "Lost the server: {why}");
@@ -823,10 +798,9 @@ impl Client {
         self.hello = None;
     }
 
-    /// Logs, as the run ends, what its link to the server sent and took, if it has one, as
-    /// [`Link::ended`] says; and how the client was corrected toward the server (`net.corrected`):
-    /// how many times, how many ticks it ran again, the most at once, how many states it took, and
-    /// its stalls, as [`Stalls`] says.
+    /// Logs, as the run ends, its link to the server, if any ([`Link::ended`]), and how it was
+    /// corrected (`net.corrected`): times, ticks run again, the most at once, states taken, and its
+    /// [`Stalls`].
     pub(crate) fn ended(&self) {
         if let Some(link) = &self.link {
             link.ended("the server");
@@ -849,17 +823,16 @@ impl Client {
     }
 }
 
-/// The `size` bytes that `bytes`, as zstd compresses them, against the dictionary `base` if it's
-/// given, decompress to: read as they decompress, rather than into `size` bytes held at once, so
-/// that a state's line, which a hostile server may write as it likes, takes no more memory than
-/// its bytes decompress to.
+/// The `size` bytes that zstd-compressed `bytes` decompress to, against the dictionary `base` if
+/// given. Read as they decompress, not into `size` bytes held at once, so a state's line, which a
+/// hostile server may write as it likes, takes no more memory than its bytes decompress to.
 ///
 /// Fails as zstd does, and for bytes that decompress to more or fewer than `size`.
 fn decompress(bytes: &[u8], base: Option<&[u8]>, size: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
 
-    // Room for up to a MiB at once, which a forged line can't make more of; past it, the text
-    // grows as its bytes decompress.
+    // Room for up to a MiB at once, which a forged line can't exceed; past it the text grows as
+    // its bytes decompress.
     let mut text = Vec::with_capacity(size.min(1 << 20));
     match base {
         Some(base) => zstd::stream::read::Decoder::with_dictionary(bytes, base)?
@@ -879,8 +852,7 @@ fn decompress(bytes: &[u8], base: Option<&[u8]>, size: usize) -> std::io::Result
     Ok(text)
 }
 
-/// Reads a state's line, which [`server`](super::server)'s states start with; `None` if it isn't
-/// one.
+/// Reads a state's line ([`server`](super::server)); `None` if it isn't one.
 fn header(line: &str) -> Option<Header> {
     let mut words = line.strip_prefix("s ")?.split(' ');
     let tick = words.next()?.parse().ok()?;
@@ -917,7 +889,6 @@ mod tests {
     use super::super::{BUILD, TESTED};
     use super::*;
 
-    /// A transform at `x`.
     fn at(x: f32) -> Transform {
         Transform {
             translation: DVec3::new(f64::from(x), 0.0, 0.0),
@@ -925,14 +896,13 @@ mod tests {
         }
     }
 
-    /// The x where `drawn` has the entity `id` drawn.
     fn x_of(drawn: &[(EntityId, Transform)], id: EntityId) -> f32 {
         let found = drawn.iter().find(|&&(of, _)| of == id);
         found.expect("drawn").1.translation.x as f32
     }
 
-    /// A state after a tick the server can't have run yet, as a packet from elsewhere may name,
-    /// however far on, is dropped, and the server's own after it are taken.
+    /// A state after a tick the server can't have run yet, however far on, as a packet from
+    /// elsewhere may name, is dropped; the server's own after it are taken.
     #[test]
     fn a_state_the_server_cant_have_run_yet_is_dropped() {
         let mut client = Client::start(
@@ -959,10 +929,9 @@ mod tests {
         assert_eq!(client.texts.keys().copied().collect::<Vec<_>>(), [101]);
     }
 
-    /// A state's line, which anyone at the server's address can forge, holds the client to no more
-    /// memory than its packets bring, however many parts and bytes it says the state has: its parts
-    /// are kept as they come, and its bytes read as they decompress, a state whose bytes come to
-    /// more or fewer than its line says dropped.
+    /// A forged state line holds the client to no more memory than its packets bring, however many
+    /// parts and bytes it claims: parts are kept as they come, bytes read as they decompress, and a
+    /// state whose bytes come to more or fewer than its line says is dropped.
     #[test]
     fn a_forged_state_s_line_holds_no_memory_but_what_came() {
         let mut client = Client::start(
@@ -997,8 +966,8 @@ mod tests {
         assert_eq!(read, text.as_bytes());
     }
 
-    /// A state rebuilds whole against its base, which the client keeps for the next; one whose
-    /// `kept` lines name more than its base holds is `net.bad_state`, and dropped.
+    /// A state rebuilds whole against its base, kept for the next; one whose `kept` lines name more
+    /// than its base holds is `net.bad_state` and dropped.
     #[test]
     fn a_state_rebuilds_against_its_base_or_is_bad() {
         let logged = crate::testing::logged();
@@ -1036,8 +1005,8 @@ mod tests {
     }
 
     /// The other players' entities draw between the two states [`INTERPOLATION`] ticks behind the
-    /// latest, as far on as that time is, each by its ID, or as the later state has one the earlier
-    /// hasn't; and as the latest has them, once that time is past it.
+    /// latest, by ID (as the later state has one the earlier hasn't), and as the latest has them
+    /// once that time is past it.
     #[test]
     fn the_others_draw_between_the_states_behind_the_latest() {
         let mut world = World::seeded(1);
@@ -1054,7 +1023,7 @@ mod tests {
             sample(12, &[(a, at(2.0)), (b, at(7.0))]),
             sample(11 + INTERPOLATION as u64, &[(a, at(4.0)), (b, at(9.0))]),
         ];
-        // The latest came `ago` before now, once the client has started.
+        // The latest came `ago` before now.
         let client = |ago: Duration| {
             let mut client = Client::start(
                 &Toward::Address("127.0.0.1:1".to_owned()),
@@ -1067,22 +1036,21 @@ mod tests {
             client.arrived = Some(Instant::now().checked_sub(ago).expect("an instant"));
             client
         };
-        // 11 ticks on, halfway from the state after tick 10 to the one after 12, and as far past as
-        // the time since the latest came, under 3 ms.
+        // 11 ticks on: halfway from the state after tick 10 to the one after 12, plus the time
+        // since the latest came, under 3 ms.
         let mut between = client(Duration::ZERO);
         let drawn = between.interpolate(Tick::DT);
         assert!((1.0..1.1).contains(&x_of(drawn, a)), "{drawn:?}");
         assert_eq!(x_of(drawn, b), 7.0);
-        // The latest came 10 ticks ago, so that the time is past it.
+        // The latest came 10 ticks ago: the time is past it.
         let mut held = client(Tick::DT * 10);
         let drawn = held.interpolate(Tick::DT);
         assert_eq!((x_of(drawn, a), x_of(drawn, b)), (4.0, 9.0));
     }
 
-    /// A correction takes the client's world back to the server's latest state, read into its copy,
-    /// keeping the navmesh: the copy brings its own up to date as it reads each state, which no
-    /// state holds, so that the world taken back to it holds the same resources, and no tick after
-    /// bakes it again.
+    /// A correction takes the client's world back to the server's latest state, keeping the
+    /// navmesh: no state holds it, so the copy keeps its own up to date, and no tick after bakes it
+    /// again.
     #[test]
     fn a_correction_keeps_the_navmesh() {
         use crate::navigation::navmesh_of;
@@ -1107,7 +1075,7 @@ mod tests {
         step_navigation(&mut server);
         let mut text = String::new();
         server.save_whole(&mut text).expect("saved");
-        // The client's world, from the server's, as it joined.
+        // The client's world, as it joined.
         let mut ours = World::seeded(4);
         for registered in [
             ours.register::<Transform>(),

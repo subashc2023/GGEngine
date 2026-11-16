@@ -1,10 +1,10 @@
-//! A server's states, as [the server](super::server) sends them: what each client sees of the
-//! world after a tick, written by a thread of the server's own, `gg-net-states`, from a copy of the
-//! world taken as the tick ends, so that the server's main thread spends a copy a tick on them,
-//! whatever the clients' number or the world's size. Each state holds what changed since its base,
-//! the state the client has said it has, and names the rest as kept, which [`rebuild`] puts the
-//! base's text in place of. The client rebuilds each state's text whole, reads and checks it as a
-//! whole state, and keeps it for the next to be against, as the server does.
+//! A server's states ([the server](super::server) sends them): what each client sees of the world
+//! after a tick. A thread of the server's, `gg-net-states`, writes them from a copy of the world
+//! taken as the tick ends, so the main thread spends a copy a tick whatever the clients' number or
+//! the world's size. Each state holds what changed since its base (the state the client has said
+//! it has) and names the rest as kept; [`rebuild`] puts the base's text in its place. The client
+//! rebuilds each state's text whole, reads and checks it as a whole state, and keeps it for the
+//! next to be against, as the server does.
 //!
 //! A state's text is the world's, as `World::save_seen` writes it, but for these lines:
 //!
@@ -14,15 +14,20 @@
 //! kept resource Physics3D      in place of the resource's line, as the base has it
 //! ```
 //!
-//! A table is kept while it's of the world the base is of, which the client's view hides the same
-//! entities of, it has as many rows as it had, and, as its marks say, no row joined it and no
-//! column of its changed since the tick the base is after, as the server's world's change tick
-//! moves on after each tick. A row taken out marks nothing, as the table's last row moves into its
-//! place, but leaves one fewer. The `children` lines are kept while no table is new, none has
-//! another number of rows, and no row joined one and no `Parent` changed since. A resource is kept
-//! while its text is the base's. A kept row that names an entity taken out since names it by its
-//! ID, where the server's text would say `Dead`, and reads as `Dead` reads, as no entity has the
-//! ID; one that comes back under its handle, as an undone delete puts it back, marks every table.
+//! A table is kept while all hold:
+//!
+//! - It's of the world the base is of, and the client's view hides the same entities of it.
+//! - It has as many rows as it had. A row taken out marks nothing, as the table's last row moves
+//!   into its place, but leaves one fewer.
+//! - By its marks, no row joined it and no column changed since the tick the base is after (the
+//!   server's world's change tick moves on after each tick).
+//!
+//! The `children` lines are kept while no table is new, none has another number of rows, and no
+//! row joined one and no `Parent` changed since. A resource is kept while its text is the base's.
+//!
+//! A kept row that names an entity taken out since names it by ID, where the server's text would
+//! say `Dead`, and reads as `Dead` reads, as no entity has the ID. One that comes back under its
+//! handle, as an undone delete puts it back, marks every table.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -38,26 +43,25 @@ use super::MAX_WORLD;
 use crate::cells::{Cell, Seen};
 use crate::{Parent, World, WorldHash};
 
-/// The level zstd compresses states at: its default, quick, as states go out each tick.
+/// The level zstd compresses states at: its quick default, as states go out each tick.
 const LEVEL: i32 = 3;
 
-/// A state's whole text, which the client keeps for the next state to be against, as the server
-/// does, with what the server keeps beside it to tell which of its tables a later state keeps.
+/// A state's whole text, which the client and the server keep for the next state to be against,
+/// with what the server keeps beside it to tell which of its tables a later state keeps.
 pub(super) struct Base {
-    /// The text of what the client saw after the tick, whole, as [`rebuild`] gives it.
     pub(super) text: String,
     /// The server's world it's of, and that world's change tick as the tick ended; and how many
     /// rows each of its tables had.
     of: Source,
     rows: Vec<usize>,
-    /// The slots of the entities the client's view hid, as [`Seen`] has them.
+    /// The slots of the entities the client's view hid ([`Seen`]).
     hidden: Vec<bool>,
 }
 
 /// The server's world a copy is of, as the copy was taken: its serial, which another world,
-/// restored or replaced, hasn't; and its change tick, which its tables' marks, copied, count by.
-/// The copy's own change tick never falls, as a copy's doesn't, so that it's past the world's once
-/// a layer puts a world of an earlier change tick in its place.
+/// restored or replaced, hasn't; and its change tick, which the tables' copied marks count by.
+/// The copy's own change tick never falls, so it's past the world's once a layer puts a world of an
+/// earlier change tick in its place.
 #[derive(Clone, Copy)]
 struct Source {
     serial: u64,
@@ -75,37 +79,36 @@ impl Source {
 
 /// A client whose state the thread writes, as the server knows it as a tick ends.
 pub(super) struct Wanted {
-    /// Which client, as the server numbers them, and its player.
+    /// The server's number for the client, and its player.
     pub(super) client: u64,
     pub(super) player: u8,
-    /// The cells it saw as its last state was written, as [`World::seen_by`] has them.
+    /// The cells it saw as its last state was written ([`World::seen_by`]).
     pub(super) had: BTreeSet<Cell>,
-    /// The latest state it has said it has, by its tick, if the server still keeps it.
+    /// The latest state it has said it has, by tick, if the server still keeps it.
     pub(super) base: Option<(u64, Arc<Base>)>,
     /// The first tick of its inputs not applied, and how many ticks before the server ran it its
-    /// latest inputs came, which its state's line says.
+    /// latest inputs came: both in its state's line.
     pub(super) next: u64,
     pub(super) lead: i64,
 }
 
 /// A client's state, as the thread wrote it.
 pub(super) struct Written {
-    /// The client, as [`Wanted`] names it, and the tick of the base its state is against.
+    /// The client and `next` and `lead` as [`Wanted`] had them; the tick of the base its state is
+    /// against.
     pub(super) client: u64,
     pub(super) base: Option<u64>,
-    /// As [`Wanted`] had them.
     pub(super) next: u64,
     pub(super) lead: i64,
     /// The hash of what the client sees, and the cells it sees.
     pub(super) hash: WorldHash,
     pub(super) cells: BTreeSet<Cell>,
-    /// Its state, which the clients that saw alike against the same base share.
+    /// Shared by the clients that saw alike against the same base.
     pub(super) state: Arc<State>,
 }
 
-/// A state: its text, as zstd compresses it, against its base as zstd's dictionary, and its bytes
-/// uncompressed; its text whole, for the next state to be against; and how many tables it wrote,
-/// and kept.
+/// A state: its text zstd-compressed with its base as the dictionary, and its uncompressed size;
+/// its text whole; and how many tables it wrote, and kept.
 pub(super) struct State {
     pub(super) bytes: Vec<u8>,
     pub(super) size: usize,
@@ -113,17 +116,15 @@ pub(super) struct State {
     pub(super) tables: [u64; 2],
 }
 
-/// The thread that writes the clients' states, `gg-net-states`: what it's given, and what it gives
-/// back, the copy of the world it wrote them from with them; and that copy, while the thread is
-/// idle, which the next tick's world is copied into, in its memory.
+/// The thread that writes the clients' states, `gg-net-states`. Holds the copy of the world while
+/// the thread is idle, for the next tick's world to be copied into, in its memory; the thread
+/// gives it back with the states.
 pub(super) struct States {
     jobs: Sender<Job>,
     done: Receiver<Done>,
     copy: Option<World>,
 }
 
-/// The clients whose states the thread writes after tick `tick`, from `copy`, a copy of the world
-/// `source` says.
 struct Job {
     copy: World,
     source: Source,
@@ -131,7 +132,6 @@ struct Job {
     wanted: Vec<Wanted>,
 }
 
-/// The states after tick `tick`, written from `copy`.
 struct Done {
     copy: World,
     tick: u64,
@@ -139,8 +139,7 @@ struct Done {
 }
 
 impl States {
-    /// Starts the thread, which ends as the `States` is dropped, once it has written what it was
-    /// given.
+    /// Starts the thread, which ends once the `States` is dropped and it has finished its work.
     ///
     /// Fails with `net.start` if the thread can't start.
     pub(super) fn start() -> Result<Self> {
@@ -178,14 +177,13 @@ impl States {
         })
     }
 
-    /// Whether the thread is idle: it has given back the states it was last given, which
-    /// [`take`](Self::take) has taken.
+    /// Whether the thread is idle: [`take`](Self::take) has taken the states it was last given.
     pub(super) fn idle(&self) -> bool {
         self.copy.is_some()
     }
 
-    /// Has the thread write the states of `wanted` after tick `tick`, of `world` as it is, which
-    /// it copies, as [`write()`] says.
+    /// Has the thread write the states of `wanted` after tick `tick` from a copy of `world`
+    /// ([`write()`]).
     ///
     /// # Panics
     ///
@@ -202,9 +200,9 @@ impl States {
         (self.jobs.send(job)).expect("the states thread runs while it's given states to write");
     }
 
-    /// The states the thread was last given, with their tick, once it has written them: by
-    /// `until`, waiting for them until then, or at once, without waiting, if it's `None`. `None`
-    /// if they aren't written by then, or the thread is idle.
+    /// The states the thread was last given, with their tick, once written: waits for them until
+    /// `until`, or doesn't wait if it's `None`. `None` if they aren't written by then, or the
+    /// thread is idle.
     ///
     /// # Panics
     ///
@@ -231,12 +229,12 @@ impl States {
     }
 }
 
-/// Writes the state of each of `wanted` from `world`, a copy of the server's world `source` says,
-/// as the module says: each view of the world, as [`World::seen_by`] finds it, hashed once, its
-/// head, resources and the tables and children its clients' states need written once, and each
-/// state once for the clients that see alike against the same base.
+/// Writes the state of each of `wanted` from `world`, a copy of the server's world `source` says.
+/// Each view of the world ([`World::seen_by`]) is hashed once; its head, resources and the tables
+/// and children its clients' states need are written once; each state is written once for the
+/// clients that see alike against the same base.
 ///
-/// Fails as [`World::save_seen`] does, and with `net.link` for a state that zstd can't compress, or
+/// Fails as [`World::save_seen`] does, and with `net.link` for a state that zstd can't compress or
 /// whose text whole is past [`MAX_WORLD`] bytes.
 fn write(world: &World, source: Source, wanted: &[Wanted]) -> Result<Vec<Written>> {
     let _zone = gg_core::zone!();
@@ -278,9 +276,8 @@ fn write(world: &World, source: Source, wanted: &[Wanted]) -> Result<Vec<Written
     Ok(written)
 }
 
-/// A view of the world, as clients that see alike have it: what it sees and its hash; its head,
-/// and its resources' texts, written as it's found; each table's text and its `children` lines,
-/// once a state needs them; and its states, each by the base it's against.
+/// A view of the world, shared by clients that see alike. Its hash, head and resources' texts are
+/// written as it's found; each table's text and its `children` lines once a state needs them.
 struct View {
     seen: Seen,
     hash: WorldHash,
@@ -323,7 +320,7 @@ impl View {
     }
 
     /// The view's state of `world`, a copy of the world `source` says, against `base`, the latest
-    /// state its client has, if the server keeps it, as the module says; and whole, otherwise.
+    /// state its client has if the server keeps it; whole otherwise.
     ///
     /// Fails as [`table`](Self::table) does, and with `net.link` for a state that zstd can't
     /// compress, or whose text whole is past [`MAX_WORLD`] bytes.
@@ -392,8 +389,8 @@ impl View {
         let bytes = compressed.map_err(|error| {
             Error::new("net.link", "can't compress a client's state").with_source(error)
         })?;
-        // Its own base holds what each `kept` line names, so that only a text past `MAX_WORLD`
-        // fails, which no client would take.
+        // Its own base holds what each `kept` line names, so only a text past `MAX_WORLD` fails,
+        // which no client would take.
         let whole = rebuild(base.map_or("", |base| &base.text), &text).map_err(|why| {
             Error::new("net.link", format!("can't write a client's state: {why}"))
         })?;
@@ -411,9 +408,9 @@ impl View {
     }
 }
 
-/// The text of the resource `name` in `text`, a world's whole, as its `resource` line has it.
+/// The text of the resource `name` in `text`, a world's whole.
 fn resource<'t>(text: &'t str, name: &str) -> Option<&'t str> {
-    // Its lines last, after the tables' and the children's.
+    // Resource lines come last, after the tables' and the children's.
     let mut lines = text.lines().rev();
     let mut resources = lines
         .by_ref()
@@ -421,9 +418,8 @@ fn resource<'t>(text: &'t str, name: &str) -> Option<&'t str> {
     resources.find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
 }
 
-/// The whole text of the state `state`, against `base`, its base's whole text, `""` for none: its
-/// lines, but for each `kept` line, in place of which goes what it names of `base`, as the module
-/// says.
+/// The whole text of the state `state` against `base`, its base's whole text (`""` for none): its
+/// lines, but each `kept` line is replaced by what it names of `base`.
 ///
 /// Fails, saying why, for a `kept tables` that names more tables than `base` holds after those
 /// before, a `kept resource` that names one `base` hasn't, and a text past [`MAX_WORLD`] bytes.
@@ -469,8 +465,8 @@ pub(super) fn rebuild(base: &str, state: &str) -> std::result::Result<String, St
     Ok(out)
 }
 
-/// Where the parts of a world's whole text are in it, by byte: each table's, its `table` line, its
-/// rows and their `opaque` lines; the `children` lines; and each resource's line, by its name.
+/// Where the parts of a world's whole text are, by byte: each table's (its `table` line, rows and
+/// their `opaque` lines), the `children` lines, and each resource's line by name.
 struct Sections<'t> {
     tables: Vec<Range<usize>>,
     children: Range<usize>,
@@ -523,7 +519,7 @@ mod tests {
     use crate::reflect::tests::everything;
     use crate::{Log, Operation, Owner, Saved, Transform};
 
-    /// A resource that saves itself, a count.
+    /// A resource that saves itself.
     #[derive(Clone)]
     struct Count(u32);
 
@@ -541,7 +537,6 @@ mod tests {
         }
     }
 
-    /// A transform at `x`.
     fn at(x: f64) -> Transform {
         Transform {
             translation: DVec3::new(x, 0.0, 0.0),
@@ -556,11 +551,10 @@ mod tests {
         text
     }
 
-    /// The state of player 0's client, which sees all of `world`, a server's after a tick, against
-    /// `base`, as the thread writes it, the world's change tick then moved on, as a server's is;
-    /// checked as a client reads it: rebuilt, it's the world's text whole, and, loaded, hashes as
-    /// the state says. Returns its text, and how many tables it wrote and kept; and has `base` be
-    /// the state.
+    /// The state of player 0's client, which sees all of `world` (a server's after a tick), against
+    /// `base`, as the thread writes it; then moves the world's change tick on, as a server does.
+    /// Checked as a client reads it: rebuilt, it's the world's text whole and, loaded, hashes as
+    /// the state says. Returns its text and tables wrote and kept; `base` becomes the state.
     fn next(world: &mut World, base: &mut Option<(u64, Arc<Base>)>) -> (String, [u64; 2]) {
         let wanted = [Wanted {
             client: 0,
@@ -587,7 +581,6 @@ mod tests {
         (text, state.tables)
     }
 
-    /// The text of `state`, against `base`, as the client decompresses it.
     fn read(state: &State, base: Option<&Base>) -> String {
         let text = match base {
             Some(base) => zstd::bulk::Decompressor::with_dictionary(base.text.as_bytes())
@@ -597,7 +590,6 @@ mod tests {
         String::from_utf8(text.expect("decompressed")).expect("text")
     }
 
-    /// The `table` lines of `text`.
     fn tables(text: &str) -> usize {
         let tables = text
             .lines()
@@ -605,9 +597,9 @@ mod tests {
         tables.count()
     }
 
-    /// A state holds the tables that changed since its base, as their marks say, or whose rows are
-    /// fewer, the last taken out; the children, as a row joins or leaves or a parent changes; and a
-    /// resource whose text changed: and names the rest as kept. Rebuilt, it's the world's text whole.
+    /// A state holds the tables that changed since its base (by their marks) or whose rows are
+    /// fewer (the last taken out); the children, as a row joins or leaves or a parent changes; and
+    /// a resource whose text changed: the rest is kept. Rebuilt, it's the world's text whole.
     #[test]
     fn a_state_holds_what_changed_since_its_base() {
         let mut world = World::seeded(1);
@@ -654,9 +646,9 @@ mod tests {
         assert!(text.contains("kept children\n") && text.contains("kept resource Count\n"));
     }
 
-    /// An entity a delete took, which an undo puts back, is named again by the rows that named it,
-    /// written `Dead` meanwhile, though nothing reached their columns: their tables are written,
-    /// and the client's world, loaded from the state, names it as the server's does.
+    /// An entity a delete took, which an undo puts back, is named again by the rows that named it
+    /// (`Dead` meanwhile), though nothing reached their columns: their tables are written, and the
+    /// client's world names it as the server's does.
     #[test]
     fn an_entity_put_back_has_the_rows_naming_it_written() {
         use crate::reflect::tests::Everything;
@@ -681,14 +673,13 @@ mod tests {
         assert!(text.contains(&format!("Some(Entity(\"{id}\"))")), "{text}");
     }
 
-    /// A world a layer puts in the server's world's place, whose change tick is earlier than the
-    /// world's it replaced, has what changes in it written, not kept, though the thread's copy of
-    /// the world, whose change tick never falls, is past it.
+    /// A world a layer puts in the server's world's place, with an earlier change tick, has what
+    /// changes in it written, not kept, though the thread's copy, whose change tick never falls, is
+    /// past it.
     #[test]
     fn a_world_put_in_place_has_what_changes_written() {
         let mut states = States::start().expect("started");
-        // As a server's tick ends: the state against `base`, rebuilt whole, and the world's change
-        // tick moved on.
+        // As a server's tick ends: the state against `base`, rebuilt whole.
         let mut state = |world: &mut World, base: Option<(u64, Arc<Base>)>| {
             let wanted = vec![Wanted {
                 client: 0,
@@ -723,8 +714,8 @@ mod tests {
         assert_eq!(next.text, whole(&world));
     }
 
-    /// A state against a base of another world, as its serial says, or whose view hid other
-    /// entities, keeps no table, nor the children.
+    /// A state against a base of another world (by serial) or whose view hid other entities keeps
+    /// no table, nor the children.
     #[test]
     fn a_state_against_another_world_or_view_keeps_nothing() {
         let mut world = World::seeded(1);
@@ -763,7 +754,7 @@ mod tests {
         }
     }
 
-    /// A world's whole text, of a head, three tables, children and two resources.
+    /// A world's whole text: a head, three tables, children and two resources.
     const BASE: &str = "\
 stream 0000000000000001
 slots 3
@@ -782,9 +773,8 @@ resource Physics2D bodies
 resource Cells in
 ";
 
-    /// A state rebuilds against its base: each `kept` line in place of what it names, the rest as
-    /// it is; and `kept tables` past the base's tables, or a `kept resource` the base hasn't,
-    /// fails.
+    /// A state rebuilds against its base: each `kept` line replaced by what it names, the rest as
+    /// it is. `kept tables` past the base's tables, or a `kept resource` the base hasn't, fails.
     #[test]
     fn a_state_rebuilds_against_its_base() {
         let state = "\
@@ -822,7 +812,6 @@ kept resource Cells
         assert_eq!(rebuild("", "kept children\n").as_deref(), Ok(""));
     }
 
-    /// A resource's text is found by its name among a world's last lines.
     #[test]
     fn a_resource_is_found_by_its_name() {
         assert_eq!(resource(BASE, "Physics2D"), Some("bodies"));

@@ -39,23 +39,18 @@ pub(super) enum Command {
     Add { player: u8, points: u32 },
 }
 
-/// A game of two players, whose commands add to their scores, and which loads the scene file at
-/// `scene`, if it's given one, and the script at `script`, whose component its score's entity
-/// has.
+/// Two players whose commands add to their scores. Loads the scene at `scene` and the script at
+/// `script`, if given.
 #[derive(Default)]
 pub(super) struct Game {
     commands: Vec<Command>,
     scene: Option<PathBuf>,
     script: Option<(crate::Scripts, PathBuf)>,
-    /// Whether it runs the run's mods, and the mods once it has loaded them.
     modded: bool,
     mods: Option<crate::Mods>,
-    /// Whether its session's peers predict each other's inputs, as a rollback session's do,
-    /// and what its link does to what comes.
+    /// Whether its peers predict inputs (rollback), and what its link does to packets.
     rollback: bool,
     link: Option<Conditions>,
-    /// Whether its run was networked as it attached or picked up from a world, each time, in
-    /// order.
     networked: Rc<RefCell<Vec<(&'static str, bool)>>>,
 }
 
@@ -107,7 +102,6 @@ impl Layer for Game {
     }
 }
 
-/// A peer: its stack, its context and the next tick it runs.
 struct Peer {
     stack: Stack,
     cx: Context,
@@ -115,7 +109,6 @@ struct Peer {
 }
 
 impl Peer {
-    /// A peer of `net`'s session, its game attached in `cx`.
     fn new(net: &Net, cx: Context, game: Game) -> Self {
         let (rollback, link) = (game.rollback, game.link);
         let mut stack = Stack::default();
@@ -123,8 +116,6 @@ impl Peer {
         Self::of(stack, net, cx, rollback, link)
     }
 
-    /// A peer of `net`'s session, `stack`'s layers attached in `cx`, which predicts the other's
-    /// inputs if `rollback` says so, over a link that does what `link` says.
     fn of(
         mut stack: Stack,
         net: &Net,
@@ -145,7 +136,6 @@ impl Peer {
         Self { stack, cx, next: 0 }
     }
 
-    /// A host, its game attached in `cx`, which plays alone for `alone` ticks.
     fn host(cx: Context, game: Game, alone: u64) -> Self {
         let mut host = Self::new(&Net::Host(crate::args::Listen::at("127.0.0.1:0")), cx, game);
         for _ in 0..alone {
@@ -155,7 +145,6 @@ impl Peer {
         host
     }
 
-    /// A joiner of `host`'s session, which hasn't connected yet, over a link like its host's.
     fn joiner(host: &mut Self) -> Self {
         let net = host.net();
         let address = net.listening.expect("listening").to_string();
@@ -173,7 +162,6 @@ impl Peer {
         joiner
     }
 
-    /// A frame's turn and the tick it runs, if the other peer's inputs have come.
     fn turn(&mut self) {
         self.wait();
         if self.stack.tick(&mut self.cx, Tick { number: self.next }) {
@@ -181,9 +169,6 @@ impl Peer {
         }
     }
 
-    /// A run alone, `game` attached in a context seeded by `seed`, whose own sessions, as
-    /// [`Context::host`] starts them, go through the relay at `relay`, predicting if `game`'s
-    /// session would.
     fn alone(seed: u64, game: Game, relay: &str) -> Self {
         let mut stack = Stack::default();
         let predicting = game.rollback;
@@ -202,8 +187,6 @@ impl Peer {
         Self { stack, cx, next: 0 }
     }
 
-    /// A frame's turn that runs no tick, taking up what the game asked of its session first,
-    /// and its status after, as a run's frame does.
     fn wait(&mut self) {
         self.stack.take_asked(&mut self.cx);
         if let Some(ticks) = self.stack.net_turn(&mut self.cx, self.next) {
@@ -212,7 +195,6 @@ impl Peer {
         self.cx.session = self.stack.session_status();
     }
 
-    /// Where the run's session stands, as its game's UI would show it.
     fn phase(&self) -> Option<SessionPhase> {
         self.cx.session().map(|status| status.phase().clone())
     }
@@ -221,7 +203,6 @@ impl Peer {
         self.stack.net_mut().expect("a peer")
     }
 
-    /// Sets player `player`'s points to `points`, as an edit of `author`'s, applied now.
     fn set(&mut self, author: &str, player: usize, points: u32) -> Edit {
         let world = self.cx.world();
         let score = world.query::<(crate::Entity, &Score)>().next();
@@ -244,8 +225,8 @@ impl Peer {
     }
 }
 
-/// Has `joiner` join `host`'s session, the host not ticking until it has sent its world, which
-/// the joiner starts from at the host's next tick.
+/// The host holds its ticks until its world is sent; the joiner starts from it at the host's next
+/// tick.
 fn join(host: &mut Peer, joiner: &mut Peer) {
     let at = host.next;
     let start = Instant::now();
@@ -262,10 +243,9 @@ fn join(host: &mut Peer, joiner: &mut Peer) {
     assert!(joiner.next >= at, "{} {at}", joiner.next);
 }
 
-/// Turns both peers until each has taken its game's queued commands into its inputs, and then
-/// the first tick neither has sent its inputs for, its delay on from its next: after it, none
-/// of the commands queued so far applies, those a falling delay held back applying at it. A
-/// command still queued would go out at the delay a busy machine may have raised.
+/// Turns both until each has taken its queued commands into its inputs, then to the first tick
+/// neither has sent for (its delay on from its next). After it none of those applies, except ones a
+/// falling delay held back, at it. One still queued might go out at a delay a busy machine raised.
 fn sent(host: &mut Peer, joiner: &mut Peer) -> u64 {
     let taken = |peer: &mut Peer| {
         peer.stack
@@ -276,7 +256,6 @@ fn sent(host: &mut Peer, joiner: &mut Peer) -> u64 {
     host.net().tagged.max(joiner.net().tagged)
 }
 
-/// Turns both peers until `done` holds, failing after 10 seconds.
 fn until(host: &mut Peer, joiner: &mut Peer, mut done: impl FnMut(&mut Peer, &mut Peer) -> bool) {
     let start = Instant::now();
     while !done(host, joiner) {
@@ -290,8 +269,7 @@ fn until(host: &mut Peer, joiner: &mut Peer, mut done: impl FnMut(&mut Peer, &mu
     }
 }
 
-/// Turns both peers until both are at tick `at`, the one ahead waiting there, its frames
-/// turning on without ticking, as they take and send packets.
+/// The one ahead waits at `at`, its frames turning without ticking.
 fn meet(host: &mut Peer, joiner: &mut Peer, at: u64) {
     let start = Instant::now();
     while host.next < at || joiner.next < at {
@@ -319,9 +297,8 @@ fn meet(host: &mut Peer, joiner: &mut Peer, at: u64) {
     }
 }
 
-/// Has both peers meet at tick `at`, as [`meet`] does, and wait there until each has the other's
-/// inputs for every tick before it, and has run each on them, rolling back where they held
-/// what it didn't predict: so that their worlds are those both peers' inputs make.
+/// Meets at `at`, then waits until each peer has run every earlier tick on the other's inputs,
+/// rolling back over mispredictions: their worlds are those both peers' inputs make.
 fn settle(host: &mut Peer, joiner: &mut Peer, at: u64) {
     meet(host, joiner, at);
     let start = Instant::now();
@@ -340,10 +317,9 @@ fn settle(host: &mut Peer, joiner: &mut Peer, at: u64) {
     }
 }
 
-/// Turns both peers for `time` as runs' frames do, in real time, each frame `each`, which may
-/// queue their commands, and then, for each peer, taking what came and running the ticks the
-/// time since its last frame owes it, as its session paces them, as [`Stepper::step`] runs a
-/// run's; where [`turn`](Peer::turn) runs a tick each turn the other's inputs allow.
+/// Turns both for `time` in real time, each frame running `each` (which may queue commands), then
+/// per peer taking packets and running the ticks owed since its last frame, paced as
+/// [`Stepper::step`] does. [`turn`](Peer::turn) runs one tick per turn instead.
 ///
 /// [`Stepper::step`]: crate::main_loop::Stepper::step
 fn real_time(
@@ -376,8 +352,8 @@ fn real_time(
     }
 }
 
-/// Queues a command of each peer's player a call, adding to `queued`, what each player's score
-/// comes to once both peers have run every tick they go out for.
+/// Per call queues a command for each peer's player, adding to `queued` what each score comes to
+/// once both have run every tick sent.
 fn queue(host: &mut Peer, joiner: &mut Peer, queued: &mut [u32; 2]) {
     host.stack_commands(Command::Add {
         player: 0,
@@ -391,10 +367,9 @@ fn queue(host: &mut Peer, joiner: &mut Peer, queued: &mut [u32; 2]) {
     queued[1] += 10;
 }
 
-/// A lockstep session's delay follows its link: each peer's rises as the link slows, to cover
-/// the way there, so that its ticks seldom wait for the other's inputs, and falls again below it
-/// once the link has been fast for [`FALLS`], a tick at a time, every command applying once on
-/// both peers, which hash alike.
+/// A lockstep delay rises as its link slows, so ticks seldom wait, and falls a tick at a time once
+/// the link has been fast for [`FALLS`]. Every command applies once on both peers, which hash
+/// alike.
 #[test]
 fn a_lockstep_session_s_delay_follows_its_link() {
     let _real_time = crate::testing::real_time();
@@ -410,8 +385,8 @@ fn a_lockstep_session_s_delay_follows_its_link() {
         Duration::from_millis(500),
         &mut queuing,
     );
-    // 200 ms each way: longer than a busy machine's loopback has the delay cover, as its frames
-    // wait to turn.
+    // 200 ms each way: more than the delay covers on a busy machine's loopback, whose frames wait
+    // to turn.
     let way = Duration::from_millis(200);
     for peer in [&mut host, &mut joiner] {
         peer.net().condition(Conditions {
@@ -424,7 +399,6 @@ fn a_lockstep_session_s_delay_follows_its_link() {
     let slowed = [counts(&mut host), counts(&mut joiner)];
     real_time(&mut host, &mut joiner, Duration::from_secs(1), &mut queuing);
     let before = [counts(&mut host), counts(&mut joiner)];
-    // Before the delay rose, as the way's first times came back.
     for (waited, (waits, _)) in slowed.into_iter().zip(before) {
         assert!(waits > waited.0, "none waited as the link slowed");
     }
@@ -433,9 +407,8 @@ fn a_lockstep_session_s_delay_follows_its_link() {
     for (i, peer) in [&mut host, &mut joiner].into_iter().enumerate() {
         let ((waits, ticks), (waited, ran)) = (counts(peer), before[i]);
         let (waits, ticks) = (waits - waited, ticks - ran);
-        // None on an idle machine, an eighth or so on one running tests on every thread, as a
-        // frame that waits long to turn runs the ticks owed at once after; nearly every one
-        // without the delay rising.
+        // None idle; an eighth or so with tests on every thread, where a frame that waits long to
+        // turn runs its owed ticks at once, mostly without the delay rising.
         assert!(waits * 4 < ticks, "{waits} of {ticks} ticks waited");
         risen[i] = peer.net().delay;
         assert!(
@@ -453,7 +426,7 @@ fn a_lockstep_session_s_delay_follows_its_link() {
         FALLS + Duration::from_secs(2),
         &mut queuing,
     );
-    // On the loopback it falls to 2, or to 8 or so on a machine running tests on every thread.
+    // On loopback it falls to 2; to 8 or so with tests on every thread.
     for (i, peer) in [&mut host, &mut joiner].into_iter().enumerate() {
         let delay = peer.net().delay;
         assert!(
@@ -475,10 +448,9 @@ fn a_lockstep_session_s_delay_follows_its_link() {
     );
 }
 
-/// A rollback session's window follows its link, past [`PREDICTED`] over a link slower than
-/// that covers; and its peers are kept alike in time, the one ahead slowing, as a host is
-/// ahead of its joiner by the time its world took to come and be restored: once paced, neither
-/// runs more than a few ticks ahead of the other, and every command applies once on both.
+/// A rollback window follows its link past [`PREDICTED`]. The one ahead slows (a host leads its
+/// joiner by the time its world took to come and restore), so neither runs more than a few ticks
+/// ahead, and every command applies once on both.
 #[test]
 fn rollback_peers_predict_as_far_as_their_link_needs_and_keep_alike_in_time() {
     let _real_time = crate::testing::real_time();
@@ -511,8 +483,8 @@ fn rollback_peers_predict_as_far_as_their_link_needs_and_keep_alike_in_time() {
             apart.push(host.next as i64 - joiner.next as i64);
         },
     );
-    // Unpaced, they stay 6 to 9 ticks apart; paced, 0 or 1. Both turn on this thread alone, so
-    // that a busy machine slows both alike.
+    // Unpaced they stay 6 to 9 ticks apart; paced, 0 or 1. Both turn on this thread so a busy
+    // machine slows both alike.
     let most = apart.iter().map(|apart| apart.abs()).max();
     assert!(
         most.is_some_and(|most| most <= 3),
@@ -535,9 +507,8 @@ fn rollback_peers_predict_as_far_as_their_link_needs_and_keep_alike_in_time() {
     );
 }
 
-/// A joiner's inputs go out from the tick its host needs them from, as its host's world says,
-/// whatever the two peers' delays: here a host's that its last link had raised, longer than a
-/// joiner starts with. Every command applies once on both peers, which hash alike.
+/// A joiner's inputs go out from the tick its host's world says, whatever the delays: here a
+/// host's, raised by its last link. Every command applies once on both peers, which hash alike.
 #[test]
 fn a_joiner_s_inputs_go_out_from_the_tick_its_host_s_world_names() {
     let _real_time = crate::testing::real_time();
@@ -556,10 +527,10 @@ fn a_joiner_s_inputs_go_out_from_the_tick_its_host_s_world_names() {
     assert!(!codes.iter().any(|code| code == "net.desync"), "{codes:?}");
 }
 
-/// A peer whose frames stop a while, as one restoring a large world's do, doesn't make the link
-/// seem slow: what it took late, the packets that waited for it, times the way there and back
-/// by the latest alone, and what the other held while it sent nothing, the other's echo of its
-/// clock, is taken off; so neither peer's delay goes to the most.
+/// A peer whose frames stop a while (restoring a large world) doesn't make the link seem slow:
+/// taken off the timing are what it took late (the way there and back is timed by the latest packet
+/// alone) and what the other held while it sent nothing (its echo of the clock). So neither delay
+/// goes to the most.
 #[test]
 fn a_peer_whose_frames_stop_awhile_leaves_the_delay_as_it_was() {
     let _real_time = crate::testing::real_time();
@@ -583,15 +554,15 @@ fn a_peer_whose_frames_stop_awhile_leaves_the_delay_as_it_was() {
         Duration::from_millis(300),
         &mut |_, _| {},
     );
-    // Timed by the stop, the joiner's would be the most, 16; a machine running tests on every
-    // thread raises both to 8 or so.
+    // Timed by the stop, the joiner's would be the most, 16; with tests on every thread both reach
+    // 8 or so.
     let delays = [host.net().delay, joiner.net().delay];
     assert!(delays.iter().all(|&delay| delay < MOST_DELAY), "{delays:?}");
 }
 
-/// A peer counts the stalls its ticks make waiting for the other's inputs, each from the first
-/// tick that waited to the next that ran: here the host's, as its joiner's frames stop for
-/// 300 ms, less the few ticks whose inputs it had, and the joiner's first tick's time after.
+/// Counts each stall a peer's ticks make waiting for the other's inputs, from the first tick that
+/// waited to the next that ran. Here the host's: the joiner's frames stop 300 ms, less the few
+/// ticks whose inputs it had, plus the joiner's first tick's time.
 #[test]
 fn a_peer_counts_its_stalls_and_their_time() {
     let _real_time = crate::testing::real_time();
@@ -620,7 +591,7 @@ fn a_peer_counts_its_stalls_and_their_time() {
     let after = counted(&mut host);
     let stalled = after.1 - before.1;
     assert!(after.0 > before.0, "no stall counted");
-    // 310 ms or so; more on a machine running tests on every thread, whose frames wait to turn.
+    // 310 ms or so; more with tests on every thread, whose frames wait to turn.
     assert!(
         (Duration::from_millis(250)..Duration::from_millis(600)).contains(&stalled),
         "{stalled:?} in {} stalls",
@@ -628,10 +599,9 @@ fn a_peer_counts_its_stalls_and_their_time() {
     );
 }
 
-/// A delay or window falls to the most the link has needed in the last [`FALLS`], not to what
-/// it needs at a lull, as a jittery link's has it: here a link whose way one way takes 11
-/// ticks, then 8 for 2 s, then 5, the 8 counting until it's 2 s old. A need above rises at once,
-/// [`MARGIN`] deviations past the way.
+/// A delay or window falls to the most the link needed in the last [`FALLS`], not to what it needs
+/// at a lull: a one-way time of 11 ticks, then 8 for 2 s, then 5, the 8 counting until 2 s old. A
+/// need above rises at once, [`MARGIN`] deviations past the way.
 #[test]
 fn a_delay_falls_to_the_most_the_link_needed_in_the_last_two_seconds() {
     let _real_time = crate::testing::real_time();
@@ -643,10 +613,9 @@ fn a_delay_falls_to_the_most_the_link_needed_in_the_last_two_seconds() {
         let mut host = Peer::host(Context::seeded(1), game, 1);
         let mut joiner = Peer::joiner(&mut host);
         join(&mut host, &mut joiner);
-        // The joiner's, joined as `join` returns, where the host's link waits for its line.
+        // The host's link still waits for its line when `join` returns.
         let net = joiner.net();
-        // Times the way one way at `ticks`, with a deviation of `deviation` ticks, and has the
-        // delay or window follow it at `at`.
+        // Times the way one way at `ticks`, deviating by `deviation` ticks, and follows it at `at`.
         let follow_deviating = |net: &mut Lockstep, ticks: u64, deviation: u64, at: Instant| {
             let tick = Tick::DT.as_secs_f64();
             net.link.as_mut().expect("joined").trip = Trip {
@@ -677,25 +646,23 @@ fn a_delay_falls_to_the_most_the_link_needed_in_the_last_two_seconds() {
         }
         assert!(has.ends_with(&[least; 10]), "{has:?}");
         assert_eq!(follow(net, 11, at(4210)), most);
-        // The way one way and two deviations: 8 ticks and 2 of 2 ticks, 12, a delay of 13 and
-        // a window of 14; four would be 16, the most.
+        // One way plus two deviations: 8 ticks and 2 of 2 ticks, 12, a delay of 13 and a window of
+        // 14; four would be 16, the most.
         let margin = if rollback { 14 } else { 13 };
         assert_eq!(follow_deviating(net, 8, 2, at(4220)), margin);
     }
 }
 
-/// What a slow link does in the tests: holds each packet 20 ms, and up to 10 more, and loses a
-/// fifth of them.
+/// Holds each packet 20 ms, and up to 10 more, and loses a fifth.
 pub(super) const SLOW: Conditions = Conditions {
     latency: Duration::from_millis(20),
     jitter: Duration::from_millis(10),
     loss: 0.2,
 };
 
-/// Rollback peers over a slow link run ahead of each other's inputs, on them predicted to hold
-/// nothing, and roll back to the first tick whose inputs held something, running it and the
-/// ticks after again: each player's commands apply once, though they come late, lost and out
-/// of order, and their worlds hash alike at each tick run on both peers' inputs.
+/// Rollback peers over a slow link run ahead on predicted-empty inputs and roll back to the first
+/// tick whose inputs held something. Commands apply once though late, lost and out of order, and
+/// worlds hash alike at each tick run on both peers' inputs.
 #[test]
 fn rollback_peers_over_a_slow_link_apply_each_command_once_and_hash_alike() {
     let _real_time = crate::testing::real_time();
@@ -750,7 +717,7 @@ fn rollback_peers_over_a_slow_link_apply_each_command_once_and_hash_alike() {
     );
 }
 
-/// The commands of [`Editor`]'s queue, which edit.
+/// [`Editor`]'s commands, which edit.
 #[derive(Default)]
 struct Edits(Vec<Command>);
 
@@ -777,9 +744,8 @@ impl Commands for Edits {
     }
 }
 
-/// Adds its commands' points to the score it attaches, and counts them as it applies them,
-/// as the Inspector keeps a log of its edits: a tick that ran them again would count them
-/// again.
+/// Adds its commands' points to the score it attaches, and counts them as applied, as the
+/// Inspector's edit log does: a rerun tick would count them again.
 struct Editor {
     queued: Edits,
     applied: Rc<Cell<u32>>,
@@ -804,10 +770,9 @@ impl Layer for Editor {
     }
 }
 
-/// In a rollback session, a tick that applies a command of a queue that edits, as the
-/// Inspector's, runs only once it has both peers' inputs, the peer whose it is waiting for the
-/// other's, and the other rolling back to it: so that each applies once on each peer, as a
-/// layer that keeps what it did, as the Inspector's log, counts it.
+/// In a rollback session a tick applying an editing queue's command (as the Inspector's) runs only
+/// once it has both peers' inputs: the peer whose it is waits, the other rolls back to it. So each
+/// applies once per peer, as a layer that counts what it did needs.
 #[test]
 fn rollback_peers_apply_each_edit_once() {
     let _real_time = crate::testing::real_time();
@@ -861,12 +826,11 @@ fn rollback_peers_apply_each_edit_once() {
     assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
 }
 
-/// A command of [`Stager`]'s: asks for the scene of this path from the asset root.
+/// [`Stager`]'s command: asks for the scene at this path from the asset root.
 #[derive(Reflect)]
 struct Stage(String);
 
-/// Loads `scenes/menu.ron` as it attaches, and asks at each tick for the scenes its commands
-/// name, as a game goes from its menu to a level.
+/// Loads `scenes/menu.ron` on attach; each tick asks for the scenes its commands name.
 #[derive(Default)]
 struct Stager(Vec<Stage>);
 
@@ -888,9 +852,8 @@ impl Layer for Stager {
     }
 }
 
-/// Lockstep peers, predicting each other's inputs and rolling back if `rollback`, each put
-/// in a scene the other's command asked for at the same tick, loading the texture it names
-/// on both, and hash alike, without a desync.
+/// Lockstep peers (rolling back if `rollback`) each go to a scene the other's command asked for at
+/// the same tick, load the texture it names on both, and hash alike, without a desync.
 fn peers_change_scenes_in_step(rollback: bool) {
     use std::fs;
 
@@ -968,8 +931,8 @@ fn peers_change_scenes_in_step(rollback: bool) {
     for peer in [&host, &joiner] {
         assert!(peer.cx.world().assets().texture("moss.png").is_some());
     }
-    // Each takes the last as final as the ticks after run, as a rollback peer may have taken
-    // it as predicted, its run on both peers' inputs alike.
+    // Each takes the last as final as later ticks run; a rollback peer may have taken it as
+    // predicted.
     let at = host.next.max(joiner.next) + 2;
     settle(&mut host, &mut joiner, at);
     let codes: Vec<String> = logged.try_iter().collect();
@@ -989,21 +952,20 @@ fn peers_change_scenes_in_step(rollback: bool) {
     );
 }
 
-/// Whether a [`Vetoer`]'s scene changes are vetoed: a resource, which rollback takes back with
-/// the world.
+/// Whether [`Vetoer`] vetoes scene changes: a resource, so rollback takes it back with the world.
 #[derive(Clone)]
 struct Vetoed;
 
-/// A command of [`Vetoer`]'s.
+/// [`Vetoer`]'s command.
 #[derive(Reflect)]
 enum Stagehand {
     /// Vetoes every scene change from then on.
     Veto,
-    /// Asks for the scene of this path from the asset root, unless vetoed.
+    /// Asks for the scene at this path from the asset root, unless vetoed.
     Go(String),
 }
 
-/// Loads `scenes/menu.ron` as it attaches, and applies its commands at each tick.
+/// Loads `scenes/menu.ron` on attach and applies its commands each tick.
 #[derive(Default)]
 struct Vetoer(Vec<Stagehand>);
 
@@ -1033,10 +995,9 @@ impl Layer for Vetoer {
     }
 }
 
-/// A rollback peer that changed the scene at a tick run on the other's inputs predicted, which
-/// held a veto of it, takes the change back as it rolls back to that tick: the world, the scene
-/// file in it and the logs keep nothing of it, both peers hashing alike, and no peer logs
-/// `scene.replaced` for it.
+/// A rollback peer that changed the scene at a tick run on the other's predicted inputs, whose
+/// actual ones held a veto, takes it back on rolling back: the world, its scene file and the logs
+/// keep nothing of it, both hash alike, and no peer logs `scene.replaced` for it.
 #[test]
 fn a_scene_change_rollback_takes_back_leaves_nothing_of_it() {
     use std::fs;
@@ -1058,8 +1019,8 @@ fn a_scene_change_rollback_takes_back_leaves_nothing_of_it() {
     };
     fs::write(root.join("scenes/menu.ron"), scene(1)).expect("the menu");
     fs::write(root.join("scenes/level.ron"), scene(2)).expect("the level");
-    // Slower than the ticks the peers predict ahead of each other's inputs, so that the
-    // joiner runs the tick of its change before the host's veto of it comes.
+    // Slower than the ticks peers predict ahead, so the joiner runs the tick of its change before
+    // the host's veto of it comes.
     let link = Conditions {
         latency: Duration::from_millis(80),
         jitter: Duration::ZERO,
@@ -1124,23 +1085,22 @@ fn a_scene_change_rollback_takes_back_leaves_nothing_of_it() {
     );
 }
 
-/// As [`peers_change_scenes_in_step`] says, in lockstep.
+/// [`peers_change_scenes_in_step`] in lockstep.
 #[test]
 fn lockstep_peers_change_scenes_in_step() {
     let _real_time = crate::testing::real_time();
     peers_change_scenes_in_step(false);
 }
 
-/// As [`peers_change_scenes_in_step`] says, rolling back over a slow link.
+/// [`peers_change_scenes_in_step`] rolling back over a slow link.
 #[test]
 fn rollback_peers_change_scenes_in_step() {
     let _real_time = crate::testing::real_time();
     peers_change_scenes_in_step(true);
 }
 
-/// A peer of `net`'s session in the asset root `root`, of a [`Walker`](crate::cells::tests::Walker)
-/// that builds a world of cells, which predicts the other's inputs and rolls back over a slow
-/// link if `rollback` says so.
+/// A peer in asset root `root` of a [`Walker`](crate::cells::tests::Walker) world of cells, rolling
+/// back over a slow link if `rollback`.
 fn walker(net: &Net, root: &std::path::Path, seed: u64, rollback: bool) -> Peer {
     let mut stack = Stack::default();
     stack.push_layer(crate::cells::tests::Walker::default());
@@ -1148,7 +1108,6 @@ fn walker(net: &Net, root: &std::path::Path, seed: u64, rollback: bool) -> Peer 
     Peer::of(stack, net, cx, rollback, rollback.then_some(SLOW))
 }
 
-/// Queues `walk` on `peer`'s walker.
 fn walk(peer: &mut Peer, walk: crate::cells::tests::Walk) {
     let queue = peer
         .stack
@@ -1157,11 +1116,10 @@ fn walk(peer: &mut Peer, walk: crate::cells::tests::Walk) {
     queue.push(&walk.to_value()).expect("queued");
 }
 
-/// Lockstep peers, predicting each other's inputs and rolling back if `rollback`, bring the
-/// same cells in and take the same out as each moves the viewer or an entity in turn, cell 1
-/// coming back from what it keeps, their worlds hashing alike once both have run each tick on
-/// both peers' inputs, without a desync: rolling back, each runs ticks again across cells'
-/// entries and exits.
+/// Lockstep peers (rolling back if `rollback`) bring in and take out the same cells as each moves
+/// the viewer or an entity in turn, cell 1 coming back from what it keeps. Worlds hash alike once
+/// both have run each tick on both peers' inputs, though rolling back reruns ticks across entries
+/// and exits.
 fn peers_stream_cells_in_step(rollback: bool) {
     use crate::cells::tests::{Walk, id_of, project, xs};
     use crate::dirs::tests::Scratch;
@@ -1224,23 +1182,22 @@ fn peers_stream_cells_in_step(rollback: bool) {
     );
 }
 
-/// As [`peers_stream_cells_in_step`] says, in lockstep.
+/// [`peers_stream_cells_in_step`] in lockstep.
 #[test]
 fn lockstep_peers_stream_cells_in_step() {
     let _real_time = crate::testing::real_time();
     peers_stream_cells_in_step(false);
 }
 
-/// As [`peers_stream_cells_in_step`] says, rolling back over a slow link.
+/// [`peers_stream_cells_in_step`] rolling back over a slow link.
 #[test]
 fn rollback_peers_stream_cells_in_step() {
     let _real_time = crate::testing::real_time();
     peers_stream_cells_in_step(true);
 }
 
-/// A joiner whose cell file isn't its host's, which their worlds part at as the cell comes in,
-/// names it and leaves the session, to try again later, rather than taking the host's world and
-/// parting again at the next cell.
+/// A joiner whose cell file isn't its host's, so their worlds part as the cell comes in, names it
+/// and leaves to retry later, not taking the host's world and parting again at the next cell.
 #[test]
 fn a_joiner_whose_cell_file_differs_names_it_and_leaves() {
     use crate::cells::tests::{Walk, project};
@@ -1284,9 +1241,8 @@ fn a_joiner_whose_cell_file_differs_names_it_and_leaves() {
     assert!(seen.iter().any(|code| code == "net.lost"), "{seen:?}");
 }
 
-/// A joiner that joins once its host's cells have come and gone starts from the host's world,
-/// what the cells keep among it, and brings them in again alike: cell 1's entity where the host
-/// left it.
+/// A joiner joining after its host's cells came and went starts from the host's world, with what
+/// the cells keep, and brings them in again alike: cell 1's entity where the host left it.
 #[test]
 fn a_joiner_takes_what_its_host_s_cells_keep() {
     use crate::cells::tests::{Walk, id_of, project, xs};
@@ -1303,7 +1259,7 @@ fn a_joiner_takes_what_its_host_s_cells_keep() {
     );
     for step in [Walk::Viewer(25.0), Walk::Crate(12.0), Walk::Viewer(100.0)] {
         walk(&mut host, step);
-        // Past the tick its commands go out for, `DELAY` on, as a peer's do alone too.
+        // Past the tick its commands go out for, `DELAY` on, as a lone peer's do.
         for _ in 0..=DELAY {
             host.turn();
         }
@@ -1313,7 +1269,6 @@ fn a_joiner_takes_what_its_host_s_cells_keep() {
         world.resource::<crate::cells::CellState>().cloned()
     };
     let held = kept(&host).expect("the host's cells came in");
-    // Cell 1 alone changed; the others went out as they came.
     assert_eq!((held.cells_in.len(), held.kept.len()), (0, 1));
     let address = host.net().listening.expect("listening").to_string();
     let mut joiner = walker(
@@ -1342,7 +1297,6 @@ fn a_joiner_takes_what_its_host_s_cells_keep() {
     assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
 }
 
-/// Queues a command for each player on its peer, and turns both, `turns` times.
 fn play(host: &mut Peer, joiner: &mut Peer, turns: usize) {
     for _ in 0..turns {
         host.stack_commands(Command::Add {
@@ -1359,7 +1313,7 @@ fn play(host: &mut Peer, joiner: &mut Peer, turns: usize) {
     }
 }
 
-/// Sends the fields of each event logged with `net.desync_field`, by name, as text.
+/// The fields of each `net.desync_field` event, by name, as text.
 struct Partings(mpsc::Sender<BTreeMap<String, String>>);
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Partings {
@@ -1385,11 +1339,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Partings {
     }
 }
 
-/// A joiner starts from the host's world, joining within [`DELAY`] ticks of the host's start,
-/// before which the host has sent no inputs; from then each tick runs on both players' commands
-/// on both peers, which hash alike. Worlds that go apart, as commands go both ways, are named
-/// at their tick once by each peer, the joiner naming the field where they parted, there, with
-/// both values, and made the same again once.
+/// A joiner joins within [`DELAY`] ticks of the host's start (it has sent no inputs before) and
+/// starts from its world; each tick runs on both players' commands on both peers, which hash alike.
+/// Worlds that part are named at their tick once by each peer, the joiner naming the field they
+/// parted at with both values, and made the same again once.
 #[test]
 fn two_peers_run_each_tick_on_both_players_inputs() {
     let _real_time = crate::testing::real_time();
@@ -1410,15 +1363,15 @@ fn two_peers_run_each_tick_on_both_players_inputs() {
     let [ours, theirs] = host.score();
     assert!(ours > 0 && theirs > 0, "{ours} {theirs}");
 
-    // The host's world changed behind the session's back, between ticks, the players playing
-    // on: the first tick after parts the worlds by the change to player 1's points.
+    // The host's world changed behind the session's back between ticks: the first tick after parts
+    // the worlds by player 1's points.
     play(&mut host, &mut joiner, 10);
     let (edited, points) = (host.next, host.score()[1]);
     let edit = host.set("cheat", 1, 5);
     host.cx.apply_edit(edit).expect("applied");
-    // The host runs ahead as far as its joiner's inputs reach, and the joiner then past it as
-    // far as the host's do, so that the joiner runs ticks after the one their worlds parted at
-    // before the host's world after it comes, as over a link slower than the loopback.
+    // The host runs ahead as far as its joiner's inputs reach, the joiner past it as far as the
+    // host's do: the joiner runs ticks after the parting one before the host's world after it
+    // comes, as over a link slower than loopback.
     for _ in 0..DELAY * 2 {
         host.stack_commands(Command::Add {
             player: 0,
@@ -1469,11 +1422,9 @@ fn two_peers_run_each_tick_on_both_players_inputs() {
     assert_eq!(joiner - host, i64::from(points) - 5, "{parting:?}");
 }
 
-/// A lockstep session's host and joiner are networked as their layers attach, and the joiner as
-/// its layers pick up from its host's world; and so is a host started again from a snapshot of
-/// its world, as `gg run` restarts a peer, as its layers pick up from it in place of attaching:
-/// so that a game keeps what only a run alone has, as a player it plays itself, out of a
-/// session's worlds.
+/// Hosts and joiners are networked as their layers attach, a joiner as they pick up from its host's
+/// world, and so is a host restarted from a snapshot (as `gg run` does). So a game keeps what only
+/// a run alone has (a player it plays itself) out of sessions' worlds.
 #[test]
 fn peers_are_networked_as_their_layers_attach_and_pick_up() {
     let _real_time = crate::testing::real_time();
@@ -1521,8 +1472,8 @@ fn peers_are_networked_as_their_layers_attach_and_pick_up() {
     assert_eq!(*restarted_saw.borrow(), [("restored", true)]);
 }
 
-/// A joiner its host refuses, as of another app, closes its connection and tries again only
-/// after [`REFUSED`], so that the host refuses it once.
+/// A joiner its host refuses (another app) closes its connection and retries only after
+/// [`REFUSED`], so the host refuses it once.
 #[test]
 fn a_refused_joiner_waits_before_trying_again() {
     let _real_time = crate::testing::real_time();
@@ -1543,21 +1494,20 @@ fn a_refused_joiner_waits_before_trying_again() {
             .count();
         refused
     });
-    // Each side's.
     assert_eq!(refused, 2);
     assert!(other.link.is_none() && host.net().link.is_none());
 }
 
-/// A joiner given another code than its host's is refused in its handshake, by the host and by
-/// itself, which tries again only after [`REFUSED`], never taking the joiner's place; a joiner
-/// given the host's then joins.
+/// A joiner given another code than its host's is refused in its handshake by the host and by
+/// itself, which retries only after [`REFUSED`], never taking the joiner's place; a joiner given
+/// the host's code then joins.
 #[test]
 fn a_joiner_given_another_code_is_refused() {
     let _real_time = crate::testing::real_time();
     let logged = crate::testing::logged();
     let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
     let address = host.net().listening.expect("listening").to_string();
-    // Of the host's app and layers, so that its code alone differs.
+    // Of the host's app and layers, so its code alone differs.
     let layers = host.net().layers.clone();
     let layers: Vec<&str> = layers.split(' ').collect();
     let code = "0000-0000-0000-0000".parse().expect("a code");
@@ -1572,15 +1522,14 @@ fn a_joiner_given_another_code_is_refused() {
         refused += codes.filter(|code| code == "net.refused").count();
         refused
     });
-    // Each side's.
     assert_eq!(refused, 2);
     let mut joiner = Peer::joiner(&mut host);
     join(&mut host, &mut joiner);
 }
 
-/// Turns a refused joiner and its host, `turn` saying how many refusals have been logged, until
-/// each side's has, and then for a fifth of a second, in which a joiner that tried again sooner
-/// than [`REFUSED`] would be refused again.
+/// Turns a refused joiner and its host until each side has logged a refusal (`turn` counts them),
+/// then a fifth of a second, in which a joiner retrying sooner than [`REFUSED`] would be refused
+/// again.
 fn until_refused_and_after(mut turn: impl FnMut() -> usize) {
     let start = Instant::now();
     let mut both = None;
@@ -1595,12 +1544,11 @@ fn until_refused_and_after(mut turn: impl FnMut() -> usize) {
 }
 
 thread_local! {
-    /// Whether the links of this thread's test ignore the other end's `at`, so that their
-    /// packets stay on the relay, as behind routers that hole punching doesn't get through.
+    /// Whether this thread's test links ignore the other end's `at`, so their packets stay on the
+    /// relay, as behind routers hole punching doesn't get through.
     pub(super) static UNPUNCHED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Has the links made on this thread ignore the other end's `at` while it's kept.
 struct Unpunched;
 
 impl Unpunched {
@@ -1616,14 +1564,12 @@ impl Drop for Unpunched {
     }
 }
 
-/// A relay of the tests' own, on the loopback, and where it is, as `--relay` names it.
 fn relay() -> (gg_relay::Relay, String) {
     let relay = gg_relay::serve("127.0.0.1:0", gg_relay::Limits::default()).expect("a relay");
     let at = relay.address().to_string();
     (relay, at)
 }
 
-/// A host at the relay `at` alone and a joiner given that relay, each of `game()`.
 fn relayed(at: &str, game: impl Fn() -> Game) -> (Peer, Peer) {
     let listen = Listen {
         address: None,
@@ -1636,8 +1582,7 @@ fn relayed(at: &str, game: impl Fn() -> Game) -> (Peer, Peer) {
     (host, joiner)
 }
 
-/// Plays `host` and `joiner` until both have said their packets go direct, `net.direct`, as
-/// `logged` has their codes, failing after 10 s.
+/// Plays both until each has logged `net.direct`; fails after 10 s.
 fn until_direct(host: &mut Peer, joiner: &mut Peer, logged: &crate::testing::Logged) {
     let start = Instant::now();
     let mut direct = 0;
@@ -1653,11 +1598,10 @@ fn until_direct(host: &mut Peer, joiner: &mut Peer, logged: &crate::testing::Log
     assert_eq!(direct, 2);
 }
 
-/// A host registered at a relay alone and a joiner given the relay and the code meet there, by
-/// the room their code gives, and play in step, their worlds hashing alike: their stream through
-/// the relay, each link's socket bound there, and their packets going direct once both see the
-/// way direct works, the relay forwarding none after; or, `unpunched`, as behind routers hole
-/// punching doesn't get through, through the relay all along.
+/// A host registered alone at a relay and a joiner given its address and the code meet there by the
+/// code's room and play in step, worlds hashing alike. Their stream goes through the relay; packets
+/// go direct once both see direct works, the relay forwarding none after. With `unpunched` (as
+/// behind routers hole punching doesn't get through), all goes through it.
 fn peers_meet_through_a_relay(rollback: bool, unpunched: bool) {
     let logged = crate::testing::logged();
     let _unpunched = unpunched.then(Unpunched::new);
@@ -1670,7 +1614,6 @@ fn peers_meet_through_a_relay(rollback: bool, unpunched: bool) {
     play(&mut host, &mut joiner, 50);
     if !unpunched {
         until_direct(&mut host, &mut joiner, &logged);
-        // Those sent through the relay before forwarded.
         play(&mut host, &mut joiner, 10);
     }
     let forwarded = relay.forwarded();
@@ -1715,10 +1658,9 @@ fn peers_whose_routers_let_no_packet_through_play_through_the_relay() {
     peers_meet_through_a_relay(false, true);
 }
 
-/// A joiner given another code comes for another room at the relay, which no host holds; one
-/// given the room alone, as one on the way to the relay sees it, is paired with the host and
-/// refused at the handshake, never taking the joiner's place; and a joiner given the code then
-/// joins.
+/// A joiner given another code comes for another room, which no host holds. One given the room
+/// alone (as one on the way to the relay sees it) is paired with the host and refused at the
+/// handshake, never taking the joiner's place; a joiner given the code then joins.
 #[test]
 fn a_stranger_who_has_the_room_but_not_the_code_is_refused_at_the_handshake() {
     let _real_time = crate::testing::real_time();
@@ -1760,7 +1702,6 @@ fn a_stranger_who_has_the_room_but_not_the_code_is_refused_at_the_handshake() {
     relay.stop();
 }
 
-/// Turns `peer` alone until `done` holds of where its session stands, failing after 10 s.
 fn until_phase(peer: &mut Peer, done: impl Fn(Option<SessionPhase>) -> bool) {
     let start = Instant::now();
     while !done(peer.phase()) {
@@ -1774,11 +1715,10 @@ fn until_phase(peer: &mut Peer, done: impl Fn(Option<SessionPhase>) -> bool) {
     }
 }
 
-/// Runs alone, partway through, host a session through their relay and join it by the code the
-/// host's session gives, as a game's own UI starts them: a joiner given a code no run hosts
-/// waits, unhosted, until it leaves; then the peers play in step, their worlds hashing alike,
-/// each phase as a game's UI would show it. The joiner leaving plays on alone, its host waiting
-/// for another; and the host leaving has its joiner lose it.
+/// Runs started alone, partway through, host a session through their relay and join it by the
+/// host's code, as a game's UI starts them. A joiner given a code no run hosts waits, unhosted,
+/// until it leaves; then the peers play in step, worlds hashing alike. A leaving joiner plays on
+/// alone, its host waiting for another; a leaving host has its joiner lose it.
 fn runs_alone_host_and_join_by_the_code(rollback: bool) {
     let (relay, at) = relay();
     let networked = Rc::new(RefCell::new(Vec::new()));
@@ -1801,7 +1741,6 @@ fn runs_alone_host_and_join_by_the_code(rollback: bool) {
     assert!(host.cx.networked());
     assert_eq!(host.cx.player(), Some(0));
     assert_eq!(host.phase(), Some(SessionPhase::Waiting));
-    // The host plays on alone meanwhile.
     assert_eq!(host.next, 6);
     let code = host.cx.session().expect("a session").code().to_owned();
     // A code no run hosts, until the joiner leaves it.
@@ -1833,7 +1772,6 @@ fn runs_alone_host_and_join_by_the_code(rollback: bool) {
     assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
     let [ours, theirs] = host.score();
     assert!(ours > 0 && theirs > 0, "{ours} {theirs}");
-    // The joiner leaves, and plays on alone from its host's world.
     joiner.cx.leave();
     joiner.turn();
     assert!(joiner.phase().is_none() && joiner.cx.player().is_none());
@@ -1841,7 +1779,6 @@ fn runs_alone_host_and_join_by_the_code(rollback: bool) {
     joiner.turn();
     assert_eq!(joiner.next, next + 1);
     until_phase(&mut host, |phase| phase == Some(SessionPhase::Waiting));
-    // It joins again, and the host leaves.
     joiner.cx.join(&code).expect("the code");
     until(&mut host, &mut joiner, |_, joiner| {
         joiner.phase() == Some(SessionPhase::Playing)
@@ -1865,9 +1802,8 @@ fn runs_alone_host_and_join_by_the_code_predicting() {
     runs_alone_host_and_join_by_the_code(true);
 }
 
-/// A thread that connects through a relay notes that no host holds its room, and ends, coming
-/// for it no more, once what it looks for is gone, as a joiner that leaves is: its channel
-/// closes.
+/// A thread that connects through a relay notes that no host holds its room, and ends once what it
+/// looks for is gone (as a leaving joiner's: its channel closes), coming for it no more.
 #[test]
 fn a_thread_that_connects_ends_with_its_session() {
     let _real_time = crate::testing::real_time();
@@ -1886,9 +1822,9 @@ fn a_thread_that_connects_ends_with_its_session() {
     relay.stop();
 }
 
-/// A run starts a session of its own only where it can, saying why not: not without a relay,
-/// nor recorded, nor given a code that isn't one, which the error doesn't repeat; and a joiner
-/// whose relay can't be reached says so as it tries.
+/// A run starts a session of its own only where it can, saying why not: no relay, a recorded run,
+/// or a code that isn't one (the error doesn't repeat it). A joiner whose relay can't be reached
+/// says so as it tries.
 #[test]
 fn a_run_starts_a_session_of_its_own_only_where_it_can() {
     let _real_time = crate::testing::real_time();
@@ -1914,7 +1850,7 @@ fn a_run_starts_a_session_of_its_own_only_where_it_can() {
     });
 }
 
-/// A name's first IPv4 address is the one taken, wherever its resolver lists it, else its first.
+/// Takes a name's first IPv4 address wherever its resolver lists it, else its first.
 #[test]
 fn a_name_s_ipv4_address_is_taken_first() {
     let at = |text: &str| text.parse::<SocketAddr>().expect("an address");
@@ -1929,8 +1865,8 @@ fn a_name_s_ipv4_address_is_taken_first() {
     );
 }
 
-/// A session whose relay is replaced at its address goes on through the new one: both peers
-/// lose their link, the host registers again within [`REGISTER`], and the joiner joins again.
+/// A session whose relay is replaced at its address goes on through the new one: both peers lose
+/// their link, the host registers again within [`REGISTER`], and the joiner joins again.
 #[test]
 fn peers_meet_again_through_a_relay_replaced() {
     let _real_time = crate::testing::real_time();
@@ -1950,9 +1886,9 @@ fn peers_meet_again_through_a_relay_replaced() {
     again.stop();
 }
 
-/// A link takes the packets the other end sealed, each once: one sent again, one sealed under
-/// another link's keys, one under a nonce of the stream's and one in plain text, each from the
-/// other end's socket, are dropped, and warned of once (`net.forged`).
+/// A link takes the packets the other end sealed, each once: a repeat, one sealed under another
+/// link's keys, one under a nonce of the stream's and one in plain text, each from the other end's
+/// socket, are dropped and warned of once (`net.forged`).
 #[test]
 fn a_link_takes_the_other_end_s_packets_alone_each_once() {
     let _real_time = crate::testing::real_time();
@@ -1991,8 +1927,8 @@ fn a_link_takes_the_other_end_s_packets_alone_each_once() {
     assert_eq!(forged.count(), 1);
 }
 
-/// What each end of a link counts it sent, on its stream and in packets, the other counts it
-/// took: the stream's bytes as sealed, more than its lines', and the packets and their bytes.
+/// What each end counts it sent, on its stream and in packets, the other counts taken: stream bytes
+/// as sealed (more than its lines') and packets with their bytes.
 #[test]
 fn each_end_of_a_link_counts_what_the_other_sent() {
     let _real_time = crate::testing::real_time();
@@ -2020,8 +1956,8 @@ fn each_end_of_a_link_counts_what_the_other_sent() {
             (stream, packets)
         })
     };
-    // Until both ways are as asserted below, which counts that match alone aren't: they match
-    // at nothing, before the links' threads have written.
+    // Until both ways are as asserted below; counts that match alone prove nothing: they match at
+    // zero, before the links' threads have written.
     let done = |sends: u64, (stream, packets): ([u64; 2], [(u64, u64); 2])| {
         stream[0] == stream[1]
             && stream[0] > sends * lines.len() as u64
@@ -2047,8 +1983,8 @@ fn each_end_of_a_link_counts_what_the_other_sent() {
     }
 }
 
-/// What a link writes on its stream is sealed: its bytes hold none of its lines, which the
-/// other end's keys open.
+/// What a link writes on its stream is sealed: its bytes hold none of its lines, which the other
+/// end's keys open.
 #[test]
 fn a_link_s_stream_holds_none_of_its_lines() {
     let _real_time = crate::testing::real_time();
@@ -2070,8 +2006,8 @@ fn a_link_s_stream_holds_none_of_its_lines() {
     assert_eq!(read, text);
 }
 
-/// A connection to `host`'s session that isn't a peer's, given the session's code: its stream,
-/// once its handshake is done, the host turning meanwhile, and what seals what it writes.
+/// A non-peer connection to `host`'s session, given its code: its stream once the handshake is done
+/// (the host turning meanwhile), and what seals writes.
 fn stranger(host: &mut Peer) -> (TcpStream, Sealer) {
     let address = host.net().listening.expect("listening");
     let made = thread::spawn(move || {
@@ -2086,8 +2022,8 @@ fn stranger(host: &mut Peer) -> (TcpStream, Sealer) {
     (stream, Sealer::new(Arc::new(keys)))
 }
 
-/// A line as long as [`MAX_LINE`] is read, and one longer, as a connection that never breaks
-/// its line sends, drops its connection before its hello, freeing the joiner's place.
+/// A line as long as [`MAX_LINE`] is read; a longer one, as from a connection that never ends its
+/// line, drops the connection before its hello, freeing the joiner's place.
 #[test]
 fn a_line_past_the_most_drops_its_connection() {
     let _real_time = crate::testing::real_time();
@@ -2121,7 +2057,7 @@ fn a_line_past_the_most_drops_its_connection() {
 }
 
 /// A connection that says no hello within [`HELLO`] of the host's taking it is lost, freeing the
-/// joiner's place, which a joiner then takes.
+/// joiner's place.
 #[test]
 fn a_connection_that_says_no_hello_is_lost() {
     let _real_time = crate::testing::real_time();
@@ -2148,9 +2084,8 @@ fn a_connection_that_says_no_hello_is_lost() {
     join(&mut host, &mut joiner);
 }
 
-/// A peer that says hello and then nothing, as one cut off from the network or stopped in a
-/// debugger, is lost once nothing has come by its link for the link's silence, the host playing
-/// on alone; until then it's kept.
+/// A peer that says hello and then nothing (cut off, or stopped in a debugger) is lost once nothing
+/// has come by its link for the link's silence, the host playing on alone; until then it's kept.
 #[test]
 fn a_peer_nothing_comes_from_is_lost() {
     let _real_time = crate::testing::real_time();
@@ -2186,9 +2121,9 @@ fn a_peer_nothing_comes_from_is_lost() {
     assert!(host.next > at, "the host plays on alone");
 }
 
-/// A peer whose frames stop for longer than its link's silence, as one busy restoring a large
-/// world, or stopped at a script's breakpoint, is kept, as its link's writing thread says it's
-/// there; and the peers go on in step once its frames go on.
+/// A peer whose frames stop longer than its link's silence (restoring a large world, a script's
+/// breakpoint) is kept, as its link's writing thread says it's there; the peers go on in step once
+/// its frames resume.
 #[test]
 fn a_peer_whose_frames_stop_is_kept_by_its_link_s_thread() {
     let _real_time = crate::testing::real_time();
@@ -2215,8 +2150,8 @@ fn a_peer_whose_frames_stop_is_kept_by_its_link_s_thread() {
     assert!(!codes.iter().any(|code| code == "net.lost"), "{codes:?}");
 }
 
-/// A joiner of another build, whose simulation may go otherwise, is refused, its hello naming
-/// both builds: one of the same source and another package too.
+/// A joiner of another build, whose simulation may differ, is refused, its hello naming both
+/// builds: one of the same source and another package too.
 #[test]
 fn a_joiner_of_another_build_is_refused() {
     let _real_time = crate::testing::real_time();
@@ -2260,10 +2195,9 @@ fn a_joiner_of_another_build_is_refused() {
     assert!(other.link.is_none() && host.net().link.is_none());
 }
 
-/// A run that names its source is named by it and by its package's bytes, as two runs of one
-/// source and package are alike wherever their packages are, and one of another package isn't,
-/// or by its source alone if it reads the disk; its session's hello naming it so, in place of
-/// its executable's digest.
+/// A run that names its source is named by it and its package's bytes, so two runs of one source
+/// and package are alike wherever their packages are and one of another package isn't; or by its
+/// source alone if it reads the disk. Its hello names it so, not by its executable's digest.
 #[test]
 fn a_run_naming_its_source_is_named_by_it_and_its_package() {
     use crate::package::{Kind, Package, Writer};
@@ -2304,13 +2238,13 @@ fn a_run_naming_its_source_is_named_by_it_and_its_package() {
         panic!("a peer");
     };
     assert_eq!(peer.build, format!("3f8a6c2e9b1d4057-{digest:016x}"));
-    // Closed first, as Windows removes no file that's open.
+    // Closed first: Windows removes no open file.
     drop((session, build));
     std::fs::remove_dir_all(&dir).expect("removed");
 }
 
-/// A peer's command that names the other's player is refused by both peers, which go on in
-/// step, its command for its own player applying: neither player steers the other's.
+/// A peer's command naming the other's player is refused by both peers, which go on in step; its
+/// command for its own player applies.
 #[test]
 fn a_peer_s_command_for_the_other_s_player_is_refused_by_both() {
     let _real_time = crate::testing::real_time();
@@ -2337,8 +2271,8 @@ fn a_peer_s_command_for_the_other_s_player_is_refused_by_both() {
 }
 
 /// An edit the joiner offers, and a save of a scene file the host's game loaded, apply on both
-/// peers before the same tick, each answered to the peer that offered it; the joiner, which
-/// doesn't look at the files, applies the save as the host does, and keeps the file's text.
+/// peers before the same tick, each answered to its offerer. The joiner, which doesn't look at
+/// files, applies the save as the host does and keeps the file's text.
 #[cfg(feature = "dev")]
 #[test]
 fn offered_edits_and_scene_saves_apply_on_both_peers() {
@@ -2364,7 +2298,6 @@ fn offered_edits_and_scene_saves_apply_on_both_peers() {
     join(&mut host, &mut joiner);
     assert_eq!(joiner.cx.scenes.files, host.cx.scenes.files);
 
-    // The joiner's edit.
     let edit = joiner.set("agent", 0, 1000);
     let ticket = joiner.net().offer(edit);
     until(&mut host, &mut joiner, |_, joiner| {
@@ -2377,8 +2310,7 @@ fn offered_edits_and_scene_saves_apply_on_both_peers() {
     assert_eq!(host.score(), [1000, 0]);
     assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
 
-    // The scene file saved, before either peer's first look, which finds it changed from the
-    // text it loaded as.
+    // Saved before either peer's first look, which finds it changed from the text it loaded as.
     let moved = Transform {
         translation: DVec3::new(1.0, 2.0, 3.0),
         ..Transform::IDENTITY
@@ -2405,9 +2337,8 @@ fn offered_edits_and_scene_saves_apply_on_both_peers() {
     }
 }
 
-/// A joiner runs its host's scripts, which come with its world, whatever its own files hold;
-/// and a script's save, which the host alone looks at, reloads on both peers before the same
-/// tick, the component's fields changing on both.
+/// A joiner runs its host's scripts, which come with its world, whatever its own files hold; a
+/// script's save, which only the host looks at, reloads on both peers before the same tick.
 #[cfg(feature = "dev")]
 #[test]
 fn a_joiner_runs_its_host_s_scripts_which_reload_on_both_peers_as_they_re_saved() {
@@ -2478,8 +2409,7 @@ fn a_joiner_runs_its_host_s_scripts_which_reload_on_both_peers_as_they_re_saved(
     assert_eq!(joiner.cx.hosts.applied(), applied);
 }
 
-/// A joiner without its host's mod runs the host's, which comes with its world, the peers going
-/// on alike.
+/// A joiner without its host's mod runs the host's, which comes with its world.
 #[test]
 fn a_joiner_without_its_host_s_mod_runs_the_host_s() {
     use std::fs;
@@ -2531,13 +2461,12 @@ fn a_joiner_without_its_host_s_mod_runs_the_host_s() {
     );
 }
 
-/// Patches `gg run` gives both peers alike, in lockstep and in a rollback session: the host's,
-/// alone, applies before the tick its delay on from its next; the joiner's, which it got before
-/// it joined, before the first tick of its host's world; and once they've joined, the host's
-/// next applies on both before the tick it chose, the joiner waiting there for its own from `gg
-/// run`, or, in a rollback session, there or past it on the host's inputs predicted, rolling
-/// back to it once its patch has come. Each is answered with the tick it applied before, here a
-/// refusal, as no process takes the tables of a test.
+/// Patches `gg run` gives both peers alike. The host's, alone, applies before the tick its delay on
+/// from its next. The joiner's, got before it joined, applies before the first tick of its host's
+/// world. Once joined, the host's next applies on both before the tick it chose; the joiner waits
+/// there for its own, or, in rollback, is there or past it on predicted inputs and rolls back once
+/// its patch comes. Each is answered with the tick it applied before, here a refusal: no process
+/// takes a test's tables.
 #[cfg(feature = "dev")]
 #[test]
 fn patches_apply_on_both_peers_before_the_ticks_the_host_chooses() {
@@ -2549,7 +2478,6 @@ fn patches_apply_on_both_peers_before_the_ticks_the_host_chooses() {
 
 #[cfg(feature = "dev")]
 fn patches_apply_before_the_ticks_the_host_chooses(rollback: bool) {
-    /// Gives `peer` the patch `table` names, as `gg run` does through the API.
     fn patch(peer: &mut Peer, table: subsecond::JumpTable) -> Ticket {
         let Ok(ticket) = peer.stack.offer_patch(table) else {
             panic!("a peer offers its patches");
@@ -2581,8 +2509,8 @@ fn patches_apply_before_the_ticks_the_host_chooses(rollback: bool) {
     assert_eq!(at, chosen);
     refused(done);
 
-    // The joiner's, from before it joined, which applies as the first tick of its host's world
-    // runs, once the host's inputs for it, which follow the world, have come.
+    // The joiner's, from before it joined: applies as the first tick of its host's world runs, once
+    // the host's inputs for it, which follow the world, have come.
     let mut joiner = Peer::joiner(&mut host);
     let theirs = patch(&mut joiner, table());
     let world = host.next;
@@ -2594,10 +2522,9 @@ fn patches_apply_before_the_ticks_the_host_chooses(rollback: bool) {
     assert_eq!(at, world);
     refused(done);
 
-    // The host's next, which the joiner waits for from `gg run`, though it has the host's inputs
-    // for the tick, as the host goes on.
+    // The host's next: the joiner waits for its own from `gg run` though it has the host's inputs
+    // for the tick.
     let second = patch(&mut host, table());
-    // The tick the host's next inputs go out for, its delay on, as the link has it then.
     let due = |host: &mut Peer| host.net().patches.due.last().map(|&(_, at)| at);
     until(&mut host, &mut joiner, |host, _| due(host) != Some(UNSENT));
     let chosen = due(&mut host).expect("due");
@@ -2632,7 +2559,6 @@ fn patches_apply_before_the_ticks_the_host_chooses(rollback: bool) {
 }
 
 impl Peer {
-    /// Queues `command` for the game's next tick.
     fn stack_commands(&mut self, command: Command) {
         let queue = self.stack.commands_of(0).expect("the game queues commands");
         queue
@@ -2641,13 +2567,13 @@ impl Peer {
     }
 }
 
-/// A command of [`Painter`]'s: spawns a sprite of this texture.
+/// [`Painter`]'s command: spawns a sprite of this texture.
 #[cfg(feature = "dev")]
 #[derive(Reflect)]
 struct Paint(crate::Texture);
 
-/// Loads `assets/stone.png` under its context's root as it loads, attaches a sprite of it, and
-/// spawns a sprite of each texture its commands give.
+/// Loads `assets/stone.png` under its context's root, attaches a sprite of it, and spawns a sprite
+/// of each texture its commands give.
 #[cfg(feature = "dev")]
 #[derive(Default)]
 struct Painter {
@@ -2683,11 +2609,10 @@ impl Layer for Painter {
     }
 }
 
-/// A joiner whose disk holds none of its host's ID files, as another machine's checkout without
-/// those not yet committed, names its textures as its host does: those it loaded, as its host's
-/// world comes, one both add after it joined, as the host's line says before the command that
-/// names it, and one the host alone loaded where text named it, which the joiner loads as it
-/// reads that command; so the peers' worlds hash alike, and neither parts from the other.
+/// A joiner whose disk holds none of its host's ID files (another machine's checkout, files not yet
+/// committed) names its textures as its host does: those it loaded, as the host's world comes; one
+/// both add after it joined, as the host's line says before the command naming it; and one only the
+/// host loaded where text named it, which the joiner loads as it reads that command.
 #[cfg(feature = "dev")]
 #[test]
 fn a_joiner_names_textures_as_its_host_does() {
@@ -2731,12 +2656,11 @@ fn a_joiner_names_textures_as_its_host_does() {
     );
     host.turn();
     let address = host.net().listening.expect("listening").to_string();
-    // As a joiner's run starts, its textures by their paths until its host's world comes.
+    // As a joiner's run starts: its textures by path until its host's world comes.
     let mut cx = Context::seeded(2).root(&theirs);
     cx.name_as([]);
     let mut joiner = peer(&Net::Join(crate::args::Toward::Address(address)), cx);
     join(&mut host, &mut joiner);
-    // The name of the texture a peer loaded from `path`.
     let textured = |peer: &Peer, path: &str| {
         let assets = peer.cx.world().assets();
         let texture = assets.texture(path)?;
@@ -2767,8 +2691,8 @@ fn a_joiner_names_textures_as_its_host_does() {
     let at = sent(&mut host, &mut joiner) + 1;
     meet(&mut host, &mut joiner, at);
     assert_eq!(textured(&joiner, path).as_deref(), Some(late));
-    // One the host loaded where text named it, as through its tool API, which the joiner's
-    // layers never add, loads there as the command naming it is read.
+    // One the host loaded where text named it, as through its tool API, which the joiner's layers
+    // never add, loads there as the command naming it is read.
     host.cx
         .load_named([crate::assets::Asset::Texture(named)], false);
     let texture = host.cx.world().assets().texture(named);
@@ -2788,12 +2712,10 @@ fn a_joiner_names_textures_as_its_host_does() {
     );
 }
 
-/// A scene file's save that names textures no layer added has its host load them before it
-/// offers it, so that their names go out first; the joiner, whose disk holds none of the ID
-/// files, loads each by the path its host's name gives, or stands in for one it hasn't, and
-/// the peers hash alike. A save naming a texture the host can't load isn't offered, as the
-/// joiner might stand in for it. The joiner loads the texture the host's scene named as it
-/// joined, as the host's world comes, and one an edit of the host's names, as it reads it.
+/// A scene file's save naming textures no layer added has its host load them before offering it, so
+/// their names go out first; the joiner, with none of the ID files, loads each by the path the
+/// host's name gives, or stands in for one it hasn't. A save naming a texture the host can't load
+/// isn't offered, as the joiner might stand in for it.
 #[cfg(feature = "dev")]
 #[test]
 fn a_joiner_loads_the_textures_its_hosts_scene_saves_name() {
@@ -2828,7 +2750,6 @@ fn a_joiner_loads_the_textures_its_hosts_scene_saves_name() {
         let file = ours.join("assets").join(format!("{name}.png.meta"));
         fs::write(file, meta.text()).expect("its ID file");
     }
-    // A scene of an entity of a name, and a sprite of each texture named.
     let scene = |names: &[&str]| {
         let mut text = "(\n    entities: {\n".to_owned();
         text += "        \"0000000000003000\": (\n            Name: (\"a\"),\n        ),\n";
@@ -2875,7 +2796,6 @@ fn a_joiner_loads_the_textures_its_hosts_scene_saves_name() {
     meet(&mut host, &mut joiner, at);
     assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
 
-    // An edit of the host's naming a texture it loaded for it, as its tool API does.
     host.cx
         .load_named([crate::assets::Asset::Texture(set)], false);
     let texture = host.cx.world().assets().texture(set).expect("loaded");
@@ -2914,9 +2834,9 @@ fn a_joiner_loads_the_textures_its_hosts_scene_saves_name() {
     assert_eq!(stood_in.count(), 1, "{codes:?}");
 }
 
-/// A peer keeps the other's inputs within a second of ticks past the first it hasn't had whole:
-/// a packet holding inputs past them, as a hostile peer's may, or a tick no run reaches, isn't
-/// one, which loses the other, those before taken.
+/// A peer keeps the other's inputs within a second of ticks past the first it hasn't had whole. A
+/// packet holding inputs past that, as a hostile peer's may, or a tick no run reaches, is rejected
+/// and loses the other peer; the ticks before it stay taken.
 #[test]
 fn a_peer_keeps_the_other_s_inputs_to_a_second() {
     let _real_time = crate::testing::real_time();
@@ -2940,15 +2860,14 @@ fn a_peer_keeps_the_other_s_inputs_to_a_second() {
     assert_eq!(kept, [0, 2, 63]);
 }
 
-/// A command that shows a texture.
+/// Shows a texture.
 #[derive(Reflect)]
 struct Show(crate::Texture);
 
-/// A tick's commands fill their layer's queue each alone: one that isn't one, or that the layer
-/// refuses, is refused, logged with its player, and those after it are queued still. A server's
-/// client's name only the assets the server has loaded, one naming another refused before
-/// anything loads it, where a peer's loads what it names, standing in for what can't be, as a
-/// replay's does.
+/// A tick's commands fill their layer's queue each alone: one that isn't a command, or that the
+/// layer refuses, is refused and logged with its player, and those after it are queued still. A
+/// server's client's name only assets the server has loaded, one naming another refused before
+/// anything loads it; a peer's loads what it names, standing in for what can't be.
 #[test]
 fn commands_fill_their_queue_each_alone_a_client_s_naming_only_what_s_loaded() {
     let (codes, logged) = mpsc::channel();
@@ -2988,18 +2907,17 @@ fn commands_fill_their_queue_each_alone_a_client_s_naming_only_what_s_loaded() {
     assert!(loaded(&cx), "a peer's command stands in for it");
 }
 
-/// The entities a joiner and its host spawn after it joins take the same slots, as code that
-/// orders by [`Entity`] needs: the host's authors' logs go as it sends its world, warning how
-/// many edits went, and the slots they kept vacant for their undos are freed, as the joiner's
-/// load frees them; and no undo reaches past the world the joiner started from.
+/// A joiner and its host spawn entities into the same slots after it joins, as code that orders by
+/// [`Entity`] needs: the host's authors' logs go as it sends its world, warning how many edits
+/// went, and the slots they kept vacant for undos are freed, as the joiner's load frees them. No
+/// undo reaches past the joiner's starting world.
 #[test]
 fn a_joiner_and_its_host_spawn_into_the_same_slots() {
     let _real_time = crate::testing::real_time();
     let (codes, logged) = mpsc::channel();
     let subscriber = tracing_subscriber::registry().with(Codes(codes));
     let _logging = tracing::subscriber::set_default(subscriber);
-    // Entities made and deleted by an edit, as a peer's are between ticks, behind the session's
-    // back.
+    // Entities made and deleted between ticks, behind the session's back, as a peer's edits do.
     let edit = |peer: &mut Peer, operations: Vec<Operation>| {
         let edit = Edit::Apply {
             author: "editor".to_owned(),
@@ -3042,11 +2960,10 @@ fn a_joiner_and_its_host_spawn_into_the_same_slots() {
     assert_eq!(cleared.count(), 1);
 }
 
-/// A renewal, as a lockstep host's as it sends its joiner its world, refuses the entries of
-/// every log from before, a layer's as the Inspector keeps its own among them, not only the
-/// authors': its undo is refused, and its clear frees nothing the renewal freed, so that no two
-/// entities take one slot. It's an edit, which a recording keeps, so that a replay renews its
-/// world where the run did.
+/// A renewal, as a lockstep host's when it sends its joiner its world, refuses the entries of every
+/// earlier log, a layer's (as the Inspector's) among them: its undo is refused, and its clear frees
+/// nothing the renewal freed, so no two entities take one slot. It's an edit, so a recording keeps
+/// it and a replay renews its world where the run did.
 #[test]
 fn a_renewal_refuses_every_log_s_entries_from_before() {
     let mut cx = Context::seeded(1);

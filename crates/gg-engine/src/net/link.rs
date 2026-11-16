@@ -24,100 +24,91 @@ use super::{Lockstep, MAX_PACKET_TEXT};
 use crate::Tick;
 use crate::args::Conditions;
 
-/// How long a link through a relay waits for the relay to answer its socket's bind before it binds
-/// again; and, once answered, how long before it binds again anyway, as its router's mapping of
-/// the socket may change, and as that keeps the mapping while the link sends nothing else.
+/// How long a link through a relay waits for the relay to answer its socket's bind before binding
+/// again; once answered, how long before it binds anyway: the router's mapping may change, and
+/// binding keeps it alive while the link sends nothing else.
 const BIND: Duration = Duration::from_millis(250);
 const BOUND: Duration = Duration::from_secs(1);
 
-/// How long a link's writing thread goes with nothing to write before it writes `k`, a line that
-/// says only that this end is there.
+/// How long the writing thread goes with nothing to write before it writes `k`, a line that says
+/// only that this end is there.
 pub(super) const KEEP: Duration = Duration::from_secs(1);
 
-/// A connection to the other peer: what its threads write to it and read from it, each a thread of
-/// its own, so that a slow link never holds the main thread; and the socket its packets come and go
-/// by.
+/// A connection to the other peer: a thread each to write and read its stream, so a slow link never
+/// holds the main thread, and the socket its packets come and go by.
 pub(super) struct Link {
-    /// What the writing thread writes, in order, each text whole; and why it stopped, if it did.
+    /// What the writing thread writes; and why it stopped, if it did.
     to: Sender<String>,
     unwritten: Receiver<io::Error>,
     from: Receiver<String>,
-    /// Where the connection comes from.
     peer: Option<SocketAddr>,
-    /// When something last came by the link, a line or a packet, past [`Link::silence`] after
-    /// which it's lost; and, while the other end's hello hasn't come on a link accepted, when the
-    /// link was made, past [`HELLO`] after which it's lost.
+    /// When a line or packet last came: past [`Link::silence`] the link is lost. `unhello` is, on
+    /// an accepted link whose hello hasn't come, when it was made: past [`HELLO`] it's lost.
     heard: Instant,
     pub(super) unhello: Option<Instant>,
     pub(super) silence: Duration,
-    /// Set once the link counts: for the host, once the joiner has said it joined, before which
-    /// what it sends was sent against a world it no longer has; for the joiner, once it has the
-    /// host's world.
+    /// Set once the link counts: for the host, once the joiner has said it joined (what it sends
+    /// before was sent against a world it no longer has); for the joiner, once it has the host's
+    /// world.
     pub(super) joined: bool,
-    /// The socket, of the address the connection is from, at a port the OS picks; and where the
-    /// other peer's is, once its hello or its world has said, which alone its packets are taken
-    /// from: on a link through a relay, the relay's, from the start.
+    /// The socket, at the connection's local IP and a port the OS picks, and the other peer's,
+    /// once its hello or world has said (the relay's from the start): the only address packets
+    /// are taken from.
     pub(super) udp: UdpSocket,
     pub(super) other: Option<SocketAddr>,
-    /// A link's through a relay: the relay and the token its socket binds there by; where the
-    /// relay last said the bind came from, the socket as its router maps it, and where this end
-    /// last told the other its socket is, on the stream (`at`); when this end last sent a bind;
-    /// and what one is written into.
+    /// Through a relay: the relay and the socket's bind token; where the relay last said the bind
+    /// came from (the socket as its router maps it); where this end last told the other its socket
+    /// is (`at`, on the stream); when it last sent a bind; the bind's buffer.
     pub(super) relayed: Option<Relayed>,
     pub(super) reflexive: Option<SocketAddr>,
     said: Option<SocketAddr>,
     bind_sent: Option<Instant>,
     bind: Vec<u8>,
-    /// A link's through a relay: which way its packets go, as [`Path`] chooses it.
+    /// Through a relay: which way packets go ([`Path`]).
     path: Path,
-    /// What the link sent and took, which its changes of way and its end log.
     pub(super) traffic: Traffic,
-    /// The keys the link's handshake made, which its threads seal and open the stream's frames
-    /// under, and the main thread its packets; the nonce of this end's next packet, from
-    /// [`PACKETS`](secure::PACKETS); the nonces of those taken from the other end; what a packet's
-    /// text goes into, after the byte that says whether this end hears the other direct, and what
-    /// it's sealed into; and whether one from the other end's address was dropped, as forged or
-    /// come before, which is warned of once a link.
+    /// The handshake's keys, for the threads' stream frames and the main thread's packets; the
+    /// nonce of this end's next packet, from [`PACKETS`](secure::PACKETS); the nonces taken; a
+    /// packet's text after its byte saying whether this end hears the other direct, and its
+    /// sealed form; whether a packet from the other end's address was dropped as forged or
+    /// replayed, warned once a link.
     pub(super) keys: Arc<Keys>,
     pub(super) nonce: u64,
     replays: Replays,
     plain: Vec<u8>,
     pub(super) sealed: Vec<u8>,
     forged: bool,
-    /// What came, each held until it's due, as `--link` says, or at once.
+    /// What came, each held until due (`--link`).
     lines: VecDeque<(Instant, String)>,
     packets: Vec<(Instant, Vec<u8>)>,
-    /// When this peer last sent its packets, if it has.
+    /// When this peer last sent its packets.
     pub(super) sent: Option<Instant>,
-    /// Whether a packet couldn't be sent, which is warned of once a link.
+    /// Whether a packet couldn't be sent, warned once a link.
     unsent: bool,
-    /// When the link was made, which this end's packets' clock counts from; the other end's clock
-    /// as its latest packet gave it, and when that came, which this end's packets echo, so that
-    /// the other times the way there and back by them; and the way there and back, as the other's
-    /// packets' echoes of this end's clock time it.
+    /// When the link was made, the epoch of this end's packet clock; the other end's clock from
+    /// its latest packet, and when that came, which this end's packets echo so the other times the
+    /// round trip; and the round trip, timed by the echoes of this end's clock.
     made: Instant,
     echo: Option<(u64, Instant)>,
     pub(super) trip: Trip,
-    /// The shortest time the packets taken this turn timed the way at, which alone is taken: those
-    /// that waited to be taken while this end's frames stopped timed the wait as well.
+    /// The shortest time the packets taken this turn timed: packets that waited while this end's
+    /// frames stopped timed the wait too.
     fastest: Option<Duration>,
     /// A peer's: how many ticks this one was past the other's next as the other's latest packet
-    /// came, which this one's packets tell the other; and how many it's ahead of the other, its
-    /// own count less the other's, halved, as GGPO's time sync has it, so that the way's length
-    /// cancels out, a slow link's or an uneven one's, smoothed, as [`Lockstep::pace`] slows it.
+    /// came, which its packets tell the other; and how far ahead of the other it is: its count
+    /// less the other's, halved as in GGPO's time sync so the way's length cancels, smoothed. See
+    /// [`Lockstep::pace`].
     pub(super) past: Option<i64>,
     pub(super) ahead: f64,
 }
 
 impl Link {
-    /// Starts reading `stream`'s lines, in the frames its handshake's `keys` open, on a thread of
-    /// their own, which ends at a line that isn't one, as one past [`MAX_LINE`] isn't, at a frame
-    /// that doesn't open, as the connection does, and at twice [`LOST`] with nothing come; starts
-    /// writing what's sent on another, as [`write_from`] says; and binds the link's socket, which
-    /// the main thread reads as each frame starts, without waiting. A link `accepted` is lost
-    /// unless the other end's hello comes within [`HELLO`], as [`hello_came`](Self::hello_came)
-    /// says. A link `relayed` sends its packets through the relay, its socket bound there, as
-    /// [`take`](Self::take) binds it.
+    /// Starts a thread reading `stream`'s lines, in frames the handshake's `keys` open. It ends at
+    /// an invalid line (such as one past [`MAX_LINE`]), a frame that doesn't open, the
+    /// connection's end, and twice [`LOST`] with nothing come. Starts [`write_from`] on another;
+    /// binds the socket, which the main thread reads each frame without waiting. An `accepted`
+    /// link is lost unless the other end's hello comes within [`HELLO`]
+    /// ([`hello_came`](Self::hello_came)). A `relayed` link sends its packets through the relay.
     pub(super) fn new(
         stream: TcpStream,
         keys: Keys,
@@ -128,9 +119,8 @@ impl Link {
         udp.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
         stream.set_write_timeout(Some(LOST))?;
-        // Past the link's silence, so that the link is lost for that first; and so that the thread
-        // reading a link dropped, which reads on until the other end closes, ends though it never
-        // does.
+        // Past the link's silence, so the link is lost for that first; and so a dropped link's
+        // reading thread, which reads until the other end closes, ends though it never does.
         stream.set_read_timeout(Some(LOST * 2))?;
         let peer = stream.peer_addr().ok();
         let keys = Arc::new(keys);
@@ -204,25 +194,25 @@ impl Link {
         })
     }
 
-    /// Sends `text`, whole lines, which the writing thread writes after what was sent before it,
-    /// failing once that thread has stopped, as the connection has closed or a write failed.
+    /// Sends `text`, whole lines, for the writing thread.
+    ///
+    /// Fails once that thread has stopped.
     pub(super) fn send(&mut self, text: String) -> std::io::Result<()> {
         self.to
             .send(text)
             .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "the link no longer writes to it"))
     }
 
-    /// Has the other peer's packets be taken from its socket's `port`, at the address the
-    /// connection comes from; on a link through a relay, from where they come from there, as they
-    /// already are.
+    /// Takes the other peer's packets from `port` at the connection's address. Through a relay,
+    /// they're already taken from the relay's.
     pub(super) fn packets_from(&mut self, port: u16) {
         if self.relayed.is_none() {
             self.other = self.peer.map(|at| SocketAddr::new(at.ip(), port));
         }
     }
 
-    /// On a link through a relay, at `now`: binds its socket there, as [`gg_relay::bind`] says,
-    /// every [`BIND`] until the relay answers, and every [`BOUND`] after.
+    /// Through a relay: binds the socket there ([`gg_relay::bind`]) every [`BIND`] until the relay
+    /// answers, then every [`BOUND`].
     fn bind(&mut self, now: Instant) {
         let Some(relayed) = self.relayed else { return };
         let every = if self.reflexive.is_some() {
@@ -248,9 +238,9 @@ impl Link {
         }
     }
 
-    /// On a link through a relay: tells the other end where its socket is, `at <reflexive>
-    /// <local>`, as the relay last said it saw it, and as it's bound, each time the relay's answer
-    /// changes, so that the other can send it packets direct, as [`Path`] says.
+    /// Through a relay: tells the other end where the socket is, `at <reflexive> <local>` (as the
+    /// relay saw it, and as bound), whenever the relay's answer changes, for direct packets
+    /// ([`Path`]).
     fn say_where(&mut self) {
         let Some(reflexive) = self.reflexive.filter(|&at| self.said != Some(at)) else {
             return;
@@ -263,8 +253,8 @@ impl Link {
         let _ = self.send(format!("at {reflexive} {local}\n"));
     }
 
-    /// Takes the other end's `at` line's words, `rest`: where its socket is, which a link through
-    /// a relay then probes, as [`Path::at`] says.
+    /// Takes the other end's `at` line's words, `rest`: where its socket is, which a relayed link
+    /// then probes ([`Path::at`]).
     ///
     /// Fails, saying why, if it isn't one.
     pub(super) fn at(&mut self, rest: &str) -> std::result::Result<(), String> {
@@ -286,9 +276,8 @@ impl Link {
         Ok(())
     }
 
-    /// Logs `change`, a link's way changing, as [`Path::step`] gives it, with the packets the link
-    /// has sent and taken each way, through the relay and direct, and its way there and back so
-    /// far, as [`Trip::millis`] gives it, if it has been timed.
+    /// Logs a change of way ([`Path::step`]) with the packets sent and taken each way and the
+    /// round trip if timed.
     fn log_way(&self, change: &Change) {
         let [relayed_sent, direct_sent] = self.traffic.sent.map(|count| count.packets);
         let [relayed_came, direct_came] = self.traffic.taken.map(|count| count.packets);
@@ -330,23 +319,21 @@ impl Link {
         }
     }
 
-    /// Notes that the other end's hello has come, after which the link isn't lost for want of one.
     pub(super) fn hello_came(&mut self) {
         self.unhello = None;
     }
 
-    /// The port this peer's packets come from.
     pub(super) fn port(&self) -> u16 {
         self.udp.local_addr().map_or(0, |at| at.port())
     }
 
-    /// This end's clock at `now`: the milliseconds since the link was made.
+    /// This end's clock, in milliseconds.
     fn clock(&self, now: Instant) -> u64 {
         now.saturating_duration_since(self.made).as_millis() as u64
     }
 
-    /// Writes after `out` what a packet sent at `now` says of the times: this end's clock, and the
-    /// other end's latest, with the milliseconds since it came, or `-` for each while none has.
+    /// Writes the times a packet sent at `now` carries: this end's clock, the other end's latest
+    /// and the milliseconds since it came, or `-` for both while none has.
     pub(super) fn write_times(&self, out: &mut String, now: Instant) {
         let clock = self.clock(now);
         let written = "a string takes any text";
@@ -359,11 +346,10 @@ impl Link {
         }
     }
 
-    /// Takes the times a packet of the other end's says, as [`write_times`](Self::write_times)
-    /// wrote them, the packet having come at `now`: its clock, `clock`, which this end's packets
-    /// echo from then on, unless a later one has come; and, if it echoes this end's, `echoed`,
-    /// that clock and the milliseconds the other end held it, the time since, less those, which
-    /// the way there and back took, as [`took`](Self::took) takes it.
+    /// Takes the times ([`write_times`](Self::write_times)) of a packet that came at `now`: its
+    /// `clock`, which this end's packets echo unless a later one has come; and `echoed`, if it
+    /// echoes this end's: that clock and the milliseconds the other held it. The time since, less
+    /// the hold, is the round trip ([`took`](Self::took)).
     pub(super) fn timed(&mut self, clock: u64, echoed: Option<(u64, u64)>, now: Instant) {
         if self.echo.is_none_or(|(latest, _)| clock >= latest) {
             self.echo = Some((clock, now));
@@ -375,19 +361,19 @@ impl Link {
         }
     }
 
-    /// Once a turn has taken its packets: has the way there and back the shortest time they
-    /// timed, as [`Trip::sample`] takes it.
+    /// After a turn's packets: samples the round trip at the shortest time they timed.
     pub(super) fn took(&mut self) {
         if let Some(fastest) = self.fastest.take() {
             self.trip.sample(fastest);
         }
     }
 
-    /// Takes the lines read and the packets come since the last take, once what `conditions` hold
-    /// is due from `now`, as [`receive`](Self::receive) holds them, the writing thread's `k`s among
-    /// the lines, and why the link is lost, if it is, once what came before has been taken: its
-    /// connection closed, or a write to it failed; nothing came by it for [`Link::silence`]; or
-    /// the other end's hello hasn't come within [`HELLO`] of a link accepted.
+    /// Takes the lines (`k`s among them) and packets come since the last take, once due under
+    /// `conditions` ([`receive`](Self::receive)). Also why the link is lost, if it is, once what
+    /// came before is taken:
+    /// - its connection closed, or a write failed;
+    /// - nothing came for [`Link::silence`];
+    /// - an accepted link's hello hasn't come within [`HELLO`].
     pub(super) fn take(
         &mut self,
         buffer: &mut [u8],
@@ -442,12 +428,11 @@ impl Link {
         (lines, packets, lost)
     }
 
-    /// Takes the packets that came from the other peer's socket, read through `buffer`, each's
-    /// text, once it has opened and its nonce hasn't come before, as [`Replays`] says, held from
-    /// `now` as `conditions` say, or lost, drawing on `random`. On a link through a relay, takes
-    /// the relay's answers to its binds, and the other's packets that came direct, from wherever
-    /// they came, as only the other end seals them so: those that don't open dropped unsaid, as
-    /// anyone can send the socket anything; and has its [`Path`] take each.
+    /// Takes the packets from the other peer's socket, read through `buffer`: each's text, once it
+    /// opens and its nonce is fresh ([`Replays`]), held or lost under `conditions`, drawing on
+    /// `random`. Through a relay, also the relay's answers to binds and the other's packets that
+    /// came direct, from wherever: only the other end seals them so, and those that don't open are
+    /// dropped unsaid, as anyone can send the socket anything. The [`Path`] takes each.
     fn receive(
         &mut self,
         buffer: &mut [u8],
@@ -503,8 +488,7 @@ impl Link {
                     self.packets.push((due, text));
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                // Windows' answer to a packet sent to a port nothing listens at, as the other
-                // peer's after it has gone.
+                // Windows' answer to a packet sent to a port nothing listens at.
                 Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
                 Err(error) => {
                     warn!(code = "net.link", "Can't read the peer's packets: {error}");
@@ -514,11 +498,10 @@ impl Link {
         }
     }
 
-    /// Sends `packet`, its text, at most [`MAX_PACKET_TEXT`] bytes, after a byte that says whether
-    /// this end hears the other direct, sealed, to the other peer's socket, warning once a link of
-    /// one that can't be sent, which is lost, as a packet may be. On a link through a relay, it goes
-    /// the ways [`Path::step`] gives, each copy sealed under a nonce of its own, a change of way
-    /// logged.
+    /// Seals `packet`, its text of at most [`MAX_PACKET_TEXT`] bytes after a byte saying whether
+    /// this end hears the other direct, and sends it to the other peer's socket. One that can't be
+    /// sent is lost, as a packet may be, and warned of once a link. Through a relay it goes the
+    /// ways [`Path::step`] gives, each copy under its own nonce, a change of way logged.
     pub(super) fn send_packet(&mut self, packet: &[u8]) {
         let Some(other) = self.other else { return };
         let now = Instant::now();
@@ -537,14 +520,13 @@ impl Link {
             self.send_sealed(other, RELAYED, true);
         }
         for to in ways.direct {
-            // A probe to an address that turns out not to reach the other is unsaid.
+            // A probe that doesn't reach the other goes unsaid.
             self.send_sealed(to, DIRECT, !ways.relay);
         }
     }
 
     /// Seals what [`send_packet`](Self::send_packet) wrote under the next nonce and sends it to
-    /// `to`, counting it as gone `way`, [`RELAYED`] or [`DIRECT`], warning once a link of one that
-    /// can't be sent if `warned`.
+    /// `to`, counted as gone `way`. A failure warns once a link if `warned`.
     fn send_sealed(&mut self, to: SocketAddr, way: usize, warned: bool) {
         secure::seal_packet(&self.keys, self.nonce, &self.plain, &mut self.sealed);
         self.nonce += 1;
@@ -558,16 +540,14 @@ impl Link {
         }
     }
 
-    /// Logs what the link sent and took (`net.traffic`), as it ends, `whose` it was, as
-    /// [`Traffic`] counts it: for its whole time, and each way the bytes, their mean a second and
-    /// the most in one, the stream's, and the packets' and how many, and how many of those went
-    /// through the relay; and its way there and back as it ended, smoothed, and its deviation, as
-    /// [`Trip::millis`] gives them, if it was timed. IP's and UDP's headers aren't counted: a
-    /// packet's count gives them, some 28 bytes a packet over IPv4.
+    /// Logs, as the link `whose` ends, what it sent and took (`net.traffic`): each way the bytes,
+    /// their mean a second and the most in one; the stream's and packets' bytes, the packets'
+    /// count and how many went through the relay; the smoothed round trip and its deviation, if
+    /// timed. IP and UDP headers aren't counted: some 28 bytes a packet over IPv4.
     pub(super) fn ended(&self, whose: &str) {
         let seconds = self.made.elapsed().as_secs_f64();
         let traffic = &self.traffic;
-        // Each counter read once, as the link's threads may count on meanwhile.
+        // Each counter read once: the threads count on meanwhile.
         let [stream_sent, stream_taken] =
             [&traffic.written, &traffic.read].map(|bytes| bytes.load(Ordering::Relaxed));
         let [packet_bytes_sent, packet_bytes_taken] =
@@ -621,18 +601,18 @@ impl Link {
     }
 }
 
-/// Starts the thread that writes to `stream` what's sent through the channel it returns, each text
-/// whole and in order, sealed under `keys` as [`Sealer`] seals it, and `k` after [`KEEP`] with
-/// nothing else, so that the other end hears from this one while its main thread is busy, as
-/// restoring a world or stopped at a script's breakpoint, adding the bytes it writes to `written`;
-/// and returns, with the channel, where the error comes that stopped it, if one did.
+/// Starts the thread that writes to `stream` what's sent through the returned channel, each text
+/// whole and in order, sealed under `keys` ([`Sealer`]), adding the bytes to `written`. It writes
+/// `k` after [`KEEP`] with nothing else, so the other end hears from this one while the main
+/// thread is busy (restoring a world, stopped at a breakpoint). Also returns where the error that
+/// stopped it comes.
 ///
-/// Once the channel closes, as its link is dropped, and what was sent before is written, it shuts
-/// the connection's sending side: the other end reads what was sent, as a refusal's why, and then
-/// its end, and closes its side, which ends the thread reading this one, which has read all that
-/// came. Shutting the receiving side too would have Windows reset the connection at what came that
-/// wasn't read, as a joiner's hello the host refuses unread, and the other end lose what was sent.
-/// At a write that fails, as one that can't go on for [`LOST`] does, it shuts both sides.
+/// Once the channel closes (the link dropped) and what was sent is written, it shuts the
+/// connection's sending side: the other end reads what was sent, such as a refusal's why, then the
+/// end, and closes its side, which ends the thread reading this one. Shutting the receiving side
+/// too would have Windows reset the connection at what came unread, such as a joiner's hello the
+/// host refuses, and the other end lose what was sent. At a failed write, such as one that can't go
+/// on for [`LOST`], it shuts both sides.
 fn write_from(
     stream: TcpStream,
     keys: Arc<Keys>,
@@ -667,8 +647,7 @@ fn write_from(
     Ok((to, unwritten))
 }
 
-/// A stream that adds the bytes read from it, or written to it, to `bytes`: a link's, whose
-/// threads count what its stream carries, sealed.
+/// A stream that adds the bytes read or written, sealed, to `bytes`.
 struct Counted<S> {
     stream: S,
     bytes: Arc<AtomicU64>,
@@ -694,18 +673,17 @@ impl<S: io::Write> io::Write for Counted<S> {
     }
 }
 
-/// The indices of what a link's packets went through, in [`Traffic`]'s counts: the relay, or
-/// direct to the other end, as every packet of a link not through a relay goes.
+/// Indices into [`Traffic`]'s counts: through the relay, or direct (every packet of a link not
+/// through a relay).
 const RELAYED: usize = 0;
 pub(super) const DIRECT: usize = 1;
 
-/// What a link sent and took, which `net.traffic` logs as it ends: its stream's bytes, sealed in
-/// their frames, as its threads write and read them, `k`s among them; its packets and their bytes,
-/// sealed, each way, by what they went through, as the main thread sends them and takes them from
-/// the other end, the binds and the relay's answers among those through the relay, and those
-/// `--link` loses not taken; and the most bytes in a second of the link, each way, as the main
-/// thread counts them as it takes what came, a frame's at a time, so that a second its frames
-/// stopped for counts toward the next.
+/// What a link sent and took, which `net.traffic` logs at its end:
+/// - the stream's bytes, sealed in frames, `k`s among them, counted by its threads;
+/// - the packets and their bytes, sealed, each way, by path, counted by the main thread: binds and
+///   the relay's answers count as relayed, packets `--link` loses aren't taken;
+/// - the most bytes in a second of the link, each way, counted a frame at a time as the main
+///   thread takes what came, so a second its frames stopped for counts toward the next.
 #[derive(Default)]
 pub(super) struct Traffic {
     pub(super) written: Arc<AtomicU64>,
@@ -713,8 +691,8 @@ pub(super) struct Traffic {
     /// By [`RELAYED`] and [`DIRECT`].
     pub(super) sent: [Count; 2],
     pub(super) taken: [Count; 2],
-    /// The second of the link counted toward, how many bytes each way had gone as it started,
-    /// and the most in one of those before it, each way.
+    /// The second counted toward, the bytes each way when it started, and the most in one before
+    /// it, each way.
     second: u64,
     at_second: [u64; 2],
     most: [u64; 2],
@@ -735,7 +713,6 @@ impl Count {
 }
 
 impl Traffic {
-    /// The bytes sent and taken so far, the stream's and the packets'.
     fn bytes(&self) -> [u64; 2] {
         let packets = |[relayed, direct]: [Count; 2]| relayed.bytes + direct.bytes;
         [
@@ -744,8 +721,7 @@ impl Traffic {
         ]
     }
 
-    /// Counts the bytes since the last second started toward it, once the link's second is
-    /// `second`, past it, and starts that one.
+    /// At a new link `second`: closes the one counted toward and starts the new.
     fn count(&mut self, second: u64) {
         if second != self.second {
             let bytes = self.bytes();
@@ -755,16 +731,15 @@ impl Traffic {
         }
     }
 
-    /// The most bytes in a second of the link, each way, the one going on among them, `bytes`
-    /// having gone so far, as [`bytes`](Self::bytes) gave them.
+    /// The most bytes in a second of the link, each way, the current one included, `bytes` having
+    /// gone ([`bytes`](Self::bytes)).
     fn busiest(&self, bytes: [u64; 2]) -> [u64; 2] {
         [0, 1].map(|way| self.most[way].max(bytes[way] - self.at_second[way]))
     }
 }
 
-/// A link's way there and back, smoothed as TCP smooths its own (RFC 6298's SRTT and RTTVAR): its
-/// mean and its mean deviation, in seconds, from each time a packet's echo gives; none before the
-/// first.
+/// A link's round trip, smoothed as TCP does (RFC 6298's SRTT and RTTVAR): mean and mean
+/// deviation, in seconds; none before the first sample.
 #[derive(Default)]
 pub(super) struct Trip {
     pub(super) mean: Option<f64>,
@@ -772,7 +747,6 @@ pub(super) struct Trip {
 }
 
 impl Trip {
-    /// Takes a time the way there and back took, `trip`.
     fn sample(&mut self, trip: Duration) {
         let trip = trip.as_secs_f64();
         match self.mean {
@@ -784,31 +758,28 @@ impl Trip {
         }
     }
 
-    /// The ticks the way one way takes, half the way there and back, and [`MARGIN`] deviations,
-    /// rounded up: within which what's sent comes, but seldom; none before the first time is taken.
+    /// The ticks one way takes: half the round trip and [`MARGIN`] deviations, rounded up. What's
+    /// sent comes within them, all but seldom. None before the first sample.
     pub(super) fn ticks(&self) -> Option<u64> {
         let way = self.mean? / 2.0 + MARGIN * self.deviation;
         Some((way / Tick::DT.as_secs_f64()).ceil() as u64)
     }
 
-    /// The mean and the mean deviation in milliseconds, to a tenth, as the logs give them; none
-    /// before the first time is taken.
+    /// Mean and mean deviation in milliseconds, to a tenth, for the logs.
     fn millis(&self) -> Option<[f64; 2]> {
         let millis = |seconds: f64| (seconds * 10_000.0).round() / 10.0;
         Some([millis(self.mean?), millis(self.deviation)])
     }
 }
 
-/// How many of its deviations past the way one way a link's delay allows: two, where TCP allows
-/// four for its retransmissions. The deviation is the way there and back's, some 1.4 times one
-/// way's where the two ways' jitter is its own, so two allow nearly three of one way's; and inputs
-/// that come late cost a stall, which `net.delay` counts, where four had the delay most of the way
-/// there and back.
+/// How many deviations past one way a link's delay allows: two, where TCP allows four for its
+/// retransmissions. The deviation is the round trip's, some 1.4 times one way's where each way's
+/// jitter is its own, so two allow nearly three of one way's. Inputs that come late cost a stall
+/// (`net.delay` counts them); four would have the delay most of the round trip.
 const MARGIN: f64 = 2.0;
 
-/// Reads a line, without its line break, `\n` or `\r\n`: `None` once the stream ends, or ends
-/// partway through a line, as a connection cut short does. As `gg_api::read_line` reads the tool
-/// API's, which builds without `dev` haven't.
+/// Reads a line without its `\n` or `\r\n`: `None` once the stream ends, even partway through a
+/// line. Like `gg_api::read_line`, which builds without `dev` lack.
 ///
 /// Fails with `InvalidData` for a line of more than [`MAX_LINE`] bytes, or one that isn't UTF-8.
 pub(super) fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
@@ -830,8 +801,8 @@ pub(super) fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>>
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
 }
 
-/// The next of `random`'s numbers, SplitMix64's, from 0 up to 1, in steps of 2⁻⁵³: for what a link
-/// does to what comes, which nothing replays.
+/// The next of `random`'s SplitMix64 numbers, from 0 up to 1 in steps of 2⁻⁵³: for `--link`'s
+/// conditions, which nothing replays.
 fn unit(random: &mut u64) -> f64 {
     *random = random.wrapping_add(0x9e37_79b9_7f4a_7c15);
     let mut z = *random;

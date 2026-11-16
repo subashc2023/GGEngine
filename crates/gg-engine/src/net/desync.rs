@@ -7,9 +7,8 @@ use super::lockstep::Lockstep;
 use crate::World;
 
 impl Lockstep {
-    /// Ends tick `tick`, which has run on both peers' inputs, leaving `world`: sends its hash, if
-    /// there's another peer, keeping a copy of the world until the hash is compared with theirs,
-    /// unless the peers have parted, and compares it.
+    /// Ends tick `tick`, run on both peers' inputs, leaving `world`. With another peer: sends the
+    /// hash, keeps the world until it's compared (unless the peers have parted), and compares.
     pub(super) fn finish(&mut self, tick: u64, world: &World) {
         if self.from.is_none() {
             return;
@@ -25,10 +24,9 @@ impl Lockstep {
         self.compare();
     }
 
-    /// Compares the hashes both peers have after the same tick, dropping them and the worlds kept
-    /// with this peer's, unless the peers have parted; a pair that differs logs `net.desync`, and
-    /// has the host send its joiner its world after that tick, which the joiner keeps its own after
-    /// until it comes, then its world again.
+    /// Compares both peers' hashes after the same tick, dropping them and our kept worlds (unless
+    /// the peers have parted). A pair that differs logs `net.desync`; the host sends its joiner its
+    /// world after that tick, and the joiner keeps its own until it comes.
     pub(super) fn compare(&mut self) {
         if self.parted {
             self.hashes = Default::default();
@@ -41,7 +39,7 @@ impl Lockstep {
             (ours.first_key_value(), theirs.first_key_value())
         {
             if a != b {
-                // One peer's hashes run ahead of the other's: drop the older, unmatched.
+                // One peer's hashes run ahead: drop the older, unmatched.
                 if a < b {
                     ours.pop_first();
                 } else {
@@ -66,7 +64,7 @@ impl Lockstep {
                 break;
             }
         }
-        // The worlds kept with the hashes dropped, but the one after the tick the peers parted at.
+        // Drop worlds whose hashes went, but keep the one after the parting tick.
         let first = self.hashes[0].first_key_value().map(|(&tick, _)| tick);
         let mut kept = None;
         while let Some(world) = self.worlds.first_entry()
@@ -81,7 +79,7 @@ impl Lockstep {
         }
         if let (Some(tick), Some(world)) = (parted, kept) {
             if hosts {
-                // Dropped after, as sending it may lose the joiner, its spares with it.
+                // Dropped after: sending may lose the joiner, and its spares.
                 self.send_parted(tick, &world);
             } else {
                 self.worlds.insert(tick, world);
@@ -89,8 +87,7 @@ impl Lockstep {
         }
     }
 
-    /// The host, as its hashes part from its joiner's after tick `tick`: sends the joiner `world`,
-    /// its own after that tick, which the joiner names where they part by.
+    /// Host: sends the joiner `world`, its own after `tick`, where the hashes parted.
     fn send_parted(&mut self, tick: u64, world: &World) {
         let mut text = format!("parted {tick}\n");
         match world.save_whole(&mut text) {
@@ -105,20 +102,20 @@ impl Lockstep {
         }
     }
 
-    /// The joiner, as its host's world after tick `tick`, where their hashes parted, has come whole
-    /// as `text`: logs the first entity, component and field where its own world after that tick
-    /// differs, as [`World::difference`] finds it (`net.desync_field`); and, where a cell's file
-    /// came in from another file than the host's, as [`World::cell_file_parted`] finds it, names
-    /// it (`net.cell_file`) and leaves the session, to try again later, as a refused hello does.
+    /// Joiner: the host's world after `tick`, where the hashes parted, has come as `text`. Logs
+    /// the first entity, component and field where ours differs ([`World::difference`],
+    /// `net.desync_field`). If a cell's file differs from the host's
+    /// ([`World::cell_file_parted`]), names it (`net.cell_file`) and leaves the session to try
+    /// again later, as after a refusal.
     pub(super) fn name_parting(&mut self, tick: u64, text: &str) {
-        // None after a tick the joiner hasn't kept a world after, as one it didn't part at.
+        // None after a tick it kept no world after, as one it didn't part at.
         let Some(ours) = self.worlds.remove(&tick) else {
             return;
         };
-        // Into a copy of its own, of the same types and assets. What's opaque comes back as the
-        // host's world names it, which a world never drawn and compared as the same takes.
+        // Loaded into a copy of ours, with the same types and assets. What's opaque comes back as
+        // the host's world names it, as in a world never drawn and compared as the same.
         let mut theirs = ours.clone();
-        // Numbered as lines of the message, after its `parted`.
+        // Numbered as the message's lines, after its `parted`.
         let lines = (2..).zip(text.lines().take_while(|line| *line != "end"));
         match theirs.load_whole(lines, true) {
             Ok(_) => {
@@ -149,10 +146,10 @@ impl Lockstep {
     }
 }
 
-/// Logs where `ours`, the joiner's world after tick `tick`, first differs from `theirs`, its host's
-/// (`net.desync_field`): the entity, and the component's field, with each world's value there,
-/// as recordings write values, or `none` where a world hasn't the component; `alive` or `none`
-/// for an entity one world alone has, its field empty.
+/// Logs where `ours` (the joiner's world after `tick`) first differs from `theirs` (the host's)
+/// (`net.desync_field`): the entity, the component's field and each world's value as recordings
+/// write them, `none` where a world lacks the component. An entity only one world has is `alive`
+/// or `none`, its field empty.
 fn log_parting(tick: u64, ours: &World, theirs: &World) {
     let Some(difference) = ours.difference(theirs) else {
         error!(

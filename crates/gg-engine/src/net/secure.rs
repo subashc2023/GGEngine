@@ -1,14 +1,13 @@
-//! What keeps a session to the runs given its code, as
-//! [Networking](../../../../ARCHITECTURE.md#networking) describes: the code; the Noise Protocol
-//! Framework's handshake, `NNpsk0`, through `snow`, which each connection opens with, keyed by the
-//! code, and which makes the link's keys; and the stream's frames and the packets, each sealed
-//! under them, the stream's nonces counted from 0 each way and the packets' from [`PACKETS`], so
-//! that no two share one under a key.
+//! What keeps a session to the runs given its code
+//! ([Networking](../../../../ARCHITECTURE.md#networking)): the code; the Noise `NNpsk0`
+//! handshake, through `snow`, which opens each connection, is keyed by the code and makes the
+//! link's keys; and the stream's frames and the packets, sealed under those keys. Stream nonces
+//! count from 0 each way and packets' from [`PACKETS`], so no two share one under a key.
 //!
-//! A frame is its length, 2 bytes, big-endian, and its text sealed, at most 65,535 bytes together
-//! as Noise has a message; a packet, its nonce, 8 bytes, big-endian, and its text sealed,
-//! [`SEALED`] bytes more than its text. A packet that doesn't open, or whose nonce came before, is
-//! dropped, as [`Replays`] says; a frame that doesn't open ends its stream.
+//! A frame is its length, 2 bytes big-endian, and its sealed text, at most 65,535 bytes together,
+//! as a Noise message. A packet is its nonce, 8 bytes big-endian, and its sealed text, [`SEALED`]
+//! bytes more than the text. A packet that doesn't open, or whose nonce came before, is dropped
+//! ([`Replays`]); a frame that doesn't open ends its stream.
 
 use std::fmt::{self, Write as _};
 use std::io::{self, BufRead, ErrorKind, Read, Write};
@@ -20,48 +19,48 @@ use snow::params::HashChoice;
 use snow::resolvers::{CryptoResolver, DefaultResolver};
 use snow::{Builder, StatelessTransportState};
 
-/// The handshake: Noise's NN, each end's key made for the connection alone, the code's key mixed
-/// in before the first message (`psk0`), so that the end that took the connection refuses one
-/// without the code at the first message, before any work of its own; X25519, ChaCha20-Poly1305
-/// and BLAKE2s, which are fast without the CPU's AES instructions.
+/// Noise's NN, each end's key made for the connection alone, the code's key mixed in before the
+/// first message (`psk0`): the end that took the connection refuses a run without the code at the
+/// first message, before any work of its own. X25519, ChaCha20-Poly1305 and BLAKE2s are fast
+/// without the CPU's AES instructions.
 const PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 
-/// What both ends' handshakes are bound to, so that a later version of these formats changes it.
+/// What both ends' handshakes are bound to, so a later version of these formats changes it.
 const PROLOGUE: &[u8] = b"gg-engine session 1";
 
-/// The key the code's own is the HMAC of the code under, which no other use of the code shares;
-/// and the key its room at a relay is, which the code's own isn't found from.
+/// The keys of the code's HMACs: its own (Noise's pre-shared key) and its room's at a relay. They
+/// differ, so the code's key isn't found from the room.
 const CODE_KEY: &[u8] = b"gg-engine session code";
 const ROOM_KEY: &[u8] = b"gg-engine relay room";
 
-/// The bytes Noise's tag takes, and the most a message of its may have, its tag among them.
+/// Bytes Noise's tag takes, and the most a Noise message may have, tag included.
 const TAG: usize = 16;
 const MOST: usize = 65535;
 
-/// The first nonce of a link's packets each way: their own range, apart from the stream's, which
-/// count from 0 and never reach it.
+/// The first nonce of a link's packets each way: apart from the stream's, which counts from 0 and
+/// never reaches it.
 pub(super) const PACKETS: u64 = 1 << 63;
 
-/// The bytes sealing adds to a packet's text: its nonce and its tag.
+/// The bytes sealing adds to a packet's text: nonce and tag.
 pub(super) const SEALED: usize = 8 + TAG;
 
-/// The symbols a code is written in, Crockford's base 32: the digits and the letters but I, L, O
-/// and U, which read as others or spell words.
+/// Crockford's base 32: the digits and the letters but I, L, O and U, which read as others or
+/// spell words.
 const SYMBOLS: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// A session's code, which each of its runs is given and its links are keyed by: 80 random bits,
-/// written as 16 of [`SYMBOLS`] in fours, as `7KQ2-9XMB-4TZD-P0WH`. Its `Debug` writes none of
-/// it, as it's the session's key.
+/// A session's code, given to each of its runs, which keys its links: 80 random bits, written as
+/// 16 of [`SYMBOLS`] in fours, as `7KQ2-9XMB-4TZD-P0WH`. Its `Debug` writes none of it, as it's the
+/// session's key.
 ///
-/// 80 bits are enough: a first message recorded on the path lets one test codes against it
-/// offline, a microsecond each, so that 2⁸⁰ of them take some 10¹⁴ s at 10¹⁰ a second; and each
-/// handshake's keys come from both ends' keys made for it too, so that a code found later opens no
-/// link made before.
+/// 80 bits suffice: a first message recorded on the path lets one test codes against it
+/// offline, a microsecond each, so 2⁸⁰ of them take some 10¹⁴ s at 10¹⁰ a second. Each
+/// handshake's keys also come from both ends' keys made for it, so a code found later opens no
+/// earlier link.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Code([u8; 10]);
 
 impl Code {
-    /// A code made from the OS's randomness, as Noise's own keys are.
+    /// A code from the OS's randomness, as Noise's own keys are.
     ///
     /// Fails if the OS gives none.
     pub(crate) fn make() -> io::Result<Self> {
@@ -75,20 +74,18 @@ impl Code {
         Ok(Self(bytes))
     }
 
-    /// The key the code makes, Noise's pre-shared key: its HMAC-BLAKE2s under [`CODE_KEY`].
     fn key(&self) -> [u8; 32] {
         self.hmac(CODE_KEY)
     }
 
-    /// The session's room at a relay, which its runs find each other by there: the first 16 bytes
-    /// of the code's HMAC-BLAKE2s under [`ROOM_KEY`]. A relay, and anyone on the path to it, sees
-    /// it, and can't find the code from it, nor the code's key, an HMAC under another key.
+    /// The session's room at a relay, where its runs find each other: the first 16 bytes of the
+    /// code's HMAC-BLAKE2s under [`ROOM_KEY`]. A relay, and anyone on the path to it, sees the
+    /// room and can't find the code or its key (an HMAC under another key) from it.
     pub(crate) fn room(&self) -> Room {
         let hmac = self.hmac(ROOM_KEY);
         Room(hmac[..16].try_into().expect("32 bytes"))
     }
 
-    /// The code's HMAC-BLAKE2s under `key`.
     fn hmac(&self, key: &[u8]) -> [u8; 32] {
         let mut hash = DefaultResolver
             .resolve_hash(&HashChoice::Blake2s)
@@ -99,8 +96,7 @@ impl Code {
     }
 }
 
-/// A code as it's written: 16 symbols, whatever their case, `I` and `L` read as `1` and `O` as
-/// `0`, hyphens and spaces skipped.
+/// 16 symbols, any case; `I` and `L` read as `1`, `O` as `0`; hyphens and spaces skipped.
 impl FromStr for Code {
     type Err = String;
 
@@ -150,18 +146,20 @@ impl fmt::Debug for Code {
     }
 }
 
-/// The keys a link's two ends share, which its handshake makes: each way's, which seal what goes
-/// that way, used from any thread, each message under the nonce it's given.
+/// A link's keys, one per direction, made by its handshake. Usable from any thread, each message
+/// under the nonce it's given.
 pub(super) type Keys = StatelessTransportState;
 
-/// Runs the handshake on `stream`, keyed by `code`, as the end that made the connection or,
-/// `accepted`, the end that took it, and returns the link's keys: the end that made it writes the
-/// first message, which the other can't read unless it holds the code, and the other answers, each
-/// message a frame. Its reads wait as long as the stream's timeout says.
+/// Runs the handshake on `stream` keyed by `code`, as the end that made the connection or, if
+/// `accepted`, took it; returns the link's keys. The maker writes the first message, which the
+/// other can't read without the code; the other answers. Each message is a frame. Reads wait as
+/// long as the stream's timeout.
 ///
-/// Fails with `InvalidData` at a first message that doesn't open, from a run of another session or
-/// what isn't a run, or an answer that doesn't; with `UnexpectedEof` where the other end closed the
-/// connection, as one that refuses this end does; and with the stream's errors.
+/// Fails with:
+/// - `InvalidData` at a first message that doesn't open, from a run of another session or what
+///   isn't a run, or an answer that doesn't;
+/// - `UnexpectedEof` where the other end closed the connection, as one that refuses this end does;
+/// - the stream's errors.
 pub(super) fn handshake<S: Read + Write>(
     stream: &mut S,
     code: &Code,
@@ -210,8 +208,7 @@ pub(super) fn handshake<S: Read + Write>(
         .map_err(io::Error::other)
 }
 
-/// Reads a frame from `reader` into `frame`, returning its length; `None` once the stream ends
-/// between frames.
+/// Reads a frame into `frame`, returning its length; `None` once the stream ends between frames.
 ///
 /// Fails with `UnexpectedEof` where it ends within one, and `InvalidData` for one longer than
 /// `frame`.
@@ -237,19 +234,17 @@ fn read_frame(reader: &mut impl Read, frame: &mut [u8]) -> io::Result<Option<usi
     Ok(Some(size))
 }
 
-/// Writes `message` to `writer` as a frame, its length first, in one write, so that Nagle's
-/// algorithm doesn't hold the message until the length is acknowledged.
+/// Writes `message` as a frame in one write, so Nagle's algorithm doesn't hold it until the length
+/// is acknowledged.
 fn write_frame(writer: &mut impl Write, message: &[u8]) -> io::Result<()> {
     let length = u16::try_from(message.len()).expect("a message is at most 65,535 bytes");
     writer.write_all(&[&length.to_be_bytes()[..], message].concat())
 }
 
-/// What one end of a link writes on its stream, each text in frames sealed under the keys, which
-/// the other's [`Opened`] opens, their nonces counted from 0.
+/// Writes texts to a stream in sealed frames, nonces from 0, for the other's [`Opened`].
 pub(super) struct Sealer {
     keys: Arc<Keys>,
     nonce: u64,
-    /// What a frame is sealed into, its length first.
     frame: Vec<u8>,
 }
 
@@ -262,7 +257,6 @@ impl Sealer {
         }
     }
 
-    /// Writes `text` to `stream`, sealed in as many frames as it takes.
     pub(super) fn write(&mut self, stream: &mut impl Write, text: &[u8]) -> io::Result<()> {
         for part in text.chunks(MOST - TAG) {
             let size = self
@@ -278,13 +272,12 @@ impl Sealer {
     }
 }
 
-/// What the other end of a link wrote on its stream, as `R` reads it, its frames opened as they
-/// come, as [`Sealer`] sealed them: a `BufRead` of the texts.
+/// A `BufRead` of the texts the other end's [`Sealer`] wrote on `R`, frames opened as they come.
 pub(super) struct Opened<R> {
     stream: R,
     keys: Arc<Keys>,
     nonce: u64,
-    /// The frame last read, and its text, up to `size`, of which `at` on hasn't been read.
+    /// The frame last read, and its text up to `size`, of which `at` on is unread.
     frame: Vec<u8>,
     text: Vec<u8>,
     at: usize,
@@ -339,8 +332,8 @@ impl<R: Read> BufRead for Opened<R> {
     }
 }
 
-/// Seals `text`, a packet's, at most `MOST - TAG` bytes, under `keys` with `nonce`, into `packet`:
-/// the nonce, then the text sealed.
+/// Seals `text`, at most `MOST - TAG` bytes, under `keys` with `nonce` into `packet`: the nonce,
+/// then the sealed text.
 pub(super) fn seal_packet(keys: &Keys, nonce: u64, text: &[u8], packet: &mut Vec<u8>) {
     packet.clear();
     packet.extend_from_slice(&nonce.to_be_bytes());
@@ -349,8 +342,8 @@ pub(super) fn seal_packet(keys: &Keys, nonce: u64, text: &[u8], packet: &mut Vec
     sealed.expect("a packet's text is fewer bytes than a message's");
 }
 
-/// Opens `packet`, as [`seal_packet`] seals it: its nonce and its text; `None` if it doesn't open,
-/// as one forged, changed on the way or sealed under other keys doesn't.
+/// Opens `packet` ([`seal_packet`]): its nonce and text. `None` if it doesn't open, as one forged,
+/// changed on the way or sealed under other keys doesn't.
 pub(super) fn open_packet(keys: &Keys, packet: &[u8]) -> Option<(u64, Vec<u8>)> {
     let (nonce, sealed) = packet.split_first_chunk::<8>()?;
     let nonce = u64::from_be_bytes(*nonce);
@@ -360,21 +353,20 @@ pub(super) fn open_packet(keys: &Keys, packet: &[u8]) -> Option<(u64, Vec<u8>)> 
     Some((nonce, text))
 }
 
-/// The nonces of the packets a link has taken, as IPsec's and WireGuard's windows keep them
-/// (RFC 6479): the newest, and of the 127 before it, those taken, so that a packet played again is
-/// dropped, while one that came out of order within them is taken; one further behind is dropped
-/// too, as a later packet carries what it did.
+/// The nonces of the packets a link has taken, in a window as IPsec and WireGuard keep them (RFC
+/// 6479): the newest, and which of the 127 before it were taken. A replayed packet is dropped; one
+/// out of order within the window is taken; one further behind is dropped too, as a later packet
+/// carries what it did.
 #[derive(Default)]
 pub(super) struct Replays {
     newest: Option<u64>,
-    /// A bit for the newest and each of the 127 before it, the newest's lowest, set for those
-    /// taken.
+    /// A bit for the newest (lowest) and each of the 127 before it, set for those taken.
     taken: u128,
 }
 
 impl Replays {
-    /// Whether `nonce`, a packet's that opened, is one to take, which it then is: a packet's,
-    /// [`PACKETS`] or past, not taken before, and less than 128 behind the newest.
+    /// Whether `nonce`, of a packet that opened, is to be taken, which it then is: [`PACKETS`] or
+    /// past, not taken before, and less than 128 behind the newest.
     pub(super) fn fresh(&mut self, nonce: u64) -> bool {
         if nonce < PACKETS {
             return false;
@@ -398,15 +390,13 @@ impl Replays {
     }
 }
 
-/// The ends of a connection on the loopback, each with the keys its handshake made, keyed by
-/// [`TESTED`]: the end that made it, then the end that took it.
+/// The ends of a loopback connection (maker, then taker) with their keys, keyed by [`TESTED`].
 #[cfg(test)]
 pub(super) fn linked() -> [(std::net::TcpStream, Keys); 2] {
     linked_by(&TESTED, &TESTED).map(|end| end.expect("a handshake"))
 }
 
-/// The ends of a connection on the loopback, the end that made it given `making` and the end that
-/// took it `taking`, each with the keys its handshake made, or why it failed.
+/// As [`linked`], the maker given `making` and the taker `taking`; each end may fail instead.
 #[cfg(test)]
 pub(super) fn linked_by(
     making: &Code,
@@ -422,14 +412,12 @@ pub(super) fn linked_by(
             handshake(&mut stream, making, false).map(|keys| (stream, keys))
         });
         let (mut stream, _) = listener.accept().expect("accepted");
-        // Its end dropped at a refusal, before the other's is waited for, which then reads that
-        // the connection closed.
+        // Its end drops at a refusal before the other's is awaited, which then reads the close.
         let took = handshake(&mut stream, taking, true).map(|keys| (stream, keys));
         [made.join().expect("made"), took]
     })
 }
 
-/// The code the tests' sessions are given.
 #[cfg(test)]
 pub(crate) const TESTED: Code = Code(*b"tested run");
 
@@ -437,9 +425,8 @@ pub(crate) const TESTED: Code = Code(*b"tested run");
 mod tests {
     use super::*;
 
-    /// A code is written in fours of its symbols, and read back from that, whatever its case, with
-    /// `I`, `L` and `O` for `1`, `1` and `0`, and spaces for hyphens; one of 15 or 17 symbols, or
-    /// of a `U`, isn't one.
+    /// A code is written in fours and read back whatever its case, with `I`, `L` and `O` for `1`,
+    /// `1` and `0` and spaces for hyphens; 15 or 17 symbols, or a `U`, isn't one.
     #[test]
     fn a_code_reads_back_as_it_s_written() {
         let code = Code([0x39, 0xe8, 0x51, 0x37, 0x4b, 0x1f, 0xa6, 0x9b, 0x5d, 0x42]);
@@ -467,10 +454,8 @@ mod tests {
         assert_ne!(Code::make().expect("a code"), Code::make().expect("a code"));
     }
 
-    /// Each nonce is taken once, from [`PACKETS`] on: one 127 behind the newest is taken, not one
-    /// 128 behind, and after a jump ahead the window moves with it.
-    /// A code's room at a relay is its own, the same each time, and another code's another; and
-    /// it's none of the code's key, which the relay, seeing the room, mustn't learn.
+    /// A code's room at a relay is its own, the same each time, and another code's another. It's
+    /// none of the code's key, which the relay, seeing the room, mustn't learn.
     #[test]
     fn a_code_s_room_is_its_own_and_not_its_key() {
         let code = Code([0x39, 0xe8, 0x51, 0x37, 0x4b, 0x1f, 0xa6, 0x9b, 0x5d, 0x42]);
@@ -481,6 +466,8 @@ mod tests {
         assert!(key.windows(16).all(|part| part != code.room().0), "{key:?}");
     }
 
+    /// Each nonce is taken once, from [`PACKETS`] on: one 127 behind the newest is taken, not one
+    /// 128 behind, and after a jump ahead the window moves with it.
     #[test]
     fn replays_take_each_packet_s_nonce_once() {
         let mut replays = Replays::default();
@@ -501,9 +488,9 @@ mod tests {
         assert!(!replays.fresh(PACKETS + 300));
     }
 
-    /// The end that made a connection and the end that took it, each given the same code, make
-    /// keys that open what the other seals, frames and packets; given another, the end that took
-    /// it refuses the first message, and the end that made it finds the connection closed.
+    /// Ends given the same code make keys that open what the other seals, frames and packets. Given
+    /// another, the end that took the connection refuses the first message and the end that made it
+    /// finds it closed.
     #[test]
     fn a_handshake_keys_its_link_by_the_code() {
         let [(_, making), (_, taking)] = linked();
