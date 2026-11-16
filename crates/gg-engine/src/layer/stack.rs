@@ -35,27 +35,24 @@ use crate::{Event, World};
 #[derive(Default)]
 pub(crate) struct Stack {
     layers: Vec<Box<dyn Layer>>,
-    /// The name of each layer's type, in the same order, which a recording names it by.
+    /// Each layer's type's name, in the same order: a recording names layers by it.
     names: Vec<&'static str>,
-    /// The full name of each layer's type, in the same order, which tells a layer's own default
-    /// `ui` from another layer's that its `ui` calls.
+    /// Each layer's type's full name: tells a layer's own default `ui` from another's that it
+    /// calls.
     #[cfg(feature = "dev")]
     types: Vec<&'static str>,
     /// Where the overlays start.
     overlays: usize,
-    /// What records the run, if it's recorded.
     recorder: Option<Recorder>,
-    /// The session the run takes part in, if it's networked: a lockstep session's peer, a server,
-    /// or a server's client.
+    /// A lockstep session's peer, a server, or a server's client.
     net: Option<Session>,
-    /// What runs each tick again, if the run's ticks are sync-tested, until one goes another way.
+    /// Runs each tick again, if sync-tested, until one goes another way.
     sync_test: Option<SyncTest>,
-    /// Whether a layer ended the run with an error, as [`Context::fail`] says, which the context
-    /// tells as the layers detach.
+    /// Whether a layer called [`Context::fail`]; the context tells it as the layers detach.
     failed: bool,
 }
 
-/// What became of an edit from outside the layers, as [`Stack::offer`] says.
+/// What became of an edit from outside the layers: see [`Stack::offer`].
 #[cfg(feature = "dev")]
 pub(crate) enum Offered {
     /// It applied, and did this.
@@ -102,7 +99,7 @@ impl Stack {
         self.recorder.is_some()
     }
 
-    /// The lockstep session the run is a peer of: for tests.
+    /// The lockstep session the run is a peer of.
     #[cfg(test)]
     pub(crate) fn net_mut(&mut self) -> Option<&mut crate::net::Lockstep> {
         match &mut self.net {
@@ -111,39 +108,38 @@ impl Stack {
         }
     }
 
-    /// The session the run takes part in, if it's networked: for tests.
+    /// The session the run takes part in, if networked.
     #[cfg(test)]
     pub(crate) fn session_mut(&mut self) -> Option<&mut Session> {
         self.net.as_mut()
     }
 
-    /// The queue of the layer at `index`, from the bottom, if it queues commands: for tests.
+    /// The queue of the layer at `index` from the bottom, if it queues commands.
     #[cfg(test)]
     pub(crate) fn commands_of(&mut self, index: usize) -> Option<&mut dyn Commands> {
         self.layers.get_mut(index)?.commands()
     }
 
-    /// What runs each tick again, if the run's ticks are sync-tested: for tests.
+    /// What runs each tick again, if sync-tested.
     #[cfg(test)]
     pub(crate) fn sync_test_mut(&mut self) -> Option<&mut SyncTest> {
         self.sync_test.as_mut()
     }
 
-    /// Has the run be a peer of `net`'s lockstep session: for tests.
+    /// Makes the run a peer of `net`'s lockstep session.
     #[cfg(test)]
     pub(crate) fn lockstep(&mut self, net: crate::net::Lockstep) {
         self.session(Session::Peer(Box::new(net)));
     }
 
-    /// Has the run take part in `session`: as a lockstep session's peer, a server or a client.
+    /// Has the run take part in `session`.
     pub(crate) fn session(&mut self, session: Session) {
         self.net = Some(session);
     }
 
-    /// Takes up what a layer asked of the run's session since the last frame, as
-    /// [`Context::host`], [`Context::join`] and [`Context::leave`] say: between ticks, as a frame
-    /// starts, before the session's turn. A session left logs what it carried and its delay, as one
-    /// does as the run ends.
+    /// Applies the layers' [`Context::host`], [`Context::join`] and [`Context::leave`] requests
+    /// since the last frame. Runs between ticks, as a frame starts, before the session's turn.
+    /// Leaving logs what the session carried and its delay, as at the run's end.
     pub(crate) fn take_asked(&mut self, cx: &mut Context) {
         let Some(asked) = cx.asked.take() else {
             return;
@@ -167,28 +163,27 @@ impl Stack {
         self.tell_session(cx);
     }
 
-    /// The run's session as a game's own UI shows it, as [`Session::status`] says: as a frame's
-    /// turn leaves it.
+    /// The session's [`Session::status`] after this frame's turn.
     pub(crate) fn session_status(&self) -> Option<SessionStatus> {
         self.net.as_ref().and_then(Session::status)
     }
 
-    /// Has each tick run again once it has run, a replay's too, as a SyncTest (`--sync-test`) runs
-    /// it, as [`tick`](Self::tick) says: before the layers attach.
+    /// Runs each tick, a replay's too, again as a SyncTest (`--sync-test`; see
+    /// [`tick`](Self::tick)). Call before the layers attach.
     pub(crate) fn sync_test(&mut self) {
         self.sync_test = Some(SyncTest::default());
     }
 
-    /// Whether the run waits on its session: a joiner without the host's world, a tick without the
-    /// other peer's inputs, or a client without the server's world or too far past its latest
-    /// state, `next` being the next to run.
+    /// Whether the run waits on its session before tick `next`: a joiner without the host's
+    /// world, a tick without the other peer's inputs, or a client without the server's world or
+    /// too far past its latest state.
     pub(crate) fn net_waits(&self, next: u64) -> bool {
         self.net.as_ref().is_some_and(|net| !net.ready(next))
     }
 
-    /// Waits out a frame until `until`: a server sending its clients' states as soon as its states
-    /// thread has written them, as [`Server::wait`](crate::net::Server::wait) says; any other run
-    /// asleep.
+    /// Waits out a frame until `until`. A server sends its clients' states as soon as its states
+    /// thread has written them ([`Server::wait`](crate::net::Server::wait)); any other run
+    /// sleeps.
     pub(crate) fn net_wait(&mut self, until: Instant) {
         match &mut self.net {
             Some(Session::Server(server)) => server.wait(until),
@@ -196,41 +191,43 @@ impl Stack {
         }
     }
 
-    /// The time a frame `dt` after the last owes the simulation: a networked run's as
-    /// [`Session::pace`] says, and any other run's `dt`.
+    /// The time a frame `dt` after the last owes the simulation: [`Session::pace`] for a networked
+    /// run, else `dt`.
     pub(crate) fn paced(&mut self, dt: Duration) -> Duration {
         self.net.as_mut().map_or(dt, |net| net.pace(dt))
     }
 
-    /// Has a client's frame, `dt` after the last, draw the other players' entities as the server's
-    /// states have them, as [`Client::interpolate`](crate::net::Client::interpolate) says, in place
-    /// of where its ticks left them: before the world is drawn.
+    /// Has a client's frame, `dt` after the last, draw the other players' entities where the
+    /// server's states put them ([`Client::interpolate`](crate::net::Client::interpolate)), not
+    /// where its ticks left them. Call before the world is drawn.
     pub(crate) fn interpolate(&mut self, cx: &mut Context, dt: Duration) {
         if let Some(Session::Client(client)) = &mut self.net {
             cx.past.instead(&cx.world, client.interpolate(dt));
         }
     }
 
-    /// Between ticks, as a frame starts, the next tick to run being `next`: takes what the session
-    /// sent since the last turn, as [`Session::turn`] says, sending the joiner or a client the
-    /// world, if the host or the server owes it, or restoring the host's or the server's in place
-    /// of the run's, the run's textures taking the names the host's or the server's gave them, as
-    /// they do the names the host gave those it added since; and, in a rollback session or a
-    /// client, takes the ticks that may run again, as [`Session::settle`] says, rolling back to the
-    /// first to, as [`roll_back`](Self::roll_back) says, or a client's world taken to the server's
-    /// where that's at or past `next`. Returns the tick the run's world is at once it restores
-    /// another's or is taken past `next`, which its ticks go on from.
+    /// Between ticks, as a frame starts, with `next` the next tick to run, takes what the session
+    /// sent since the last turn ([`Session::turn`]). The host or server sends the joiner or a
+    /// client the world if it owes it. A joiner or client restores the host's or server's world in
+    /// place of the run's; its textures take the names the host gave them, and those of what it
+    /// added since.
+    ///
+    /// In a rollback session or a client, it then takes the ticks that may run again
+    /// ([`Session::settle`]): it rolls back to the first ([`roll_back`](Self::roll_back)), or
+    /// takes a client's world to the server's where that's at or past `next`.
+    ///
+    /// Returns the tick the run's world is at once it restores another's or is taken past `next`;
+    /// its ticks go on from there.
     pub(crate) fn net_turn(&mut self, cx: &mut Context, next: u64) -> Option<u64> {
         let mut net = self.net.take()?;
         let mut restored = None;
         match net.turn(next) {
             Turn::None => {}
             Turn::Send => {
-                // A lockstep host's logs go, and the slots they kept vacant for their undos with
-                // them, freed as the joiner's load of the world frees them, so that the peers give
-                // the same slots to the entities spawned after; and no undo reaches past the world
-                // the joiner starts from, which its own logs don't hold. Recorded, as an edit
-                // between ticks, so that a replay drops them there too. A server's clients take
+                // A lockstep host's logs go, with the slots they kept vacant for undos, as the
+                // joiner's load frees them, so the peers give the same slots to entities spawned
+                // after, and no undo reaches past the world the joiner starts from. Recorded as an
+                // edit between ticks, so a replay drops them there too. A server's clients take
                 // its world again with each state.
                 if matches!(net, Session::Peer(_)) {
                     if let Some(recorder) = &mut self.recorder {
@@ -267,8 +264,7 @@ impl Stack {
             Turn::Restore((tick, text)) => {
                 let from = format!("the host's or the server's world at tick {tick}");
                 let snapshot = Snapshot::parse(text, from, net.app());
-                // A client's player is the server's choice, which its layers pick up as it
-                // restores.
+                // A client's player is the server's choice; its layers pick it up as it restores.
                 cx.player = net.player();
                 let ticks = snapshot.and_then(|snapshot| {
                     // Its textures go by the host's names, whatever ID files this run's disk holds.
@@ -277,8 +273,8 @@ impl Stack {
                         (snapshot.names.iter()).map(|(path, name)| (name.clone(), path.clone())),
                     );
                     cx.load_restored(snapshot.added());
-                    // Its host's scripts, which its world's components are as, in place of its
-                    // own files', and its host's mods in place of its own.
+                    // Its host's scripts, which its world's components follow, replace its own
+                    // files', and its host's mods replace its own.
                     cx.hosts.take(&mut cx.world, &snapshot.scripts);
                     cx.mods.take(&mut cx.world, &snapshot.mods);
                     self.restore_in_place(cx, &snapshot)
@@ -327,9 +323,8 @@ impl Stack {
         restored
     }
 
-    /// Tells `cx` the session the run takes part in, if any, as [`Context::player`] and
-    /// [`Context::networked`] say, and whether it's a server's or a client's: as the layers attach
-    /// or pick up from a restore.
+    /// Sets `cx`'s [`Context::player`], [`Context::networked`] and server or client state, as the
+    /// layers attach or pick up from a restore.
     fn tell_session(&self, cx: &mut Context) {
         cx.player = self.net.as_ref().and_then(Session::player);
         cx.networked = self.net.is_some();
@@ -339,15 +334,13 @@ impl Stack {
     }
 
     /// Whether the run hosts or plays alone, rather than joining a lockstep session or connecting
-    /// to a server, whose host or server alone watches the scene and script files the layers
-    /// loaded.
+    /// to a server: only a host or server watches the scene and script files the layers loaded.
     #[cfg(feature = "dev")]
     pub(crate) fn watches_files(&self) -> bool {
         !self.joins()
     }
 
-    /// Whether the run joins a lockstep session or connects to a server, going as the host's or the
-    /// server's world goes.
+    /// Whether the run joins a lockstep session or connects to a server.
     fn joins(&self) -> bool {
         self.net.as_ref().is_some_and(Session::follows)
     }
@@ -357,17 +350,17 @@ impl Stack {
         matches!(self.net, Some(Session::Server(_) | Session::Client(_)))
     }
 
-    /// Whether the run is networked, hosting, joining, serving or connecting, whose scene files the
-    /// session's others' must stay as.
+    /// Whether the run is networked: hosting, joining, serving or connecting. Its scene files must
+    /// stay as the session's others'.
     #[cfg(feature = "dev")]
     pub(crate) fn is_peer(&self) -> bool {
         self.net.is_some()
     }
 
-    /// Applies `edit`, an author's from outside the layers, between ticks, as [`edit`](Self::edit)
-    /// does; or, in a lockstep session, offers it for the tick both peers apply it before, giving
-    /// its ticket. A server's client refuses it (`net.no_edit`), as the server's next state would
-    /// take the edit away.
+    /// Applies `edit`, an author's from outside the layers, between ticks like
+    /// [`edit`](Self::edit). In a lockstep session it's offered for the tick both peers apply it
+    /// before, and the ticket is given. A server's client refuses it (`net.no_edit`): the
+    /// server's next state would take the edit away.
     #[cfg(feature = "dev")]
     pub(crate) fn offer(&mut self, cx: &mut Context, edit: Edit) -> Offered {
         match &mut self.net {
@@ -384,16 +377,16 @@ impl Stack {
         }
     }
 
-    /// Applies the save of the scene file whose author is `author`, its text now `text`, between
-    /// ticks, as [`scene_files::apply_save`] does; or, in a lockstep session, offers it for the
-    /// tick both peers apply it before. Either way it logs what it did.
+    /// Applies the save of `author`'s scene file, its text now `text`, between ticks
+    /// ([`scene_files::apply_save`]). In a lockstep session it's offered for the tick both peers
+    /// apply it before. It logs what it did.
     #[cfg(feature = "dev")]
     pub(crate) fn offer_save(&mut self, cx: &mut Context, author: String, text: String) {
         match &mut self.net {
             Some(Session::Peer(net)) => {
-                // What it names that isn't loaded is loaded now, so that the names the host gives
-                // those go out before it. One naming a texture that can't be, which the joiner
-                // might stand in for, isn't offered, warning as a save that doesn't load does.
+                // What it names that isn't loaded loads now, so the names the host gives those go
+                // out before it. One naming a texture that can't load (the joiner might stand in
+                // for it) isn't offered, and warns like a save that doesn't load.
                 if let Ok(missing) = cx.load_scene_assets(&text)
                     && !missing.is_empty()
                     && let Err(error) = cx.world().scene_loads(&text)
@@ -415,10 +408,10 @@ impl Stack {
         }
     }
 
-    /// Reloads the script whose path from the project's root is `path`, its text now `text`, as
-    /// its file is saved, through an edit, between ticks, as [`edit`](Self::edit) applies it; or,
-    /// in a lockstep session, offers that edit for the tick both peers apply it before. Either
-    /// way, what it did is logged, as [`Hosts::reload`](crate::luau::Hosts::reload) says.
+    /// Reloads the script at `path` from the project's root, its text now `text`, as its file is
+    /// saved: an [`edit`](Self::edit) between ticks, or in a lockstep session offered for the
+    /// tick both peers apply it before. It logs what it did
+    /// ([`Hosts::reload`](crate::luau::Hosts::reload)).
     #[cfg(feature = "dev")]
     pub(crate) fn offer_script(&mut self, cx: &mut Context, path: String, text: String) {
         let edit = Edit::Script { path, text };
@@ -430,9 +423,9 @@ impl Stack {
         }
     }
 
-    /// Offers the patch `table` names, as
-    /// [`Lockstep::offer_patch`](crate::net::Lockstep::offer_patch) does; `None` outside a
-    /// lockstep session, where it applies now.
+    /// Offers the patch `table` names, like
+    /// [`Lockstep::offer_patch`](crate::net::Lockstep::offer_patch). Outside a lockstep session
+    /// it gives `table` back: it applies now.
     #[cfg(feature = "dev")]
     pub(crate) fn offer_patch(
         &mut self,
@@ -444,17 +437,17 @@ impl Stack {
         }
     }
 
-    /// Applies the patch `table` names, the simulation having run `ticks` ticks, as
-    /// [`patch::apply`](crate::patch::apply) does, outside a lockstep session, which
-    /// [`offer_patch`](Self::offer_patch) offers it to; a recording gets it once it has applied,
-    /// as [`Recorder::patched`] says.
+    /// Applies the patch `table` names, the simulation having run `ticks` ticks
+    /// ([`patch::apply`](crate::patch::apply)), outside a lockstep session, which
+    /// [`offer_patch`](Self::offer_patch) offers it to. A recording gets it once applied
+    /// ([`Recorder::patched`]).
     #[cfg(feature = "dev")]
     pub(crate) fn patch(&mut self, table: subsecond::JumpTable, ticks: u64) -> Result<()> {
         patched(&mut self.recorder, table, ticks)
     }
 
-    /// What the edit or the patch offered with `ticket` did, and the tick it applied before, once
-    /// it has, which it gives once.
+    /// What the edit or patch offered with `ticket` did, and the tick it applied before, once it
+    /// has. Given once.
     #[cfg(feature = "dev")]
     pub(crate) fn offered(&mut self, ticket: Ticket) -> Option<(u64, Result<Done>)> {
         match &mut self.net {
@@ -469,13 +462,13 @@ impl Stack {
         matches!(&self.net, Some(Session::Peer(net)) if net.is_done(ticket))
     }
 
-    /// Fails, once the run's recording has stopped, as [`Recorder::check`] says.
+    /// Fails once the run's recording has stopped ([`Recorder::check`]).
     pub(crate) fn recorded(&self) -> Result<()> {
         self.recorder.as_ref().map_or(Ok(()), Recorder::check)
     }
 
     /// Loads the layers, then attaches them, each from the bottom up, in `cx`, whose world nothing
-    /// has drawn an ID from: its seed is what a recording starts from.
+    /// has drawn an ID from: its seed is where a recording starts.
     pub(crate) fn attach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
         if let Some(recorder) = &mut self.recorder {
@@ -500,16 +493,18 @@ impl Stack {
     }
 
     /// Loads the layers, then puts `snapshot`'s world in `cx`'s place, as a run restored from it
-    /// starts, and has each layer pick up from it, each from the bottom up; returns the ticks the
-    /// simulation had run as it was taken, which the run's go on from, and whether its run was
-    /// stopped, as the run then is. A development build's run that a tool API `serves`, and that
-    /// can stop, as [`refuses_stop`](Self::refuses_stop) says, goes on as the snapshot's run was:
-    /// one taken while a copy played holds the world as edited too, which comes back held aside, as
-    /// [`play`](Self::play) holds it, the authors' edits afresh, as after any restore. Any other
-    /// run plays on with the world that played, warning `snapshot.plays`, with why, of a snapshot
-    /// whose run was stopped or held a world as edited.
+    /// starts, and has each layer pick up from it, from the bottom up. Returns the ticks the
+    /// simulation had run as it was taken, where the run's ticks go on from, and whether its run
+    /// was stopped.
     ///
-    /// Fails as [`Snapshot::restore`] does.
+    /// A development build's run that a tool API `serves`, and that can stop (see
+    /// [`refuses_stop`](Self::refuses_stop)), goes on as the snapshot's run was. One taken while a
+    /// copy played also holds the world as edited, which comes back held aside like
+    /// [`play`](Self::play)'s, with the authors' edits afresh as after any restore. Any other run
+    /// plays on with the world that played, and warns `snapshot.plays`, with why, if the
+    /// snapshot's run was stopped or held a world as edited.
+    ///
+    /// Fails like [`Snapshot::restore`].
     pub(crate) fn restore(
         &mut self,
         cx: &mut Context,
@@ -568,9 +563,9 @@ impl Stack {
         Ok((ticks, false))
     }
 
-    /// Whether the tool API's `stop` can't stop the run, and if so, why: a recorded run's replay
-    /// couldn't follow a world brought back between ticks, its ticks taken back, and a lockstep
-    /// peer's world would part from the other's. Such a run plays from start to end.
+    /// Why the tool API's `stop` can't stop the run, if it can't: a recorded run's replay couldn't
+    /// follow a world brought back between ticks, and a lockstep peer's world would part from the
+    /// other's. Such a run plays from start to end.
     #[cfg(feature = "dev")]
     pub(crate) fn refuses_stop(&self) -> Option<&'static str> {
         if self.recorder.is_some() {
@@ -585,12 +580,11 @@ impl Stack {
         }
     }
 
-    /// Has a copy of `cx`'s world, the world as edited, which is at `ticks`, play in its place, as
-    /// the tool API's `play` asks of a stopped run: holds the world as edited aside, with its
-    /// ticks, its scene files, its open scene and the authors' edits of it, whose logs the copy
-    /// starts afresh, until [`stop`](Self::stop); the copy's open scene starts as a copy of it.
-    /// The layers are told nothing: what they hold of the world holds of the copy, which goes on
-    /// exactly as the world would.
+    /// Plays a copy of `cx`'s world, the world as edited, at `ticks`, in its place: the tool API's
+    /// `play` of a stopped run. The world as edited is held aside until [`stop`](Self::stop),
+    /// with its ticks, scene files, open scene and the authors' edits; the copy starts their logs
+    /// afresh and its open scene as a copy. The layers are told nothing: what they hold of the
+    /// world holds of the copy, which goes on exactly as the world would.
     #[cfg(feature = "dev")]
     pub(crate) fn play(&self, cx: &mut Context, ticks: u64) {
         let _zone = gg_core::zone!();
@@ -608,14 +602,13 @@ impl Stack {
         info!(ticks, entities, "Playing a copy of the world as edited");
     }
 
-    /// Brings back the world as edited that [`play`](Self::play) holds aside, if it holds one, as
-    /// the tool API's `stop` asks: the very world, with its scene files, its open scene and the
-    /// authors' edits of it, the copy and all done to it going, but for the scripts reloaded since,
-    /// whose components it holds as they declare them now, as [`Scripts`](crate::Scripts) says;
-    /// empties each layer's queue, which
-    /// the copy's ticks were to apply; has each layer pick up from the world, from the bottom up,
-    /// as [`Layer::restored`] says; and returns the ticks the world as edited is at. A run playing
-    /// from its start holds none: `None`, and nothing changes.
+    /// Brings back the world as edited that [`play`](Self::play) holds aside, if any, as the tool
+    /// API's `stop` asks: the very world, with its scene files, open scene and the authors' edits.
+    /// The copy and all done to it go, but for the scripts reloaded since: the world holds their
+    /// components as they declare them now ([`Scripts`](crate::Scripts)). It empties each layer's
+    /// queue, which the copy's ticks were to apply, and has each layer pick up from the world,
+    /// from the bottom up ([`Layer::restored`]). Returns the ticks the world as edited is at.
+    /// A run playing from its start holds none: `None`, nothing changes.
     #[cfg(feature = "dev")]
     pub(crate) fn stop(&mut self, cx: &mut Context) -> Option<u64> {
         let edited = cx.dev.edited.take()?;
@@ -642,15 +635,14 @@ impl Stack {
         Some(edited.ticks)
     }
 
-    /// Has `apply` change `cx`'s world, between ticks, through a log of its own, which no author
-    /// undoes, as the tool API's `scene open` and `scene new` change it; and then starts every
-    /// author's edits afresh, since none of them could undo past it: the world is renewed, as
-    /// [`World::renew`] says, refusing every log's entries from before, the authors' logs go, and
-    /// each layer picks up from the world, from the bottom up, as at [`stop`](Self::stop), so that
-    /// the in-process Inspector lets go of its own. Refused, what `apply` applied comes undone,
-    /// and nothing else changes.
+    /// Has `apply` change `cx`'s world, between ticks, through a log of its own that no author
+    /// undoes, as the tool API's `scene open` and `scene new` do. Then every author's edits start
+    /// afresh, as none could undo past it: the world is [renewed](World::renew), refusing every
+    /// log's earlier entries, the authors' logs go, and each layer picks up from the world, from
+    /// the bottom up, as at [`stop`](Self::stop), so the in-process Inspector lets go of its own.
+    /// If `apply` is refused, what it applied is undone and nothing else changes.
     ///
-    /// Fails as `apply` does.
+    /// Fails if `apply` does.
     #[cfg(feature = "dev")]
     pub(crate) fn rewrite(
         &mut self,
@@ -677,9 +669,9 @@ impl Stack {
     }
 
     /// Puts `snapshot`'s world in `cx`'s place, the layers having loaded, with its scene files and
-    /// its open scene, or the start scene's file open for a snapshot that holds none, its scripts'
-    /// components as the layers' scripts declare them, and has each layer pick up from it, from the
-    /// bottom up; returns the ticks the simulation had run as it was taken.
+    /// open scene (the start scene's file for a snapshot that holds none) and its scripts'
+    /// components as the layers' scripts declare them, and has each layer pick up from it, from
+    /// the bottom up. Returns the ticks the simulation had run as it was taken.
     ///
     /// Fails as [`Snapshot::restore`] does.
     fn restore_in_place(&mut self, cx: &mut Context, snapshot: &Snapshot) -> Result<u64> {
@@ -720,9 +712,8 @@ impl Stack {
 
     /// Detaches from the top down, the reverse of attaching, once a recording has its end, a
     /// SyncTest that found no tick going another way has logged how many it ran again
-    /// (`sync_test.matched`), and a rollback session's peer how it rolled back (`net.rollback`);
-    /// and takes from `cx` whether a layer ended the run with an error, as
-    /// [`failed`](Self::failed) tells, as it detached too.
+    /// (`sync_test.matched`), and a rollback peer has logged how it rolled back (`net.rollback`).
+    /// Takes from `cx` whether a layer failed the run as it detached ([`failed`](Self::failed)).
     pub(crate) fn detach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
         if let Some(recorder) = &mut self.recorder {
@@ -747,18 +738,18 @@ impl Stack {
         self.failed |= cx.failed;
     }
 
-    /// Whether a layer ended the run with an error, as [`Context::fail`] says, once the layers have
-    /// detached, which makes the run's status 1.
+    /// Whether a layer ended the run with an error ([`Context::fail`]), once the layers have
+    /// detached. The run's status is then 1.
     pub(crate) fn failed(&self) -> bool {
         self.failed
     }
 
     #[cfg(feature = "dev")]
-    /// Applies `edit`, an author's from outside the layers, to `cx`'s world, between ticks, and says
-    /// what it did. A recording gets it first, as it was asked for, before the commands of the tick
-    /// after, so that a replay applies it there, and is refused where the run refused it.
+    /// Applies `edit`, an author's from outside the layers, to `cx`'s world between ticks, and
+    /// says what it did. A recording gets it first, as asked for, before the next tick's
+    /// commands, so a replay applies it there and is refused where the run refused it.
     ///
-    /// Fails as [`Authors::edit`] does.
+    /// Fails like [`Authors::edit`].
     pub(crate) fn edit(&mut self, cx: &mut Context, edit: Edit) -> Result<Done> {
         if let Some(recorder) = &mut self.recorder {
             recorder.edited(&edit.to_value(), &cx.world);
@@ -766,13 +757,12 @@ impl Stack {
         cx.apply_edit(edit)
     }
 
-    /// Runs a tick of the simulation, as [`run`](Self::run) says. A tick waits for the cells it
-    /// brings in as it starts to be prepared, returning `false` without running until they are, as
-    /// [`Context::cells_ready`] says. In a lockstep session, the tick also waits for the other
-    /// peer's inputs, or, in a rollback session, until it's near enough them, and a client's for the
-    /// server's world, and while it's too far past the latest state, as [`Session::ready`] says;
-    /// once it can run, the run's queued commands go out as its inputs, as [`Session::start_tick`]
-    /// says.
+    /// Runs a tick of the simulation ([`run`](Self::run)). It returns `false` without
+    /// running until the cells it brings in are prepared ([`Context::cells_ready`]). It also
+    /// waits ([`Session::ready`]): in a lockstep session for the other peer's inputs (in a
+    /// rollback session, until near enough them), and a client for the server's world and while
+    /// too far past the latest state. Once it can run, the run's queued commands go out as its
+    /// inputs ([`Session::start_tick`]).
     pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) -> bool {
         let _zone = gg_core::zone!();
         if !cx.cells_ready() {
@@ -799,22 +789,31 @@ impl Stack {
         true
     }
 
-    /// Runs tick `tick`: each layer's, from the bottom up, after which the world shares the
-    /// context's assets again, as [`Context::share_assets`] says; then the world's cells come in and
-    /// go out, as [`Context::stream_cells`] says, as they do wherever a tick runs; and then the
-    /// sounds the tick queued play, as [`World::play_sound`] says. A recording gets each layer's
-    /// commands just before its tick applies them, so that a tick that panics leaves them, and the
-    /// world's hash after the last. In a networked session, the tick runs on the session's inputs
-    /// for it, as [`Session::inputs`] says: in a lockstep session, both peers', the edits among
-    /// them applying first, as a recording keeps them; or, in a rollback session, before the
-    /// other's have come, on them predicted, a copy of the world kept as it starts, which a
-    /// rollback runs it again from; a server's own and its clients'; and a client's own. Where the
-    /// tick may run again, as a rollback peer's or a client's, the sounds it plays are kept, which
-    /// a run again doesn't play again, as [`Context::play_queued_again`] says; and the session is
-    /// told once it has run, as [`Session::ran`] says. A SyncTest takes a copy of the world once
-    /// the edits have applied, keeps each layer's commands as its tick is about to apply them, and
-    /// runs the tick again once it has run, as [`run_again`](Self::run_again) says: one that fails
-    /// ends the run with its error, as [`Context::fail`] does, and the SyncTest with it.
+    /// Runs tick `tick`, in order:
+    /// 1. Each layer's tick, from the bottom up, the world sharing the context's assets again
+    ///    after each ([`Context::share_assets`]).
+    /// 2. The world's cells come in and go out ([`Context::stream_cells`]), wherever a tick runs.
+    /// 3. The sounds the tick queued play ([`World::play_sound`]).
+    ///
+    /// A recording gets each layer's commands just before its tick applies them, so a tick that
+    /// panics leaves them, and the world's hash after the last.
+    ///
+    /// In a networked session the tick runs on the session's inputs for it
+    /// ([`Session::inputs`]):
+    /// - lockstep: both peers', the edits among them applying first, as a recording keeps them;
+    /// - rollback, before the other's have come: on them predicted, with a copy of the world kept
+    ///   as it starts, for a rollback to run it again from;
+    /// - a server: its own and its clients';
+    /// - a client: its own.
+    ///
+    /// Where the tick may run again (a rollback peer's or a client's), its sounds are kept and a
+    /// run again doesn't replay them ([`Context::play_queued_again`]). The session is told once
+    /// it has run ([`Session::ran`]).
+    ///
+    /// A SyncTest takes a copy of the world once the edits have applied, keeps each layer's
+    /// commands as its tick is about to apply them, and runs the tick again once it has run
+    /// ([`run_again`](Self::run_again)). A failure ends the run with its error, like
+    /// [`Context::fail`], and the SyncTest with it.
     fn run(
         layers: &mut [Box<dyn Layer>],
         names: &[&'static str],
@@ -944,14 +943,13 @@ impl Stack {
         }
     }
 
-    /// Takes the world back to where tick `from` started, as [`Session::start_of`] has it, the
-    /// start of a tick run on the other lockstep peer's inputs predicted, which held something, or
-    /// a client's server's world after the tick before, and runs it and the ticks after again, to
-    /// `next`, the next to run, as rollback does, the world going on as they leave it, as
-    /// [`run`](Self::run) runs each: the very world, as [`World::rewind`] says, so that what's kept
-    /// of it holds, and the layers are told nothing. Each layer's queue, which holds what it queued
-    /// since the last tick, is as it was once they've run; and the frames after draw on from where
-    /// the last started.
+    /// Takes the world back to where tick `from` started ([`Session::start_of`]: a tick run on
+    /// the other lockstep peer's inputs predicted, which held something, or a client's server's
+    /// world after the tick before). Runs it and the ticks after again, to `next`, the next to
+    /// run, each as [`run`](Self::run) does, and the world goes on as they leave it. It's the
+    /// very world ([`World::rewind`]), so what's kept of it holds, and the layers are told
+    /// nothing. Each layer's queue, holding what it queued since the last tick, is as it was once
+    /// they've run, and the frames after draw on from where the last started.
     fn roll_back(&mut self, cx: &mut Context, from: u64, next: u64) {
         let _zone = gg_core::zone!();
         let Self {
@@ -996,12 +994,12 @@ impl Stack {
         net.rolled_back(from, next);
     }
 
-    /// Runs a tick as a replay does: as [`tick`](Self::tick) does, but never waiting, the cells it
-    /// brings in prepared then and there unless the tick before prepared them, with each layer's
-    /// queue emptied and filled again by `fill`, which gets the layer's index, its queue, if it has
-    /// one, and the world as its tick finds it; and a SyncTest runs it again.
+    /// Runs a tick as a replay does: like [`tick`](Self::tick), but never waiting. The cells it
+    /// brings in are prepared then and there unless the tick before prepared them. Each layer's
+    /// queue is emptied and refilled by `fill`, given the layer's index, its queue if it has one,
+    /// and the world as its tick finds it. A SyncTest runs it again.
     ///
-    /// Fails as `fill` does, and as [`run_again`](Self::run_again) does, which ends the SyncTest.
+    /// Fails if `fill` does, or like [`run_again`](Self::run_again), which ends the SyncTest.
     pub(crate) fn replay_tick(
         &mut self,
         cx: &mut Context,
@@ -1047,14 +1045,13 @@ impl Stack {
     }
 
     /// Runs `tick` again, as a SyncTest does once it has run, `sync_test` having kept a copy of the
-    /// world as it started and each layer's commands as its tick applied them: on the copy, put in
-    /// the world's place, each layer told as it's put there and as the world comes back, as
-    /// [`Layer::swapped`] says, and given back the commands its tick applied; the sounds the tick
-    /// queues there stay in the copy, which nothing plays, as they played as it ran on the world.
-    /// Then checks that it left the copy as it left the world.
+    /// world as it started and each layer's commands as its tick applied them. It runs on the
+    /// copy, put in the world's place; each layer is told ([`Layer::swapped`]) as the copy goes
+    /// in and as the world comes back, and gets back the commands its tick applied. The sounds
+    /// it queues stay in the copy, which nothing plays: they played when the tick ran on the
+    /// world. Then it checks that the tick left the copy as it left the world.
     ///
-    /// Fails, without running it again, as [`SyncTest::refused`] does, and as
-    /// [`SyncTest::compare`] does.
+    /// Fails like [`SyncTest::refused`], without running again, and like [`SyncTest::compare`].
     fn run_again(
         layers: &mut [Box<dyn Layer>],
         sync_test: &mut SyncTest,
@@ -1091,10 +1088,9 @@ impl Stack {
         }
     }
 
-    /// Draws UI from the bottom up, so the layers above draw over those below, and returns
-    /// whether any layer draws UI: every layer does but one whose `ui` is its own type's default,
-    /// [`Layer::ui`]'s. One whose `ui` calls another layer's default draws UI as far as this goes,
-    /// whatever it draws.
+    /// Draws UI from the bottom up, so layers above draw over those below. Returns whether any
+    /// layer draws UI: all but one whose `ui` is its own type's default, [`Layer::ui`]'s. One
+    /// whose `ui` calls another layer's default counts as drawing, whatever it draws.
     #[cfg(feature = "dev")]
     pub(crate) fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) -> bool {
         let _zone = gg_core::zone!();
@@ -1106,12 +1102,12 @@ impl Stack {
         draws
     }
 
-    /// Records `event` in the input state that layers poll, then hands it down from the top
-    /// until a layer handles it. `Break` means one did. A release, a gamepad's stick or trigger
-    /// back at rest, and the loss of focus, go on to the layers below one that handles them, as
-    /// releases go past the UI, so that none is left holding what it saw pressed: a release without
-    /// its press changes nothing. A game UI that takes the mouse's buttons or its wheel from the
-    /// layers below, as [`GameUi::event`] says, handles them for the layer that sent it them.
+    /// Records `event` in the input state that layers poll, then hands it down from the top until
+    /// a layer handles it. `Break` means one did. A release, a gamepad's stick or trigger back at
+    /// rest, and the loss of focus, go on to the layers below one that handles them, as releases
+    /// go past the UI, so none is left holding what it saw pressed: a release without its press
+    /// changes nothing. A game UI that takes the mouse's buttons or wheel from the layers below
+    /// ([`GameUi::event`]) handles them for the layer that sent it them.
     pub(crate) fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         cx.input.record(event);
         let lets_go = match *event {
@@ -1138,16 +1134,19 @@ impl Stack {
     }
 }
 
-/// A layer as a development build's stack holds it, which calls each of the layer's methods
-/// through subsecond's `HotFn`, as [`Layer`] says, since the stack calls what it holds through a
-/// vtable, which no patch changes, while `HotFn`, in a build with debug assertions, looks each call
-/// up in the jump table of the last patch applied. Each call goes through the method as a function
-/// item, such as `L::tick`: `HotFn` finds a function of no size in the table by its own `call_it`
-/// for it, which the game's crate makes, since `L` is the game's, and so the patch makes again; it
-/// takes anything the size of a pointer, a closure that holds one among them, for a function
-/// pointer, and calls it as one. A method added to `Layer` needs its call here too, or the trait's
-/// default runs in place of the layer's own. The stack names the layer by `L`, and `L`'s default
-/// `ui` names `L`, as the stack's types do. A call allocates nothing.
+/// A layer as a development build's stack holds it. It calls each of the layer's methods through
+/// subsecond's `HotFn` (see [`Layer`]): the stack calls through a vtable, which no patch changes,
+/// while `HotFn`, in a build with debug assertions, looks each call up in the jump table of the
+/// last patch applied.
+///
+/// Each call goes through the method as a function item, such as `L::tick`. `HotFn` finds a
+/// function of no size in the table by its own `call_it` for it. The game's crate makes that,
+/// since `L` is the game's, and so does the patch. `HotFn` takes anything the size of a pointer,
+/// a closure holding one among them, for a function pointer, and calls it as one.
+///
+/// A method added to `Layer` needs its call here too, or the trait's default runs in place of
+/// the layer's own. The stack names the layer by `L`, and `L`'s default `ui` names `L`, as the
+/// stack's types do. A call allocates nothing.
 #[cfg(feature = "dev")]
 pub(super) struct Hot<L>(pub(super) L);
 
@@ -1194,10 +1193,10 @@ impl<L: Layer> Layer for Hot<L> {
     }
 }
 
-/// Applies the patch `table` names, the simulation having run `ticks` ticks, as
-/// [`patch::apply`](crate::patch::apply) does, and has `recorder`, if the run is recorded, write it
-/// once it has applied, so that the recording's replay, which can't apply it, stops where the run's
-/// code changed rather than going another way from there unsaid.
+/// Applies the patch `table` names, the simulation having run `ticks` ticks
+/// ([`patch::apply`](crate::patch::apply)), and has `recorder`, if any, write it once applied. The
+/// recording's replay can't apply it, so it stops where the run's code changed instead of going
+/// another way unsaid.
 #[cfg(feature = "dev")]
 fn patched(recorder: &mut Option<Recorder>, table: subsecond::JumpTable, ticks: u64) -> Result<()> {
     let library = table.lib.clone();
@@ -1208,7 +1207,7 @@ fn patched(recorder: &mut Option<Recorder>, table: subsecond::JumpTable, ticks: 
     Ok(())
 }
 
-/// The name of type `L`, without its path or its generics: such as `Inspector`.
+/// The name of type `L`, without path or generics: `Inspector`.
 pub(super) fn short_name<L>() -> &'static str {
     let name = type_name::<L>();
     let name = name.split('<').next().unwrap_or(name);

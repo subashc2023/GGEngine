@@ -54,51 +54,50 @@ impl Context {
         self.clear_color = color;
     }
 
-    /// How a layer set the game's view to be antialiased, in place of its world's environment's, if
-    /// one has, as [`set_antialiasing`](Self::set_antialiasing) says.
+    /// The antialiasing a layer set for the game's view, if any: see
+    /// [`set_antialiasing`](Self::set_antialiasing).
     pub fn antialiasing(&self) -> Option<Antialiasing> {
         self.antialiasing
     }
 
-    /// Has the game's view antialiased as `antialiasing` says, in place of what its world's
-    /// [`Environment`] says, a world without one antialiased by it too, from the frame being made
-    /// on; or, for `None`, as the environment says again. It's the run's own, as a player's display
-    /// settings are, and holds for the run: no hash, scene, snapshot or recording holds it, so that
-    /// lockstep peers whose players choose differently, and a replay of either, go as they would.
+    /// Antialiases the game's view as `antialiasing` says from the frame being made on, over the
+    /// world's [`Environment`], or without one. `None` goes back to the environment. It's the
+    /// run's own, like a player's display settings: no hash, scene, snapshot or recording holds
+    /// it, so lockstep peers that choose differently, and replays of either, go as they would.
     pub fn set_antialiasing(&mut self, antialiasing: Option<Antialiasing>) {
         self.antialiasing = antialiasing;
     }
 
-    /// What a layer set the game's view to see the world from this frame, if one has.
+    /// The viewpoint a layer set for this frame, if any.
     pub fn viewpoint(&self) -> Option<Viewpoint> {
         self.viewpoint
     }
 
-    /// Sets what the game's view sees the world from this frame, in place of the world's camera,
-    /// which it sees through in frames no layer sets one: of the entities with a [`Camera`] and a
-    /// [`Transform`], the one that's primary; without one, [`Viewpoint::default`]. A projection
-    /// that can't project, as [`Projection`](crate::Projection) says, is drawn as the last that
-    /// could, or the default's, once for a warning (`engine.bad_projection`) as the frame takes it.
+    /// Sets where the game's view sees the world from this frame. Frames where no layer sets one
+    /// use the primary entity with a [`Camera`] and a [`Transform`], else [`Viewpoint::default`].
+    /// A projection that can't project (see [`Projection`](crate::Projection)) is drawn as the
+    /// last that could, or the default's, and warns once (`engine.bad_projection`).
     pub fn set_viewpoint(&mut self, viewpoint: Viewpoint) {
         self.viewpoint = Some(viewpoint);
     }
 
-    /// What every matrix and position a frame draws is relative to, in `f32`, as
-    /// [`RenderData::origin`](gg_renderer::RenderData::origin) says: the engine draws the world
-    /// from it, and takes what layers draw in the world, by [`draw`](Self::draw),
-    /// [`draw_sprite`](Self::draw_sprite) and the rest, from it, so that what's near the view draws
-    /// as precisely 1,000 km from the world's origin as at it, but as far as a layer's `f32`s
-    /// reach. A multiple of 1,024 on each axis near where the view saw from the frame before, or,
-    /// in a development build, where the look's viewpoint is: it moves once the view is more than
-    /// 1,024 from it on an axis, to the nearest, so never while the view stays within 1,024 of the
-    /// world's origin.
+    /// What every matrix and position a frame draws is relative to, in `f32`: see
+    /// [`RenderData::origin`](gg_renderer::RenderData::origin). The engine draws the world, and
+    /// what layers draw ([`draw`](Self::draw), [`draw_sprite`](Self::draw_sprite) and the rest),
+    /// from it, so what's near the view draws as precisely 1,000 km from the world's origin as at
+    /// it, as far as a layer's own `f32`s reach.
+    ///
+    /// A multiple of 1,024 on each axis, near where the view saw from the frame before or, in a
+    /// development build, where the look's viewpoint is. It moves to the nearest multiple once
+    /// the view is more than 1,024 from it on an axis, so never while the view stays within 1,024
+    /// of the world's origin.
     pub fn origin(&self) -> DVec3 {
         self.origin
     }
 
-    /// Moves the [origin](Self::origin) to follow the look's viewpoint, in a frame that isn't bare,
-    /// before the layers draw, so that a frame drawn the moment a tool looks from far off draws
-    /// near it as precisely as the frames after.
+    /// Moves the [origin](Self::origin) to follow the look's viewpoint, in a frame that isn't
+    /// bare, before the layers draw, so a frame drawn as a tool looks from far off is as precise
+    /// as the frames after.
     #[cfg(feature = "dev")]
     pub(crate) fn follow_look(&mut self) {
         if let Some(looked) = self.dev.look.viewpoint.filter(|_| !self.dev.look.bare) {
@@ -111,23 +110,21 @@ impl Context {
     pub(crate) fn follow_look(&mut self) {}
 
     /// Where the game's view was in the main window as the last frame handed it to the renderer:
-    /// its physical pixels from the window's top left, as [`Input::cursor`] places the cursor. The
-    /// view is the main window's central area, which the panels dock around, or the panel that
-    /// [`App::view_panel`](crate::App::view_panel) names. `None` while it has no area, as in a
-    /// dockspace's first frame and while another panel's tab shows over the view's, and in replays,
-    /// which render nothing. For what's presented, such as a camera that keeps the point under the
-    /// cursor where it is, rather than the world.
+    /// physical pixels from the window's top left, as [`Input::cursor`] places the cursor. The
+    /// view is the main window's central area, or the panel
+    /// [`App::view_panel`](crate::App::view_panel) names. `None` while it has no area (a
+    /// dockspace's first frame, another panel's tab over it) and in replays, which render
+    /// nothing. For what's presented, such as a camera that keeps the point under the cursor
+    /// where it is, not the world.
     pub fn view(&self) -> Option<Viewport> {
         self.view
     }
 
-    /// Has the game's view show `size` pixels in place of what's drawn, from the frame being made
-    /// on, which `fill` writes, given their bytes: rows of RGBA8, sRGB-encoded and tightly packed,
-    /// top row first. They show from the view's top left, each onto one of its pixels, as far as
-    /// they reach of it, the rest of it the clear color, and go on showing in the frames after,
-    /// until the next call or [`hide_pixels`](Self::hide_pixels): the view of another process's
-    /// game, as the editor shows it. Nothing drawn shows in the view meanwhile, and picks find
-    /// nothing there.
+    /// Has the game's view show `size` pixels instead of what's drawn, from the frame being made
+    /// on, until the next call or [`hide_pixels`](Self::hide_pixels): another process's game, as
+    /// the editor shows it. `fill` writes their bytes: RGBA8 rows, sRGB-encoded, tightly packed,
+    /// top row first. Each shows on one view pixel from its top left; the rest is the clear
+    /// color. Nothing drawn shows meanwhile, and picks find nothing.
     ///
     /// # Panics
     ///
@@ -153,24 +150,22 @@ impl Context {
         self.shown_new = false;
     }
 
-    /// Asks which of the world's entities the game's view shows at `at`, in the main window's
-    /// physical pixels from its top left, as [`Input::cursor`] places the cursor, in the frame
-    /// being made: the one whose sprite, circle or mesh draws on top at that pixel, or whose
-    /// collider's outline does, as [`set_colliders_shown`](Self::set_colliders_shown) shows them;
-    /// and returns the ticket its answer comes back with in [`picked`](Self::picked), or `None`
-    /// once the frame has asked 64, as many as a frame reads back. The answer comes four frames
-    /// after the frame that asks, about 67 ms at 60 Hz: the main thread runs a frame ahead of the
-    /// render thread, which reads the pixel back with a frame that the GPU finishes two frames
-    /// later. It's `None` where the view shows no entity: where a layer's own draw is on top, as
-    /// [`draw`](Self::draw), [`draw_sprite`](Self::draw_sprite),
-    /// [`draw_circle`](Self::draw_circle), [`draw_line`](Self::draw_line) and
-    /// [`draw_rect`](Self::draw_rect) draw, where the view shows its clear color, and outside the
-    /// view, which is answered sooner, with the next answers to come back. Where a sprite, a
-    /// circle, a line or a blended model is fully transparent, which their shaders discard, the
-    /// pick finds what's behind it. A frame whose rendering had nothing to render into, as when the
-    /// window's swapchain had no image to give, leaves its picks to the next that renders, which
-    /// reads them by what it shows; and so does a development build's frame that a tool's capture
-    /// of the game's own view makes bare. Replays, which render nothing, answer none.
+    /// Asks which entity the game's view shows at `at` in the frame being made: main-window
+    /// physical pixels from its top left, as [`Input::cursor`] places the cursor. It's the entity
+    /// whose sprite, circle or mesh draws on top there, or whose collider's outline does (see
+    /// [`set_colliders_shown`](Self::set_colliders_shown)).
+    ///
+    /// Returns the ticket the answer comes back with in [`picked`](Self::picked), or `None` once
+    /// the frame has asked 64, as many as a frame reads back. The answer arrives four frames
+    /// later, about 67 ms at 60 Hz: the main thread runs a frame ahead of the render thread,
+    /// which reads the pixel back with a frame the GPU finishes two frames after.
+    ///
+    /// The answer is `None` where a layer's own draw ([`draw`](Self::draw) and the like) is on
+    /// top, where the view shows its clear color, and, sooner, outside the view. A fully
+    /// transparent sprite, circle, line or blended model, which their shaders discard, finds what's
+    /// behind it. A frame with nothing to render into (no swapchain image), or a development
+    /// build's frame a tool's capture makes bare, leaves its picks to the next that renders.
+    /// Replays render nothing and answer none.
     pub fn pick(&mut self, at: [f64; 2]) -> Option<Pick> {
         if self.picks.len() == MAX_PICKS {
             return None;
@@ -182,21 +177,21 @@ impl Context {
     }
 
     /// The answers that came back with the frame the main loop last took back from the render
-    /// thread: each a ticket that [`pick`](Self::pick) gave, with the entity the view showed at its
-    /// pixel, or `None`. Each is here for one frame, until the answers that come back with the
-    /// next take its place, after that frame's updates and UI; the entity may have gone since.
+    /// thread: each a ticket from [`pick`](Self::pick) with the entity the view showed at its
+    /// pixel, or `None`. They stay for one frame, until the next answers replace them after that
+    /// frame's updates and UI. The entity may have gone since.
     pub fn picked(&self) -> &[(Pick, Option<EntityId>)] {
         &self.picked
     }
 
-    /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, in the
-    /// game's view as the camera sees it: with what's opaque, first, hiding what's behind it, if
-    /// `shader` is opaque, or else over what's drawn before it and what's opaque, but where what's
-    /// opaque is nearer; the shader gets `params`. The view is the main window's central area, which the
-    /// panels dock around, or the panel that [`App::view_panel`](crate::App::view_panel) names.
+    /// Draws `mesh` with `shader` this frame, placed in the world by `transform`, in the game's
+    /// view as the camera sees it. The shader gets `params`.
+    ///
+    /// An opaque `shader` draws with what's opaque, first, hiding what's behind it. Otherwise it
+    /// draws over what's drawn before it and what's opaque, but under a nearer opaque draw.
     /// Consecutive draws of one mesh with one shader render as one instanced draw, whatever their
-    /// transforms and parameters, so a frame of many takes few draws on the GPU. It's of no
-    /// entity, so a [pick](Self::pick) where it's on top finds none.
+    /// transforms and parameters, so a frame of many takes few GPU draws. It's of no entity, so a
+    /// [pick](Self::pick) where it's on top finds none.
     pub fn draw<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,
@@ -208,37 +203,37 @@ impl Context {
         self.draws.push(mesh, shader, transform, params);
     }
 
-    /// Draws `sprite` this frame, where `transform` places it in the world, over what's drawn
-    /// before it and what's opaque, but where what's opaque is nearer, in the game's view as the
-    /// camera sees it.
-    /// Unscaled, a sprite is a unit square around the transform's translation, as [`Sprite`] says.
-    /// It's of no entity, so a [pick](Self::pick) where it's on top finds none.
+    /// Draws `sprite` this frame, placed in the world by `transform`, over what's drawn before it
+    /// and what's opaque, but under a nearer opaque draw. Unscaled, it's a unit square around the
+    /// transform's translation, as [`Sprite`] says. It's of no entity, so a [pick](Self::pick)
+    /// where it's on top finds none.
     pub fn draw_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         (self.draws).push_sprite(relative(transform, self.origin), sprite);
     }
 
-    /// Draws `circle` this frame, where `transform` places it in the world, over what's drawn
-    /// before it and what's opaque, but where what's opaque is nearer, in the game's view as the
-    /// camera sees it.
-    /// Unscaled, a circle is a unit across, around the transform's translation, as [`Circle`]
-    /// says. It's of no entity, so a [pick](Self::pick) where it's on top finds none.
+    /// Draws `circle` this frame, placed in the world by `transform`, over what's drawn before it
+    /// and what's opaque, but under a nearer opaque draw. Unscaled, it's a unit across around the
+    /// transform's translation, as [`Circle`] says. It's of no entity, so a [pick](Self::pick)
+    /// where it's on top finds none.
     pub fn draw_circle(&mut self, transform: Mat4, circle: Circle) {
         let transform = relative(transform, self.origin);
         self.draws.push_circle(&mut self.shaders, transform, circle);
     }
 
-    /// Draws `text` this frame in `style`, where `transform` places its origin in the world, over
-    /// what's drawn before it and what's opaque, but where what's opaque is nearer, in the game's
-    /// view as the camera sees it: a line for each of its own, which `\n` ends, or `\r\n`, laid out left to
-    /// right, each of its characters a glyph of the style's font as its kerning places them, shaped
-    /// without the features that put glyphs in place of others, as ligatures, its em `style.size`
-    /// of the transform's units, and its origin the point of its box `style.align` says, in the
-    /// transform's XY plane, +Y up, facing +Z, as a sprite is. Each glyph is drawn crisp at any
-    /// size from the font's field, as [`Glyph`](gg_renderer::Glyph) says, by straight alpha, and
-    /// it's of no entity, so a [pick](Self::pick) where it's on top finds none. A style that names
-    /// no font draws in the engine's own, Inter, as the UI does, which bakes the first time text is
-    /// drawn in it, about 50 ms in release and 140 ms in a debug build. Once a text as long has
-    /// been drawn, drawing text allocates nothing.
+    /// Draws `text` this frame in `style`, over what's drawn before it and what's opaque, but
+    /// under a nearer opaque draw. It's of no entity, so a [pick](Self::pick) where it's on top
+    /// finds none.
+    ///
+    /// - `transform` places the origin, in its XY plane, +Y up, facing +Z, as for a sprite.
+    /// - Lines end at `\n` or `\r\n`, laid out left to right, kerned, without glyph-replacing
+    ///   features such as ligatures.
+    /// - The em is `style.size` of the transform's units; the origin is the point of the text's
+    ///   box `style.align` says.
+    /// - Glyphs are crisp at any size, as [`Glyph`](gg_renderer::Glyph) says, by straight alpha.
+    ///
+    /// A style with no font draws in Inter, as the UI does. It bakes the first time text is drawn
+    /// in it: about 50 ms in release, 140 ms in debug. Once a text as long has been drawn,
+    /// drawing text allocates nothing.
     ///
     /// # Panics
     ///
@@ -249,11 +244,11 @@ impl Context {
         self.draws.extend_glyphs(&mut self.shaders, glyphs);
     }
 
-    /// Draws a line from `from` to `to` in the world this frame, `width` pixels of the view wide
-    /// however near or far it is, or, thinner than a pixel, a pixel wide and as much fainter as
-    /// it's thinner, its ends squared off half its width past its points, in `color`, linear RGBA
-    /// with alpha not multiplied in: over everything else the view draws, the world's entities as
-    /// well as what layers draw, but where an opaque mesh is nearer, so that it shows as debugging
+    /// Draws a line from `from` to `to` in the world this frame, `width` view pixels wide at any
+    /// distance; thinner than a pixel, a pixel wide and fainter by as much. Its ends are squared
+    /// off half its width past its points. `color` is linear RGBA, alpha not multiplied in.
+    ///
+    /// It draws over everything else the view draws, but under a nearer opaque mesh, as debugging
     /// wants. It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_line(&mut self, from: Vec3, to: Vec3, color: Vec4, width: f32) {
         let origin = self.origin.as_vec3();
@@ -267,26 +262,28 @@ impl Context {
             .push_line(&mut self.shaders, Mat4::IDENTITY, line, 0);
     }
 
-    /// Draws the outline of the square that `transform` places in the world this frame, a unit
-    /// across around its translation unscaled, as a sprite is: its four sides, as
-    /// [`draw_line`](Self::draw_line) draws lines, which meet at its corners.
+    /// Draws the outline of the unit square `transform` places in the world this frame, around
+    /// its translation as a sprite is: four sides, drawn as [`draw_line`](Self::draw_line) does,
+    /// meeting at the corners.
     pub fn draw_rect(&mut self, transform: Mat4, color: Vec4, width: f32) {
         let transform = relative(transform, self.origin);
         self.over
             .push_rect(&mut self.shaders, transform, color, width, 0);
     }
 
-    /// Draws on the game's view's canvas this frame, from `anchor`: a game's own UI, its HUDs and
-    /// menus, apart from the development UI, which a layer lays out as it updates, each frame, in
-    /// the view's own space. `anchor` is one of the view's edges, its corners or its middle, across
-    /// then down, as text's alignment says, such as `[Align::End, Align::Start]` for its top right,
-    /// which the canvas's origin is at, +Y up; and the canvas scales with the view,
-    /// [`CANVAS_HEIGHT`](crate::CANVAS_HEIGHT) units to its height, as the frame handed off finds
-    /// it, whatever its size in pixels. What's drawn on it draws over everything else in the view,
-    /// the world's nearest entities and lines too, in the order it's drawn, so that captures and
-    /// the editor's view show it, but under the development UI. Its state, such as which button has
-    /// the focus, is the layer's, so that each lockstep peer has its own, and a choice that changes
-    /// the game queues a command, as input does.
+    /// Draws on the game's view's canvas this frame, from `anchor`: a game's own UI, HUDs and
+    /// menus, laid out by a layer as it updates, each frame, in the view's own space, apart from
+    /// the development UI.
+    ///
+    /// `anchor` is one of the view's edges, corners or middle, across then down, as text's
+    /// alignment says: `[Align::End, Align::Start]` is the top right. The canvas's origin is
+    /// there, +Y up. It scales with the view, [`CANVAS_HEIGHT`](crate::CANVAS_HEIGHT) units to
+    /// its height, as the frame handed off finds it, whatever the pixels.
+    ///
+    /// It draws in order over everything else in the view, nearest entities and lines too, so
+    /// captures and the editor's view show it, but under the development UI. Its state, such as
+    /// which button has the focus, is the layer's, so each lockstep peer has its own. A choice
+    /// that changes the game queues a command, as input does.
     pub fn canvas(&mut self, anchor: [Align; 2]) -> Canvas<'_> {
         let (view, cursor) = (self.view, self.input.cursor());
         let shaders = &mut self.shaders;
@@ -300,19 +297,17 @@ impl Context {
         )
     }
 
-    /// Whether the cursor is over what a game UI draws that a pointer works on, in any UI that
-    /// takes input and drew in the last frame: a button, a widget or a list, within what clips it,
-    /// or anywhere while a drop-down's options are open, as [`GameUi::pointer_over`] says of one.
-    /// A game that reads the mouse itself, to aim, pick or drag, leaves it alone while it's over.
+    /// Whether the cursor is over what a pointer works on in any UI that takes input and drew in
+    /// the last frame: a button, widget or list within what clips it, or anywhere while a
+    /// drop-down's options are open, as [`GameUi::pointer_over`] says. A game that reads the mouse
+    /// itself, to aim, pick or drag, leaves it alone while this is true.
     pub fn pointer_over_ui(&mut self) -> bool {
         let (view, cursor) = (self.view, self.input.cursor());
         self.uis.pointer_over(&mut self.fonts, view, cursor)
     }
 
-    /// What the UIs the layers added lay out, draw and take input with, lent apart: the UIs, the
-    /// fonts their texts are measured and drawn in, the canvas and the shaders it draws with,
-    /// where the view was as the last frame handed it off, and the input as the layers are sent
-    /// it.
+    /// What the layers' UIs lay out, draw and take input with, lent apart: the UIs, fonts, canvas,
+    /// shaders, the view as the last frame handed it off, and the input as layers are sent it.
     pub(crate) fn ui_parts(&mut self) -> game_ui::Parts<'_> {
         game_ui::Parts {
             uis: &mut self.uis,
@@ -331,19 +326,20 @@ impl Context {
         self.uis.listed(&mut self.fonts, self.view)
     }
 
-    /// Draws a grid this frame as `viewpoint` sees it, fitted to the game's view as the last frame
-    /// handed it off, which [`view`](Self::view) gives: lines a power of ten apart on the world's
-    /// axis plane `plane`, or on the one an orthographic viewpoint along an axis faces, as
-    /// [`grid::shown`] says, and the plane's two axes in their colors, [`grid::RED`],
-    /// [`grid::GREEN`] and [`grid::BLUE`], as the editor's view shows them. The lines show once
-    /// they're 8 pixels apart, are crisp, a pixel each, through an orthographic viewpoint that's
-    /// [`grid::square`], and fade toward grazing angles. It draws by straight alpha over what's
-    /// drawn before it and what's opaque, but where what's opaque is nearer, and is of no entity, so
-    /// drawn before the world, which the engine draws after the layers' draws, it leaves picks to
-    /// what's on top.
-    /// `viewpoint` is the one the frame sees from, as [`set_viewpoint`](Self::set_viewpoint) sets
-    /// it. Nothing draws while the view has no area, as in a dockspace's first frame, or while the
-    /// plane is too near edge-on to show.
+    /// Draws a grid this frame as `viewpoint` sees it (the one the frame sees from, as
+    /// [`set_viewpoint`](Self::set_viewpoint) sets it), fitted to the game's view as the last
+    /// frame handed it off ([`view`](Self::view)).
+    ///
+    /// Lines are a power of ten apart on the world's axis plane `plane`, or the one an
+    /// orthographic viewpoint along an axis faces, as [`grid::shown`] says. The plane's two axes
+    /// are in [`grid::RED`], [`grid::GREEN`] and [`grid::BLUE`]. Lines show once they're 8 pixels
+    /// apart, are a crisp pixel each through an orthographic viewpoint that's [`grid::square`],
+    /// and fade toward grazing angles.
+    ///
+    /// It draws by straight alpha over what's drawn before it and what's opaque, but under a
+    /// nearer opaque draw. It's of no entity and drawn before the world, so picks go to what's on
+    /// top. Nothing draws while the view has no area (a dockspace's first frame) or the plane is
+    /// too near edge-on.
     pub fn draw_grid(&mut self, viewpoint: &Viewpoint, plane: Plane) {
         let Some(view) = self.view else {
             return;
@@ -354,15 +350,17 @@ impl Context {
         }
     }
 
-    /// Outlines what the game's view shows of entity `id` and of every entity under it this frame,
-    /// as the editor outlines what's picked, a model's nodes or a prefab's entities among them:
-    /// round whatever shape the pixels make together where their draws are on top, their
-    /// colliders' outlines among them, even across something in front of them, but not round
-    /// what's hidden; over what the view shows and under the UI, in `color`, linear RGBA with
-    /// alpha not multiplied in: a solid band `width` pixels of the view wide, at most 8, its outer
-    /// edge smoothed, then a glow at up to half its alpha that fades over as far again. An entity
-    /// that's gone outlines nothing. One entity and its subtree a frame: a later call replaces an
-    /// earlier one's.
+    /// Outlines what the game's view shows of entity `id` and its subtree this frame, as the
+    /// editor outlines what's picked: a model's nodes and a prefab's entities included.
+    ///
+    /// The outline runs round the shape their pixels make together where their draws, and their
+    /// colliders' outlines, are on top, even across something in front, but not round what's
+    /// hidden. It's over what the view shows and under the UI: a solid band `width` view pixels
+    /// wide, at most 8, its outer edge smoothed, then a glow at up to half its alpha fading over
+    /// as far again. `color` is linear RGBA, alpha not multiplied in.
+    ///
+    /// An entity that's gone outlines nothing. One outline a frame: a later call replaces an
+    /// earlier one.
     pub fn outline(&mut self, id: EntityId, color: Vec4, width: f32) {
         self.outline_root.clear();
         self.outline_root.push(id);
@@ -376,55 +374,56 @@ impl Context {
         Some((*self.outline_root.first()?, color, width))
     }
 
-    /// Whether the world's colliders' outlines draw, as
-    /// [`set_colliders_shown`](Self::set_colliders_shown) says: not at first.
+    /// Whether the world's colliders' outlines draw: see
+    /// [`set_colliders_shown`](Self::set_colliders_shown). Not at first.
     pub fn colliders_shown(&self) -> bool {
         self.colliders
     }
 
-    /// Has the world's colliders' outlines draw each frame from then on, or not: each
+    /// Has the world's colliders' outlines draw each frame from then on, or not. Each
     /// [`BoxCollider2D`], [`CircleCollider2D`], [`BoxCollider3D`], [`SphereCollider3D`] and
-    /// [`CapsuleCollider3D`] whose entity has a [`Transform`], as physics shapes it, 2 points wide
-    /// in light green, where its entity draws, over everything else the view draws but a nearer
-    /// opaque mesh, as lines are; with its entity's ID, so that a [pick](Self::pick) of an outline
-    /// finds its entity. A collider's outline draws whether physics moves its entity or not, as it
-    /// doesn't without a [`RigidBody2D`] or a [`RigidBody3D`], or under a parent.
+    /// [`CapsuleCollider3D`] whose entity has a [`Transform`] is outlined as physics shapes it,
+    /// 2 points wide in light green, where its entity draws, as lines are. Outlines carry their
+    /// entity's ID, so a [pick](Self::pick) of one finds it. They draw whether physics moves the
+    /// entity or not, as it doesn't without a [`RigidBody2D`] or [`RigidBody3D`], or under a
+    /// parent.
     pub fn set_colliders_shown(&mut self, shown: bool) {
         self.colliders = shown;
     }
 
-    /// Whether the world's navmesh and its agents' paths draw, as
-    /// [`set_navmesh_shown`](Self::set_navmesh_shown) says: not at first.
+    /// Whether the world's navmesh and its agents' paths draw: see
+    /// [`set_navmesh_shown`](Self::set_navmesh_shown). Not at first.
     pub fn navmesh_shown(&self) -> bool {
         self.navmesh
     }
 
     /// Has the world's navmesh and its agents' paths draw each frame from then on, or not, as the
-    /// last [`step_navigation`](crate::step_navigation) left them: each of the navmesh's polygons
-    /// outlined in sky blue along its cells' floors, with its [`NavMeshVolume`]'s entity's ID, and
-    /// each [`NavAgent`]'s path in amber from where its entity draws through the corners it has
-    /// left, its destination marked, with the agent's ID, so that a [pick](Self::pick) of a line
-    /// finds its entity; 2 points wide, a little above the floors, over everything else the view
-    /// draws but a nearer opaque mesh, as lines are.
+    /// last [`step_navigation`](crate::step_navigation) left them:
+    /// - each navmesh polygon outlined in sky blue along its cells' floors, with its
+    ///   [`NavMeshVolume`]'s entity's ID;
+    /// - each [`NavAgent`]'s path in amber from where its entity draws through the corners it has
+    ///   left, its destination marked, with the agent's ID.
+    ///
+    /// A [pick](Self::pick) of a line finds its entity. Lines are 2 points wide, a little above
+    /// the floors, drawn as lines are.
     pub fn set_navmesh_shown(&mut self, shown: bool) {
         self.navmesh = shown;
     }
 
     /// Copies where the world's entities are, as a tick starts, for the frames after it to draw
-    /// them on from; and moves the world's change tick on, so that what the tick changes is marked
-    /// as changed since it started.
+    /// them from, and moves the world's change tick on, so what the tick changes is marked as
+    /// changed since it started.
     pub(crate) fn capture(&mut self) {
         self.past.capture(&mut self.world);
         self.tick_started = self.world.change_tick();
     }
 
-    /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
+    /// Draws the world's entities, after what the layers drew this frame: each `alpha` of the way
     /// from where it was as the latest of the `ticks` ticks run started to where the tick left it,
-    /// at `time`, the simulation's in seconds, emitters' particles too, and their colliders'
-    /// outlines, over the rest, while they're shown, or the look shows them; and finds where the
-    /// world's camera sees from, the world's environment, and its lights, where they draw. Before
-    /// the entities, a development build draws the look's grid, unless the frame is bare, as the
-    /// viewpoint the frame sees from so far sees it.
+    /// at `time`, the simulation's in seconds. Emitters' particles draw too, and colliders'
+    /// outlines over the rest while shown or the look shows them. It also finds the world's
+    /// camera, environment and lights. Before the entities, a development build draws the look's
+    /// grid, unless the frame is bare, as the viewpoint the frame sees from so far sees it.
     pub(crate) fn draw_world(&mut self, alpha: f32, time: f32, ticks: u64) {
         self.past.resolve(&self.world);
         self.placed.place(&self.world);
@@ -476,9 +475,9 @@ impl Context {
         self.world.advance();
     }
 
-    /// Draws the cubes of the world's cells in, each its twelve edges, as lines are drawn, in
-    /// [`CELL_IN`], and of those refused in [`CELL_REFUSED`], as the look's grid draws, so that the
-    /// editor's view shows where the cells are.
+    /// Draws the world's cells' cubes as twelve lines each, [`CELL_IN`] for those in and
+    /// [`CELL_REFUSED`] for those refused, as the look's grid draws, so the editor's view shows
+    /// where the cells are.
     #[cfg(feature = "dev")]
     fn draw_cells(&mut self) {
         let Some((_, cells, _)) = self.world.world_cells() else {
@@ -515,8 +514,8 @@ impl Context {
         }
     }
 
-    /// Whether the frame draws the colliders' outlines: as the look shows them, where it says, in
-    /// a frame that isn't bare, or else as the layers set.
+    /// Whether the frame draws the colliders' outlines: as the look says, in a frame that isn't
+    /// bare, or else as the layers set.
     fn colliders_drawn(&self) -> bool {
         #[cfg(feature = "dev")]
         if !self.dev.look.bare
@@ -532,32 +531,30 @@ impl Context {
         self.navmesh
     }
 
-    /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
-    /// [`view`](Self::view) gives from then on: the world's environment's tonemapper,
-    /// antialiasing, exposure and its adaptation, sky, ambient occlusion, fog, reflections and
-    /// camera's effects, or none, none, the default's and none, none, none, none, none and none,
-    /// the antialiasing a layer set in place of its own, and its lights, as the world was last
-    /// drawn, and the time it was drawn at;
-    /// its draws, those over the rest last, and its canvas's, placed from their anchors in the view's
-    /// pixels, for the last frame's, which it forgets, keeping their memory for the next; the
-    /// viewpoint a layer set this
-    /// frame, which it forgets too, or else where the world's camera sees from, or else the
-    /// default, which hears the sounds playing from a place, as [`Place`] says, and whether the
-    /// view is cut to it, as it comes from elsewhere than the last frame's, as [`Seer`] says; the
-    /// origin the frame drew from, which then follows that viewpoint, as [`origin`](Self::origin)
-    /// says; what a layer
-    /// outlined this frame, which it forgets too; the pixels the view shows,
-    /// if it shows any, swapping new ones for those `frame` had; what's been added since a frame
-    /// last took it, after what `frame` still holds, the images the loader has decoded since among
-    /// it, and how many it's still decoding; and the picks asked this frame, each at
-    /// the pixel of the view under it, the floor of where it was asked less the view's origin, but
-    /// those outside the view, which the next answers to come back answer `None`. In a development
-    /// build, the look's viewpoint and outline go in place of the layers', the passes it leaves
-    /// out are left out, the frame carries the look's revision, and whether it's seen from the
-    /// look's viewpoint, whose exposure adapts apart from the game's own; but a bare frame leaves
-    /// the look out, and the picks to the next
-    /// frame that isn't bare, both those asked this frame and those the renderer holds, so that
-    /// none reads a view a client isn't shown.
+    /// Fills in `frame` with this frame's render data, with the game's view at `viewport`
+    /// ([`view`](Self::view) gives it from then on):
+    /// - the world's environment's settings and lights as last drawn, and the time. Without an
+    ///   environment there's no tonemapper, antialiasing (unless a layer set one), adaptation,
+    ///   sky, ambient occlusion, fog, reflections or camera effects, and the default's exposure;
+    /// - the draws, those over the rest last, and the canvas placed from its anchors in the
+    ///   view's pixels, forgetting the last frame's but keeping their memory;
+    /// - the viewpoint a layer set this frame, else the world's camera's, else the default. The
+    ///   frame is cut to it if it comes from elsewhere than the last frame's, as [`Seer`] says,
+    ///   and audio hears from it, as [`Place`] says. The [origin](Self::origin) then follows it;
+    /// - what a layer outlined this frame;
+    /// - the pixels the view shows, if any, swapped for those `frame` had;
+    /// - what's been added since a frame last took it, after what `frame` holds, including images
+    ///   the loader has decoded and how many it's still decoding;
+    /// - the picks asked this frame, each at the view's pixel under it (the floor of where it was
+    ///   asked, less the view's origin). Those outside the view are answered `None` with the next
+    ///   answers to come back.
+    ///
+    /// The viewpoint, outline and picks are forgotten once taken. In a development build the
+    /// look's viewpoint and outline replace the layers', the passes it leaves out are left out,
+    /// and the frame carries the look's revision and whether it's seen from the look's viewpoint,
+    /// whose exposure adapts apart from the game's own. A bare frame leaves the look out, and
+    /// leaves all picks, asked this frame or held by the renderer, to the next frame that isn't
+    /// bare, so none reads a view a client isn't shown.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
         // A world without an environment isn't tonemapped or antialiased, but as a layer sets, and
@@ -687,9 +684,9 @@ impl Context {
         }
     }
 
-    /// Takes `answers`, which came back with the frame taken back from the render thread, each the
-    /// number of a pick's ticket with the ID the view showed at its pixel, in place of those
-    /// before; and answers `None` the picks the last frame handed off asked outside the view.
+    /// Takes `answers`, which came back with the frame taken back from the render thread, each a
+    /// pick's ticket number with the ID the view showed at its pixel, replacing the earlier ones.
+    /// Picks the last frame handed off outside the view are answered `None`.
     pub(crate) fn take_answers(&mut self, answers: &[(u64, u64)]) {
         self.picked.clear();
         for &(tag, id) in answers {
@@ -701,15 +698,15 @@ impl Context {
     }
 }
 
-/// How far apart on each axis the points a frame's [origin](Context::origin) can be at are, and how
-/// far on one the view goes from it before it moves: a power of two, so that the origin is exact
-/// in `f32`, and positions within it of the origin step by less than 0.25 mm in `f32`.
+/// How far apart on each axis a frame's [origin](Context::origin) can be, and how far on one axis
+/// the view goes from it before it moves. A power of two, so the origin is exact in `f32` and
+/// positions within a step of it differ by less than 0.25 mm in `f32`.
 const ORIGIN_STEP: f64 = 1024.0;
 
-/// The origin a frame after one drawn from `origin` draws from, the view having seen from `at`:
-/// `origin` while `at` is within [`ORIGIN_STEP`] of it on every axis, or isn't finite; else `at`
-/// rounded to a multiple of it on each axis. So it moves at most once for each half a step the view
-/// travels, and never for a view within a step of the world's origin.
+/// The origin the frame after one drawn from `origin` draws from, the view having seen from `at`.
+/// It's `origin` while `at` is within [`ORIGIN_STEP`] of it on every axis, or isn't finite; else
+/// `at` rounded to a multiple of it on each axis. So it moves at most once per half step the
+/// view travels, and never for a view within a step of the world's origin.
 pub(super) fn followed(origin: DVec3, at: DVec3) -> DVec3 {
     let near = (at - origin).abs().cmple(DVec3::splat(ORIGIN_STEP)).all();
     if near || !at.is_finite() {
@@ -718,18 +715,18 @@ pub(super) fn followed(origin: DVec3, at: DVec3) -> DVec3 {
     (at / ORIGIN_STEP).round() * ORIGIN_STEP
 }
 
-/// `transform`, which places something in the world, placing it relative to `origin` instead.
+/// `transform`, which places something in the world, placed relative to `origin` instead.
 fn relative(transform: Mat4, origin: DVec3) -> Mat4 {
     let mut relative = transform;
     relative.w_axis -= origin.as_vec3().extend(0.0);
     relative
 }
 
-/// The color of a cell in's edges, as [`Context::draw_cells`] draws them: a light blue, apart from
-/// the grid's axes' colors.
+/// The color of the edges of a cell in, as [`Context::draw_cells`] draws them: a light blue, apart
+/// from the grid's axes' colors.
 #[cfg(feature = "dev")]
 const CELL_IN: Vec4 = Vec4::new(0.3, 0.7, 1.0, 0.6);
 
-/// The color of a cell refused's edges, as [`Context::draw_cells`] draws them.
+/// The color of the edges of a cell refused, as [`Context::draw_cells`] draws them.
 #[cfg(feature = "dev")]
 const CELL_REFUSED: Vec4 = Vec4::new(1.0, 0.25, 0.2, 0.9);

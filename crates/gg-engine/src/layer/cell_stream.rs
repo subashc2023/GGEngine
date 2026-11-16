@@ -29,23 +29,22 @@ use crate::scene_files;
 use crate::scene_files::SceneFile;
 
 impl Context {
-    /// Makes the cells of a world whose [`Cells`](crate::Cells) are of folder `folder` that have no
-    /// file, from `from` to `to` on each axis, as `text` gives each: a cell's scene text, as its
-    /// file would hold it. So a world reaches as far as the game makes it, without a file for each
-    /// cell; a cell's file stands for the game's making of it, as a development build's save writes
-    /// one for a made cell that changed. A layer makes them in its
-    /// [`load`](crate::Layer::load), which a restart and a replay run too; again, for the same
-    /// folder, in place of what it made before.
+    /// Makes the cells of the world's [`Cells`](crate::Cells) of folder `folder` that have no file,
+    /// from `from` to `to` on each axis. `text` gives each cell's scene text, as its file would
+    /// hold it. A development build's save writes a file for a made cell that changed, and the
+    /// file stands for the making.
     ///
-    /// `text` runs on a thread that prepares cells, as a viewer comes near, and again whenever the
-    /// cell comes in from it, so it reads nothing but its cell, and gives each cell the same text
-    /// each time and on every platform, as the world's ticks must; and the IDs its entities have
-    /// are theirs alone. A made cell comes in, and goes out keeping nothing as it came, as one of a
-    /// file does, its text's digest noted in the world, but neither kept by the run nor written to
-    /// a recording, which the world's hash checks in its place. The cells within each viewer's
-    /// radius and a cell and a half are looked for, each tick, in a box of at most 32,768 cells
-    /// round the viewer: so a world one cell deep reaches some 90 cells either way, and the 4,096
-    /// nearest, a world's most at once, are always among them.
+    /// A layer calls this in its [`load`](crate::Layer::load), which a restart and a replay run
+    /// too. A second call for the same folder replaces the first.
+    ///
+    /// `text` runs on a preparing thread, and again whenever the cell comes in. It reads only its
+    /// cell and gives the same text each time and on every platform, as ticks must. Its entities'
+    /// IDs are theirs alone. The text's digest is noted in the world, neither kept by the run nor
+    /// written to a recording; the world's hash checks it.
+    ///
+    /// Each tick looks for cells within each viewer's radius and a cell and a half, in a box of at
+    /// most 32,768 cells round the viewer: a world one cell deep reaches some 90 cells either way,
+    /// and the 4,096 nearest, a world's most at once, are always among them.
     pub fn make_cells(
         &mut self,
         folder: &str,
@@ -66,19 +65,15 @@ impl Context {
     }
 
     /// Takes the world's cells out and finds those coming in, as [`Cells`](crate::Cells),
-    /// [`Viewer`](crate::Viewer) and [`Streamed`](crate::Streamed) say, as each tick ends, after
-    /// its layers', wherever a tick runs, again in a rollback or a SyncTest too: from the world
-    /// alone, as [`World::plan_cells`] finds it, so that every run of the tick does the same. Cells
-    /// go out first, in order, then the roots left in cells out; and the cells coming in are noted
-    /// in the world, which the next tick brings in as it starts, as
-    /// [`enter_coming`](Self::enter_coming) says, so that a tick whose cells aren't ready can wait
-    /// for them before it runs.
+    /// [`Viewer`](crate::Viewer) and [`Streamed`](crate::Streamed) say. It runs as each tick ends,
+    /// after its layers', in a rollback or a SyncTest too, from the world alone
+    /// ([`World::plan_cells`]), so every run of the tick does the same. Cells go out first, in
+    /// order, then the roots left in cells out. Cells coming in are noted in the world; the next
+    /// tick brings them in ([`enter_coming`](Self::enter_coming)), waiting if they aren't ready.
     ///
-    /// Logs, at the debug level, `cells.left`, with the cell, how many roots went and how long it
-    /// took. A cell whose roots can't be kept as text stays in, warning `cells.held`. A server's
-    /// client takes none out: its cells come and go with its server's states. A world without
-    /// `Cells` costs a query; one whose cells stay as they are, the plan, whose room [`CellRun`]
-    /// keeps from tick to tick.
+    /// Logs `cells.left` at the debug level. A cell whose roots can't be kept as text stays in,
+    /// warning `cells.held`. A server's client takes none out: its cells come and go with its
+    /// server's states. [`CellRun`] keeps the plan's room from tick to tick.
     pub(crate) fn stream_cells(&mut self) {
         if self.client {
             return;
@@ -177,17 +172,20 @@ impl Context {
         self.cells.plan = plan;
     }
 
-    /// The cells' step while the run is stopped, as a world is edited, each frame, since no tick
-    /// runs: as [`stream_cells`](Self::stream_cells) does as a tick ends, the look's viewpoint a
-    /// viewer too, its radius the largest of the world's viewers' and [`VIEWED_RADIUS`]; but the
-    /// cells coming in come once all of them are prepared, as [`cells_ready`](Self::cells_ready)
-    /// prepares them, no frame waiting; a cell that a streamed root is in comes in wherever it is,
-    /// so that a root moved into a cell brings the cell's file in with it, rather than going out
-    /// into what the cell keeps; and a cell no viewer is near goes out only as its file has it, its
-    /// roots written as a world's save would write its file the same as the file as last applied,
-    /// as [`World::cell_written`] says, keeping nothing, as [`World::forget_cell`] says, logging
-    /// `cells.left` at the debug level. So what's edited stays in until it's saved, and nothing
-    /// edited is kept as text, which a save would have to write. A server's client streams none.
+    /// The cells' step each frame while the run is stopped. Like
+    /// [`stream_cells`](Self::stream_cells), except:
+    ///
+    /// - The look's viewpoint is a viewer too, its radius the largest of the world's viewers' and
+    ///   [`VIEWED_RADIUS`].
+    /// - Cells coming in come once all are prepared ([`cells_ready`](Self::cells_ready)).
+    /// - A cell that a streamed root is in comes in wherever it is, so a root moved into a cell
+    ///   brings the cell's file with it.
+    /// - A cell no viewer is near goes out only if its roots, written as a save would
+    ///   ([`World::cell_written`]), equal the file as last applied. It keeps nothing
+    ///   ([`World::forget_cell`]) and logs `cells.left` at the debug level.
+    ///
+    /// So what's edited stays in until saved, and nothing edited is kept as text. A server's client
+    /// streams none.
     #[cfg(feature = "dev")]
     pub(crate) fn stream_stopped(&mut self) {
         if self.client {
@@ -202,7 +200,7 @@ impl Context {
             return;
         }
         let folder = cells.folder.clone();
-        // Every frame, as every tick, so that what's prepared ahead goes on from stage to stage.
+        // Every frame, so what's prepared ahead goes on from stage to stage.
         self.prepare_cells();
         let state = self.world.resource::<CellState>();
         let mut changed = false;
@@ -221,8 +219,7 @@ impl Context {
         let mut plan = mem::take(&mut self.cells.plan);
         self.world
             .plan_cells(size, &listed, made, viewer, &mut plan);
-        // The cells that streamed roots are in, out and neither coming nor refused, come in with
-        // those near a viewer.
+        // Cells with streamed roots, out and neither coming nor refused, come in too.
         let mut entering = plan.entering.clone();
         let state = self.world.resource::<CellState>();
         let waiting = |cell: &Cell| {
@@ -292,9 +289,9 @@ impl Context {
     #[cfg(not(feature = "dev"))]
     pub(crate) fn stream_stopped(&mut self) {}
 
-    /// The world's cells, as the tool API's `cells` reads them, the world as edited at `ticks`, as
-    /// [`scene_files::unsaved_cells`] finds those a save would write; `stopped` whether the run is,
-    /// as the look's viewpoint is a viewer then, as [`stream_stopped`](Self::stream_stopped) says.
+    /// The world's cells for the tool API's `cells`, as edited at `ticks`
+    /// ([`scene_files::unsaved_cells`] finds those a save would write). When `stopped`, the look's
+    /// viewpoint is a viewer ([`stream_stopped`](Self::stream_stopped)).
     #[cfg(feature = "dev")]
     pub(crate) fn cells_read(&mut self, stopped: bool, ticks: u64) -> gg_api::CellList {
         let Some((id, cells, _)) = self.world.world_cells() else {
@@ -367,10 +364,9 @@ impl Context {
         gg_api::CellList { world: Some(world) }
     }
 
-    /// Lists the world's cells' folder again, as a development build's look at its scene files
-    /// does while the run can stop, so that a cell's file made since brings its cell in, and one
-    /// taken away no longer does. A folder that can't be listed keeps the cells it had, its first
-    /// listing having warned (`cells.listing`).
+    /// Lists the cells' folder again, as a development build does while the run can stop: a file
+    /// made since brings its cell in, one taken away no longer does. A folder that can't be listed
+    /// keeps its cells, its first listing having warned (`cells.listing`).
     #[cfg(feature = "dev")]
     pub(crate) fn list_cells_again(&mut self) {
         let Some((_, cells, _)) = self.world.world_cells() else {
@@ -386,9 +382,8 @@ impl Context {
         }
     }
 
-    /// Notes that each of `cells`' files, of its digest, holds what the world as edited holds of
-    /// its cell, as a world's save leaves them, as [`World::note_filed`] says: of the world held
-    /// aside while a copy plays, and else of the context's own, between ticks.
+    /// [`World::note_filed`] for each cell, in the world held aside while a copy plays, else the
+    /// context's own.
     #[cfg(feature = "dev")]
     pub(crate) fn note_filed(&mut self, cells: impl IntoIterator<Item = (Cell, u64)>) {
         let world = match &mut self.dev.edited {
@@ -401,8 +396,7 @@ impl Context {
     }
 
     /// Empties what the world holds of its cells and what the run prepared of them, as the tool
-    /// API's `scene new` and `open` put another scene in a world's place, so that the next world's
-    /// cells come in from their files.
+    /// API's `scene new` and `open` do, so the next world's cells come in from their files.
     #[cfg(feature = "dev")]
     pub(crate) fn empty_cells(&mut self) {
         self.world.empty_cells();
@@ -410,20 +404,17 @@ impl Context {
         self.cells.held = Default::default();
     }
 
-    /// Brings in the cells the last tick's end found coming, as
-    /// [`stream_cells`](Self::stream_cells) says, as a tick starts, before its layers', wherever a
-    /// tick runs: each in order, its file read, unless what the cell keeps stands for it, as
-    /// [`scene_text`](Self::scene_text) keeps it, once a run, and what it and the texts the cell
-    /// keeps name loaded first, as [`load_assets_of`](Self::load_assets_of) does for a scene
-    /// change, in a server's session none; each text parsed, and the cell's entities spawned. A
-    /// world whose `Cells` went meanwhile drops them. A server's client brings none in.
+    /// Brings in the cells the last tick's end found coming ([`stream_cells`](Self::stream_cells)),
+    /// as a tick starts, before its layers'. Each cell in order: its file is read, unless what the
+    /// cell keeps stands for it ([`scene_text`](Self::scene_text)); what it and the kept texts name
+    /// is loaded ([`load_assets_of`](Self::load_assets_of), none in a server's session); each text
+    /// is parsed and the entities spawned. A world whose `Cells` went meanwhile drops them. A
+    /// server's client brings none in.
     ///
-    /// Logs, at the debug level, `cells.entered`, with the cell, how many roots came, whether it
-    /// came as prepared ahead, as [`cells_ready`](Self::cells_ready) prepares it, and how long it
-    /// took; and notes, for a recording, the digest of each cell's file that came in. A cell that
-    /// doesn't come in, as one whose file gives an entity's ID that's alive (`ecs.id_taken`) or
-    /// names a model that doesn't load, stays out, warning `cells.refused`, with why, until every
-    /// viewer has gone.
+    /// Logs `cells.entered` at the debug level, and notes, for a recording, the digest of each
+    /// cell's file that came in. A cell that doesn't come in, as one whose file gives an entity's
+    /// ID that's alive (`ecs.id_taken`) or names a model that doesn't load, stays out, warning
+    /// `cells.refused` with why, until every viewer has gone.
     pub(crate) fn enter_coming(&mut self) {
         self.cells.came.clear();
         if self.client {
@@ -471,16 +462,13 @@ impl Context {
         }
     }
 
-    /// Brings cell `cell`, of the cells of `folder`, in, as
-    /// [`enter_coming`](Self::enter_coming) says: its file read, or the game's making of it, as
-    /// `source` says, and what it names loaded, unless what the cell keeps stands for it, and what
-    /// each text it keeps names; or as prepared ahead, if what was prepared stands for its texts
-    /// still, as [`stands_for`](Self::stands_for) says. Returns how many roots came, the digest of
-    /// its file's text, if it came, and whether it came as prepared.
+    /// Brings `cell` of `folder` in, from what was prepared ahead if it still
+    /// [stands for](Self::stands_for) the texts. Returns the roots that came, its file's digest if
+    /// it came, and whether it came as prepared.
     ///
-    /// Fails, bringing nothing in, as [`scene_text`](Self::scene_text) does, as
-    /// [`load_assets_of`](Self::load_assets_of) does, and as [`World::parse_scene`] and
-    /// [`World::enter_cell`] do, the cell's path beginning the message.
+    /// Fails, bringing nothing in, as [`scene_text`](Self::scene_text),
+    /// [`load_assets_of`](Self::load_assets_of), [`World::parse_scene`] and [`World::enter_cell`]
+    /// do, the cell's path beginning the message.
     fn enter_cell(
         &mut self,
         folder: &str,
@@ -545,10 +533,8 @@ impl Context {
     }
 
     /// Whether `prepared`, cell `path`'s, was parsed from the texts the cell would bring in now:
-    /// what its `source` gives, its file's, as [`scene_text`](Self::scene_text) gives it, or the
-    /// game's making of it, for a cell whose file is yet to come in; and those it keeps, `kept`. A
-    /// development build's save of the file since, a file made for a made cell, or a root left in
-    /// the cell since, makes it stand for them no more.
+    /// `source`'s, if the cell is yet to come in, and `kept`. A save of the file since, a file
+    /// made for a made cell, or a root left in the cell since, ends that.
     fn stands_for(
         &mut self,
         prepared: &Prepared,
@@ -572,9 +558,9 @@ impl Context {
         }
     }
 
-    /// The text cell `cell` of the cells of `folder` comes in from, as `source` says: its file's, as
-    /// [`scene_text`](Self::scene_text) gives it, or what the game makes of it, unless the run
-    /// keeps a file of it, as a development build's save of a made cell that changed writes one.
+    /// The text `cell` of `folder` comes in from, per `source`: its file's
+    /// ([`scene_text`](Self::scene_text)), or the game's making, unless the run keeps a file of it
+    /// (a development build's save of a changed made cell writes one).
     ///
     /// Fails as `scene_text` does, and with `scene.not_found` for a cell of neither.
     pub(crate) fn source_text(
@@ -596,10 +582,8 @@ impl Context {
         }
     }
 
-    /// Starts preparing cell `cell`, of the cells of `folder`, as [`Preparing`] says: on a thread,
-    /// its file read, as the run keeps it or from the disk or the game's package, or the game's
-    /// making of it, as `source` says, if it's yet to come in, and the texts it keeps taken with
-    /// it.
+    /// Starts preparing `cell` of `folder` on a thread ([`Preparing`]): `source`'s text, if it's
+    /// yet to come in, with the texts it keeps.
     fn start_preparing(&mut self, folder: &str, cell: Cell, source: Option<CellSource>) {
         let path = format!("{folder}/{cell}.ron");
         let state = self.world.resource::<CellState>();
@@ -635,13 +619,11 @@ impl Context {
         (self.cells.preparing).read((cell, number), (path, made), read, kept, world);
     }
 
-    /// Takes what the threads preparing cells have finished, and starts the next stage of each:
-    /// for a cell whose texts name what isn't loaded, its models' files read on threads, then the
-    /// rest loaded here, as [`load_assets_of`](Self::load_assets_of) loads it for a scene change,
-    /// none in a server's session, and its texts parsed on a thread. A cell prepared, or that
-    /// couldn't be, logs `cells.prepared` at the debug level, with how long it took and how long
-    /// the main thread spent on it. A file read is kept as [`scene_text`](Self::scene_text) keeps
-    /// it, unless the run has it already.
+    /// Takes what the preparing threads have finished, and starts each cell's next stage: models'
+    /// files read on threads, the rest loaded here ([`load_assets_of`](Self::load_assets_of), none
+    /// in a server's session), then the texts parsed on a thread. A cell prepared, or that
+    /// couldn't be, logs `cells.prepared` at the debug level. A file read is kept as
+    /// [`scene_text`](Self::scene_text) keeps it, unless the run has it.
     pub(crate) fn prepare_cells(&mut self) {
         while let Some(done) = self.cells.preparing.take() {
             let started = Instant::now();
@@ -730,10 +712,8 @@ impl Context {
         self.cells.preparing.forget_models();
     }
 
-    /// The stage after cell `cell`'s texts, `texts`, were found to name `missing`, which isn't
-    /// loaded, for its preparing numbered `number`: the files of the models among them read on
-    /// threads, which it waits for, unless none is to read, as in a server's session, which loads
-    /// none; then, as [`finish_loading`](Self::finish_loading) says.
+    /// Reads the models among `missing` on threads and waits for them, unless none is to read
+    /// (none in a server's session); then [`finish_loading`](Self::finish_loading).
     fn load_for(
         &mut self,
         (cell, number): (Cell, u64),
@@ -770,10 +750,8 @@ impl Context {
         }
     }
 
-    /// The stage after what cell `cell`'s texts, `texts`, name has been read, for its preparing
-    /// numbered `number`: what they name loaded, as [`load_assets_of`](Self::load_assets_of) loads
-    /// it, the models' files read on threads taken; and then its texts parsed on a thread, in a
-    /// scratch world that has what was loaded; or, ready, why it couldn't be loaded.
+    /// Loads what `texts` name ([`load_assets_of`](Self::load_assets_of)), then parses them on a
+    /// thread in a scratch world. Or the stage is ready with why it couldn't be loaded.
     fn finish_loading(&mut self, (cell, number): (Cell, u64), texts: Texts) -> Stage {
         for text in texts.each() {
             if let Err(error) = self.load_assets_of(&texts.path, text) {
@@ -786,18 +764,16 @@ impl Context {
         Stage::Parsing
     }
 
-    /// Whether the cells coming in as the next tick starts are prepared, as
-    /// [`enter_coming`](Self::enter_coming) brings them in: taking what the threads have finished,
-    /// as [`prepare_cells`](Self::prepare_cells) does, whatever's coming, and starting to prepare
-    /// those coming that aren't being prepared; true for a server's client, which
-    /// brings none in, and in a world with none coming. A tick that isn't run, as it waits for
-    /// them, starts a wait, which logs `cells.waited` at the debug level as it ends, with how long it
-    /// took; in a context without threads, as a test's, each is prepared then and there.
+    /// Whether the cells that [`enter_coming`](Self::enter_coming) brings in as the next tick
+    /// starts are prepared. It runs [`prepare_cells`](Self::prepare_cells) and starts preparing
+    /// those coming that aren't. True for a server's client, and with none coming. A wait logs
+    /// `cells.waited` at the debug level as it ends. Without threads, as in a test, each is
+    /// prepared then and there.
     pub(crate) fn cells_ready(&mut self) -> bool {
         if self.client {
             return true;
         }
-        // Every tick, so that what's prepared ahead goes on from stage to stage between entries.
+        // Every tick, so what's prepared ahead goes on from stage to stage.
         self.prepare_cells();
         let state = self.world.resource::<CellState>();
         let Some(coming) = state.map(|state| &state.coming).filter(|c| !c.is_empty()) else {
@@ -859,8 +835,8 @@ impl Context {
     }
 }
 
-/// The radius of the look's viewpoint as a viewer while the run is stopped, at least, as
-/// [`Context::stream_stopped`] says: a [`Viewer`](cells::Viewer)'s default.
+/// The least radius of the look's viewpoint as a viewer while the run is stopped
+/// ([`Context::stream_stopped`]): a [`Viewer`](cells::Viewer)'s default.
 #[cfg(feature = "dev")]
 const VIEWED_RADIUS: f32 = 512.0;
 

@@ -22,14 +22,13 @@ use crate::model;
 use crate::{Prefab, gltf};
 
 impl Context {
-    /// Sends the thread that reloads assets the shaders the layers added since, and puts each
-    /// shader, texture, model, font, sound and music it read again since in place of the one
-    /// loaded, under the same handle, as [`reload_texture`](Self::reload_texture),
-    /// [`reload_model`](Self::reload_model) and [`reload_font`](Self::reload_font) say, which the
-    /// next frame handed off draws, a sound's next play plays, logging `Sound reloaded`, and
-    /// music's play crossfades to, logging `Music reloaded`: as a frame starts, `recorded` saying
-    /// whether a recording follows the run. Once it has sent the shaders, it allocates nothing
-    /// unless something came back.
+    /// As a frame starts, sends the reload thread the shaders added since, and puts each asset it
+    /// read again in place of the one loaded, under the same handle
+    /// ([`reload_texture`](Self::reload_texture), [`reload_model`](Self::reload_model),
+    /// [`reload_font`](Self::reload_font)). The next frame handed off draws it; a sound's next
+    /// play plays it (`Sound reloaded`); music's next play crossfades to it (`Music reloaded`).
+    /// `recorded` says whether a recording follows the run. It allocates nothing once the shaders
+    /// are sent, unless something came back.
     #[cfg(feature = "dev")]
     pub(crate) fn take_reloaded(&mut self, recorded: bool) {
         let Some(hot_reload) = &mut self.dev.hot_reload else {
@@ -79,12 +78,10 @@ impl Context {
         }
     }
 
-    /// Puts what `font` baked again from `path`, `bake`, in place of what it drew, its field taking
-    /// the new one's texels at whatever size they are, logging `Font reloaded`, and has a later add
-    /// of its file, by whatever path, give the font, as for a stand-in whose file came; but a
-    /// stand-in keeps its place rather than take a file that came outside the asset root, as a
-    /// texture's does, warning `asset.outside_root`. Text in it is laid out by what it baked from
-    /// the next frame.
+    /// Puts `bake`, `font` baked again from `path`, in place of what it drew, at whatever size,
+    /// logging `Font reloaded`. A later add of its file, by whatever path, gives the font, as for
+    /// a stand-in whose file came. A stand-in keeps its place rather than take a file outside the
+    /// asset root, warning `asset.outside_root`. Text uses the new bake from the next frame.
     #[cfg(feature = "dev")]
     pub(super) fn reload_font(&mut self, font: Font, path: &Path, bake: font::Bake) {
         let named = assets::name_of(self.root.as_deref(), path);
@@ -122,14 +119,17 @@ impl Context {
         info!(font = &*named, ?size, "Font reloaded");
     }
 
-    /// Puts `image`, read again from `path`, in place of `texture`'s pixels, at whatever size it
-    /// is, logging `Texture reloaded`, and has a later add of its file, by whatever path, give the
-    /// texture, as for a stand-in whose file came. A sprite sheet's texture keeps drawing as it did
-    /// rather than take an image of another size, whose cells would be elsewhere in it than its
-    /// sprites have them, warning `asset.sheet_resized`; and a stand-in keeps its place rather
-    /// than take a file that came outside the asset root, as through `..` or a link, as text's
-    /// names are kept inside it, warning `asset.outside_root`. A texture removed since its file
-    /// was read takes nothing. The image takes the place of any its loader was still decoding.
+    /// Puts `image`, read again from `path`, in place of `texture`'s pixels, at whatever size,
+    /// logging `Texture reloaded`. A later add of its file, by whatever path, gives the texture, as
+    /// for a stand-in whose file came.
+    ///
+    /// - A sprite sheet's texture keeps drawing as it did rather than take another size, which
+    ///   would move its sprites' cells: `asset.sheet_resized`.
+    /// - A stand-in keeps its place rather than take a file outside the asset root (through `..`
+    ///   or a link): `asset.outside_root`.
+    /// - A texture removed since its file was read takes nothing.
+    ///
+    /// The image replaces any its loader was still decoding.
     #[cfg(feature = "dev")]
     pub(super) fn reload_texture(&mut self, texture: Texture, path: &Path, image: Image) {
         if self.assets.removed(texture) {
@@ -189,14 +189,12 @@ impl Context {
         info!(texture = &*named, ?size, "Texture reloaded");
     }
 
-    /// Puts what the model loaded from `file` draws, `imported`, read again from `path`, in place
-    /// of what it drew, as [`model::reload`] says, logging `Model reloaded`: all of it, its roots'
-    /// nodes fitted to its nodes as [`World::fit_nodes`] says, in the world and the world as edited,
-    /// unless the run is `recorded`, or in a lockstep session or follows another, whose worlds
-    /// change only as the run they go with changed them; there it takes its meshes and images
-    /// alone, warning `asset.model_changed` of what changed that stays as it was until the run
-    /// starts again, its nodes and materials, or of other numbers of primitives or images, which
-    /// it doesn't take.
+    /// Puts `imported`, the model loaded from `file` read again from `path`, in place of what it
+    /// drew ([`model::reload`]), logging `Model reloaded`. All of it is taken, its roots' nodes
+    /// fitted to its nodes ([`World::fit_nodes`]) in the world and the world as edited, unless the
+    /// run is `recorded`, in a lockstep session or follows another: those worlds change only as
+    /// their run did. There it takes meshes and images alone, warning `asset.model_changed` of
+    /// what stays as it was until the run starts again (nodes, materials, other counts).
     #[cfg(feature = "dev")]
     fn reload_model(&mut self, file: &Path, path: &Path, imported: gltf::Imported, recorded: bool) {
         let Some(&model) = self.loaded.models.get(file) else {
@@ -265,14 +263,13 @@ impl Context {
         info!(model = &*named, "Model reloaded");
     }
 
-    /// Puts `text`, prefab `prefab`'s file read again from `path`, in place of what it held, and
-    /// has every instance of it, in the world and the world as edited, take what changed, as
-    /// [`World::refit_prefab`] says, logging `Prefab reloaded`; but where the run is `recorded`, in
-    /// a lockstep session or follows another, whose worlds change only as the run they go with
-    /// changed them, it keeps what it held, warning `asset.prefab_changed`. What the text names
-    /// that isn't loaded is loaded first; text that doesn't load into the world, as one naming a
-    /// type the world hasn't, or a prefab that links it, warns with its error's code, and the
-    /// prefab and its instances stay as they were.
+    /// Puts `text`, `prefab`'s file read again from `path`, in place of what it held, and has
+    /// every instance, in the world and the world as edited, take what changed
+    /// ([`World::refit_prefab`]), logging `Prefab reloaded`. Where the run is `recorded`, in a
+    /// lockstep session or follows another, it keeps what it held, warning `asset.prefab_changed`.
+    /// What the text names is loaded first. Text that doesn't load into the world (an unknown
+    /// type, a prefab that links it) warns with its error's code, and the prefab and its
+    /// instances stay as they were.
     #[cfg(feature = "dev")]
     pub(super) fn reload_prefab(
         &mut self,
@@ -326,10 +323,10 @@ impl Context {
     }
 
     /// Puts `document`, UI file `file` read again from `path`, in place of what it held, every UI
-    /// of it taking its nodes, as [`add_ui`](Self::add_ui) says, logging `UI reloaded`, unless it
-    /// holds the same; what it names that isn't loaded is loaded first, and a font or a texture
-    /// that doesn't load warns with its code, the UI staying as it was. A UI's state is the run's
-    /// alone, so a recorded run or a lockstep peer takes it too.
+    /// of it taking its nodes ([`add_ui`](Self::add_ui)), logging `UI reloaded`, unless it holds
+    /// the same. What it names is loaded first; a font or texture that doesn't load warns with its
+    /// code, the UI staying as it was. A UI's state is the run's alone, so a recorded run or a
+    /// lockstep peer takes it too.
     #[cfg(feature = "dev")]
     fn reload_ui(&mut self, file: usize, path: &Path, mut document: game_ui::Document) {
         let named = assets::name_of(self.root.as_deref(), path);
@@ -348,9 +345,7 @@ impl Context {
         info!(ui = self.uis.path(file), "UI reloaded");
     }
 
-    /// Has the thread that reloads assets, if one does, watch UI file `file`, loaded as `name` from
-    /// the file at `path` by a read begun at `read_at`, as [`watch_texture`](Self::watch_texture)
-    /// has it watch a texture.
+    /// Like [`watch_texture`](Self::watch_texture), for UI file `file`.
     #[cfg(feature = "dev")]
     pub(super) fn watch_ui(
         &mut self,
@@ -376,9 +371,7 @@ impl Context {
         }
     }
 
-    /// Has the thread that reloads assets, if one does, watch `prefab`, loaded as `name` from the
-    /// file at `path` by a read begun at `read_at`, as [`watch_texture`](Self::watch_texture) has
-    /// it watch a texture.
+    /// Like [`watch_texture`](Self::watch_texture), for `prefab`.
     #[cfg(feature = "dev")]
     pub(super) fn watch_prefab(
         &mut self,
@@ -404,9 +397,9 @@ impl Context {
         }
     }
 
-    /// Has the thread that reloads assets, if one does, watch `texture`, loaded as `name` from the
-    /// file at `path` by a read begun at `read_at`, following its file as it's renamed or moved,
-    /// as [`followed`](Self::followed) says, by its asset ID if it's named by one, as `named` is.
+    /// Has the reload thread, if there is one, watch `texture`, loaded as `name` from `path` by a
+    /// read begun at `read_at`. It follows the file as it's renamed or moved
+    /// ([`followed`](Self::followed)), by its asset ID if `named` is one.
     #[cfg(feature = "dev")]
     pub(super) fn watch_texture(
         &mut self,
@@ -432,8 +425,8 @@ impl Context {
         }
     }
 
-    /// Has the thread that reloads assets, if one does, put the file of the asset whose ID `name`
-    /// is, if it's one, in place of `texture`, which stands in for it, once one has it.
+    /// If `name` is an asset ID, has the reload thread, if there is one, put its file in place of
+    /// `texture`, the stand-in, once one has it.
     #[cfg(feature = "dev")]
     pub(super) fn watch_for(&mut self, texture: Texture, name: &str) {
         let id = name.parse::<AssetId>().ok().filter(|_| assets::is_id(name));
@@ -442,9 +435,8 @@ impl Context {
         }
     }
 
-    /// Has the thread that reloads assets, if one does, watch the model loaded as `name` from the
-    /// file at `path`, which resolved to `file`, by a read begun at `read_at` that read `files`,
-    /// following its file as it's renamed or moved, as [`followed`](Self::followed) says.
+    /// Like [`watch_texture`](Self::watch_texture), for the model loaded as `name` from `path`,
+    /// which resolved to `file`; the read at `read_at` read `files`.
     #[cfg(feature = "dev")]
     pub(super) fn watch_model(
         &mut self,
@@ -467,9 +459,7 @@ impl Context {
         }
     }
 
-    /// Has the thread that reloads assets, if one does, watch `font`, loaded as `name` from the
-    /// file at `path` by a read begun at `read_at`, as [`watch_texture`](Self::watch_texture) has
-    /// it watch a texture.
+    /// Like [`watch_texture`](Self::watch_texture), for `font`.
     #[cfg(feature = "dev")]
     pub(super) fn watch_font(
         &mut self,
@@ -495,8 +485,8 @@ impl Context {
         }
     }
 
-    /// Has the thread that reloads assets, if one does, watch `sound`, loaded as `name` from the
-    /// file at `path` by a read begun at `read_at`, at that path, as no asset ID names a sound.
+    /// Like [`watch_texture`](Self::watch_texture), for `sound`, at its path: no asset ID names a
+    /// sound.
     #[cfg(feature = "dev")]
     pub(super) fn watch_sound(
         &mut self,
@@ -516,8 +506,8 @@ impl Context {
         }
     }
 
-    /// Has the thread that reloads assets, if one does, watch `music`, loaded as `name` from the
-    /// file at `path` by a read begun at `read_at`, at that path, as no asset ID names music.
+    /// Like [`watch_texture`](Self::watch_texture), for `music`, at its path: no asset ID names
+    /// music.
     #[cfg(feature = "dev")]
     pub(super) fn watch_music(
         &mut self,
@@ -537,8 +527,8 @@ impl Context {
         }
     }
 
-    /// Has the thread that reloads assets, if one does, bake the file of the asset whose ID `name`
-    /// is, if it's one, in place of `font`, which stands in for it, once one has it.
+    /// If `name` is an asset ID, has the reload thread, if there is one, bake its file in place of
+    /// `font`, the stand-in, once one has it.
     #[cfg(feature = "dev")]
     pub(super) fn watch_font_for(&mut self, font: Font, name: &str) {
         let id = name.parse::<AssetId>().ok().filter(|_| assets::is_id(name));
@@ -547,11 +537,10 @@ impl Context {
         }
     }
 
-    /// What the thread that reloads assets follows the file at `path` by as it's renamed or moved,
-    /// as [`HotReload::watch`] takes it: its asset ID, `id`, if it has one, and its path from the
-    /// asset root, as the asset database has it by that ID, or else as `path` gives it, or as the
-    /// OS resolves it, if it's under the root, by which the database gives it an ID once it has
-    /// one, as for a file new to the run; none outside the root.
+    /// What the reload thread follows the file at `path` by as it's renamed or moved
+    /// ([`HotReload::watch`]): its asset ID `id` if it has one, and its path from the asset root.
+    /// That path is the asset database's by that ID, else as `path` gives it, else as the OS
+    /// resolves it, so the database can give a new file an ID later. None outside the root.
     #[cfg(feature = "dev")]
     fn followed(&self, id: Option<AssetId>, path: &Path) -> (Option<AssetId>, Option<Arc<str>>) {
         let by_id = id

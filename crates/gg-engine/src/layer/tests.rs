@@ -41,7 +41,7 @@ use crate::render_thread::Extracted;
 use crate::{Fog, Key, Projection, Transform, render_thread};
 use crate::{MeshDraw, Model, ModelNode, gltf};
 
-/// A frame of `cx`'s world, drawn and handed off with its view at 64 by 32.
+/// A frame of `cx`'s world, drawn and handed off at a 64 by 32 view.
 fn handed_off(cx: &mut Context) -> Extracted {
     cx.draw_world(1.0, 0.0, 0);
     let mut frame = Extracted::default();
@@ -53,13 +53,12 @@ fn handed_off(cx: &mut Context) -> Extracted {
     frame
 }
 
-/// A frame of `cx`'s world, as [`handed_off`] has it: whether it's cut to its viewpoint.
 fn cut(cx: &mut Context) -> bool {
     handed_off(cx).cut
 }
 
-/// Where the look's grid draws, each cell in draws its cube's twelve edges, and each cell
-/// refused; without the grid, none.
+/// Where the look's grid draws: each cell in draws its cube's twelve edges, and each cell refused;
+/// without the grid, none.
 #[cfg(feature = "dev")]
 #[test]
 fn the_cells_draw_where_the_look_s_grid_does() {
@@ -86,11 +85,10 @@ fn the_cells_draw_where_the_look_s_grid_does() {
     assert_eq!(lines(&mut cx), 3 * 12);
 }
 
-/// The frame's origin stays at the world's while the view is within 1,024 of it on every axis,
-/// and from the frame after one whose view went past, is where the view was, rounded to a
-/// multiple of 1,024 on each axis, the frame that went past drawing from where it was; what a
-/// layer draws in the world is drawn from it; a view that isn't finite leaves it; and in a
-/// development build, the look's viewpoint moves it as a frame starts.
+/// The frame's origin stays at the world's while the view is within 1,024 of it per axis; once
+/// past, the next frame's origin is the view rounded to a multiple of 1,024 per axis (the frame
+/// that went past keeps the old one). A non-finite view leaves it. A development build's look
+/// viewpoint moves it as a frame starts.
 #[test]
 fn the_origin_follows_the_view_a_step_of_1024_at_a_time() {
     let x = |x| DVec3::new(x, 0.0, 0.0);
@@ -143,9 +141,8 @@ fn the_origin_follows_the_view_a_step_of_1024_at_a_time() {
     }
 }
 
-/// The view is antialiased as a layer sets, in place of its world's environment's, and of none
-/// for a world without one, and as the environment says again once it's unset; the world, its
-/// environment and its hash among it, stays as it was.
+/// The view is antialiased as a layer sets, over its world's environment's, and as the environment
+/// says once unset. World and hash stay as they were.
 #[test]
 fn a_layers_antialiasing_takes_the_environments_place() {
     let antialiased = |cx: &mut Context| handed_off(cx).antialiasing;
@@ -185,10 +182,9 @@ fn camera_at(x: f32, primary: bool) -> (Transform, Camera) {
     )
 }
 
-/// A projection set from code that can't project, as a near plane of 0 or a field of view that
-/// isn't a number, which would panic the render thread, is drawn through the last that could,
-/// or the default's, from where the camera is, and warns once (`engine.bad_projection`) until
-/// one can again.
+/// A projection that can't project (near plane 0, non-number field of view) would panic the render
+/// thread: the frame draws through the last good one, or the default, warning once
+/// (`engine.bad_projection`) until one can again.
 #[test]
 fn a_projection_that_cant_project_is_replaced_by_the_last_that_could_with_a_warning() {
     let logged = crate::testing::logged();
@@ -231,9 +227,8 @@ fn a_projection_that_cant_project_is_replaced_by_the_last_that_could_with_a_warn
     assert_eq!(seen(&mut cx).projection, good, "the last that could");
     assert_eq!(seen(&mut cx).projection, good);
     assert_eq!(warnings(), ["engine.bad_projection"], "once");
-    // A layer's viewpoint, which a game sets whole, as the frame takes it: of a source of its
-    // own, which has no good projection of the camera's to fall back to, and warns anew, as
-    // does the camera as the view comes back to it.
+    // A layer's viewpoint, set whole: its source has no good projection to fall back to, so it
+    // warns anew, as the camera does when the view returns to it.
     let flat = Viewpoint::default().projection;
     cx.set_viewpoint(Viewpoint {
         projection: Projection::Orthographic {
@@ -252,8 +247,8 @@ fn a_projection_that_cant_project_is_replaced_by_the_last_that_could_with_a_warn
     assert!(warnings().is_empty());
 }
 
-/// Fog with a number that isn't finite, set from code, would turn the whole view black: the
-/// frame is drawn without it, with one warning (`engine.bad_fog`) for as long as it lasts.
+/// Non-finite fog set from code would turn the view black: the frame draws without it, with one
+/// warning (`engine.bad_fog`) for as long as it lasts.
 #[test]
 fn fog_that_isnt_finite_is_left_out_of_the_frame_with_a_warning() {
     let logged = crate::testing::logged();
@@ -284,8 +279,7 @@ fn fog_that_isnt_finite_is_left_out_of_the_frame_with_a_warning() {
     assert_eq!(warnings(), ["engine.bad_fog"], "anew after good fog");
 }
 
-/// A layer that sends each event to its UI and lets it go on, as a game that doesn't ask what
-/// the UI did.
+/// A layer that sends each event to its UI and lets it go on.
 struct Sends(crate::GameUi);
 
 impl Layer for Sends {
@@ -295,9 +289,8 @@ impl Layer for Sends {
     }
 }
 
-/// A game UI takes the mouse's presses and wheel over its buttons and lists from the layers
-/// below the layer that sent it them, which see those elsewhere, and releases go on; whether
-/// the cursor is over it is asked of the UI and of the context.
+/// A game UI takes mouse presses and wheel over its buttons and lists from the layers below the
+/// layer that sent them; releases go on. UI and context both say whether the cursor is over it.
 #[test]
 fn a_game_ui_takes_the_mouse_over_what_it_draws_from_the_layers_below() {
     use crate::MouseButton;
@@ -305,8 +298,8 @@ fn a_game_ui_takes_the_mouse_over_what_it_draws_from_the_layers_below() {
     let scratch = crate::dirs::tests::Scratch::new("ui-takes-the-mouse");
     std::fs::create_dir_all(&scratch.0).expect("a directory");
     let path = scratch.0.join("menu.ui");
-    // A button in the view's middle, a list in its top left corner and a text in its top right,
-    // in canvas units of a view 1,920 by 1,080 pixels.
+    // A button in the view's middle, a list at its top left, a text at its top right, in canvas
+    // units of a 1,920 by 1,080 view.
     let file = r#"(nodes: [
             Button(name: "play", width: Fixed(400.0), height: Fixed(80.0)),
             List(
@@ -329,7 +322,7 @@ fn a_game_ui_takes_the_mouse_over_what_it_draws_from_the_layers_below() {
         calls: calls.clone(),
     });
     stack.push_layer(Sends(ui));
-    // Drawn and handed off, so that the view is known and the UI drew in the last frame.
+    // Drawn and handed off, so the view is known and the UI drew last frame.
     ui.draw(&mut cx);
     let mut frame = Extracted::default();
     let view = Viewport {
@@ -394,10 +387,9 @@ fn a_game_ui_takes_the_mouse_over_what_it_draws_from_the_layers_below() {
     assert!(reached(), "a UI without input takes no press");
 }
 
-/// The view is cut to its viewpoint as it comes from elsewhere than the last frame's, which
-/// motion blur takes as standing still: in the first frame; as the primary camera switches, not
-/// as it moves; as its projection turns to the other kind; and as a layer sets a viewpoint and
-/// as it stops, not as the one it sets moves.
+/// The view is cut to its viewpoint when it comes from elsewhere than the last frame's (motion blur
+/// treats that as standing still): the first frame, a primary camera switch or projection kind
+/// change (not a move), a layer starting or stopping a viewpoint (not moving it).
 #[test]
 fn the_view_cuts_as_its_viewpoint_comes_from_elsewhere() {
     let mut cx = Context::seeded(1);
@@ -448,15 +440,12 @@ fn the_view_cuts_as_its_viewpoint_comes_from_elsewhere() {
     );
 }
 
-/// The view is cut to the tool API's look as it's set, as each viewpoint it sets changes, and
-/// as it's cleared; and to and from a bare frame among the look's, which sees through the
-/// game's camera, but for a look without a viewpoint, whose bare frames see as the rest. Each
-/// frame says the look shows, for the exposure, as it sees from the look's viewpoint, so that
-/// every frame that turns to or from it is cut to.
+/// The view is cut to the tool API's look when it's set, its viewpoints change, or it's cleared,
+/// and to and from a bare frame among the look's (it sees through the game's camera, as does a look
+/// without a viewpoint). Each frame says whether the look shows, for the exposure.
 #[cfg(feature = "dev")]
 #[test]
 fn the_view_cuts_to_and_from_the_tools_look() {
-    // Whether the next frame is cut to, and whether it says the look shows.
     let seen = |cx: &mut Context| {
         cx.draw_world(1.0, 0.0, 0);
         let mut frame = Extracted::default();
@@ -499,16 +488,14 @@ fn the_view_cuts_to_and_from_the_tools_look() {
     assert_eq!(seen(&mut cx), (false, false), "the frame after it");
 }
 
-/// The passes the tool API's look leaves out are left out of the frame, each as it would be
-/// drawn were the game's environment without it, and its lights without shadows; a bare frame,
-/// a capture of the game's own view's, leaves none out; and the world, its environment and
-/// lights among it, stays as it was.
+/// The look leaves out passes: the environment as if the game had none, the lights without shadows.
+/// A bare frame leaves none out. The world stays as it was.
 #[cfg(feature = "dev")]
 #[test]
 fn the_passes_the_look_leaves_out_are_left_out_of_the_frame_but_a_bare_one() {
     use gg_renderer::{Adaptation, AmbientOcclusion, DepthOfField, Lens, MotionBlur, Reflections};
 
-    /// Each pass of a frame, by [`gg_api::Pass::ALL`]'s order, the shadows by the light's.
+    /// Each pass of a frame, in [`gg_api::Pass::ALL`]'s order; shadows by the light's.
     type Passes = (
         Option<AmbientOcclusion>,
         Option<Reflections>,
@@ -608,10 +595,9 @@ fn the_passes_the_look_leaves_out_are_left_out_of_the_frame_but_a_bare_one() {
     assert_eq!(world.hash(), hash);
 }
 
-/// Each skinned part of a model's root draws a mesh of its own, a copy of its model's, which
-/// the frame skins by its skin's joints, each where it draws, from the mesh's space as it was
-/// bound: at rest, as the Fox spawns, the matrix of no change for each of its 24; the copy
-/// kept from frame to frame, and gone with its root.
+/// Each skinned part of a model's root draws its own copy of the model's mesh, skinned by its
+/// joints from the bound space (at rest, as the Fox spawns: the identity for each of its 24). The
+/// copy persists across frames and goes with its root.
 #[test]
 fn a_skinned_part_draws_a_mesh_of_its_own_moved_by_its_joints() {
     let mut cx = Context::seeded(1);
@@ -656,7 +642,7 @@ fn a_skinned_part_draws_a_mesh_of_its_own_moved_by_its_joints() {
     cx.draw_world(1.0, 0.0, 0);
     assert_eq!(cx.draws.skins().count(), 0);
     assert_eq!(cx.skins.held(), (0, 1), "its copy spare");
-    // Another Fox takes the spare copy, which the renderer has, adding no mesh.
+    // Another Fox takes the spare copy, adding no mesh.
     let meshes = cx.meshes.count();
     model.spawn(cx.world_mut(), Transform::IDENTITY);
     cx.draws.clear();
@@ -668,8 +654,8 @@ fn a_skinned_part_draws_a_mesh_of_its_own_moved_by_its_joints() {
     assert_eq!((cx.meshes.count(), cx.skins.held()), (meshes, (1, 0)));
 }
 
-/// A Fox's context, the Fox's model added, after a frame of a Fox spawned and despawned, which
-/// leaves its skinned copy spare.
+/// A Fox's context, its model added, after a Fox spawned and despawned in a frame, leaving its
+/// skinned copy spare.
 fn spare_fox() -> (Context, Model) {
     let mut cx = Context::seeded(1);
     let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox");
@@ -685,8 +671,8 @@ fn spare_fox() -> (Context, Model) {
     (cx, model)
 }
 
-/// A spare copy of a skinned model's mesh goes, and the renderer removes it, once its model's
-/// mesh is another, as the model read again makes it.
+/// A spare copy of a skinned model's mesh goes, and the renderer removes it, once its model's mesh
+/// changes, as a model read again does.
 #[test]
 fn a_spare_skinned_copy_goes_once_its_models_mesh_is_another() {
     let (mut cx, model) = spare_fox();
@@ -701,8 +687,8 @@ fn a_spare_skinned_copy_goes_once_its_models_mesh_is_another() {
     assert_eq!((cx.skins.held(), cx.meshes.kept()), ((0, 0), kept - 1));
 }
 
-/// A spare copy of a skinned model's mesh that no entity takes goes, and the renderer removes
-/// it, after `SPARE_FRAMES`, so that the copies of a crowd that went give back their memory.
+/// A spare copy no entity takes goes, and the renderer removes it, after `SPARE_FRAMES`: a gone
+/// crowd's copies give back their memory.
 #[test]
 fn a_spare_skinned_copy_goes_once_its_time_is_up() {
     let (mut cx, _) = spare_fox();
@@ -716,9 +702,8 @@ fn a_spare_skinned_copy_goes_once_its_time_is_up() {
     assert_eq!((cx.skins.held(), cx.meshes.kept()), ((0, 0), kept - 1));
 }
 
-/// A skinned part's copy whose entity is alive, and no longer skinned, as its draw was changed
-/// to another mesh, goes rather than being spare, as the scene may still draw it: the next Fox
-/// has a copy of its own.
+/// A copy whose entity lives but is no longer skinned goes rather than staying spare: the scene may
+/// still draw it, and the next Fox gets its own.
 #[test]
 fn a_skinned_copy_of_an_entity_still_alive_goes_rather_than_being_spare() {
     let mut cx = Context::seeded(1);
@@ -759,7 +744,7 @@ fn a_skinned_copy_of_an_entity_still_alive_goes_rather_than_being_spare() {
     assert_eq!(cx.meshes.kept(), kept);
 }
 
-/// Records each call it gets, by layer name, and handles events if `handles` is set.
+/// Records each call by layer name; handles events if `handles`.
 struct Probe {
     name: &'static str,
     handles: bool,
@@ -795,8 +780,7 @@ impl Layer for Probe {
     }
 }
 
-/// Spawns an entity as it attaches, at each tick, and as it detaches; and as it updates, if
-/// `rogue`.
+/// Spawns an entity as it attaches, at each tick and as it detaches; as it updates too, if `rogue`.
 struct Spawner {
     rogue: bool,
 }
@@ -818,7 +802,7 @@ impl Layer for Spawner {
     }
 }
 
-/// Notes, for each key event it's sent, whether the input state shows that key held.
+/// Notes per key event whether the input state shows that key held.
 struct Poll(Rc<RefCell<Vec<bool>>>);
 
 impl Layer for Poll {
@@ -830,8 +814,8 @@ impl Layer for Poll {
     }
 }
 
-/// Pushes, in this order: overlay `o`, layer `a`, layer `b` (which handles events if
-/// `b_handles`), and returns the stack, bottom to top `a b o`, with its call record.
+/// Pushes overlay `o`, layer `a`, layer `b` (handles events if `b_handles`), in this order. Returns
+/// the stack, bottom to top `a b o`, with its call record.
 fn probes(b_handles: bool) -> (Stack, Rc<RefCell<Vec<String>>>) {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let probe = |name, handles| Probe {
@@ -865,9 +849,9 @@ fn lifecycle_goes_up_the_stack_and_detach_comes_back_down() {
     assert_eq!(short_name::<Vec<crate::inspector::Inspector>>(), "Vec");
 }
 
-/// What the app keeps for the user reads back as it was saved, from the next run's context
-/// too, a file not saved reading as none; a name that isn't a file's alone is refused, saving
-/// nothing; and a headless run's context reads none and keeps nothing.
+/// What the app keeps for the user reads back as saved, also in the next run's context; an unsaved
+/// file reads as none. A name that isn't a file's alone is refused, saving nothing. A headless run
+/// reads and keeps nothing.
 #[test]
 fn the_apps_state_reads_back_as_it_was_kept() {
     let scratch = crate::dirs::tests::Scratch::new("app-state");
@@ -907,8 +891,8 @@ impl Layer for Replacer {
     }
 }
 
-/// A world a tick puts in the context's place shares the context's assets after it, so that
-/// the textures the layers added stay named, and one added afterwards is named after them.
+/// A world a tick puts in the context's place shares the context's assets: the textures the layers
+/// added stay named, and later ones are named after them.
 #[test]
 fn a_world_put_in_the_contexts_place_shares_its_assets() {
     let mut stack = Stack::default();
@@ -953,9 +937,8 @@ impl Layer for Failer {
     }
 }
 
-/// A layer that fails ends the run, as an exit does, logging its error by its code at once; the
-/// layers still detach, after which the stack says the run failed, as one that exits alone
-/// doesn't.
+/// A layer that fails ends the run like an exit, logging its error by its code at once. The layers
+/// still detach; then the stack says the run failed, unlike a plain exit.
 #[test]
 fn a_layer_that_fails_ends_the_run_with_its_error() {
     let logged = crate::testing::logged();
@@ -986,8 +969,8 @@ fn a_layer_that_fails_ends_the_run_with_its_error() {
     assert!(cx.exiting() && !stack.failed());
 }
 
-/// Each component type the engine registers has a doc, and so does each of its named fields,
-/// which the Inspector shows on hover.
+/// Each component type the engine registers has a doc, and each named field: the Inspector shows
+/// them on hover.
 #[test]
 fn the_engines_components_and_their_named_fields_have_docs() {
     let cx = Context::new(None);
@@ -1030,7 +1013,7 @@ fn events_go_down_the_stack_until_a_layer_handles_them_but_releases_go_on() {
     );
     assert_eq!(*calls.borrow(), ["event o", "event b", "event a"]);
 
-    // A press, and a stick or a trigger away from rest, stop at the layer that handles them.
+    // A press, and a stick or trigger away from rest, stop at the layer that handles them.
     let pad = crate::Pad(0);
     let stick = |value| Event::PadStick {
         pad,
@@ -1145,8 +1128,8 @@ fn draws_ui(mut stack: Stack) -> bool {
     draws
 }
 
-/// A layer draws UI unless its `ui` is its own type's default: one that has a `ui` of its own
-/// draws, though it draws nothing, as does one whose `ui` calls another layer's default.
+/// A layer draws UI unless its `ui` is its type's default: one with its own `ui` draws, even
+/// drawing nothing, as does one whose `ui` calls another layer's default.
 #[cfg(feature = "dev")]
 #[test]
 fn layers_draw_ui_unless_theirs_is_the_default() {
@@ -1167,10 +1150,9 @@ fn layers_draw_ui_unless_theirs_is_the_default() {
     assert!(draws_ui(stack(&|stack| stack.push_layer(Wrapper(Quiet)))));
 }
 
-/// A run that reads a package loads from it what layers add and text names, though no file of
-/// theirs is on the disk: a texture, compressed, by its path, however it's written, named by
-/// its ID, and by that ID, as text names it; a model, cooked, its primitives with levels of
-/// detail and its images compressed; a scene's text; a script; and a prefab, by its ID.
+/// A run that reads a package loads from it what layers add and text names, with no files on disk:
+/// textures (compressed; by path, ID, and ID in text), cooked models (levels of detail, compressed
+/// images), scene text, scripts, prefabs by ID.
 #[test]
 fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
     use crate::image::tests::ktx2;
@@ -1181,8 +1163,8 @@ fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
     let root = dir.0.join("game");
     // A block of BC7, in KTX2.
     let block = |size| ktx2(ktx2::Format::BC7_SRGB_BLOCK, size, &[vec![0; 16]], true);
-    // The glTF tests' model, cooked: each primitive's triangles twice, its second level, and
-    // each image a block.
+    // The glTF tests' model, cooked: each primitive's triangles twice (second level), each image a
+    // block.
     let glb = crate::gltf::tests::model();
     let read = |_: &Path, _: u64| Ok(glb.clone());
     let mut model = (crate::gltf::read("m", Path::new("m.glb"), read, u64::MAX))
@@ -1206,7 +1188,7 @@ fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
         mesh.lods.levels = levels;
         primitive.mesh = Some(mesh);
     }
-    // Each compressed as what it holds says, as the cooker compresses it.
+    // Each compressed as what it holds says, as the cooker does.
     let images: Vec<_> = (model.images.iter().enumerate())
         .map(|(i, image)| {
             let holds = crate::model::texels(&model.primitives, i);
@@ -1273,7 +1255,7 @@ fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
         added, counts,
         "a mesh for each primitive, a texture for each image"
     );
-    // As text names it, by its ID, which a run without `dev` finds in the package alone.
+    // As text names it, by ID, which a run without `dev` finds in the package alone.
     cx.load_named([Asset::Texture("5f3c9a1e07b2d846")], false);
     assert_eq!(cx.assets.texture("5f3c9a1e07b2d846"), Some(stone));
     let unknown = cx.asset_path("0123456789abcdef", "texture", false);
@@ -1284,7 +1266,7 @@ fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
     let mut scripts = crate::Scripts::new().expect("Luau starts");
     let declared = scripts.load(&mut cx, root.join("scripts/still.luau"));
     assert_eq!(declared.expect("the script loads"), "Still");
-    // A prefab by its ID, whose instance's sprite shows the texture it names.
+    // A prefab by ID, whose instance's sprite shows the texture it names.
     cx.load_named([Asset::Prefab("6b5e1c3f29d0a487")], false);
     let prefab = cx.assets.prefab("6b5e1c3f29d0a487").expect("by its ID");
     assert_eq!(cx.assets.prefab_path(prefab), "prefabs/lamp.prefab");
@@ -1292,8 +1274,8 @@ fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
     let placed = placed.unwrap_or_else(|error| panic!("{error:#}"));
     let sprite = cx.world().get::<Sprite>(placed).expect("the prefab's");
     assert_eq!(sprite.texture, Some(stone));
-    // Nor does a scan, as the tool API's `assets` asks for, read the disk under the root, or
-    // write an ID file there.
+    // Nor does a scan, as the tool API's `assets` asks, read the disk under the root or write an ID
+    // file.
     #[cfg(feature = "dev")]
     {
         std::fs::create_dir_all(&root).unwrap();
@@ -1330,8 +1312,8 @@ fn a_sprite_sheet_loads_only_if_its_cells_fit_its_image() {
     let sheet = add_sheet(&mut loader, &mut textures, "tiles", path, image(), [64, 32]);
     let sheet = sheet.expect("a sheet");
     assert_eq!((sheet.size, sheet.cell), ([64, 32], [64, 32]));
-    // The sheets that didn't load took no texture, so this one's comes first after the
-    // engine's white one.
+    // The sheets that didn't load took no texture, so this one's comes first after the engine's
+    // white one.
     let first = Textures::default().add("first", [1, 1], &[0; 4], Mipmaps::None);
     assert_eq!(sheet.texture, first.expect("a texture"));
 }
@@ -1350,10 +1332,9 @@ fn a_model_that_cant_be_read_fails_naming_its_file() {
     );
 }
 
-/// A texture's file added again, by another form of its path, gives the texture it gave first
-/// without loading it again, as a sprite sheet's does, whichever comes first, cut by the image's
-/// size; the texture keeps its first path's name, which the other path names too, and each add
-/// notes its own path, as a snapshot's asset lines count them.
+/// A texture's file added again by another form of its path gives the first texture without loading
+/// again, as does a sprite sheet's (cut by the image's size). The first path's name stays and the
+/// other names it too; each add notes its own path, as a snapshot's asset lines count.
 #[test]
 fn a_texture_added_twice_loads_once_however_its_path_is_written() {
     let scratch = crate::dirs::tests::Scratch::new("texture-once");
@@ -1402,10 +1383,10 @@ fn a_texture_added_twice_loads_once_however_its_path_is_written() {
     assert_eq!(sheet_first.textures.count(), count);
 }
 
-/// A texture whose ID file holds an ID is named by it, as a test's context reads it from its
-/// root, writing none: found by it and by its path, however that's written; one without an ID
-/// file by its path; and a model's images by the model's ID and their places. So a world hashes
-/// alike once a texture's file is renamed with its ID file, but not without it.
+/// A texture whose ID file holds an ID is named by it (a test's context reads it from the root,
+/// writing none) and found by ID or path; without one, by path; a model's images by the model's ID
+/// and place. So a world hashes alike once a texture's file is renamed with its ID file, not
+/// without it.
 #[cfg(feature = "dev")]
 #[test]
 fn a_texture_is_named_by_its_id_so_its_file_renamed_with_it_hashes_alike() {
@@ -1458,8 +1439,8 @@ fn a_texture_is_named_by_its_id_so_its_file_renamed_with_it_hashes_alike() {
         let (id, path) = (format!("{model}#{i}"), format!("assets/m.glb#{i}"));
         assert_eq!(image, (&*id, &*path));
     }
-    // A file outside the root, given by a path from the working directory spelled as one in the
-    // root is from it, has none of that one's ID.
+    // A file outside the root, given by a working-directory path spelled as one in the root is, has
+    // none of that one's ID.
     let stone_id = Some(stone.parse().expect("an ID"));
     assert_eq!(cx.asset_id(&root.join("assets/stone.png"), None), stone_id);
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -1489,9 +1470,8 @@ fn a_texture_is_named_by_its_id_so_its_file_renamed_with_it_hashes_alike() {
     assert_ne!(hash("assets/rock.png"), before, "by its path, without one");
 }
 
-/// A texture's file renamed with its ID file while the run has it loaded, added again by its
-/// new path once the database has it there, gives the texture loaded before, as by its ID,
-/// loading nothing again; a sheet cut from it too.
+/// Renamed with its ID file while loaded, a texture's file added again by its new path (once the
+/// database has it) gives the loaded texture, loading nothing; a sheet cut from it too.
 #[cfg(feature = "dev")]
 #[test]
 fn a_texture_renamed_while_loaded_loads_once_by_its_new_path() {
@@ -1524,10 +1504,9 @@ fn a_texture_renamed_while_loaded_loads_once_by_its_new_path() {
     assert_eq!(cx.assets.texture("assets/rock.png"), Some(stone));
 }
 
-/// A run that serves the tool API and writes ID files keeps the prints of what its assets hold
-/// in its cache, by the thread that watches them, so that the next run's start gives an asset
-/// renamed alone while no run watched the ID it had, by the ID file the rename left behind; a
-/// run that writes none reads no cache, and moves nothing.
+/// A run serving the tool API and writing ID files caches its assets' prints through the watching
+/// thread, so the next run recognizes an asset renamed while no run watched, by the ID file the
+/// rename left. A run that writes none reads no cache and moves nothing.
 #[cfg(feature = "dev")]
 #[test]
 fn a_runs_start_keeps_the_id_of_an_asset_renamed_while_none_watched() {
@@ -1546,8 +1525,8 @@ fn a_runs_start_keeps_the_id_of_an_asset_renamed_while_none_watched() {
     let cx = started(true, true);
     let a = cx.catalog().id("a.png").expect("an ID written");
     cx.ask_assets().expect("a thread watches");
-    // The thread keeps the prints after it answers a look, and a run's end waits for it no
-    // longer than `asset_watch::STOP`: until the cache holds a.png's.
+    // The thread keeps the prints after it answers a look; a run's end waits for it up to
+    // `asset_watch::STOP`: until the cache holds a.png's.
     let kept = || std::fs::read_to_string(&cache).is_ok_and(|kept| kept.contains(&a.to_string()));
     let until = std::time::Instant::now() + Duration::from_secs(30);
     while !kept() {
@@ -1568,12 +1547,11 @@ fn a_runs_start_keeps_the_id_of_an_asset_renamed_while_none_watched() {
     assert!(!root.join("a.png.meta").exists(), "moved beside b.png");
 }
 
-/// In a run that reloads assets, a texture whose file is edited takes the image as a frame
-/// starts, under its handle, at another size; one renamed with its ID file is followed where the
-/// database finds it, and an edit there taken; a stand-in takes its file's image once the file
-/// comes, which a later add of the file gives, and is followed by the ID the database gives it
-/// then; a sprite sheet's texture keeps its size, warning, since its cells would move; and a
-/// stand-in for a file outside the asset root takes none of it.
+/// In a run that reloads assets, an edited texture file gives the new image as a frame starts,
+/// under its handle, at another size. A texture renamed with its ID file is followed where the
+/// database finds it, edits there included. A stand-in takes its file's image once the file comes,
+/// followed by the ID the database then gives. A sheet's texture keeps its size, warning (its cells
+/// would move). A stand-in for a file outside the asset root takes none.
 #[cfg(feature = "dev")]
 #[test]
 fn a_texture_edited_renamed_or_come_reloads_under_its_handle() {
@@ -1593,7 +1571,7 @@ fn a_texture_edited_renamed_or_come_reloads_under_its_handle() {
             None,
         )
     };
-    // Dated an hour back, so that each loads as it is.
+    // Dated an hour back, so each loads as it is.
     let written_long_ago = |name: &str, bytes: &[u8]| {
         let path = assets.join(name);
         std::fs::write(&path, bytes).expect("written");
@@ -1640,7 +1618,7 @@ fn a_texture_edited_renamed_or_come_reloads_under_its_handle() {
         "the edit reloads",
     );
 
-    // Renamed with its ID file, and edited at once, before the database has it there.
+    // Renamed with its ID file and edited at once, before the database has it there.
     for name in ["stone.png", "stone.png.meta"] {
         let to = assets.join(name.replacen("stone", "rock", 1));
         std::fs::rename(assets.join(name), to).expect("renamed");
@@ -1688,8 +1666,8 @@ fn a_texture_edited_renamed_or_come_reloads_under_its_handle() {
     until(&mut cx, &resized, "a sheet's texture keeps its size");
     assert_eq!(size(&cx, sheet), Some([2, 1]));
 
-    // Outside the root, through `..`: one there is refused, and isn't watched; one that comes
-    // after is refused as it comes.
+    // Outside the root, through `..`: one there is refused and not watched; one that comes after is
+    // refused as it comes.
     std::fs::write(scratch.0.join("there.png"), png(8)).expect("written");
     cx.load_named(["../there.png", "../after.png"].map(Asset::Texture), true);
     let there = cx.assets.texture("../there.png").expect("a stand-in");
@@ -1705,9 +1683,9 @@ fn a_texture_edited_renamed_or_come_reloads_under_its_handle() {
     assert_eq!((size(&cx, there), size(&cx, after)), (None, None));
 }
 
-/// An ID no asset has, which the project's fetch list gives a file, names that file and `cargo
-/// gg fetch`, the list read beside the manifest, not under the asset root; but not an ID the
-/// list doesn't give, nor in a context that isn't a project's game.
+/// An ID no asset has names the file the project's fetch list gives it (read beside the manifest)
+/// and `cargo gg fetch`. An ID the list lacks, or a context that isn't a project's game, names
+/// none.
 #[cfg(feature = "dev")]
 #[test]
 fn an_unknown_id_the_fetch_list_gives_names_what_fetches_it() {
@@ -1756,13 +1734,12 @@ fn an_unknown_id_the_fetch_list_gives_names_what_fetches_it() {
     assert!(!message.contains("fetch"), "{message}");
 }
 
-/// A scene file loads the textures it names that no layer added, by an ID or by a path from the
-/// root, once each, named as a layer's add would name them, and a model's image with its model.
-/// One naming a texture that can't be loaded is refused where it names it, saying why,
-/// spawning nothing: a file that isn't an image or isn't there, one outside the root, by an
-/// absolute path or through `..`, an ID no asset has, and an image a model hasn't. A run that
-/// follows another loads them, and stands in for those, named as named; and asked by the tool
-/// API, as a lockstep joiner, loads only what it was given.
+/// A scene file loads the textures it names that no layer added, by ID or root-relative path, once
+/// each, named as a layer's add would; a model's image loads with its model. One that can't load is
+/// refused where named, saying why, spawning nothing: not an image, missing, outside the root
+/// (absolute or `..`), an ID no asset has, an image the model lacks. A run following another loads
+/// and stands in for those; asked by the tool API (a lockstep joiner), it loads only what it was
+/// given.
 #[cfg(feature = "dev")]
 #[test]
 fn a_scene_loads_the_textures_it_names_and_refuses_those_it_cant() {
@@ -1787,7 +1764,7 @@ fn a_scene_loads_the_textures_it_names_and_refuses_those_it_cant() {
     write("assets/m.glb", &gltf::tests::model()).expect("written");
     write("assets/m.glb.meta", meta(model).text().as_bytes()).expect("written");
     std::fs::write(scratch.0.join("outside.png"), &png).expect("written");
-    // A scene of a sprite of each texture named, their IDs from `first` on.
+    // A scene of a sprite of each texture named, IDs from `first` on.
     let scene = |first: usize, names: &[&str]| -> PathBuf {
         let mut text = "(\n    entities: {\n".to_owned();
         for (i, name) in names.iter().enumerate() {
@@ -1877,7 +1854,7 @@ fn a_scene_loads_the_textures_it_names_and_refuses_those_it_cant() {
         .filter(|code| code == "asset.stand_in");
     assert_eq!(codes.count(), refused.len());
 
-    // Asked by the tool API, it loads what it was given alone.
+    // Asked by the tool API, it loads only what it was given.
     let given = [(Arc::from(stone), Arc::from("assets/stone.png"))];
     let mut joiner = Context::seeded(0).root(root);
     joiner.name_as(given);
@@ -1888,10 +1865,9 @@ fn a_scene_loads_the_textures_it_names_and_refuses_those_it_cant() {
     assert!(plain.contains("asset.not_given"), "{plain}");
 }
 
-/// A scene that names a model by its ID loads it, and its root spawns the model's nodes. Edited,
-/// the model's nodes and materials reload, the root's nodes taking them, unless the run is
-/// recorded, which keeps them, warning; and renamed with its ID file, the model loads by its
-/// ID from where it is.
+/// A scene naming a model by ID loads it and its root spawns the model's nodes. Edited, the model's
+/// nodes and materials reload into the root's nodes, unless the run is recorded (kept, warning).
+/// Renamed with its ID file, it loads by ID from where it is.
 #[cfg(feature = "dev")]
 #[test]
 fn a_scene_names_a_model_by_its_id_whose_nodes_reload_as_it_changes() {
@@ -1911,7 +1887,7 @@ fn a_scene_names_a_model_by_its_id_whose_nodes_reload_as_it_changes() {
             gltf["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] = color;
         })
     };
-    // Dated an hour back, so that it loads as it is.
+    // Dated an hour back, so it loads as it is.
     let written_long_ago = |name: &str, bytes: &[u8]| {
         let path = root.join("assets").join(name);
         std::fs::write(&path, bytes).expect("written");
@@ -1960,7 +1936,7 @@ fn a_scene_names_a_model_by_its_id_whose_nodes_reload_as_it_changes() {
     assert_eq!(at(&cx), DVec3::ZERO);
     let drew = draw(&cx);
 
-    // Frame starts, as a run that's `recorded` or not, until `done`.
+    // Frame starts, as a run `recorded` or not, until `done`.
     let until = |cx: &mut Context, recorded, done: &dyn Fn(&Context) -> bool, what: &str| {
         let until = std::time::Instant::now() + Duration::from_secs(30);
         while !done(cx) {
@@ -1973,7 +1949,7 @@ fn a_scene_names_a_model_by_its_id_whose_nodes_reload_as_it_changes() {
     std::fs::write(&path, gltf([0.0, 5.0, 0.0], 0.5)).expect("an edit");
     let moved = |cx: &Context| at(cx) == DVec3::new(0.0, 5.0, 0.0);
     until(&mut cx, false, &moved, "the node moves");
-    // Its material's color changed in the table of materials, where its draw reads it.
+    // Its material's color changed in the materials table, where its draw reads it.
     assert_eq!(draw(&cx), drew, "the same draw, of the same material");
 
     let _ = logged.codes.try_iter().count();
@@ -1999,11 +1975,10 @@ fn a_scene_names_a_model_by_its_id_whose_nodes_reload_as_it_changes() {
     assert!(cx.world().children(placed).expect("alive").next().is_some());
 }
 
-/// A scene that names a prefab by its ID loads it, and the textures its text names, and its
-/// instance spawns the prefab's entities. Edited, the prefab reloads, and its instance takes
-/// what changed but what it changed itself, unless the run is recorded, which keeps it,
-/// warning; and a run following another stands in for a prefab it can't load, whose instances
-/// are their roots alone.
+/// A scene naming a prefab by ID loads it and the textures its text names; its instance spawns the
+/// prefab's entities. Edited, the prefab reloads and the instance takes what changed except its own
+/// changes, unless the run is recorded (kept, warning). A run following another stands in for one
+/// it can't load: instances are their roots alone.
 #[cfg(feature = "dev")]
 #[test]
 fn a_scene_names_a_prefab_by_its_id_whose_instances_reload_as_it_changes() {
@@ -2026,7 +2001,7 @@ fn a_scene_names_a_prefab_by_its_id_whose_instances_reload_as_it_changes() {
                  ({scale}, {scale}, 1.0),\n            ),\n        ),\n    }},\n)\n"
         )
     };
-    // Dated an hour back, so that it loads as it is.
+    // Dated an hour back, so it loads as it is.
     let written_long_ago = |name: &str, bytes: &[u8]| {
         let path = root.join("assets").join(name);
         std::fs::write(&path, bytes).expect("written");
@@ -2074,7 +2049,7 @@ fn a_scene_names_a_prefab_by_its_id_whose_instances_reload_as_it_changes() {
     let name = |cx: &Context| cx.world().get::<Name>(placed).cloned();
     assert_eq!(name(&cx), Some(Name("mine".to_owned())), "its own");
 
-    // Frame starts, as a run that's `recorded` or not, until `done`.
+    // Frame starts, as a run `recorded` or not, until `done`.
     let until = |cx: &mut Context, recorded, done: &dyn Fn(&Context) -> bool, what: &str| {
         let until = std::time::Instant::now() + Duration::from_secs(30);
         while !done(cx) {
@@ -2121,15 +2096,13 @@ fn a_scene_names_a_prefab_by_its_id_whose_instances_reload_as_it_changes() {
     );
 }
 
-/// A UI added by its file's asset ID is named by its ID and loads the texture it names, its
-/// image fit to the texture's size; its layer sets a text by its name, refused for a name no
-/// node has or a node that says nothing, and moves its focus by a key; a second add of its
-/// file reads it no more, sharing it, and is a UI of its own. Edited, the file reads again, and
-/// each UI takes its nodes, keeping the text code set and the focus by their names; an edit
-/// naming a texture that doesn't load warns with its code, and the UIs stay as they were.
-/// Renamed with its ID file, the file is found by its ID at its new path, which each UI lists,
-/// a third add by that path sharing it, and its edits there read again; and a new file at its
-/// old path is a file of its own.
+/// A UI added by its file's asset ID is named by it and loads the texture it names, its image fit
+/// to the texture's size. Its layer sets text by node name (refused for an unknown node or one
+/// saying nothing) and moves focus by key. A second add shares the file yet is a UI of its own.
+/// Edited, the file reads again and each UI takes its nodes, keeping text codes set and focus by
+/// name; an edit naming a texture that doesn't load warns with its code and leaves the UIs as they
+/// were. Renamed with its ID file, it's found by ID at the new path, which each UI lists; a third
+/// add by that path shares it. A new file at the old path is its own.
 #[cfg(feature = "dev")]
 #[test]
 fn a_ui_added_by_its_id_reloads_as_its_file_changes() {
@@ -2141,7 +2114,7 @@ fn a_ui_added_by_its_id_reloads_as_its_file_changes() {
     let scratch = crate::dirs::tests::Scratch::new("ui-by-id");
     let root = scratch.0.join("game");
     std::fs::create_dir_all(root.join("ui")).expect("a directory");
-    // Dated an hour back, so that it loads as it is.
+    // Dated an hour back, so it loads as it is.
     let written_long_ago = |name: &str, bytes: &[u8]| {
         let path = root.join(name);
         std::fs::write(&path, bytes).expect("written");
@@ -2149,7 +2122,7 @@ fn a_ui_added_by_its_id_reloads_as_its_file_changes() {
         let file = std::fs::File::options().write(true).open(path);
         (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
     };
-    // Focused on `play` as it's added, a logo, a button of each name and a score.
+    // Focused on `play` as added: a logo, a button of each name, a score.
     let menu = |texture: &str, buttons: &[&str]| {
         let buttons: String = (buttons.iter())
             .map(|name| format!("    Button(name: \"{name}\"),\n"))
@@ -2277,8 +2250,8 @@ fn a_ui_added_by_its_id_reloads_as_its_file_changes() {
     assert!(named(&mut cx, 4, "new") && !named(&mut cx, 0, "new"));
 }
 
-/// A UI lays out again as a font it writes in bakes again, its text measured by what it baked,
-/// and as a texture an image shows reads again at another size, the image fit to that.
+/// A UI lays out again when a font it writes in bakes again, or a texture an image shows reloads at
+/// another size (the image fits it).
 #[cfg(feature = "dev")]
 #[test]
 fn a_ui_lays_out_again_as_its_font_or_texture_reloads() {
@@ -2328,9 +2301,8 @@ fn a_ui_lays_out_again_as_its_font_or_texture_reloads() {
     );
 }
 
-/// A prefab's change that the world as edited can't take, as it hasn't registered a type the
-/// text names, changes neither the world playing nor the prefab: both worlds take it, or
-/// neither does.
+/// A prefab change the world as edited can't take (it hasn't registered a type the text names)
+/// changes neither world: both take it or neither.
 #[cfg(feature = "dev")]
 #[test]
 fn a_prefab_change_one_world_refuses_changes_neither() {
@@ -2373,9 +2345,8 @@ fn a_prefab_change_one_world_refuses_changes_neither() {
     assert_eq!(kept, Some(text), "the prefab as it was");
 }
 
-/// A model that a run following another can't load stands in, as a model of no nodes, named as
-/// named, so that a scene naming it loads, its root spawning nothing; and its image, named,
-/// stands in as a texture.
+/// A model a run following another can't load stands in as a model of no nodes, so a scene naming
+/// it loads, its root spawning nothing. Its image, named, stands in as a texture.
 #[test]
 fn a_model_that_cant_be_loaded_stands_in_for_a_following_run() {
     let logged = crate::testing::logged();
@@ -2398,9 +2369,8 @@ fn a_model_that_cant_be_loaded_stands_in_for_a_following_run() {
     assert_eq!(cx.world().children(roots[0]).expect("alive").count(), 0);
 }
 
-/// A scene that names a text's font by its ID loads the font, and saves it by that ID, a text
-/// that names none saving none; and edited, the font bakes again, under its handle, its text
-/// laid out by what its file holds now.
+/// A scene naming a text's font by ID loads and saves it by that ID; a text naming none saves none.
+/// Edited, the font bakes again under its handle and text lays out by the new file.
 #[cfg(feature = "dev")]
 #[test]
 fn a_scene_names_a_texts_font_by_its_id_which_bakes_again_as_it_changes() {
@@ -2413,7 +2383,7 @@ fn a_scene_names_a_texts_font_by_its_id_which_bakes_again_as_it_changes() {
     }
     let path = root.join("fonts/title.ttf");
     std::fs::write(&path, font::INTER).expect("a font");
-    // Dated an hour back, so that it loads as it is.
+    // Dated an hour back, so it loads as it is.
     let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
     let file = std::fs::File::options().write(true).open(&path);
     (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
@@ -2465,12 +2435,10 @@ fn a_scene_names_a_texts_font_by_its_id_which_bakes_again_as_it_changes() {
     assert_eq!(cx.assets.font(id), Some(title), "under its handle");
 }
 
-/// Text that names by their IDs a font, a texture and a model a layer added already loads none
-/// of them again, noting nothing, in a run that names them by their IDs and in one that names
-/// them by their paths, as a lockstep joiner does until its host's names come: so that both
-/// note what their layers added alike, by which what's opaque in the host's world comes back
-/// in the joiner's. The run that names them by their paths names them by the IDs too from then
-/// on.
+/// Text naming by ID a font, texture or model a layer added already loads and notes nothing again,
+/// in a run naming them by ID and in one naming them by path (a lockstep joiner, until its host's
+/// names come). So both note alike what their layers added, bringing what's opaque in the host's
+/// world back in the joiner's; the path-naming run then uses IDs.
 #[cfg(feature = "dev")]
 #[test]
 fn text_naming_by_id_what_a_layer_added_notes_nothing_however_the_run_names_it() {
@@ -2526,8 +2494,8 @@ fn text_naming_by_id_what_a_layer_added_notes_nothing_however_the_run_names_it()
     assert_eq!(notes[0], notes[1]);
 }
 
-/// A font that a run following another can't load stands in, named as named, so that a scene
-/// naming it loads, its text drawing in the engine's own font.
+/// A font a run following another can't load stands in, so a scene naming it loads, its text
+/// drawing in the engine's own font.
 #[cfg(feature = "dev")]
 #[test]
 fn a_font_that_cant_be_loaded_stands_in_for_a_following_run() {
@@ -2556,8 +2524,8 @@ fn a_font_that_cant_be_loaded_stands_in_for_a_following_run() {
     assert!(glyphs.all(|(_, glyph, _)| glyph.field == inter));
 }
 
-/// A model's file added again gives the model it gave first, adding none of its meshes or
-/// images again; each add notes it.
+/// A model's file added again gives the first model, adding none of its meshes or images again;
+/// each add notes it.
 #[test]
 fn a_model_added_twice_loads_once() {
     let scratch = crate::dirs::tests::Scratch::new("model-once");
@@ -2578,10 +2546,9 @@ fn a_model_added_twice_loads_once() {
     assert_eq!(models.count(), 2);
 }
 
-/// Each texture, model, scene file, prefab, font, UI, sound and music loaded logs how long it
-/// took, a texture's image as it decodes too, a model's images among them, and a font's bake;
-/// but a file added again, which loads nothing, logs nothing, and nor does a scene that fails
-/// to load, whose error says why.
+/// Each texture, model, scene file, prefab, font, UI, sound and music loaded logs how long it took,
+/// including a texture's decode, a model's images and a font's bake. A file added again, or a scene
+/// that fails to load (its error says why), logs nothing.
 #[test]
 fn loads_log_how_long_they_took() {
     let logged = crate::testing::logged();
@@ -2602,7 +2569,7 @@ fn loads_log_how_long_they_took() {
     let wav = audio::tests::wav(&[0; 480]);
     write("assets/chime.wav", &wav).expect("written");
     write("assets/theme.wav", &wav).expect("written");
-    // A scene of a sprite of the texture named, whose ID is `id`, written to `file`.
+    // A scene of a sprite of the texture named by `id`, written to `file`.
     let scene = |file: &str, id: u64, name: &str| -> PathBuf {
         let sprite = format!("(Sprite: (texture: Some(\"{name}\")))");
         let text = format!("(entities: {{\"{id:016x}\": {sprite}}})");
@@ -2639,7 +2606,7 @@ fn loads_log_how_long_they_took() {
     let codes: Vec<String> = (logged.codes.try_iter())
         .filter(|code| code.starts_with("asset.") || code.starts_with("scene."))
         .collect();
-    // A test's context decodes each image as it's added, so each logs before its add does.
+    // A test's context decodes each image as added, so each logs before its add does.
     let decoded = "asset.texture_decoded";
     assert_eq!(
         codes,
@@ -2662,8 +2629,8 @@ fn loads_log_how_long_they_took() {
     );
 }
 
-/// Frames handed off, as a run's do, at a view of 64 pixels square, until the context's loader
-/// decodes nothing, which each frame takes what it decoded of.
+/// Frames handed off, as a run's do, at a 64-pixel-square view, until the context's loader decodes
+/// nothing.
 fn decoded(cx: &mut Context) {
     let view = Viewport {
         origin: [0, 0],
@@ -2677,10 +2644,9 @@ fn decoded(cx: &mut Context) {
     }
 }
 
-/// A texture whose header reads but whose pixels don't decode, as a PNG cut short in its rows,
-/// loads, its handle and name as any texture's, and warns as its pixels are found not to
-/// decode: off the main thread in a run's context, and at once in a test's or a replay's, so
-/// that both add it alike, as they do a model whose image is such a file.
+/// A texture whose header reads but whose pixels don't decode (a PNG cut short) loads like any
+/// texture and warns when its pixels are found bad: off the main thread in a run's context, at once
+/// in a test's or replay's, so both add it alike, as with a model whose image is such a file.
 #[test]
 fn a_texture_that_reads_but_doesnt_decode_loads_and_warns() {
     let logged = crate::testing::logged();
@@ -2726,10 +2692,9 @@ fn a_texture_that_reads_but_doesnt_decode_loads_and_warns() {
     }
 }
 
-/// A texture removed keeps its name, which finds it still, so that the world's hash reads
-/// nothing of the removal; but where text names it, it loads anew, under a handle of its own,
-/// which its names find from then on, as a layer's add of its file gives. Its removal is noted
-/// once, by its index and its path; and the engine's own textures aren't removed.
+/// A removed texture keeps its name, which finds it still, so the world's hash reads nothing of the
+/// removal. Where text names it, it loads anew under its own handle. The removal is noted once, by
+/// index and path; the engine's own textures aren't removed.
 #[test]
 fn a_removed_texture_keeps_its_name_and_loads_anew_where_named() {
     let scratch = crate::dirs::tests::Scratch::new("removed-texture");
@@ -2782,7 +2747,7 @@ fn a_removed_texture_keeps_its_name_and_loads_anew_where_named() {
     assert!(white.is_err(), "the engine's white texture");
 }
 
-/// The draws under `entity`, a model's root, and under each of its nodes, in order.
+/// The draws under `entity`, a model's root, and each of its nodes, in order.
 fn drawn(world: &World, entity: Entity) -> Vec<Option<MeshDraw>> {
     let mut drawn = vec![world.get::<MeshDraw>(entity).copied()];
     for child in world.children(entity).expect("alive") {
@@ -2791,9 +2756,9 @@ fn drawn(world: &World, entity: Entity) -> Vec<Option<MeshDraw>> {
     drawn
 }
 
-/// A model removed takes its meshes and images with it, noted once, and keeps its nodes, so
-/// that a root spawned of it after spawns what one before did; but its file loads anew as
-/// another model; and its own meshes and images aren't removed alone.
+/// A removed model takes its meshes and images with it (noted once) and keeps its nodes, so later
+/// roots spawn what earlier ones did. Its file loads anew as another model; its meshes and images
+/// aren't removed alone.
 #[test]
 fn a_removed_model_takes_its_meshes_and_images_and_spawns_alike() {
     let scratch = crate::dirs::tests::Scratch::new("removed-model");
@@ -2844,8 +2809,8 @@ fn a_removed_model_takes_its_meshes_and_images_and_spawns_alike() {
     assert!(alone.is_err(), "a model's image alone");
 }
 
-/// A texture removed is watched no more: an edit of its file reads nothing of it, where one of
-/// another texture's reads that.
+/// A removed texture is watched no more: an edit of its file reads nothing of it, unlike another
+/// texture's.
 #[cfg(feature = "dev")]
 #[test]
 fn a_removed_texture_is_watched_no_more() {
@@ -2897,9 +2862,8 @@ fn a_removed_texture_is_watched_no_more() {
     assert!(!read.contains(&gone), "the removed one read again");
 }
 
-/// A sound's file added again, by another form of its path, gives the sound it gave first,
-/// without decoding it again; a file that isn't a sound, or isn't there, is refused, naming the
-/// sound and its file.
+/// A sound's file added again by another form of its path gives the first sound, decoding nothing.
+/// A file that isn't a sound or isn't there is refused, naming the sound and file.
 #[test]
 fn a_sound_decodes_once_however_its_path_is_written() {
     let scratch = crate::dirs::tests::Scratch::new("sound-once");
@@ -2938,8 +2902,8 @@ impl Layer for Chime {
     }
 }
 
-/// The sounds a tick queues play once it has run, every layer's, so that the world holds none
-/// between ticks, in a run that plays sound or not.
+/// The sounds a tick queues (every layer's) play once it has run, so the world holds none between
+/// ticks, whether or not the run plays sound.
 #[test]
 fn the_sounds_a_tick_queues_play_once_it_has_run() {
     let scratch = crate::dirs::tests::Scratch::new("sound-tick");
@@ -2961,8 +2925,7 @@ fn the_sounds_a_tick_queues_play_once_it_has_run() {
     assert_eq!(queued, [(sound, Place::Nowhere)]);
 }
 
-/// A sound's file edited decodes again, under its handle, its plays taking what the file holds
-/// now.
+/// A sound's file edited decodes again under its handle; its plays take what the file holds.
 #[cfg(feature = "dev")]
 #[test]
 fn a_sound_decodes_again_as_its_file_changes() {
@@ -2987,9 +2950,8 @@ fn a_sound_decodes_again_as_its_file_changes() {
     assert_eq!(cx.audio.frames(sound), 960);
 }
 
-/// Music's file added again, by another form of its path, gives the music it gave first,
-/// without reading it again; a file that isn't music, or isn't there, is refused, naming the
-/// music and its file.
+/// Music's file added again by another form of its path gives the first music, reading nothing. A
+/// file that isn't music or isn't there is refused, naming the music and file.
 #[test]
 fn music_reads_once_however_its_path_is_written() {
     let scratch = crate::dirs::tests::Scratch::new("music-once");
@@ -3016,8 +2978,8 @@ fn music_reads_once_however_its_path_is_written() {
     }
 }
 
-/// Music's file edited reads again, under its handle, as it plays, its plays taking what the
-/// file holds now.
+/// Music's file edited reads again, under its handle, as it plays; its plays take what the file
+/// holds.
 #[cfg(feature = "dev")]
 #[test]
 fn music_reads_again_as_its_file_changes() {
@@ -3044,9 +3006,9 @@ fn music_reads_again_as_its_file_changes() {
     assert_eq!(cx.music_playing(), Some(theme));
 }
 
-/// A shader's file added again with the same vertex and parameter types and blend gives the
-/// shader it gave first, by another form of its path inside the root too, compiled once; with
-/// another blend or type of parameters, of the same size, it's another shader.
+/// A shader's file added again with the same vertex and parameter types and blend gives the first
+/// shader (also by another path form in the root), compiled once. Another blend, or other parameter
+/// types of the same size, makes another shader.
 #[test]
 fn a_shader_added_twice_loads_once_for_its_types_and_blend() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -3075,9 +3037,8 @@ fn a_shader_added_twice_loads_once_for_its_types_and_blend() {
     assert_eq!(shaders.count(), 5);
 }
 
-/// Two files that a layer's paths name alike are two files, each loaded: here one outside the
-/// root, by a path relative to the working directory, gg-engine's, where cargo runs its tests,
-/// and one inside it.
+/// Two files a layer's paths name alike are two files, each loaded: one outside the root, by a path
+/// relative to the working directory (gg-engine's, where cargo runs tests), and one inside it.
 #[test]
 fn files_named_alike_load_apart() {
     let scratch = crate::dirs::tests::Scratch::new("named-alike");
@@ -3094,8 +3055,8 @@ fn files_named_alike_load_apart() {
     assert_eq!(cx.shaders.sources().len(), 2);
 }
 
-/// What a layer outlines is the frame's it's set in alone, as `outlined` says until the frame
-/// takes it; a later call in the frame replaces an earlier one's.
+/// What a layer outlines is the frame's it's set in alone, as `outlined` says until the frame takes
+/// it; a later call replaces an earlier one's.
 #[test]
 fn an_outline_is_its_frames_alone() {
     let viewport = Viewport {
@@ -3117,10 +3078,9 @@ fn an_outline_is_its_frames_alone() {
     assert_eq!(frame.outline, None, "the next frame outlines nothing");
 }
 
-/// A frame hands the renderer the IDs of the outlined entity and of every entity under it,
-/// sorted: a parent's children and theirs, but not its siblings or its own parent; a model's
-/// root, which draws nothing, its nodes. An entity that's gone gives none, and the next frame
-/// reuses the IDs' memory.
+/// A frame hands the renderer the sorted IDs of the outlined entity and everything under it: a
+/// parent's children and theirs, not siblings or its own parent; for a model's root, which draws
+/// nothing, its nodes. A gone entity gives none; the next frame reuses the IDs' memory.
 #[test]
 fn an_outline_covers_the_entity_and_every_entity_under_it() {
     let viewport = Viewport {
@@ -3229,9 +3189,8 @@ impl Layer for Keeper {
     }
 }
 
-/// A development build's stack holds each layer in a `Hot`, which calls the layer's own
-/// methods and gives back what they return; `ui` is
-/// `layers_draw_ui_unless_theirs_is_the_default`'s to check, through the stack.
+/// A development build's stack holds each layer in a `Hot`, which calls the layer's methods and
+/// returns what they return. `layers_draw_ui_unless_theirs_is_the_default` checks `ui` through it.
 #[cfg(feature = "dev")]
 #[test]
 fn a_hot_layer_calls_the_layers_own_methods() {
@@ -3256,7 +3215,7 @@ fn a_hot_layer_calls_the_layers_own_methods() {
     assert_eq!(hot.0.calls, calls);
 }
 
-/// Holds a queue of commands, and counts the calls of its `restored`.
+/// Holds a queue of commands, and counts calls of its `restored`.
 #[cfg(feature = "dev")]
 struct Restorable {
     queued: Vec<u32>,
@@ -3273,11 +3232,10 @@ impl Layer for Restorable {
     }
 }
 
-/// `play` holds the world as edited aside, with its ticks, its scene files and the authors'
-/// edits of it, while a copy plays in its place, whose edits start afresh; `stop` brings back
-/// the very world, with them, empties each layer's queue, has each pick up from the world,
-/// once, and returns its ticks; a `stop` that finds none held changes nothing; and a recorded
-/// run refuses `stop`.
+/// `play` sets the world as edited aside (ticks, scene files, authors' edits) while a copy plays
+/// with edits of its own. `stop` restores that world with them, empties each layer's queue, has
+/// each pick up from the world once, and returns its ticks. With none held, `stop` changes nothing;
+/// a recorded run refuses it.
 #[cfg(feature = "dev")]
 #[test]
 fn stop_brings_back_the_world_as_edited_that_play_held() {
