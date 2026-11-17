@@ -162,9 +162,10 @@ struct Aerial {
 // The view's reflections, as reflections.slang traces them and shading.slang's `reflection` reads
 // them.
 struct Reflected {
-    // A bindless texture of the view's size, in levels: each pixel's mirror-ray light, exposed,
-    // times its trust, and the trust in alpha; each level the mean of the 2 by 2 under it. 0
-    // without them, and in every pass but those shading the view.
+    // A bindless texture of the view's size padded to whole texels of its last level, in levels:
+    // each pixel's mirror-ray light, exposed, times its trust, and the trust in alpha; each level
+    // the mean of the 2 by 2 under it. 0 without them, and in every pass but those shading the
+    // view.
     uint colors;
     // A bindless texture of the view's size: in red, how far each pixel's reflection spreads, in
     // pixels per unit of the lobe angle's tangent.

@@ -33,10 +33,16 @@ const GROUP: u32 = 8;
 /// view 2,048 pixels on its longer side to a texel.
 const MOST_LEVELS: usize = 12;
 
-/// The reflections' most levels, each half the last: the last's texels are 64 pixels a side, as
-/// wide as shading blurs a reflection. A wider lobe takes the sky's light, by
-/// [`Reflections::roughness`].
+/// The reflections' levels, each half the last: the last's texels are 64 pixels a side, as wide as
+/// shading blurs a reflection. A wider lobe takes the sky's light, by [`Reflections::roughness`].
 const LEVELS: u32 = 7;
+
+/// The reflections' images at a view of `size`: its sides rounded up to the last level's texel, so
+/// each level halves the one before exactly and its texels cover whole squares of pixels, as
+/// shading samples them. A side whose halving drops a texel would shift the levels after it.
+fn padded(size: [u32; 2]) -> [u32; 2] {
+    size.map(|side| side.next_multiple_of(1 << (LEVELS - 1)))
+}
 
 /// How the view reflects what it shows, as
 /// [`RenderData::reflections`](crate::RenderData::reflections) has it.
@@ -148,15 +154,10 @@ fn pyramid(size: [u32; 2]) -> (usize, [u32; MOST_LEVELS], u64) {
     (count, starts, start * 4)
 }
 
-/// The reflections' levels at `size`: [`LEVELS`], or the mip chain's, if fewer.
-fn reflected_levels(size: [u32; 2]) -> u32 {
-    (mip_sizes(size[0], size[1]).count() as u32).min(LEVELS)
-}
-
 /// The reflections' images, kept from frame to frame: the view's colors as the last reflecting
-/// frame kept them, and the view's reflections, in levels. Remade when the view's size changes,
-/// dropped by a frame without reflections; either forgets how the last frame drew the kept colors.
-/// Apart from [`ReflectionPass`] because a frame takes them as targets while recording.
+/// frame kept them, and the view's reflections, in levels, [`padded`]. Remade when the view's size
+/// changes, dropped by a frame without reflections; either forgets how the last frame drew the kept
+/// colors. Apart from [`ReflectionPass`] because a frame takes them as targets while recording.
 #[derive(Default)]
 pub(crate) struct Images {
     images: Option<[StorageImage; 2]>,
@@ -191,8 +192,7 @@ impl Images {
         }
         self.forget();
         let kept = StorageImage::new(device, size, 1, false, "reflections kept")?;
-        let reflected =
-            StorageImage::new(device, size, reflected_levels(size), false, "reflections")?;
+        let reflected = StorageImage::new(device, padded(size), LEVELS, false, "reflections")?;
         self.images = Some([kept, reflected]);
         Ok(())
     }
@@ -268,7 +268,7 @@ pub(crate) struct Plan {
     reflected: ImageId,
     spread: ImageId,
     trace: PassId,
-    blurs: [Option<PassId>; LEVELS as usize - 1],
+    blurs: [PassId; LEVELS as usize - 1],
 }
 
 impl Plan {
@@ -363,15 +363,11 @@ impl ReflectionPass {
         let sampled = distinct.iter().chain(normals.iter().flatten());
         let trace = sampled.fold(trace, |trace, &image| trace.sample(image));
         let trace = trace.overwrite(reflected).overwrite(spread).add();
-        let mut blurs = [None; LEVELS as usize - 1];
-        for blur in blurs.iter_mut().take(reflected_levels(size) as usize - 1) {
-            *blur = Some(
-                graph
-                    .compute(label!("reflections blur"))
-                    .write(reflected)
-                    .add(),
-            );
-        }
+        let blurs = std::array::from_fn(|_| {
+            (graph.compute(label!("reflections blur")))
+                .write(reflected)
+                .add()
+        });
         Plan {
             size,
             depths,
@@ -477,15 +473,14 @@ impl ReflectionPass {
         };
         pass.set_pipeline(&self.trace);
         pass.push_constants(bytemuck::bytes_of(&push));
-        pass.dispatch(dispatch(plan.size));
+        // Over the padding too, which it clears.
+        let [width, height] = padded(plan.size);
+        pass.dispatch(dispatch([width, height]));
         drop(pass);
-        let mut finer = plan.size;
-        for (level, (&blur, size)) in (1..).zip(
-            plan.blurs
-                .iter()
-                .flatten()
-                .zip(mip_sizes(plan.size[0], plan.size[1]).skip(1)),
-        ) {
+        let mut finer = [width, height];
+        for (level, (&blur, size)) in
+            (1..).zip(plan.blurs.iter().zip(mip_sizes(width, height).skip(1)))
+        {
             let mut pass = frame.compute(blur);
             let push = Push {
                 size,
@@ -564,9 +559,14 @@ mod tests {
         assert_eq!(pyramid([4096, 4096]).0, MOST_LEVELS);
         assert_eq!(level_size([1280, 720], 4), [80, 45]);
         assert_eq!(level_size([1281, 721], 4), [81, 46]);
-        // As many as blur to 64 pixels, or as the view's chain has.
-        assert_eq!(reflected_levels([1280, 720]), LEVELS);
-        assert_eq!(reflected_levels([4, 16]), 5);
+    }
+
+    /// To whole texels of the last level, which a view a few pixels across still has.
+    #[test]
+    fn the_reflections_pad_the_view_to_their_last_levels_texels() {
+        assert_eq!(padded([1280, 720]), [1280, 768]);
+        assert_eq!(padded([1281, 64]), [1344, 64]);
+        assert_eq!(padded([4, 16]), [64, 64]);
     }
 
     /// Only at the same size, with the exposure they were kept at. Not once the images go, as for a

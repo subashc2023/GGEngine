@@ -102,6 +102,7 @@ fn main() -> ExitCode {
         reflections_mirror_what_lights_light_under_a_dark_sky,
         reflections_leave_what_they_dont_take_as_it_is,
         reflections_mirror_about_the_shading_normal,
+        reflections_blur_in_place_at_any_view_size,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
@@ -7877,6 +7878,58 @@ fn mirror_about_the_shading_normal(beside_cut: bool) {
     assert!(
         !red(seen),
         "where a flat mirror shows the red sphere, the floor shows {seen:?}"
+    );
+    shut_down(renderer);
+}
+
+/// [`reflection_scene`] 380 pixels across, whose halvings drop a column from 95: the blue panel's
+/// mirror on a rough strip, the reflection alone, centers across where it does on a smooth one.
+/// Sampled as if levels that dropped columns still spanned the view, the blur would shift it
+/// right, more the farther right it is: 25 pixels here.
+fn reflections_blur_in_place_at_any_view_size() {
+    const WIDTH: u32 = 380;
+    const HEIGHT: u32 = 256;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    // Where the panel's mirror centers across in the view's right half, weighed by how much bluer
+    // than red and green it shows, and that weight.
+    let mut center = |roughness: f32| {
+        let scene = reflection_scene(&mut stores, [0.05, 0.05, roughness], None);
+        let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
+        // The first frame keeps the colors the second, the reflection alone, traces against.
+        for show in [None, Some(Show::Shading(Channel::Reflection))] {
+            let data = RenderData {
+                reflections: Some(Reflections::default()),
+                show,
+                ..stores.data(viewport, viewpoint, draws)
+            };
+            render_without_ui(&mut renderer, data);
+        }
+        let frame = frame_pixels(&mut renderer);
+        let (mut sum, mut weight) = (0.0, 0.0);
+        for y in 0..HEIGHT {
+            for x in WIDTH / 2..WIDTH {
+                let [r, g, b, _] = pixel_at(&frame, WIDTH, [x, y]).map(decoded);
+                let blue = (b - r.max(g)).max(0.0);
+                sum += blue * (x as f32 + 0.5);
+                weight += blue;
+            }
+        }
+        (sum / weight, weight)
+    };
+    let (sharp, seen) = center(0.05);
+    let (rough, spread) = center(0.4);
+    assert!(
+        seen > 5.0 && spread > 5.0,
+        "the panel's mirror weighs {seen} smooth and {spread} rough"
+    );
+    // Within 8 pixels: a ray that finds nothing blurs as far as where it left the view, which
+    // spreads the mirror into the strip unevenly.
+    assert!(
+        (rough - sharp).abs() < 8.0,
+        "the panel's mirror centers at {rough} on a rough strip, at {sharp} on a smooth one"
     );
     shut_down(renderer);
 }

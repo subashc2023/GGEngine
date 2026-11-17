@@ -6,7 +6,9 @@
 // Passes, a pixel a thread:
 // - `depth_main` and `reduce_main`: a pyramid of the nearest depth, each level's sides half the
 //   last's, rounded up, so texel `c` of level `n` covers pixels `c * 2^n` to `(c + 1) * 2^n`.
-// - `trace_main`: each pixel's mirror ray through the pyramid.
+// - `trace_main`: each pixel's mirror ray through the pyramid, into the reflections' first level.
+//   Their image is the view's padded to whole texels of their last level, so each level's texel
+//   `c` covers pixels `c * 2^n` to `(c + 1) * 2^n`, where shading samples it.
 // - `blur_main`: the reflections' coarser levels, which shading samples to blur them.
 // - `keep_main`: the drawn, resolved view's colors, for the next frame's rays.
 //
@@ -269,10 +271,12 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     // Loaded whole, as the model shaders load the frame's data.
     Trace trace = *push.trace;
     uint2 pixel = thread.xy;
-    if (pixel.x >= trace.size.x || pixel.y >= trace.size.y) {
+    uint3 to = uint3(pixel, 0);
+    // The padding past the view, which the blurs read: nothing there.
+    if (any(pixel >= trace.size)) {
+        storage[trace.target][to] = float4(0.0);
         return;
     }
-    uint3 to = uint3(pixel, 0);
     float z = nearest_at(trace, 0, int2(pixel));
     float2 size = float2(trace.size);
     float3 center = position(trace, (float2(pixel) + 0.5) / size, view_depth(trace, z));
