@@ -1,9 +1,9 @@
 //! The game's and the editor's frame rates over the last second, at the view's bottom right while
 //! the settings' "Show frame rates" is on.
 //!
-//! The Performance panel times only the editor's frames. The game renders a frame once the editor
-//! has taken its last, so it may run slower. What depends on its rate, such as antialiasing's
-//! settling, goes by the game's.
+//! The game renders a frame once the editor has taken its last, so it may run slower. What depends
+//! on its rate, such as antialiasing's settling, goes by the game's. The Performance panel shows
+//! the game's frames as it times them, and the editor's a click away.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

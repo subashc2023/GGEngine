@@ -571,6 +571,9 @@ pub(crate) struct Dev {
     /// Whether a SyncTest runs each tick again (`--sync-test`), as the layers attach or pick up
     /// from a restore.
     sync_tested: bool,
+    /// Another process's game's frames, as [`show_frame_times`](Context::show_frame_times) gave
+    /// them, and the number of the last.
+    pub(crate) game_perf: Option<(Perf, u64)>,
 }
 
 #[cfg(feature = "dev")]
@@ -588,6 +591,7 @@ impl Dev {
             scripts: crate::luau::Files::default(),
             edited: None,
             sync_tested: false,
+            game_perf: None,
         }
     }
 

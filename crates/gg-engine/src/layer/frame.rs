@@ -145,6 +145,19 @@ impl Context {
         self.shown_new = false;
     }
 
+    /// Has the Performance panel ([`PerfPanel`](crate::PerfPanel)) show `times`, a frame of the
+    /// game whose pixels it shows, as the view's memory gives them
+    /// ([`Frame::times`](gg_api::view::Frame::times)). The panel then shows the game's frames
+    /// first, and this app's a click away. A frame whose number it had last is skipped, as the
+    /// same times carried by two frames.
+    #[cfg(feature = "dev")]
+    pub fn show_frame_times(&mut self, times: &gg_api::view::Times) {
+        let (perf, last) = self.dev.game_perf.get_or_insert_default();
+        if mem::replace(last, times.number) != times.number {
+            perf.add_times(times);
+        }
+    }
+
     /// Asks which entity the game's view shows at `at` (main-window physical pixels, like
     /// [`Input::cursor`]) in this frame: the one whose sprite, circle, mesh or collider outline
     /// ([`set_colliders_shown`](Self::set_colliders_shown)) is on top there.

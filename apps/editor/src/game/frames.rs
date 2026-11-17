@@ -125,6 +125,10 @@ impl Game {
         };
         let copying = Instant::now();
         cx.show_pixels(frame.size, |pixels| reader.read(pixels));
+        // The Performance panel shows the game's frames first.
+        if let Some(times) = &frame.times {
+            cx.show_frame_times(times);
+        }
         self.measures
             .add(frame.started, copying.elapsed(), frame.size);
         let seen = engine_viewpoint(&frame.viewpoint);

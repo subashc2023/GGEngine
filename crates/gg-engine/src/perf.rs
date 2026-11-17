@@ -167,6 +167,31 @@ impl Perf {
             self.first = Some(sample.frame);
             return;
         }
+        self.add(sample);
+    }
+
+    /// Measures `times`, another process's frame, as its own measured it.
+    #[cfg(feature = "dev")]
+    pub(crate) fn add_times(&mut self, times: &Times) {
+        self.add(Sample {
+            frame: times.frame,
+            ticks: times.ticks,
+            update: times.update,
+            ui: times.ui,
+            handoff: times.handoff,
+            limit: times.limit,
+            render: times.render,
+            wait: times.wait,
+            publish: times.publish,
+            gpu: times.gpu,
+            draws: times.draws,
+            instances: times.instances,
+            triangles: times.triangles,
+        });
+    }
+
+    /// Keeps `sample`, a whole frame.
+    fn add(&mut self, sample: Sample) {
         if self.kept.len() < KEPT {
             self.kept.reserve_exact(KEPT - self.kept.len());
             self.kept.push(sample);
@@ -313,20 +338,45 @@ fn nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// The Performance panel: `.overlay(gg_engine::PerfPanel)`. Shows the last second's frame time
-/// and rate, a graph of recent frames by part, and where the second went. Does nothing without
-/// `dev` (no UI).
+/// The Performance panel: `.overlay(gg_engine::PerfPanel)`.
+///
+/// Shows the last second's frame time and rate, a graph of recent frames by part, and where the
+/// second went. In an app that shows a game's frames ([`Context::show_frame_times`]), the game's
+/// first. Does nothing without `dev` (no UI).
 pub struct PerfPanel;
 
 #[cfg(feature = "dev")]
 impl Layer for PerfPanel {
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
-        let perf = &cx.perf;
+        let game = cx.dev.game_perf.as_ref().map(|(perf, _)| perf);
+        let (own, app) = (&cx.perf, cx.own.app);
         ui.panel("Performance", |ui| {
             // A new panel floats smaller than its contents.
-            egui::ScrollArea::vertical().show(ui, |ui| show(perf, ui));
+            egui::ScrollArea::vertical().show(ui, |ui| contents(own, app, game, ui));
         });
     }
+}
+
+/// The panel's contents: `own`, this run's frames, or, in app `app` showing a game's
+/// ([`Context::show_frame_times`]), `game`'s first, with a switch to `own`.
+#[cfg(feature = "dev")]
+fn contents(own: &Perf, app: &str, game: Option<&Perf>, ui: &mut egui::Ui) {
+    let Some(game) = game else {
+        return show(own, ui);
+    };
+    let id = ui.make_persistent_id("game's frames");
+    let mut games = ui.data(|data| data.get_temp(id)).unwrap_or(true);
+    ui.horizontal(|ui| {
+        let tip = "The game's frames, as it measures them";
+        ui.selectable_value(&mut games, true, "Game")
+            .on_hover_text(tip);
+        let tip = format!("The {app}'s own frames");
+        ui.selectable_value(&mut games, false, app)
+            .on_hover_text(tip);
+    });
+    ui.data_mut(|data| data.insert_temp(id, games));
+    // The graph holds what's hovered by its own count of frames.
+    ui.push_id(games, |ui| show(if games { game } else { own }, ui));
 }
 
 #[cfg(not(feature = "dev"))]
@@ -997,6 +1047,73 @@ mod tests {
         for time in ["\u{2007}\u{2007}2.020 ms", "\u{2007}12.000 ms"] {
             assert!(texts.iter().any(|text| text == time), "{time}: {texts:?}");
         }
+    }
+
+    /// In an app showing a game's frames, the panel shows the game's first, and the app's own a
+    /// click away.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn the_panel_shows_the_games_frames_first_and_the_apps_a_click_away() {
+        let own = run(&iter_first(1, std::iter::repeat_n(2, 100)));
+        let mut game = Perf::default();
+        for number in 1..=100 {
+            let frame = 5_000_000;
+            game.add_times(&Times {
+                number,
+                frame,
+                ..Times::default()
+            });
+        }
+        let ctx = crate::egui_context();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut texts = Vec::new();
+        let mut lines = Vec::new();
+        // A layout pass, a click on the app's switch, and a pass after.
+        for pass in 0..3 {
+            let mut events = Vec::new();
+            if pass == 1 {
+                let (_, at) = (texts.iter())
+                    .find(|(text, _): &&(String, egui::Rect)| text == "Editor")
+                    .expect("the switch");
+                let click = |pressed| egui::Event::PointerButton {
+                    pos: at.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                events = vec![
+                    egui::Event::PointerMoved(at.center()),
+                    click(true),
+                    click(false),
+                ];
+            }
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| contents(&own, "Editor", Some(&game), ui));
+            output.textures_delta.clear();
+            texts = (crate::testing::painted(&output.shapes).into_iter())
+                .filter_map(|shape| match shape {
+                    egui::Shape::Text(text) => Some((
+                        text.galley.text().to_owned(),
+                        text.galley.rect.translate(text.pos.to_vec2()),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            let line = texts.iter().find(|(text, _)| text.contains("ms a frame"));
+            lines.push(line.map(|(text, _)| text.clone()).expect("the top line"));
+        }
+        assert!(
+            lines[0].starts_with("5.00 ms a frame, 200 fps"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[2].starts_with("2.00 ms a frame, 500 fps"),
+            "{lines:?}"
+        );
     }
 
     /// Finds the graph (the one shape filled in `background`) and the texts in a pass's `shapes`.
