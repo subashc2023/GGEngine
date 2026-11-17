@@ -94,7 +94,6 @@ fn tries<T>(tried: impl FnOnce() -> T) -> Result<T, String> {
     })
 }
 
-/// Runs `broken`, which must panic, and gives its message.
 fn panics(broken: impl FnOnce()) -> String {
     tries(broken).expect_err("a panic")
 }
@@ -267,7 +266,6 @@ fn spirv(shader: &str, entries: &[(&str, &str)]) -> Vec<u8> {
     std::fs::read(&spirv).expect("the SPIR-V slangc wrote")
 }
 
-/// The pipeline that draws a probe of a texture, from `spirv`.
 fn sampling_pipeline(device: &Arc<Device>, spirv: &[u8]) -> Pipeline {
     let desc = GraphicsDesc {
         name: "sample probes",
@@ -349,7 +347,6 @@ fn write_stand_in(frame: &mut Frame<'_>, stand_in: &mut Texture) {
     written.expect("a write");
 }
 
-/// Streams all of `pixels` into `texture`'s image in one part, by a budget past them.
 fn stream_whole(frame: &mut Frame<'_>, texture: &mut Texture, pixels: &[u8]) {
     let copied = frame
         .stream_texture(texture, pixels, u64::MAX)

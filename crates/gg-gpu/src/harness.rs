@@ -54,8 +54,9 @@ pub unsafe fn begin(name: &str, dir: &Path) -> Option<PathBuf> {
     Some(gg_core::log::init(name, dir, true).expect("the tests read the JSON log"))
 }
 
-/// An instance under validation for the tests to share: making one per renderer took over a quarter
-/// of gg-renderer's GPU tests' time on an RTX 4090.
+/// An instance under validation for the tests to share.
+///
+/// Making one per renderer took over a quarter of gg-renderer's GPU tests' time on an RTX 4090.
 /// [`Tests::run`] counts what validation reports through it against the test running.
 ///
 /// # Panics

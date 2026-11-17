@@ -14,9 +14,10 @@ use crate::device::Retired;
 use crate::frame::graph::ImageKind;
 use crate::{Device, vk_error, vk_failed};
 
-/// The pixel formats of what a pass renders into, which pipelines are made for: its color
-/// target's, its IDs' and motion's beside it if it has them, and its depth's if it has it, as a
-/// [`Graph`]'s passes declare them; or its depth's alone.
+/// The pixel formats of what a pass renders into, which pipelines are made for.
+///
+/// Its color target's, its IDs' and motion's beside it if it has them, and its depth's if it has
+/// it, as a [`Graph`]'s passes declare them; or its depth's alone.
 ///
 /// [`Graph`]: crate::Graph
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,10 +143,11 @@ impl Blend {
     }
 }
 
-/// Which of a mesh's triangles draw, by how their corners wind on screen. Vulkan measures in
-/// framebuffer coordinates, whose Y points down, and flips the area's sign, so its
-/// counterclockwise is as seen; the renderer's cameras show the world upright. Whichever draw, a
-/// fragment shader's front face, `SV_IsFrontFace`, is a triangle that winds counterclockwise.
+/// Which of a mesh's triangles draw, by how their corners wind on screen.
+///
+/// Vulkan measures in framebuffer coordinates, whose Y points down, and flips the area's sign, so
+/// its counterclockwise is as seen; the renderer's cameras show the world upright. Whichever draw,
+/// a fragment shader's front face, `SV_IsFrontFace`, is a triangle that winds counterclockwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Faces {
     /// All of them: what a pass starts drawing.
@@ -168,10 +170,12 @@ impl Faces {
     }
 }
 
-/// What a graphics pipeline is made from. It draws triangle lists; its viewport, scissor and
-/// [`Faces`] are set as it draws, a pass starting with both. Where its targets have depth, it
-/// tests it, drawing only where it's as near as what was drawn there or nearer: depth runs from 1
-/// at the near plane to 0 far away, as the renderer's cameras project it.
+/// What a graphics pipeline is made from.
+///
+/// It draws triangle lists; its viewport, scissor and [`Faces`] are set as it draws, a pass
+/// starting with both. Where its targets have depth, it tests it, drawing only where it's as near
+/// as what was drawn there or nearer: depth runs from 1 at the near plane to 0 far away, as the
+/// renderer's cameras project it.
 pub struct GraphicsDesc<'a> {
     /// The debug name.
     pub name: &'a str,

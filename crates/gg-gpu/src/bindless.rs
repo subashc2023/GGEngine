@@ -136,9 +136,11 @@ impl Wrap {
     }
 }
 
-/// Where shaders find, after every [`Sampler`] and [`Wrap`]'s anisotropic ones, the sampler that
-/// compares depth: a `SamplerComparisonState` for `SampleCmp`, to sample a shadow map, an image
-/// of depth ([`Graph::depth`](crate::Graph::depth)). Each of the four texels nearest the point
+/// Where shaders find the sampler that compares depth, after every [`Sampler`] and [`Wrap`]'s
+/// anisotropic ones.
+///
+/// It's a `SamplerComparisonState` for `SampleCmp`, to sample a shadow map, an image of depth
+/// ([`Graph::depth`](crate::Graph::depth)). Each of the four texels nearest the point
 /// is 1 where the depth compared is as near as the texel's or nearer (depth runs from 1 at the
 /// near plane), else 0, and the four filter linearly, as percentage-closer filtering takes them.
 /// Past the edges, the edge texels. Shaders sample nothing else through it, and nothing but by

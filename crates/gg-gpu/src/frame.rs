@@ -58,12 +58,13 @@ pub(crate) const FRAMES_IN_FLIGHT: u64 = 2;
 /// The most IDs a frame reads back ([`Frame::read_ids`]).
 pub const MAX_READS: usize = 64;
 
-/// The bytes of an ID read back: two 32-bit unsigned integers.
 const ID_BYTES: usize = size_of::<[u32; 2]>();
 
-/// What the frames' arenas hold, which [`Frame::upload`] copies into, and the most a frame has
-/// taken of its own, in bytes, as [`Frames::arenas`] gives them. A run's log compares the two: an
-/// arena grows by doubling and keeps what it grew to.
+/// What the frames' arenas hold and the most a frame has taken, in bytes, as [`Frames::arenas`]
+/// gives them.
+///
+/// [`Frame::upload`] copies into the arenas. A run's log compares the two: an arena grows by
+/// doubling and keeps what it grew to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Arenas {
     /// The bytes of every slot's arena's buffers.
@@ -82,9 +83,10 @@ pub enum Target<'a> {
     Storage(&'a mut StorageImage),
 }
 
-/// The resources of the frames in flight, and the timeline semaphore that paces them. A device's
-/// resources retire by its frames, so it has one `Frames` at a time, and once one has begun a
-/// frame, no other for its whole life.
+/// The resources of the frames in flight, and the timeline semaphore that paces them.
+///
+/// A device's resources retire by its frames, so it has one `Frames` at a time, and once one has
+/// begun a frame, no other for its whole life.
 pub struct Frames {
     device: Arc<Device>,
     /// Reaches N when the Nth frame has finished on the GPU, on every queue.
@@ -96,9 +98,7 @@ pub struct Frames {
     queue_timelines: [vk::Semaphore; 2],
     /// How far the timelines are planned and waited for, as the last frame begun left them.
     timelines: Timelines,
-    /// The batches of the frame being recorded.
     plan: Plan,
-    /// The command buffer of each of its batches, as `plan` has them.
     batch_commands: Vec<vk::CommandBuffer>,
     /// Whether the frame being recorded has written a buffer outside its passes, in its first
     /// batch, which a compute-queue batch then waits for.
@@ -279,7 +279,6 @@ struct Scratch {
     waits: Vec<vk::SemaphoreSubmitInfo<'static>>,
     signals: Vec<vk::SemaphoreSubmitInfo<'static>>,
     commands: Vec<vk::CommandBufferSubmitInfo<'static>>,
-    /// Each batch's submission.
     batches: Vec<Submission>,
     /// The batches submitted in a call, emptied between calls: their lists borrow the ones above.
     submits: Vec<vk::SubmitInfo2<'static>>,
@@ -774,7 +773,6 @@ impl Frames {
         }))
     }
 
-    /// Waits until the GPU has finished the `frame`th frame.
     fn wait(&self, frame: u64) -> Result<()> {
         wait_on(&self.device, self.timeline, "frame timeline", frame)
     }
@@ -868,7 +866,6 @@ fn check_targets(graph: &Graph, targets: &[Target<'_>]) {
     }
 }
 
-/// A target's image, view and size; for a swapchain's, its image `index`.
 fn target_parts(target: &Target<'_>, index: u32) -> (vk::Image, vk::ImageView, vk::Extent2D) {
     match target {
         Target::Swapchain(swapchain) => swapchain.image(index),
@@ -978,14 +975,12 @@ pub struct Frame<'a> {
     frames: &'a mut Frames,
     targets: Vec<Target<'a>>,
     graph: &'a Graph,
-    /// The graph's next pass to record.
     next: usize,
     slot: usize,
     submitted: bool,
     /// The command buffer the frame's transfer-queue copies record into, among
     /// `Frames::transfers`, once begun.
     transfers: Option<usize>,
-    /// The commands of the batch of the pass recorded last, and its queue.
     commands: vk::CommandBuffer,
     queue: Queue,
     /// Whether a pass is open, which only its drop closes. The frame records nothing of its own
@@ -1028,8 +1023,7 @@ impl<'a> Frame<'a> {
         )
     }
 
-    /// Checks that no pass is open: only outside one does the frame record its own commands or
-    /// end them.
+    /// Checks that no pass is open.
     ///
     /// # Panics
     ///
@@ -1188,7 +1182,6 @@ impl<'a> Frame<'a> {
         self.frames.buffer_barriers = buffer_barriers;
     }
 
-    /// Ends the pass started last: its label and timestamp.
     fn close_pass(&mut self) {
         let commands = self.commands();
         let device = &self.frames.device;
@@ -1461,7 +1454,6 @@ impl<'a> Frame<'a> {
         self.buffer_parts(buffer).0
     }
 
-    /// The address of `buffer`, one of the graph's own, and its declared bytes.
     fn buffer_parts(&self, buffer: BufferId) -> (u64, u64) {
         let address = self.frames.transients.buffer(buffer).address();
         (address, self.graph.buffers[buffer.0 as usize].size)
@@ -1511,7 +1503,6 @@ impl<'a> Frame<'a> {
         presented
     }
 
-    /// Submits the frame's copies and batches, readying its swapchains' images to present.
     fn send(&mut self) -> Result<()> {
         let Frames {
             submitted,
@@ -1555,7 +1546,6 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Ends and submits the frame's copies on the transfer queue, if it recorded any.
     fn submit_uploads(&mut self, frame: u64) -> Result<()> {
         let Frames {
             device,
@@ -1643,8 +1633,7 @@ impl<'a> Frame<'a> {
         }
     }
 
-    /// Lists each batch's waits, signals and commands for frame `frame`, whose timeline batch
-    /// `last` signals.
+    /// `last` is the batch that signals frame `frame`'s timeline.
     fn plan_submissions(&mut self, frame: u64, last: usize) {
         let Frames {
             timeline,

@@ -12,9 +12,10 @@ use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
 use crate::{COLOR_RANGE, Device, Format, copy_region, vk_failed};
 
-/// A color image in GPU memory: frames render into it, their later passes sample it through its
-/// bindless slot, and the CPU can read it back. Dropping it retires it and its slot until the GPU
-/// is done with it.
+/// A color image in GPU memory. Dropping it retires it and its slot until the GPU is done with it.
+///
+/// Frames render into it, their later passes sample it through its bindless slot, and the CPU can
+/// read it back.
 pub struct ColorImage {
     device: Arc<Device>,
     raw: vk::Image,

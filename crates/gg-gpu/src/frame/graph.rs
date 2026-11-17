@@ -31,10 +31,12 @@ pub const MAX_BUFFER_READ: u64 = 256;
 /// The most buffers a frame reads back ([`Graph::read_back`]).
 pub const MAX_BUFFER_READS: usize = 4;
 
-/// What a frame runs: its passes, in order, each with the images it uses and how. A frame places
-/// the barriers and layout transitions between passes from the image's last use before a pass and
-/// the pass's own, so no pass records one itself. Clear it and add the frame's passes every frame;
-/// it keeps its memory, so a frame that adds no more than the last allocates nothing.
+/// What a frame runs: its passes, in order, each with the images it uses and how.
+///
+/// A frame places the barriers and layout transitions between passes from the image's last use
+/// before a pass and the pass's own, so no pass records one itself. Clear it and add the frame's
+/// passes every frame; it keeps its memory, so a frame that adds no more than the last allocates
+/// nothing.
 ///
 /// Its own images ([`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::motion`],
 /// [`Graph::visibility`], [`Graph::depth`], [`Graph::scalar`]) last for a frame. Each is undefined
@@ -724,9 +726,11 @@ impl Graph {
     }
 }
 
-/// A pass that draws, being built: its color target and any IDs and depth beside it, or its depth
-/// alone, as a shadow map's pass draws; the images it samples; and the buffers its shaders read and
-/// its draws take their commands from. [`RenderPass::add`] adds it to its graph.
+/// A pass that draws, being built. [`RenderPass::add`] adds it to its graph.
+///
+/// It holds its color target and any IDs and depth beside it, or its depth alone, as a shadow map's
+/// pass draws; the images it samples; and the buffers its shaders read and its draws take their
+/// commands from.
 #[must_use = "a pass is in its graph once it's added"]
 pub struct RenderPass<'g> {
     graph: &'g mut Graph,

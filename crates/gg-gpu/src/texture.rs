@@ -18,9 +18,10 @@ pub const MAX_TEXTURE_SIZE: u32 = 8192;
 /// The most mip levels a texture has: a full chain of [`MAX_TEXTURE_SIZE`] pixels a side.
 pub(crate) const MAX_LEVELS: usize = MAX_TEXTURE_SIZE.ilog2() as usize + 1;
 
-/// The level sizes of a full mip chain of a `width` by `height` image, largest first: each half
-/// the one before, rounded down but at least a pixel a side, down to a pixel. A mipmapped texture
-/// has these levels.
+/// The level sizes of a full mip chain of a `width` by `height` image, largest first.
+///
+/// Each is half the one before, rounded down but at least a pixel a side, down to a pixel. A
+/// mipmapped texture has these levels.
 pub fn mip_sizes(width: u32, height: u32) -> impl Iterator<Item = [u32; 2]> {
     iter::successors(Some([width, height]), |&[width, height]| {
         (width > 1 || height > 1).then(|| [(width / 2).max(1), (height / 2).max(1)])
