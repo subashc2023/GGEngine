@@ -3,9 +3,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use gg_api::Project;
+use gg_engine::RigidBody2D;
 use gg_engine::cook::Kind;
 
 use super::*;
+use crate::components::Shard;
+use crate::ui::{BUTTON, item_middle};
 
 /// The game as it attaches, rooted at its project as the app is, so the world's hash doesn't depend
 /// on where the repository is. IDs are drawn from `seed`.
