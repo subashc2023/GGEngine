@@ -10,7 +10,7 @@ fn world() -> World {
     let mut world = World::default();
     world.register::<Transform>().expect("registered");
     world.register::<Sprite>().expect("registered");
-    register(&mut world);
+    register(&mut world).expect("registered");
     world
 }
 
@@ -188,7 +188,7 @@ fn a_restored_world_simulates_as_before() {
         swarm: 1_000,
         ..Sandbox::new()
     };
-    sandbox.load(&mut cx);
+    sandbox.load(&mut cx).expect("loaded");
     sandbox.attach(&mut cx);
     let world = cx.world_mut();
     for number in 0..64 {
@@ -263,7 +263,7 @@ fn simulate() -> Vec<String> {
         swarm: 1_000,
         ..Sandbox::new()
     };
-    sandbox.load(&mut cx);
+    sandbox.load(&mut cx).expect("loaded");
     sandbox.attach(&mut cx);
     let hashed = |at: &dyn std::fmt::Display, world: &World| format!("{at} {}", world.hash());
     let mut lines = vec![hashed(&"attach", cx.world())];

@@ -124,10 +124,9 @@ struct GridCell {
     color: u32,
 }
 
-fn register(world: &mut World) {
-    for registered in [world.register::<Drifter>(), world.register::<GridCell>()] {
-        registered.expect("the sandbox's types describe themselves");
-    }
+fn register(world: &mut World) -> Result<(), Error> {
+    world.register::<Drifter>()?;
+    world.register::<GridCell>()
 }
 
 /// The sandbox's scene `name`: `grid.ron` is the grid, 10 by 10 squares 2 units across.
@@ -324,27 +323,16 @@ impl Sandbox {
 }
 
 impl Layer for Sandbox {
-    fn load(&mut self, cx: &mut Context) {
-        // A texture that doesn't load ends the run with its error.
+    fn load(&mut self, cx: &mut Context) -> Result<(), Error> {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-        let shapes = match cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [32, 32]) {
-            Ok(shapes) => shapes,
-            Err(error) => {
-                cx.fail(error);
-                return;
-            }
-        };
+        let shapes = cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [32, 32])?;
         self.scene = Some(SwarmShapes {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
         });
-        register(cx.world_mut());
+        register(cx.world_mut())
     }
 
     fn attach(&mut self, cx: &mut Context) {
-        // A run ending as it loads loads no grid, so it ends with the load's error alone.
-        if cx.exiting() {
-            return;
-        }
         // Development builds watch the grid and apply its saves.
         if let Err(error) = cx.load_scene_file(scene("grid.ron")) {
             cx.fail(error);

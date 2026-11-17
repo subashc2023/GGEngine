@@ -1167,9 +1167,10 @@ mod tests {
     struct Drawn<const N: usize>;
 
     impl<const N: usize> Layer for Drawn<N> {
-        fn load(&mut self, cx: &mut Context) {
+        fn load(&mut self, cx: &mut Context) -> Result<()> {
             cx.add_mesh("tri", &[[0.0f32; N]; 3], &[0, 1, 2])
                 .expect("a mesh");
+            Ok(())
         }
     }
 
@@ -1178,7 +1179,7 @@ mod tests {
     #[test]
     fn what_is_opaque_comes_back_where_the_same_assets_were_added() {
         let mut saved = Context::seeded(3);
-        Drawn::<3>.load(&mut saved);
+        Drawn::<3>.load(&mut saved).expect("loaded");
         let quad = MeshDraw::from_parts(0, 0, false, false, &[]).expect("a draw");
         let drawn = saved.world_mut().spawn((Transform::IDENTITY, quad));
         let none = Open::default();
@@ -1191,11 +1192,11 @@ mod tests {
         save(&path, &text).expect("saved");
         let snapshot = Snapshot::read(&path, "Tested").expect("read");
         let mut same = Context::seeded(4);
-        Drawn::<3>.load(&mut same);
+        Drawn::<3>.load(&mut same).expect("loaded");
         snapshot.restore(same.world_mut(), &[]).expect("restored");
         assert_eq!(same.world().get::<MeshDraw>(drawn), Some(&quad));
         let mut wider = Context::seeded(5);
-        Drawn::<4>.load(&mut wider);
+        Drawn::<4>.load(&mut wider).expect("loaded");
         for mut other in [Context::seeded(5), wider] {
             snapshot.restore(other.world_mut(), &[]).expect("restored");
             assert_eq!(other.world().get::<MeshDraw>(drawn), None);

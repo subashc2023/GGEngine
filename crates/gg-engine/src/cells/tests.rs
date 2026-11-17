@@ -375,8 +375,9 @@ fn a_cell_whose_file_changed_since_it_came_keeps_what_it_holds() {
 struct Maker;
 
 impl Layer for Maker {
-    fn load(&mut self, cx: &mut Context) {
+    fn load(&mut self, cx: &mut Context) -> Result<()> {
         make(cx);
+        Ok(())
     }
 }
 
@@ -546,7 +547,7 @@ fn cells_prepared_on_threads_come_in_as_prepared_on_the_spot() {
     run.stack.sync_test();
     let mut cx = Context::seeded(1).root(root.clone());
     cx.cells.preparing = Preparing::threaded();
-    run.stack.attach(&mut cx);
+    run.stack.attach(&mut cx).expect("loaded");
     let started = std::time::Instant::now();
     let mut number = 0;
     let mut queued = None;
@@ -983,7 +984,7 @@ fn a_streaming_run_runs_again_alike_and_replays_to_its_hashes() {
         .record(Recorder::create(&path, run.name).expect("created"));
     run.stack.sync_test();
     let mut cx = Context::seeded(1).root(root.clone());
-    run.stack.attach(&mut cx);
+    run.stack.attach(&mut cx).expect("loaded");
     let mut seen = Vec::new();
     for (number, walk) in (0..).zip(WALK) {
         if let Some(walk) = walk {
@@ -1089,7 +1090,7 @@ fn a_run_of_made_cells_replays_naming_no_made_cell() {
         .record(Recorder::create(&path, run.name).expect("created"));
     run.stack.sync_test();
     let mut cx = Context::seeded(1).root(root.clone());
-    run.stack.attach(&mut cx);
+    run.stack.attach(&mut cx).expect("loaded");
     let mut made = BTreeSet::new();
     for (number, walk) in (0..).zip(WALK) {
         if let Some(walk) = walk {

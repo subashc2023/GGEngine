@@ -553,7 +553,9 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   render pass, a shader's file and line, or a scene's line and column; and, where there is one, the
   next step, such as `cargo gg fetch`. What outlives an entity, as a pick or a queued message does,
   keeps its ID, not its handle. A layer that can't go on ends the run through `Context::fail`, not
-  a panic: the layers detach, and the status is 1. A panic logs `log.panic` before the process ends.
+  a panic: the layers detach, and the status is 1. One that can't load returns the error from
+  `Layer::load`, which ends the run before any layer attaches. A panic logs `log.panic` before the
+  process ends.
 - **Panics in shipped builds.** `log.panic` holds the backtrace, whatever `RUST_BACKTRACE` says, and
   its `frames`, each a module and offset, as `Shards.exe+0x12a4f0`
   ([frames.rs](crates/gg-core/src/log/frames.rs)). `Starting GGEngine` names the build's source

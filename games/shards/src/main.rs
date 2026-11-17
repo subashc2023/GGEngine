@@ -208,7 +208,7 @@ struct Sounds {
 }
 
 /// The game's layer. An asset or script of its own, or the start scene, that doesn't load ends the
-/// run, through [`Context::fail`].
+/// run.
 struct Shards {
     /// The player this run's keys steer: 0, unless it joined a lockstep session or a server gave
     /// it another.
@@ -279,10 +279,12 @@ impl Shards {
             text: String::new(),
         }
     }
+}
 
+impl Layer for Shards {
     /// Loads the game's assets and script, and the installed mods. Fails with the first of the
     /// game's own that doesn't load, as a shader that doesn't compile.
-    fn load_game(&mut self, cx: &mut Context) -> Result<(), Error> {
+    fn load(&mut self, cx: &mut Context) -> Result<(), Error> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let shader = cx.add_shader("floor", root.join("shaders/floor.slang"), Blend::Opaque)?;
         let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].map(|[u, v]| Corner {
@@ -304,27 +306,15 @@ impl Shards {
         });
         let music = cx.add_music("match", root.join("music/match.ogg"))?;
         cx.play_music(Some(music), MUSIC_FADE_IN);
-        register(cx.world_mut());
+        register(cx.world_mut())?;
         self.scripts.load(cx, root.join("scripts/spin.luau"))?;
         // Mods read the world, and write sprites alone, as the rainbow writes the shards' colors.
         let grant = Grant::parse(["read", "write:Sprite"]).expect("capabilities");
         self.mods = Some(Mods::load(cx, grant));
         Ok(())
     }
-}
-
-impl Layer for Shards {
-    fn load(&mut self, cx: &mut Context) {
-        if let Err(error) = self.load_game(cx) {
-            cx.fail(error);
-        }
-    }
 
     fn attach(&mut self, cx: &mut Context) {
-        // A run ending as it loads builds no arena: the script declares the shards' spin.
-        if cx.exiting() {
-            return;
-        }
         self.player = cx.player().unwrap_or(0);
         // Development builds watch the arena and apply its saves.
         if let Err(error) = cx.load_start_scene() {
@@ -500,12 +490,10 @@ impl Layer for Shards {
 
 /// Registers the game's components, so its scene and the tool API know them before any entity has
 /// one.
-fn register(world: &mut World) {
-    let registered = world.register::<Player>().and_then(|()| {
-        world.register::<Shard>()?;
-        world.register::<Match>()
-    });
-    registered.expect("the game's components describe themselves");
+fn register(world: &mut World) -> Result<(), Error> {
+    world.register::<Player>()?;
+    world.register::<Shard>()?;
+    world.register::<Match>()
 }
 
 /// Builds what the arena's scene doesn't hold: the camera, the match, the players and the first

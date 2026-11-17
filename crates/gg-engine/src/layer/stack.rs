@@ -462,7 +462,9 @@ impl Stack {
 
     /// Loads the layers, then attaches them, each from the bottom up, in `cx`, whose world nothing
     /// has drawn an ID from: its seed is where a recording starts.
-    pub(crate) fn attach(&mut self, cx: &mut Context) {
+    ///
+    /// Fails as a layer's [`Layer::load`] does, attaching none.
+    pub(crate) fn attach(&mut self, cx: &mut Context) -> Result<()> {
         let _zone = gg_core::zone!();
         if let Some(recorder) = &mut self.recorder {
             recorder.start(&self.names, cx.world.stream_state());
@@ -472,7 +474,7 @@ impl Stack {
         {
             cx.dev.sync_tested = self.sync_test.is_some();
         }
-        self.load(cx);
+        self.load(cx)?;
         #[cfg(feature = "dev")]
         cx.read_scenes();
         for layer in &mut self.layers {
@@ -483,6 +485,7 @@ impl Stack {
         if let Some(recorder) = &mut self.recorder {
             recorder.attached(&cx.world, &cx.mods.applied());
         }
+        Ok(())
     }
 
     /// Loads the layers, puts `snapshot`'s world in `cx`'s place, and has each layer pick up from
@@ -496,7 +499,7 @@ impl Stack {
     /// world that played, warning `snapshot.plays`, with why, if the snapshot's run was stopped or
     /// held a world as edited.
     ///
-    /// Fails like [`Snapshot::restore`].
+    /// Fails as a layer's [`Layer::load`] does, and like [`Snapshot::restore`].
     pub(crate) fn restore(
         &mut self,
         cx: &mut Context,
@@ -509,7 +512,7 @@ impl Stack {
         {
             cx.dev.sync_tested = self.sync_test.is_some();
         }
-        self.load(cx);
+        self.load(cx)?;
         cx.attached = true;
         cx.load_restored(snapshot.added());
         #[cfg(feature = "dev")]
@@ -683,14 +686,16 @@ impl Stack {
 
     /// Loads the layers, from the bottom up.
     ///
+    /// Fails as the first layer whose [`Layer::load`] fails does, loading none above it.
+    ///
     /// # Panics
     ///
     /// If a layer spawned an entity, or changed the world's rows otherwise, as it loaded: a
     /// restored run, whose world comes from a snapshot, would spawn it again.
-    fn load(&mut self, cx: &mut Context) {
+    fn load(&mut self, cx: &mut Context) -> Result<()> {
         let before = cx.world.version();
         for (layer, name) in self.layers.iter_mut().zip(&self.names) {
-            layer.load(cx);
+            layer.load(cx)?;
             cx.share_assets();
             assert_eq!(
                 cx.world.version(),
@@ -699,6 +704,7 @@ impl Stack {
                  that a run restored from a snapshot doesn't spawn them again"
             );
         }
+        Ok(())
     }
 
     /// Detaches top down, the reverse of attaching, after a recording gets its end, a SyncTest with
@@ -1136,8 +1142,8 @@ pub(super) struct Hot<L>(pub(super) L);
 
 #[cfg(feature = "dev")]
 impl<L: Layer> Layer for Hot<L> {
-    fn load(&mut self, cx: &mut Context) {
-        HotFn::current(L::load).call((&mut self.0, cx));
+    fn load(&mut self, cx: &mut Context) -> Result<()> {
+        HotFn::current(L::load).call((&mut self.0, cx))
     }
 
     fn attach(&mut self, cx: &mut Context) {

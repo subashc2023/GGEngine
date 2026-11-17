@@ -304,7 +304,7 @@ pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>)
 /// until the host's world comes. The snapshot's textures are found where the run's database has
 /// their IDs, as after a rename (`Snapshot::follow`).
 ///
-/// Fails as `Stack::restore` does.
+/// Fails as `Stack::attach` and `Stack::restore` do.
 pub(crate) fn start(
     stack: &mut Stack,
     cx: &mut Context,
@@ -342,7 +342,7 @@ pub(crate) fn start(
             (stopped, snapshot.paused)
         }
         None => {
-            stack.attach(cx);
+            stack.attach(cx)?;
             (stopped, false)
         }
     };
@@ -1177,7 +1177,7 @@ pub(crate) mod tests {
             let mut stack = Stack::default();
             stack.push_layer(Turner(ticks.clone()));
             let mut cx = Context::new(None);
-            stack.attach(&mut cx);
+            stack.attach(&mut cx).expect("loaded");
             let mut stepper = Stepper::default();
             for dt in frames {
                 // A frame without time, as the first and the first after a pause, runs no tick.
@@ -1334,8 +1334,9 @@ pub(crate) mod tests {
         struct Looks(std::path::PathBuf, Rc<Cell<Option<bool>>>);
 
         impl Layer for Looks {
-            fn load(&mut self, _: &mut Context) {
+            fn load(&mut self, _: &mut Context) -> Result<()> {
                 self.1.set(Some(self.0.exists()));
+                Ok(())
             }
         }
 
@@ -1391,7 +1392,7 @@ pub(crate) mod tests {
         let mut stack = Stack::default();
         stack.push_layer(Order(calls.clone()));
         let mut cx = Context::new(None);
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let mut clock = Clock::default();
         let mut stepper = Stepper::lockstep();
         for _ in 0..2 {
@@ -1416,7 +1417,7 @@ pub(crate) mod tests {
             folder: "cells".to_owned(),
             size: 10.0,
         });
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         look_at(&mut cx, 15.0);
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
@@ -1436,7 +1437,7 @@ pub(crate) mod tests {
         let mut stack = Stack::default();
         stack.push_layer(Drawer);
         let mut cx = Context::new(None);
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
         let (cx, dt, stepper) = (&mut cx, clock.start_frame(), &mut stepper);
@@ -1536,7 +1537,7 @@ pub(crate) mod tests {
         let mut cx = Context::new(None);
         cx.extract(&mut frame, viewport);
         assert_eq!(frame.viewpoint, Viewpoint::default());
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let mut stepper = Stepper::lockstep();
         for (set, seen) in [
             (false, ITS_CAMERA),
@@ -1560,7 +1561,7 @@ pub(crate) mod tests {
         let mut stack = Stack::default();
         stack.push_layer(Slider::default());
         let mut cx = Context::new(None);
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let mut stepper = Stepper::default();
         let quarters = iter::repeat_n(Tick::DT / 4, 16);
         let dts = quarters.chain(iter::repeat_n(Tick::DT * 5 / 2, 3));
@@ -1592,7 +1593,7 @@ pub(crate) mod tests {
         let mut stack = Stack::default();
         stack.push_layer(Slider::default());
         let mut cx = Context::new(None);
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let mut stepper = Stepper::lockstep();
         for frame in 1..=5 {
             let draws = drawn(&mut stack, &mut cx, Duration::ZERO, &mut stepper);
@@ -1610,7 +1611,7 @@ pub(crate) mod tests {
         stack.push_layer(Drawer);
         stack.push_overlay(Inspector::default());
         let mut cx = Context::new(None);
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,

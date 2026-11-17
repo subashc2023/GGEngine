@@ -540,24 +540,21 @@ impl Assets {
 
 /// Registers the game's own components with `world`, so that its scenes, the Inspector's Add
 /// Component and the tool API know them before any entity has one.
-fn register(world: &mut World) {
-    let registered = world.register::<Chime>().and_then(|()| {
-        world.register::<Burster>()?;
-        world.register::<Jukebox>()?;
-        world.register::<Hud>()?;
-        world.register::<Menu>()?;
-        world.register::<Widgets>()?;
-        world.register::<Plasma>()?;
-        world.register::<Look>()?;
-        world.register::<StateLabel>()?;
-        world.register::<Tether>()?;
-        world.register::<Launch>()
-    });
-    registered.expect("the game's components describe themselves");
+fn register(world: &mut World) -> Result<(), Error> {
+    world.register::<Chime>()?;
+    world.register::<Burster>()?;
+    world.register::<Jukebox>()?;
+    world.register::<Hud>()?;
+    world.register::<Menu>()?;
+    world.register::<Widgets>()?;
+    world.register::<Plasma>()?;
+    world.register::<Look>()?;
+    world.register::<StateLabel>()?;
+    world.register::<Tether>()?;
+    world.register::<Launch>()
 }
 
-/// The game's layer. A script, an asset or the start scene that doesn't load ends the run, through
-/// [`Context::fail`].
+/// The game's layer. A script, an asset or the start scene that doesn't load ends the run.
 struct Showcase {
     scripts: Scripts,
     actions: Actions<Act>,
@@ -810,32 +807,23 @@ fn apply(world: &mut World, command: &Command) {
 }
 
 impl Layer for Showcase {
-    fn load(&mut self, cx: &mut Context) {
+    fn load(&mut self, cx: &mut Context) -> Result<(), Error> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         // Development builds watch each one and reload it as it's saved.
         for script in SCRIPTS {
-            if let Err(error) = self.scripts.load(cx, root.join(script)) {
-                cx.fail(error);
-                return;
-            }
+            self.scripts.load(cx, root.join(script))?;
         }
-        register(cx.world_mut());
+        register(cx.world_mut())?;
         let [from, to] = WORLD_CELLS.map(|cell| Cell(IVec3::from_array(cell)));
         cx.make_cells(WORLD_FOLDER, from, to, world_cell);
         self.scenes = scenes(cx, root);
         // Only a scene with a navmesh volume, `navigation.ron`, has any to show.
         cx.set_navmesh_shown(true);
-        match Assets::load(cx, root) {
-            Ok(assets) => self.assets = Some(assets),
-            Err(error) => cx.fail(error),
-        }
+        self.assets = Some(Assets::load(cx, root)?);
+        Ok(())
     }
 
     fn attach(&mut self, cx: &mut Context) {
-        // A run ending as it loads loads no scene. The scripts declare the scene's components.
-        if cx.exiting() {
-            return;
-        }
         // Development builds watch the scene and apply its saves.
         if let Err(error) = cx.load_start_scene() {
             cx.fail(error);

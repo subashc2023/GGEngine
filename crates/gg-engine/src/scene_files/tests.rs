@@ -1064,7 +1064,7 @@ fn a_world_s_save_writes_each_cell_s_file_as_its_entities_stand() {
     let mut cx = started(&dir.0);
     let mut stack = Stack::default();
     // Attached, as a run's is, whose world changes between ticks through the engine alone.
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     bring_cells_in(&mut cx);
     assert!(!open_scene::unsaved(&mut cx, 0), "as loaded");
     let cell = |x: i32| scenes.join(format!("cells/{x}_0_0.ron"));
@@ -1135,7 +1135,7 @@ fn a_world_s_save_writes_a_made_cell_s_file_once_it_changes() {
         cells_scene(&[(0x100 + x as u64, x as f32 * 10.0 + 5.0)])
     });
     let mut stack = Stack::default();
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     let look = |cx: &mut Context, x: f32| {
         look_at(cx, x);
         cx.stream_stopped();

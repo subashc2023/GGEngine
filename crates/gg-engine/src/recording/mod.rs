@@ -543,7 +543,8 @@ impl Replay {
     /// - `replay.bad_command`, naming the line: a command of a layer the recording hasn't.
     /// - `replay.diverged`, like [`step`](Self::step).
     ///
-    /// Also fails if the project manifest didn't read, as [`App::project`] says.
+    /// Also fails if the project manifest didn't read, as [`App::project`] says, and as a layer's
+    /// [`Layer::load`](crate::Layer::load) does.
     pub fn new(app: App, text: &str) -> Result<Self> {
         let replay = Self::attach(app, text)?;
         replay.check(None)?;
@@ -587,7 +588,7 @@ impl Replay {
         cx.name_as(recording.names.iter().cloned());
         cx.follows = true;
         cx.start.clone_from(&app.start);
-        app.stack.attach(&mut cx);
+        app.stack.attach(&mut cx)?;
         Ok(Self {
             app,
             cx,
@@ -1075,10 +1076,11 @@ mod tests {
 
     #[cfg(feature = "dev")]
     impl Layer for Painter {
-        fn load(&mut self, cx: &mut Context) {
+        fn load(&mut self, cx: &mut Context) -> Result<()> {
             let root = cx.root.clone().expect("a root");
             let stone = cx.add_texture("stone", root.join("assets/stone.png"));
             self.stone = Some(stone.expect("a texture"));
+            Ok(())
         }
 
         fn attach(&mut self, _: &mut Context) {
@@ -1136,7 +1138,7 @@ mod tests {
         let path = dir.0.join("run.recording");
         let recorder = Recorder::create(&path, app.name).expect("created");
         app.stack.record(recorder);
-        app.stack.attach(&mut cx);
+        app.stack.attach(&mut cx).expect("loaded");
         let mut stepper = Stepper::default();
         for &dt in frames {
             between(&mut app.stack, &mut cx, stepper.ticks);
@@ -1202,7 +1204,7 @@ mod tests {
         run.stack
             .record(Recorder::create(&path, run.name).expect("created"));
         let mut cx = Context::seeded(1).root(root.clone());
-        run.stack.attach(&mut cx);
+        run.stack.attach(&mut cx).expect("loaded");
         run.stack.tick(&mut cx, Tick { number: 0 });
         // An edit naming a texture loaded for it, as the tool API loads one.
         cx.load_named([crate::assets::Asset::Texture(edited)], false);
@@ -1503,9 +1505,10 @@ mod tests {
 
     #[cfg(feature = "dev")]
     impl Layer for Stepped {
-        fn load(&mut self, cx: &mut Context) {
+        fn load(&mut self, cx: &mut Context) -> Result<()> {
             let loaded = self.scripts.load(cx, &self.path);
             loaded.unwrap_or_else(|error| panic!("{error:#}"));
+            Ok(())
         }
 
         fn attach(&mut self, cx: &mut Context) {
@@ -1580,8 +1583,9 @@ mod tests {
     struct Modded(Option<crate::Mods>);
 
     impl Layer for Modded {
-        fn load(&mut self, cx: &mut Context) {
+        fn load(&mut self, cx: &mut Context) -> Result<()> {
             self.0 = Some(crate::Mods::load(cx, crate::Grant::all()));
+            Ok(())
         }
 
         fn attach(&mut self, cx: &mut Context) {
@@ -1768,7 +1772,7 @@ mod tests {
         app.stack
             .record(Recorder::create(&path, app.name).expect("created"));
         let mut cx = Context::new(None);
-        app.stack.attach(&mut cx);
+        app.stack.attach(&mut cx).expect("loaded");
         app.stack.tick(&mut cx, Tick { number: 0 });
         app.stack.detach(&mut cx);
         let error = app.stack.recorded().expect_err("stopped");

@@ -97,7 +97,18 @@ pub trait Layer {
     /// draws with (textures, meshes, shaders) and registers its world's component types, which a
     /// restored run needs as much as a fresh one. Spawns nothing, since a restored world comes from
     /// the snapshot: a layer that spawns here panics.
-    fn load(&mut self, _cx: &mut Context) {}
+    ///
+    /// An `Err`, for what the layer can't run without, ends the run before any layer attaches or
+    /// is restored. The layers above don't load; the run logs the error by its code, last, and its
+    /// status is 1. So:
+    ///
+    /// - a run fresh or from a snapshot, windowed, headless or a server, ends as it starts;
+    /// - `gg run` reports it `crashed` and waits for a rebuild, as for a crash before a snapshot,
+    ///   and so does the editor's game, which `gg run` runs embedded;
+    /// - a replay (`--replay`) ends with it.
+    fn load(&mut self, _cx: &mut Context) -> Result<()> {
+        Ok(())
+    }
 
     /// Called once at start, after every layer has loaded, before the first tick and update.
     /// Builds the world the simulation starts from.

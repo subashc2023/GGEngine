@@ -20,7 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gg_api::{Captured, Client, Session, UiList, UiNode, UiValue};
-use gg_engine::{App, Context, Event, GameUi, Layer, UiEvent};
+use gg_engine::{App, Context, Error, Event, GameUi, Layer, UiEvent};
 use serde_json::{Value, json};
 
 /// How long to wait before failing rather than hanging: a debug build under validation starts
@@ -150,11 +150,9 @@ struct Menu {
 }
 
 impl Layer for Menu {
-    fn load(&mut self, cx: &mut Context) {
-        match cx.add_ui("menu", self.dir.join("menu.ui")) {
-            Ok(ui) => self.ui = Some(ui),
-            Err(error) => cx.fail(error),
-        }
+    fn load(&mut self, cx: &mut Context) -> Result<(), Error> {
+        self.ui = Some(cx.add_ui("menu", self.dir.join("menu.ui"))?);
+        Ok(())
     }
 
     fn update(&mut self, cx: &mut Context, _: Duration) {

@@ -13,7 +13,7 @@ fn attached(seed: u64) -> (Context, Shards) {
     let cx = Context::seeded(seed).project(env!("CARGO_MANIFEST_DIR"));
     let mut cx = cx.expect("the project reads");
     let mut shards = Shards::new();
-    shards.load(&mut cx);
+    shards.load(&mut cx).expect("loaded");
     shards.attach(&mut cx);
     (cx, shards)
 }
@@ -64,7 +64,7 @@ fn the_sample_mod_cycles_the_shards_colors_and_a_greedy_one_is_refused() {
     let cx = Context::seeded(1).project(game).expect("the project reads");
     let mut cx = cx.mods("Shards", &dir);
     let mut shards = Shards::new();
-    shards.load(&mut cx);
+    shards.load(&mut cx).expect("loaded");
     shards.attach(&mut cx);
     for number in 0..16 {
         shards.tick(cx.world_mut(), Tick { number });
@@ -138,7 +138,7 @@ fn the_arena_saves_as_it_is() {
     let path = scene("arena.ron");
     let text = fs::read_to_string(&path).expect("the arena");
     let mut cx = Context::seeded(1).root(env!("CARGO_MANIFEST_DIR"));
-    register(cx.world_mut());
+    register(cx.world_mut()).expect("registered");
     let roots = cx
         .load_scene_file(&path)
         .unwrap_or_else(|error| panic!("{error:#}"));

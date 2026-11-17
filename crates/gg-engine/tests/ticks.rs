@@ -246,7 +246,7 @@ struct Movers {
 }
 
 impl Layer for Movers {
-    fn load(&mut self, cx: &mut Context) {
+    fn load(&mut self, cx: &mut Context) -> Result<(), gg_engine::Error> {
         for (name, script) in [("drift", DRIFT), ("pace", PACE)] {
             let file = format!("gg-ticks-{name}-{}.luau", process::id());
             let path = std::env::temp_dir().join(file);
@@ -258,6 +258,7 @@ impl Layer for Movers {
         let fox = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/models/fox/Fox.gltf");
         let fox = cx.add_model("fox", fox);
         self.fox = Some(fox.unwrap_or_else(|error| panic!("{error:#}")));
+        Ok(())
     }
 
     fn attach(&mut self, cx: &mut Context) {
@@ -511,7 +512,7 @@ fn main() {
         turned: 0,
         corners: 0,
     };
-    movers.load(&mut cx);
+    movers.load(&mut cx).expect("loaded");
     movers.attach(&mut cx);
     let mut number = 0;
     for threads in [1, 4] {

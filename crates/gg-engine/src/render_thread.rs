@@ -860,7 +860,9 @@ mod tests {
             codes.filter(|code| code == "engine.loaded").count()
         };
         assert_eq!(frames(&mut cx, 2), 0, "before the layers attach");
-        crate::layer::Stack::default().attach(&mut cx);
+        crate::layer::Stack::default()
+            .attach(&mut cx)
+            .expect("loaded");
         assert_eq!(frames(&mut cx, 1), 1);
         assert_eq!(frames(&mut cx, 2), 0, "once");
     }

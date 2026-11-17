@@ -1900,7 +1900,7 @@ fn a_sync_tests_copy_takes_the_inspectors_edits_undos_and_redos_as_the_world_did
     let mut stack = crate::layer::Stack::default();
     stack.push_overlay(Inspector::default());
     stack.sync_test();
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     let serial = cx.world().serial();
     let set = |count| {
         let edit = Edit {

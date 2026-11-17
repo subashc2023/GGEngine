@@ -56,7 +56,7 @@ pub(super) struct Game {
 }
 
 impl Layer for Game {
-    fn load(&mut self, cx: &mut Context) {
+    fn load(&mut self, cx: &mut Context) -> Result<()> {
         if let Some((scripts, path)) = &mut self.script {
             scripts.load(cx, path).expect("loaded");
         }
@@ -65,6 +65,7 @@ impl Layer for Game {
             cx.world_mut().register::<Score>().expect("described");
             self.mods = Some(crate::Mods::load(cx, crate::Grant::all()));
         }
+        Ok(())
     }
 
     fn attach(&mut self, cx: &mut Context) {
@@ -133,7 +134,7 @@ impl Peer {
             lockstep.condition(link);
         }
         stack.lockstep(lockstep);
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         Self { stack, cx, next: 0 }
     }
 
@@ -184,7 +185,7 @@ impl Peer {
             predicting,
             recorded: false,
         };
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         Self { stack, cx, next: 0 }
     }
 
@@ -2581,10 +2582,11 @@ struct Painter {
 
 #[cfg(feature = "dev")]
 impl Layer for Painter {
-    fn load(&mut self, cx: &mut Context) {
+    fn load(&mut self, cx: &mut Context) -> Result<()> {
         let root = cx.root.clone().expect("a root");
         let stone = cx.add_texture("stone", root.join("assets/stone.png"));
         self.stone = Some(stone.expect("a texture"));
+        Ok(())
     }
 
     fn attach(&mut self, cx: &mut Context) {
@@ -2645,7 +2647,7 @@ fn a_joiner_names_textures_as_its_host_does() {
         stack.push_layer(Painter::default());
         let names = stack.names().to_vec();
         stack.lockstep(Lockstep::start(net, TESTED, "Tested", BUILD, &names).expect("started"));
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         Peer { stack, cx, next: 0 }
     };
     let mut host = peer(

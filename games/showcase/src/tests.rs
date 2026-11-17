@@ -70,7 +70,7 @@ fn scenes() -> Vec<PathBuf> {
 fn loaded() -> (Context, Showcase) {
     let mut cx = Context::seeded(1).root(dir());
     let mut showcase = Showcase::new();
-    showcase.load(&mut cx);
+    showcase.load(&mut cx).expect("loaded");
     (cx, showcase)
 }
 

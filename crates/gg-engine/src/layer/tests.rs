@@ -878,7 +878,7 @@ fn probes(b_handles: bool) -> (Stack, Rc<RefCell<Vec<String>>>) {
 fn lifecycle_goes_up_the_stack_and_detach_comes_back_down() {
     let (mut stack, calls) = probes(false);
     let mut cx = Context::new(None);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     stack.tick(&mut cx, Tick { number: 0 });
     stack.update(&mut cx, Duration::ZERO);
     stack.detach(&mut cx);
@@ -941,7 +941,7 @@ fn a_world_put_in_the_contexts_place_shares_its_assets() {
     let mut stack = Stack::default();
     stack.push_layer(Replacer);
     let mut cx = Context::new(None);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     let add = |cx: &mut Context, path: &str| {
         let texture = cx.textures.add(path, [1, 1], &[0; 4], Mipmaps::None);
         let texture = texture.expect("a texture");
@@ -964,7 +964,7 @@ fn layers_change_the_world_as_they_attach_and_detach_and_at_their_ticks() {
     let mut stack = Stack::default();
     stack.push_layer(Spawner { rogue: false });
     let mut cx = Context::new(None);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     stack.tick(&mut cx, Tick { number: 0 });
     stack.update(&mut cx, Duration::ZERO);
     stack.detach(&mut cx);
@@ -987,7 +987,7 @@ fn a_layer_that_fails_ends_the_run_with_its_error() {
     let (mut stack, calls) = probes(false);
     stack.push_layer(Failer);
     let mut cx = Context::new(None);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     assert!(cx.exiting());
     let codes = logged
         .codes
@@ -1005,7 +1005,7 @@ fn a_layer_that_fails_ends_the_run_with_its_error() {
 
     let (mut stack, _) = probes(false);
     let mut cx = Context::new(None);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     cx.exit();
     stack.detach(&mut cx);
     assert!(cx.exiting() && !stack.failed());
@@ -1041,7 +1041,7 @@ fn a_layer_changing_the_world_as_it_updates_is_a_bug() {
     let mut stack = Stack::default();
     stack.push_layer(Spawner { rogue: true });
     let mut cx = Context::new(None);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     stack.update(&mut cx, Duration::ZERO);
 }
 
@@ -3196,8 +3196,9 @@ struct Keeper {
 
 #[cfg(feature = "dev")]
 impl Layer for Keeper {
-    fn load(&mut self, _: &mut Context) {
+    fn load(&mut self, _: &mut Context) -> Result<()> {
         self.calls.push("load");
+        Ok(())
     }
     fn attach(&mut self, _: &mut Context) {
         self.calls.push("attach");
@@ -3237,7 +3238,7 @@ fn a_hot_layer_calls_the_layers_own_methods() {
         ..Keeper::default()
     });
     let (mut cx, mut world) = (Context::new(None), World::default());
-    hot.load(&mut cx);
+    hot.load(&mut cx).expect("loaded");
     hot.attach(&mut cx);
     hot.restored(&mut cx);
     hot.swapped(&mut cx);
@@ -3291,7 +3292,7 @@ fn stop_brings_back_the_world_as_edited_that_play_held() {
         "(entities: {})\n".to_owned(),
     );
     cx.scenes.loaded(file.clone());
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     let id = cx.world().id(hero).expect("alive");
     let set = |x: f32| Edit::Apply {
         author: "test".to_owned(),

@@ -121,7 +121,7 @@ fn a_scene_asked_for_in_a_tick_goes_in_as_it_returns_and_replays_to_its_hashes()
     run.stack
         .record(Recorder::create(&path, run.name).expect("created"));
     let mut cx = Context::seeded(1).root(root.clone());
-    run.stack.attach(&mut cx);
+    run.stack.attach(&mut cx).expect("loaded");
     assert_eq!(ids(cx.world()).len(), 2, "the menu's and the layer's own");
     let serial = cx.world().serial();
     tick(&mut run.stack, &mut cx, 0, None);
@@ -177,7 +177,7 @@ fn a_scene_that_isn_t_there_or_doesn_t_load_changes_nothing() {
     let mut stack = Stack::default();
     stack.push_layer(Levels::default());
     let mut cx = Context::seeded(1).root(root);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     let (hash, serial) = (cx.world().hash(), cx.world().serial());
     let refused = [
         ("scenes/gone.ron", "scene.not_found"),
@@ -257,7 +257,7 @@ fn a_scene_asked_for_outside_a_tick_is_dropped() {
     let mut stack = Stack::default();
     stack.push_layer(Eager);
     let mut cx = Context::seeded(1).root(root);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     let hash = cx.world().hash();
     assert!(stack.tick(&mut cx, Tick { number: 0 }));
     assert_eq!(cx.world().hash(), hash);
@@ -330,7 +330,7 @@ fn a_run_restored_from_a_snapshot_comes_back_in_the_scene() {
     let mut stack = Stack::default();
     stack.push_layer(Levels::default());
     let mut cx = Context::seeded(1).root(root.clone());
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     tick(&mut stack, &mut cx, 0, Some("scenes/level.ron"));
     assert_eq!(authors(&cx.scenes.files), ["scenes/level.ron"]);
     let of = Of {
@@ -371,7 +371,7 @@ fn a_scene_change_runs_again_alike_under_a_sync_test() {
     stack.push_layer(Levels::default());
     stack.sync_test();
     let mut cx = Context::seeded(1).root(root);
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     tick(&mut stack, &mut cx, 0, Some("scenes/level.ron"));
     tick(&mut stack, &mut cx, 1, Some("scenes/menu.ron"));
     assert!(!cx.exiting());
@@ -403,7 +403,7 @@ fn edits_from_before_a_change_refuse_to_undo_and_a_save_reaches_the_next_change(
     stack.push_layer(Levels::default());
     let mut cx = Context::seeded(1).root(root.clone());
     cx.start = Some(root.join("scenes/menu.ron"));
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     assert_eq!(cx.scenes.open.author.as_deref(), Some("scenes/menu.ron"));
     tick(&mut stack, &mut cx, 0, Some("scenes/placed.ron"));
     let one = EntityId::new(1).expect("an ID");
@@ -486,7 +486,7 @@ fn a_run_from_a_package_changes_to_a_scene_it_holds() {
     cx.files = Files::package(Arc::new(Package::open(&path).expect("opened")), root);
     let mut stack = Stack::default();
     stack.push_layer(Levels::default());
-    stack.attach(&mut cx);
+    stack.attach(&mut cx).expect("loaded");
     assert!(cx.world().assets().texture(named).is_none());
     tick(&mut stack, &mut cx, 0, Some("scenes/level.ron"));
     assert_eq!(ids(cx.world()), scene_ids(1));

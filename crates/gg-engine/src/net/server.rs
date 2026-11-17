@@ -675,7 +675,7 @@ mod tests {
                 .expect("started");
             session.condition(SLOW);
             stack.session(session);
-            stack.attach(&mut cx);
+            stack.attach(&mut cx).expect("loaded");
             let stepper = Stepper::default();
             let last = Instant::now();
             Self {
@@ -1480,9 +1480,10 @@ mod tests {
     }
 
     impl crate::Layer for Arena {
-        fn load(&mut self, cx: &mut Context) {
+        fn load(&mut self, cx: &mut Context) -> Result<()> {
             let fox = cx.add_model("fox", self.root.join("Fox.gltf"));
             self.fox = Some(fox.expect("the Fox reads"));
+            Ok(())
         }
 
         fn attach(&mut self, cx: &mut Context) {
@@ -1668,7 +1669,7 @@ mod tests {
         let mut stack = Stack::default();
         stack.push_layer(Arena::new(&scratch.0, Hashes::default()));
         stack.sync_test();
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let (ball, agent) = (ball_at(cx.world()), Vec3::new(-3.0, 0.5, -3.0));
         // Player 0's fox walks into the ball, player 1's about, and both stand from tick 120.
         let walks = [(0, 0, 0.0, 3.0), (1, 1, -2.0, 1.0), (60, 1, 2.0, 1.0)];

@@ -205,7 +205,7 @@ mod tests {
         stack.push_layer(Pusher { pushes, sound });
         stack.sync_test();
         let logged = logged();
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let serial = cx.world().serial();
         for number in 0..3 {
             let push = Push(entity, 1.0).to_value();
@@ -247,7 +247,7 @@ mod tests {
         let mut stack = Stack::default();
         stack.push_layer(Counter::default());
         stack.sync_test();
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let replayed = stack.replay_tick(&mut cx, Tick { number: 0 }, |_, _, _| Ok(()));
         let error = replayed.expect_err("parted");
         assert_eq!(error.code(), "sync_test.diverged");
@@ -287,7 +287,7 @@ mod tests {
         let mut stack = Stack::default();
         stack.push_layer(Sealer(vec![Seal(Handle(7))]));
         stack.sync_test();
-        stack.attach(&mut cx);
+        stack.attach(&mut cx).expect("loaded");
         let replayed = stack.replay_tick(&mut cx, Tick { number: 0 }, |_, _, _| Ok(()));
         let error = replayed.expect_err("refused");
         assert_eq!(error.code(), "sync_test.bad_command");
