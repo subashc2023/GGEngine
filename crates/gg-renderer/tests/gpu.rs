@@ -7211,28 +7211,45 @@ fn floor_seen(frame: usize, over: usize, size: [u32; 2]) -> Viewpoint {
 fn floor_balls_shown(
     viewpoint: Viewpoint,
     size: [u32; 2],
-    centers: impl Iterator<Item = Vec3> + Clone,
+    centers: impl Iterator<Item = Vec3>,
     margin: usize,
 ) -> Vec<bool> {
     let [width, height] = size.map(|side| side as f32);
     let tan = math::libm::tanf(FLOOR_FOV / 2.0);
-    let hits = |x: u32, y: u32| {
-        let ndc = Vec2::new(
-            (x as f32 + 0.5) / width * 2.0 - 1.0,
-            (y as f32 + 0.5) / height * 2.0 - 1.0,
-        );
-        // Looking down -Y, the view's up along -Z: its pixels' rows run down along +Z.
-        let way = Vec3::new(ndc.x * tan * width / height, -1.0, ndc.y * tan).normalize();
-        centers.clone().any(|center| {
-            let to = center - viewpoint.position.as_vec3();
-            let along = to.dot(way);
-            (to - way * along).length_squared() <= FLOOR_BALL * FLOOR_BALL
-        })
-    };
-    let shows: Vec<bool> = (0..size[1])
-        .flat_map(|y| (0..size[0]).map(move |x| [x, y]))
-        .map(|[x, y]| hits(x, y))
-        .collect();
+    let mut shows = vec![false; (size[0] * size[1]) as usize];
+    for center in centers {
+        let to = center - viewpoint.position.as_vec3();
+        // Only pixels between the corners of the sphere's bounding box, seen on the plane a unit
+        // below the eye, and one more each way, can show it. Testing every pixel took 1.4 s a
+        // call in a debug build.
+        let r = FLOOR_BALL;
+        assert!(-to.y > r, "the spheres are below the eye");
+        let depths = [-to.y - r, -to.y + r];
+        let pixels = |offset: f32, scale: f32, side: f32| {
+            let corners = [offset - r, offset + r].map(|at| depths.map(|depth| at / depth));
+            let seen = corners.as_flattened().iter().copied();
+            let low = seen.clone().fold(f32::MAX, f32::min);
+            let high = seen.fold(f32::MIN, f32::max);
+            let pixel = |s: f32| (s / scale + 1.0) * side / 2.0 - 0.5;
+            let first = (pixel(low).floor() - 1.0).max(0.0) as u32;
+            let last = (pixel(high).ceil() + 1.0).clamp(0.0, side - 1.0) as u32;
+            first..last + 1
+        };
+        for y in pixels(to.z, tan, height) {
+            for x in pixels(to.x, tan * width / height, width) {
+                let ndc = Vec2::new(
+                    (x as f32 + 0.5) / width * 2.0 - 1.0,
+                    (y as f32 + 0.5) / height * 2.0 - 1.0,
+                );
+                // Looking down -Y, the view's up along -Z: its pixels' rows run down along +Z.
+                let way = Vec3::new(ndc.x * tan * width / height, -1.0, ndc.y * tan).normalize();
+                let along = to.dot(way);
+                if (to - way * along).length_squared() <= r * r {
+                    shows[(y * size[0] + x) as usize] = true;
+                }
+            }
+        }
+    }
     // Widened by `margin` each way, across and then down.
     let [width, height] = size.map(|side| side as usize);
     let near =
