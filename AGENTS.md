@@ -210,6 +210,7 @@ could break, and run [ship.yml](.github/workflows/ship.yml) only when asked.
 - Say only what code can't: intent, invariants, units and sentinels, external quirks, the why and
   the why not.
 - Link to a fact's home instead of re-explaining it.
+- A doc opens with one short sentence; clippy's `too_long_first_doc_paragraph` checks public ones.
 - `# Panics` and `# Errors` are bullet lists of conditions.
 - Private items and fields get docs only for an invariant or a why.
 - Never cut SAFETY notes, invariants, drop order, diagnostic codes, wire formats or determinism

@@ -240,5 +240,6 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
+too_long_first_doc_paragraph = "warn"
 
 # The profiles, `shipping` and the dependencies dev builds optimize, are in .cargo/config.toml.

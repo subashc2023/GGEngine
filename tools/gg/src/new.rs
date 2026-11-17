@@ -63,6 +63,7 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
+too_long_first_doc_paragraph = "warn"
 
 "#;
 

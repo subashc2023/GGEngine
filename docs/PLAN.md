@@ -33,6 +33,8 @@ Each phase's milestones, and what each deferred, are in git history.
   its match is under Open
 - **Phase 22, games of their own, and a sweep**: the engine reads no game's folder, `gg new`
   outside the workspace, Foxball deleted, the docs checked against the code (2026-11-15)
+- **A polish sweep**: a README, leaner docs and comments, crates untangled, a prelude and `gg new`'s
+  game, faster frames and tests, cheaper CI (2026-11-17)
 
 ## Open
 
