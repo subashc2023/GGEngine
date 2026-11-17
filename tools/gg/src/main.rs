@@ -206,8 +206,9 @@ it has no ID file, a fresh one, as a development run would. Prints a line per fi
             summary: "Write a new game, in the engine's workspace or in one of its own",
             details: "\
 Writes over nothing: package NAME, whose binary `gg-NAME` is a development build of the engine's by
-default; its project, whose start scene `scenes/main.ron` is empty; and its main module, whose layer
-loads the start scene. Prints a line naming its directory and files.
+default; its project, whose start scene `scenes/main.ron` holds a camera and a square; and its main
+module, whose layer moves the square by the arrow keys, WASD or a pad's left stick. Prints a line
+naming its directory, its files and `next`, the command that runs it.
 
 In the engine's workspace, the game is a member in `games/NAME`. Elsewhere it's a workspace of its
 own in `NAME`, built against the engine `--engine` names: a checkout's directory, or

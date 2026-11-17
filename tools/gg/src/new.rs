@@ -76,13 +76,14 @@ fn main() -> Result<(), gg_api::Failure> {
 
 const MAIN: &str = r#"//! {name}, a game made with GGEngine.
 //!
-//! Its world starts as its project's start scene, `scenes/main.ron`, which a development build
-//! applies as it's saved.
+//! Its start scene, `scenes/main.ron`, holds a camera and the player, a square that the arrow keys,
+//! WASD or a pad's left stick move. A development build applies the scene's saves as it runs.
 
 // A build without `dev`, as it ships, opens no console window on Windows: its JSON log still
 // records the run, and what it prints still reaches a process it's piped to, as a tool's or CI's.
 #![cfg_attr(not(feature = "dev"), windows_subsystem = "windows")]
 
+use std::ops::ControlFlow;
 use std::process::ExitCode;
 
 use gg_engine::prelude::*;
@@ -97,14 +98,56 @@ fn app() -> App {
     let app = App::new("{name}")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    let app = app.layer(Game).overlay(gg_engine::PerfPanel);
-    app.overlay(gg_engine::Inspector::default())
+    app.layer(Game::new()).dev_panels()
+}
+
+/// What the player steers: it moves `speed` units a second along `heading`.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+struct Player {
+    #[reflect(min = 0.0, default = 4.0)]
+    speed: f32,
+    /// As the last steer set it, of length at most 1.
+    heading: Vec2,
+}
+
+/// What the keys and pads do, applied at the next tick. Recordings keep them.
+#[derive(Clone, Debug, PartialEq, Reflect)]
+enum Command {
+    /// Turns every player toward `heading` until the next.
+    Steer { heading: Vec2 },
+}
+
+/// What the keys and pads are bound to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Act {
+    Steer,
 }
 
 /// The game's layer.
-struct Game;
+struct Game {
+    actions: Actions<Act>,
+    commands: Vec<Command>,
+}
+
+impl Game {
+    fn new() -> Self {
+        let mut actions = Actions::default();
+        let steer = [Binding::WASD, Binding::ARROWS, Binding::stick(Stick::Left)];
+        let bound = actions.bind_all(steer.map(|binding| (Act::Steer, binding)));
+        bound.expect("the bindings are pairs of axes, of other sources");
+        Self {
+            actions,
+            commands: Vec::new(),
+        }
+    }
+}
 
 impl Layer for Game {
+    /// Registers the player, which the start scene names.
+    fn load(&mut self, cx: &mut Context) -> Result<(), Error> {
+        cx.world_mut().register::<Player>()
+    }
+
     fn attach(&mut self, cx: &mut Context) {
         // Watched as the game runs, in development builds, which apply its saves. One that doesn't
         // load ends the run with its error.
@@ -112,11 +155,90 @@ impl Layer for Game {
             cx.fail(error);
         }
     }
+
+    /// Lets go of what was held as the world was taken, as when `gg run` restarts the game.
+    fn restored(&mut self, _: &mut Context) {
+        let heading = Vec2::ZERO;
+        self.commands.push(Command::Steer { heading });
+    }
+
+    fn tick(&mut self, world: &mut World, _: Tick) {
+        for command in self.commands.drain(..) {
+            match command {
+                Command::Steer { heading } => {
+                    for player in world.query_mut::<&mut Player>() {
+                        player.heading = heading;
+                    }
+                }
+            }
+        }
+        let dt = Tick::DT.as_secs_f32();
+        for (player, at) in world.query_mut::<(&Player, &mut Transform)>() {
+            let by = player.heading * player.speed * dt;
+            at.translation += by.extend(0.0).as_dvec3();
+        }
+    }
+
+    fn commands(&mut self) -> Option<&mut dyn Commands> {
+        Some(&mut self.commands)
+    }
+
+    fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+        // Queued now, so the next tick applies them.
+        let commands = &mut self.commands;
+        self.actions.event(event, |change| {
+            if let Change::Axis2(Act::Steer, heading) = change {
+                commands.push(Command::Steer { heading });
+            }
+        });
+        ControlFlow::Continue(())
+    }
 }
 "#;
 
-/// An empty scene, in canonical text.
-const SCENE: &str = "(\n    entities: {},\n)\n";
+/// The start scene, in canonical text: a camera, and the player's square.
+const SCENE: &str = r#"(
+    entities: {
+        "2f6c3a91d8e4b057": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7b1e94c2a05d63f8": (
+            Name: ("Player"),
+            Player: (
+                speed: 4.0,
+                heading: (0.0, 0.0),
+            ),
+            Sprite: (
+                color: (0.2, 0.6, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)
+"#;
 
 /// The AGENTS.md of a game outside the engine's workspace; `{engine}` and `{install}` come from
 /// [`Source`].
@@ -124,6 +246,10 @@ const AGENTS: &str = r#"# {name}
 
 A game made with GGEngine, a workspace of its own, which builds against
 {engine}.
+
+As `gg new` made it, its start scene, `scenes/main.ron`, holds a camera and a square with the
+game's `Player` component. `src/main.rs` registers `Player`, binds the arrow keys, WASD and a pad's
+left stick, and moves the square at each tick by the commands they queue.
 
 The engine's rules hold here as in its own games. Read, in the engine: `AGENTS.md`, how to work with
 it; `ARCHITECTURE.md`, its design, and what keeps a simulation the same on every platform;
@@ -297,9 +423,10 @@ struct Source {
     install: String,
 }
 
-/// Writes new game `name`, printing a JSON line of its directory and files. In the engine's
-/// workspace (cargo's from the working directory, if it has gg-engine) it's a member in `games`,
-/// taking no `engine`; elsewhere a workspace in the working directory, building against `engine`.
+/// Writes new game `name`, printing a JSON line of its directory, its files and `next`, the command
+/// that runs it. In the engine's workspace (cargo's from the working directory, if it has
+/// gg-engine) it's a member in `games`, taking no `engine`; elsewhere a workspace in the working
+/// directory, building against `engine`.
 ///
 /// Fails with `gg.new` for:
 /// - `engine` given in the engine's workspace, or missing outside it;
@@ -365,7 +492,12 @@ pub(crate) fn new(name: &str, engine: Option<&Engine>) -> Result<(), Failure> {
             ));
         }
     };
-    crate::print(&json!({"new": name, "dir": dir, "files": files}).to_string());
+    // Outside the engine's workspace, from the directory gg ran in, as the game's is below it.
+    let next = match engine {
+        None => format!("cargo gg run {name}"),
+        Some(_) => format!("gg run --project {name}"),
+    };
+    crate::print(&json!({"new": name, "dir": dir, "files": files, "next": next}).to_string());
     Ok(())
 }
 
@@ -490,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_game_is_its_manifest_its_project_its_main_and_an_empty_scene() {
+    fn a_new_game_is_its_manifest_its_project_its_main_and_its_start_scene() {
         let games = std::env::temp_dir().join(format!("gg-new-{}", std::process::id()));
         let _ = fs::remove_dir_all(&games);
         let dir = games.join("probe");

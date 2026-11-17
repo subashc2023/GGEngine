@@ -50,7 +50,7 @@ cargo run -p sandbox                # 100,000 sprites and a scene file
 cargo run -p sandbox -- --help      # the flags every app shares
 cargo gg help                       # the command-line tool and the tool API
 
-cargo gg new mygame                 # a new game in games/mygame
+cargo gg new mygame                 # a new game in games/mygame: a square the keys move
 cargo gg run mygame                 # run it supervised: edits patch in as you save
 
 cd games/shards && cargo gg run --peers 2   # the networked demo: a host and a joiner
