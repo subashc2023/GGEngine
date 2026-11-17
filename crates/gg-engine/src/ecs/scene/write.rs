@@ -16,8 +16,9 @@ use crate::ecs::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Field, Shape, Type, Types, Value};
 use crate::{ModelNode, PrefabRoot};
 
-/// RON's words, which no name a scene writes is, so that a name never reads as a value.
-pub(in crate::ecs) const WORDS: [&str; 10] = [
+/// RON's words, which a scene writes raw as names (`r#None`), as `ron` does, so that a reader
+/// without the types never takes a name for a value.
+const WORDS: [&str; 10] = [
     "true", "false", "Some", "None", "inf", "inff32", "inff64", "NaN", "NaNf32", "NaNf64",
 ];
 
@@ -271,9 +272,8 @@ impl Writer<'_> {
                 .or_insert_with(|| world.components.new_column(component));
             built.push_value(&value).map_err(about)?;
             built.swap_remove(0);
-            writable(name).map_err(about)?;
             pad(&mut self.out, 3);
-            self.out.push_str(name);
+            push_name(&mut self.out, name).map_err(about)?;
             self.out.push_str(": ");
             match written {
                 Written::Whole => self.value(&ty, &value, 3, 1).map_err(about)?,
@@ -387,9 +387,8 @@ impl Writer<'_> {
                     let names: Vec<&str> = variants.iter().map(|variant| &*variant.name).collect();
                     return Err(reflect::no_variant(name, &names));
                 };
-                writable(name)?;
+                push_name(&mut self.out, name)?;
                 let parts = self.saved_parts(&variant.fields, given)?;
-                self.out.push_str(name);
                 if !parts.is_empty() {
                     self.block(&parts, variant.tuple, indent, depth)?;
                 }
@@ -444,8 +443,7 @@ impl Writer<'_> {
             let at = |error| reflect::within(error, &field.name);
             pad(&mut self.out, indent + 1);
             if !tuple {
-                writable(&field.name).map_err(at)?;
-                self.out.push_str(&field.name);
+                push_name(&mut self.out, &field.name).map_err(at)?;
                 self.out.push_str(": ");
             }
             self.value(&field.ty, value, indent + 1, depth + 1)
@@ -618,23 +616,24 @@ fn hidden(c: char) -> bool {
     }
 }
 
-/// Refuses a name that isn't an ASCII identifier or is one of RON's words.
-fn writable(name: &str) -> Result<()> {
+/// Writes `name`, raw if it's one of RON's words; refuses one that isn't an ASCII identifier.
+fn push_name(out: &mut String, name: &str) -> Result<()> {
     let mut bytes = name.bytes();
     let identifier = bytes
         .next()
         .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    if identifier && !WORDS.contains(&name) {
-        return Ok(());
+    if !identifier {
+        return Err(Error::new(
+            "scene.bad_name",
+            format!("`{name}` isn't a name a scene writes: those are ASCII identifiers"),
+        ));
     }
-    Err(Error::new(
-        "scene.bad_name",
-        format!(
-            "`{name}` isn't a name a scene writes: those are ASCII identifiers, and none of RON's \
-             words, `true`, `false`, `Some`, `None`, `inf` and `NaN`"
-        ),
-    ))
+    if WORDS.contains(&name) {
+        out.push_str("r#");
+    }
+    out.push_str(name);
+    Ok(())
 }
 
 fn opaque_part() -> Error {

@@ -703,10 +703,18 @@ struct Measure {
     größe: f32,
 }
 
-/// Named as one of RON's words.
-#[derive(Clone, crate::Component)]
+/// Named with RON's words.
+#[derive(Clone, Debug, PartialEq, crate::Component)]
 #[reflect(name = "None")]
-struct Nothing;
+struct Nothing {
+    inf: Word,
+}
+
+#[derive(Clone, Debug, PartialEq, crate::Reflect)]
+enum Word {
+    None,
+    Some(u8),
+}
 
 /// A tree, as deep as it's made.
 #[derive(Clone, Debug, PartialEq, crate::Component)]
@@ -776,7 +784,6 @@ fn a_save_refuses_what_a_load_would_and_says_where() {
             "scene.bad_name",
             "Measure.größe",
         ),
-        (world.spawn(Nothing), "scene.bad_name", "None"),
         (
             world.spawn(GridCell { color: 2 }),
             "reflect.out_of_range",
@@ -883,6 +890,38 @@ fn a_far_translation_comes_back_bit_for_bit() {
     let loaded = other.get::<Transform>(roots[0]).expect("loaded");
     let bits = |v: DVec3| v.to_array().map(f64::to_bits);
     assert_eq!(bits(loaded.translation), bits(far));
+}
+
+/// Names that are RON's words, such as `Tonemapper::None`, save raw (`r#None`), so even a reader
+/// without the types takes them for names. Written bare, they load.
+#[test]
+fn names_that_are_rons_words_save_raw_and_load() {
+    let mut world = World::seeded(13);
+    let saved = [Word::None, Word::Some(3)].map(|inf| world.spawn(Nothing { inf }));
+    let text = world
+        .save_scene(&saved)
+        .unwrap_or_else(|error| panic!("{error}"));
+    for raw in ["r#None: (", "r#inf: r#None,", "r#inf: r#Some(3),"] {
+        assert!(text.contains(raw), "{raw}: {text}");
+    }
+    let ids = saved.map(|entity| world.id(entity).expect("alive"));
+    let mut read = World::scene_ids(&text).expect("read");
+    read.sort_unstable();
+    let mut sorted = ids;
+    sorted.sort_unstable();
+    assert_eq!(read, sorted);
+    for given in [text.clone(), text.replace("r#", "")] {
+        let mut other = World::seeded(14);
+        other.register::<Nothing>().expect("registered");
+        let roots = other
+            .load_scene(&given)
+            .unwrap_or_else(|error| panic!("{error}"));
+        for (id, inf) in ids.into_iter().zip([Word::None, Word::Some(3)]) {
+            let entity = other.entity(id).expect("loaded");
+            assert_eq!(other.get::<Nothing>(entity).expect("loaded").inf, inf);
+        }
+        assert_eq!(other.save_scene(&roots).expect("saved"), text, "{given}");
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, crate::Component)]

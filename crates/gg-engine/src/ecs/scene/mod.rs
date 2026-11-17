@@ -48,7 +48,6 @@ use crate::package::Files;
 use crate::reflect::{Meta, Show};
 use read::Loaded;
 pub(super) use template::{Expanding, Template};
-pub(super) use write::WORDS;
 pub(crate) use write::{float, quote};
 
 /// The most levels a scene's values nest: a component's value is the first; each value inside a
@@ -131,7 +130,7 @@ impl World {
     /// - `reflect.opaque` for opaque state in a list or option, or in a variant or option a load
     ///   would have to make.
     /// - `asset.unnamed` for a texture not loaded from a file.
-    /// - `scene.bad_name` for a name that isn't an ASCII identifier, or is one of RON's words.
+    /// - `scene.bad_name` for a name that isn't an ASCII identifier.
     /// - `scene.too_deep` for a value nested more than 64 levels.
     /// - `set_field`'s errors for a value it refuses.
     ///

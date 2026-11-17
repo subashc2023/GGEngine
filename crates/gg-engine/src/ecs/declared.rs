@@ -333,12 +333,6 @@ mod tests {
         );
         let twice = vec![number("speed", 0.0), number("speed", 1.0)];
         assert_eq!(refused("Spin", twice), "reflect.bad_name");
-        // Nor a RON word as a type's or field's name: no scene could save it.
-        assert_eq!(refused("None", vec![]), "reflect.bad_name");
-        assert_eq!(
-            refused("Spin", vec![number("inf", 0.0)]),
-            "reflect.bad_name"
-        );
         assert_eq!(
             refused("Spin", vec![number("speed", f64::NAN)]),
             "reflect.bad_default"
@@ -349,6 +343,9 @@ mod tests {
         spin.expect("declared, its name free");
         let again = world.declare("Spin", "", Vec::new()).expect_err("refused");
         assert_eq!(again.code(), "reflect.name_taken");
+        // RON's words are names too: a scene writes them raw.
+        let words = world.declare("None", "", vec![number("inf", 0.0)]);
+        words.expect("declared");
     }
 
     #[test]

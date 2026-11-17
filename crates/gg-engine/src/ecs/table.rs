@@ -11,7 +11,6 @@ use std::{iter, mem};
 use gg_core::{Error, Result};
 
 use super::declared::{self, Declared, Kind, is_identifier};
-use super::scene::WORDS;
 use super::{Component, Entity, World, hash};
 use crate::reflect::{self, Ident, Meta, Reflect, Shape, Type, TypeIndex, TypeInfo, Types, Value};
 
@@ -182,8 +181,7 @@ impl Components {
     ///
     /// Fails:
     /// - `reflect.name_taken`: a type has `name` already;
-    /// - `reflect.bad_name`: a type or field name isn't an identifier, is one of RON's words
-    ///   (no scene could save it), or a field's is repeated;
+    /// - `reflect.bad_name`: a type or field name isn't an identifier, or a field's is repeated;
     /// - `reflect.bad_default`: a kind refuses its default, or a number isn't finite.
     pub fn declare(
         &mut self,
@@ -338,20 +336,11 @@ fn described(
     doc: &str,
     fields: Vec<(Ident, Kind, Value)>,
 ) -> Result<(Arc<Declared>, TypeInfo)> {
-    let names = iter::once(name).chain(fields.iter().map(|(field, ..)| &**field));
-    if let Some(bad) = names.clone().find(|name| !is_identifier(name)) {
+    let mut names = iter::once(name).chain(fields.iter().map(|(field, ..)| &**field));
+    if let Some(bad) = names.find(|name| !is_identifier(name)) {
         return Err(Error::new(
             "reflect.bad_name",
             format!("`{bad}` isn't an identifier: a letter or `_`, then letters, digits or `_`"),
-        ));
-    }
-    if let Some(word) = names.clone().find(|name| WORDS.contains(name)) {
-        return Err(Error::new(
-            "reflect.bad_name",
-            format!(
-                "`{word}` is one of RON's words, `true`, `false`, `Some`, `None`, `inf` and \
-                 `NaN`, which a scene writes no name as, so that no scene could save the type"
-            ),
         ));
     }
     for (i, (field, ..)) in fields.iter().enumerate() {
