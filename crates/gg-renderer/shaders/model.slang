@@ -161,13 +161,17 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     Frame frame = *push.frame;
     Material material = frame.materials[push.params[input.instance].material];
     // Every texture sampled before any branch or discard, which would leave the derivatives that
-    // pick their levels undefined. Base, emission and specular-glossiness specular colors decode
-    // from sRGB as sampled; other maps, and glossiness in alpha, read as stored.
+    // pick their levels undefined, and the normal's too. Base, emission and specular-glossiness
+    // specular colors decode from sRGB as sampled; other maps, and glossiness in alpha, read as
+    // stored.
     float4 color = sampled(material, 0, input.uv) * material.color * input.color;
     float4 surface = sampled(material, 1, input.uv);
     float2 mapped = sampled(material, 2, input.uv).xy * 2.0 - 1.0;
     float occlusion = 1.0 + material.occlusion_strength * (sampled(material, 3, input.uv).r - 1.0);
     float3 emission = sampled(material, 4, input.uv).rgb * material.emissive;
+    // Widened by the normal's change a pixel across and down.
+    float3 unit = normalize(input.normal);
+    float roughness = filtered_roughness(roughness_of(material, surface), ddx(unit), ddy(unit));
 #if defined(MASKED)
     if (color.a < material.cutoff) {
         discard;
@@ -191,10 +195,10 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     // takes neither.
     uint2 pixel = uint2(input.position.xy);
     occlusion = ambient(frame, pixel, occlusion);
-    reflected = reflection(frame, pixel, roughness_of(material, surface));
+    reflected = reflection(frame, pixel, roughness);
 #endif
     out.color = lit(frame, material, input.world, input.normal, input.tangent, shows_front, color,
-                    surface, mapped, occlusion, emission, reflected);
+                    surface, roughness, mapped, occlusion, emission, reflected);
     out.motion = float4(input.moved, 0.0);
 #if !defined(OPAQUE) && !defined(MASKED)
     out.color = fogged(fog_at(frame, input.world), out.color);

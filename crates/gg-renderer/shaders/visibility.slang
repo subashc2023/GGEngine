@@ -7,9 +7,9 @@
 // normalized coordinates weighs each by the determinant of the other two and the point,
 // `dot(cross(b, c), (x, y, 1))`, over their sum (Olano and Greer, "Triangle Scan Conversion using
 // 2D Homogeneous Coordinates", 1997). Dividing by no W, it weighs a clipped corner behind the
-// camera right too. The weights a pixel across and down give the UVs' change, which picks texture
-// levels as a quad's derivatives would. Applied to the corners as placed the frame before, they
-// give the view's motion; 0 where nothing drew.
+// camera right too. The weights a pixel across and down give the UVs' and the normal's change,
+// which pick texture levels and widen roughness as a quad's derivatives would. Applied to the
+// corners as placed the frame before, they give the view's motion; 0 where nothing drew.
 //
 // Where the view reflects, `normal_main` first finds each pixel's smooth shading normal the same
 // way, for reflections.slang's rays: a curved mesh's depth facets aren't smooth.
@@ -93,7 +93,8 @@ uint byte_of(uint word, uint byte) {
 }
 
 // What a pixel shows of its triangle. `was`: where the transform the frame before placed it.
-// `uv_across` and `uv_down`: the UVs' change a pixel across and down.
+// `uv_across` and `uv_down`: the UVs' change a pixel across and down; `normal_across` and
+// `normal_down`, the unit normal's.
 struct Shown {
     Material material;
     float3 world;
@@ -103,6 +104,8 @@ struct Shown {
     float2 uv_down;
     float4 vertex_color;
     float3 normal;
+    float3 normal_across;
+    float3 normal_down;
     float4 tangent;
     bool front;
 };
@@ -176,6 +179,11 @@ Shown shown_at(Shading shading, Material* materials, uint2 pixel, uint2 seen) {
         weight.x * a.vertex.color + weight.y * b.vertex.color + weight.z * c.vertex.color;
     out.normal =
         weight.x * a.turned.normal + weight.y * b.turned.normal + weight.z * c.turned.normal;
+    float3 unit = normalize(out.normal);
+    out.normal_across = normalize(out.normal + weight_across.x * a.turned.normal
+        + weight_across.y * b.turned.normal + weight_across.z * c.turned.normal) - unit;
+    out.normal_down = normalize(out.normal + weight_down.x * a.turned.normal
+        + weight_down.y * b.turned.normal + weight_down.z * c.turned.normal) - unit;
     out.tangent =
         weight.x * a.turned.tangent + weight.y * b.turned.tangent + weight.z * c.turned.tangent;
     return out;
@@ -213,10 +221,12 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     float3 emission = sampled_by(material, 4, uv, uv_across, uv_down).rgb * material.emissive;
     color.a = 1.0;
     occlusion = ambient(frame, pixel.xy, occlusion);
-    float4 reflected = reflection(frame, pixel.xy, roughness_of(material, surface));
+    float roughness = filtered_roughness(roughness_of(material, surface), shown.normal_across,
+                                         shown.normal_down);
+    float4 reflected = reflection(frame, pixel.xy, roughness);
     storage[push.target][at] =
         lit(frame, material, shown.world, shown.normal, shown.tangent, shown.front, color, surface,
-            mapped, occlusion, emission, reflected);
+            roughness, mapped, occlusion, emission, reflected);
 }
 
 // Each pixel's unit normal in the world, as shading turns it, with its normal map's bumps, in RGB,

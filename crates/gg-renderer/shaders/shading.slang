@@ -8,6 +8,8 @@
 // - KHR_materials_pbrSpecularGlossiness by its reference: specular color head-on, diffuse color
 //   times 1 less that color's strongest channel, roughness 1 less glossiness.
 // - Light falloff by KHR_lights_punctual's reference.
+// - Roughness widened by how far the normal turns across the pixel (`filtered_roughness`), so a
+//   highlight narrower than a pixel spreads over it rather than flickering as it moves.
 // - The sky's prefiltered light by the split sum, with Fdez-Agüera's roughness-dependent Fresnel
 //   and multiple scattering ("A Multiple-Scattering Microfacet Model for Real-Time Image-based
 //   Lighting", 2019), as glTF-Sample-Renderer's ibl.glsl and pbr.frag have it (at df3e51cb).
@@ -344,6 +346,23 @@ float roughness_of(Material material, float4 surface) {
     return clamp(material.roughness * surface.g, LEAST_ROUGHNESS, 1.0);
 }
 
+// Geometric specular antialiasing's screen-space variance of the pixel's filter, and the most it
+// adds to GGX's alpha squared, against its derivatives' error: Filament's defaults
+// (`specularAntiAliasingVariance` and `specularAntiAliasingThreshold`).
+static const float SPECULAR_VARIANCE = 0.15;
+static const float SPECULAR_THRESHOLD = 0.2;
+
+// `roughness` widened for a normal that turns by `across` and `down` a pixel across and down, the
+// interpolated normal's change: the pixel's spread of normals added to the lobe's alpha squared
+// (Tokuyoshi and Kaplanyan, "Improved Geometric Specular Antialiasing", 2019, as Filament's
+// `normalFiltering` has it). A normal map's own spread within the pixel isn't counted.
+float filtered_roughness(float roughness, float3 across, float3 down) {
+    float spread = min(2.0 * SPECULAR_VARIANCE * (dot(across, across) + dot(down, down)),
+                       SPECULAR_THRESHOLD);
+    float alpha = roughness * roughness;
+    return sqrt(sqrt(saturate(alpha * alpha + spread)));
+}
+
 // The share of `Reflected::roughness`, below it, over which the view's reflections fade into the
 // sky's specular light.
 static const float ROUGHNESS_FADE = 0.25;
@@ -457,8 +476,8 @@ float3 specular_color(Material material, float3 base, float4 surface) {
 // material's base color, and black for the rest, which it doesn't read: a glTF one without
 // normals has +Z everywhere.
 float4 surface_shown(uint show, Material material, float3 interpolated, float4 tangent, bool front,
-                     float4 color, float4 surface, float2 mapped, float occlusion,
-                     float3 emission) {
+                     float4 color, float4 surface, float roughness, float2 mapped,
+                     float occlusion, float3 emission) {
     if (show == SHOW_BASE_COLOR) {
         return color;
     }
@@ -480,7 +499,7 @@ float4 surface_shown(uint show, Material material, float3 interpolated, float4 t
         bool metal_rough = (material.flags & SPECULAR_GLOSSINESS) == 0;
         value = float3(metal_rough ? saturate(material.metallic * surface.b) : 0.0);
     } else if (show == SHOW_ROUGHNESS) {
-        value = float3(roughness_of(material, surface));
+        value = float3(roughness);
     } else {
         value = float3(occlusion);
     }
@@ -490,14 +509,14 @@ float4 surface_shown(uint show, Material material, float3 interpolated, float4 t
 // The color of a point of `material`, lit or unlit. `front`: whether its triangle shows the side
 // its mesh winds counterclockwise, which a mirroring transform reverses. `color` (vertices' and
 // factor's in), `surface`, `mapped` (X and Y, -1 to 1), `occlusion`, `emission`: its maps there.
-// Where `show` asks: an input (`surface_shown`), or a part of its light, exposed, unhazed, none for
-// what's unlit.
+// `roughness`: the surface's, as `filtered_roughness` widens it. Where `show` asks: an input
+// (`surface_shown`), or a part of its light, exposed, unhazed, none for what's unlit.
 float4 lit(Frame frame, Material material, float3 world, float3 interpolated, float4 tangent,
-           bool front, float4 color, float4 surface, float2 mapped, float occlusion,
-           float3 emission, float4 reflection) {
+           bool front, float4 color, float4 surface, float roughness, float2 mapped,
+           float occlusion, float3 emission, float4 reflection) {
     if (frame.show != SHOW_LIGHT && frame.show < SHOW_DIRECT_LIGHT) {
         return surface_shown(frame.show, material, interpolated, tangent, front, color, surface,
-                             mapped, occlusion, emission);
+                             roughness, mapped, occlusion, emission);
     }
     if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
         return frame.show == SHOW_LIGHT ? color : float4(0.0, 0.0, 0.0, color.a);
@@ -507,7 +526,6 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
     // What it diffuses and reflects head-on, for the lights; for the sky's light, a dielectric's,
     // which `sky_light` mixes with a metal's by how metallic it is.
     float metallic = 0.0;
-    float roughness = roughness_of(material, surface);
     float3 diffuse_color;
     float3 f0 = specular_color(material, color.rgb, surface);
     float3 sky_diffuse;

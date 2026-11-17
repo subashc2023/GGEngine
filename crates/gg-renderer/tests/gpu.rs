@@ -104,6 +104,7 @@ fn main() -> ExitCode {
         reflections_mirror_about_the_shading_normal,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
+        a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -175,6 +176,7 @@ fn main() -> ExitCode {
         reflections_mirror_about_the_shading_normal,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
+        a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -8334,6 +8336,68 @@ fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
         [[0.0; 3]; 2],
         "what's unlit takes no light"
     );
+    shut_down(renderer);
+}
+
+/// A mirror-smooth ball 8 pixels across, lit from the view, reflects about the same light wherever
+/// it falls within a pixel: its roughness widens by how far its normal turns across each pixel, so
+/// its highlight, unwidened far narrower than a pixel, spreads over pixels rather than lighting
+/// one only where its center hits the highlight.
+fn a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel() {
+    const SIZE: u32 = 32;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    // 16 pixels a unit; the view's center between four pixels.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    let ball = sphere(&mut stores.meshes, 0.25, 24, 48);
+    let material = stores.materials.add(&Material {
+        color: Vec4::ONE,
+        workflow: metallic(1.0, 0.0),
+        ..Material::default()
+    });
+    let draw = MeshDraw::with_material(ball, material, &stores.materials, &mut stores.shaders);
+    stores.lights = vec![Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::NEG_Z,
+        color: Vec3::splat(0.05),
+        range: None,
+        shadow_distance: None,
+    }];
+    let viewport = filling([SIZE, SIZE]);
+    // The red light the ball reflects, summed over the view, with its center `offset` pixels right
+    // of and below the view's: a pixel's center at 0.5.
+    let mut reflected = |offset: f32| {
+        let mut draws = Draws::default();
+        let at = Vec3::new(offset, -offset, 0.0) / 16.0;
+        draws.push_draw(Mat4::from_translation(at), &draw, 1);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let data = RenderData {
+            show: Some(Show::Shading(Channel::SpecularLight)),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let frame = frame_pixels(&mut renderer);
+        let pixels = frame.as_chunks::<4>().0.iter();
+        pixels.map(|pixel| decoded(pixel[0])).sum::<f32>()
+    };
+    let sums = [0.0, 0.25, 0.5, 0.75].map(&mut reflected);
+    let mean = sums.iter().sum::<f32>() / 4.0;
+    assert!(mean > 0.1, "the ball reflects {sums:?}");
+    for sum in sums {
+        assert!(
+            (sum / mean - 1.0).abs() < 0.1,
+            "the ball reflects {sums:?} as it moves by quarters of a pixel"
+        );
+    }
     shut_down(renderer);
 }
 

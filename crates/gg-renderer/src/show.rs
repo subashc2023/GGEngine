@@ -83,7 +83,7 @@ pub enum Channel {
     SurfaceNormal,
     /// 0 for a specular-glossiness material.
     Metallic,
-    /// As shading takes it, from 0.045.
+    /// As shading takes it, from 0.045, widened where the normal turns across the pixel.
     Roughness,
     /// The share of light from all around that reaches it: its occlusion map's and the view's
     /// ambient occlusion's.

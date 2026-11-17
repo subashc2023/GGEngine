@@ -1073,7 +1073,8 @@ pub enum Shown {
     SurfaceNormal,
     /// 0 for a specular-glossiness material.
     Metallic,
-    /// As shading takes it: from 0.045, the least it takes, to 1.
+    /// As shading takes it: from 0.045, the least it takes, to 1, widened where the normal turns
+    /// across the pixel.
     Roughness,
     /// The share of ambient light that reaches it, as shading takes it: its material's occlusion
     /// map's and the view's ambient occlusion's.
