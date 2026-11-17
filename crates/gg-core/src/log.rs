@@ -40,9 +40,11 @@ const MOST_LINE: usize = 1 << 20;
 /// The JSON log's last events.
 pub static EVENTS: Events = Events::new();
 
-/// Starts this process's logging: colored lines on stderr if `console`, and JSON lines in
-/// [`EVENTS`] and a file in `dir`, named by `name`, the time and the process ID. Returns the file's
-/// path, or `None`, warning why, if it can't be made.
+/// Starts this process's logging, returning the log file's path, or `None`, warning why, if it can't
+/// be made.
+///
+/// Lines go colored to stderr if `console`, and as JSON to [`EVENTS`] and a file in `dir`, named by
+/// `name`, the time and the process ID.
 ///
 /// Without `console`, nothing reaches stderr: an embedded game's tool reads its stderr and events,
 /// and would show each event twice.
