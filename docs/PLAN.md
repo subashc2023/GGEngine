@@ -92,6 +92,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Debug events compiled out of shipping builds, which keep them for agents (`release_max_level_debug`) | They cost a shipped game |
 | CI: GPU tests on Windows and macOS, windowed frames' allocations, captures' names, time gates | A runner with a GPU, or a break CI misses |
 | ship.yml's caches; micro-benchmarks | ship.yml runs often, or a hot path gets a target |
+| Faster CI builds: rust-lld on Windows (−9 to −16 s a job), gg-engine's four one-test binaries as one (−2 to −6 s), slangc processes in parallel (up to −13 s on Linux) | CI's minutes or waits matter more |
 | Tracy: thread names on macOS, egui's own scopes (`profiling` 1.0.18 takes tracy-client 0.18) | Someone profiles on macOS, or `profiling` moves to 0.19 |
 | A clean exit on Ctrl+C in windowed runs; layers pushed and popped mid-run; a layer reading and drawing in one loop | A console ends runs, or a tool needs it |
 | Hand checks: Windows' frame on Windows 10 and across monitors of mixed scale; the cursor's grab on each OS | Someone is at such a machine |
