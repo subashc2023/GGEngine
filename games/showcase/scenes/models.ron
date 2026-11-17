@@ -3,7 +3,7 @@
         "0a1f3dc12b66bf20": (
             Name: ("Hint"),
             Text: (
-                text: "glTF, unlit: vertex colors, a texture, and a model of two nodes, through a camera with perspective",
+                text: "glTF, lit and unlit: flat and smooth normals, a texture, vertex colors, and a model of two nodes, through a camera with perspective",
                 font: None,
                 size: 0.2,
                 color: (0.45, 0.5, 0.62, 1.0),
@@ -33,6 +33,24 @@
                 translation: (0.0, -1.4, -2.0),
                 rotation: (-0.70710677, 0.0, 0.0, 0.70710677),
                 scale: (14.0, 10.0, 1.0),
+            ),
+        ),
+        "3910f768a8ca4eec": (
+            Light: (
+                kind: Directional,
+                color: (0.85, 0.9, 1.0),
+                intensity: 30000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Fill light"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.1182969, 0.4190027, 0.05516275, 0.8985542),
+                scale: (1.0, 1.0, 1.0),
             ),
         ),
         "48ea1872cf32d8d0": (
@@ -80,9 +98,9 @@
             ),
         ),
         "7491b8e19d6ad231": (
-            Name: ("Label: Vertex colors"),
+            Name: ("Label: Flat"),
             Text: (
-                text: "Vertex colors",
+                text: "Flat",
                 font: None,
                 size: 0.24,
                 color: (0.95, 0.96, 1.0, 1.0),
@@ -94,6 +112,24 @@
             Transform: (
                 translation: (-3.3, -1.05, 0.8),
                 rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "8b6fe80d9022372b": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 0.96, 0.9),
+                intensity: 100000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 5.0, 0.0),
+                rotation: (-0.49303037, -0.34512126, 0.0, 0.79863155),
                 scale: (1.0, 1.0, 1.0),
             ),
         ),
@@ -142,9 +178,9 @@
             ),
         ),
         "cdf343ab1ecfcb8a": (
-            Name: ("Label: Two nodes"),
+            Name: ("Label: Unlit, two nodes"),
             Text: (
-                text: "Two nodes",
+                text: "Unlit, vertex colors\nTwo nodes",
                 font: None,
                 size: 0.24,
                 color: (0.95, 0.96, 1.0, 1.0),

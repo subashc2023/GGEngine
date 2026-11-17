@@ -41,7 +41,7 @@
 //!
 //! # Models and animation
 //!
-//! - `models.ron`: glTF models, unlit, textured and of several nodes.
+//! - `models.ron`: glTF models, lit, flat and smooth, textured, and unlit of several nodes.
 //! - `skeletal.ron`: Khronos's Fox, skinned, playing Survey, Walk and Run alone, blended and
 //!   cross-faded. `models/fox` is CC0 by PixelMannen, rigged and animated by tomkranis, and made
 //!   glTF by AsoboStudio and scurest under CC BY 4.0, as its README says.
