@@ -115,7 +115,7 @@ pub use taa::Antialiasing;
 pub use text::Glyph;
 pub use texture::{Map, Mipmaps, Texels, Texture, Textures};
 #[doc(hidden)]
-pub use texture::{add_levels, add_map_mipmaps, add_mipmaps};
+pub use texture::{add_levels, add_map_mipmaps, add_mipmaps, widen_by_normals};
 pub use tonemap::Tonemapper;
 pub use ui::Ui;
 pub use view::{Outline, ViewCallback};

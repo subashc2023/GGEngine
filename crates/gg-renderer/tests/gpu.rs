@@ -106,6 +106,7 @@ fn main() -> ExitCode {
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
         a_masked_textures_coverage_holds_as_it_shrinks,
+        a_bumpy_planes_highlight_holds_as_it_shrinks,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -8462,6 +8463,95 @@ fn a_masked_textures_coverage_holds_as_it_shrinks() {
     assert!(
         (small - large).abs() < 0.1,
         "the leaves cover {large} at {SIZE} pixels and {small} at 8"
+    );
+    shut_down(renderer);
+}
+
+/// A bumpy plane's highlight, lit and seen head on, keeps its brightness at 16 pixels across, its
+/// normal map's fifth level, as at 256, its first: the surface map's levels are widened by the
+/// normals' spread under each texel ([`gg_renderer::widen_by_normals`]). Unwidened, the averaged
+/// normals are flat and the small plane's highlight several times brighter. Seen orthographically,
+/// only the levels differ.
+fn a_bumpy_planes_highlight_holds_as_it_shrinks() {
+    const SIZE: u32 = 256;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    // Slopes across and down of about 0.15, each the sum of three uniform hashes (lowbias32).
+    let hash = |mut x: u32| {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb_352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846c_a68b);
+        x ^ (x >> 16)
+    };
+    let slope = |i: u32| {
+        let uniform = |n: u32| (hash(3 * i + n) as f32 / u32::MAX as f32) - 0.5;
+        let slope = 0.3 * (uniform(0) + uniform(1) + uniform(2));
+        ((slope + 1.0) / 2.0 * 255.0).round() as u8
+    };
+    let normals: Vec<u8> = (0..SIZE * SIZE)
+        .flat_map(|i| [slope(2 * i), slope(2 * i + 1), 255, 255])
+        .collect();
+    // Roughness 0.3, not metallic.
+    let mut surface = [255, 77, 0, 255].repeat((SIZE * SIZE) as usize);
+    gg_renderer::add_map_mipmaps(&mut surface, [SIZE, SIZE]);
+    let paired = gg_renderer::widen_by_normals(&mut surface, [SIZE; 2], &normals, [SIZE; 2], 1.0);
+    assert!(paired);
+    let textures = &mut stores.textures;
+    let normals = textures.add("bumps", [SIZE; 2], &normals, Texels::Map(Map::Normal));
+    let surface = textures.add(
+        "rough",
+        [SIZE; 2],
+        &surface,
+        Texels::MapLevels(Map::Surface),
+    );
+    let material = stores.materials.add(&Material {
+        color: Vec4::ONE,
+        workflow: metallic(1.0, 1.0),
+        surface_texture: Sampled::of(surface.expect("a texture")),
+        normal_texture: Some(Sampled::of(normals.expect("a texture"))),
+        ..Material::default()
+    });
+    let square = model_square(&mut stores.meshes);
+    let draw = MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+    stores.lights = vec![Light {
+        kind: LightKind::Directional,
+        position: Vec3::ZERO,
+        direction: Vec3::NEG_Z,
+        color: Vec3::ONE,
+        range: None,
+        shadow_distance: None,
+    }];
+    let viewport = filling([SIZE, SIZE]);
+    // The mean red light the plane reflects, `across` pixels a side, on pixels' edges.
+    let mut reflected = |across: u32| {
+        let mut draws = Draws::default();
+        let scale = Vec3::splat(across as f32 / SIZE as f32);
+        draws.push_draw(Mat4::from_scale(scale), &draw, 1);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let data = RenderData {
+            show: Some(Show::Shading(Channel::SpecularLight)),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let frame = frame_pixels(&mut renderer);
+        let pixels = frame.as_chunks::<4>().0.iter();
+        pixels.map(|pixel| decoded(pixel[0])).sum::<f32>() / (across * across) as f32
+    };
+    let [large, small] = [SIZE, 16].map(&mut reflected);
+    assert!(large > 0.01, "the plane reflects {large} at {SIZE} pixels");
+    assert!(
+        (small / large - 1.0).abs() < 0.25,
+        "the plane reflects {large} at {SIZE} pixels and {small} at 16"
     );
     shut_down(renderer);
 }

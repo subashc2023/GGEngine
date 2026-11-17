@@ -579,6 +579,109 @@ pub fn add_map_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2]) {
     }
 }
 
+/// Widens the roughness (green) of `pixels`, a `size` surface map's full chain as
+/// [`add_map_mipmaps`] makes it, by the spread of the normals under each texel. They're those of
+/// `normals`, a `normals_size` normal map's RGBA8 first level, X and Y times `normal_scale`, built
+/// as shaders build them. Returns false, changing nothing, unless the sizes have one aspect and are
+/// equal or a power of two apart.
+///
+/// The spread is the length r of the normals' mean (Toksvig). A von Mises-Fisher lobe of
+/// κ = (3r - r³) / (1 - r²) fits them, which adds 2 / κ to GGX's alpha squared (Neubelt and
+/// Pettineo, "Crafting a Next-Gen Material Pipeline for The Order: 1886", 2013). So roughness g,
+/// alpha's square root, becomes (g⁴ + 2 / κ)^¼, at most 1. A texel over a single normal keeps its
+/// own.
+///
+/// # Panics
+///
+/// - If `pixels` isn't the chain's RGBA8, or `normals` holds less than its first level.
+#[doc(hidden)]
+pub fn widen_by_normals(
+    pixels: &mut [u8],
+    size: [u32; 2],
+    normals: &[u8],
+    normals_size: [u32; 2],
+    normal_scale: f32,
+) -> bool {
+    // Levels `larger` is above `[width, height]`, if a power of two times it.
+    let above = |[width, height]: [u32; 2], larger: [u32; 2]| {
+        (0..u32::BITS)
+            .find(|&up| [u64::from(width) << up, u64::from(height) << up] == larger.map(u64::from))
+    };
+    // The normal map's level as large as the surface map's first.
+    let first = match (above(size, normals_size), above(normals_size, size)) {
+        (Some(up), _) => i64::from(up),
+        (None, Some(down)) => -i64::from(down),
+        (None, None) => return false,
+    };
+    let _zone = gg_core::zone!();
+    let mut levels = Vec::new();
+    let mut at = 0;
+    for [width, height] in mip_sizes(size[0], size[1]) {
+        let bytes = width as usize * height as usize * 4;
+        levels.push(at..at + bytes);
+        at += bytes;
+    }
+    assert_eq!(pixels.len(), at, "a {size:?} map's full chain");
+    // Each X and Y byte pair's normal; a table, as building one per texel is slow in debug builds.
+    let built: Vec<[f32; 3]> = (0..=u16::MAX)
+        .map(|bytes| {
+            let [x, y] = bytes
+                .to_be_bytes()
+                .map(|byte| f32::from(byte) / 255.0 * 2.0 - 1.0);
+            let z = (1.0 - x * x - y * y).clamp(0.0, 1.0).sqrt();
+            let [x, y] = [x * normal_scale, y * normal_scale];
+            let length = (x * x + y * y + z * z).sqrt();
+            if length > 0.0 {
+                [x / length, y / length, z / length]
+            } else {
+                [0.0, 0.0, 1.0]
+            }
+        })
+        .collect();
+    let first_normals = normals.as_chunks::<4>().0;
+    let normal = |i: usize| {
+        let [x, y, ..] = first_normals[i];
+        let [x, y, z] = built[usize::from(u16::from_be_bytes([x, y]))];
+        [x, y, z, 0.0]
+    };
+    // Each level's mean normals, from the second: the first's texels each hold one.
+    let mut sizes = mip_sizes(normals_size[0], normals_size[1]);
+    let mut from = sizes.next().expect("a chain has its first level");
+    let mut means = Vec::new();
+    for (level, to) in (1..).zip(sizes) {
+        means = if level == 1 {
+            shrink(normal, from, to, false)
+        } else {
+            shrink(|i| means[i], from, to, false)
+        };
+        from = to;
+        let Ok(surface) = usize::try_from(level - first) else {
+            continue;
+        };
+        let texels = pixels[levels[surface].clone()].as_chunks_mut::<4>().0;
+        for (texel, &mean) in texels.iter_mut().zip(&means) {
+            texel[1] = widened(texel[1], mean);
+        }
+    }
+    true
+}
+
+/// `roughness`, a byte, widened by the spread of normals whose mean is `mean`
+/// ([`widen_by_normals`]).
+fn widened(roughness: u8, [x, y, z, _]: [f32; 4]) -> u8 {
+    let r2 = (x * x + y * y + z * z).min(1.0);
+    // 2 / κ, infinite where they cancel. None for 1 - r² under 1e-6, rounding's error for normals
+    // all alike, well under the 1.5e-5 of two a byte apart.
+    let spread = if 1.0 - r2 < 1e-6 {
+        0.0
+    } else {
+        2.0 * (1.0 - r2) / (r2.sqrt() * (3.0 - r2))
+    };
+    let g = f32::from(roughness) / 255.0;
+    let alpha2 = g * g * g * g + spread;
+    (alpha2.sqrt().sqrt().min(1.0) * 255.0).round() as u8
+}
+
 /// Reserves `pixels`' RGBA8 for every level from one of `from` texels on, at once: growing level by
 /// level would double the first's room, a 4,096 by 4,096 texture's 64 MiB to 128, rather than the
 /// 85 its chain takes.
@@ -1174,6 +1277,70 @@ mod tests {
         // Averaged, 8 by 8's texels each hold under half, a third on average.
         assert!(plain[3] < 0.05, "{plain:?}");
         assert_eq!(kept_colors, plain_colors);
+    }
+
+    /// A surface map's roughness widens by the spread of the normals under each texel: tilted ±30°
+    /// in a checker, 0.2 becomes 0.71, (0.2⁴ + 2 / κ)^¼ for r = cos 30°, where a texel covers both.
+    /// A flat normal map changes nothing, nor does one whose size doesn't pair.
+    #[test]
+    fn surface_levels_widen_by_their_normals_spread() {
+        let surface = |roughness: u8| {
+            let mut pixels = [255, roughness, 0, 128].repeat(16);
+            add_map_mipmaps(&mut pixels, [4, 4]);
+            pixels
+        };
+        // X 0.498 and -0.498, as bytes hold them.
+        let checker = |side: u32| -> Vec<u8> {
+            let tilted = |i: u32| {
+                if (i % side + i / side).is_multiple_of(2) {
+                    191
+                } else {
+                    64
+                }
+            };
+            (0..side * side)
+                .flat_map(|i| [tilted(i), 128, 255, 255])
+                .collect()
+        };
+        // Level by level, 4 by 4 to 1, under normals of each size.
+        for (side, levels) in [(2, [51, 51, 181]), (4, [51, 181, 181]), (8, [181; 3])] {
+            let mut pixels = surface(51);
+            assert!(widen_by_normals(
+                &mut pixels,
+                [4, 4],
+                &checker(side),
+                [side, side],
+                1.0
+            ));
+            let expected = [16, 4, 1].into_iter().zip(levels);
+            let expected: Vec<_> = expected
+                .flat_map(|(n, g)| vec![[255, g, 0, 128]; n])
+                .collect();
+            assert_eq!(
+                pixels.as_chunks::<4>().0,
+                expected,
+                "under {side} by {side}"
+            );
+        }
+        // Rough or smooth, flat normals spread none.
+        for roughness in [0, 51] {
+            let mut pixels = surface(roughness);
+            let flat = [128, 128, 255, 255].repeat(16);
+            assert!(widen_by_normals(&mut pixels, [4, 4], &flat, [4, 4], 1.0));
+            assert_eq!(pixels, surface(roughness));
+        }
+        for unpaired in [[4, 2], [6, 6], [2, 4]] {
+            let mut pixels = surface(51);
+            let normals = vec![0; (unpaired[0] * unpaired[1] * 4) as usize];
+            assert!(!widen_by_normals(
+                &mut pixels,
+                [4, 4],
+                &normals,
+                unpaired,
+                1.0
+            ));
+            assert_eq!(pixels, surface(51));
+        }
     }
 
     #[test]
