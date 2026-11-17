@@ -1636,11 +1636,10 @@ fn the_cursors_moves_queued_for_the_game_take_each_others_places() {
     assert_eq!(game.input, [in_game(at(499)), w_down, in_game(at(999))]);
 }
 
-/// A game asking for the cursor grabbed has the editor grab its own in Play. Escape lets go, though
-/// the game still asks, until a press in the view; the game gets both. Simulate lets go. Raw motion
-/// queued for the game adds up.
+/// A game asking for the cursor grabbed has the editor grab its own in Play, through Escape, which
+/// the game gets, as for its menu. Simulate lets go. Raw motion queued for the game adds up.
 #[test]
-fn a_games_grab_holds_the_editors_cursor_in_play_until_escape() {
+fn a_games_grab_holds_the_editors_cursor_in_play_through_escape() {
     let (mut game, _ends) = serving();
     let reader = Reader::create(4, 4).expect("memory");
     let writer = Writer::open(reader.name()).expect("opened");
@@ -1664,27 +1663,13 @@ fn a_games_grab_holds_the_editors_cursor_in_play_until_escape() {
     };
     let _ = game.route(&escape, &at, Some(VIEW));
     game.update(&mut cx, Duration::ZERO);
-    assert!(!cx.cursor_grabbed(), "let go at Escape");
-    let press = Event::MouseButton {
-        button: MouseButton::Left,
-        pressed: true,
-    };
-    let _ = game.route(&press, &at, Some(VIEW));
-    game.update(&mut cx, Duration::ZERO);
-    assert!(cx.cursor_grabbed(), "grabbed again at a press in the view");
+    assert!(cx.cursor_grabbed(), "held through Escape");
     let escaped = InputEvent::Key {
         key: "Escape".to_owned(),
         pressed: true,
         repeat: false,
     };
-    let pressed = InputEvent::Button {
-        button: gg_api::Button::Left,
-        pressed: true,
-    };
-    assert_eq!(
-        game.input,
-        [InputEvent::Motion([1.5, 4.0]), escaped, pressed]
-    );
+    assert_eq!(game.input, [InputEvent::Motion([1.5, 4.0]), escaped]);
     game.view.toolbar.world_camera = false;
     game.update(&mut cx, Duration::ZERO);
     assert!(!cx.cursor_grabbed(), "Simulate lets go");
@@ -1731,12 +1716,12 @@ fn shift_f1_lets_go_of_the_cursor_unseen_by_the_game() {
 }
 
 /// Play captures the view's input for a game that doesn't ask for a grab: the editor grabs the
-/// cursor from the game's answer until Escape, after which a press in the view grabs nothing.
-/// Resume in Play captures again, after an Escape too, as Play from Simulate does. Another client's
-/// stop lets go for good, as Simulate and Stop do: a switch back to the game's camera after another
-/// client's play isn't a click of Play.
+/// cursor from the game's answer, through Escape, until Shift+F1, after which a press in the view
+/// grabs nothing. Resume in Play captures again, after a Shift+F1 too, as Play from Simulate does.
+/// Another client's stop lets go for good, as Simulate and Stop do: a switch back to the game's
+/// camera after another client's play isn't a click of Play.
 #[test]
-fn play_captures_the_views_input_for_any_game_until_escape() {
+fn play_captures_the_views_input_for_any_game_until_shift_f1() {
     let (mut game, ends) = serving();
     let mut cx = Context::seeded(1);
     let mut grabbed = |game: &mut Game| {
@@ -1752,25 +1737,30 @@ fn play_captures_the_views_input_for_any_game_until_escape() {
     assert!(!grabbed(&mut game), "before the game plays");
     answer("play", false);
     assert!(grabbed(&mut game), "once it plays");
-    let at = reading([300.0, 200.0]);
-    let escape = Event::Key {
-        key: Key::Escape,
+    let at = Reading {
+        shift: true,
+        ..reading([300.0, 200.0])
+    };
+    let key = |key| Event::Key {
+        key,
         pressed: true,
         repeat: false,
     };
-    let _ = game.route(&escape, &at, Some(VIEW));
-    assert!(!grabbed(&mut game), "let go at Escape");
+    let _ = game.route(&key(Key::Escape), &at, Some(VIEW));
+    assert!(grabbed(&mut game), "held through Escape");
+    let _ = game.route(&key(Key::F1), &at, Some(VIEW));
+    assert!(!grabbed(&mut game), "let go at Shift+F1");
     game.click(overlay::Clicked::Pause);
     assert!(!grabbed(&mut game), "Pause");
     game.click(overlay::Clicked::Resume);
     assert!(grabbed(&mut game), "Resume in Play");
-    let _ = game.route(&escape, &at, Some(VIEW));
+    let _ = game.route(&key(Key::F1), &at, Some(VIEW));
     let press = Event::MouseButton {
         button: MouseButton::Left,
         pressed: true,
     };
     let _ = game.route(&press, &at, Some(VIEW));
-    assert!(!grabbed(&mut game), "a press in the view after Escape");
+    assert!(!grabbed(&mut game), "a press in the view after Shift+F1");
     game.click(overlay::Clicked::Resume);
     answer("status", true);
     assert!(!grabbed(&mut game), "another client's stop");

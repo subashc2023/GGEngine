@@ -31,7 +31,7 @@ impl Game {
     pub(super) fn click(&mut self, clicked: overlay::Clicked) {
         let resumes_play = clicked == overlay::Clicked::Resume && self.mode() == Mode::Play;
         let captures = clicked == overlay::Clicked::To(Mode::Play) || resumes_play;
-        // A capture grabs again what Escape let go of; any other click ends a capture.
+        // A capture grabs again what Shift+F1 let go of; any other click ends a capture.
         self.grab = match (captures, self.grab) {
             (true, _) => Grab::Captured,
             (false, Grab::Captured) => Grab::Asks,

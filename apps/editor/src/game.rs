@@ -58,12 +58,12 @@
 //!
 //! - In Play, a game that asks for the cursor grabbed, as the view's memory says, has the editor
 //!   grab it while the view has the keys. The mouse's raw motion goes to the game.
-//! - Escape lets go, though the game still gets the key: a game may not let go itself. Shift+F1
-//!   lets go too, as in Unreal, and the game never gets F1's press. A press in the view grabs
-//!   again. Simulate and Stop let go.
+//! - Shift+F1 lets go, as in Unreal: a game may not let go itself. The game never gets F1's press.
+//!   Escape is the game's, as for its menu. A press in the view grabs again. Simulate and Stop let
+//!   go.
 //! - Play, and Resume in Play, capture the view's input for any game: the view gets the keys their
-//!   click took, and the cursor is grabbed, the engine moving it onto the view, until Escape. After
-//!   that, a press grabs again only for a game that asks.
+//!   click took, and the cursor is grabbed, the engine moving it onto the view, until Shift+F1.
+//!   After that, a press grabs again only for a game that asks.
 //! - In Play, an outline round the view says it has the keys.
 //! - The editor's camera grabs the cursor while it looks about, orbits or dollies
 //!   ([`camera`](crate::camera)).
@@ -307,17 +307,17 @@ struct Game {
     rates: Rates,
 }
 
-/// The cursor's grab for the game, in Play: one state, as Escape ends a capture and a capture
-/// grabs again what Escape let go of.
+/// The cursor's grab for the game, in Play: one state, as Shift+F1 ends a capture and a capture
+/// grabs again what Shift+F1 let go of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Grab {
     /// Grabbed as the game asks, as the view's memory says.
     Asks,
     /// Play captured the view's input for the game, the cursor grabbed whether or not the game
-    /// asks: from a click of Play, or of Resume in Play, until Escape or the input stopping going
+    /// asks: from a click of Play, or of Resume in Play, until Shift+F1 or the input stopping going
     /// to the game, but while a Play clicked waits for the game's answer.
     Captured,
-    /// Escape let go of the cursor, until a press in the view.
+    /// Shift+F1 let go of the cursor, until a press in the view.
     Escaped,
 }
 
@@ -442,7 +442,7 @@ impl Layer for Game {
         if let Some(view) = cx.view() {
             self.fit(view.size);
         }
-        // The game's grab, in Play alone: Stop or Simulate end what Escape and Play did, but not
+        // The game's grab, in Play alone: Stop or Simulate end what Shift+F1 and Play did, but not
         // while a Play clicked waits for its answer. Also the editor's camera's grab.
         let through = self.through();
         self.grab = match self.grab {

@@ -30,22 +30,10 @@ impl Game {
     ) -> ControlFlow<()> {
         let origin = view.map_or([0, 0], |view| view.origin);
         let through = self.through();
-        // Escape lets go of the cursor, whatever the game does with it (a game may not let go
-        // itself), and ends Play's capture; a press in the view grabs it again if the game asks.
-        // The game gets both, as its own window would give them.
-        let escape = matches!(
-            *event,
-            Event::Key {
-                key: Key::Escape,
-                pressed: true,
-                ..
-            }
-        );
-        if through && escape {
-            self.grab = Grab::Escaped;
-        }
-        // Shift+F1 lets go too, as in Unreal, and the game never gets its press: a key no game
-        // takes for itself.
+        // Shift+F1 lets go of the cursor, whatever the game does with it (a game may not let go
+        // itself), and ends Play's capture, as in Unreal; a press in the view grabs it again if
+        // the game asks. The game never gets its press: Escape, which may open its menu, is its
+        // own.
         let frees = through && frees_cursor(event, reading.shift);
         if frees {
             self.grab = Grab::Escaped;
@@ -75,6 +63,14 @@ impl Game {
             self.view.toggles = toggles;
         }
         // Escape closes the Probe tool's numbers; a new probe shows its own instead.
+        let escape = matches!(
+            *event,
+            Event::Key {
+                key: Key::Escape,
+                pressed: true,
+                ..
+            }
+        );
         if escape {
             self.probing = None;
         }
