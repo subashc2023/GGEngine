@@ -202,26 +202,21 @@ fn main() -> ExitCode {
         let name = format!("meshlets_draw_as_their_indices_do through {through} shaders");
         tests.run(&name, || meshlets_draw_as_their_indices_do(mesh_shaders));
     }
-    // Once per upload path the GPU has.
-    for path in UploadPath::ALL {
-        if let Err(error) = Renderer::headless(&settings(Some(path)), 1, 1) {
-            assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
-            println!("tests uploading by {path} skipped: {error}");
-            continue;
-        }
-        run!(
-            tests uploading by path,
-            meshes_match_their_reference,
-            textures_match_their_reference,
-            sheets_match_their_reference,
-            a_large_texture_draws_once_streamed,
-            large_assets_stream_over_frames_within_the_budget,
-            a_reload_draws_the_old_until_the_new_is_drawable,
-            bc7_textures_sample_as_their_blocks,
-            replaced_meshes_and_textures_draw_once_they_are_there,
-            mipmaps_match_their_reference,
-        );
-    }
+    // By the GPU's own upload path alone: the renderer streams through the same calls on every
+    // path, and gg-gpu's tests make them on each.
+    let path = (Renderer::headless(&settings(None), 1, 1).expect("a renderer")).upload_path();
+    run!(
+        tests uploading by path,
+        meshes_match_their_reference,
+        textures_match_their_reference,
+        sheets_match_their_reference,
+        a_large_texture_draws_once_streamed,
+        large_assets_stream_over_frames_within_the_budget,
+        a_reload_draws_the_old_until_the_new_is_drawable,
+        bc7_textures_sample_as_their_blocks,
+        replaced_meshes_and_textures_draw_once_they_are_there,
+        mipmaps_match_their_reference,
+    );
     tests.finish()
 }
 
