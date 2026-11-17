@@ -289,8 +289,24 @@ impl Renderer {
             validation: settings.validation,
             window: None,
         })?;
+        Self::headless_on(&instance, settings, width, height)
+    }
+
+    /// [`Renderer::headless`] on `instance`, in place of the one `settings.app_name` and
+    /// `settings.validation` would make. For the GPU tests, which share one.
+    ///
+    /// # Panics
+    ///
+    /// - If a side is 0.
+    #[doc(hidden)]
+    pub fn headless_on(
+        instance: &Arc<Instance>,
+        settings: &Settings<'_>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
         let device = Device::new(
-            &instance,
+            instance,
             settings.gpu,
             None,
             settings.uploads,
@@ -298,7 +314,7 @@ impl Renderer {
         )?;
         let image = ColorImage::new(&device, width, height, OFFSCREEN)?;
         let output = Output::Offscreen(image, [width, height]);
-        Self::new(&instance, &device, output, settings)
+        Self::new(instance, &device, output, settings)
     }
 
     fn new(

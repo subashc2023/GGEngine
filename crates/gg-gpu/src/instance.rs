@@ -64,6 +64,12 @@ impl Validation {
     pub fn synchronization(&self) -> bool {
         self.synchronization
     }
+
+    /// Counts from 0 again, for the GPU tests' harness: tests that share an instance each count
+    /// their own reports.
+    pub(crate) fn reset(&self) {
+        self.messages.store(0, Ordering::Relaxed);
+    }
 }
 
 impl Instance {

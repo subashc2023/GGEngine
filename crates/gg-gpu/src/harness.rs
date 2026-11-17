@@ -2,13 +2,17 @@
 //!
 //! Each runs its tests in one process with a main of its own. It [`begin`]s before any thread
 //! exists, then runs the tests one after another through [`Tests`]: those whose names contain a
-//! non-flag argument, as libtest picks them, or all without one.
+//! non-flag argument, as libtest picks them, or all without one. Tests may share an [`instance`].
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::Validation;
+use crate::{Instance, InstanceDesc, Validation};
+
+/// What [`instance`] gives, made by its first call. [`Tests::finish`] destroys it.
+static SHARED: Mutex<Option<Arc<Instance>>> = Mutex::new(None);
 
 /// Readies a run of `name`'s GPU tests, logging into `dir`. Returns the JSON log's path, or `None`
 /// where the tests are skipped, which it prints.
@@ -50,6 +54,34 @@ pub unsafe fn begin(name: &str, dir: &Path) -> Option<PathBuf> {
     Some(gg_core::log::init(name, dir, true).expect("the tests read the JSON log"))
 }
 
+/// An instance under validation for the tests to share: making one per renderer took over a quarter
+/// of gg-renderer's GPU tests' time on an RTX 4090.
+/// [`Tests::run`] counts what validation reports through it against the test running.
+///
+/// # Panics
+///
+/// - If the instance can't be made, or doesn't validate as [`assert_validating`] asks.
+pub fn instance() -> Arc<Instance> {
+    let mut shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+    let instance = shared.get_or_insert_with(|| {
+        let instance = Instance::new(&InstanceDesc {
+            app_name: "GPU tests",
+            validation: true,
+            window: None,
+        })
+        .expect("a Vulkan instance");
+        assert_validating(&instance.validation());
+        instance
+    });
+    Arc::clone(instance)
+}
+
+/// What validation reports through the shared [`instance`], once made.
+fn shared_validation() -> Option<Validation> {
+    let shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+    shared.as_ref().map(|instance| instance.validation())
+}
+
 /// Runs the tests the arguments pick, one after another, and counts how they go.
 pub struct Tests {
     /// The arguments that aren't libtest's flags or their values: a test runs if its name
@@ -88,14 +120,24 @@ impl Tests {
     }
 
     /// Runs `test` if the filters pick it, and prints whether it passed. A failing test stops
-    /// there and the log shows its panic, but later tests still run.
+    /// there and the log shows its panic, but later tests still run. A test also fails if
+    /// validation reports anything through the shared [`instance`] while it runs.
     pub fn run(&mut self, name: &str, test: impl FnOnce()) {
         let picked = self.filters.is_empty()
             || (self.filters.iter()).any(|filter| name.contains(filter.as_str()));
         if !picked {
             return;
         }
-        if panic::catch_unwind(AssertUnwindSafe(test)).is_ok() {
+        if let Some(validation) = shared_validation() {
+            validation.reset();
+        }
+        let tested = panic::catch_unwind(AssertUnwindSafe(|| {
+            test();
+            if let Some(validation) = shared_validation() {
+                check(&validation);
+            }
+        }));
+        if tested.is_ok() {
             self.passed += 1;
             println!("test {name} ... ok");
         } else {
@@ -104,11 +146,25 @@ impl Tests {
         }
     }
 
-    /// Prints how many tests passed and failed, and fails the run if any failed.
+    /// Destroys the shared [`instance`], prints how many tests passed and failed, and fails the
+    /// run if any failed or validation reported anything as the instance was destroyed.
     pub fn finish(self) -> ExitCode {
         let Self { passed, failed, .. } = self;
+        let shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let destroyed_cleanly = shared.is_none_or(|instance| {
+            let validation = instance.validation();
+            validation.reset();
+            drop(instance);
+            validation.messages() == 0
+        });
+        if !destroyed_cleanly {
+            println!(
+                "validation reported problems as the shared instance was destroyed; the log above \
+                 says what"
+            );
+        }
         println!("test result: {passed} passed; {failed} failed");
-        if failed == 0 {
+        if failed == 0 && destroyed_cleanly {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
@@ -130,7 +186,8 @@ pub fn assert_validating(validation: &Validation) {
     );
 }
 
-/// Checks that validation reported nothing, once what it validated has been dropped.
+/// Checks that validation reported nothing, once what it validated has been dropped: through the
+/// shared [`instance`], nothing since the test began.
 #[track_caller]
 pub fn check(validation: &Validation) {
     assert_eq!(

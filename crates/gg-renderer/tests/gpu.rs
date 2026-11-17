@@ -1,8 +1,8 @@
 //! GPU tests against reference images, on the loader's GPU (lavapipe in Linux CI).
 //!
 //! Their main turns off the loader's implicit layers before any thread exists, then runs the
-//! tests whose names contain a non-flag argument, or all. `GG_UPDATE_REFERENCES=1` writes each
-//! output as its new reference.
+//! tests whose names contain a non-flag argument, or all. Renderers share an instance, except in
+//! tests of how one is made. `GG_UPDATE_REFERENCES=1` writes each output as its new reference.
 
 // For setting the environment; see the SAFETY comment.
 #![allow(unsafe_code)]
@@ -193,7 +193,7 @@ fn main() -> ExitCode {
             mesh_shaders: Some(mesh_shaders),
             ..settings(None)
         };
-        if let Err(error) = Renderer::headless(&settings, 1, 1) {
+        if let Err(error) = Renderer::headless_on(&harness::instance(), &settings, 1, 1) {
             assert_eq!(error.code(), "gpu.no_mesh_shaders", "{error:#}");
             println!("tests drawing meshlets through mesh shaders skipped: {error}");
             continue;
@@ -204,7 +204,7 @@ fn main() -> ExitCode {
     }
     // By the GPU's own upload path alone: the renderer streams through the same calls on every
     // path, and gg-gpu's tests make them on each.
-    let path = (Renderer::headless(&settings(None), 1, 1).expect("a renderer")).upload_path();
+    let path = renderer(1, 1).upload_path();
     run!(
         tests uploading by path,
         meshes_match_their_reference,
@@ -242,7 +242,7 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
     }
 }
 
-/// A headless renderer, validating.
+/// A headless renderer on the instance the tests share, validating.
 fn renderer(width: u32, height: u32) -> Renderer {
     renderer_uploading(width, height, None)
 }
@@ -258,8 +258,8 @@ fn renderer_within(width: u32, height: u32, uploads: Option<UploadPath>, budget:
         upload_budget: budget,
         ..settings(uploads)
     };
-    let renderer = Renderer::headless(&settings, width, height).expect("a renderer");
-    harness::assert_validating(&renderer.validation());
+    let instance = harness::instance();
+    let renderer = Renderer::headless_on(&instance, &settings, width, height).expect("a renderer");
     if let Some(uploads) = uploads {
         assert_eq!(
             renderer.upload_path(),
@@ -10468,7 +10468,8 @@ fn meshlets_draw_as_their_indices_do(mesh_shaders: bool) {
             visibility_buffer,
             ..settings(None)
         };
-        let mut renderer = Renderer::headless(&settings, WIDTH, HEIGHT).expect("a renderer");
+        let mut renderer = Renderer::headless_on(&harness::instance(), &settings, WIDTH, HEIGHT)
+            .expect("a renderer");
         let mut stores = Stores::default();
         let floor = model_square(&mut stores.meshes);
         // Its finest level, then every other ring and segment of it.
