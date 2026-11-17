@@ -44,9 +44,10 @@ pub struct ViewCallback;
 /// An outline round what the game's view shows of a set of IDs' draws, such as an entity's and its
 /// descendants'.
 ///
-/// Drawn into the view so it shows wherever the view does, and as it's read back. It rings the shape their pixels on top make together, inside it too where another ID's draw covers
-/// part, but not what's hidden. A solid band `width` pixels past their edge, its outer edge
-/// smoothed, then a glow fading over as far again.
+/// It's drawn into the view so it shows wherever the view does, and as it's read back. It rings the
+/// shape their pixels on top make together, inside it too where another ID's draw covers part, but
+/// not what's hidden. A solid band `width` pixels past their edge, its outer edge smoothed, then a
+/// glow fading over as far again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Outline<'a> {
     /// Sorted, without 0 (draws of no entity) or repeats. None outlines nothing. The renderer

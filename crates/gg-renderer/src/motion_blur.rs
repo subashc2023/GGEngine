@@ -23,8 +23,8 @@ const TILES_DOWN: u32 = 36;
 /// Motion blur, as [`RenderData::motion_blur`](crate::RenderData::motion_blur) gives it.
 ///
 /// The view is blurred along how far things moved while the shutter was open, centered on where
-/// they show. Motion is as [`Antialiasing::Taa`](crate::Antialiasing::Taa) says. A headless frame draws a
-/// tick, so its motion is a tick's.
+/// they show. Motion is as [`Antialiasing::Taa`](crate::Antialiasing::Taa) says. A headless frame
+/// draws a tick, so its motion is a tick's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionBlur {
     /// The share of the frame the shutter is open, as a film shutter's angle is of a turn: 0 none,

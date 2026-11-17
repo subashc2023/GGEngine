@@ -118,9 +118,9 @@ impl AssetKind {
 
 /// An asset's ID file, `<file>.meta` beside it.
 ///
-/// Canonical RON, a part to a line, as [`text`](Self::text) writes it: `(`,
-/// `    id: "5f3c9a1e07b2d846",`, `)`. `id` is required; a part added later, as import settings will
-/// be, takes its default where a file leaves it out; an unknown part is refused.
+/// It's canonical RON, a part to a line, as [`text`](Self::text) writes it: `(`,
+/// `    id: "5f3c9a1e07b2d846",`, `)`. `id` is required; a part added later, as import settings
+/// will be, takes its default where a file leaves it out; an unknown part is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meta {
     pub id: AssetId,
@@ -197,11 +197,11 @@ pub struct Scan {
 
 /// An asset [`scan`] found.
 ///
-/// Its path from the root, `/` between parts, such as `assets/stone.png`; the file, as the scan
-/// reached it; its stamp, `None` if its listing gave none; its kind; and its ID file: `None` if
-/// there's none, or what it holds, or why it doesn't. That's `asset.bad_meta` for one that doesn't
-/// read or isn't a regular file, and `asset.meta_case` for one whose name matches only ignoring
-/// case, whose path from the root `misnamed` gives.
+/// It holds its path from the root, `/` between parts, such as `assets/stone.png`; the file, as the
+/// scan reached it; its stamp, `None` if its listing gave none; its kind; and its ID file: `None`
+/// if there's none, or what it holds, or why it doesn't. That's `asset.bad_meta` for one that
+/// doesn't read or isn't a regular file, and `asset.meta_case` for one whose name matches only
+/// ignoring case, whose path from the root `misnamed` gives.
 #[derive(Debug, PartialEq)]
 pub struct Scanned {
     pub path: String,
@@ -214,9 +214,9 @@ pub struct Scanned {
 
 /// An ID file whose asset isn't there as a regular file.
 ///
-/// A link or a folder of the asset's name, which the scan doesn't take, may be. Holds the path from
-/// the root, such as `assets/gone.png.meta`; the file, as the scan reached it; its asset's kind;
-/// and what it holds, or why it doesn't read.
+/// A link or a folder of the asset's name, which the scan doesn't take, may be. It holds the path
+/// from the root, such as `assets/gone.png.meta`; the file, as the scan reached it; its asset's
+/// kind; and what it holds, or why it doesn't read.
 #[derive(Debug, PartialEq)]
 pub struct Orphan {
     pub path: String,
@@ -361,9 +361,9 @@ pub fn files(root: &Path) -> (Vec<Found>, Vec<Unread>) {
 
 /// Whether [`scan`] and [`files`] reach the file at `path` from the asset root, by its names.
 ///
-/// None hidden, and no folder they skip as built, so that an asset a game writes there is in the
-/// next scan and its package. A link on the way, which they never go through, is the caller's to
-/// look for, as a path the disk resolved has none.
+/// It holds when none is hidden and no folder is one they skip as built, so that an asset a game
+/// writes there is in the next scan and its package. A link on the way, which they never go
+/// through, is the caller's to look for, as a path the disk resolved has none.
 pub fn reached(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
     let (_, folders) = parts.split_last().expect("a split gives a part at least");

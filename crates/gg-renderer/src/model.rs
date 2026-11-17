@@ -94,10 +94,10 @@ pub(crate) struct MeshletSpirv {
 
 /// A model mesh's vertex.
 ///
-/// Its position in mesh space, its texture coordinates, a linear RGBA color multiplying the
-/// material's, its unit normal, and its unit tangent along the textures' X, with the sign making
-/// the bitangent `cross(normal, tangent) * w` run along their Y, as glTF's `TANGENT` has it. A mesh
-/// without a normal map may leave tangents as anything.
+/// It holds its position in mesh space, its texture coordinates, a linear RGBA color multiplying
+/// the material's, its unit normal, and its unit tangent along the textures' X, with the sign
+/// making the bitangent `cross(normal, tangent) * w` run along their Y, as glTF's `TANGENT` has it.
+/// A mesh without a normal map may leave tangents as anything.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
 pub struct ModelVertex {
@@ -153,10 +153,10 @@ impl Sampled {
 
 /// How a model's mesh looks, as glTF's metallic-roughness materials say.
 ///
-/// Lit, its base color, reflection, normal map, occlusion and emission; or unlit
-/// (KHR_materials_unlit), its base color
-/// alone, as every material draws in a frame without lights. Each texture multiplies its factor,
-/// sampled where the vertices say. `alpha` says how it covers what's behind.
+/// It is lit, with its base color, reflection, normal map, occlusion and emission; or unlit
+/// (KHR_materials_unlit), with its base color alone, as every material draws in a frame without
+/// lights. Each texture multiplies its factor, sampled where the vertices say. `alpha` says how it
+/// covers what's behind.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
     /// Linear RGBA, straight alpha, multiplied by its texture's colors and the vertices'. A
@@ -251,9 +251,9 @@ impl MaterialId {
 /// The materials models' draws index, in a GPU table.
 ///
 /// Each entry is written when added or replaced, not copied per draw per frame. Handles come at
-/// once; [`Uploads::take`](crate::Uploads::take)
-/// takes the writes for the frame to make before it draws. A renderer draws one `Materials`'
-/// materials only. Handles are never reused, so the table holds every material a run added.
+/// once; [`Uploads::take`](crate::Uploads::take) takes the writes for the frame to make before it
+/// draws. A renderer draws one `Materials`' materials only. Handles are never reused, so the table
+/// holds every material a run added.
 #[derive(Default)]
 pub struct Materials {
     /// Written since last taken, in order: each material's index and entry.

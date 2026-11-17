@@ -14,8 +14,8 @@ const CHUNK: usize = 1024;
 
 /// What a query takes of each entity: `&T`, `&mut T`, `Entity`, or a tuple of up to 8 of them.
 ///
-/// `&T` reads its `T`, `&mut T` changes it ([`Writable`] only), `Entity` is the entity; a
-/// component is named once. [`World::query_mut`](super::World::query_mut) takes any;
+/// `&T` reads its `T`, `&mut T` changes it ([`Writable`] only), `Entity` is the entity; a component
+/// is named once. [`World::query_mut`](super::World::query_mut) takes any;
 /// [`World::query`](super::World::query) only readers.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a query",

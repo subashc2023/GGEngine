@@ -1,10 +1,9 @@
 //! Reflection: the engine's runtime knowledge of its types' fields.
 //!
-//! The inspector, scenes,
-//! operations, snapshots, replication, Luau's bindings and the tool API reach components by name
-//! through it, without Rust types. A type describes itself once to [`Types`]. Its values go in and
-//! out as [`Value`]s, checked against that description. Derive [`Reflect`], or
-//! `#[derive(Clone, Component)]` for components.
+//! The inspector, scenes, operations, snapshots, replication, Luau's bindings and the tool API
+//! reach components by name through it, without Rust types. A type describes itself once to
+//! [`Types`]. Its values go in and out as [`Value`]s, checked against that description. Derive
+//! [`Reflect`], or `#[derive(Clone, Component)]` for components.
 
 mod impls;
 mod path;
@@ -649,9 +648,9 @@ struct Declared;
 
 /// A type reflection reads and sets without its Rust type: it describes itself to [`Types`].
 ///
-/// Structs and enums derive it with `#[derive(Reflect)]`, components with
-/// `#[derive(Clone, Component)]`. The derive takes each field's type's description and its doc
-/// comment as its doc. Hints in `#[reflect(...)]`:
+/// Structs and enums derive it with `#[derive(Reflect)]`, components with `#[derive(Clone,
+/// Component)]`. The derive takes each field's type's description and its doc comment as its doc.
+/// Hints in `#[reflect(...)]`:
 ///
 /// - On a type:
 ///   - `name = "..."` replaces its identifier, as two types of one name need.

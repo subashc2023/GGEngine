@@ -1,6 +1,7 @@
 //! The camera effects a world's [`Environment`](crate::Environment) sets beyond its light.
 //!
-//! Depth of field, motion blur, and a lens's vignette, chromatic aberration and film grain.
+//! It holds depth of field, motion blur, and a lens's vignette, chromatic aberration and film
+//! grain.
 
 use crate::Reflect;
 
@@ -49,8 +50,8 @@ impl DepthOfField {
 
 /// Motion blur along how far things moved while the shutter was open.
 ///
-/// Models blur by their own motion; particles and a layer's own draws by the camera's alone; a skinned model by its parts'
-/// transforms, not its joints'.
+/// Models blur by their own motion; particles and a layer's own draws by the camera's alone; a
+/// skinned model by its parts' transforms, not its joints'.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct MotionBlur {
     /// The share of the frame the shutter is open: 0.5 by default, film's 180° shutter; 0 blurs

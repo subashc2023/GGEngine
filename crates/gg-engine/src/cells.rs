@@ -84,10 +84,9 @@ pub struct Cells {
 
 /// On an entity the world streams cells around.
 ///
-/// As each tick ends, cells whose nearest point is
-/// within `radius` of its [`World::pose`] come in, and those farther than `radius` plus half a cell
-/// from every viewer go out, so a viewer on a cell's edge doesn't flip it in and out. A viewer, or
-/// what holds one, never goes out with a cell.
+/// As each tick ends, cells whose nearest point is within `radius` of its [`World::pose`] come in,
+/// and those farther than `radius` plus half a cell from every viewer go out, so a viewer on a
+/// cell's edge doesn't flip it in and out. A viewer, or what holds one, never goes out with a cell.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Viewer {
     /// How far from it, in units, cells come in: 512 by default, two default cells.
@@ -97,12 +96,11 @@ pub struct Viewer {
 
 /// On a root that streams.
 ///
-/// It goes out, kept with what its cell keeps, when its cell (by its
-/// [`Transform`], the origin without one) goes out, or at once if the tick left it in a cell that's
-/// out. It comes back with the cell as it was. A cell's load gives it to the cell's roots; a game
-/// gives it to what it spawns that should stream, like a dropped item. What's under a root goes
-/// with it. References from outside find it gone while it's out, as if despawned, and don't find it
-/// again on return.
+/// It goes out, kept with what its cell keeps, when its cell (by its [`Transform`], the origin
+/// without one) goes out, or at once if the tick left it in a cell that's out. It comes back with
+/// the cell as it was. A cell's load gives it to the cell's roots; a game gives it to what it
+/// spawns that should stream, like a dropped item. What's under a root goes with it. References
+/// from outside find it gone while it's out, as if despawned, and don't find it again on return.
 ///
 /// A root referring to an entity going with neither it nor its cell, which no scene could save,
 /// holds its cell in, warning (`cells.held`); so does one whose texture wasn't loaded from a file.

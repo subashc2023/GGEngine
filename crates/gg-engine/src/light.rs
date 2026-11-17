@@ -27,10 +27,10 @@ pub enum LightKind {
 /// A KHR_lights_punctual light.
 ///
 /// It lights the world's models from where its entity draws (ancestors carry it), facing as the
-/// entity does. Materials shade by every light each frame, as
-/// glTF's metallic-roughness model says, scaled by the environment's exposure. Without lights,
-/// models draw unlit in base colors. An entity with a light but no [`Transform`] lights nothing.
-/// A model's nodes have the lights its file gives them.
+/// entity does. Materials shade by every light each frame, as glTF's metallic-roughness model says,
+/// scaled by the environment's exposure. Without lights, models draw unlit in base colors. An
+/// entity with a light but no [`Transform`] lights nothing. A model's nodes have the lights its
+/// file gives them.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Light {
     /// How it shines: directional, from a point, or as a spot.

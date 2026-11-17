@@ -1,6 +1,6 @@
 //! The grid a view shows ([`Context::draw_grid`](crate::Context::draw_grid)).
 //!
-//! Lines a power of ten apart on a world axis plane, with the plane's axes colored, in either
+//! It's lines a power of ten apart on a world axis plane, with the plane's axes colored, in either
 //! projection. The renderer's grid shader draws it on a unit square that `quad` lays in the plane
 //! each frame.
 
@@ -76,8 +76,8 @@ pub fn shown(camera: &Viewpoint, pick: Plane) -> Plane {
 /// Whether `camera`'s basis lines up with `view`'s pixels, as an axis view's does.
 ///
 /// It faces along an axis and its right lies within a quarter of a pixel, across the view, of one
-/// of the facing plane's axes. A roll, or a yaw at the poles, fails it. A square orthographic camera draws
-/// crisp grid lines, a pixel each.
+/// of the facing plane's axes. A roll, or a yaw at the poles, fails it. A square orthographic
+/// camera draws crisp grid lines, a pixel each.
 pub fn square(camera: &Viewpoint, view: Viewport) -> bool {
     let Some(plane) = facing(camera) else {
         return false;

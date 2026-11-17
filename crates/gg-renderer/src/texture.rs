@@ -44,9 +44,10 @@ pub enum Mipmaps {
 
 /// What a texture's texels are.
 ///
-/// sRGB colors with [`Mipmaps`] (which converts to one) or with levels made; data, as a font's distance field, read as stored bytes from 0 to 1, one level; BC7 colors,
-/// as packages hold them; a material's map ([`Map`]) with its full chain, stored or compressed; or
-/// HDR colors, as a sky's, one level, stored or compressed.
+/// It is sRGB colors with [`Mipmaps`] (which converts to one) or with levels made; data, as a
+/// font's distance field, read as stored bytes from 0 to 1, one level; BC7 colors, as packages hold
+/// them; a material's map ([`Map`]) with its full chain, stored or compressed; or HDR colors, as a
+/// sky's, one level, stored or compressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Texels {
     Color(Mipmaps),
@@ -177,9 +178,9 @@ impl Texels {
 
 /// The textures a renderer's shaders sample, the engine's white one first.
 ///
-/// Handles come at once; [`Uploads::take`](crate::Uploads::take) takes pixels for frames to stream within budget, slots
-/// showing stand-ins until then. Replacements and removals follow in order. A renderer samples one
-/// `Textures`' textures only.
+/// Handles come at once; [`Uploads::take`](crate::Uploads::take) takes pixels for frames to stream
+/// within budget, slots showing stand-ins until then. Replacements and removals follow in order. A
+/// renderer samples one `Textures`' textures only.
 pub struct Textures {
     /// Added, filled, replaced or removed since last taken, in order.
     pub(crate) changes: Vec<Change>,

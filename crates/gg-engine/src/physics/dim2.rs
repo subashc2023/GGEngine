@@ -31,9 +31,9 @@ use joint::{Jointed, SavedJoint};
 ///
 /// Physics moves its entity's [`Transform`] (position, turn about Z) and the velocities here, which
 /// each step reads and writes back. It collides as its entity's [`BoxCollider2D`] and
-/// [`CircleCollider2D`], either or both, which also give a dynamic body its mass; [`Joint2D`]s
-/// hold it to other bodies. A body under a parent isn't moved: its transform is in its parent's
-/// space (`physics.child_body`).
+/// [`CircleCollider2D`], either or both, which also give a dynamic body its mass; [`Joint2D`]s hold
+/// it to other bodies. A body under a parent isn't moved: its transform is in its parent's space
+/// (`physics.child_body`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
 pub struct RigidBody2D {
     /// How it moves. Dynamic: by its velocity, which gravity and collisions change. Kinematic: by

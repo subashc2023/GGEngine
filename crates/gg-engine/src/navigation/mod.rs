@@ -174,7 +174,8 @@ impl Clone for NavAgent {
     }
 }
 
-/// The world's navigation, a [`Resource`](crate::Resource) [`step_navigation`] adds at a first step.
+/// The world's navigation, a [`Resource`](crate::Resource) [`step_navigation`] adds at a first
+/// step.
 ///
 /// A world with a [`NavMeshVolume`] or a [`NavAgent`] gets it. It holds the navmesh and a
 /// fingerprint of what it was baked from: the volume and each static body's transform and
@@ -232,8 +233,9 @@ impl Clone for Navigation {
 
 /// Steps `world`'s navigation a tick: updates the navmesh, then each [`NavAgent`] plans and steers.
 ///
-/// Each agent heads for its next corner and steers round the rest. A layer's tick runs it after what sets
-/// destinations (such as scripts) and before physics, which moves characters as their agents set.
+/// Each agent heads for its next corner and steers round the rest. A layer's tick runs it after
+/// what sets destinations (such as scripts) and before physics, which moves characters as their
+/// agents set.
 pub fn step_navigation(world: &mut World) {
     let _zone = gg_core::zone!();
     refresh(world);

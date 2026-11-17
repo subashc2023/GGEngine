@@ -52,8 +52,8 @@ impl<V> fmt::Debug for Mesh<V> {
 
 /// A mesh, a shader and its parameters, as [`Draws::push`] draws them, without their types.
 ///
-/// Checked against each other at creation, then erased, so one type holds any draw, as in a
-/// component. The parameters are copied in.
+/// They are checked against each other at creation, then erased, so one type holds any draw, as in
+/// a component. The parameters are copied in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshDraw {
     pub(crate) mesh: u32,
@@ -162,7 +162,8 @@ pub struct Lod {
 /// The most levels of detail a mesh has, level 0 among them.
 pub const MAX_LEVELS: usize = 8;
 
-/// A mesh's levels of detail, finest first, and the sphere round its vertices that picks among them.
+/// A mesh's levels of detail, finest first, and the sphere round its vertices that picks among
+/// them.
 ///
 /// The sphere also culls. Level 0 is the mesh itself, usually of error 0; errors never decrease.
 /// Levels may share indices.

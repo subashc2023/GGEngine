@@ -14,9 +14,9 @@ use crate::{Device, vk_failed};
 
 /// An image that compute passes write and shaders sample, in GPU memory.
 ///
-/// [`StorageImage::FORMAT`], one layer for a 2D image or six for a cube, with mip levels. Its
-/// contents are undefined until a pass writes them. Dropping it retires it and its slots until the
-/// GPU is done with it.
+/// It has [`StorageImage::FORMAT`], one layer for a 2D image or six for a cube, with mip levels.
+/// Its contents are undefined until a pass writes them. Dropping it retires it and its slots until
+/// the GPU is done with it.
 pub struct StorageImage {
     device: Arc<Device>,
     raw: vk::Image,

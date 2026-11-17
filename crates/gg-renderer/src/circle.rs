@@ -8,10 +8,10 @@ pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/circl
 
 /// A disc or ring filling a unit square centered on its origin in its XY plane, facing +Z.
 ///
-/// As a sprite does. The draw's transform places, sizes and turns it; an uneven scale draws an
-/// ellipse. It blends by straight alpha over what's drawn before it, testing depth without writing it. Its
-/// edges are smoothed over a pixel at any size. Where it's fully transparent it draws nothing, so
-/// picks there find what's behind it. `Circle::default()` is a white disc.
+/// It draws as a sprite does. The draw's transform places, sizes and turns it; an uneven scale
+/// draws an ellipse. It blends by straight alpha over what's drawn before it, testing depth without
+/// writing it. Its edges are smoothed over a pixel at any size. Where it's fully transparent it
+/// draws nothing, so picks there find what's behind it. `Circle::default()` is a white disc.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Circle {
     /// Linear RGBA, alpha not premultiplied. White by default.

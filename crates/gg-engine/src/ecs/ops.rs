@@ -24,8 +24,8 @@ use super::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Ident, Reflect, Value};
 use crate::{ModelNode, ModelRoot, Prefab, PrefabRoot};
 
-/// An authoring change to a world, by a person or an agent, which a [`Log`](super::Log) applies
-/// and undoes.
+/// An authoring change to a world, by a person or an agent, which a [`Log`](super::Log) applies and
+/// undoes.
 ///
 /// It names entities by ID and carries reflection's values, whose entities are handles, as
 /// [`World::set_field`] takes one.

@@ -36,9 +36,9 @@ const METER: f32 = 3.0;
 
 /// What lit shading multiplies light by at exposure value `ev100`.
 ///
-/// 1 over the largest luminance that doesn't saturate a camera there, 1.2 × 2^EV100, as Frostbite
-/// and Filament do (Lagarde and de Rousiers, "Moving Frostbite to Physically Based Rendering",
-/// 2014).
+/// It's 1 over the largest luminance that doesn't saturate a camera there, 1.2 × 2^EV100, as
+/// Frostbite and Filament do (Lagarde and de Rousiers, "Moving Frostbite to Physically Based
+/// Rendering", 2014).
 pub fn light_scale(ev100: f32) -> f32 {
     1.0 / (1.2 * exp2f(ev100))
 }

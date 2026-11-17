@@ -28,10 +28,11 @@ const SHARPEST: f32 = 0.99;
 
 /// Height fog, as [`RenderData::fog`](crate::RenderData::fog) gives it.
 ///
-/// Its density is `density` at `height`, thinning exponentially above by `falloff` and thickening below, from `start` along the
-/// way from the eye. It scatters `color` of the light reaching it: the sky's from all around
-/// (`luminance` without a sky), and the sun's (the brightest directional light) in a lobe as sharp
-/// as `sharpness`. It casts and takes no shadows, so `sun` scales the sun's light.
+/// Its density is `density` at `height`, thinning exponentially above by `falloff` and thickening
+/// below, from `start` along the way from the eye. It scatters `color` of the light reaching it:
+/// the sky's from all around (`luminance` without a sky), and the sun's (the brightest directional
+/// light) in a lobe as sharp as `sharpness`. It casts and takes no shadows, so `sun` scales the
+/// sun's light.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fog {
     /// The extinction at `height`: the share of light taken out per world unit. 0.02 by default,

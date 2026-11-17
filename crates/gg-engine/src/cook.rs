@@ -35,9 +35,9 @@ pub enum UiAsset {
 /// UI `name`'s file at `path`, read and checked as [`Context::add_ui`](crate::Context::add_ui)
 /// reads it.
 ///
-/// That is the file as is, and each font and texture its nodes name, once, as named: by asset ID
-/// (a model's image by model name and index, `5f3c9a1e07b2d846#0`) or by path from the asset root.
-/// The cooker finds them in the package as a run would, so it holds no UI a run refuses.
+/// That is the file as is, and each font and texture its nodes name, once, as named: by asset ID (a
+/// model's image by model name and index, `5f3c9a1e07b2d846#0`) or by path from the asset root. The
+/// cooker finds them in the package as a run would, so it holds no UI a run refuses.
 ///
 /// Fails as `add_ui` does for a file that doesn't read or isn't a UI's.
 pub fn read_ui(name: &str, path: &Path) -> Result<ReadUi> {
@@ -122,8 +122,8 @@ pub fn read_model(name: &str, path: &Path) -> Result<Imported> {
 
 /// What image `image` of `model` holds, which decides its mips and compression as in a run.
 ///
-/// Either a data map (averaged levels), or colors (alpha-weighted if a masked or blended material
-/// samples them, else plainly averaged).
+/// It is either a data map (averaged levels), or colors (alpha-weighted if a masked or blended
+/// material samples them, else plainly averaged).
 pub fn texels(model: &Imported, image: usize) -> Texels {
     crate::model::texels(&model.primitives, image)
 }

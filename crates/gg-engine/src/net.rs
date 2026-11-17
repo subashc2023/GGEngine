@@ -326,8 +326,8 @@ impl Merged {
 
 /// Fails with `net.bad_command` if `command`, from player `player`'s inputs, names another player:
 /// a variant or struct whose field `player` holds an integer, as Shards' commands name the player
-/// they steer. Layers queue commands for their own player alone, and peers refuse alike. A
-/// server's own commands, which steer any player, aren't checked.
+/// they steer. Layers queue commands for their own player alone, and peers refuse alike. A server's
+/// own commands, which steer any player, aren't checked.
 fn steers_its_own(command: &Value, player: u8) -> Result<()> {
     let (Value::Variant(_, fields) | Value::Struct(fields)) = command else {
         return Ok(());

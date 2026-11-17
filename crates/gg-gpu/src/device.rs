@@ -1113,11 +1113,11 @@ impl Drop for Device {
 
 /// The SPIR-V capabilities a shader may declare on the devices the engine makes.
 ///
-/// Those Vulkan 1.4 gives without a feature, and those of the features [`Device::new`] enables on
-/// every device, as the Vulkan SDK 1.4.335's vk.xml lists them under `spirvcapabilities`. They
-/// change with those features. A shader that declares another needs a feature some device hasn't enabled, which
-/// validation reports in debug builds and a driver may crash on in others, as with the engine's
-/// own mesh shaders and the fragment shaders behind them.
+/// They are those Vulkan 1.4 gives without a feature, and those of the features [`Device::new`]
+/// enables on every device, as the Vulkan SDK 1.4.335's vk.xml lists them under
+/// `spirvcapabilities`. They change with those features. A shader that declares another needs a
+/// feature some device hasn't enabled, which validation reports in debug builds and a driver may
+/// crash on in others, as with the engine's own mesh shaders and the fragment shaders behind them.
 pub const SHADER_CAPABILITIES: [u32; 17] = [
     0,    // Matrix
     1,    // Shader

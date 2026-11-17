@@ -8,9 +8,9 @@ use gg_core::{Error, Result};
 
 /// What a mod's scripts or a tool API connection may do.
 ///
-/// `read` or `write` the whole world or one type's components (`read:Shard`), or one of the tool
-/// API's own: `play`, `input`, `view`, `scene`, `snapshot`, `debug`, `patch`, `files`, `note` or
-/// `quit`. A mod may ask for `read` and `write` alone.
+/// It is `read` or `write` of the whole world or one type's components (`read:Shard`), or one of
+/// the tool API's own: `play`, `input`, `view`, `scene`, `snapshot`, `debug`, `patch`, `files`,
+/// `note` or `quit`. A mod may ask for `read` and `write` alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Capability {
     /// The components of the named type alone, or all.

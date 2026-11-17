@@ -96,8 +96,8 @@ pub struct Emission {
 
 /// An emitter's births in a frame: `count` particles numbered from `first`.
 ///
-/// The first is born at `time` (world ticks), each next `every` ticks later, at `along` of the way from `from` (last
-/// frame's transform) to `to` (this frame's), each next `step` further.
+/// The first is born at `time` (world ticks), each next `every` ticks later, at `along` of the way
+/// from `from` (last frame's transform) to `to` (this frame's), each next `step` further.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Births {
     pub first: u64,
@@ -158,9 +158,9 @@ impl Bursts {
 
 /// An emitter's particles in a frame, drawn where [`Draws::push_particles`] puts them.
 ///
-/// The renderer keeps them across frames by `id`, in a ring of their own, while each frame draws them. A
-/// particle's randomness hashes `id` with its number (or its burst's and its own). They write `id`
-/// for picks.
+/// The renderer keeps them across frames by `id`, in a ring of their own, while each frame draws
+/// them. A particle's randomness hashes `id` with its number (or its burst's and its own). They
+/// write `id` for picks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Particles {
     pub id: u64,

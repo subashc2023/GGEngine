@@ -2,11 +2,10 @@
 //!
 //! The memory is made and named by the client in a `view` request; the game writes each frame into
 //! it and the client reads from it, neither waiting for the other. It holds a triple buffer of
-//! pixels: the slot the game writes, the one the
-//! client reads, and the latest published. The game swaps its slot for the latest as it publishes,
-//! and the client its own as it takes, each by one atomic exchange, so that neither touches a slot
-//! the other has. A header before them holds what both read: the size the client asks for, the
-//! frames published and taken, and each slot's frame.
+//! pixels: the slot the game writes, the one the client reads, and the latest published. The game
+//! swaps its slot for the latest as it publishes, and the client its own as it takes, each by one
+//! atomic exchange, so that neither touches a slot the other has. A header before them holds what
+//! both read: the size the client asks for, the frames published and taken, and each slot's frame.
 //!
 //! On Windows the memory is a named file mapping backed by the paging file, which goes with its
 //! last handle. Elsewhere it's a POSIX shared memory object, whose name the client removes once the

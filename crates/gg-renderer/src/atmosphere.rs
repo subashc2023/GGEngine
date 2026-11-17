@@ -26,8 +26,8 @@ static SKY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/atmosphere_sky.spv
 
 /// Hillaire's atmosphere, as [`RenderData::atmosphere`](crate::RenderData::atmosphere) gives it.
 ///
-/// Rayleigh's and Mie's scattering and ozone's absorption, over a planet of Earth's radius (6,360
-/// km) up to 100 km, as the paper's. World units are meters, +Y up.
+/// It models Rayleigh's and Mie's scattering and ozone's absorption, over a planet of Earth's
+/// radius (6,360 km) up to 100 km, as the paper's. World units are meters, +Y up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Atmosphere {
     /// Rayleigh's scattering at the ground, per channel, in millionths per meter, thinning

@@ -74,10 +74,9 @@ pub(crate) fn cutoff(sky: Sky, lights: &[Light]) -> f32 {
 
 /// The sky a frame shows, as [`RenderData::sky`](crate::RenderData::sky) gives it.
 ///
-/// Its sun lights
-/// once: a shining directional light stands for it, and casts the shadows the sky's light can't.
-/// The sky's light then caps each texel at 10⁷ cd/m², or down to half that, leaving out the sun's
-/// disk (some 1.6 × 10⁹ at noon). Without such a light, the sky lights by all of it.
+/// Its sun lights once: a shining directional light stands for it, and casts the shadows the sky's
+/// light can't. The sky's light then caps each texel at 10⁷ cd/m², or down to half that, leaving
+/// out the sun's disk (some 1.6 × 10⁹ at noon). Without such a light, the sky lights by all of it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sky {
     /// Its equirectangular image of the world around: the center column toward +X, a quarter across

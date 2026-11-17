@@ -63,7 +63,8 @@ const RELOAD_FADE: Duration = Duration::from_millis(100);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sound(u32);
 
-/// Music loaded with [`Context::add_music`]: its file's bytes, kept compressed, decoded as it plays.
+/// Music loaded with [`Context::add_music`]: its file's bytes, kept compressed, decoded as it
+/// plays.
 ///
 /// It loops. Layers play one at a time ([`Context::play_music`]). A handle of the context that
 /// loaded it.

@@ -135,8 +135,8 @@ impl BoxCollider3D {
 
 /// The sphere a [`RigidBody3D`] on the same entity collides as, in the entity's space.
 ///
-/// It's around its offset, which turns and scales with the entity. The radius scales by the
-/// largest of the entity's scales, since a sphere stays one. Default: half a unit, a unit across.
+/// It's around its offset, which turns and scales with the entity. The radius scales by the largest
+/// of the entity's scales, since a sphere stays one. Default: half a unit, a unit across.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct SphereCollider3D {
     /// Its middle, from the entity's origin.

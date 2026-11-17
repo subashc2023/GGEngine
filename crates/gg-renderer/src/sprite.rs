@@ -50,8 +50,8 @@ impl Default for Sprite {
 
 /// A texture cut into `cell`-pixel cells packed edge to edge from its top left.
 ///
-/// As tile sets and animation frames come. Cells a pixel across allow any rectangle of pixels, as
-/// an atlas of images of different sizes. `size` is the texture's, in pixels.
+/// It is how tile sets and animation frames come. Cells a pixel across allow any rectangle of
+/// pixels, as an atlas of images of different sizes. `size` is the texture's, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpriteSheet {
     pub texture: Texture,

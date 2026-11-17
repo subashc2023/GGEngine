@@ -21,8 +21,8 @@ use crate::{Component, Entity, Reflect, Transform, World};
 /// A model added by [`Context::add_model`](crate::Context::add_model) or loaded from text: its
 /// index among its context's, held by a [`ModelRoot`].
 ///
-/// Scenes, recordings, snapshots and the tool API name it as they name a texture: by asset ID,
-/// else path. [`spawn`](Self::spawn) places it in a world.
+/// Scenes, recordings, snapshots and the tool API name it as they name a texture: by asset ID, else
+/// path. [`spawn`](Self::spawn) places it in a world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Model(u32);
 

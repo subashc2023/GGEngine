@@ -79,9 +79,9 @@ pub struct Pad(pub usize);
 
 /// A gamepad's button, by position as keys are.
 ///
-/// `South` is Xbox's A and PlayStation's Cross, `Select` View and Create, `Start` Menu and
-/// Options. Shoulders are the bumpers above the
-/// triggers; thumbs are the sticks pressed in. Windows doesn't report `Mode`.
+/// `South` is Xbox's A and PlayStation's Cross, `Select` View and Create, `Start` Menu and Options.
+/// Shoulders are the bumpers above the triggers; thumbs are the sticks pressed in. Windows doesn't
+/// report `Mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PadButton {
     South,

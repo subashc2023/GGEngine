@@ -70,8 +70,9 @@ use crate::reflect::Reflect;
 /// Data an entity can have: a struct or enum with `#[derive(Clone, Component)]`.
 ///
 /// The derive also implements [`Reflect`], so tools reach it by name, and [`Writable`]. `Clone`
-/// lets snapshots copy the world; `Send + Sync` lets [`par_for_each`](QueryIterMut::par_for_each) hand rows to
-/// job threads. A type registers when an entity first has one, or through [`World::register`].
+/// lets snapshots copy the world; `Send + Sync` lets [`par_for_each`](QueryIterMut::par_for_each)
+/// hand rows to job threads. A type registers when an entity first has one, or through
+/// [`World::register`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component",
     note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`"
@@ -129,9 +130,9 @@ pub trait Component: Reflect + Clone {
 /// A component code may spawn, insert, remove and edit.
 ///
 /// That is through [`World::spawn`], [`World::insert`], [`World::remove`], [`World::get_mut`] and
-/// `&mut T` in [`World::query_mut`]. The derive implements it; a hand-written component implements it beside
-/// `Component`. Every engine component is one but [`Parent`], which the world keeps so the
-/// hierarchy stays whole: only [`World::set_parent`] changes it.
+/// `&mut T` in [`World::query_mut`]. The derive implements it; a hand-written component implements
+/// it beside `Component`. Every engine component is one but [`Parent`], which the world keeps so
+/// the hierarchy stays whole: only [`World::set_parent`] changes it.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component that code changes",
     note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`, or with \
@@ -155,9 +156,9 @@ pub trait Bundle: seal::Bundle {}
 
 /// A handle to an entity.
 ///
-/// It never names another entity once despawned, unless its world is restored from a snapshot
-/// taken before the spawn. It prints as slot and generation, such as
-/// `7v2`. It's the world's own: files, tools and diagnostics use the [`EntityId`].
+/// It never names another entity once despawned, unless its world is restored from a snapshot taken
+/// before the spawn. It prints as slot and generation, such as `7v2`. It's the world's own: files,
+/// tools and diagnostics use the [`EntityId`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Entity {
     /// Its slot.
@@ -207,12 +208,11 @@ impl fmt::Debug for Entity {
 
 /// Entities and their components.
 ///
-/// Each set of component types has a table: rows are the entities
-/// with exactly those types, in the order they joined; columns are each type's values.
-/// Despawning an entity, or giving or taking a component, moves the table's last row into its
-/// place. So query order follows from the changes made and is the same every time, but a game
-/// shouldn't depend on it: order anything (such as what's drawn over what) by component values or
-/// entity IDs.
+/// Each set of component types has a table: rows are the entities with exactly those types, in the
+/// order they joined; columns are each type's values. Despawning an entity, or giving or taking a
+/// component, moves the table's last row into its place. So query order follows from the changes
+/// made and is the same every time, but a game shouldn't depend on it: order anything (such as
+/// what's drawn over what) by component values or entity IDs.
 ///
 /// A copy of the world is a snapshot: [`clone`](Clone::clone) takes one, and
 /// [`clone_from`](Clone::clone_from) restores the world from one, or takes one into a copy kept

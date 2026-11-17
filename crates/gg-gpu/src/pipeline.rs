@@ -16,8 +16,8 @@ use crate::{Device, vk_error, vk_failed};
 
 /// The pixel formats of what a pass renders into, which pipelines are made for.
 ///
-/// Its color target's, its IDs' and motion's beside it if it has them, and its depth's if it has
-/// it, as a [`Graph`]'s passes declare them; or its depth's alone.
+/// It holds its color target's, its IDs' and motion's beside it if it has them, and its depth's if
+/// it has it, as a [`Graph`]'s passes declare them; or its depth's alone.
 ///
 /// [`Graph`]: crate::Graph
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

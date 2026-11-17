@@ -377,10 +377,10 @@ pub enum CameraAction {
 
 /// Steers an orthographic viewpoint from the keyboard, mouse wheel and gamepads.
 ///
-/// W, A, S and D, or a gamepad's right stick, move it half the view's height a second along its own axes, so it
-/// crosses the screen as fast at any zoom. With [`rotation`](Self::rotation) set, Q and E, or the
-/// triggers, turn it a quarter turn a second. The wheel zooms about the view's center, 1.1 times a
-/// line, between a hundredth and a hundred times the starting height.
+/// W, A, S and D, or a gamepad's right stick, move it half the view's height a second along its own
+/// axes, so it crosses the screen as fast at any zoom. With [`rotation`](Self::rotation) set, Q and
+/// E, or the triggers, turn it a quarter turn a second. The wheel zooms about the view's center,
+/// 1.1 times a line, between a hundredth and a hundred times the starting height.
 ///
 /// A layer keeps one, and calls [`update`](Self::update) and [`event`](Self::event) from its own,
 /// as `self.camera.event(cx, event)?`.
@@ -522,10 +522,11 @@ pub enum FlyAction {
 
 /// Steers a flying viewpoint, under either projection.
 ///
-/// W, A, S and D, or a gamepad's left stick, move it forward, where it looks, and sideways, 2 units a second at first. E and Q, or the
-/// triggers, raise and lower it along the world's up. The right stick, or the mouse moved with
-/// its right button held, looks about: half a turn a second at full tilt, or 0.003 radians a
-/// point. Looking keeps it level, its right along the horizon, and no more than 89° up or down.
+/// W, A, S and D, or a gamepad's left stick, move it forward, where it looks, and sideways, 2 units
+/// a second at first. E and Q, or the triggers, raise and lower it along the world's up. The right
+/// stick, or the mouse moved with its right button held, looks about: half a turn a second at full
+/// tilt, or 0.003 radians a point. Looking keeps it level, its right along the horizon, and no more
+/// than 89° up or down.
 ///
 /// A layer keeps one and calls [`update`](Self::update) and [`event`](Self::event) as for the
 /// orthographic controller. It keeps nothing of the viewpoint but [`viewpoint`](Self::viewpoint),

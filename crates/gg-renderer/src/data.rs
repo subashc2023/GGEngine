@@ -276,8 +276,8 @@ pub struct RenderData<'a> {
 
 /// Pixels for [`RenderData::pixels`].
 ///
-/// Their width and height, and tightly packed rows of sRGB-encoded RGBA8, top row first. `None`
-/// bytes show those the last rendering frame wrote, if it wrote some of this size.
+/// It holds their width and height, and tightly packed rows of sRGB-encoded RGBA8, top row first.
+/// `None` bytes show those the last rendering frame wrote, if it wrote some of this size.
 #[derive(Clone, Copy, Debug)]
 pub struct Pixels<'a> {
     pub size: [u32; 2],

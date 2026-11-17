@@ -14,8 +14,7 @@ use crate::Component;
 /// [`Context::world`](crate::Context::world): opaque meshes, then the rest back to front by world
 /// z, ties in entity-ID order, which overlapping entities keep as others come and go. Frames draw
 /// each between where a tick found it and where it left it: a tick that makes one jump, like a
-/// teleport, calls
-/// [`World::reset_interpolation`](crate::World::reset_interpolation) for it.
+/// teleport, calls [`World::reset_interpolation`](crate::World::reset_interpolation) for it.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Transform {
     /// Where its origin is, from its parent's, or the world's.

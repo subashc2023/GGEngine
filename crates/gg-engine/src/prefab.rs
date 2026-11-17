@@ -39,9 +39,9 @@ impl Prefab {
     /// Spawns an instance at `at`, as [`PrefabRoot`] says, and returns its root.
     ///
     /// The root is a `PrefabRoot` entity at `at` with the prefab root's other components, the
-    /// prefab's other entities under it. Its ID is drawn from the world's stream, the others' mixed from it, so a world
-    /// seeded alike spawns alike. It reads the prefab's text and allocates: spawn as a level
-    /// loads, not each tick.
+    /// prefab's other entities under it. Its ID is drawn from the world's stream, the others' mixed
+    /// from it, so a world seeded alike spawns alike. It reads the prefab's text and allocates:
+    /// spawn as a level loads, not each tick.
     ///
     /// Fails, spawning nothing, as a scene naming the prefab fails to load, such as with
     /// `reflect.unknown_type` for a component type the world hasn't registered,
@@ -59,13 +59,13 @@ impl Prefab {
 
 /// The root of a prefab's instance.
 ///
-/// The world spawns the instance when an entity comes with this
-/// ([`Prefab::spawn`], a loaded scene, a tool's create or add) or is given another prefab, and
-/// takes it away with it. The root keeps its own [`Transform`], which places the instance, and
-/// takes the prefab root's other components. The prefab's other entities go under it, each ID
-/// mixed from the root's and the prefab's own: the root's ID alone gives them wherever it's
-/// loaded, made or restored, and references to the prefab's entities mean the instance's. A
-/// prefab entity may link another prefab, whose IDs mix again from its own.
+/// The world spawns the instance when an entity comes with this ([`Prefab::spawn`], a loaded scene,
+/// a tool's create or add) or is given another prefab, and takes it away with it. The root keeps
+/// its own [`Transform`], which places the instance, and takes the prefab root's other components.
+/// The prefab's other entities go under it, each ID mixed from the root's and the prefab's own: the
+/// root's ID alone gives them wherever it's loaded, made or restored, and references to the
+/// prefab's entities mean the instance's. A prefab entity may link another prefab, whose IDs mix
+/// again from its own.
 ///
 /// An instance keeps only what differs from its prefab, field by field; a scene saves that.
 /// Fields left as the prefab has them follow its file as it changes, in a development run that

@@ -2,14 +2,15 @@
 
 use crate::{Entity, Tick, World, Writable};
 
-/// A component that acts: a layer's tick runs it for each entity that has one, with [`run_scripts`].
+/// A component that acts: a layer's tick runs it for each entity that has one, with
+/// [`run_scripts`].
 ///
-/// It runs among the layer's systems and after its commands, so its input arrives as the rest
-/// of the simulation's does, in the components those commands set. Its fields are its state, held
-/// by the world: scenes save it, the Inspector and operations edit it, the hash reads it,
-/// snapshots copy it. A script keeps nothing elsewhere. It starts from the value code, a scene or
-/// an operation gave it; setup needing the world runs in [`tick`](Self::tick), behind a field of
-/// its own.
+/// It runs among the layer's systems and after its commands, so its input arrives as the rest of
+/// the simulation's does, in the components those commands set. Its fields are its state, held by
+/// the world: scenes save it, the Inspector and operations edit it, the hash reads it, snapshots
+/// copy it. A script keeps nothing elsewhere. It starts from the value code, a scene or an
+/// operation gave it; setup needing the world runs in [`tick`](Self::tick), behind a field of its
+/// own.
 ///
 /// Scripts run one entity at a time on the tick's thread, since each gets the whole world. A kind
 /// of entity a game has thousands of is faster as a system over a query, which
@@ -23,11 +24,11 @@ pub trait Script: Writable {
 
 /// Runs `S` at `tick`, once for each entity that has one as the pass starts, in query order.
 ///
-/// An entity despawned, or stripped of `S`, by a script before its turn is skipped. One
-/// given an `S` during the pass starts at the next tick. A script that replaces the world, or
-/// restores it from a copy, ends the pass, since the listed entities are another world's: that
-/// world's scripts start at the next tick. The list lives in memory the world keeps, so a pass,
-/// and one nested in a script's tick, allocates nothing once the world has listed as many.
+/// An entity despawned, or stripped of `S`, by a script before its turn is skipped. One given an
+/// `S` during the pass starts at the next tick. A script that replaces the world, or restores it
+/// from a copy, ends the pass, since the listed entities are another world's: that world's scripts
+/// start at the next tick. The list lives in memory the world keeps, so a pass, and one nested in a
+/// script's tick, allocates nothing once the world has listed as many.
 pub fn run_scripts<S: Script>(world: &mut World, tick: Tick) {
     let zone = gg_core::zone!();
     // A zone made in a generic function is one for every `S`, which its text tells apart.
