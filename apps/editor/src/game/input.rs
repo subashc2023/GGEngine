@@ -31,15 +31,13 @@ impl Game {
         let origin = view.map_or([0, 0], |view| view.origin);
         let through = self.through();
         // Shift+F1 lets go of the cursor, whatever the game does with it (a game may not let go
-        // itself), and ends Play's capture, as in Unreal; a press in the view grabs it again if
-        // the game asks. The game never gets its press: Escape, which may open its menu, is its
-        // own.
+        // itself), as in Unreal; a press in the view grabs it again if the game asks. The game
+        // never gets its press: Escape, which may open its menu, is its own.
         let frees = through && frees_cursor(event, reading.shift);
-        if frees {
-            self.grab = Grab::Escaped;
-        }
         let press = matches!(*event, Event::MouseButton { pressed: true, .. });
-        if through && press && self.grab == Grab::Escaped {
+        if frees {
+            self.grab = Grab::Released;
+        } else if through && press {
             self.grab = Grab::Asks;
         }
         let shortcut = frees || shortcuts_key(event, reading.command);

@@ -61,9 +61,8 @@
 //! - Shift+F1 lets go, as in Unreal: a game may not let go itself. The game never gets F1's press.
 //!   Escape is the game's, as for its menu. A press in the view grabs again. Simulate and Stop let
 //!   go.
-//! - Play, and Resume in Play, capture the view's input for any game: the view gets the keys their
-//!   click took, and the cursor is grabbed, the engine moving it onto the view, until Shift+F1.
-//!   After that, a press grabs again only for a game that asks.
+//! - Play, and Resume in Play, give the view the keys their click took, and grab again what
+//!   Shift+F1 let go of. A game that doesn't ask keeps a free cursor, as for a menu it clicks.
 //! - In Play, an outline round the view says it has the keys.
 //! - The editor's camera grabs the cursor while it looks about, orbits or dollies
 //!   ([`camera`](crate::camera)).
@@ -307,18 +306,14 @@ struct Game {
     rates: Rates,
 }
 
-/// The cursor's grab for the game, in Play: one state, as Shift+F1 ends a capture and a capture
-/// grabs again what Shift+F1 let go of.
+/// The cursor's grab for the game, in Play.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Grab {
     /// Grabbed as the game asks, as the view's memory says.
     Asks,
-    /// Play captured the view's input for the game, the cursor grabbed whether or not the game
-    /// asks: from a click of Play, or of Resume in Play, until Shift+F1 or the input stopping going
-    /// to the game, but while a Play clicked waits for the game's answer.
-    Captured,
-    /// Shift+F1 let go of the cursor, until a press in the view.
-    Escaped,
+    /// Shift+F1 let go of the cursor, until a press in the view, a click of Play or of Resume in
+    /// Play, or the input stopping going to the game.
+    Released,
 }
 
 impl Game {
@@ -442,16 +437,14 @@ impl Layer for Game {
         if let Some(view) = cx.view() {
             self.fit(view.size);
         }
-        // The game's grab, in Play alone: Stop or Simulate end what Shift+F1 and Play did, but not
-        // while a Play clicked waits for its answer. Also the editor's camera's grab.
+        // The game's grab, in Play alone: Stop or Simulate end what Shift+F1 did. Also the editor's
+        // camera's grab.
         let through = self.through();
-        self.grab = match self.grab {
-            Grab::Escaped if !through => Grab::Asks,
-            Grab::Captured if !(through || self.playing > 0) => Grab::Asks,
-            grab => grab,
-        };
+        if !through {
+            self.grab = Grab::Asks;
+        }
         let asked = self.reader.as_ref().is_some_and(Reader::cursor_grabbed);
-        let games = through && self.grab != Grab::Escaped && (asked || self.grab == Grab::Captured);
+        let games = through && self.grab == Grab::Asks && asked;
         cx.set_cursor_grabbed(games || self.view.camera.grabs());
         let picked = picked(&self.view.link);
         self.view.hold(picked.as_ref());
@@ -604,12 +597,11 @@ impl Layer for Game {
             clicked.inner
         };
         let clicked = bar.then(|| ui.title_bar(title_bar)).flatten();
-        if let Some(clicked) = clicked.flatten() {
-            self.click(clicked);
-            // The click's press, off the view, took the keys a capture gives the view.
-            if self.grab == Grab::Captured {
-                ui.focus_view();
-            }
+        // The click's press, off the view, took the keys Play gives the view.
+        if let Some(clicked) = clicked.flatten()
+            && self.click(clicked)
+        {
+            ui.focus_view();
         }
         // A click on a scene, after the menus' choices, as a File menu New.
         let (open, unsaved, enabled) = (self.scene.clone(), self.unsaved, self.files());

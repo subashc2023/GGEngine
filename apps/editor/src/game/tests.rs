@@ -1715,28 +1715,24 @@ fn shift_f1_lets_go_of_the_cursor_unseen_by_the_game() {
     assert!(cx.cursor_grabbed(), "grabbed again at a press in the view");
 }
 
-/// Play captures the view's input for a game that doesn't ask for a grab: the editor grabs the
-/// cursor from the game's answer, through Escape, until Shift+F1, after which a press in the view
-/// grabs nothing. Resume in Play captures again, after a Shift+F1 too, as Play from Simulate does.
-/// Another client's stop lets go for good, as Simulate and Stop do: a switch back to the game's
-/// camera after another client's play isn't a click of Play.
+/// Play gives the view the keys its click took, as Resume in Play does, and Pause doesn't. The
+/// editor grabs the cursor only for a game that asks, Escape or not. Play and Resume in Play grab
+/// again what Shift+F1 let go of; Simulate and Stop let go.
 #[test]
-fn play_captures_the_views_input_for_any_game_until_shift_f1() {
+fn play_gives_the_view_the_keys_and_grabs_only_for_a_game_that_asks() {
     let (mut game, ends) = serving();
+    let reader = Reader::create(4, 4).expect("memory");
+    let writer = Writer::open(reader.name()).expect("opened");
+    game.reader = Some(reader);
     let mut cx = Context::seeded(1);
     let mut grabbed = |game: &mut Game| {
         game.update(&mut cx, Duration::ZERO);
         cx.cursor_grabbed()
     };
-    let answer = |method: &str, stopped| {
-        let answer = (method.to_owned(), status(stopped, false));
-        ends.answer.send(answer).expect("sent");
-    };
     game.stopped = true;
-    game.click(overlay::Clicked::To(Mode::Play));
-    assert!(!grabbed(&mut game), "before the game plays");
-    answer("play", false);
-    assert!(grabbed(&mut game), "once it plays");
+    assert!(game.click(overlay::Clicked::To(Mode::Play)), "Play's keys");
+    let played = ("play".to_owned(), status(false, false));
+    ends.answer.send(played).expect("sent");
     let at = Reading {
         shift: true,
         ..reading([300.0, 200.0])
@@ -1747,29 +1743,18 @@ fn play_captures_the_views_input_for_any_game_until_shift_f1() {
         repeat: false,
     };
     let _ = game.route(&key(Key::Escape), &at, Some(VIEW));
-    assert!(grabbed(&mut game), "held through Escape");
+    assert!(!grabbed(&mut game), "a game that doesn't ask, after Escape");
+    writer.set_cursor_grabbed(true);
+    assert!(grabbed(&mut game), "one that asks");
     let _ = game.route(&key(Key::F1), &at, Some(VIEW));
     assert!(!grabbed(&mut game), "let go at Shift+F1");
-    game.click(overlay::Clicked::Pause);
+    assert!(!game.click(overlay::Clicked::Pause), "Pause's keys");
     assert!(!grabbed(&mut game), "Pause");
-    game.click(overlay::Clicked::Resume);
+    assert!(game.click(overlay::Clicked::Resume), "Resume's keys");
     assert!(grabbed(&mut game), "Resume in Play");
     let _ = game.route(&key(Key::F1), &at, Some(VIEW));
-    let press = Event::MouseButton {
-        button: MouseButton::Left,
-        pressed: true,
-    };
-    let _ = game.route(&press, &at, Some(VIEW));
-    assert!(!grabbed(&mut game), "a press in the view after Shift+F1");
-    game.click(overlay::Clicked::Resume);
-    answer("status", true);
-    assert!(!grabbed(&mut game), "another client's stop");
-    answer("status", false);
-    game.view.toolbar.world_camera = true;
-    assert!(
-        !grabbed(&mut game),
-        "another client's play, through the game's camera"
-    );
+    game.click(overlay::Clicked::To(Mode::Play));
+    assert!(grabbed(&mut game), "Play");
     game.click(overlay::Clicked::To(Mode::Simulate));
     assert!(!grabbed(&mut game), "Simulate");
     game.click(overlay::Clicked::To(Mode::Play));

@@ -26,23 +26,22 @@ impl Game {
     }
 
     /// Does what a click of the title bar's controls asks while a game serves, as
-    /// [`run`](Self::run) and [`step`](Self::step) say, or pauses or resumes it. Play, and Resume
-    /// in Play, capture the view's input; any other click ends the capture.
-    pub(super) fn click(&mut self, clicked: overlay::Clicked) {
+    /// [`run`](Self::run) and [`step`](Self::step) say, or pauses or resumes it. Returns whether
+    /// the view gets the keys: for Play, and Resume in Play, which also grab again what Shift+F1
+    /// let go of.
+    pub(super) fn click(&mut self, clicked: overlay::Clicked) -> bool {
         let resumes_play = clicked == overlay::Clicked::Resume && self.mode() == Mode::Play;
-        let captures = clicked == overlay::Clicked::To(Mode::Play) || resumes_play;
-        // A capture grabs again what Shift+F1 let go of; any other click ends a capture.
-        self.grab = match (captures, self.grab) {
-            (true, _) => Grab::Captured,
-            (false, Grab::Captured) => Grab::Asks,
-            (false, grab) => grab,
-        };
+        let plays = clicked == overlay::Clicked::To(Mode::Play) || resumes_play;
+        if plays {
+            self.grab = Grab::Asks;
+        }
         match clicked {
             overlay::Clicked::To(to) => self.run(to),
             overlay::Clicked::Pause => self.ask("pause"),
             overlay::Clicked::Resume => self.ask("resume"),
             overlay::Clicked::Step => self.step(),
         }
+        plays
     }
 
     /// Asks the game `method`, without params, while one serves.
