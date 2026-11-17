@@ -216,7 +216,6 @@ impl Skins {
         &self.fresh
     }
 
-    /// Own and spare mesh counts, for tests.
     #[cfg(test)]
     pub(crate) fn held(&self) -> (usize, usize) {
         (self.held.len(), self.spare.len())

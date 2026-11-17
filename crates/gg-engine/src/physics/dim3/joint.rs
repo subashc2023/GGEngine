@@ -362,7 +362,6 @@ mod tests {
     use crate::placed::Placed;
     use crate::{BodyType, BoxCollider3D, RigidBody3D, Transform};
 
-    /// A static unit box at `at`.
     fn post(world: &mut World, at: Vec3) -> Entity {
         let at = Transform {
             translation: at.as_dvec3(),
@@ -885,7 +884,6 @@ mod tests {
         (held, hinges)
     }
 
-    /// Hangs a box from the left of `held` by a hinge.
     fn hang_left(world: &mut World, held: Entity) {
         let hung = crate_at(world, Vec3::new(-2.0, 6.0, 0.0), Quat::IDENTITY);
         let other = Joint3D {

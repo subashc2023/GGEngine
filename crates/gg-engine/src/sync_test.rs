@@ -27,7 +27,6 @@ pub(crate) struct SyncTest {
 }
 
 impl SyncTest {
-    /// Copies `world` as the coming tick finds it, and forgets the previous tick's commands.
     pub(crate) fn take(&mut self, world: &World) {
         self.world.clone_from(world);
         self.commands.clear();

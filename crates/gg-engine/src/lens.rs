@@ -1,12 +1,14 @@
-//! The camera effects a world's [`Environment`](crate::Environment) sets beyond its light: depth of
-//! field, motion blur, and a lens's vignette, chromatic aberration and film grain.
+//! The camera effects a world's [`Environment`](crate::Environment) sets beyond its light.
+//!
+//! Depth of field, motion blur, and a lens's vignette, chromatic aberration and film grain.
 
 use crate::Reflect;
 
-/// Depth of field: what's nearer or farther than the focus blurs, as through a thin lens whose
-/// focal length is what the field of view gives on a 24 mm-high full-frame sensor. A wider
-/// aperture, nearer focus or narrower field of view blurs more. World units are meters.
-/// Perspective views only.
+/// Depth of field: what's nearer or farther than the focus blurs.
+///
+/// A thin lens whose focal length is what the field of view gives on a 24 mm-high full-frame
+/// sensor. A wider aperture, nearer focus or narrower field of view blurs more. World units are
+/// meters. Perspective views only.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct DepthOfField {
     /// Distance ahead of the view that's in focus, in meters: 3 by default.
@@ -45,8 +47,9 @@ impl DepthOfField {
     }
 }
 
-/// Motion blur along how far things moved while the shutter was open. Models blur by their own
-/// motion; particles and a layer's own draws by the camera's alone; a skinned model by its parts'
+/// Motion blur along how far things moved while the shutter was open.
+///
+/// Models blur by their own motion; particles and a layer's own draws by the camera's alone; a skinned model by its parts'
 /// transforms, not its joints'.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct MotionBlur {

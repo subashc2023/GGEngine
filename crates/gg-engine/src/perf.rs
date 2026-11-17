@@ -106,7 +106,6 @@ impl Perf {
         self.pending = Some(Sample::default());
     }
 
-    /// Records the frame's ticks, update and UI times.
     pub(crate) fn ran(&mut self, ticks: Duration, update: Duration, ui: Duration) {
         if let Some(sample) = &mut self.pending {
             sample.ticks = nanos(ticks);
@@ -141,7 +140,6 @@ impl Perf {
         }
     }
 
-    /// Records the wait for the cap.
     pub(crate) fn limited(&mut self, limit: Duration) {
         if let Some(sample) = &mut self.pending {
             sample.limit = nanos(limit);
@@ -659,7 +657,6 @@ mod tests {
 
     const MS: Duration = Duration::from_millis(1);
 
-    /// A render of `render`, `wait` of it waiting.
     fn rendered(render: Duration, wait: Duration, drawn: DrawCounts, presented: bool) -> Rendered {
         Rendered {
             presented: Ok(presented),
@@ -848,7 +845,6 @@ mod tests {
         }
         perf.finish(MS);
         let summary = perf.summary();
-        // Of four measured, two had GPU times.
         assert_eq!(summary.measured, 4);
         let gpu = summary.gpu;
         assert_eq!(

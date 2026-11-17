@@ -165,11 +165,9 @@ impl Reflect for Sprite {
         sampler.digest(to);
     }
 
-    /// None of its fields holds one.
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// A sprite's fields, in description order.
 const SPRITE_FIELDS: [&str; 4] = ["color", "texture", "rect", "sampler"];
 
 impl Component for Circle {}
@@ -310,11 +308,9 @@ impl Reflect for Circle {
         fade.digest(to);
     }
 
-    /// None of its fields holds one.
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// A circle's fields, in description order.
 const CIRCLE_FIELDS: [&str; 3] = ["color", "thickness", "fade"];
 
 /// Taken apart whole, like a sprite. Defaults are the default fog's; amounts are at least 0;
@@ -485,11 +481,9 @@ impl Reflect for Fog {
         }
     }
 
-    /// None of its fields holds one.
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// Fog's fields, in description order.
 const FOG_FIELDS: [&str; 9] = [
     "density",
     "falloff",
@@ -936,11 +930,9 @@ impl Reflect for Grade {
         power.digest(to);
     }
 
-    /// None of its fields holds one.
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// A grade's fields, in description order.
 const GRADE_FIELDS: [&str; 7] = [
     "temperature",
     "tint",
@@ -1040,11 +1032,9 @@ impl Reflect for AmbientOcclusion {
         strength.digest(to);
     }
 
-    /// None of its fields holds one.
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// Ambient occlusion's fields, in description order.
 const AMBIENT_OCCLUSION_FIELDS: [&str; 2] = ["radius", "strength"];
 
 /// Taken apart whole, like ambient occlusion. Defaults are the default reflections'; each field is
@@ -1145,11 +1135,9 @@ impl Reflect for Reflections {
         }
     }
 
-    /// None of its fields holds one.
     fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
-/// Reflections' fields, in description order.
 const REFLECTIONS_FIELDS: [&str; 3] = ["distance", "thickness", "roughness"];
 
 /// `reflections`' fields in [`REFLECTIONS_FIELDS`]' order, taken apart whole, so a field

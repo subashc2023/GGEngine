@@ -277,10 +277,8 @@ impl Recorder {
     }
 }
 
-/// A recording, as read.
 struct Recording {
     app: String,
-    /// The recording engine and build.
     engine: String,
     /// Layer type names, bottom up.
     layers: Vec<String>,
@@ -317,7 +315,6 @@ struct Ticked {
     hash: Option<(WorldHash, usize)>,
 }
 
-/// A recorded command: its layer's index (bottom up), value and line.
 struct Recorded {
     layer: usize,
     value: Text,
@@ -499,7 +496,6 @@ impl Recording {
         Ok(recording)
     }
 
-    /// The command of line `number`, `command` after its `> `.
     fn command(&self, number: usize, command: &str) -> Result<Recorded> {
         let (layer, value) = command.split_once(' ').unwrap_or((command, ""));
         // Where the value starts: after `> `, the layer and a space.
@@ -531,7 +527,6 @@ pub struct Replay {
     app: App,
     cx: Context,
     recording: Recording,
-    /// How many of its ticks have run.
     ran: usize,
 }
 

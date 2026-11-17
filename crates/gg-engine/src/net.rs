@@ -326,9 +326,8 @@ impl Merged {
 
 /// Fails with `net.bad_command` if `command`, from player `player`'s inputs, names another player:
 /// a variant or struct whose field `player` holds an integer, as Shards' commands name the player
-/// they steer. A run's layers queue commands for its own player alone, so no client or peer steers
-/// another's player; peers refuse alike, as each knows whose inputs are whose. A server's own
-/// commands, which steer any player, aren't checked.
+/// they steer. Layers queue commands for their own player alone, and peers refuse alike. A
+/// server's own commands, which steer any player, aren't checked.
 fn steers_its_own(command: &Value, player: u8) -> Result<()> {
     let (Value::Variant(_, fields) | Value::Struct(fields)) = command else {
         return Ok(());
@@ -410,8 +409,7 @@ impl Stalls {
     }
 }
 
-/// What a peer, server or client must do between ticks ([`Lockstep::turn`], [`Server::turn`],
-/// [`Client::turn`]).
+/// What [`Lockstep::turn`], [`Server::turn`] and [`Client::turn`] ask for between ticks.
 pub(crate) enum Turn {
     None,
     /// The host owes its joiner its world, or the server a client its own.

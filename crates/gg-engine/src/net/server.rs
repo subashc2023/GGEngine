@@ -89,7 +89,6 @@ pub(super) const PART: usize = MAX_PACKET_TEXT - 128;
 /// ([`Client`](super::Client)).
 const STATES: u64 = 2;
 
-/// A server: where its clients' connections come, and each client.
 pub(crate) struct Server {
     accepted: Accepted,
     /// Where the server listens, for tests, which listen where the OS picks.
@@ -116,7 +115,6 @@ pub(crate) struct Server {
     unsaved: bool,
 }
 
-/// A client, as its server knows it.
 struct Remote {
     /// Which client it is among those that connected, as the states thread names it.
     number: u64,
@@ -323,8 +321,7 @@ impl Server {
         }
     }
 
-    /// As a tick starts: empties the queues (each layer's, by index) into the server's own commands
-    /// for the tick, written against `world`.
+    /// As a tick starts: empties each layer's queue into the server's own commands for the tick.
     pub(crate) fn start_tick<'q>(
         &mut self,
         queues: impl Iterator<Item = (usize, &'q mut dyn Commands)>,
@@ -400,8 +397,7 @@ impl Server {
         world.advance();
     }
 
-    /// Between frames, until `until`: sends the states as soon as the thread has written them,
-    /// then waits out the time left.
+    /// Between frames, until `until`: sends the states as the thread writes them.
     pub(crate) fn wait(&mut self, until: Instant) {
         self.send_written(Some(until));
         std::thread::sleep(until.saturating_duration_since(Instant::now()));

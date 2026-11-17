@@ -225,7 +225,6 @@ impl Drop for TextureChanges {
     }
 }
 
-/// How rendering a frame went.
 #[derive(Debug)]
 pub(crate) struct Rendered {
     /// Whether it presented ([`Renderer::render`]).
@@ -417,7 +416,6 @@ impl Extracted {
     }
 }
 
-/// The render thread, and the renderer while it's back from it.
 pub(crate) struct RenderThread<R: Render = Renderer> {
     /// The renderer and its last frame, while back.
     home: Option<Box<Trip<R>>>,

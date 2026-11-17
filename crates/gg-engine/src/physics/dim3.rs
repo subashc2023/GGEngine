@@ -38,12 +38,13 @@ pub use joint::{Joint3D, JointKind3D};
 use joint::{Jointed, SavedJoint};
 pub use query::{Cast, Hit3D, Shape3D};
 
-/// A body 3D physics moves at each tick a layer runs [`step_physics`](crate::step_physics): its
-/// entity's [`Transform`] (translation, rotation) and the velocities here, which each step reads
-/// and writes back. It collides as its entity's [`BoxCollider3D`], [`SphereCollider3D`] and
-/// [`CapsuleCollider3D`], any or all, which also give a dynamic body its mass; [`Joint3D`]s hold
-/// it to other bodies. A body under a parent isn't moved: its transform is in its parent's space
-/// (`physics.child_body`).
+/// A body 3D physics moves at each [`step_physics`](crate::step_physics).
+///
+/// Physics moves its entity's [`Transform`] (translation, rotation) and the velocities here, which
+/// each step reads and writes back. It collides as its entity's [`BoxCollider3D`],
+/// [`SphereCollider3D`] and [`CapsuleCollider3D`], any or all, which also give a dynamic body its
+/// mass; [`Joint3D`]s hold it to other bodies. A body under a parent isn't moved: its transform is
+/// in its parent's space (`physics.child_body`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
 pub struct RigidBody3D {
     /// How it moves. Dynamic: by its velocity, which gravity and collisions change. Kinematic: by
@@ -132,9 +133,10 @@ impl BoxCollider3D {
     }
 }
 
-/// The sphere a [`RigidBody3D`] on the same entity collides as, in the entity's space: around its
-/// offset, which turns and scales with the entity. The radius scales by the largest of the
-/// entity's scales, since a sphere stays one. Default: half a unit, a unit across.
+/// The sphere a [`RigidBody3D`] on the same entity collides as, in the entity's space.
+///
+/// It's around its offset, which turns and scales with the entity. The radius scales by the
+/// largest of the entity's scales, since a sphere stays one. Default: half a unit, a unit across.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct SphereCollider3D {
     /// Its middle, from the entity's origin.
@@ -182,7 +184,6 @@ impl Default for SphereCollider3D {
 }
 
 impl SphereCollider3D {
-    /// Offset scaled, radius by the largest scale.
     fn collider(&self, scale: Vec3) -> Collider {
         let shape = ColliderBuilder::ball((self.radius * scale.abs().max_element()).into());
         let Self {
@@ -200,12 +201,14 @@ impl SphereCollider3D {
     }
 }
 
-/// The capsule a [`RigidBody3D`] on the same entity collides as, in the entity's space: what's
-/// within its radius of a segment along the entity's Y, a cylinder capped by half spheres, upright
-/// like a standing character. It's around its offset, which turns and scales with the entity. Its
-/// height scales by the entity's scale along Y, its radius by the larger of its scales along X and
-/// Z, so it stays round. One no taller than twice its radius is a sphere of that radius. Default:
-/// 2 units tall and half a unit in radius, a person's size where a unit is a meter.
+/// The capsule a [`RigidBody3D`] on the same entity collides as, in the entity's space.
+///
+/// It's what's within its radius of a segment along the entity's Y, a cylinder capped by half
+/// spheres, upright like a standing character. It's around its offset, which turns and scales with
+/// the entity. Its height scales by the entity's scale along Y, its radius by the larger of its
+/// scales along X and Z, so it stays round. One no taller than twice its radius is a sphere of that
+/// radius. Default: 2 units tall and half a unit in radius, a person's size where a unit is a
+/// meter.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct CapsuleCollider3D {
     /// Its middle, from the entity's origin.
@@ -285,12 +288,13 @@ impl CapsuleCollider3D {
     }
 }
 
-/// The triangles a [`RigidBody3D`] on the same entity collides as: those of the model its entity's
-/// [`ModelRoot`] names, each node's where it is in the model, in the entity's space, so they turn
-/// with it and scale along each axis as it does, like a level's floors and walls. Triangles hold
-/// no volume, so it gives a body no mass and suits static and kinematic bodies; a dynamic one
-/// takes its mass from its other colliders. An entity with no `ModelRoot`, or a model without
-/// triangles (as one that didn't load), collides as nothing, warned of when made
+/// The triangles a [`RigidBody3D`] on the same entity collides as: those of its entity's model.
+///
+/// They are the model [`ModelRoot`] names, each node's where it is in the model, in the entity's
+/// space, so they turn with it and scale along each axis as it does, like a level's floors and
+/// walls. Triangles hold no volume, so it gives a body no mass and suits static and kinematic
+/// bodies; a dynamic one takes its mass from its other colliders. An entity with no `ModelRoot`, or
+/// a model without triangles (as one that didn't load), collides as nothing, warned of when made
 /// (`physics.no_surface`). Its outline isn't drawn: its model shows where it is.
 ///
 /// A world saved whole holds its triangles whole, as rapier serializes them, at a cost DEFECTS.md
@@ -429,12 +433,13 @@ fn groups(membership: u32, filter: u32) -> InteractionGroups {
     )
 }
 
-/// The world's 3D physics, a [`Resource`](crate::Resource): rapier's bodies, colliders, joints and
-/// contacts, which each step continues from, and each body's and joint's entity, so a restored
-/// snapshot steps as its world did. [`step_physics`](crate::step_physics) adds it at the first step
-/// of a world with a [`RigidBody3D`] and none; a game may insert one first, with its gravity. A
-/// world cleared, or whose entities a scene replaced, keeps it; the next step follows the entities
-/// there.
+/// The world's 3D physics, a [`Resource`](crate::Resource) holding rapier's state.
+///
+/// It has rapier's bodies, colliders, joints and contacts, which each step continues from, and each
+/// body's and joint's entity, so a restored snapshot steps as its world did.
+/// [`step_physics`](crate::step_physics) adds it at the first step of a world with a
+/// [`RigidBody3D`] and none; a game may insert one first, with its gravity. A world cleared, or
+/// whose entities a scene replaced, keeps it; the next step follows the entities there.
 pub struct Physics3D {
     /// Which way dynamic bodies fall, and how fast they speed up, in units per second squared:
     /// down along -Y at 9.81 by default, Earth's if a unit is a meter. Characters fall as much as
@@ -1186,7 +1191,6 @@ fn body_type(body_type: BodyType) -> RigidBodyType {
     }
 }
 
-/// Swaps the collider `handle` holds for `made`, on `body`.
 fn replace(
     rapier: &mut Rapier,
     handle: &mut Option<ColliderHandle>,

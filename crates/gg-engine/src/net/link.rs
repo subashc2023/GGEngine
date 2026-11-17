@@ -698,7 +698,6 @@ pub(super) struct Traffic {
     most: [u64; 2],
 }
 
-/// Packets and their bytes.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Count {
     pub(super) packets: u64,

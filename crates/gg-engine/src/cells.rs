@@ -60,6 +60,7 @@ fn looked(at: [f64; 3], reach: f64, size: f64, within: (IVec3, IVec3)) -> (IVec3
 }
 
 /// On an entity of a world's scene: cuts space into cubes `size` units on a side from the origin.
+///
 /// A cell's entities are in `folder`'s scene file named by its grid place: the cube (768, 0, -512)
 /// to (1024, 256, -256) at size 256 is `cells/3_0_-2.ron`. A cell without a file is empty unless
 /// the game makes it ([`Context::make_cells`](crate::Context::make_cells)). As each tick ends,
@@ -81,7 +82,9 @@ pub struct Cells {
     pub size: f32,
 }
 
-/// On an entity the world streams cells around. As each tick ends, cells whose nearest point is
+/// On an entity the world streams cells around.
+///
+/// As each tick ends, cells whose nearest point is
 /// within `radius` of its [`World::pose`] come in, and those farther than `radius` plus half a cell
 /// from every viewer go out, so a viewer on a cell's edge doesn't flip it in and out. A viewer, or
 /// what holds one, never goes out with a cell.
@@ -92,7 +95,9 @@ pub struct Viewer {
     pub radius: f32,
 }
 
-/// On a root that streams. It goes out, kept with what its cell keeps, when its cell (by its
+/// On a root that streams.
+///
+/// It goes out, kept with what its cell keeps, when its cell (by its
 /// [`Transform`], the origin without one) goes out, or at once if the tick left it in a cell that's
 /// out. It comes back with the cell as it was. A cell's load gives it to the cell's roots; a game
 /// gives it to what it spawns that should stream, like a dropped item. What's under a root goes
@@ -376,7 +381,6 @@ pub(crate) struct Plan {
     pub(crate) leavers: Vec<(Cell, Entity)>,
     /// The refused cells whose viewers have gone, which may retry.
     pub(crate) forgotten: Vec<Cell>,
-    /// Whether more cells than [`MOST_CELLS`] would be in.
     pub(crate) full: bool,
     /// The cells out within a viewer's radius plus 1.5 cells, each with how far past that radius it
     /// is, nearest first, at most [`MOST_CELLS`]: those to prepare ahead ([`Preparing`]), which
@@ -685,7 +689,6 @@ impl World {
         seen
     }
 
-    /// Whether `root` is a [`Viewer`], or holds one under it.
     fn holds_viewer(&self, root: Entity, walk: &mut Vec<Entity>) -> bool {
         walk.clear();
         walk.push(root);

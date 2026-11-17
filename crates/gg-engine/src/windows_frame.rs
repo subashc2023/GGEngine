@@ -45,7 +45,6 @@ use crate::chrome::{Caption, Look};
 /// the UI how the maximize button looks.
 pub(crate) struct Frame(Rc<State>);
 
-/// What the window procedure keeps between messages.
 #[derive(Default)]
 struct State {
     /// The title bar's parts that are the OS's, in the inside's pixels.

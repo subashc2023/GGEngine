@@ -25,8 +25,10 @@ use crate::reflect::{self, Ident, Reflect, Value};
 use crate::{ModelNode, ModelRoot, Prefab, PrefabRoot};
 
 /// An authoring change to a world, by a person or an agent, which a [`Log`](super::Log) applies
-/// and undoes. It names entities by ID and carries reflection's values, whose entities are
-/// handles, as [`World::set_field`] takes one.
+/// and undoes.
+///
+/// It names entities by ID and carries reflection's values, whose entities are handles, as
+/// [`World::set_field`] takes one.
 ///
 /// Applying one checks everything first, so a refusal changes nothing. Refusals:
 /// - `ecs.no_entity`: an entity it changes, or a parent it gives, isn't alive.
@@ -686,7 +688,6 @@ impl World {
         }
     }
 
-    /// Frees the slots `undo` keeps, and lets their IDs go.
     fn let_go(&mut self, undo: Undo) {
         match undo {
             Undo::Restore { taken, .. }
@@ -793,7 +794,6 @@ impl World {
         Ok(())
     }
 
-    /// Applies `operation`, and returns what undoes it.
     fn applied(&mut self, operation: &Operation) -> Result<Undo> {
         let refused = |error: Error| {
             let message = format!("can't {operation}: {error}");
@@ -997,7 +997,6 @@ impl World {
         })
     }
 
-    /// A copy of `entity`'s component of type `name` in a one-row column; `None` if it has none.
     fn copy_of(&self, entity: Entity, name: &str) -> Option<Box<dyn AnyColumn>> {
         let at = self.location(entity)?;
         let table = &self.tables[at.table as usize];

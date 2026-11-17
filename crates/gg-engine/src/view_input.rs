@@ -158,7 +158,6 @@ impl ViewInput {
         self.focus(true);
     }
 
-    /// Whether the cursor is in the window.
     pub(crate) fn inside(&self) -> bool {
         self.inside
     }

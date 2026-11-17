@@ -27,8 +27,9 @@ pub(super) use joint::joint_lines;
 pub use joint::{Joint2D, JointKind2D};
 use joint::{Jointed, SavedJoint};
 
-/// A body 2D physics moves at each tick a layer runs [`step_physics`](crate::step_physics), in the
-/// XY plane: its entity's [`Transform`] (position, turn about Z) and the velocities here, which
+/// A body 2D physics moves at each [`step_physics`](crate::step_physics), in the XY plane.
+///
+/// Physics moves its entity's [`Transform`] (position, turn about Z) and the velocities here, which
 /// each step reads and writes back. It collides as its entity's [`BoxCollider2D`] and
 /// [`CircleCollider2D`], either or both, which also give a dynamic body its mass; [`Joint2D`]s
 /// hold it to other bodies. A body under a parent isn't moved: its transform is in its parent's
@@ -113,10 +114,11 @@ impl BoxCollider2D {
     }
 }
 
-/// The circle a [`RigidBody2D`] on the same entity collides as, in the entity's space: around its
-/// offset, which turns and scales with the entity. The radius scales by the larger of the entity's
-/// scales across and up, since a circle stays one. Default: half a unit, a unit across like a
-/// circle drawn on a sprite's square.
+/// The circle a [`RigidBody2D`] on the same entity collides as, in the entity's space.
+///
+/// It's around its offset, which turns and scales with the entity. The radius scales by the larger
+/// of the entity's scales across and up, since a circle stays one. Default: half a unit, a unit
+/// across like a circle drawn on a sprite's square.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct CircleCollider2D {
     /// Its middle, from the entity's origin.
@@ -162,7 +164,6 @@ impl Default for CircleCollider2D {
 }
 
 impl CircleCollider2D {
-    /// Offset scaled across and up, radius by the larger scale.
     fn collider(&self, scale: Vec3) -> Collider {
         let scale = scale.truncate();
         let shape = ColliderBuilder::ball((self.radius * scale.abs().max_element()).into())
@@ -191,12 +192,13 @@ fn met(shape: ColliderBuilder, sensor: bool, membership: u32, filter: u32) -> Co
     }
 }
 
-/// The world's 2D physics, a [`Resource`](crate::Resource): rapier's bodies, colliders, joints and
-/// contacts, which each step continues from, and each body's and joint's entity, so a restored
-/// snapshot steps as its world did. [`step_physics`](crate::step_physics) adds it at the first step
-/// of a world with a [`RigidBody2D`] and none; a game may insert one first, with its gravity. A
-/// world cleared, or whose entities a scene replaced, keeps it; the next step follows the entities
-/// there.
+/// The world's 2D physics, a [`Resource`](crate::Resource) holding rapier's state.
+///
+/// It has rapier's bodies, colliders, joints and contacts, which each step continues from, and each
+/// body's and joint's entity, so a restored snapshot steps as its world did.
+/// [`step_physics`](crate::step_physics) adds it at the first step of a world with a
+/// [`RigidBody2D`] and none; a game may insert one first, with its gravity. A world cleared, or
+/// whose entities a scene replaced, keeps it; the next step follows the entities there.
 pub struct Physics2D {
     /// Which way dynamic bodies fall, and how fast they speed up, in units per second squared:
     /// down at 9.81 by default, Earth's if a unit is a meter.
@@ -209,7 +211,6 @@ pub struct Physics2D {
     pub(super) contacts: Contacts,
 }
 
-/// What rapier keeps from one step to the next.
 #[derive(Clone, Serialize, Deserialize)]
 struct Rapier {
     bodies: RigidBodySet,
@@ -790,7 +791,6 @@ fn body_type(body_type: BodyType) -> RigidBodyType {
     }
 }
 
-/// Swaps the collider `handle` holds for `made`, on `body`.
 fn replace(
     rapier: &mut Rapier,
     handle: &mut Option<ColliderHandle>,

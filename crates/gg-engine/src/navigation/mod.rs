@@ -36,9 +36,11 @@ use bake::{Settings, Shape, bounds};
 use mesh::NavMesh;
 use path::Search;
 
-/// What the world's navmesh is baked from, for what size of agent: the static 3D colliders, as
-/// physics has them, inside a box around its entity's origin. The box is in its entity's space and
-/// moves, turns and scales with it; the bake uses the box bounding it along the world's axes.
+/// What the world's navmesh is baked from, for what size of agent: the static 3D colliders inside a
+/// box around its entity's origin.
+///
+/// The box is in its entity's space and moves, turns and scales with it; the bake uses the box
+/// bounding it along the world's axes. Colliders are as physics has them.
 ///
 /// Surfaces are voxelized into cells `cell_size` across and `cell_height` tall. Cells are kept
 /// where an agent can stand: a surface no steeper than `max_slope`, `agent_height` of room above,
@@ -172,10 +174,11 @@ impl Clone for NavAgent {
     }
 }
 
-/// The world's navigation, a [`Resource`](crate::Resource) [`step_navigation`] gives a world with
-/// a [`NavMeshVolume`] or a [`NavAgent`] at its first step. It holds the navmesh and a fingerprint
-/// of what it was baked from: the volume and each static body's transform and colliders, by
-/// entity ID. A changed fingerprint bakes again; agents' paths are planned on it.
+/// The world's navigation, a [`Resource`](crate::Resource) [`step_navigation`] adds at a first step.
+///
+/// A world with a [`NavMeshVolume`] or a [`NavAgent`] gets it. It holds the navmesh and a
+/// fingerprint of what it was baked from: the volume and each static body's transform and
+/// colliders, by entity ID. A changed fingerprint bakes again; agents' paths are planned on it.
 ///
 /// Snapshots share the navmesh with their world. Snapshot files don't hold it: the same entities
 /// and assets bake the same navmesh, bit for bit, so a restored run bakes it at its first step,
@@ -227,8 +230,9 @@ impl Clone for Navigation {
     }
 }
 
-/// Steps `world`'s navigation a tick: brings the navmesh up to date, then each [`NavAgent`] plans,
-/// heads for its next corner and steers round the rest. A layer's tick runs it after what sets
+/// Steps `world`'s navigation a tick: updates the navmesh, then each [`NavAgent`] plans and steers.
+///
+/// Each agent heads for its next corner and steers round the rest. A layer's tick runs it after what sets
 /// destinations (such as scripts) and before physics, which moves characters as their agents set.
 pub fn step_navigation(world: &mut World) {
     let _zone = gg_core::zone!();

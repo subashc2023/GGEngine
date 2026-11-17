@@ -91,7 +91,6 @@ pub enum Compressed {
 }
 
 impl Compressed {
-    /// Every way the cooker compresses an image.
     const ALL: [Self; 4] = [Self::Bc7Srgb, Self::Bc7Unorm, Self::Bc5, Self::Bc6h];
 
     /// How the cooker compresses `texels`: colors as sRGB BC7, a surface map as BC7 of values, a
@@ -287,9 +286,10 @@ pub(crate) fn decode_texture(name: &str, path: &Path, image: Image) -> Result<Im
     })
 }
 
-/// Reads and decodes a texture as the cooker writes it, into a game's package or a model it cooked:
-/// KTX2 of what [`Compressed`] says, a 2D image of one level or the full chain [`mip_sizes`] gives,
-/// each level plain or zstd-supercompressed. The error says what's wrong with it.
+/// Reads and decodes a texture as the cooker writes it, into a game's package or a model it cooked.
+///
+/// It is KTX2 of what [`Compressed`] says, a 2D image of one level or the full chain [`mip_sizes`]
+/// gives, each level plain or zstd-supercompressed. The error says what's wrong with it.
 pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
     read_ktx2(bytes.to_vec())?.decoded()
 }
@@ -362,7 +362,6 @@ pub(crate) fn read_ktx2(bytes: Vec<u8>) -> Result<Image, String> {
     })
 }
 
-/// Takes the levels' blocks out of `bytes`, a [`read_ktx2`] file, out of zstd if supercompressed.
 fn decode_ktx2_levels(bytes: &[u8]) -> Result<Image, String> {
     let reader = ktx2::Reader::new(bytes).map_err(|error| format!("it isn't KTX2: {error}"))?;
     let header = reader.header();
@@ -492,7 +491,6 @@ fn dds_header(bytes: &[u8]) -> Result<([u32; 2], Compressed, bool), String> {
     Ok((size, compressed, mipmapped))
 }
 
-/// Takes the levels' blocks out of `bytes`, a DDS file [`read_dds`] read.
 fn decode_dds(bytes: &[u8]) -> Result<Image, String> {
     let (size, compressed, mipmapped) = dds_header(bytes)?;
     Ok(Image {

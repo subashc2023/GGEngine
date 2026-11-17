@@ -96,7 +96,6 @@ impl Kind {
     }
 }
 
-/// An entry of a package, as its table has it.
 #[derive(Clone, Debug)]
 struct Entry {
     path: Box<str>,
@@ -636,7 +635,6 @@ impl Writer {
 mod tests {
     use super::*;
 
-    /// A package written in a test's own directory.
     fn written(writer: &Writer, name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gg-package-{}-{name}", std::process::id()));
         let path = dir.join("game.ggpk");

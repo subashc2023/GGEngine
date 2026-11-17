@@ -73,7 +73,6 @@ struct Pass {
     textures: TextureChanges,
 }
 
-/// What a window's pass drew.
 pub(crate) struct Drawn {
     key: u64,
     primitives: Vec<ClippedPrimitive>,
@@ -446,7 +445,6 @@ fn title(builder: &ViewportBuilder) -> &str {
     builder.title.as_deref().unwrap_or_default()
 }
 
-/// The renderer's key for `id`'s window.
 fn key(id: ViewportId) -> u64 {
     id.0.value()
 }
@@ -476,7 +474,6 @@ impl WindowInput {
         }
     }
 
-    /// The cursor's position, in points.
     pub(crate) fn cursor(&self) -> Pos2 {
         self.cursor
     }

@@ -9,8 +9,9 @@ use gg_core::{Error, Result};
 
 use super::{Entity, World};
 
-/// An entity's persistent ID: what files, operations, diagnostics and the tool API name it by,
-/// where its [`Entity`] handle is the world's own. A world draws one at random for each entity
+/// An entity's persistent ID: what files, operations, diagnostics and the tool API name it by.
+///
+/// Its [`Entity`] handle is the world's own. A world draws one at random for each entity
 /// code spawns; a loaded scene's entities keep theirs; a placed prefab's are mixed from its
 /// own. No two living entities share one.
 ///

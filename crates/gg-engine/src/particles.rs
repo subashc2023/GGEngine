@@ -49,9 +49,10 @@ pub enum ParticleBlend {
     Additive,
 }
 
-/// Emits particles from where its entity draws (ancestors carry it). Only the emitter is in the
-/// world, as an ordinary component: saved in scenes, editable, read by the world hash. The frames
-/// own the particles.
+/// Emits particles from where its entity draws (ancestors carry it).
+///
+/// Only the emitter is in the world, as an ordinary component: saved in scenes, editable, read by
+/// the world hash. The frames own the particles.
 ///
 /// - Births: `rate` a second, evenly. Particle `n` is born `n / rate` seconds of world time after
 ///   the emitter first draws, at its position then, interpolated between the frames around it.

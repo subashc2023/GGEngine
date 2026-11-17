@@ -62,7 +62,6 @@ pub(crate) struct Assets {
     by_name: HashMap<Arc<str>, Texture>,
     models: Vec<NamedModel>,
     model_names: HashMap<Arc<str>, Model>,
-    /// Each font's name and path, by index.
     fonts: Vec<(Arc<str>, Arc<str>)>,
     font_names: HashMap<Arc<str>, Font>,
     prefabs: Vec<NamedPrefab>,
@@ -94,7 +93,6 @@ pub(crate) struct Assets {
     catalog: Catalog,
 }
 
-/// A texture loaded from a file, as [`Assets`] holds it.
 #[derive(Clone, Debug)]
 struct Named {
     texture: Texture,
@@ -165,7 +163,6 @@ impl<S: AsRef<str>> Asset<S> {
         }
     }
 
-    /// What it is, in words, for refusals.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Texture(_) => "texture",
@@ -239,7 +236,7 @@ impl Assets {
         named.is_some_and(|named| named.as_ref().is_some_and(|named| named.removed))
     }
 
-    /// Counts `texture` as removed from now on, keeping its name and path.
+    /// Keeps its name and path.
     pub(crate) fn remove_texture(&mut self, texture: Texture) {
         let named = self.textures.get_mut(texture.index() as usize);
         let named = named.and_then(Option::as_mut);
@@ -335,7 +332,7 @@ impl Assets {
         self.add_prefab(path, name, Some(text))
     }
 
-    /// Sets `prefab`'s text, its file read again.
+    /// Its file read again.
     #[cfg(feature = "dev")]
     pub(crate) fn set_prefab_text(&mut self, prefab: Prefab, text: Arc<str>) {
         self.prefabs[prefab.index()].text = Some(text);
@@ -403,7 +400,7 @@ impl Assets {
             .is_some_and(|model| model.removed)
     }
 
-    /// Counts `model` as removed from now on, keeping its name, path and what its root spawns.
+    /// Keeps its name, path and what its root spawns.
     pub(crate) fn remove_model(&mut self, model: Model) {
         self.models[model.index()].removed = true;
     }
@@ -661,7 +658,7 @@ pub(crate) fn is_id(name: &str) -> bool {
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Catalog {
-    /// Each asset found, by path from the root, `/` between parts.
+    /// By path from the root, `/` between parts.
     assets: BTreeMap<Arc<str>, Cataloged>,
     /// The path of the asset each ID is: bound once a run.
     ids: HashMap<AssetId, Arc<str>>,
@@ -673,13 +670,11 @@ pub(crate) struct Catalog {
     warned: HashSet<(&'static str, Arc<str>)>,
 }
 
-/// An asset the database holds.
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Cataloged {
     pub(crate) kind: AssetKind,
     pub(crate) id: Option<AssetId>,
-    /// Whether the last scan found its file.
     pub(crate) present: bool,
     /// What's wrong with its ID file at the last scan, if anything.
     pub(crate) problem: Option<Problem>,

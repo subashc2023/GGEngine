@@ -67,9 +67,10 @@ pub(crate) use table::{ComponentId, Table};
 use crate::assets::Assets;
 use crate::reflect::Reflect;
 
-/// Data an entity can have: a struct or enum with `#[derive(Clone, Component)]`. The derive also
-/// implements [`Reflect`], so tools reach it by name, and [`Writable`]. `Clone` lets snapshots
-/// copy the world; `Send + Sync` lets [`par_for_each`](QueryIterMut::par_for_each) hand rows to
+/// Data an entity can have: a struct or enum with `#[derive(Clone, Component)]`.
+///
+/// The derive also implements [`Reflect`], so tools reach it by name, and [`Writable`]. `Clone`
+/// lets snapshots copy the world; `Send + Sync` lets [`par_for_each`](QueryIterMut::par_for_each) hand rows to
 /// job threads. A type registers when an entity first has one, or through [`World::register`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component",
@@ -125,9 +126,10 @@ pub trait Component: Reflect + Clone {
     }
 }
 
-/// A component code may spawn, insert, remove and edit: through [`World::spawn`],
-/// [`World::insert`], [`World::remove`], [`World::get_mut`] and `&mut T` in
-/// [`World::query_mut`]. The derive implements it; a hand-written component implements it beside
+/// A component code may spawn, insert, remove and edit.
+///
+/// That is through [`World::spawn`], [`World::insert`], [`World::remove`], [`World::get_mut`] and
+/// `&mut T` in [`World::query_mut`]. The derive implements it; a hand-written component implements it beside
 /// `Component`. Every engine component is one but [`Parent`], which the world keeps so the
 /// hierarchy stays whole: only [`World::set_parent`] changes it.
 #[diagnostic::on_unimplemented(
@@ -151,8 +153,10 @@ pub use gg_macros::Component;
 )]
 pub trait Bundle: seal::Bundle {}
 
-/// A handle to an entity. It never names another entity once despawned, unless its world is
-/// restored from a snapshot taken before the spawn. It prints as slot and generation, such as
+/// A handle to an entity.
+///
+/// It never names another entity once despawned, unless its world is restored from a snapshot
+/// taken before the spawn. It prints as slot and generation, such as
 /// `7v2`. It's the world's own: files, tools and diagnostics use the [`EntityId`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Entity {
@@ -201,7 +205,9 @@ impl fmt::Debug for Entity {
     }
 }
 
-/// Entities and their components. Each set of component types has a table: rows are the entities
+/// Entities and their components.
+///
+/// Each set of component types has a table: rows are the entities
 /// with exactly those types, in the order they joined; columns are each type's values.
 /// Despawning an entity, or giving or taking a component, moves the table's last row into its
 /// place. So query order follows from the changes made and is the same every time, but a game
@@ -489,7 +495,6 @@ impl World {
         list
     }
 
-    /// Keeps `list`'s memory for a [`take_list`](Self::take_list) after.
     pub(crate) fn keep_list(&mut self, list: Vec<Entity>) {
         self.lists.push(list);
     }
@@ -705,7 +710,6 @@ impl World {
         QueryIterMut::new(&mut self.tables, &self.components, self.change_tick)
     }
 
-    /// The tables, in the order made.
     pub(crate) fn tables(&self) -> &[Table] {
         &self.tables
     }
@@ -758,19 +762,16 @@ impl World {
         self.meta.len()
     }
 
-    /// The table and row indices of living `entity`, for drawing.
     pub(crate) fn table_row(&self, entity: Entity) -> Option<(u32, u32)> {
         self.location(entity).map(|at| (at.table, at.row))
     }
 
-    /// Where `entity` is, if it's alive.
     fn location(&self, entity: Entity) -> Option<Location> {
         let meta = self.meta.get(entity.index as usize)?;
         meta.location
             .filter(|_| meta.generation == entity.generation)
     }
 
-    /// Where `entity` is, or the error that it isn't alive.
     fn locate(&self, entity: Entity) -> Result<Location> {
         self.location(entity).ok_or_else(|| {
             Error::new(
@@ -782,7 +783,6 @@ impl World {
         })
     }
 
-    /// The table of sorted `signature`, made if missing.
     fn table(&mut self, signature: &[ComponentId]) -> u32 {
         if let Some(&table) = self.by_signature.get(signature) {
             return table;
@@ -1350,7 +1350,6 @@ mod tests {
     #[derive(Clone, Debug, PartialEq, Component)]
     struct D(String);
 
-    /// An entity's components, as the model keeps them.
     #[derive(Clone, Debug, Default, PartialEq)]
     struct Has {
         a: Option<A>,
@@ -1444,7 +1443,6 @@ mod tests {
     pub(in crate::ecs) struct Rng(pub(in crate::ecs) u64);
 
     impl Rng {
-        /// A number below `n`.
         pub(in crate::ecs) fn below(&mut self, n: usize) -> usize {
             (splitmix64(&mut self.0) % n as u64) as usize
         }

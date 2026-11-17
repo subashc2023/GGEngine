@@ -351,7 +351,6 @@ mod tests {
     use super::*;
     use crate::{BodyType, BoxCollider2D, RigidBody2D, Transform};
 
-    /// A static unit box at `x`, `y`.
     fn post(world: &mut World, x: f32, y: f32) -> Entity {
         let at = Transform {
             translation: Vec3::new(x, y, 0.0).as_dvec3(),

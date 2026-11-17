@@ -2,8 +2,9 @@
 
 use crate::{Entity, Tick, World, Writable};
 
-/// A component that acts: a layer's tick runs it for each entity that has one, with
-/// [`run_scripts`], among its systems and after its commands, so its input arrives as the rest
+/// A component that acts: a layer's tick runs it for each entity that has one, with [`run_scripts`].
+///
+/// It runs among the layer's systems and after its commands, so its input arrives as the rest
 /// of the simulation's does, in the components those commands set. Its fields are its state, held
 /// by the world: scenes save it, the Inspector and operations edit it, the hash reads it,
 /// snapshots copy it. A script keeps nothing elsewhere. It starts from the value code, a scene or
@@ -20,8 +21,9 @@ pub trait Script: Writable {
     fn tick(entity: Entity, world: &mut World, tick: Tick);
 }
 
-/// Runs `S` at `tick`, once for each entity that has one as the pass starts, in the order queries
-/// find them. An entity despawned, or stripped of `S`, by a script before its turn is skipped. One
+/// Runs `S` at `tick`, once for each entity that has one as the pass starts, in query order.
+///
+/// An entity despawned, or stripped of `S`, by a script before its turn is skipped. One
 /// given an `S` during the pass starts at the next tick. A script that replaces the world, or
 /// restores it from a copy, ends the pass, since the listed entities are another world's: that
 /// world's scripts start at the next tick. The list lives in memory the world keeps, so a pass,

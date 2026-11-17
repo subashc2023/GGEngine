@@ -367,9 +367,7 @@ fn queue(host: &mut Peer, joiner: &mut Peer, queued: &mut [u32; 2]) {
     queued[1] += 10;
 }
 
-/// A lockstep delay rises as its link slows, so ticks seldom wait, and falls a tick at a time once
-/// the link has been fast for [`FALLS`]. Every command applies once on both peers, which hash
-/// alike.
+/// A delay falls a tick at a time once the link has been fast for [`FALLS`].
 #[test]
 fn a_lockstep_session_s_delay_follows_its_link() {
     let _real_time = crate::testing::real_time();
@@ -507,8 +505,7 @@ fn rollback_peers_predict_as_far_as_their_link_needs_and_keep_alike_in_time() {
     );
 }
 
-/// A joiner's inputs go out from the tick its host's world says, whatever the delays: here a
-/// host's, raised by its last link. Every command applies once on both peers, which hash alike.
+/// Here the host's delay was raised by its last link.
 #[test]
 fn a_joiner_s_inputs_go_out_from_the_tick_its_host_s_world_names() {
     let _real_time = crate::testing::real_time();

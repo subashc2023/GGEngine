@@ -19,8 +19,9 @@ use super::{Component, Entity, EntityId, Operation, World};
 use crate::Transform;
 use crate::reflect::Reflect;
 
-/// The entity this one is a child of; its [`Transform`] is relative to its parent's. The world
-/// keeps the hierarchy whole: only scenes and [`World::set_parent`] change it. Code reads it but
+/// The entity this one is a child of; its [`Transform`] is relative to its parent's.
+///
+/// The world keeps the hierarchy whole: only scenes and [`World::set_parent`] change it. Code reads it but
 /// can't change it, nor can tools by name.
 ///
 /// ```

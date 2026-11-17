@@ -148,8 +148,9 @@ struct Held {
     at: u32,
 }
 
-/// A layer's actions, of its own type (such as an enum of what its game does), and what does
-/// them. The layer binds them at start, feeds [`event`](Self::event) each event its
+/// A layer's actions, of its own type (such as an enum of what its game does), and what does them.
+///
+/// The layer binds them at start, feeds [`event`](Self::event) each event its
 /// [`Layer::event`](crate::Layer::event) gets, and queues the changes as commands, since a tick
 /// goes by its commands alone. Values are for what's presented, such as the camera. Unlike
 /// [`Input`](crate::Input), actions don't see a press a layer above handled.

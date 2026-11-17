@@ -21,7 +21,6 @@ use gg_core::Result;
 use crate::edits::{Done, Edit};
 use crate::{Context, EntityId};
 
-/// A scene file a game loaded.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SceneFile {
     /// As the game named it.
@@ -105,7 +104,6 @@ impl SceneFiles {
     }
 }
 
-/// Keeps `file` among `cached`, as [`SceneFiles::cache`] says.
 fn cache(cached: &mut Vec<SceneFile>, file: SceneFile) {
     match cached.iter_mut().find(|kept| kept.author == file.author) {
         #[cfg(feature = "dev")]
@@ -575,7 +573,6 @@ mod open_scene {
         }
     }
 
-    /// The edited world's kept texts, as [`as_edited`] says.
     fn cached_as_edited(cx: &Context) -> &[SceneFile] {
         match &cx.dev.edited {
             Some(edited) => &edited.cached,
@@ -687,7 +684,6 @@ mod open_scene {
         }
     }
 
-    /// What the game makes of `world`'s cells, if it makes some.
     fn made_for<'a>(cx: &'a Context, world: &World) -> Option<&'a MadeCells> {
         let (_, cells, _) = world.world_cells()?;
         cx.cells.made(&cells.folder)

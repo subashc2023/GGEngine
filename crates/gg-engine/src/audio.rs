@@ -53,18 +53,20 @@ const QUICKEST: Duration = Duration::from_millis(10);
 #[cfg(feature = "dev")]
 const RELOAD_FADE: Duration = Duration::from_millis(100);
 
-/// A sound loaded with [`Context::add_sound`], whole in memory. Ticks queue it with
-/// [`World::play_sound`], layers play it with [`Context::play_sound`], many at once, each from its
-/// start. A handle of the context that loaded it.
+/// A sound loaded with [`Context::add_sound`], whole in memory.
+///
+/// Ticks queue it with [`World::play_sound`], layers play it with [`Context::play_sound`], many at
+/// once, each from its start. A handle of the context that loaded it.
 ///
 /// [`Context::add_sound`]: crate::Context::add_sound
 /// [`Context::play_sound`]: crate::Context::play_sound
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sound(u32);
 
-/// Music loaded with [`Context::add_music`]: its file's bytes, kept compressed, decoded as a play
-/// goes, looping. Layers play one at a time ([`Context::play_music`]). A handle of the context
-/// that loaded it.
+/// Music loaded with [`Context::add_music`]: its file's bytes, kept compressed, decoded as it plays.
+///
+/// It loops. Layers play one at a time ([`Context::play_music`]). A handle of the context that
+/// loaded it.
 ///
 /// [`Context::add_music`]: crate::Context::add_music
 /// [`Context::play_music`]: crate::Context::play_music

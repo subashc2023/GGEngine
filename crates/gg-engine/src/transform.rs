@@ -4,8 +4,9 @@ use gg_core::math::{DAffine3, DVec3, Mat4, Quat, Vec3};
 
 use crate::Component;
 
-/// Where an entity is, how it's turned and how big it is: translation, rotation and scale, as
-/// glTF's nodes have them. They are in its [`Parent`](crate::Parent)'s space, or the world's
+/// Where an entity is, how it's turned and how big it is: translation, rotation and scale.
+///
+/// As glTF's nodes have them, they are in its [`Parent`](crate::Parent)'s space, or the world's
 /// without one. [`matrix`](Self::matrix) applies scale, then rotation, then translation.
 /// Translation is `f64`, so an entity 1,000 km from the origin is as precise as one at it (about a
 /// tenth of a nanometer); rotation and scale are `f32`. A child is placed in the world by its own

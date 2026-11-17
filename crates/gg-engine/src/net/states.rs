@@ -92,7 +92,6 @@ pub(super) struct Wanted {
     pub(super) lead: i64,
 }
 
-/// A client's state, as the thread wrote it.
 pub(super) struct Written {
     /// The client and `next` and `lead` as [`Wanted`] had them; the tick of the base its state is
     /// against.

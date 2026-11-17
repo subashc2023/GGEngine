@@ -70,7 +70,6 @@ impl NavMesh {
         self.min.y + f32::from(floor) * self.cell_height
     }
 
-    /// The cells of column (`x`, `z`).
     pub(super) fn column(&self, x: u32, z: u32) -> &[Cell] {
         let at = (z * self.width + x) as usize;
         let range = self.columns[at] as usize..self.columns[at + 1] as usize;

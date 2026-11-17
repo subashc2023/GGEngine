@@ -54,8 +54,9 @@ pub(crate) use file::read;
 use layout::{Laid, share};
 pub(crate) use uis::Uis;
 
-/// A UI [`Context::add_ui`] added: its index among its context's. A layer drives it each frame with
-/// [`event`](Self::event) and [`draw`](Self::draw), and sets its nodes' text, visibility and
+/// A UI [`Context::add_ui`] added: its index among its context's.
+///
+/// A layer drives it each frame with [`event`](Self::event) and [`draw`](Self::draw), and sets its nodes' text, visibility and
 /// widgets' values by name. Its state is the run's (ARCHITECTURE.md's Events and layers).
 ///
 /// Each method panics if the UI is another context's.

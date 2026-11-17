@@ -6,8 +6,9 @@ use tracing::warn;
 
 use crate::{Component, DepthOfField, Entity, EntityId, Lens, MotionBlur, Reflect, Sky, World};
 
-/// How the game's view shows its world's light, from any viewpoint; the editor's and the tool
-/// API's looks use it too. A world has one, on an entity of its own; of several, the view uses
+/// How the game's view shows its world's light, from any viewpoint.
+///
+/// The editor's and the tool API's looks use it too. A world has one, on an entity of its own; of several, the view uses
 /// the lowest ID and warns (`engine.environment_tie`). Without one, a world isn't tonemapped,
 /// antialiased, bloomed or graded, so in-range content like 2D sprites shows as drawn, each pixel
 /// what's at its center, and lit shading exposes as the default environment does.

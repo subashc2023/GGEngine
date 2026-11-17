@@ -12,10 +12,11 @@ use crate::jobs;
 /// every machine. 1,024 of the sandbox's drifters take about 17 µs in a release build.
 const CHUNK: usize = 1024;
 
-/// What a query takes of each entity: `&T` reads its `T`, `&mut T` changes it ([`Writable`]
-/// only), `Entity` is the entity; or a tuple of up to 8, each component named once.
-/// [`World::query_mut`](super::World::query_mut) takes any; [`World::query`](super::World::query)
-/// only readers.
+/// What a query takes of each entity: `&T`, `&mut T`, `Entity`, or a tuple of up to 8 of them.
+///
+/// `&T` reads its `T`, `&mut T` changes it ([`Writable`] only), `Entity` is the entity; a
+/// component is named once. [`World::query_mut`](super::World::query_mut) takes any;
+/// [`World::query`](super::World::query) only readers.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a query",
     note = "a query's terms are `&T` and `&mut T` for components `T`, and `Entity`, alone or in a \

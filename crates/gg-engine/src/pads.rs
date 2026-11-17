@@ -72,7 +72,6 @@ impl Gamepads {
         }
     }
 
-    /// Emits what the pads did since the last poll.
     pub(crate) fn poll(&mut self, mut emit: impl FnMut(Event<'static>)) {
         let Some(gilrs) = &mut self.gilrs else {
             return;
@@ -458,7 +457,6 @@ mod tests {
         // A square gate's corner goes as far as straight.
         let corner = dead_zone(Vec2::ONE);
         assert!(near(corner, Vec2::ONE.normalize()), "{corner}");
-        // A button's press stays a press.
         assert_eq!(dead_zone(Vec2::X), Vec2::X);
     }
 
@@ -508,7 +506,6 @@ mod tests {
             Reading::Button(A, PadButton::South, true),
         ];
         poll(&mut pads, t, &held);
-        // Losing focus lets go.
         assert_eq!(
             focus(&mut pads, false, t),
             [
@@ -536,7 +533,6 @@ mod tests {
             Reading::Button(A, PadButton::East, false),
         ];
         assert_eq!(poll(&mut pads, back + SETTLE, &moving), NONE);
-        // Back at rest and away again: seen.
         let again = [
             Reading::Stick(A, Stick::Left, 0, 0.0),
             Reading::Button(A, PadButton::South, false),

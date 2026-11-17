@@ -61,8 +61,9 @@ pub(super) static NO_HINTS: Meta = Meta {
     doc: Cow::Borrowed(""),
 };
 
-/// Writes scene `text` (as [`World::save_scene`] gives) to the file at `path`, whole or not at
-/// all: to a temporary file beside it, flushed, then renamed over it, so a crash or power loss
+/// Writes scene `text` (as [`World::save_scene`] gives) to the file at `path`, whole or not at all.
+///
+/// It writes a temporary file beside it, flushed, then renames it over, so a crash or power loss
 /// leaves the last file whole. Through a link it writes the file the link names, keeping its
 /// permissions. It makes no directories.
 ///

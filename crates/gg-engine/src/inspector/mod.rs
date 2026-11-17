@@ -140,13 +140,11 @@ pub struct Inspector {
     /// next shows (as it opens).
     finding: bool,
     focus_find: bool,
-    /// The name being typed into the picked entity's row.
     renaming: Option<Renaming>,
     /// Whether the Entities panel has the keys: from a press in it until a press elsewhere.
     keys: bool,
     /// The last value refused of each field of the picked entity.
     refusals: Vec<Refusal>,
-    /// The edits made, which undo and redo step through.
     log: Log,
     /// The serial of the world the log, pick and open rows are of, as found when it attached or
     /// at the last tick or restore. At the next, another serial puts them aside.
@@ -172,7 +170,6 @@ pub struct Inspector {
     open: Option<Gesture>,
     /// What it shares with its links.
     link: Rc<RefCell<Linked>>,
-    /// The game's world it shows, if remote.
     remote: Option<Remote>,
 }
 

@@ -6,9 +6,10 @@ use std::num::NonZeroUsize;
 
 use gg_core::{Error, Result};
 
-/// Starts a pool of `threads` threads, the calling thread (which runs the ticks) the first; with
-/// one thread, starts none. Fails with `engine.threads` if the threads can't start, or a pool was
-/// started before in the process.
+/// Starts a pool of `threads` threads, the calling thread (which runs the ticks) the first.
+///
+/// With one thread, it starts none. Fails with `engine.threads` if the threads can't start, or a
+/// pool was started before in the process.
 ///
 /// Each thread allocates the first time it looks for a job to steal (crossbeam-epoch records it),
 /// and on macOS the first time it sleeps for want of one (std makes the mutex and condition

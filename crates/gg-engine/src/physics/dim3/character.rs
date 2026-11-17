@@ -918,7 +918,6 @@ pub(super) mod tests {
         assert!(stopped.y < 2.5, "{stopped}");
     }
 
-    /// A character walking into a dynamic box pushes it along.
     #[test]
     fn a_character_pushes_dynamic_bodies() {
         let mut world = World::default();
@@ -1036,7 +1035,6 @@ pub(super) mod tests {
         );
     }
 
-    /// Two characters on one moving platform are each carried, keeping their places and apart.
     #[test]
     fn characters_ride_a_platform_together() {
         let mut world = World::default();

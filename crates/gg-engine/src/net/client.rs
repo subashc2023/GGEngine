@@ -66,7 +66,6 @@ const SAMPLES: usize = 16;
 /// How many of the latest states still coming the client gathers the parts of at once.
 const GATHERED: usize = 4;
 
-/// A client.
 pub(crate) struct Client {
     /// Where the server is and the session's code: connects by them again each time it's lost.
     toward: Toward,
@@ -324,8 +323,7 @@ impl Client {
         }
     }
 
-    /// Takes `line` from the server. Returns the server's world, its tick and text, once its last
-    /// line has come.
+    /// Takes `line` from the server; returns its world, tick and text, once the last line has come.
     fn read(&mut self, line: &str, now: Instant) -> Option<(u64, String)> {
         if let Some((_, text)) = &mut self.coming {
             if text.len() + line.len() >= MAX_WORLD {
@@ -1075,7 +1073,6 @@ mod tests {
         step_navigation(&mut server);
         let mut text = String::new();
         server.save_whole(&mut text).expect("saved");
-        // The client's world, as it joined.
         let mut ours = World::seeded(4);
         for registered in [
             ours.register::<Transform>(),

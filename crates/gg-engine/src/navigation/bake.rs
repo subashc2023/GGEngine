@@ -324,7 +324,6 @@ fn divide(polygon: &Clipped, at: f32, axis: usize) -> (Clipped, Clipped) {
     (before, after)
 }
 
-/// The area `polygon` covers in the XZ plane.
 fn area(polygon: &Clipped) -> f32 {
     let vertices = polygon.vertices();
     let mut twice = 0.0;
@@ -528,13 +527,11 @@ struct Compact {
 }
 
 impl Compact {
-    /// The open span indices of column (`x`, `z`).
     fn column(&self, x: u32, z: u32) -> std::ops::Range<u32> {
         let at = (z * self.width + x) as usize;
         self.starts[at]..self.starts[at + 1]
     }
 
-    /// The open span `open` joins on way `way`, if any.
     fn link(&self, open: u32, way: usize) -> Option<u32> {
         let link = self.opens[open as usize].links[way];
         (link != NONE).then_some(link)

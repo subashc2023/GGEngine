@@ -375,7 +375,6 @@ pub(crate) struct Snapshot {
     /// Scripts: a path from the project's root and the text as last applied.
     pub(crate) scripts: Vec<(String, String)>,
     pub(crate) mods: Vec<ModText>,
-    /// Scene files as last applied.
     pub(crate) scenes: Vec<SceneFile>,
     /// The scene files' texts its run kept for scene changes.
     pub(crate) cached: Vec<SceneFile>,

@@ -33,9 +33,10 @@ pub enum Sky {
 const EARTH: gg_renderer::Atmosphere = gg_renderer::Atmosphere::EARTH;
 
 /// Hillaire's atmosphere ("A Scalable and Production Ready Sky and Atmosphere Rendering
-/// Technique", EGSR 2020): Rayleigh and Mie scattering and ozone absorption over an Earth-radius
-/// planet (6,360 km) up to 100 km above the ground, as in the paper. Earth's by default.
-/// Scattering and absorption are in millionths per meter.
+/// Technique", EGSR 2020), Earth's by default.
+///
+/// Rayleigh and Mie scattering and ozone absorption over an Earth-radius
+/// planet (6,360 km) up to 100 km above the ground, as in the paper. Scattering and absorption are in millionths per meter.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Atmosphere {
     /// Rayleigh scattering at the ground per color, thinning over a scale height of 8 km. Makes

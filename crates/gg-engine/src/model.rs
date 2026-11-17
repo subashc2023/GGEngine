@@ -18,10 +18,11 @@ use crate::gltf::{self, Imported, Part, Primitive, Slot};
 use crate::loader::Loader;
 use crate::{Component, Entity, Reflect, Transform, World};
 
-/// A model that [`Context::add_model`](crate::Context::add_model) added, or that text named and the
-/// engine loaded: its index among its context's, held by a [`ModelRoot`]. Scenes, recordings,
-/// snapshots and the tool API name it as they name a texture: by asset ID, else path.
-/// [`spawn`](Self::spawn) places it in a world.
+/// A model added by [`Context::add_model`](crate::Context::add_model) or loaded from text: its
+/// index among its context's, held by a [`ModelRoot`].
+///
+/// Scenes, recordings, snapshots and the tool API name it as they name a texture: by asset ID,
+/// else path. [`spawn`](Self::spawn) places it in a world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Model(u32);
 
@@ -49,9 +50,10 @@ impl Model {
     }
 }
 
-/// The entity a model's nodes are spawned under. The world spawns them with the entity
-/// ([`Model::spawn`], a loaded scene, a tool's create) and again when it's given another model,
-/// and removes them with it.
+/// The entity a model's nodes are spawned under.
+///
+/// The world spawns them with the entity ([`Model::spawn`], a loaded scene, a tool's create) and
+/// again when it's given another model, and removes them with it.
 ///
 /// Each node of the default scene is an entity under it, with its transform in its parent's space,
 /// a [`ModelNode`] and its glTF node's name ([`World::name`]). A node with a mesh draws it, as a
@@ -71,9 +73,10 @@ pub struct ModelRoot(pub Model);
 // Not `Writable`: only the world changes it, spawning its nodes as it does.
 impl Component for ModelRoot {}
 
-/// Which part of the model its root's [`ModelRoot`] names this entity is: a node or a primitive of
-/// a node's mesh, by index in the model's node order (each after its parent). Kept by the world;
-/// tools change no entity that has it.
+/// Which part of its root's model this entity is: a node or a primitive of a node's mesh.
+///
+/// The index is in the model's node order (each after its parent). The world keeps it; tools change
+/// no entity that has it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Reflect)]
 pub struct ModelNode(pub u32);
 

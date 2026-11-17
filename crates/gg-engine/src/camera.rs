@@ -22,10 +22,12 @@ use crate::{
     Transform, Trigger, World, Writable,
 };
 
-/// The game's view, while [`primary`](Self::primary) and no layer sets a viewpoint with
-/// [`Context::set_viewpoint`]. Its entity needs a [`Transform`]. It sees from where the entity
-/// draws, between ticks too: ancestors carry and turn it, their scales don't count. That
-/// position is drawing's alone: no hash, scene or recording holds it, only the component.
+/// The game's view, while [`primary`](Self::primary) and no layer sets a viewpoint.
+///
+/// A layer sets one with [`Context::set_viewpoint`]. The entity needs a [`Transform`]. It sees from
+/// where the entity draws, between ticks too: ancestors carry and turn it, their scales don't
+/// count. That position is drawing's alone: no hash, scene or recording holds it, only the
+/// component.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Camera {
     /// How it projects what's in front of it onto the view, fitted to the view's aspect ratio.
@@ -373,8 +375,9 @@ pub enum CameraAction {
     Turn,
 }
 
-/// Steers an orthographic viewpoint from the keyboard, mouse wheel and gamepads. W, A, S and D, or
-/// a gamepad's right stick, move it half the view's height a second along its own axes, so it
+/// Steers an orthographic viewpoint from the keyboard, mouse wheel and gamepads.
+///
+/// W, A, S and D, or a gamepad's right stick, move it half the view's height a second along its own axes, so it
 /// crosses the screen as fast at any zoom. With [`rotation`](Self::rotation) set, Q and E, or the
 /// triggers, turn it a quarter turn a second. The wheel zooms about the view's center, 1.1 times a
 /// line, between a hundredth and a hundred times the starting height.
@@ -517,8 +520,9 @@ pub enum FlyAction {
     Drag,
 }
 
-/// Steers a flying viewpoint, under either projection. W, A, S and D, or a gamepad's left stick,
-/// move it forward, where it looks, and sideways, 2 units a second at first. E and Q, or the
+/// Steers a flying viewpoint, under either projection.
+///
+/// W, A, S and D, or a gamepad's left stick, move it forward, where it looks, and sideways, 2 units a second at first. E and Q, or the
 /// triggers, raise and lower it along the world's up. The right stick, or the mouse moved with
 /// its right button held, looks about: half a turn a second at full tilt, or 0.003 radians a
 /// point. Looking keeps it level, its right along the horizon, and no more than 89° up or down.

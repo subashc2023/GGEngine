@@ -83,7 +83,6 @@ impl Find {
     }
 }
 
-/// A peer of a lockstep session.
 pub(crate) struct Lockstep {
     pub(super) find: Find,
     /// Where the host listens, for tests.

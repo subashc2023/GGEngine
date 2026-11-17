@@ -41,7 +41,6 @@ use crate::render_thread::Extracted;
 use crate::{Fog, Key, Projection, Transform, render_thread};
 use crate::{MeshDraw, Model, ModelNode, gltf};
 
-/// A frame of `cx`'s world, drawn and handed off at a 64 by 32 view.
 fn handed_off(cx: &mut Context) -> Extracted {
     cx.draw_world(1.0, 0.0, 0);
     let mut frame = Extracted::default();
@@ -163,7 +162,6 @@ fn a_layers_antialiasing_takes_the_environments_place() {
     assert_eq!(antialiased(&mut cx), Antialiasing::Taa, "the environment's");
 }
 
-/// A camera at `x` along X, of perspective, primary or not.
 fn camera_at(x: f32, primary: bool) -> (Transform, Camera) {
     let at = Transform {
         translation: DVec3::new(f64::from(x), 0.0, 0.0),
@@ -279,7 +277,6 @@ fn fog_that_isnt_finite_is_left_out_of_the_frame_with_a_warning() {
     assert_eq!(warnings(), ["engine.bad_fog"], "anew after good fog");
 }
 
-/// A layer that sends each event to its UI and lets it go on.
 struct Sends(crate::GameUi);
 
 impl Layer for Sends {
@@ -510,7 +507,6 @@ fn the_passes_the_look_leaves_out_are_left_out_of_the_frame_but_a_bare_one() {
         Option<Adaptation>,
     );
 
-    /// The passes of `frame`.
     fn passes(frame: &Extracted) -> Passes {
         (
             frame.ambient_occlusion,
@@ -930,7 +926,6 @@ fn the_apps_state_reads_back_as_it_was_kept() {
     assert_eq!(kept, 1, "projects.json alone");
 }
 
-/// Puts a new world in the context's place at each tick.
 struct Replacer;
 
 impl Layer for Replacer {
@@ -976,7 +971,6 @@ fn layers_change_the_world_as_they_attach_and_detach_and_at_their_ticks() {
     assert_eq!(cx.world().query::<&Transform>().count(), 3);
 }
 
-/// Fails as it attaches.
 struct Failer;
 
 impl Layer for Failer {
@@ -1159,7 +1153,6 @@ impl Layer for Wrapper {
     }
 }
 
-/// Whether `stack`'s layers draw UI, as a pass of egui's tells.
 #[cfg(feature = "dev")]
 fn draws_ui(mut stack: Stack) -> bool {
     let egui = crate::egui_context();
@@ -2677,8 +2670,6 @@ fn loads_log_how_long_they_took() {
     );
 }
 
-/// Frames handed off, as a run's do, at a 64-pixel-square view, until the context's loader decodes
-/// nothing.
 fn decoded(cx: &mut Context) {
     let view = Viewport {
         origin: [0, 0],
@@ -2795,7 +2786,6 @@ fn a_removed_texture_keeps_its_name_and_loads_anew_where_named() {
     assert!(white.is_err(), "the engine's white texture");
 }
 
-/// The draws under `entity`, a model's root, and each of its nodes, in order.
 fn drawn(world: &World, entity: Entity) -> Vec<Option<MeshDraw>> {
     let mut drawn = vec![world.get::<MeshDraw>(entity).copied()];
     for child in world.children(entity).expect("alive") {

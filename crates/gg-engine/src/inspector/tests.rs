@@ -14,12 +14,10 @@ use crate::reflect::tests::{Everything, Form, Inner, everything, same_snapshots,
 use crate::reflect::{self, Ident};
 use crate::{Camera, Component, Entity, Projection, Sprite};
 
-/// `entity`'s ID: what the Inspector picks and names it by.
 fn id(world: &World, entity: Entity) -> EntityId {
     world.id(entity).expect("alive")
 }
 
-/// A text drawn, and where.
 type Text = (String, egui::Rect);
 
 /// Queues `pass` as the panels do, then makes what it found at a tick.
@@ -40,8 +38,7 @@ fn panels(inspector: &mut Inspector, world: &World, ui: &mut egui::Ui, pass: &mu
     ui.scope_builder(inspect, |ui| inspector.inspect(world, ui, pass, &pending));
 }
 
-/// A frame of both panels on a screen big enough for them; its edits are then set at a tick.
-/// Returns its texts and its edit count.
+/// Returns the texts and the edit count; the edits are then set at a tick.
 fn frame(
     inspector: &mut Inspector,
     world: &mut World,
@@ -66,7 +63,6 @@ fn frame_ticking(
     (texts_in(&shapes), made)
 }
 
-/// The texts `shapes` draw, and where, in drawing order.
 fn texts_in(shapes: &[egui::epaint::ClippedShape]) -> Vec<Text> {
     let painted = crate::testing::painted(shapes).into_iter();
     let texts = painted.filter_map(|shape| match shape {
@@ -283,7 +279,7 @@ fn a_parent_lists_its_first_16_children() {
     assert_eq!(children(&world, parent_id), Some(shown));
 }
 
-/// A click of `button` at `at`, pressed and released in one frame (egui's tap).
+/// Pressed and released in one frame (egui's tap).
 fn click(button: egui::PointerButton, at: egui::Pos2) -> Vec<egui::Event> {
     let button = |pressed| egui::Event::PointerButton {
         pos: at,
@@ -304,7 +300,7 @@ fn enter() -> Vec<egui::Event> {
     }]
 }
 
-/// The pointer pressed at `from`, moved to `to` and released, each in its own frame.
+/// Press, move and release, each in its own frame.
 fn drag(from: egui::Pos2, to: egui::Pos2) -> [Vec<egui::Event>; 3] {
     let button = |pos, pressed| egui::Event::PointerButton {
         pos,
@@ -319,7 +315,7 @@ fn drag(from: egui::Pos2, to: egui::Pos2) -> [Vec<egui::Event>; 3] {
     ]
 }
 
-/// Where the text `name` is, the first drawn at or after the text `after`.
+/// The first `name` drawn at or after the text `after`.
 fn find(texts: &[Text], after: &str, name: &str) -> egui::Rect {
     let start = texts.iter().position(|(text, _)| text == after);
     let start = start.unwrap_or_else(|| panic!("no {after}: {texts:?}"));
@@ -347,7 +343,7 @@ fn next_to(texts: &[Text], label: egui::Rect) -> &Text {
     nearest.expect("a widget beside the label")
 }
 
-/// The middle of what's drawn just right of `label` on its row: its field's widget.
+/// The middle of [`next_to`]'s widget.
 fn beside(texts: &[Text], label: egui::Rect) -> egui::Pos2 {
     next_to(texts, label).1.center()
 }
@@ -410,7 +406,6 @@ fn called(name: &str) -> Name {
     Name(name.to_owned())
 }
 
-/// What `entity`'s row in the Entities panel says.
 fn row_text(world: &World, entity: Entity) -> String {
     row_label(world, id(world, entity)).text().to_owned()
 }
@@ -432,8 +427,7 @@ fn shaped() -> Shaped {
     }
 }
 
-/// An entity's row shows its name alone; one without a name, or with an empty one, "Entity".
-/// Neither shows its ID or components: the Inspector's heading names it and gives its ID.
+/// The Inspector's heading, not the row, names the entity and gives its ID.
 #[test]
 fn an_entitys_row_shows_its_name_alone_and_the_inspector_its_id() {
     let mut world = World::default();
@@ -496,8 +490,7 @@ fn a_tuple_of_one_field_shows_its_field_without_a_label() {
     }
 }
 
-/// A name typed into is set at its field's path (`0` as a component, `name.0` in a field) and
-/// whole in an option.
+/// Paths: `0` as a component, `name.0` in a field.
 #[test]
 fn a_tuple_of_one_field_is_set_at_its_own_path_or_whole() {
     let mut world = World::default();
@@ -541,7 +534,6 @@ fn a_tuple_of_one_field_is_set_at_its_own_path_or_whole() {
     assert!(texts.iter().any(row), "{texts:?}");
 }
 
-/// A value refused for a tuple struct's field shows under it, not in its grid's row.
 #[test]
 fn a_value_refused_for_a_tuple_of_one_field_shows_under_it() {
     let mut world = World::default();
@@ -860,8 +852,7 @@ fn a_value_refused_shows_beside_its_field_until_one_is_set() {
     assert!(inspector.refusals.is_empty());
 }
 
-/// A despawned pick is named by the ID it was shown by. An entity field whose handle's entity
-/// is gone shows the handle, not the ID of the entity now in its slot.
+/// A field's handle to a gone entity shows the handle, not the ID of the entity now in its slot.
 #[test]
 fn the_despawned_are_named_by_what_they_were_shown_by() {
     let mut world = World::default();
@@ -887,7 +878,7 @@ fn the_despawned_are_named_by_what_they_were_shown_by() {
     assert!(texts.contains(&despawned), "{texts:?}");
 }
 
-/// `key` pressed with Ctrl (Cmd on macOS), and Shift if `shift`.
+/// Ctrl (Cmd on macOS) with `key`, and Shift if `shift`.
 fn shortcut(key: egui::Key, shift: bool) -> Vec<egui::Event> {
     let modifiers = match shift {
         true => Modifiers::COMMAND.plus(Modifiers::SHIFT),
@@ -902,7 +893,7 @@ fn shortcut(key: egui::Key, shift: bool) -> Vec<egui::Event> {
     }]
 }
 
-/// A drag from `at`: pressed, moved right three times, released, each in its own frame.
+/// Press at `at`, three moves right, release, each in its own frame.
 fn slide(at: egui::Pos2) -> Vec<Vec<egui::Event>> {
     let button = |pressed, pos| egui::Event::PointerButton {
         pos,
@@ -1481,8 +1472,7 @@ fn in_window(ctx: &egui::Context) -> Rc<RefCell<Window>> {
     window
 }
 
-/// A frame of the main window, in whose pass both panels draw in `window`. Returns that
-/// window's texts and its edit count.
+/// Both panels draw in `window`; returns its texts and edit count.
 fn window_frame(
     inspector: &mut Inspector,
     world: &mut World,
@@ -1601,8 +1591,8 @@ fn each_click_is_an_edit_and_a_text_field_keeps_its_keys() {
     assert_eq!(inspector.log.edits().len(), 3);
 }
 
-/// A frame of the open Edit and Entity menus' items alone, then the tick that makes what the
-/// clicked item chose. Returns its texts.
+/// A frame of the open Edit and Entity menus' items alone, then the tick that makes the clicked
+/// item's choice. Returns its texts.
 fn menu(
     inspector: &mut Inspector,
     world: &mut World,

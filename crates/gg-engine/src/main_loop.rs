@@ -371,11 +371,10 @@ pub(crate) type EguiPass<'a> = (&'a egui::Context, &'a mut Dock, egui::RawInput)
 #[cfg(feature = "dev")]
 pub(crate) type Passed = (egui::FullOutput, bool);
 
-/// Never built: a build without `dev` runs no pass.
+// Never built: a build without `dev` runs no pass.
 #[cfg(not(feature = "dev"))]
 pub(crate) type EguiPass<'a> = (std::convert::Infallible, std::marker::PhantomData<&'a ()>);
 
-/// Never built.
 #[cfg(not(feature = "dev"))]
 pub(crate) type Passed = std::convert::Infallible;
 
@@ -1481,7 +1480,6 @@ pub(crate) mod tests {
         own: Rc<Cell<bool>>,
     }
 
-    /// What [`Overlooker`] sets.
     const OVERLOOKING: Viewpoint = Viewpoint {
         position: DVec3::new(0.0, 0.0, 5.0),
         rotation: Quat::IDENTITY,
@@ -1492,7 +1490,6 @@ pub(crate) mod tests {
         },
     };
 
-    /// What [`Overlooker`]'s camera sees from.
     const ITS_CAMERA: Viewpoint = Viewpoint {
         position: DVec3::new(1.0, 2.0, 0.0),
         rotation: Quat::IDENTITY,

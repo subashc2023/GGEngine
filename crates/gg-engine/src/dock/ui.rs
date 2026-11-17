@@ -68,7 +68,6 @@ impl<'a> Ui<'a> {
         self.default_ui = Some(layer);
     }
 
-    /// The type of the last layer whose `ui` was the default, since this was last asked.
     pub(crate) fn take_default_ui(&mut self) -> Option<&'static str> {
         self.default_ui.take()
     }
@@ -457,7 +456,7 @@ impl Dock {
         }
     }
 
-    /// Sets, as the frame starts, whether a dockspace's view has the keys: [`Ui::view_focused`].
+    /// Called as the frame starts: [`Ui::view_focused`]'s answer.
     pub(crate) fn set_view_focused(&mut self, focused: bool) {
         self.view_focused = focused && self.is_dockspace();
     }
@@ -710,7 +709,6 @@ impl Dock {
         self.knowing.clear();
     }
 
-    /// Does what the menus chose this frame.
     fn choose(&mut self) {
         let chosen = (self.menu.as_mut()).map(|menu| mem::take(&mut menu.chosen));
         let Some(chosen) = chosen.filter(|chosen| !chosen.is_empty()) else {
@@ -775,7 +773,7 @@ impl Dock {
         self.save();
     }
 
-    /// Hides or shows `side`'s panels from the next frame.
+    /// Takes effect from the next frame.
     fn set_hidden(&mut self, side: Side, hidden: bool) {
         self.layout.set_hidden(side, hidden);
         for panel in &self.knowing {
@@ -1149,7 +1147,6 @@ impl Dock {
         });
     }
 
-    /// The handles between the sides of the main tree's splits.
     fn splitters(&mut self, root: &mut egui::Ui) {
         let mut stopped = false;
         for splitter in &self.arrangement.splitters {
@@ -1416,12 +1413,10 @@ fn saved(path: &Path) -> Vec<String> {
     })
 }
 
-/// The widget holding egui's drag while the dock drags.
 fn drag_id() -> Id {
     Id::unique("gg dock drag")
 }
 
-/// The side whose panels a title bar button hides and shows.
 fn side_of(sidebar: Sidebar) -> Side {
     match sidebar {
         Sidebar::Left => Side::Left,
@@ -1430,7 +1425,6 @@ fn side_of(sidebar: Sidebar) -> Side {
     }
 }
 
-/// The viewport of floating group `id`'s window.
 fn window_id(id: NodeId) -> ViewportId {
     ViewportId::from_hash_of(("gg dock window", id))
 }
@@ -1485,7 +1479,6 @@ fn window_frame(ctx: &Context, id: NodeId) -> Vec2 {
     .unwrap_or(Vec2::ZERO)
 }
 
-/// A desktop position, in physical pixels, in the main window's points.
 fn from_desktop(ctx: &Context, [x, y]: [i32; 2]) -> Option<Pos2> {
     let (main, ppp) = geometry(ctx, ViewportId::ROOT)?;
     Some(pos2(
@@ -1494,13 +1487,11 @@ fn from_desktop(ctx: &Context, [x, y]: [i32; 2]) -> Option<Pos2> {
     ))
 }
 
-/// A position in the main window's points on the desktop, in physical pixels.
 fn to_desktop(ctx: &Context, pos: Pos2) -> Option<[i32; 2]> {
     let (main, ppp) = geometry(ctx, ViewportId::ROOT)?;
     Some(rounded((main.min + pos.to_vec2()) * ppp))
 }
 
-/// A position on the desktop in physical pixels, to the nearest pixel.
 fn rounded(px: Pos2) -> [i32; 2] {
     [px.x.round() as i32, px.y.round() as i32]
 }
@@ -1639,8 +1630,6 @@ fn preview(rect: Rect, zone: Zone, share: f32) -> Rect {
     }
 }
 
-/// Draws the drop targets over what a dragged group is over, above all else in its window, and the
-/// group's would-be place.
 fn paint_hover(ctx: &Context, hover: &Hover) {
     let painter: Painter = ctx.layer_painter(LayerId::new(
         Order::Foreground,

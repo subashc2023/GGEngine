@@ -19,9 +19,11 @@ use crate::{Component, Entity, Reflect, Transform, World};
 /// The most bytes a prefab's file may have: a load reads it whole.
 const MOST: u64 = 16 << 20;
 
-/// A prefab added by [`Context::add_prefab`](crate::Context::add_prefab) or loaded from a name in
-/// text: its index among its context's, which a [`PrefabRoot`] holds. Scenes, recordings,
-/// snapshots and the tool API name it as they name a texture: by asset ID, else path.
+/// A prefab added by [`Context::add_prefab`](crate::Context::add_prefab) or loaded from text: its
+/// index among its context's, held by a [`PrefabRoot`].
+///
+/// Scenes, recordings, snapshots and the tool API name it as they name a texture: by asset ID, else
+/// path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Prefab(u32);
 
@@ -34,9 +36,10 @@ impl Prefab {
         self.0 as usize
     }
 
-    /// Spawns an instance at `at`, as [`PrefabRoot`] says, and returns its root: a `PrefabRoot`
-    /// entity at `at` with the prefab root's other components, the prefab's other entities under
-    /// it. The root's ID is drawn from the world's stream, the others' mixed from it, so a world
+    /// Spawns an instance at `at`, as [`PrefabRoot`] says, and returns its root.
+    ///
+    /// The root is a `PrefabRoot` entity at `at` with the prefab root's other components, the
+    /// prefab's other entities under it. Its ID is drawn from the world's stream, the others' mixed from it, so a world
     /// seeded alike spawns alike. It reads the prefab's text and allocates: spawn as a level
     /// loads, not each tick.
     ///
@@ -54,7 +57,9 @@ impl Prefab {
     }
 }
 
-/// The root of a prefab's instance. The world spawns the instance when an entity comes with this
+/// The root of a prefab's instance.
+///
+/// The world spawns the instance when an entity comes with this
 /// ([`Prefab::spawn`], a loaded scene, a tool's create or add) or is given another prefab, and
 /// takes it away with it. The root keeps its own [`Transform`], which places the instance, and
 /// takes the prefab root's other components. The prefab's other entities go under it, each ID
