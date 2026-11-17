@@ -65,6 +65,13 @@ pub fn in_order<T: Send, R: Send>(mut items: Vec<T>, f: &(impl Fn(T) -> R + Sync
     done
 }
 
+/// Whether the calling thread is a pool's.
+///
+/// There [`join`] offers work to the pool's other threads, and runs theirs while it waits.
+pub(crate) fn on_pool() -> bool {
+    rayon_core::current_thread_index().is_some()
+}
+
 /// Offers `f` to the pool's other threads and returns at once. Outside a pool, as [`join`] says,
 /// does nothing.
 pub(crate) fn spawn(f: impl FnOnce() + Send + 'static) {

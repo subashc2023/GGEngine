@@ -8,7 +8,7 @@
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 use std::vec::Drain;
 
@@ -78,10 +78,11 @@ pub enum Align {
     End,
 }
 
-/// Text the world draws at its entity, like [`Context::draw_text`](crate::Context::draw_text) with
-/// a [`TextStyle`] of its fields. Glyphs lie in the transform's XY plane facing +Z, like a sprite;
-/// picking them finds the entity. Default: "Text" in the engine's font, an em a unit tall, white,
-/// centered.
+/// Text the world draws at its entity.
+///
+/// Like [`Context::draw_text`](crate::Context::draw_text) with a [`TextStyle`] of its fields.
+/// Glyphs lie in the transform's XY plane facing +Z, like a sprite; picking them finds the entity.
+/// Default: "Text" in the engine's font, an em a unit tall, white, centered.
 #[derive(Clone, Debug, PartialEq, Component)]
 pub struct Text {
     /// What it says; `\n` ends a line.
@@ -708,34 +709,79 @@ fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
     })
 }
 
-/// The [`field`] of the font in `bytes`, and whether this process had already baked it (then it
-/// takes that). The error says what's wrong with the font.
+/// The [`field`] of the font in `bytes`, baked once a process, and whether another asker baked it.
 ///
-/// A process keeps each baked field, keyed by the font's bytes, which always bake the same. Tests
-/// build contexts again and again, each adding its fonts and the engine's, and would bake each
-/// anew, about a second a font in debug. Each kept font is some 2 MB of field and file, for the
+/// The error says what's wrong with the font. Bytes always bake the same, so the first asker's
+/// field is kept for later asks. Tests build contexts again and again, many at once, each adding
+/// its fonts and the engine's, and would bake each anew, about a second a font in debug. Those
+/// asking while it bakes wait for its field or its error, as [`bake_once`] says. A failed bake
+/// isn't kept: the next ask bakes again. Each kept font is some 2 MB of field and file, for the
 /// process's life; each save a development run reloads keeps another, the old staying: if runs
 /// save fonts often, keep only the latest few.
 fn field_of(bytes: &[u8]) -> Result<(Field, bool), String> {
-    static FIELDS: Mutex<Vec<(Box<[u8]>, Field)>> = Mutex::new(Vec::new());
-    let find = |fields: &[(Box<[u8]>, Field)]| {
-        let found = fields.iter().find(|(of, _)| **of == *bytes);
-        found.map(|(_, field)| field.clone())
-    };
+    bake_once(bytes, field)
+}
+
+/// Each font's field, as [`field_of`] keeps them.
+static FIELDS: Mutex<Vec<Arc<Flight>>> = Mutex::new(Vec::new());
+
+/// A font's field as its first asker bakes it.
+struct Flight {
+    /// The font's file, which keys it.
+    bytes: Box<[u8]>,
+    /// `None` until it lands, which wakes those waiting.
+    field: Mutex<Option<Result<Field, String>>>,
+    landed: Condvar,
+}
+
+/// [`field_of`], baking with `bake`, which tests control.
+///
+/// Only threads outside the job system's pool wait for another's bake. A pool thread may be
+/// running that bake further down its own stack, since a pool thread runs others' jobs while its
+/// join waits, as baking's own joins and the cook's `in_order` do: waiting there would never end.
+/// So a pool thread finding a bake in flight bakes alone, keeping nothing. A baker never waits, so
+/// every bake lands.
+fn bake_once(
+    bytes: &[u8],
+    bake: impl FnOnce(&[u8]) -> Result<Field, String>,
+) -> Result<(Field, bool), String> {
     let lock = || FIELDS.lock().expect("no thread panics holding it");
-    if let Some(field) = find(&lock()) {
-        return Ok((field, true));
-    }
     // fdsm can panic on a malformed font: the file's doing, so it fails like an unreadable one.
     // gg-core's panic hook still logs it.
-    let field = panic::catch_unwind(AssertUnwindSafe(|| field(bytes)));
-    let field = field.unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))?;
-    // Two threads may bake the same font at once: the first to finish keeps its field.
+    let baked = || {
+        let baked = panic::catch_unwind(AssertUnwindSafe(|| bake(bytes)));
+        baked.unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))
+    };
     let mut fields = lock();
-    if find(&fields).is_none() {
-        fields.push((bytes.into(), field.clone()));
+    if let Some(flight) = fields.iter().find(|flight| *flight.bytes == *bytes) {
+        let flight = Arc::clone(flight);
+        drop(fields);
+        let mut field = flight.field.lock().expect("no thread panics holding it");
+        if field.is_none() && jobs::on_pool() {
+            drop(field);
+            return baked().map(|field| (field, false));
+        }
+        while field.is_none() {
+            field = (flight.landed.wait(field)).expect("no thread panics holding it");
+        }
+        let field = field.as_ref().expect("it landed").clone();
+        return field.map(|field| (field, true));
     }
-    Ok((field, false))
+    let flight = Arc::new(Flight {
+        bytes: bytes.into(),
+        field: Mutex::new(None),
+        landed: Condvar::new(),
+    });
+    fields.push(Arc::clone(&flight));
+    drop(fields);
+    let field = baked();
+    if field.is_err() {
+        // Gone before it lands, so that later asks bake again rather than take the error.
+        lock().retain(|kept| !Arc::ptr_eq(kept, &flight));
+    }
+    *flight.field.lock().expect("no thread panics holding it") = Some(field.clone());
+    flight.landed.notify_all();
+    field.map(|field| (field, false))
 }
 
 /// What a font bakes into before its field is a texture: the size and tightly packed RGBA8 rows,

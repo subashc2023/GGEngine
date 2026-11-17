@@ -1,8 +1,17 @@
+use std::sync::{Barrier, mpsc};
+use std::thread;
+use std::time::Duration;
+
 use super::*;
 
-/// Inter, baked.
+/// How long a test of asks at once waits for each answer before failing.
+///
+/// An ask that never ends fails its test instead of stalling the run.
+const ANSWERED: Duration = Duration::from_secs(30);
+
+/// Inter, baked once a process.
 fn inter() -> (Baked, Field) {
-    let field = super::field(INTER).expect("Inter bakes");
+    let (field, _) = field_of(INTER).expect("Inter bakes");
     let font = FontRef::new(INTER).expect("Inter reads");
     let shaping = ShaperData::new(&font);
     let shaper = shaping.shaper(&font).build();
@@ -337,6 +346,111 @@ fn a_process_bakes_a_fonts_bytes_once() {
     let (other, cached) = field_of(&inter_of(16384)).expect("it bakes");
     assert!(!cached, "other bytes bake apart");
     assert_ne!(other.units_per_em, first.units_per_em);
+}
+
+/// Threads asking for two fonts at once share one bake a font.
+///
+/// Each font bakes once, the first asker's, the rest waiting for it and taking its field: its
+/// units, its texels. Uses Inter at 4,096 and 12,288 units to the em, which no other test bakes.
+#[test]
+fn threads_asking_at_once_share_one_bake_a_font() {
+    let fonts = [inter_of(4096), inter_of(12288)].map(Arc::new);
+    let asking = Arc::new(Barrier::new(8));
+    let (answer, answers) = mpsc::channel();
+    for ask in 0..8 {
+        let font = ask % 2;
+        let (bytes, asking) = (Arc::clone(&fonts[font]), Arc::clone(&asking));
+        let answer = answer.clone();
+        thread::spawn(move || {
+            asking.wait();
+            answer.send((font, field_of(&bytes)))
+        });
+    }
+    let asked: Vec<_> = (0..8)
+        .map(|_| answers.recv_timeout(ANSWERED).expect("an ask ends"))
+        .collect();
+    for (font, units) in [4096.0, 12288.0].into_iter().enumerate() {
+        let fields: Vec<_> = (asked.iter().filter(|(of, _)| *of == font))
+            .map(|(_, asked)| asked.as_ref().expect("it bakes"))
+            .collect();
+        let bakes = fields.iter().filter(|(_, cached)| !cached).count();
+        assert_eq!(bakes, 1, "font {font}'s bakes");
+        for (field, _) in &fields {
+            assert_eq!(field.units_per_em, units, "font {font}'s own field");
+            assert!(field.pixels == fields[0].0.pixels, "font {font}'s texels");
+        }
+    }
+}
+
+/// A bake in flight is waited for off the pool, and a failed one isn't kept.
+///
+/// Threads outside the job system's pool asking meanwhile wait for it, and take its error when it
+/// fails; a pool thread asking bakes alone instead, as it may be running that bake itself. The
+/// next ask after the failure bakes again.
+#[test]
+fn a_bake_in_flight_is_waited_for_off_the_pool_and_a_failed_one_isnt_kept() {
+    fn tiny() -> Field {
+        Field {
+            size: [1, 1],
+            pixels: vec![0; 4],
+            glyphs: Vec::new(),
+            units_per_em: 1.0,
+            lines: Lines {
+                ascent: 1.0,
+                descent: 0.0,
+                gap: 0.0,
+            },
+        }
+    }
+    let bytes: &'static [u8] = b"a font's bytes that only this test bakes";
+    let (started, baking) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let baker = thread::spawn(move || {
+        bake_once(bytes, |_| {
+            started.send(()).expect("the test waits");
+            released.recv().expect("the test releases it");
+            Err("it failed".to_owned())
+        })
+    });
+    baking.recv().expect("it bakes");
+    let fields = FIELDS.lock().expect("no thread panics holding it");
+    let found = fields.iter().find(|flight| *flight.bytes == *bytes);
+    let flight = Arc::clone(found.expect("in flight"));
+    drop(fields);
+
+    let (answer, answers) = mpsc::channel();
+    for _ in 0..3 {
+        let answer = answer.clone();
+        let waited = move || answer.send(bake_once(bytes, |_| Err("a waiter baked".to_owned())));
+        thread::spawn(waited);
+    }
+    let (pooled, pool_answer) = mpsc::channel();
+    let on_pool = move || pooled.send(jobs::on_threads(2, || bake_once(bytes, |_| Ok(tiny()))));
+    thread::spawn(on_pool);
+    let on_pool = pool_answer
+        .recv_timeout(ANSWERED)
+        .expect("a pool thread doesn't wait");
+    assert_eq!(
+        on_pool.map(|(_, cached)| cached),
+        Ok(false),
+        "it baked alone"
+    );
+    // The cache's, the baker's, this test's and each waiter's.
+    let deadline = Instant::now() + ANSWERED;
+    while Arc::strong_count(&flight) < 6 {
+        assert!(Instant::now() < deadline, "the waiters never asked");
+        thread::yield_now();
+    }
+
+    release.send(()).expect("the baker waits");
+    for _ in 0..3 {
+        let waited = answers.recv_timeout(ANSWERED).expect("a waiter wakes");
+        assert_eq!(waited.err().as_deref(), Some("it failed"));
+    }
+    let baked = baker.join().expect("it baked");
+    assert_eq!(baked.err().as_deref(), Some("it failed"));
+    let again = bake_once(bytes, |_| Ok(tiny()));
+    assert_eq!(again.map(|(_, cached)| cached), Ok(false), "baked again");
 }
 
 /// A file that isn't a font, or is one without outlines, is refused, saying why.
