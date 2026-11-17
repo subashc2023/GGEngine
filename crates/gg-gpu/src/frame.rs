@@ -1123,6 +1123,15 @@ impl<'a> Frame<'a> {
         timer.begin(device, commands, self.slot, decl.label);
         // SAFETY: the commands are recording outside a pass.
         unsafe { device.begin_label(commands, decl.label.name()) };
+        for &(buffer, _) in graph.buffer_uses(pass) {
+            if let Some(raw) = self.frames.transients.fill(buffer, self.queue) {
+                // SAFETY: the commands are recording outside a pass, and the buffer, made to be
+                // filled, lives until the frame has finished.
+                unsafe {
+                    (self.frames.device.raw()).cmd_fill_buffer(commands, raw, 0, vk::WHOLE_SIZE, 0)
+                };
+            }
+        }
         let mut barriers = std::mem::take(&mut self.frames.barriers);
         barriers.clear();
         for &(image, use_) in graph.uses(pass) {

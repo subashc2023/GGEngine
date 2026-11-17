@@ -785,7 +785,8 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 ### The graph and the GPU
 
 - The graph's own images last a frame and share memory where their uses don't overlap. Its buffers
-  last from frame to frame by name, as the culling's record of what was unhidden does.
+  last from frame to frame by name, starting as zeros, as the culling's record of what was unhidden
+  does.
 - Compute-queue passes run there where the device has a compute family apart from graphics and
   uploads, as the RTX 4090 and AMD's GPUs do, else on the graphics queue, as on lavapipe. They use
   buffers alone, which every queue shares, so nothing changes queue family.

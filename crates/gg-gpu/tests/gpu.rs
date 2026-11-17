@@ -44,6 +44,7 @@ fn main() -> ExitCode {
         sampled_images_keep_their_layout,
         compute_passes_write_cubes_that_passes_sample,
         compute_passes_write_buffers_that_draws_take_commands_from,
+        graph_buffers_hold_zeros_where_nothing_wrote,
         compute_queue_passes_run_beside_the_graphics_queues,
         passes_over_keep_what_their_target_holds,
         images_read_back_once_their_frame_has_finished,
@@ -817,6 +818,71 @@ fn compute_passes_write_buffers_that_draws_take_commands_from() {
     assert!(refused.contains("within its buffer"), "{refused}");
 
     drop((frames, image, write, draw, device, instance));
+    check(&validation);
+}
+
+/// A graph buffer holds zeros where no frame has written, even in memory that buffers written over
+/// and dropped held: the frames fill each they make before its first use.
+fn graph_buffers_hold_zeros_where_nothing_wrote() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = device(&instance);
+    let spirv = spirv("indirect", &[("write_main", "compute")]);
+    let write = ComputePipeline::new(&device, "write commands", &spirv, c"write_main").expect("a");
+    let mut image = ColorImage::new(&device, 1, 1, "zeros").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    // Each the size of the buffer read back.
+    let mut dirtied = Graph::default();
+    let dirt = ["test dirt 0", "test dirt 1", "test dirt 2"].map(|name| dirtied.buffer(name, 48));
+    let dirty = (dirtied.compute(label!("dirty")))
+        .write_buffer(dirt[0])
+        .write_buffer(dirt[1])
+        .write_buffer(dirt[2])
+        .add();
+    let (idle, cleared) = clearing(1, [0.0; 4]);
+    let mut fresh = Graph::default();
+    let zeros = fresh.buffer("test zeros", 48);
+    let unwritten = (fresh.compute(label!("write nothing")))
+        .write_buffer(zeros)
+        .add();
+    let read = fresh.read_back(label!("read zeros"), zeros);
+    let mut read_last = Vec::new();
+    // Dirt, then frames enough for its buffers to be freed, then three for the read to come back.
+    for i in 0..8 {
+        let graph = match i {
+            0 => &dirtied,
+            1..5 => &idle,
+            _ => &fresh,
+        };
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        read_last = frame.buffer_read("test zeros").1.to_vec();
+        match i {
+            0 => {
+                let source = frame
+                    .upload(&[1.0f32; 8].map(f32::to_ne_bytes).concat())
+                    .expect("colors")
+                    .address();
+                let mut pass = frame.compute(dirty);
+                pass.set_pipeline(&write);
+                let [commands, counts, colors] = dirt.map(|buffer| pass.address(buffer));
+                let addresses = [commands, counts, colors, source];
+                pass.push_constants(&addresses.map(u64::to_ne_bytes).concat());
+                pass.dispatch([1, 1, 1]);
+            }
+            1..5 => drop(frame.render(cleared[0])),
+            _ => {
+                drop(frame.compute(unwritten));
+                frame.read_back(read).expect("a read back");
+            }
+        }
+        frame.submit().expect("the frame's submission");
+    }
+    assert_eq!(read_last, [0; 48]);
+
+    drop((frames, image, write, device, instance));
     check(&validation);
 }
 

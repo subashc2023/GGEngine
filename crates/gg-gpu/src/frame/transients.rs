@@ -7,8 +7,8 @@
 //! waits for. Each image also remembers what its own last use left, which its next waits for too.
 //!
 //! Buffers each have memory of their own, kept for later frames that declare one of their name no
-//! larger. Each remembers what its last use on each queue left, and its uses across the two, which
-//! frames plan their batches by.
+//! larger, and filled with zeros before their first use. Each remembers what its last use on each
+//! queue left, and its uses across the two, which frames plan their batches by.
 
 use std::sync::Arc;
 
@@ -53,7 +53,19 @@ struct MadeBuffer {
     hazards: [Hazard; 2],
     /// Its uses on the two queues, which a use on one waits for on the other by a semaphore.
     crossing: Crossing,
+    /// Whether a frame has recorded its fill with zeros, which [`Transients::fill`] leaves to its
+    /// first use.
+    filled: bool,
 }
+
+/// What filling a buffer with zeros does: a transfer, as `vkCmdFillBuffer`'s barriers take it.
+const FILL: Access = Access {
+    stages: vk::PipelineStageFlags2::ALL_TRANSFER,
+    reads: vk::AccessFlags2::NONE,
+    writes: vk::AccessFlags2::TRANSFER_WRITE,
+    layout: vk::ImageLayout::UNDEFINED,
+    discards: false,
+};
 
 /// An image made for one of a graph's own.
 pub(crate) struct Made {
@@ -138,9 +150,9 @@ impl Transients {
     }
 
     /// Readies the buffers for `graph`'s own: the one made earlier of the same name if it holds
-    /// enough bytes, else a new one of the next power of two bytes, so that a buffer declared a
-    /// little larger than last frame's isn't remade every frame. Old buffers no buffer of the
-    /// graph's takes retire until the frames using them have finished.
+    /// enough bytes, else a new one of the next power of two bytes, at least 4 for its fill, so
+    /// that a buffer declared a little larger than last frame's isn't remade every frame. Old
+    /// buffers no buffer of the graph's takes retire until the frames using them have finished.
     fn prepare_buffers(&mut self, graph: &Graph) -> Result<()> {
         let wanted = |made: &MadeBuffer| {
             (graph.buffers.iter())
@@ -156,8 +168,10 @@ impl Transients {
                     let usage = vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::INDIRECT_BUFFER
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                        | vk::BufferUsageFlags::TRANSFER_SRC;
-                    let size = decl.size.next_power_of_two();
+                        | vk::BufferUsageFlags::TRANSFER_SRC
+                        | vk::BufferUsageFlags::TRANSFER_DST;
+                    // `vkCmdFillBuffer` fills whole words alone.
+                    let size = decl.size.next_power_of_two().max(4);
                     let buffer = Buffer::new(&self.device, size, usage, Memory::Gpu, decl.name)?;
                     trace!(name = decl.name, bytes = size, "Transient buffer made");
                     self.buffers.push(MadeBuffer {
@@ -165,6 +179,7 @@ impl Transients {
                         buffer,
                         hazards: [Hazard::default(); 2],
                         crossing: Crossing::default(),
+                        filled: false,
                     });
                     self.buffers.len() - 1
                 }
@@ -348,6 +363,21 @@ impl Transients {
     /// The buffer made for the graph's `buffer`.
     pub(crate) fn buffer(&self, buffer: BufferId) -> &Buffer {
         &self.buffers[self.buffer_of[buffer.0 as usize]].buffer
+    }
+
+    /// The buffer made for the graph's `buffer` if no frame has filled it with zeros yet, as the
+    /// caller then does on `queue` before using it there. Later uses wait for the fill as for a
+    /// write.
+    pub(crate) fn fill(&mut self, buffer: BufferId, queue: Queue) -> Option<vk::Buffer> {
+        let made = &mut self.buffers[self.buffer_of[buffer.0 as usize]];
+        if made.filled {
+            return None;
+        }
+        made.filled = true;
+        let raw = made.buffer.raw();
+        let waits = self.follow_buffer(buffer, queue, FILL);
+        assert!(waits.is_none(), "a buffer is filled before its first use");
+        Some(raw)
     }
 
     /// The barrier, if needed, on `queue` that lets `access`, a use there of the graph's `buffer`,

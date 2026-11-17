@@ -518,9 +518,10 @@ impl Graph {
 
     /// A graph buffer of `size` bytes, named `name`, in the GPU's own memory. Compute shaders write
     /// it through its address, as a pass that writes it says; later passes' shaders read it, draws
-    /// take their commands from it, or frames read it back. The frames keep it by name, so a pass
-    /// that writes it finds what the last frame to add it left, unless that frame added none of
-    /// its name, or one smaller: then it holds nothing defined.
+    /// take their commands from it, or frames read it back. The frames keep it by name: a pass
+    /// that writes it finds what the last frame to add it left, and zeros where no frame has
+    /// written since the frames made it. They make it anew after a frame that added none of its
+    /// name, and may after one that added it smaller.
     ///
     /// # Panics
     ///
