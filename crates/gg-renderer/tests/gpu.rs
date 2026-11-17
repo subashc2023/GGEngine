@@ -242,7 +242,6 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
     }
 }
 
-/// A headless renderer on the instance the tests share, validating.
 fn renderer(width: u32, height: u32) -> Renderer {
     renderer_uploading(width, height, None)
 }
@@ -270,7 +269,6 @@ fn renderer_within(width: u32, height: u32, uploads: Option<UploadPath>, budget:
     renderer
 }
 
-/// A fixture shader's path.
 fn shader(file: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/shaders")
@@ -377,7 +375,6 @@ fn settle(
     );
 }
 
-/// A view that fills a frame of `size` pixels.
 fn filling(size: [u32; 2]) -> Viewport {
     Viewport {
         origin: [0, 0],
@@ -385,7 +382,6 @@ fn filling(size: [u32; 2]) -> Viewport {
     }
 }
 
-/// An RGBA8 pixel of `frame`.
 fn pixel_at(frame: &[u8], width: u32, [x, y]: [u32; 2]) -> [u8; 4] {
     let at = ((y * width + x) * 4) as usize;
     <[u8; 4]>::try_from(&frame[at..at + 4]).expect("a pixel")

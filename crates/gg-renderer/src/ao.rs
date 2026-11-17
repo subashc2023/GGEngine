@@ -45,8 +45,10 @@ const PHASES: u64 = 8;
 const CYCLES: u64 = 8;
 
 /// How the view's ambient occlusion darkens the light from all around, as
-/// [`RenderData::ambient_occlusion`](crate::RenderData::ambient_occlusion) has it. It darkens the
-/// sky's diffuse and specular light by how much of it nearby depth hides, never the frame's lights.
+/// [`RenderData::ambient_occlusion`](crate::RenderData::ambient_occlusion) has it.
+///
+/// It darkens the sky's diffuse and specular light by how much of it nearby depth hides, never the
+/// frame's lights.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AmbientOcclusion {
     /// How far what hides a point's light reaches, in world units, fading over the farther part.

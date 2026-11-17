@@ -22,9 +22,11 @@ pub(crate) const SQUARE: [Vec2; 5] = [
 /// lines are finest there, and the plane's coordinates interpolate most precisely near a vertex.
 pub(crate) const FAN: [u32; 12] = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1];
 
-/// A grid on the XY, XZ or YZ plane, in either projection: a unit square about its center in its XY
-/// plane, which the draw's transform lays in the plane. The engine's grid places it around the
-/// camera's foot in perspective, and over the view orthographically.
+/// A grid on the XY, XZ or YZ plane, in either projection.
+///
+/// A unit square about its center in its XY plane, which the draw's transform lays in the plane.
+/// The engine's grid places it around the camera's foot in perspective, and over the view
+/// orthographically.
 ///
 /// Lines of each power of ten show once 8 pixels apart, fade in until 80 apart, and brighten to the
 /// major lines' gray by 800. Crisp lines are a pixel each. Anti-aliased ones are filtered per

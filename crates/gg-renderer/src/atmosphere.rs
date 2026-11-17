@@ -24,7 +24,8 @@ use crate::{Light, LightKind, Viewpoint, sky, taa};
 static COMPUTE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/atmosphere.spv"));
 static SKY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/atmosphere_sky.spv"));
 
-/// Hillaire's atmosphere, as [`RenderData::atmosphere`](crate::RenderData::atmosphere) gives it:
+/// Hillaire's atmosphere, as [`RenderData::atmosphere`](crate::RenderData::atmosphere) gives it.
+///
 /// Rayleigh's and Mie's scattering and ozone's absorption, over a planet of Earth's radius (6,360
 /// km) up to 100 km, as the paper's. World units are meters, +Y up.
 #[derive(Clone, Copy, Debug, PartialEq)]

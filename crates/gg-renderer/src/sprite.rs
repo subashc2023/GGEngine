@@ -10,7 +10,9 @@ use crate::{Mesh, Sampler, Shader, Texture};
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprite.spv"));
 
 /// A tinted rectangle of a texture, on a unit square centered on its origin in its XY plane, facing
-/// +Z, `rect`'s top left at its top left (+Y up). The draw's transform places, sizes and turns it.
+/// +Z.
+///
+/// `rect`'s top left is at its top left (+Y up). The draw's transform places, sizes and turns it.
 /// It blends by straight alpha over what's drawn before it, testing depth without writing it.
 /// `Sprite::default()` shows the engine's white texture untinted, so a plain color is `Sprite {
 /// color, ..Sprite::default() }`.
@@ -46,9 +48,10 @@ impl Default for Sprite {
     }
 }
 
-/// A texture cut into `cell`-pixel cells packed edge to edge from its top left, as tile sets and
-/// animation frames come. Cells a pixel across allow any rectangle of pixels, as an atlas of images
-/// of different sizes. `size` is the texture's, in pixels.
+/// A texture cut into `cell`-pixel cells packed edge to edge from its top left.
+///
+/// As tile sets and animation frames come. Cells a pixel across allow any rectangle of pixels, as
+/// an atlas of images of different sizes. `size` is the texture's, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpriteSheet {
     pub texture: Texture,

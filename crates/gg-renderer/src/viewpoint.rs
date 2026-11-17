@@ -19,9 +19,11 @@ pub struct Viewpoint {
     pub projection: Projection,
 }
 
-/// How a camera projects what's in front of it onto the view. Both projections run depth reversed,
-/// from 1 at the near plane to 0 at the far one, or infinitely far: that keeps the floating-point
-/// depth's precision where it's needed, and lets perspective see forever.
+/// How a camera projects what's in front of it onto the view.
+///
+/// Both projections run depth reversed, from 1 at the near plane to 0 at the far one, or infinitely
+/// far: that keeps the floating-point depth's precision where it's needed, and lets perspective see
+/// forever.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Projection {
     /// Without perspective, as 2D games draw. The view spans `height` world units from bottom to

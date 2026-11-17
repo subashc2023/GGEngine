@@ -9,10 +9,11 @@ use crate::Texture;
 /// `shaders/text.slang`, compiled by the build.
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.spv"));
 
-/// A glyph of text, drawn from its font's multi-channel signed distance field: a
-/// [data](crate::Texels::Data) texture whose red, green and blue hold distances to the glyph's
-/// edges. Their median is the distance to the nearest edge, keeping corners sharp: 0.5 at the edge,
-/// rising inside and falling outside.
+/// A glyph of text, drawn from its font's multi-channel signed distance field.
+///
+/// The field is a [data](crate::Texels::Data) texture whose red, green and blue hold distances to
+/// the glyph's edges. Their median is the distance to the nearest edge, keeping corners sharp: 0.5
+/// at the edge, rising inside and falling outside.
 ///
 /// A glyph is a unit square centered on its origin in its XY plane, facing +Z, as a sprite is. It
 /// shows `rect` of the field (top left at its top left, +Y up), filled with `color` inside the

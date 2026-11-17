@@ -50,9 +50,10 @@ impl<V> fmt::Debug for Mesh<V> {
     }
 }
 
-/// A mesh, a shader and its parameters, as [`Draws::push`] draws them, without their types: checked
-/// against each other at creation, then erased, so one type holds any draw, as in a component. The
-/// parameters are copied in.
+/// A mesh, a shader and its parameters, as [`Draws::push`] draws them, without their types.
+///
+/// Checked against each other at creation, then erased, so one type holds any draw, as in a
+/// component. The parameters are copied in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshDraw {
     pub(crate) mesh: u32,
@@ -161,9 +162,10 @@ pub struct Lod {
 /// The most levels of detail a mesh has, level 0 among them.
 pub const MAX_LEVELS: usize = 8;
 
-/// A mesh's levels of detail, finest first, and the sphere round its vertices that picks among them
-/// and culls. Level 0 is the mesh itself, usually of error 0; errors never decrease. Levels may
-/// share indices.
+/// A mesh's levels of detail, finest first, and the sphere round its vertices that picks among them.
+///
+/// The sphere also culls. Level 0 is the mesh itself, usually of error 0; errors never decrease.
+/// Levels may share indices.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lods {
     /// Finest first, at most [`MAX_LEVELS`].
@@ -192,9 +194,11 @@ impl Lods {
     }
 }
 
-/// The meshes a renderer draws, the engine's quad (for sprites) first. Handles come at once;
-/// [`Uploads::take`] takes the data, frames stream it within their budget, and a mesh draws once
-/// there. Replacements and removals follow in order. A renderer draws one `Meshes`' meshes only.
+/// The meshes a renderer draws, the engine's quad (for sprites) first.
+///
+/// Handles come at once; [`Uploads::take`] takes the data, frames stream it within their budget,
+/// and a mesh draws once there. Replacements and removals follow in order. A renderer draws one
+/// `Meshes`' meshes only.
 pub struct Meshes {
     /// Added, replaced or removed since last taken, in order.
     pub(crate) changes: Vec<Change>,

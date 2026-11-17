@@ -6,8 +6,10 @@ use gg_core::math::libm::{exp2f, log2f};
 use gg_core::math::{Mat3, Vec2, Vec3};
 
 /// How the view's linear light is graded before tonemapping, as
-/// [`RenderData::grade`](crate::RenderData::grade) has it, so the tonemapper rolls off what it
-/// brightens. In order: white balance, contrast, ASC CDL's slope, offset and power, saturation.
+/// [`RenderData::grade`](crate::RenderData::grade) has it.
+///
+/// The tonemapper rolls off what it brightens. In order: white balance, contrast, ASC CDL's slope,
+/// offset and power, saturation.
 ///
 /// - Each step keeps light within a half float's largest, 65,504, as the view's colors hold.
 /// - A game's canvas, drawn after, isn't graded.

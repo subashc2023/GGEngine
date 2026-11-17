@@ -31,18 +31,20 @@ const MAX_REACH: u32 = 17;
 const GROUP_X: u32 = 64;
 const GROUP_Y: u32 = 4;
 
-/// Shows the game's view where the main window's UI paints it, as an egui `PaintCallback`: at the
-/// callback's rect's top left, the view's size, clipped as the UI clips the callback, in the UI's
-/// order. So the view can be a panel among the UI's, under some and over others, rather than at
-/// [`RenderData::viewport`]'s origin under the whole UI.
+/// Shows the game's view where the main window's UI paints it, as an egui `PaintCallback`.
+///
+/// It's at the callback's rect's top left, the view's size, clipped as the UI clips the callback,
+/// in the UI's order. So the view can be a panel among the UI's, under some and over others, rather
+/// than at [`RenderData::viewport`]'s origin under the whole UI.
 ///
 /// [`RenderData::viewport`]: crate::RenderData::viewport
 #[derive(Debug)]
 pub struct ViewCallback;
 
 /// An outline round what the game's view shows of a set of IDs' draws, such as an entity's and its
-/// descendants', drawn into the view so it shows wherever the view does, and as it's read back. It
-/// rings the shape their pixels on top make together, inside it too where another ID's draw covers
+/// descendants'.
+///
+/// Drawn into the view so it shows wherever the view does, and as it's read back. It rings the shape their pixels on top make together, inside it too where another ID's draw covers
 /// part, but not what's hidden. A solid band `width` pixels past their edge, its outer edge
 /// smoothed, then a glow fading over as far again.
 #[derive(Clone, Copy, Debug, PartialEq)]

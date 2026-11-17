@@ -12,6 +12,7 @@ use gg_core::math::{Vec3, Vec4};
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.spv"));
 
 /// A straight line from `from` to `to`, in the space the draw's transform takes to the world's.
+///
 /// It's `width` pixels wide at any distance, whatever the transform's scale. Its ends are squared
 /// off half its width past its points, so lines meeting at a point leave no gap, though a
 /// translucent color shows darker where they overlap. Its edges are smoothed over a pixel. It

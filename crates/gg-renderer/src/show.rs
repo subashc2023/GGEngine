@@ -36,9 +36,10 @@ pub enum Show<'a> {
     Image(&'a str),
 }
 
-/// An image a frame made that [`Show::Image`] finds, as [`Renderer::images`] lists them: its debug
-/// name, what it holds, which says how a show reads it, and its size in pixels, which a show
-/// stretches over the view.
+/// An image a frame made that [`Show::Image`] finds, as [`Renderer::images`] lists them.
+///
+/// Its debug name, what it holds, which says how a show reads it, and its size in pixels, which a
+/// show stretches over the view.
 ///
 /// [`Renderer::images`]: crate::Renderer::images
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

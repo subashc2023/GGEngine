@@ -20,9 +20,10 @@ const GROUP: u32 = 8;
 /// at 720, as McGuire et al. have it.
 const TILES_DOWN: u32 = 36;
 
-/// Motion blur, as [`RenderData::motion_blur`](crate::RenderData::motion_blur) gives it: the view
-/// blurred along how far things moved while the shutter was open, centered on where they show.
-/// Motion is as [`Antialiasing::Taa`](crate::Antialiasing::Taa) says. A headless frame draws a
+/// Motion blur, as [`RenderData::motion_blur`](crate::RenderData::motion_blur) gives it.
+///
+/// The view is blurred along how far things moved while the shutter was open, centered on where
+/// they show. Motion is as [`Antialiasing::Taa`](crate::Antialiasing::Taa) says. A headless frame draws a
 /// tick, so its motion is a tick's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionBlur {

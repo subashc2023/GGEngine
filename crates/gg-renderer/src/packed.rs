@@ -27,12 +27,15 @@ use crate::{Lod, Lods, ModelVertex};
 pub const MAX_MESHLET_VERTICES: u32 = 64;
 
 /// The most triangles a meshlet has: 124, not NVIDIA's 126, as meshoptimizer takes a multiple of 4.
+///
 /// `MAX_TRIANGLES` in `shaders/model.slang`, whose vertex path draws each meshlet as this many
 /// triangles, those past its own drawing nothing.
 pub const MAX_MESHLET_TRIANGLES: u32 = 124;
 
-/// A model mesh's vertex as the GPU holds it: `PackedVertex` in `shaders/model.slang`, which
-/// unpacks it to a [`ModelVertex`]'s fields, as nearly as they're kept.
+/// A model mesh's vertex as the GPU holds it.
+///
+/// `PackedVertex` in `shaders/model.slang` unpacks it to a [`ModelVertex`]'s fields, as nearly as
+/// they're kept.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, NoUninit)]
 pub struct PackedVertex {
@@ -54,8 +57,9 @@ pub struct PackedVertex {
     pub color: [u8; 4],
 }
 
-/// A skinned vertex's joints and weights, after its mesh's vertices in the buffer: `SkinVertex` in
-/// `shaders/skin.slang`. Each frame the renderer moves the vertex where its joints, as drawn then,
+/// A skinned vertex's joints and weights, after its mesh's vertices in the buffer.
+///
+/// `SkinVertex` in `shaders/skin.slang`. Each frame the renderer moves the vertex where its joints, as drawn then,
 /// carry it, each by its weight.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, NoUninit)]
@@ -180,9 +184,11 @@ pub struct Meshlets {
     pub levels: Vec<[u32; 2]>,
 }
 
-/// A model's mesh as the GPU draws it: packed vertices, triangle indices, levels of detail among
-/// them with the sphere round its vertices, and meshlets if the cooker cut them; or, skinned, no
-/// meshlets and what moves each vertex.
+/// A model's mesh as the GPU draws it.
+///
+/// Packed vertices, triangle indices, levels of detail among them with the sphere round its
+/// vertices, and meshlets if the cooker cut them; or, skinned, no meshlets and what moves each
+/// vertex.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelMesh {
     pub packing: Packing,

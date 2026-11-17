@@ -61,10 +61,12 @@ impl std::ops::AddAssign for DrawCounts {
     }
 }
 
-/// What's been added to, replaced in or removed from a [`Meshes`], [`Shaders`], [`Textures`] and
-/// [`Materials`] since last taken, in order, and what's changed in a [`Scene`]. Before it draws, a
-/// frame makes the shaders' pipelines, queues the meshes and textures to stream, writes the
-/// materials and the scene into their tables, and applies the removals.
+/// What's been added to, replaced in or removed from the registries since last taken, and what's
+/// changed in a [`Scene`].
+///
+/// The registries are [`Meshes`], [`Shaders`], [`Textures`] and [`Materials`], in order. Before it
+/// draws, a frame makes the shaders' pipelines, queues the meshes and textures to stream, writes
+/// the materials and the scene into their tables, and applies the removals.
 ///
 /// Taking moves the changes out of the registries, which go on handing out handles, so a renderer
 /// on another thread renders what they handed out before. It keeps its memory, so a frame that adds
@@ -272,9 +274,10 @@ pub struct RenderData<'a> {
     pub pixels: Option<Pixels<'a>>,
 }
 
-/// Pixels for [`RenderData::pixels`]: their width and height, and tightly packed rows of
-/// sRGB-encoded RGBA8, top row first. `None` bytes show those the last rendering frame wrote, if it
-/// wrote some of this size.
+/// Pixels for [`RenderData::pixels`].
+///
+/// Their width and height, and tightly packed rows of sRGB-encoded RGBA8, top row first. `None`
+/// bytes show those the last rendering frame wrote, if it wrote some of this size.
 #[derive(Clone, Copy, Debug)]
 pub struct Pixels<'a> {
     pub size: [u32; 2],

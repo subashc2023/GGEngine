@@ -10,8 +10,10 @@ use gg_gpu::{Device, Faces, Frame, GpuBuffer};
 
 use crate::{MeshDraw, halves};
 
-/// The world's opaque meshes, as changes since [`Uploads::take_scene`](crate::Uploads::take_scene)
-/// last took them; renderers keep them on the GPU. Each is an instance of a mesh with a
+/// The world's opaque meshes, as changes since
+/// [`Uploads::take_scene`](crate::Uploads::take_scene) last took them.
+///
+/// Renderers keep them on the GPU. Each is an instance of a mesh with a
 /// depth-writing shader, with a transform, parameters and ID, in a slot its caller picks. Frames
 /// draw them at [`Draws::draw_scene`](crate::Draws::draw_scene), culled and batched as other opaque
 /// runs are: by shader, mesh, faces and ID. A frame without changes writes nothing, and one

@@ -75,8 +75,9 @@ impl<V, P> fmt::Debug for Shader<V, P> {
     }
 }
 
-/// The shaders a renderer draws meshes with, the engine's sprite shader first. Each is compiled as
-/// it's added, and its SPIR-V kept until [`Uploads::take`](crate::Uploads::take) takes it, for a
+/// The shaders a renderer draws meshes with, the engine's sprite shader first.
+///
+/// Each is compiled as it's added, and its SPIR-V kept until [`Uploads::take`](crate::Uploads::take) takes it, for a
 /// renderer to make its pipeline when it next renders. A game's shader compiled again replaces it
 /// the same way; removals go in order with them. A renderer draws with one `Shaders`' shaders only.
 pub struct Shaders {
@@ -702,10 +703,11 @@ fn check(name: &str, path: &Path, spirv: &[u8], types: &Types) -> Result<()> {
     Err(Error::new("renderer.shader_mismatch", message))
 }
 
-/// Compiles a game's shader `name` at `path` to SPIR-V with the build's slangc, as [`Shaders::add`]
-/// does, but unchecked: the check needs its types. For `tools/cook`: a run adds the package's
-/// SPIR-V through [`Shaders::add_compiled`], which checks it. Gives the files read too, its own
-/// first, then its includes.
+/// Compiles a game's shader `name` at `path` to SPIR-V with the build's slangc, unchecked.
+///
+/// As [`Shaders::add`] does, but the check needs its types. For `tools/cook`: a run adds the
+/// package's SPIR-V through [`Shaders::add_compiled`], which checks it. Gives the files read too,
+/// its own first, then its includes.
 ///
 /// Fails as `Shaders::add` does, but for the contract.
 pub fn compile_shader(name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathBuf>)> {

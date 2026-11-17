@@ -39,7 +39,9 @@ const MOST_LEVELS: usize = 12;
 const LEVELS: u32 = 7;
 
 /// How the view reflects what it shows, as
-/// [`RenderData::reflections`](crate::RenderData::reflections) has it. Each opaque point's ray,
+/// [`RenderData::reflections`](crate::RenderData::reflections) has it.
+///
+/// Each opaque point's ray,
 /// traced through the view's depth, replaces the sky's specular light where it finds something,
 /// blurred by the point's roughness, and leaves the sky's where it finds nothing.
 #[derive(Clone, Copy, Debug, PartialEq)]
