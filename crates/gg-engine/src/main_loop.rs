@@ -198,7 +198,8 @@ pub(crate) fn run_headless(
             hand_off(&mut render, &mut cx, view, ui, Vec::new());
             handed += 1;
             match handing {
-                Some(frame) => api::pace(&api, frame),
+                // A wait for the frame to be due, as under the frame rate limit.
+                Some(frame) => cx.perf.limited(api::pace(&api, frame)),
                 None if real_time => {
                     let tick = frame_started + crate::Tick::DT;
                     std::thread::sleep(tick.saturating_duration_since(Instant::now()));

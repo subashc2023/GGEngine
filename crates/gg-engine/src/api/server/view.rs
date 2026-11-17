@@ -160,8 +160,11 @@ impl Api {
             });
         }
         if let Some(publish) = &mut frame.publish {
-            // The client grabs its own cursor for the game.
+            // The client grabs its own cursor for the game, and shows its frame times.
             publish.writer.set_cursor_grabbed(cx.cursor_grabbed());
+            if let Some(times) = cx.perf.times() {
+                publish.writer.time(times);
+            }
             if let Some(error) = publish.failed.take()
                 && !mem::replace(&mut self.view_warned, true)
             {
@@ -361,15 +364,16 @@ impl Api {
     }
 
     /// While the view is published, waits at most `timeout` for the client to take frame `handed`
-    /// ([`handing`](Self::handing)).
-    pub(crate) fn pace(&self, handed: u64, timeout: Duration) {
+    /// ([`handing`](Self::handing)). Returns how long it waited.
+    pub(crate) fn pace(&self, handed: u64, timeout: Duration) -> Duration {
         let Some(pacer) = &self.pacer else {
-            return;
+            return Duration::ZERO;
         };
         let start = Instant::now();
         while pacer.taken() < handed && start.elapsed() < timeout {
             thread::sleep(Duration::from_micros(250));
         }
+        start.elapsed()
     }
 }
 

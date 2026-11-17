@@ -40,6 +40,9 @@ pub const MAX_SIDE: u32 = 8192;
 /// The words a slot holds its frame's viewpoint in, as [`pack_viewpoint`] lays it out.
 const VIEWPOINT_WORDS: usize = 14;
 
+/// The words a slot holds its frame's [`Times`] in, as [`Times::words`] lays them out.
+const TIMES_WORDS: usize = 14;
+
 /// The memory's header, at its start. Each field is atomic, as both processes read it while the
 /// other may write it, and each has one writer: the client, which made the memory, or the game.
 #[repr(C)]
@@ -63,6 +66,9 @@ struct Header {
     /// so that an older engine's end, which knows none, lays out the rest alike; zeroed memory
     /// reads as 0.
     grab: AtomicU64,
+    /// Each slot's frame's [`Times`]: the game's, written before it publishes the slot. After
+    /// `grab`, for the same reason; zeroed memory reads as none.
+    times: [[AtomicU64; TIMES_WORDS]; SLOTS as usize],
 }
 
 /// A slot's frame, in the header.
@@ -98,12 +104,101 @@ pub struct Frame {
     /// The revision of the look it drew with, as [`Looked::revision`](crate::Looked::revision)
     /// counts them.
     pub look: u64,
+    /// The game's frame measured last before it, as [`Writer::time`] said; `None` from a game that
+    /// says none.
+    pub times: Option<Times>,
 }
 
 impl Frame {
     /// The bytes of its pixels.
     pub fn bytes(&self) -> usize {
         bytes(self.size)
+    }
+}
+
+/// A frame of the game's as its Performance panel measures it, in nanoseconds; draws, instances
+/// and triangles are counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Times {
+    /// Its number among the frames the game measured, from 1.
+    pub number: u64,
+    /// From its start to the next's, and its parts on the main thread.
+    pub frame: u64,
+    pub ticks: u64,
+    pub update: u64,
+    pub ui: u64,
+    /// Waiting for the render thread to finish the frame before.
+    pub handoff: u64,
+    /// Waiting for the frame to be due: under the frame rate limit, and for the client to take the
+    /// frame before.
+    pub limit: u64,
+    /// The render thread rendering the frame before, but its waits for the GPU, which `wait` holds.
+    pub render: u64,
+    pub wait: u64,
+    /// Of `render`, copying the view into the memory.
+    pub publish: u64,
+    /// The GPU's time on the frame two before; 0 where none came back.
+    pub gpu: u64,
+    pub draws: u64,
+    pub instances: u64,
+    pub triangles: u64,
+}
+
+impl Times {
+    /// Them in order, as the header holds them.
+    fn words(&self) -> [u64; TIMES_WORDS] {
+        [
+            self.number,
+            self.frame,
+            self.ticks,
+            self.update,
+            self.ui,
+            self.handoff,
+            self.limit,
+            self.render,
+            self.wait,
+            self.publish,
+            self.gpu,
+            self.draws,
+            self.instances,
+            self.triangles,
+        ]
+    }
+
+    /// Them from `words`; `None` for a `number` of 0, as zeroed memory has it.
+    fn from_words(words: [u64; TIMES_WORDS]) -> Option<Self> {
+        let [
+            number,
+            frame,
+            ticks,
+            update,
+            ui,
+            handoff,
+            limit,
+            render,
+            wait,
+            publish,
+            gpu,
+            draws,
+            instances,
+            triangles,
+        ] = words;
+        (number != 0).then_some(Self {
+            number,
+            frame,
+            ticks,
+            update,
+            ui,
+            handoff,
+            limit,
+            render,
+            wait,
+            publish,
+            gpu,
+            draws,
+            instances,
+            triangles,
+        })
     }
 }
 
@@ -198,6 +293,9 @@ impl Reader {
         let words = (published.viewpoint)
             .each_ref()
             .map(|word| word.load(Ordering::Relaxed));
+        let times = header.times[slot as usize]
+            .each_ref()
+            .map(|word| word.load(Ordering::Relaxed));
         let frame = unpack_viewpoint(words).map(|viewpoint| Frame {
             size: unpack(published.size.load(Ordering::Relaxed)),
             number,
@@ -206,6 +304,7 @@ impl Reader {
             published: published.published.load(Ordering::Relaxed),
             viewpoint,
             look: published.look.load(Ordering::Relaxed),
+            times: Times::from_words(times),
         });
         header.taken.store(number, Ordering::Release);
         let fits = |frame: &Frame| fits_sides(frame.size) && frame.bytes() <= self.memory.capacity;
@@ -260,6 +359,8 @@ pub struct Writer {
     memory: Arc<Memory>,
     /// The slot it writes, which it picks as it first publishes, as [`open`](Self::open) says.
     back: Option<u64>,
+    /// What [`time`](Self::time) said; none at first.
+    times: Option<Times>,
 }
 
 impl Writer {
@@ -305,7 +406,14 @@ impl Writer {
         Ok(Self {
             memory: Arc::new(memory),
             back: None,
+            times: None,
         })
+    }
+
+    /// Has the frames it publishes from now carry `times`, the game's frame measured last, for the
+    /// client's Performance panel.
+    pub fn time(&mut self, times: Times) {
+        self.times = Some(times);
     }
 
     /// The size the client asks for; `None` for one that doesn't fit in the memory, which
@@ -377,7 +485,12 @@ impl Writer {
             published: nanos(SystemTime::now()),
             viewpoint,
             look,
+            times: self.times.filter(|times| times.number != 0),
         };
+        let times = frame.times.unwrap_or_default().words();
+        for (word, time) in header.times[back as usize].iter().zip(times) {
+            word.store(time, Ordering::Relaxed);
+        }
         let written = &header.slots[back as usize];
         written.size.store(pack(size), Ordering::Relaxed);
         written.number.store(number, Ordering::Relaxed);
@@ -969,6 +1082,29 @@ mod tests {
             assert_eq!((taken.viewpoint, taken.look), (viewpoint, look));
             assert_eq!(taken, published);
         }
+    }
+
+    /// A frame carries the game's times said before it's published; before any are, none.
+    #[test]
+    fn a_frame_carries_the_times_said_before_it() {
+        let mut reader = Reader::create(1, 1).expect("memory for a view");
+        let mut writer = Writer::open(reader.name()).expect("the memory");
+        let publish = |writer: &mut Writer, reader: &mut Reader| {
+            let published = writer.publish([1, 1], 0, SystemTime::now(), SEEN, 0, gray(0));
+            let taken = reader.take().expect("the frame");
+            assert_eq!(Ok(taken), published.map_err(|error| error.kind()));
+            taken.times
+        };
+        assert_eq!(publish(&mut writer, &mut reader), None, "before any");
+        let times = Times {
+            number: 3,
+            frame: 4_000_000,
+            gpu: 1_000_000,
+            triangles: 12,
+            ..Times::default()
+        };
+        writer.time(times);
+        assert_eq!(publish(&mut writer, &mut reader), Some(times));
     }
 
     /// The client reads whether the game wants the cursor grabbed as the game last said, not

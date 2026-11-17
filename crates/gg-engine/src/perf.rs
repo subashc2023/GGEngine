@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "dev")]
+use gg_api::view::Times;
 pub(crate) use gg_core::log::millis;
 
 use crate::Layer;
@@ -34,7 +36,8 @@ pub(crate) struct Sample {
     /// Waiting for the render thread to finish the frame before.
     pub(crate) handoff: u64,
     /// Waiting for the next frame to be due under
-    /// [`Context::set_max_fps`](crate::Context::set_max_fps).
+    /// [`Context::set_max_fps`](crate::Context::set_max_fps), or for an embedded run's client to
+    /// take the last.
     pub(crate) limit: u64,
     /// Rendering the frame before, with submission and present, without its waits.
     pub(crate) render: u64,
@@ -182,6 +185,28 @@ impl Perf {
     pub(crate) fn recent(&self) -> impl Iterator<Item = &Sample> {
         let (newer, older) = self.kept.split_at(self.next);
         newer.iter().rev().chain(older.iter().rev())
+    }
+
+    /// The frame measured last, for a client's panel; `None` before one is.
+    #[cfg(feature = "dev")]
+    pub(crate) fn times(&self) -> Option<Times> {
+        let s = self.recent().next()?;
+        Some(Times {
+            number: self.measured,
+            frame: s.frame,
+            ticks: s.ticks,
+            update: s.update,
+            ui: s.ui,
+            handoff: s.handoff,
+            limit: s.limit,
+            render: s.render,
+            wait: s.wait,
+            publish: s.publish,
+            gpu: s.gpu,
+            draws: s.draws,
+            instances: s.instances,
+            triangles: s.triangles,
+        })
     }
 
     /// The run summed up, in milliseconds.
@@ -401,8 +426,8 @@ const RENDERING: [(&str, &str, Time); 3] = [
 const FRAME_TIP: &str = "The whole frame on the main thread, from its start to the next's";
 
 #[cfg(feature = "dev")]
-const LIMIT_TIP: &str = "The main thread waiting for the next frame to be due under the frame rate limit, which the \
-     graph leaves empty";
+const LIMIT_TIP: &str = "The main thread waiting for the next frame to be due under the frame rate limit, or, in a \
+     tool, for the tool to show the last; the graph leaves it empty";
 
 #[cfg(feature = "dev")]
 #[derive(Clone, Copy, Default)]

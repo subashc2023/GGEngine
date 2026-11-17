@@ -9,7 +9,6 @@ mod server;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
-#[cfg(feature = "dev")]
 use std::time::Duration;
 
 use crate::Context;
@@ -298,13 +297,15 @@ pub(crate) fn handing(api: &Option<Api>) -> Option<u64> {
 }
 
 /// Once the frame's handed off, waits up to [`PACED`] for the client to take frame `handed`
-/// ([`handing`]), so an embedded run renders no frame its client doesn't take.
-pub(crate) fn pace(api: &Option<Api>, handed: u64) {
+/// ([`handing`]), so an embedded run renders no frame its client doesn't take. Returns how long it
+/// waited.
+pub(crate) fn pace(api: &Option<Api>, handed: u64) -> Duration {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
-        api.pace(handed, PACED);
+        return api.pace(handed, PACED);
     }
     let _ = (api, handed);
+    Duration::ZERO
 }
 
 /// While the simulation is paused or stopped with nothing asked of the frames, waits for a request

@@ -115,7 +115,7 @@ fn session() -> Session {
 }
 
 /// Publishes the view to memory of its own and checks the frames taken: green, at the size asked,
-/// the next only once the last is taken, red once W is held, and as fast paused as playing.
+/// the next only once the last is taken, timed, red once W is held, and as fast paused as playing.
 fn check(client: &mut Client) {
     let mut reader = Reader::create(64, 32).expect("memory for the view");
     let memory = json!({"memory": reader.name()});
@@ -133,6 +133,11 @@ fn check(client: &mut Client) {
     assert!(reader.ask([32, 16]));
     let (frame, _) = take_until(&mut reader, |frame, _| frame.size == [32, 16]);
     assert!(frame.started <= frame.published);
+    // Frames carry the game's times for one before them, a wait for the client among them. Not
+    // the first wait's: a run's first frame measured is kept apart.
+    thread::sleep(Duration::from_millis(50));
+    let waited = |frame: &Frame, _: &[u8]| frame.times.is_some_and(|t| t.limit >= 30_000_000);
+    take_until(&mut reader, waited);
 
     // Frames drawn with a look carry its viewpoint and revision; a capture of the game's own
     // view, whose frame isn't published, still comes.
