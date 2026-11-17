@@ -113,7 +113,6 @@ fn scene_status(scene: Option<&str>, unsaved: bool) -> Result<Value, Failure> {
     Ok(json!(status))
 }
 
-/// The `scene` requests sent since.
 fn scenes(ends: &Ends) -> Vec<Scene> {
     let asked = ends
         .asked
@@ -132,12 +131,10 @@ fn save(path: Option<PathBuf>) -> Scene {
     }
 }
 
-/// The methods of the requests sent since.
 fn methods(ends: &Ends) -> Vec<String> {
     ends.asked.try_iter().map(|(method, _)| method).collect()
 }
 
-/// The looks asked for since.
 fn looks(ends: &Ends) -> Vec<Look> {
     let asked = ends.asked.try_iter().filter(|(method, _)| method == "look");
     let looks = asked.map(|(_, look)| serde_json::from_value(look).expect("a look"));

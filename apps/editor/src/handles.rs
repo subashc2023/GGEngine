@@ -788,7 +788,6 @@ impl Drag {
     }
 }
 
-/// `x` to the nearest multiple of `step`.
 fn stepped(x: f32, step: f32) -> f32 {
     (x / step).round() * step
 }
@@ -876,7 +875,6 @@ impl Sight {
         })
     }
 
-    /// How many pixels `points` points span.
     fn pixels(&self, points: f32) -> f32 {
         points * self.scale
     }
@@ -941,7 +939,6 @@ impl Sight {
         (meets && met.is_finite()).then_some(met)
     }
 
-    /// The ray through pixel `at`.
     fn ray(&self, at: Vec2) -> Ray {
         let [x0, y0] = self.view.origin.map(|at| at as f32);
         let [width, height] = self.view.size.map(|side| side as f32);
@@ -1001,9 +998,7 @@ struct Placed {
     /// sign in either.
     space: Space,
     carry: Mat3,
-    /// How long the handles are in the world, at the origin.
     length: f32,
-    /// Which way the camera is from the origin.
     toward: Vec3,
     /// How much of each axis's handle shows, from 0, hidden, to 1; a plane's goes by the axis
     /// square to it.
@@ -1336,14 +1331,12 @@ impl Pen<'_> {
             .add(Shape::convex_polygon(corners, fill, stroke));
     }
 
-    /// A circle about `center`, `radius` points across from it.
     fn circle(&self, center: Vec2, radius: f32, fill: Color32, stroke: Color32) {
         let stroke = Stroke::new(self.size(WIDTH), stroke);
         self.painter
             .circle(self.at(center), self.size(radius), fill, stroke);
     }
 
-    /// A square about `center`, `half` points across from its middle each way.
     fn square(&self, center: Vec2, half: f32, color: Color32) {
         let side = egui::Vec2::splat(2.0 * self.size(half));
         let rect = egui::Rect::from_center_size(self.at(center), side);
