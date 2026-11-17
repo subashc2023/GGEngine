@@ -173,6 +173,7 @@ use scene::{Action, Closing, Request};
 /// the Inspector's vectors and the Entities header in a 1920 by 1080 point window.
 pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>, release: bool) -> App {
     let app = App::new("Editor")
+        .embeds_game()
         .custom_title_bar()
         .view_panel("Viewport")
         .window_size(1920, 1080);

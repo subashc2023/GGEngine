@@ -350,6 +350,8 @@ pub struct App {
     /// How sessions the layers host and join start ([`Context::host`]). The run's arguments fill
     /// it in, but for [`predicting`](Self::predicting).
     own_sessions: layer::OwnSessions,
+    /// Set by [`embeds_game`](Self::embeds_game).
+    embeds_game: bool,
 }
 
 impl App {
@@ -378,6 +380,7 @@ impl App {
             mods: None,
             started: None,
             own_sessions: layer::OwnSessions::default(),
+            embeds_game: false,
         }
     }
 
@@ -598,6 +601,19 @@ impl App {
         }
     }
 
+    /// Marks a tool that shows a game it embeds, as the editor shows its Play: it presents at the
+    /// display's refresh rate, as `--vsync` does.
+    ///
+    /// The embedded game renders a frame each time the tool takes one, so the tool's rate is the
+    /// game's ceiling.
+    #[must_use]
+    pub fn embeds_game(self) -> Self {
+        Self {
+            embeds_game: true,
+            ..self
+        }
+    }
+
     /// Shows the game's view in its own panel, `name`, docked and floated like the layers' panels.
     /// The dock fills the main window, without games' central area: for tools. The view fills the
     /// dock until panels dock beside it, and never goes into a window of its own.
@@ -702,7 +718,7 @@ fn run_args(
     program: &str,
     args: impl IntoIterator<Item = OsString>,
 ) -> ExitCode {
-    let args = match args::parse(args) {
+    let mut args = match args::parse(args) {
         Ok(Some(args)) => args,
         Ok(None) => {
             print!("{}", args::usage(program));
@@ -717,6 +733,7 @@ fn run_args(
             return ExitCode::from(2);
         }
     };
+    args.vsync |= app.embeds_game;
 
     // An embedded run's tool reads events through the tool API's `logs`; stderr would show each
     // twice.
