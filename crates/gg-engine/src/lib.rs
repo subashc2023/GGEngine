@@ -33,6 +33,51 @@
 //! shaders, textures, models, fonts, prefabs, UIs, sounds and music; the OS's file dialogs; and
 //! egui's UI, which layers draw through `Ui`: the dock, its title bars, and the Inspector and
 //! Performance panels.
+//!
+//! A game in one file, a square turning before a camera. [`prelude`] names what most games use;
+//! `cargo gg new` makes a game like it, its world in a scene file.
+//!
+//! ```no_run
+//! use std::process::ExitCode;
+//!
+//! use gg_engine::Camera;
+//! use gg_engine::math::DVec3;
+//! use gg_engine::prelude::*;
+//!
+//! fn main() -> ExitCode {
+//!     gg_engine::run(App::new("Hello").layer(Hello).dev_panels())
+//! }
+//!
+//! struct Hello;
+//!
+//! impl Layer for Hello {
+//!     fn attach(&mut self, cx: &mut Context) {
+//!         let projection = Projection::Orthographic {
+//!             height: 4.0,
+//!             near: 0.1,
+//!             far: 100.0,
+//!         };
+//!         let camera = Camera {
+//!             projection,
+//!             primary: true,
+//!         };
+//!         let above = Transform {
+//!             translation: DVec3::Z * 10.0,
+//!             ..Transform::IDENTITY
+//!         };
+//!         let world = cx.world_mut();
+//!         world.spawn((above, camera));
+//!         world.spawn((Transform::IDENTITY, Sprite::default()));
+//!     }
+//!
+//!     fn tick(&mut self, world: &mut World, _: Tick) {
+//!         let turn = Quat::from_rotation_z(Tick::DT.as_secs_f32());
+//!         for (at, _) in world.query_mut::<(&mut Transform, &Sprite)>() {
+//!             at.rotation = (turn * at.rotation).normalize();
+//!         }
+//!     }
+//! }
+//! ```
 
 // For the derives' code, which names `::gg_engine`.
 extern crate self as gg_engine;

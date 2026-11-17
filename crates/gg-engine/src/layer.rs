@@ -76,22 +76,41 @@ use crate::scene_files::{self, SceneFile};
 use crate::skins::Skins;
 use crate::{Entity, EntityId, Event, Input, Ui, World};
 
-/// A part of an app that the main loop drives. Every method defaults to nothing; keeping
-/// [`ui`](Self::ui)'s default also tells the engine the layer draws no UI.
+/// A part of an app that the main loop drives.
+///
+/// | When | Called |
+/// |---|---|
+/// | The run starts, bottom up | [`load`], then [`attach`], or [`restored`] from a snapshot |
+/// | Each tick, 64 a second | [`commands`] read, then [`tick`] |
+/// | Each input event, top down | [`event`] |
+/// | Each frame, after its ticks | [`update`], then [`ui`] |
+/// | A SyncTest reruns a tick | [`swapped`] |
+/// | The run ends, top down | [`detach`] |
+///
+/// Every method defaults to nothing; keeping `ui`'s default also tells the engine the layer draws
+/// no UI.
 ///
 /// The world changes only as layers attach and detach, and at their ticks. Otherwise a layer reads
 /// it and queues commands, data of its own, for its next tick to apply, so the simulation runs at
 /// its own rate whatever the frame rate. A tick changes the world only through its commands and
-/// systems, so a recording of the commands replays the run.
-///
-/// At start every layer loads, bottom up, then every layer attaches. A run restored from a
-/// snapshot (`--restore`) calls [`restored`](Self::restored) instead of `attach`, so a game that
-/// restarts after a crash or rebuild goes on where it was.
+/// systems, so a recording of the commands replays the run. A run restored from a snapshot
+/// (`--restore`), as after a crash or rebuild, goes on where it was.
 ///
 /// In a development build the engine calls each method through subsecond's `HotFn`. A patch from
 /// `gg run`, applied between ticks, reaches the method and what it calls directly, such as the
 /// systems and scripts its tick runs. What it calls through a trait object or the game's own
 /// function pointer waits for the next rebuild.
+///
+/// [`load`]: Self::load
+/// [`attach`]: Self::attach
+/// [`restored`]: Self::restored
+/// [`commands`]: Self::commands
+/// [`tick`]: Self::tick
+/// [`event`]: Self::event
+/// [`update`]: Self::update
+/// [`ui`]: Self::ui
+/// [`swapped`]: Self::swapped
+/// [`detach`]: Self::detach
 pub trait Layer {
     /// Called once at start, before any layer attaches, in a restored run too. Makes what the layer
     /// draws with (textures, meshes, shaders) and registers its world's component types, which a
