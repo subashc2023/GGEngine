@@ -20,7 +20,8 @@ impl Game {
     ///   editor's camera.
     /// - Otherwise the tools take it, the game gets nothing, and a press off the handles asks the
     ///   game for a pick.
-    /// - In every mode, neither gets a File menu shortcut's key, as [`shortcuts_key`] says.
+    /// - In every mode, neither gets a File menu shortcut's key, as [`shortcuts_key`] says; in
+    ///   Play, nor Shift+F1's, which frees the cursor.
     pub(super) fn route(
         &mut self,
         event: &Event<'_>,
@@ -43,11 +44,17 @@ impl Game {
         if through && escape {
             self.grab = Grab::Escaped;
         }
+        // Shift+F1 lets go too, as in Unreal, and the game never gets its press: a key no game
+        // takes for itself.
+        let frees = through && frees_cursor(event, reading.shift);
+        if frees {
+            self.grab = Grab::Escaped;
+        }
         let press = matches!(*event, Event::MouseButton { pressed: true, .. });
         if through && press && self.grab == Grab::Escaped {
             self.grab = Grab::Asks;
         }
-        let shortcut = shortcuts_key(event, reading.command);
+        let shortcut = frees || shortcuts_key(event, reading.command);
         let handled = if shortcut || (through && !lets_go(event)) {
             ControlFlow::Continue(())
         } else {
@@ -138,6 +145,20 @@ fn shortcuts_key(event: &Event<'_>, command: bool) -> bool {
     };
     let file = |shortcut: &Shortcut| matches!(shortcut.does, Does::File(_)) && shortcut.key == key;
     command && SHORTCUTS.iter().any(file)
+}
+
+/// Whether `event` is a press, or a repeat, of F1 with `shift` held, which frees the cursor. Its
+/// release goes on, as a shortcut's does.
+fn frees_cursor(event: &Event<'_>, shift: bool) -> bool {
+    let f1 = matches!(
+        *event,
+        Event::Key {
+            key: Key::F1,
+            pressed: true,
+            ..
+        }
+    );
+    f1 && shift
 }
 
 /// Whether `event` lets go of what's held: a key's or a button's release, or the loss of the

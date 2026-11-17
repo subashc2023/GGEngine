@@ -18,6 +18,7 @@ use super::*;
 use crate::assets::tests::{Scratch, find, texts};
 use crate::camera::{Move, Tool};
 use crate::file::Choice;
+use crate::handles::Reading;
 use crate::look::Parts;
 use crate::overlay::Mode;
 use crate::tests::{SCALE, VIEW, reading};
@@ -1687,6 +1688,46 @@ fn a_games_grab_holds_the_editors_cursor_in_play_until_escape() {
     game.view.toolbar.world_camera = false;
     game.update(&mut cx, Duration::ZERO);
     assert!(!cx.cursor_grabbed(), "Simulate lets go");
+}
+
+/// Shift+F1 lets go of the cursor in Play, though the game asks, until a press in the view. The
+/// game never gets F1's press.
+#[test]
+fn shift_f1_lets_go_of_the_cursor_unseen_by_the_game() {
+    let (mut game, _ends) = serving();
+    let reader = Reader::create(4, 4).expect("memory");
+    Writer::open(reader.name())
+        .expect("opened")
+        .set_cursor_grabbed(true);
+    game.reader = Some(reader);
+    game.inputting = true;
+    let mut cx = Context::seeded(1);
+    game.update(&mut cx, Duration::ZERO);
+    assert!(cx.cursor_grabbed(), "the game asks");
+    let shifted = Reading {
+        shift: true,
+        ..reading([300.0, 200.0])
+    };
+    let f1 = Event::Key {
+        key: Key::F1,
+        pressed: true,
+        repeat: false,
+    };
+    let _ = game.route(&f1, &reading([300.0, 200.0]), Some(VIEW));
+    game.update(&mut cx, Duration::ZERO);
+    assert!(cx.cursor_grabbed(), "F1 alone is the game's");
+    game.input.clear();
+    let _ = game.route(&f1, &shifted, Some(VIEW));
+    game.update(&mut cx, Duration::ZERO);
+    assert!(!cx.cursor_grabbed(), "let go at Shift+F1");
+    assert_eq!(game.input, [], "the game never got it");
+    let press = Event::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+    };
+    let _ = game.route(&press, &shifted, Some(VIEW));
+    game.update(&mut cx, Duration::ZERO);
+    assert!(cx.cursor_grabbed(), "grabbed again at a press in the view");
 }
 
 /// Play captures the view's input for a game that doesn't ask for a grab: the editor grabs the

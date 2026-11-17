@@ -58,8 +58,9 @@
 //!
 //! - In Play, a game that asks for the cursor grabbed, as the view's memory says, has the editor
 //!   grab it while the view has the keys. The mouse's raw motion goes to the game.
-//! - Escape lets go, though the game still gets the key: a game may not let go itself. A press in
-//!   the view grabs again. Simulate and Stop let go.
+//! - Escape lets go, though the game still gets the key: a game may not let go itself. Shift+F1
+//!   lets go too, as in Unreal, and the game never gets F1's press. A press in the view grabs
+//!   again. Simulate and Stop let go.
 //! - Play, and Resume in Play, capture the view's input for any game: the view gets the keys their
 //!   click took, and the cursor is grabbed, the engine moving it onto the view, until Escape. After
 //!   that, a press grabs again only for a game that asks.
