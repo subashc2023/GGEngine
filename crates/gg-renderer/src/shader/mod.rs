@@ -1288,6 +1288,7 @@ mod tests {
             "model_opaque.slang",
             "model.slang",
             "shading.slang",
+            "common.slang",
             "mesh.slang",
             "aerial.slang",
             "fog.slang",

@@ -164,18 +164,6 @@ float in_front(float a, float b) {
     return saturate(1.0 - (b - a) / max(SOFT_DEPTH * max(a, b), 1.0e-7));
 }
 
-// PCG2D, two numbers hashed into two (Jarzynski and Olano, "Hash Functions for GPU Rendering",
-// 2020), as tonemap.slang's.
-uint2 pcg2d(uint2 v) {
-    v = v * 1664525u + 1013904223u;
-    v.x += v.y * 1664525u;
-    v.y += v.x * 1664525u;
-    v = v ^ (v >> 16u);
-    v.x += v.y * 1664525u;
-    v.y += v.x * 1664525u;
-    return v ^ (v >> 16u);
-}
-
 // A pixel a thread.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]

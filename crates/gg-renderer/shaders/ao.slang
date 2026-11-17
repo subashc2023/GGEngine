@@ -18,6 +18,8 @@
 //
 // `Push` and `Accumulation` match `Push` and `Accumulation` in src/ao.rs field for field.
 
+#include "common.slang"
+
 [[vk::binding(0, 0)]] Texture2D<float> depths[];
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(2, 0)]] [format("r32f")] RWTexture2DArray<float> scalars[];
@@ -79,11 +81,7 @@ struct Push {
 static const uint GROUP = 8;
 // The view-space depth's levels: `LEVELS` in src/ao.rs.
 static const uint LEVELS = 5;
-// The view-space depth of what's infinitely far, as the sky: past any sample's reach, and far
-// enough short of a float's largest that its points and their differences stay finite.
-static const float FARTHEST = 1.0e30;
 
-static const float PI = 3.14159265358979;
 static const float HALF_PI = 1.57079632679490;
 // XeGTAO's defaults, by its names: XE_GTAO_DEFAULT_RADIUS_MULTIPLIER,
 // XE_GTAO_DEFAULT_FALLOFF_RANGE, XE_GTAO_DEFAULT_SAMPLE_DISTRIBUTION_POWER,

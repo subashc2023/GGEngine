@@ -21,8 +21,8 @@
 //
 // What's let through is `least` or more, the opacity's cap.
 
-// `Sampler::LinearClamp`'s index in the bindless set, for the sky's diffuse light.
-static const uint FOG_SAMPLER = 0;
+#include "common.slang"
+
 // 1 over a sphere's 4π steradians: an isotropic phase function's value.
 static const float PER_STERADIAN = 0.0795774715;
 // The most the density's exponent below the fog's height grows, e^60, so the optical depth stays
@@ -30,9 +30,6 @@ static const float PER_STERADIAN = 0.0795774715;
 static const float DENSEST = 60.0;
 // The most optical depth taken: e^-80 lets through less than a half float holds.
 static const float DEEPEST = 80.0;
-// The largest half float short of infinity, which the view's colors are. Fogged colors are kept to
-// it: a sharp lobe toward a bright sun scatters more.
-static const float HALF_MOST = 65504.0;
 
 // The share of the light, 0 to 1, the fog lets through from `along` past its start, `way` from
 // `origin`, or from infinitely far if `endless`.
@@ -73,7 +70,7 @@ float4 fog_along(Frame frame, float3 origin, float3 way, float distance, bool en
         max(transmittance(fog, origin, way, distance - fog.start, endless), fog.least);
     float3 light = fog.ambient;
     if (frame.specular_levels > 0) {
-        SamplerState clamp_ = samplers[FOG_SAMPLER];
+        SamplerState clamp_ = samplers[LINEAR_CLAMP];
         light *= cubes[frame.irradiance].SampleLevel(clamp_, way, 0.0).rgb;
     }
     float g = fog.lobe;
@@ -113,13 +110,14 @@ float4 fog_at(Frame frame, float3 world) {
 }
 
 // `color`, alpha not multiplied in, fogged by `fog` from `fog_at` where it is. Blended by its
-// alpha, it trades the fog behind it, which the fog's pass applied, for the fog in front.
+// alpha, it trades the fog behind it, which the fog's pass applied, for the fog in front. Kept to
+// `BRIGHTEST`: a sharp lobe toward a bright sun scatters more.
 float4 fogged(float4 fog, float4 color) {
-    return float4(min(color.rgb * fog.a + fog.rgb, HALF_MOST), color.a);
+    return float4(min(color.rgb * fog.a + fog.rgb, BRIGHTEST), color.a);
 }
 
 // `fogged` for alpha multiplied in: of an additive color, alpha 0, the fog lets its share through
 // and adds none of its own.
 float4 fogged_premultiplied(float4 fog, float4 color) {
-    return float4(min(color.rgb * fog.a + fog.rgb * color.a, HALF_MOST), color.a);
+    return float4(min(color.rgb * fog.a + fog.rgb * color.a, BRIGHTEST), color.a);
 }

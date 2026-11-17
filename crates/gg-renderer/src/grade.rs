@@ -160,7 +160,7 @@ const BRIGHTEST: f32 = 65504.0;
 
 const MID_GRAY: f32 = 0.18;
 
-/// Luminance weights: `LUMA` in `shaders/grade.slang`.
+/// Luminance weights: `LUMA` in `shaders/common.slang`.
 const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
 
 /// `light` to the `power`, per channel, 0 giving 0 at any power (even 0) rather than NaN, as

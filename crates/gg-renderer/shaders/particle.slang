@@ -3,7 +3,7 @@
 // too; and the hash seeding a particle's randomness. `Look` and `Emission` match `GpuLook` and
 // `GpuEmission` in src/particles.rs field for field.
 
-static const float PI = 3.14159265358979;
+#include "common.slang"
 
 // A particle's birth record, from which its age alone gives where it is and how it looks, as
 // particles.slang finds them.

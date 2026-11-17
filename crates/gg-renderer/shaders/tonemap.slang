@@ -117,18 +117,6 @@ float3 srgb_decoded(float3 value) {
     return select(value <= 0.04045, value / 12.92, pow((value + 0.055) / 1.055, 2.4));
 }
 
-// PCG2D, a hash of two numbers into two (Jarzynski and Olano, "Hash Functions for GPU Rendering",
-// 2020).
-uint2 pcg2d(uint2 v) {
-    v = v * 1664525u + 1013904223u;
-    v.x += v.y * 1664525u;
-    v.y += v.x * 1664525u;
-    v = v ^ (v >> 16u);
-    v.x += v.y * 1664525u;
-    v.y += v.x * 1664525u;
-    return v ^ (v >> 16u);
-}
-
 // `color`, 0 to 1, dithered against banding in the target's 8 bits, in its encoding. Triangular
 // noise, two uniform noises of up to half a step either way, hashed from the pixel alone, so the
 // same colors write the same each frame. It's added to the encoded color, which is decoded for the

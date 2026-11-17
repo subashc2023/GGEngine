@@ -95,8 +95,6 @@ struct Push {
 static const uint GROUP = 8;
 // The most steps a ray takes, texel to texel at any level.
 static const uint MOST_STEPS = 64;
-// The view-space depth that what's infinitely far, as the sky, stands at, as ao.slang's.
-static const float FARTHEST = 1.0e30;
 // The largest float short of infinity, FidelityFX's FFX_SSSR_FLOAT_MAX.
 static const float FLOAT_MAX = 3.402823466e38;
 // How far past a texel's edge a ray steps into the next, in pixels, as FidelityFX's `uv_offset`.
@@ -105,8 +103,6 @@ static const float NUDGE = 0.005;
 // ray's reach over which they fade toward its end.
 static const float EDGE_FADE = 0.05;
 static const float DISTANCE_FADE = 0.25;
-// `Sampler::LinearClamp`'s index in the bindless set.
-static const uint LINEAR_CLAMP = 0;
 
 // The nearer of the view's two depths at the first level's texel `at`.
 [shader("compute")]

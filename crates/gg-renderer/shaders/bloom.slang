@@ -26,9 +26,6 @@
 [[vk::binding(1, 0)]] SamplerState samplers[];
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
 
-// The bindless set's linear sampler clamped to the edges: `Sampler::Linear` with `Wrap::Clamp`.
-static const uint LINEAR_CLAMP = 0;
-
 // A workgroup's texels across and down: `GROUP` in src/bloom.rs.
 static const uint GROUP = 8;
 
@@ -51,10 +48,6 @@ struct Push {
 // `BloomPush::BLOOMS` and `BloomPush::GRADES` in src/bloom.rs.
 static const uint BLOOMS = 1;
 static const uint GRADES = 2;
-
-float luminance(float3 color) {
-    return dot(color, LUMA);
-}
 
 // The view's color at `at`, clamped to its edges, as light.
 float3 drawn(int2 at) {

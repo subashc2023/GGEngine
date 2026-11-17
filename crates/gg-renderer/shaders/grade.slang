@@ -18,9 +18,6 @@ struct Grade {
 
 static const float MID_GRAY = 0.18;
 
-// Luminance weights: Rec. 709's, the sRGB primaries' own, as ASC CDL's saturation weighs them.
-static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
-
 // `light` to `power`, per channel: 0 to any power, 0 included, is a number, not NaN.
 float3 raised(float3 light, float3 power) {
     return exp2(power * log2(max(light, 1.0e-10)));

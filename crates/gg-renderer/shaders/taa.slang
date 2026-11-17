@@ -48,9 +48,6 @@
 [[vk::binding(1, 0)]] SamplerState samplers[];
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
 
-// The bindless set's linear, edge-clamped sampler: `Sampler::Linear` with `Wrap::Clamp`.
-static const uint LINEAR_CLAMP = 0;
-
 // Pixels across and down a workgroup: `GROUP` in src/taa.rs.
 static const uint GROUP = 8;
 
@@ -173,10 +170,6 @@ struct Push {
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-float luminance(float3 color) {
-    return dot(color, float3(0.2126, 0.7152, 0.0722));
-}
-
 // `color` weighed by 1 / (1 + luminance), in YCoCg, where the clip and blend work; `unweighed`
 // undoes it.
 float3 weighed(float3 color) {
@@ -190,12 +183,12 @@ float3 weighed(float3 color) {
 float3 unweighed(float3 ycocg) {
     float t = ycocg.x - ycocg.z;
     float3 c = max(float3(t + ycocg.y, ycocg.x + ycocg.z, t - ycocg.y), 0.0);
-    return c / max(1.0 - luminance(c), 1.0 / 65504.0);
+    return c / max(1.0 - luminance(c), 1.0 / BRIGHTEST);
 }
 
 // A gray's luminance as `weighed` has it, of light `scale` times as bright.
 float relit(float weighed, float scale) {
-    float light = max(weighed, 0.0) / max(1.0 - weighed, 1.0 / 65504.0) * scale;
+    float light = max(weighed, 0.0) / max(1.0 - weighed, 1.0 / BRIGHTEST) * scale;
     return light / (1.0 + light);
 }
 

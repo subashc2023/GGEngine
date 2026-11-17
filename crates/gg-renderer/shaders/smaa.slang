@@ -24,9 +24,6 @@
 [[vk::binding(1, 0)]] SamplerState samplers[];
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
 
-// The bindless set's linear, edge-clamped sampler: `Sampler::Linear` with `Wrap::Clamp`.
-static const uint LINEAR_CLAMP = 0;
-
 // Pixels across and down a workgroup: `GROUP` in src/smaa.rs.
 static const uint GROUP = 8;
 

@@ -41,13 +41,6 @@ struct Push {
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-// `value`, each channel 0 to 1, encoded so the view's sRGB image stores it as byte / 255, as
-// shading.slang's `stored_as` says.
-float3 stored_as(float3 value) {
-    float3 v = saturate(value);
-    return select(v <= 0.04045, v / 12.92, pow((v + 0.055) / 1.055, 2.4));
-}
-
 // A color per value from its PCG3D hash (Jarzynski and Olano, "Hash Functions for GPU Rendering",
 // 2020), bright enough to tell apart; black for 0.
 float3 hashed(uint2 value) {

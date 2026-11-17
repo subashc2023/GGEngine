@@ -3,9 +3,9 @@
 //   and three.js do: center column toward +X, a quarter across toward -Z, top row straight up;
 // - a cube face's texel as its way, by Vulkan's table of cube map faces.
 
-static const float PI = 3.14159265358979;
-// `Sampler::LinearClamp`'s and `Sampler::LinearRepeat`'s indices in the bindless set.
-static const uint LINEAR_CLAMP = 0;
+#include "common.slang"
+
+// `Sampler::LinearRepeat`'s index in the bindless set.
 static const uint LINEAR_REPEAT = 2;
 
 // The color `image`, `size` texels, holds the way `direction`, a unit vector, from its first

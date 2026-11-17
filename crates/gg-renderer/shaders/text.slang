@@ -5,6 +5,7 @@
 // behind. Fogged at its corners, as fog.slang says. `Glyph` matches `Params` in src/text.rs byte
 // for byte, `rect` as `top_left` then `bottom_right`.
 
+#include "common.slang"
 #include "mesh.slang"
 #include "fog.slang"
 
@@ -20,9 +21,6 @@ struct Glyph {
 };
 
 [[vk::push_constant]] ConstantBuffer<Push<Corner, Glyph>> push;
-
-// The engine's first sampler: linear, clamped to the edge.
-static const uint LINEAR_CLAMP = 0;
 
 struct Varyings {
     float4 position : SV_Position;

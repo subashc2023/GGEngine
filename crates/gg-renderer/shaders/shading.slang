@@ -19,6 +19,7 @@
 // A point shades by the lights that light everywhere, then its cluster's (clusters.slang), in the
 // frame's order; in no cluster, or without clusters, by every light.
 
+#include "common.slang"
 #include "mesh.slang"
 #include "aerial.slang"
 
@@ -124,17 +125,12 @@ Turned turned(Vertex vertex, float4x4 transform) {
     return out;
 }
 
-static const float PI = 3.14159265358979;
 // The least roughness shading takes, Filament's: below it the specular lobe is too narrow to
 // filter; at 0 its peak divides by 0.
 static const float LEAST_ROUGHNESS = 0.045;
-// The largest finite half float: the view's colors are half floats.
-static const float BRIGHTEST = 65504.0;
 static const uint UNLIT = 1;
 static const uint NORMAL_MAPPED = 2;
 static const uint SPECULAR_GLOSSINESS = 4;
-// `Sampler::LinearClamp`'s index in the bindless set.
-static const uint LINEAR_CLAMP = 0;
 // `MARGIN` in src/shadow.rs: the texels inside a map's edges its cascade keeps its points to.
 static const float MARGIN = 8.0;
 // The normal offset against self-shadowing (Holbert, "Saying Goodbye to Shadow Acne", GDC 2011),
@@ -454,14 +450,6 @@ float3 specular_color(Material material, float3 base, float4 surface) {
         return material.specular * surface.rgb;
     }
     return lerp(float3(0.04), base, saturate(material.metallic * surface.b));
-}
-
-// `value`, each channel 0 to 1, as the view's colors hold it for its sRGB image, which the tonemap
-// pass writes clamped, to store it as its byte over 255: decoded from sRGB, which the image
-// encodes again.
-float3 stored_as(float3 value) {
-    float3 v = saturate(value);
-    return select(v <= 0.04045, v / 12.92, pow((v + 0.055) / 1.055, 2.4));
 }
 
 // The input of shading that `show`, below `SHOW_DIRECT_LIGHT`, names, of `lit`'s arguments: colors

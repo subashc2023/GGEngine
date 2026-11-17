@@ -25,9 +25,6 @@
 [[vk::binding(1, 0)]] SamplerState samplers[];
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
 
-// The bindless set's `Sampler::Linear` with `Wrap::Clamp`.
-static const uint LINEAR_CLAMP = 0;
-
 // Texels across and down a workgroup: `GROUP` in src/depth_of_field.rs.
 static const uint GROUP = 8;
 // Half-size texels a tile spans each way, a workgroup of the tiles' pass: `TILE` in
