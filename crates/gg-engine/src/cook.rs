@@ -137,16 +137,22 @@ pub fn pack(name: &str, primitive: &Primitive, levels: Vec<Lod>) -> Result<Model
     crate::model::pack(name, primitive, levels)
 }
 
-/// `image`'s RGBA8 then the rest of its mip chain, smallest last, made as `texels` say and as a
-/// frame makes a texture's the cooker hasn't. [`Mipmaps::None`] gives the first level alone.
+/// Image `image` of `model`'s RGBA8 then the rest of its mip chain, smallest last, as a run makes it.
+///
+/// They're made as [`texels`] says, a surface map's roughness widened by its normal map's spread
+/// where it has one of a size that pairs.
 ///
 /// # Panics
 ///
-/// If `image` isn't RGBA8.
-pub fn levels(image: &Image, texels: Texels) -> Vec<u8> {
-    assert_eq!(image.format, Format::Rgba8, "levels are made from RGBA8");
-    let mut pixels = image.pixels.clone();
-    gg_renderer::add_levels(&mut pixels, image.size, texels);
+/// If the image isn't RGBA8.
+pub fn levels(model: &Imported, image: usize) -> Vec<u8> {
+    let read = &model.images[image];
+    assert_eq!(read.format, Format::Rgba8, "levels are made from RGBA8");
+    if let Some(levels) = crate::model::widened_levels(&model.primitives, &model.images, image) {
+        return levels;
+    }
+    let mut pixels = read.pixels.clone();
+    gg_renderer::add_levels(&mut pixels, read.size, texels(model, image));
     pixels
 }
 

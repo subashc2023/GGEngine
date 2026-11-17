@@ -17,7 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use gg_core::{Error, Result};
-use gg_renderer::{Texels, Texture, Textures, add_levels};
+use gg_renderer::{Texels, Texture, Textures, add_levels, widen_by_normals};
 use tracing::{debug, warn};
 
 use crate::image::{self, Format, Image};
@@ -62,12 +62,14 @@ struct Workers {
 
 /// An image to decode: `texture`'s, `name`'s from `path`, read as far as its header. If given,
 /// `levels` says which mip levels to make ([`add_levels`]); the texture was reserved for them.
+/// `normals` widens them, as [`Loader::load_paired`] says.
 struct Job {
     texture: Texture,
     name: String,
     path: PathBuf,
     image: Image,
     levels: Option<Texels>,
+    normals: Option<(Image, f32)>,
 }
 
 /// `texture`'s pixels (levels included) decoded, or why they didn't.
@@ -126,6 +128,21 @@ impl Loader {
         image: Image,
         texels: impl Into<Texels>,
     ) -> Result<Texture> {
+        self.load_paired(textures, name, path, image, texels.into(), None)
+    }
+
+    /// As [`load`](Self::load), with `normals`, for a surface map: its material's normal map,
+    /// read as far as its header, and normal scale. On a thread, its levels' roughness widens by
+    /// their spread ([`widen_by_normals`]); inline, frames make them plainly.
+    pub(crate) fn load_paired(
+        &mut self,
+        textures: &mut Textures,
+        name: &str,
+        path: &Path,
+        image: Image,
+        texels: Texels,
+        normals: Option<(Image, f32)>,
+    ) -> Result<Texture> {
         if let Kind::Threads {
             count,
             workers: None,
@@ -148,7 +165,7 @@ impl Loader {
         // On a thread, colors and maps get their levels with their pixels (cooked ones bring
         // their own); inline, the streaming frames make them, as no frame waits for these threads.
         let threaded = matches!(self.kind, Kind::Threads { .. });
-        let texels = image.texels(texels.into());
+        let texels = image.texels(texels);
         let (reserved, levels) = if threaded {
             (texels.with_levels(), Some(texels))
         } else {
@@ -161,6 +178,7 @@ impl Loader {
             path: path.to_owned(),
             image,
             levels,
+            normals,
         };
         match &self.kind {
             Kind::Threads {
@@ -259,8 +277,8 @@ impl Workers {
 }
 
 /// Decodes `job`'s image and makes the mip levels its texture was reserved for (PNG or JPEG;
-/// cooked images bring their own). Logs `asset.texture_decoded` with how long it took, and how
-/// much of that the levels took, if made.
+/// cooked images bring their own), widened by its normal map's spread if paired with one. Logs
+/// `asset.texture_decoded` with how long it took, and how much of that the levels took, if made.
 fn decode(job: Job) -> Done {
     let _zone = gg_core::zone!("decode an image");
     let started = Instant::now();
@@ -270,6 +288,7 @@ fn decode(job: Job) -> Done {
         path,
         image,
         levels,
+        normals,
     } = job;
     let size = image.size;
     let mut leveled = None;
@@ -280,6 +299,20 @@ fn decode(job: Job) -> Done {
         {
             let leveling = Instant::now();
             add_levels(&mut pixels, image.size, texels);
+            // A normal map that doesn't decode warns from its own texture's job. Where the sizes
+            // don't pair, the levels stay plain.
+            if let Some((normals, scale)) = normals
+                && let Ok(normals) = normals.decoded()
+                && normals.format == Format::Rgba8
+            {
+                widen_by_normals(
+                    &mut pixels,
+                    image.size,
+                    &normals.pixels,
+                    normals.size,
+                    scale,
+                );
+            }
             leveled = Some(leveling.elapsed());
         }
         pixels
@@ -394,6 +427,32 @@ mod tests {
             let texture = texture.expect("a handle");
             assert_eq!(inline.pending(), 0);
             assert!(filled(&mut textures, texture), "filled as it's added");
+        }
+    }
+
+    /// A surface map's levels, made on a thread, widen by its normal map's spread: roughness 0.2
+    /// under normals tilted ±30° in a checker becomes 0.71 a level down.
+    #[test]
+    fn a_surface_maps_levels_widen_by_its_normal_maps_spread() {
+        let rgba8 = |pixels: Vec<[u8; 4]>| Image {
+            size: [2, 2],
+            pixels: pixels.concat(),
+            format: Format::Rgba8,
+        };
+        let surface = rgba8(vec![[255, 51, 0, 255]; 4]);
+        let [left, right] = [[191, 128, 255, 255], [64, 128, 255, 255]];
+        let checker = rgba8(vec![left, right, right, left]);
+        for (normals, roughness) in [(Some((checker, 1.0)), 181), (None, 51)] {
+            let job = Job {
+                texture: Texture::WHITE,
+                name: "rough".to_owned(),
+                path: PathBuf::from("assets/m.gltf"),
+                image: surface.clone(),
+                levels: Some(Texels::Map(gg_renderer::Map::Surface)),
+                normals,
+            };
+            let pixels = decode(job).pixels.expect("pixels");
+            assert_eq!(pixels[16..], [255, roughness, 0, 255]);
         }
     }
 

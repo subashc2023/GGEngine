@@ -2,8 +2,8 @@
 //! normal maps' X and Y to BC5, and colors of high dynamic range, as a sky's, to BC6H.
 //!
 //! A layer's texture and a sky have one level. A model's images have full mip chains, which the
-//! engine makes for the cooker as a frame makes a texture's. A model's BC7 DDS images keep their
-//! blocks and levels.
+//! engine makes for the cooker as a run makes them. A model's BC7 DDS images keep their blocks and
+//! levels.
 
 use ctt::encoders::Encoder;
 use ctt::encoders::bc7enc::Bc7encSettings;

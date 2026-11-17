@@ -123,7 +123,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Requiring Slang 2026.11 (SDK 1.4.363), dropping `decorate_non_uniform`; dev builds run away from their build's slangc | When required, or builds move |
 | Layers' textures: mips, anisotropy, spaced sheets, one cell tiled, made from pixels, resized live; an engine tile map | A game's 2D art needs it |
 | glTF that `add_model` refuses or ignores: morph targets, over 4 joints, cameras, sparse accessors, transmission, Draco | Each with its first model |
-| Materials: back-face culling for games' meshes, specular antialiasing of normal maps, emission in physical units | A game needs one |
+| Materials: back-face culling for games' meshes, emission in physical units | A game needs one |
 | SMAA's other presets, T2x, S2x and 4x, edges by depth or color; FXAA; a run's graphics options beyond antialiasing | A game needs them |
 | HDR displays (HDR10, scRGB); exposure metered by center or spot, local, adapting while paused, on the GPU without lag | A game's light needs it |
 | Bloom's radius and threshold, lens dirt and flares, `.cube` LUTs, curves, lens distortion, grain, moving dither | A look needs them |

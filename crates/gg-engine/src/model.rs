@@ -10,12 +10,14 @@ use std::sync::Arc;
 use gg_core::math::{DVec3, Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    AlphaMode, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps, ModelMesh,
+    AlphaMode, Map, Material, MaterialId, Materials, Mesh, MeshDraw, Meshes, Mipmaps, ModelMesh,
     ModelVertex, PackedVertex, Sampled, Shaders, SkinVertex, Texels, Texture, Textures,
+    add_map_mipmaps, widen_by_normals,
 };
 
 use crate::animation::{Clip, Skin};
 use crate::gltf::{self, Imported, Part, Primitive, Slot};
+use crate::image::{Format, Image};
 use crate::loader::Loader;
 use crate::{Component, Entity, Reflect, Transform, World};
 
@@ -228,7 +230,8 @@ pub(crate) struct Stores<'a> {
 }
 
 /// Adds what model `name` (`imported`, from `path`) draws to `stores`: images as textures through
-/// `loader`, with mip levels per [`texels`], then each primitive's mesh and material, drawn
+/// `loader`, with mip levels per [`texels`] (a surface map's widened by its normal map's spread,
+/// [`spread_source`]), then each primitive's mesh and material, drawn
 /// through the model shader (added for every alpha mode, so a later material change adds none).
 /// Gives what its root spawns and what it's made of.
 ///
@@ -262,11 +265,15 @@ pub(crate) fn add(
     let surfaces = Arc::new(packed.iter().map(|(_, mesh)| Surface::of(mesh)).collect());
     let skinned = skinned(&packed);
     shaders.add_model_shaders();
-    let images: Vec<_> = (images.into_iter().enumerate())
-        .map(|(i, image)| {
+    // Each surface map's normal map, read as far as its header, to widen its levels by.
+    let normals: Vec<_> = (0..images.len())
+        .map(|i| spread_source(&primitives, i).map(|(at, scale)| (images[at].clone(), scale)))
+        .collect();
+    let images: Vec<_> = (images.into_iter().zip(normals).enumerate())
+        .map(|(i, (image, normals))| {
             let texels = texels(&primitives, i);
             let name = format!("{name} image {i}");
-            let added = loader.load(textures, &name, path, image, texels);
+            let added = loader.load_paired(textures, &name, path, image, texels, normals);
             let texture = added.expect("an image read fits a texture, and there's room for it");
             (texture, texels)
         })
@@ -410,18 +417,28 @@ pub(crate) fn reload(
     let changed = changed.into_iter().filter(|&(changed, _)| changed);
     let changed = changed.map(|(_, what)| what).collect();
     let mut added = Vec::new();
-    for (i, image) in images.into_iter().enumerate() {
+    // Made before any image's pixels are taken: a surface map's needs its normal map's.
+    let widened: Vec<_> = (0..images.len())
+        .map(|i| widened_levels(&primitives, &images, i))
+        .collect();
+    for ((i, image), widened) in images.into_iter().enumerate().zip(widened) {
         let name = format!("{name} image {i}");
         let made_from = texels(&primitives, i);
-        let texels = image.texels(made_from);
+        let (pixels, texels) = match widened {
+            Some(levels) => (levels, made_from.with_levels()),
+            None => {
+                let texels = image.texels(made_from);
+                (image.pixels, texels)
+            }
+        };
         match made.images.get_mut(i) {
             Some((texture, was)) => {
-                let replaced = textures.replace(&name, *texture, image.size, image.pixels, texels);
+                let replaced = textures.replace(&name, *texture, image.size, pixels, texels);
                 replaced.expect("a decoded image fits a texture of what it held");
                 *was = made_from;
             }
             None => {
-                let texture = textures.add(&name, image.size, image.pixels, texels);
+                let texture = textures.add(&name, image.size, pixels, texels);
                 let texture = texture.expect("a decoded image fits a texture, and there's room");
                 made.images.push((texture, made_from));
                 added.push((i, texture));
@@ -682,13 +699,58 @@ fn cutoff_byte(cutoff: f32, factor: f32) -> Option<u8> {
     (0..=255).find(|&byte| f32::from(byte) / 255.0 * factor >= cutoff)
 }
 
+/// The normal map and scale whose spread surface map `image`'s roughness widens by
+/// ([`widen_by_normals`]): those of every material sampling it as its metallic-roughness map, if
+/// all have one and it's the same. A material's textures all read one set of texture coordinates,
+/// so its maps' texels line up.
+pub(crate) fn spread_source(primitives: &[Primitive], image: usize) -> Option<(usize, f32)> {
+    if texels(primitives, image) != Texels::Map(Map::Surface) {
+        return None;
+    }
+    let mut sources = (primitives.iter())
+        .map(|primitive| &primitive.material)
+        .filter(|material| {
+            (material.texture(Slot::Surface)).is_some_and(|texture| texture.image == image)
+        })
+        .map(|material| {
+            let normals = material.texture(Slot::Normal)?;
+            Some((normals.image, material.normal_scale))
+        });
+    let first = sources.next()??;
+    sources.all(|other| other == Some(first)).then_some(first)
+}
+
+/// Decoded `images`' `image` with its full chain of levels, roughness widened by its normal map's
+/// spread ([`spread_source`]), as the loader's threads make them; `None` unless it has one, both
+/// are decoded and their sizes pair, for its levels to be made plainly.
+pub(crate) fn widened_levels(
+    primitives: &[Primitive],
+    images: &[Image],
+    image: usize,
+) -> Option<Vec<u8>> {
+    let (normals, scale) = spread_source(primitives, image)?;
+    let (surface, normals) = (&images[image], &images[normals]);
+    if surface.format != Format::Rgba8 || normals.format != Format::Rgba8 {
+        return None;
+    }
+    let mut levels = surface.pixels.clone();
+    add_map_mipmaps(&mut levels, surface.size);
+    let paired = widen_by_normals(
+        &mut levels,
+        surface.size,
+        &normals.pixels,
+        normals.size,
+        scale,
+    );
+    paired.then_some(levels)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use gg_core::math::Quat;
     use gg_renderer::Workflow;
 
     use super::*;
-    use crate::image::{Format, Image};
     use crate::{Context, gltf};
 
     fn turned() -> Transform {
@@ -1080,6 +1142,107 @@ pub(crate) mod tests {
         let sampled = material.textures.iter_mut().find_map(Option::take);
         material.textures[Slot::Surface as usize] = sampled;
         assert_eq!(texels(&primitives, 1), colors(Mipmaps::Averaged));
+    }
+
+    /// `imported`, its primitives' materials sampling image 0 as their metallic-roughness map and
+    /// image 1 as their normal map, at scale 0.5.
+    fn paired(mut imported: Imported) -> Imported {
+        let sampling = |image| {
+            Some(gltf::Sampling {
+                image,
+                nearest: false,
+                wrap: gg_renderer::Wrap::Repeat,
+            })
+        };
+        for primitive in &mut imported.primitives {
+            let material = &mut primitive.material;
+            material.textures = [None; 5];
+            material.textures[Slot::Surface as usize] = sampling(0);
+            material.textures[Slot::Normal as usize] = sampling(1);
+            material.normal_scale = 0.5;
+        }
+        imported
+    }
+
+    /// A metallic-roughness map widens by the normal map and scale its materials all share
+    /// ([`spread_source`]); a material sampling it for occlusion alone reads no roughness.
+    #[test]
+    fn surface_maps_pair_with_the_normal_map_their_materials_share() {
+        let Imported { mut primitives, .. } = paired(imported());
+        assert_eq!(spread_source(&primitives, 0), Some((1, 0.5)));
+        assert_eq!(spread_source(&primitives, 1), None, "a normal map has none");
+        let textures = &mut primitives[1].material.textures;
+        textures[Slot::Occlusion as usize] = textures[Slot::Surface as usize].take();
+        textures[Slot::Normal as usize] = None;
+        assert_eq!(spread_source(&primitives, 0), Some((1, 0.5)));
+        let Imported { primitives, .. } = paired(imported());
+        let unshared = |change: fn(&mut gltf::Material)| {
+            let mut primitives = primitives.clone();
+            change(&mut primitives[1].material);
+            spread_source(&primitives, 0)
+        };
+        assert_eq!(unshared(|material| material.normal_scale = 1.0), None);
+        assert_eq!(unshared(|material| material.textures[2] = None), None);
+        let other = |material: &mut gltf::Material| {
+            let normals = material.textures[Slot::Normal as usize].as_mut();
+            normals.expect("a normal map").image = 2;
+        };
+        assert_eq!(unshared(other), None);
+        // A specular-glossiness material's surface map holds colors.
+        let glossy = |material: &mut gltf::Material| {
+            material.workflow = Workflow::SpecularGlossiness {
+                specular: Vec3::ONE,
+                glossiness: 1.0,
+            };
+        };
+        let mut primitives = primitives;
+        primitives
+            .iter_mut()
+            .for_each(|primitive| glossy(&mut primitive.material));
+        assert_eq!(spread_source(&primitives, 0), None);
+    }
+
+    /// RGBA8 normals tilted ±30° across, in a checker `side` texels square, and a 4 by 4 map of
+    /// roughness 0.2.
+    fn bumps(side: u32) -> [Image; 2] {
+        let tilted = |i: u32| {
+            let x = if (i % side + i / side).is_multiple_of(2) {
+                191
+            } else {
+                64
+            };
+            [x, 128, 255, 255]
+        };
+        let normals = (0..side * side).flat_map(tilted).collect();
+        [
+            Image {
+                size: [4, 4],
+                pixels: [255, 51, 0, 255].repeat(16),
+                format: Format::Rgba8,
+            },
+            Image {
+                size: [side, side],
+                pixels: normals,
+                format: Format::Rgba8,
+            },
+        ]
+    }
+
+    /// The cooker makes a paired surface map's levels as a run's loader does, roughness widened by
+    /// its normal map's spread, here at scale 0.5: 0.2 to 0.53, (0.2⁴ + 2 / κ)^¼ for r = cos 16°.
+    /// A normal map whose size doesn't pair leaves them plain.
+    #[test]
+    fn a_surface_maps_cooked_levels_widen_by_its_normal_maps_spread() {
+        for (side, roughness) in [(4, 135), (3, 51)] {
+            let model = Imported {
+                images: bumps(side).into(),
+                ..paired(imported())
+            };
+            let levels = crate::cook::levels(&model, 0);
+            let level = &levels[16 * 4..20 * 4];
+            let expected = [255, roughness, 0, 255].repeat(4);
+            assert_eq!(level, expected, "under {side} by {side}");
+        }
     }
 
     /// A primitive's material goes into the table as read: its factors, and each texture as the

@@ -71,7 +71,8 @@ pub enum Texels {
     /// ([`add_map_mipmaps`]).
     Map(Map),
     /// A map as [`Map`](Self::Map)'s, its full chain made already by the engine's loader, off the
-    /// main thread. A frame makes none.
+    /// main thread: a surface map's maybe widened by its normal map's spread
+    /// ([`widen_by_normals`]). A frame makes none.
     MapLevels(Map),
     /// A compressed map, blocks as [`Bc7`](Self::Bc7)'s: BC5 if `bc5` (a [`Map::Normal`]'s X and Y,
     /// as the cooker makes them), else BC7 (the cooker's [`Map::Surface`], or any map in a model's

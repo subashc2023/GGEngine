@@ -290,7 +290,7 @@ fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
             };
             return texture::keep(&name, image.size, &image.pixels, mipmapped, compressed);
         }
-        let levels = cook::levels(image, texels);
+        let levels = cook::levels(&model, i);
         // Other images have their full chain of levels, which `levels` made.
         texture::compress(&name, image.size, &levels, true, Compressed::of(texels))
     };
