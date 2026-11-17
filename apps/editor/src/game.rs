@@ -93,7 +93,9 @@
 //! - The view's list shows, after shading's parts, the images the game's frame makes, as the API's
 //!   `images` answers as the list opens.
 //! - The title bar's settings show frame rates at the view's bottom right
-//!   ([`rates`](crate::rates)).
+//!   ([`rates`](crate::rates)). Their frame rate limit caps the game, as the look's `max_fps`,
+//!   which the editor takes from another client too. The editor presents at the display's rate.
+//! - The Performance panel shows the game's frames first, as each frame's memory carries them.
 //!
 //! # Drag and drop
 //!
@@ -131,6 +133,7 @@ mod scene;
 
 use std::collections::VecDeque;
 use std::mem;
+use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin};
@@ -155,7 +158,7 @@ use crate::debugger::Debugger;
 use crate::file::{self, Item, Message};
 use crate::handles::Sight;
 use crate::hub::{self, Hub};
-use crate::look::Looking;
+use crate::look::{Looking, Part};
 use crate::overlay::{self, Toolbar};
 use crate::rates::Rates;
 use crate::scenes::{self, Scenes};
@@ -305,6 +308,9 @@ struct Game {
     message: Option<Message>,
     measures: Measures,
     rates: Rates,
+    /// The cap on the game's frames, as the settings' frame rate limit last said or another client
+    /// set it.
+    max_fps: Option<NonZeroU32>,
 }
 
 /// The cursor's grab for the game, in Play.
@@ -391,6 +397,7 @@ impl Game {
             message: None,
             measures: Measures::default(),
             rates: Rates::default(),
+            max_fps: None,
         }
     }
 }
@@ -430,8 +437,15 @@ impl Layer for Game {
         self.view.camera.update(dt);
         self.frame_asked();
         self.changes(wants(&self.view));
+        // The settings' frame rate limit caps the game; one another client set shows there.
+        let max_fps = cx.game_max_fps();
+        if max_fps != self.max_fps {
+            self.max_fps = max_fps;
+            self.looking.change(Part::MaxFps);
+        }
         self.view.settle();
         self.take_answers();
+        cx.set_game_max_fps(self.max_fps);
         self.debugger.update();
         self.take_picks();
         self.take_probes();

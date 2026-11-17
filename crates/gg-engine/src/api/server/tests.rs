@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::io::{self, BufReader, Read as _, Write as _};
 use std::net::TcpStream;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -2466,7 +2467,10 @@ fn clients_set_the_look_part_by_part_the_last_setter_winning() {
             read: look(&mut client, Value::Null),
             set: look(&mut client, json!({"viewpoint": viewpoint, "grid": "xz"})),
             again: look(&mut client, json!({"grid": "xz"})),
-            theirs: look(&mut them, json!({"grid": "xy", "colliders": true})),
+            theirs: look(
+                &mut them,
+                json!({"grid": "xy", "colliders": true, "max_fps": 30}),
+            ),
             given_back: look(&mut client, json!({"viewpoint": null, "colliders": null})),
             run: (client.call_as::<LogEvents>("logs", json!({"last": 0})))
                 .expect("the logs")
@@ -2517,11 +2521,17 @@ fn clients_set_the_look_part_by_part_the_last_setter_winning() {
         viewpoint: by("test"),
         grid: by("other"),
         colliders: by("other"),
+        max_fps: by("other"),
         ..By::default()
     };
     assert_eq!(
-        (&theirs.by, theirs.colliders, theirs.revision),
-        (&both, Some(true), 2)
+        (
+            &theirs.by,
+            theirs.colliders,
+            theirs.max_fps,
+            theirs.revision
+        ),
+        (&both, Some(true), NonZeroU32::new(30), 2)
     );
     let back = &looks.given_back;
     assert_eq!(
@@ -2530,13 +2540,14 @@ fn clients_set_the_look_part_by_part_the_last_setter_winning() {
     );
     let left = By {
         grid: by("other"),
+        max_fps: by("other"),
         ..By::default()
     };
     assert_eq!((&back.by, back.revision), (&left, 3));
     let look = &cx.dev.look;
     assert_eq!(
-        (look.viewpoint, look.grid, look.colliders),
-        (None, Some(Plane::XY), None)
+        (look.viewpoint, look.grid, look.colliders, look.max_fps),
+        (None, Some(Plane::XY), None, NonZeroU32::new(30))
     );
     assert_eq!(look.revision, 3);
 }

@@ -167,6 +167,24 @@ fn check(client: &mut Client) {
         "frames {paused:?} apart at the least paused, {playing:?} playing"
     );
 
+    // A look's cap spaces frames out, as a window's frame rate limit does; given back, they come as
+    // the client takes them again.
+    client.call("look", json!({"max_fps": 10})).expect("capped");
+    // The frame that took the look, and the first capped, due at once.
+    for _ in 0..2 {
+        take_until(&mut reader, |_, _| true);
+    }
+    let capped = shortest_apart(&mut reader);
+    assert!(
+        capped >= Duration::from_millis(90),
+        "{capped:?} apart capped"
+    );
+    client
+        .call("look", json!({"max_fps": null}))
+        .expect("uncapped");
+    let uncapped = shortest_apart(&mut reader);
+    assert!(uncapped < playing + Tick::DT, "{uncapped:?} apart uncapped");
+
     // The game's Quit while a copy plays stops the copy, as the editor's Stop does, and frames go
     // on, until the client's `quit`.
     client.call("stop", Value::Null).expect("stopped");

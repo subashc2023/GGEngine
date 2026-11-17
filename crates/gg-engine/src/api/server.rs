@@ -287,6 +287,7 @@ impl Api {
                 colliders: None,
                 show: None,
                 skip: None,
+                max_fps: None,
                 by: By::default(),
                 revision: 0,
                 run,

@@ -143,9 +143,10 @@ impl Perf {
         }
     }
 
+    /// Adds `limit` to the frame's waits to be due.
     pub(crate) fn limited(&mut self, limit: Duration) {
         if let Some(sample) = &mut self.pending {
-            sample.limit = nanos(limit);
+            sample.limit += nanos(limit);
         }
     }
 

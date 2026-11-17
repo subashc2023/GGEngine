@@ -100,6 +100,7 @@ impl Api {
             colliders,
             show,
             skip,
+            max_fps,
             by,
             revision,
             ..
@@ -111,6 +112,7 @@ impl Api {
             set_part(colliders, &mut by.colliders, given.colliders, client),
             set_part(show, &mut by.show, given.show, client),
             set_part(skip, &mut by.skip, given.skip, client),
+            set_part(max_fps, &mut by.max_fps, given.max_fps, client),
         ];
         if changed.contains(&true) {
             *revision += 1;
@@ -132,6 +134,7 @@ impl Api {
         look.colliders = *colliders;
         look.show = show.as_ref().map(Shown::of);
         look.skip = skip.clone().unwrap_or_default();
+        look.max_fps = *max_fps;
         look.revision = *revision;
     }
 

@@ -243,12 +243,13 @@ server](crates/gg-engine/src/api/server.rs) how a game answers.
 - **The view** is shared through memory the client makes, a triple buffer neither end waits on, not
   through the game's window: only Windows and X11 let a process embed another's window, which it
   can't draw over. An embedded run (`--embedded`) renders at the client's size, a frame once the
-  client has taken the last. The editor takes one a display refresh (`App::embeds_game`). Clients
-  share one look, part by part, the last setter of each winning:
-  viewpoint, outline, grid, colliders, what shows in place of the light, passes left out. Extraction
-  drops a pass left out, so the world is unchanged and the renderer has nothing to skip. Each frame
-  carries its viewpoint and the look's revision, so what a client draws over it lines up, and the
-  game's last frame times, for the client's Performance panel.
+  client has taken the last, and no faster than the look's cap. The editor takes one a display
+  refresh (`App::embeds_game`), and its frame rate limit sets the cap. Clients share one look,
+  part by part, the last setter of each winning: viewpoint, outline, grid, colliders, what shows in
+  place of the light, passes left out, the cap. Extraction drops a pass left out, so the world is
+  unchanged and the renderer has nothing to skip. Each frame carries its viewpoint and the look's
+  revision, so what a client draws over it lines up, and the game's last frame times, for the
+  client's Performance panel.
 - **Captures** show the view as shown. Asked, they show it as the game shows it alone, or a part of
   shading in place of the light, from frames that aren't shared, so the user's view doesn't change.
   `frames` captures frames in a row along a scripted path, to see how the view settles or shimmers.

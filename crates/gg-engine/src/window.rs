@@ -274,9 +274,16 @@ impl Handler<'_> {
             ));
         }
         self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app, true);
-        // What the settings kept; a flag overrides it for the run.
+        // What the settings kept; a flag overrides it for the run. In an app that embeds a game, it
+        // caps the game.
         #[cfg(feature = "dev")]
-        let kept = frame_rate::kept(&self.cx);
+        let kept = match frame_rate::kept(&self.cx) {
+            kept if self.app.embeds_game => {
+                self.cx.set_game_max_fps(kept);
+                None
+            }
+            kept => kept,
+        };
         #[cfg(not(feature = "dev"))]
         let kept = None;
         self.cx.set_max_fps(self.args.max_fps.or(kept));

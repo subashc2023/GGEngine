@@ -70,6 +70,7 @@ impl Game {
     /// - An outline's entities the Inspector picks; `null` unpicks.
     /// - The grid and the colliders set the toolbar's switches, and the grid its plane.
     /// - What the view shows and the passes it leaves out set the toolbar's choices.
+    /// - The cap sets the settings' frame rate limit, as the next update hands it on.
     pub(super) fn take_look(&mut self, taken: gg_api::Look) {
         let toolbar = &mut self.view.toolbar;
         let through = toolbar.world_camera;
@@ -104,6 +105,9 @@ impl Game {
         }
         if let Some(skip) = taken.skip {
             toolbar.skip = skip.unwrap_or_default();
+        }
+        if let Some(max_fps) = taken.max_fps {
+            self.max_fps = max_fps;
         }
     }
 
@@ -221,6 +225,7 @@ impl Game {
     /// - The colliders' outlines while their switch is on, or else whatever the game does.
     /// - What the toolbar has the view show, or else its light.
     /// - The passes the toolbar has it leave out, if any.
+    /// - The settings' frame rate limit, if any.
     pub(super) fn wanted(&self, scale: f32) -> Parts {
         let ViewTools {
             camera,
@@ -242,6 +247,7 @@ impl Game {
             colliders: toolbar.colliders.then_some(true),
             show: toolbar.show.clone(),
             skip: (!toolbar.skip.is_empty()).then(|| toolbar.skip.clone()),
+            max_fps: self.max_fps,
         }
     }
 }

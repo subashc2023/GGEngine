@@ -41,6 +41,8 @@ pub(crate) struct Look {
     pub(crate) show: Option<Shown>,
     /// The passes the frames leave out, empty for none.
     pub(crate) skip: Vec<gg_api::Pass>,
+    /// The cap on an embedded run's frames ([`max_fps`]).
+    pub(crate) max_fps: Option<std::num::NonZeroU32>,
     pub(crate) revision: u64,
     pub(crate) bare: bool,
     pub(crate) captured: Option<Shown>,
@@ -306,6 +308,18 @@ pub(crate) fn pace(api: &Option<Api>, handed: u64) -> Duration {
     }
     let _ = (api, handed);
     Duration::ZERO
+}
+
+/// The most frames a second a client's look caps the run at
+/// ([`gg_api::Look::max_fps`]); `None` uncapped.
+pub(crate) fn max_fps(cx: &Context) -> Option<std::num::NonZeroU32> {
+    #[cfg(feature = "dev")]
+    return cx.dev.look.max_fps;
+    #[cfg(not(feature = "dev"))]
+    {
+        let _ = cx;
+        None
+    }
 }
 
 /// While the simulation is paused or stopped with nothing asked of the frames, waits for a request

@@ -574,6 +574,10 @@ pub(crate) struct Dev {
     /// Another process's game's frames, as [`show_frame_times`](Context::show_frame_times) gave
     /// them, and the number of the last.
     pub(crate) game_perf: Option<(Perf, u64)>,
+    /// Whether the app shows a game it embeds ([`App::embeds_game`](crate::App::embeds_game)), and
+    /// the cap the settings set on that game.
+    pub(crate) embeds_game: bool,
+    pub(crate) game_max_fps: Option<std::num::NonZeroU32>,
 }
 
 #[cfg(feature = "dev")]
@@ -592,6 +596,8 @@ impl Dev {
             edited: None,
             sync_tested: false,
             game_perf: None,
+            embeds_game: false,
+            game_max_fps: None,
         }
     }
 

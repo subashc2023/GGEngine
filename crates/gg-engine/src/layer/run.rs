@@ -77,6 +77,10 @@ impl Context {
         cx.load_started = app.started;
         cx.own = app.own_sessions.clone();
         #[cfg(feature = "dev")]
+        {
+            cx.dev.embeds_game = app.embeds_game;
+        }
+        #[cfg(feature = "dev")]
         if !cx.reads_package() {
             if let Some(manifest) = app.manifest() {
                 cx.dev.folders.clone_from(&manifest.scenes);
@@ -551,11 +555,26 @@ impl Context {
     /// burst follows a slow frame. Ticks go on in real time however fast frames come.
     ///
     /// `--max-fps` sets it at the start; in a development build the title bar's settings
-    /// ([`Ui::settings`](crate::Ui::settings)) set it and keep it for the user. Headless runs
-    /// (as fast as they can, or `--real-time`) and embedded ones (paced by their tool taking
-    /// frames) ignore it.
+    /// ([`Ui::settings`](crate::Ui::settings)) set it and keep it for the user, but in an app that
+    /// embeds a game, where they set [`game_max_fps`](Self::game_max_fps). Headless runs (as fast
+    /// as they can, or `--real-time`) ignore it, and embedded ones take their tool's cap
+    /// ([`gg_api::Look::max_fps`]).
     pub fn set_max_fps(&mut self, max: Option<NonZeroU32>) {
         self.max_fps = max;
+    }
+
+    /// The cap on frames a second the title bar's settings set on the game an app shows
+    /// ([`App::embeds_game`](crate::App::embeds_game)), which the app sends the game in its look
+    /// ([`gg_api::Look::max_fps`]); `None` while uncapped.
+    #[cfg(feature = "dev")]
+    pub fn game_max_fps(&self) -> Option<NonZeroU32> {
+        self.dev.game_max_fps
+    }
+
+    /// Sets [`game_max_fps`](Self::game_max_fps), as when another client caps the game.
+    #[cfg(feature = "dev")]
+    pub fn set_game_max_fps(&mut self, max: Option<NonZeroU32>) {
+        self.dev.game_max_fps = max;
     }
 
     /// Ends the run before its next frame, as closing its window does when no layer handles that;

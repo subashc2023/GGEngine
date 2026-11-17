@@ -297,6 +297,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -984,6 +985,14 @@ pub struct Look {
         skip_serializing_if = "Option::is_none"
     )]
     pub skip: Option<Option<Vec<Pass>>>,
+    /// The most frames a second an embedded run renders, 1 or more, as a window's frame rate
+    /// limit; it renders no more than its client takes either way.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_fps: Option<Option<NonZeroU32>>,
 }
 
 /// A pass of the view the look can leave out, to find which makes what the view shows.
@@ -1114,6 +1123,9 @@ pub struct Looked {
     /// older than passes left out.
     #[serde(default)]
     pub skip: Option<Vec<Pass>>,
+    /// `None` from an engine older than the cap, too.
+    #[serde(default)]
+    pub max_fps: Option<NonZeroU32>,
     pub by: By,
     /// How many times the look has changed in the run, which a shared frame gives as the revision
     /// it drew with ([`view::Frame::look`]). A `look` that changes no part's value or setter
@@ -1140,6 +1152,8 @@ pub struct By {
     pub show: Option<String>,
     #[serde(default)]
     pub skip: Option<String>,
+    #[serde(default)]
+    pub max_fps: Option<String>,
 }
 
 /// What `pick` takes: the view's pixel `at`, `[x, y]` from its top left, as `input`'s cursor and a
@@ -2399,11 +2413,16 @@ mod tests {
             colliders: None,
             show: None,
             skip: None,
+            max_fps: None,
         };
         assert_eq!(look, expected);
         let written = serde_json::to_value(&look).unwrap();
         assert_eq!(written.get("outline"), Some(&Value::Null), "given back");
         assert_eq!(written.get("colliders"), None, "kept");
+        let capped: Look = serde_json::from_str(r#"{"max_fps": 30}"#).unwrap();
+        assert_eq!(capped.max_fps, Some(NonZeroU32::new(30)));
+        let uncapped: Look = serde_json::from_str(r#"{"max_fps": null}"#).unwrap();
+        assert_eq!(uncapped.max_fps, Some(None), "given back");
         assert_eq!(serde_json::from_value::<Look>(written).unwrap(), look);
         assert_eq!(serde_json::from_str::<Look>("{}").unwrap(), Look::default());
         let orthographic = Projection::Orthographic {
@@ -2487,6 +2506,9 @@ mod tests {
             r#"{"show": "albedo"}"#,
             r#"{"show": {"image": "view depth", "level": 0}}"#,
             r#"{"grid": "XZ"}"#,
+            r#"{"max_fps": 0}"#,
+            r#"{"max_fps": -1}"#,
+            r#"{"max_fps": 2.5}"#,
             r#"{"colliders": true, "camera": null}"#,
             r#"{"outline": {"ids": ["2b7e151628aed2a6"], "color": [1, 0, 0, 1]}}"#,
             r#"{"outline": {"id": "2b7e151628aed2a6", "color": [1, 0, 0, 1], "width": 2}}"#,
@@ -2563,10 +2585,11 @@ mod tests {
             }),
             grid: Some(Plane::Xy),
             colliders: None,
-            // From an engine older than what the view shows and the passes it leaves out, which
-            // names neither.
+            // From an engine older than what the view shows, the passes it leaves out and the cap,
+            // which names none of them.
             show: None,
             skip: None,
+            max_fps: None,
             by: By {
                 viewpoint: None,
                 outline: Some("editor".to_owned()),
@@ -2574,6 +2597,7 @@ mod tests {
                 colliders: None,
                 show: None,
                 skip: None,
+                max_fps: None,
             },
             revision: 3,
             run: 7,
@@ -2583,9 +2607,11 @@ mod tests {
         let shown = Looked {
             show: Some(Shown::Roughness),
             skip: Some(vec![Pass::Shadows, Pass::Adaptation]),
+            max_fps: NonZeroU32::new(30),
             by: By {
                 show: Some("gg".to_owned()),
                 skip: Some("agent".to_owned()),
+                max_fps: Some("editor".to_owned()),
                 ..expected.by
             },
             ..expected

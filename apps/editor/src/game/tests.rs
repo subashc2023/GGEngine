@@ -913,6 +913,7 @@ fn a_new_or_an_open_turns_the_view_to_the_games_camera() {
         colliders: None,
         show: None,
         skip: None,
+        max_fps: None,
         by: By {
             viewpoint: Some(CLIENT.to_owned()),
             outline: None,
@@ -920,6 +921,7 @@ fn a_new_or_an_open_turns_the_view_to_the_games_camera() {
             colliders: None,
             show: None,
             skip: None,
+            max_fps: None,
         },
         revision: 1,
         run: 1,
@@ -1015,6 +1017,7 @@ fn the_first_frame_through_the_games_camera_turns_the_view_to_the_editors() {
             colliders: None,
             show: None,
             skip: None,
+            max_fps: None,
             revision,
             run: 1,
             seen: None,
@@ -1226,6 +1229,7 @@ fn the_look_goes_to_the_game_as_the_user_changes_it() {
             colliders: None,
             show: None,
             skip: None,
+            max_fps: None,
             by: By {
                 viewpoint,
                 outline,
@@ -1233,6 +1237,7 @@ fn the_look_goes_to_the_game_as_the_user_changes_it() {
                 colliders: None,
                 show: None,
                 skip: None,
+                max_fps: None,
             },
             revision,
             run: 1,
@@ -1413,6 +1418,7 @@ fn the_grid_follows_a_turn_another_clients_viewpoint_makes() {
             colliders: None,
             show: None,
             skip: None,
+            max_fps: None,
             by: By {
                 viewpoint: viewpoint_by,
                 outline: None,
@@ -1420,6 +1426,7 @@ fn the_grid_follows_a_turn_another_clients_viewpoint_makes() {
                 colliders: None,
                 show: None,
                 skip: None,
+                max_fps: None,
             },
             revision,
             run: 1,
@@ -1469,6 +1476,7 @@ fn the_passes_left_out_go_to_the_game_and_are_taken_from_other_clients() {
             colliders: None,
             show: None,
             skip,
+            max_fps: None,
             by: By {
                 skip: by.map(str::to_owned),
                 ..By::default()
@@ -1510,6 +1518,64 @@ fn the_passes_left_out_go_to_the_game_and_are_taken_from_other_clients() {
     game.view.toolbar.skip.clear();
     game.update(&mut cx, Duration::ZERO);
     assert_eq!(looks(&ends), [skips(None)], "the user's null");
+}
+
+/// The settings' frame rate limit caps the game: the cap goes as the user sets it, null as they
+/// turn it off, and again to a game served anew. One another client sets shows in the settings.
+#[test]
+fn the_settings_frame_rate_limit_caps_the_game() {
+    let (mut game, ends) = serving();
+    let mut cx = Context::seeded(1);
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [], "all the game's own");
+    // The game answers a look capped at `max_fps`, set by `by`, at `revision`; returns the looks
+    // the editor asks for in the update that takes it.
+    let answer = |game: &mut Game, cx: &mut Context, max_fps, by: Option<&str>, revision| {
+        let looked = Looked {
+            viewpoint: None,
+            outline: None,
+            grid: None,
+            colliders: None,
+            show: None,
+            skip: None,
+            max_fps,
+            by: By {
+                max_fps: by.map(str::to_owned),
+                ..By::default()
+            },
+            revision,
+            run: 1,
+            seen: None,
+        };
+        let answer = ("look".to_owned(), Ok(json!(looked)));
+        ends.answer.send(answer).expect("sent");
+        game.update(cx, Duration::ZERO);
+        looks(&ends)
+    };
+    let caps = |max_fps| Look {
+        max_fps: Some(max_fps),
+        ..Look::default()
+    };
+    let (thirty, five) = (NonZeroU32::new(30), NonZeroU32::new(5));
+    // The settings' choice, which a test sets, since it can't run `ui`.
+    cx.set_game_max_fps(thirty);
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [caps(thirty)]);
+    assert_eq!(answer(&mut game, &mut cx, thirty, Some(CLIENT), 1), []);
+    let sent = answer(&mut game, &mut cx, five, Some("agent"), 2);
+    assert_eq!((sent, cx.game_max_fps()), (vec![], five), "the agent's");
+    cx.set_game_max_fps(None);
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [caps(None)], "the user's null");
+    assert_eq!(answer(&mut game, &mut cx, None, None, 3), []);
+    cx.set_game_max_fps(thirty);
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [caps(thirty)]);
+    assert_eq!(answer(&mut game, &mut cx, thirty, Some(CLIENT), 4), []);
+    // As a game serves anew.
+    game.looking.reset();
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [caps(thirty)], "served anew");
 }
 
 /// A Probe press asks the game for a probe of its pixel, in the view's pixels, taking the press

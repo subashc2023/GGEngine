@@ -19,6 +19,7 @@ use crate::chrome::Chrome;
 use crate::dock::{Dock, Ui};
 #[cfg(feature = "dev")]
 use crate::frame_rate;
+use crate::frame_rate::Limiter;
 use crate::interrupt;
 use crate::layer::{Context, Stack, Tick};
 use crate::memory;
@@ -38,8 +39,9 @@ use crate::{App, BUILD};
 ///
 /// Embedded (`--embedded`), it also steps in real time, with no UI, playing sound and keeping the
 /// pipeline cache. Its view fills its image at the size its client asks for. Each frame waits for
-/// the client to take it ([`api::pace`]); until one has it published, frames come a tick apart or
-/// more. A layer's exit while a copy plays stops the copy ([`api::stop_at_exit`]).
+/// the client to take it ([`api::pace`]), and none comes faster than a client's look caps it
+/// ([`api::max_fps`]); until one has it published, frames come a tick apart or more. A layer's exit
+/// while a copy plays stops the copy ([`api::stop_at_exit`]).
 pub(crate) fn run_headless(
     app: &mut App,
     args: &Args,
@@ -94,6 +96,7 @@ pub(crate) fn run_headless(
     let mut egui_runs = !embedded;
     // The frames handed over to render, and those rendered.
     let (mut handed, mut frames) = (0, 0);
+    let mut limiter = Limiter::default();
     let started = start(
         &mut app.stack,
         &mut cx,
@@ -104,6 +107,10 @@ pub(crate) fn run_headless(
     );
     let rendered = started.and_then(|()| {
         while args.frames.is_none_or(|limit| handed < limit) {
+            // A client's cap, as a window's frame rate limit; the frame before's wait to be due.
+            if embedded {
+                cx.perf.limited(limiter.wait(api::max_fps(&cx)));
+            }
             // A frame its client takes waits for that instead, paused, stopped or playing
             // (`api::pace`).
             if !embedded || api::handing(&api).is_none() {

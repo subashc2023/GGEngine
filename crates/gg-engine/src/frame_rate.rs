@@ -1,5 +1,6 @@
-//! Frame-rate caps for windowed runs, as [`Context::set_max_fps`] says, and, in development
-//! builds, the frame rate limit among the title bar's settings, kept across runs.
+//! Frame-rate caps for windowed runs, as [`Context::set_max_fps`] says, and embedded ones, as a
+//! client's look says; in development builds, the frame rate limit among the title bar's settings,
+//! kept across runs.
 
 use std::num::NonZeroU32;
 use std::thread;
@@ -19,6 +20,11 @@ use crate::{Context, Ui};
 #[cfg(feature = "dev")]
 const KEPT: &str = "max_fps.ron";
 
+/// Likewise, in an app that embeds a game, the game's limit: a file of its own, so an app's old
+/// limit for itself doesn't cap its games.
+#[cfg(feature = "dev")]
+const KEPT_GAME: &str = "game_max_fps.ron";
+
 /// Rates offered at a click, in frames a second.
 #[cfg(feature = "dev")]
 const RATES: [u32; 6] = [10, 30, 60, 120, 144, 240];
@@ -28,9 +34,12 @@ const RATES: [u32; 6] = [10, 30, 60, 120, 144, 240];
 const MOST: u32 = 1000;
 
 #[cfg(feature = "dev")]
-const TIP: &str = "The most frames a second this app renders, which a game it embeds, as the \
-                   editor does, renders no more of; kept for its next runs, unless --max-fps sets \
-                   another";
+const TIP: &str = "The most frames a second this app renders; kept for its next runs, unless \
+                   --max-fps sets another";
+
+#[cfg(feature = "dev")]
+const GAME_TIP: &str = "The most frames a second the game this app shows renders, which renders \
+                        no more than this app shows either way; kept for its next runs";
 
 /// Holds frames to [`Context::set_max_fps`]'s rate by sleeping before each, as Unreal and Godot
 /// do. Winit's `ControlFlow::WaitUntil` doesn't wake while the user moves or resizes the window
@@ -69,14 +78,25 @@ fn next_due(due: Instant, start: Instant, period: Duration) -> Instant {
 
 /// Adds the frame rate limit to the title bar's settings ([`Ui::settings`]): Off or a rate at a
 /// click, or, while capped, any rate from 1 in a field, as slow motion. A choice caps `cx`'s
-/// frames from the next and is kept for [`kept`]; a field drag is kept as it ends.
+/// frames from the next and is kept for [`kept`]; a field drag is kept as it ends. In an app that
+/// embeds a game, it caps the game's instead ([`Context::game_max_fps`]).
 #[cfg(feature = "dev")]
 pub(crate) fn settings(ui: &mut Ui<'_>, cx: &mut Context) {
-    let max = cx.max_fps();
+    let game = cx.dev.embeds_game;
+    let max = if game {
+        cx.game_max_fps()
+    } else {
+        cx.max_fps()
+    };
+    let (label, tip) = if game {
+        ("Game frame rate limit", GAME_TIP)
+    } else {
+        ("Frame rate limit", TIP)
+    };
     // What was chosen, and whether to keep it.
     let mut chosen = None;
     ui.settings(|ui| {
-        ui.label("Frame rate limit").on_hover_text(TIP);
+        ui.label(label).on_hover_text(tip);
         ui.horizontal_wrapped(|ui| {
             if ui.add(Button::selectable(max.is_none(), "Off")).clicked() {
                 chosen = Some((None, true));
@@ -101,19 +121,31 @@ pub(crate) fn settings(ui: &mut Ui<'_>, cx: &mut Context) {
         }
     });
     if let Some((max, keep)) = chosen {
-        cx.set_max_fps(max);
-        if keep && let Err(error) = cx.save_state(KEPT, kept_text(max).as_bytes()) {
+        if game {
+            cx.set_game_max_fps(max);
+        } else {
+            cx.set_max_fps(max);
+        }
+        if keep && let Err(error) = cx.save_state(kept_in(cx), kept_text(max).as_bytes()) {
             warn!(code = error.code(), "{error:#}");
         }
     }
+}
+
+/// The file the settings keep their limit in: [`KEPT`], or [`KEPT_GAME`] in an app that embeds a
+/// game.
+#[cfg(feature = "dev")]
+fn kept_in(cx: &Context) -> &'static str {
+    if cx.dev.embeds_game { KEPT_GAME } else { KEPT }
 }
 
 /// The limit the settings last kept. Uncapped if none, or, with an `engine.state` warning, if it
 /// can't be read.
 #[cfg(feature = "dev")]
 pub(crate) fn kept(cx: &Context) -> Option<NonZeroU32> {
-    let read = cx.read_state(KEPT).and_then(|bytes| match bytes {
-        Some(bytes) => read_kept(&bytes),
+    let file = kept_in(cx);
+    let read = cx.read_state(file).and_then(|bytes| match bytes {
+        Some(bytes) => read_kept(&bytes, file),
         None => Ok(None),
     });
     read.unwrap_or_else(|error| {
@@ -131,11 +163,11 @@ fn kept_text(max: Option<NonZeroU32>) -> String {
 }
 
 #[cfg(feature = "dev")]
-fn read_kept(bytes: &[u8]) -> Result<Option<NonZeroU32>> {
+fn read_kept(bytes: &[u8], file: &str) -> Result<Option<NonZeroU32>> {
     let text = std::str::from_utf8(bytes).map_err(|e| e.to_string());
     let max = text.and_then(|text| ron::from_str(text).map_err(|e| e.to_string()));
     max.map_err(|problem| {
-        let message = format!("can't read the frame rate limit kept in {KEPT}: {problem}");
+        let message = format!("can't read the frame rate limit kept in {file}: {problem}");
         Error::new("engine.state", message)
     })
 }
@@ -213,7 +245,7 @@ mod tests {
     }
 
     /// The gear opens the settings; a rate click caps the frames and keeps the cap; Off uncaps
-    /// and keeps that.
+    /// and keeps that. In an app that embeds a game, it caps the game, kept in a file of its own.
     #[cfg(feature = "dev")]
     #[test]
     fn the_settings_frame_rate_limit_caps_the_frames_and_keeps_the_cap() {
@@ -221,64 +253,82 @@ mod tests {
 
         use crate::chrome::{BAR, BUTTON, Chrome, TOOL};
 
-        let scratch = crate::dirs::tests::Scratch::new("frame-rate");
-        let mut cx = Context::new(None);
-        cx.keep_state_in(scratch.0.clone());
-        let mut stack = crate::layer::Stack::default();
-        let mut dock = crate::dock::Dock::new(None, Chrome::InWindowsFrame, None, true, &[]);
-        let egui = crate::egui_context();
-        let mut frame = 0;
-        let mut run = |cx: &mut Context, events| {
-            frame += 1;
-            texts((&mut stack, cx, &mut dock, &egui), frame, events)
-        };
-        // The dock lays out a frame before it draws.
-        run(&mut cx, Vec::new());
-        run(&mut cx, Vec::new());
-        let mut click = |cx: &mut Context, at: Pos2| {
-            let button = |pressed| Event::PointerButton {
-                pos: at,
-                button: PointerButton::Primary,
-                pressed,
-                modifiers: Modifiers::NONE,
+        for embeds in [false, true] {
+            let scratch = crate::dirs::tests::Scratch::new("frame-rate");
+            let context = || {
+                let mut cx = Context::new(None);
+                cx.keep_state_in(scratch.0.clone());
+                cx.dev.embeds_game = embeds;
+                cx
             };
-            for events in [
-                vec![Event::PointerMoved(at)],
-                vec![button(true)],
-                vec![button(false)],
-            ] {
-                run(cx, events);
-            }
-            // Its sizing pass, and the next that shows it.
-            run(cx, Vec::new());
-            run(cx, Vec::new())
-        };
-        assert_eq!(cx.max_fps(), None);
-        let gear = egui::pos2(1280.0 - 3.0 * BUTTON - 3.5 * TOOL, BAR / 2.0);
-        let shown = click(&mut cx, gear);
-        let at = |text: &str| {
-            let found = shown.iter().find(|(shown, _)| shown == text);
-            found.unwrap_or_else(|| panic!("{text:?} shows")).1
-        };
-        assert!(shown.iter().any(|(text, _)| text == "Frame rate limit"));
-        let (sixty, off) = (at("60"), at("Off"));
-        click(&mut cx, sixty);
-        assert_eq!(cx.max_fps(), NonZeroU32::new(60));
-        let mut next = Context::new(None);
-        next.keep_state_in(scratch.0.clone());
-        assert_eq!(kept(&next), NonZeroU32::new(60));
-        click(&mut cx, off);
-        assert_eq!((cx.max_fps(), kept(&next)), (None, None));
+            let mut cx = context();
+            let mut stack = crate::layer::Stack::default();
+            let mut dock = crate::dock::Dock::new(None, Chrome::InWindowsFrame, None, true, &[]);
+            let egui = crate::egui_context();
+            let mut frame = 0;
+            let mut run = |cx: &mut Context, events| {
+                frame += 1;
+                texts((&mut stack, cx, &mut dock, &egui), frame, events)
+            };
+            // The dock lays out a frame before it draws.
+            run(&mut cx, Vec::new());
+            run(&mut cx, Vec::new());
+            let mut click = |cx: &mut Context, at: Pos2| {
+                let button = |pressed| Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                };
+                for events in [
+                    vec![Event::PointerMoved(at)],
+                    vec![button(true)],
+                    vec![button(false)],
+                ] {
+                    run(cx, events);
+                }
+                // Its sizing pass, and the next that shows it.
+                run(cx, Vec::new());
+                run(cx, Vec::new())
+            };
+            // The cap the limit sets, and the other, which it leaves alone.
+            let caps = |cx: &Context| match embeds {
+                false => (cx.max_fps(), cx.game_max_fps()),
+                true => (cx.game_max_fps(), cx.max_fps()),
+            };
+            assert_eq!(caps(&cx), (None, None));
+            let gear = egui::pos2(1280.0 - 3.0 * BUTTON - 3.5 * TOOL, BAR / 2.0);
+            let shown = click(&mut cx, gear);
+            let at = |text: &str| {
+                let found = shown.iter().find(|(shown, _)| shown == text);
+                found.unwrap_or_else(|| panic!("{text:?} shows")).1
+            };
+            let label = if embeds {
+                "Game frame rate limit"
+            } else {
+                "Frame rate limit"
+            };
+            assert!(shown.iter().any(|(text, _)| text == label), "{embeds}");
+            let (sixty, off) = (at("60"), at("Off"));
+            click(&mut cx, sixty);
+            assert_eq!(caps(&cx), (NonZeroU32::new(60), None), "{embeds}");
+            let next = context();
+            assert_eq!(kept(&next), NonZeroU32::new(60));
+            let other = if embeds { KEPT } else { KEPT_GAME };
+            assert!(!scratch.0.join(other).exists(), "{other} written");
+            click(&mut cx, off);
+            assert_eq!((caps(&cx).0, kept(&next)), (None, None));
+        }
     }
 
     #[cfg(feature = "dev")]
     #[test]
     fn the_kept_limit_reads_back_as_it_was_kept_and_what_isnt_one_is_refused() {
         for max in [None, NonZeroU32::new(1), NonZeroU32::new(60)] {
-            assert_eq!(read_kept(kept_text(max).as_bytes()).unwrap(), max);
+            assert_eq!(read_kept(kept_text(max).as_bytes(), KEPT).unwrap(), max);
         }
         for bad in ["Some(0)", "Some(-1)", "60fps", "", "\u{fffd}"] {
-            let error = read_kept(bad.as_bytes()).unwrap_err();
+            let error = read_kept(bad.as_bytes(), KEPT).unwrap_err();
             assert_eq!(error.code(), "engine.state", "{bad:?}: {error}");
         }
     }
