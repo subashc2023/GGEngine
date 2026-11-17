@@ -1,6 +1,7 @@
-//! A layer whose load fails ends the run as it starts, before any layer attaches, with status 1 and
-//! the load's error last in its log. It needs a GPU, as the headless renderer starts first, and
-//! runs in a process of its own, since a process starts the log once.
+//! A layer whose load fails ends the run before any layer attaches, its error last in the log.
+//!
+//! It needs a GPU, as the headless renderer starts first, and runs in a process of its own, since a
+//! process starts the log once.
 
 use std::fs;
 use std::process::ExitCode;

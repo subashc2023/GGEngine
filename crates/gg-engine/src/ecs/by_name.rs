@@ -30,8 +30,9 @@ impl World {
         self.components.register::<T>().map(drop)
     }
 
-    /// Registers each type of `B`, a component or a tuple of up to 8, in order, as
-    /// [`register`](Self::register) does: `world.register_all::<(Player, Score)>()`.
+    /// Registers each component type of `B`, in order, as [`register`](Self::register) does.
+    ///
+    /// `B` is a type or a tuple of up to 8: `world.register_all::<(Player, Score)>()`.
     ///
     /// Fails as `register` does at the first it refuses; those before stay registered.
     pub fn register_all<B: Bundle>(&mut self) -> Result<()> {

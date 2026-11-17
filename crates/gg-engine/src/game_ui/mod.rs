@@ -759,8 +759,9 @@ impl GameUi {
         Ok(())
     }
 
-    /// Like [`set_text`](Self::set_text), with `text` formatted into a string the UIs keep, so
-    /// setting a number each frame allocates nothing: `ui.set_text_fmt(cx, "score", score)`.
+    /// Like [`set_text`](Self::set_text), formatting `text`: `ui.set_text_fmt(cx, "score", score)`.
+    ///
+    /// It formats into a string the UIs keep, so setting a number each frame allocates nothing.
     ///
     /// Fails as `set_text` does.
     pub fn set_text_fmt(self, cx: &mut Context, name: &str, text: impl fmt::Display) -> Result<()> {
