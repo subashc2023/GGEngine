@@ -315,7 +315,8 @@ keeps the newest 32.
                plays, and print an array of the answers; PATH refuses them
 Parts of shading: `base_color`, `normal`, `surface_normal`, `metallic`, `roughness`, `occlusion`,
 `emission`, `specular_color` (what it reflects head-on), `direct_light`, `sky_light`, `reflection`,
-`diffuse_light` and `specular_light` (the light it diffuses and reflects, of all three).
+`diffuse_light` and `specular_light` (the light it diffuses and reflects, of all three). An unlit
+material shows its base color, and black for the rest.
 ",
             },
             Help {
@@ -392,7 +393,8 @@ look shows it, or with `--own`, as the game shows it on its own. Prints one JSON
   nothing drew and without a perspective;
 - `entity`: what `pick` answers; and `size`, `at` and `ticks`;
 - `quantized`: values are read from 8-bit bytes, good to about 1/255, `distance` to about 3%.
-Every value is `null` for a pixel outside the view.
+Every value is `null` for a pixel outside the view. On an unlit material, each part of shading but
+`base_color` is 0, and normals [-1, -1, -1].
 ",
             },
             Help {

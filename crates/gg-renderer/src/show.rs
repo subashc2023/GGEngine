@@ -71,6 +71,7 @@ pub(crate) fn list(images: &mut Vec<FrameImage>, graph: &Graph, unlisted: Range<
 ///   stores them, as bytes over 255.
 /// - Light, exposed, without the haze, which the tonemapper maps.
 ///
+/// An unlit material shows its base color, and black for the rest, which it doesn't read.
 /// Shading.slang's `SHOW_` constants number them, as `Channel::index` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
@@ -92,7 +93,7 @@ pub enum Channel {
     /// What it reflects head-on: a metallic-roughness material's 0.04 mixed with its base color by
     /// how metallic it is; a specular-glossiness material's specular color.
     SpecularColor,
-    /// The frame's lights' shading, shadows and all; none for what's unlit.
+    /// The frame's lights' shading, shadows and all.
     DirectLight,
     /// The sky's diffuse and specular light, as occlusion darkens it and the view's reflections
     /// replace it.

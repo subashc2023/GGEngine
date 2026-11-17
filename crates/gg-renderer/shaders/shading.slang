@@ -453,12 +453,17 @@ float3 specular_color(Material material, float3 base, float4 surface) {
 }
 
 // The input of shading that `show`, below `SHOW_DIRECT_LIGHT`, names, of `lit`'s arguments: colors
-// as they are; values, and normals' axes from -1 to 1 as 0 to 1, by `stored_as`.
+// as they are; values, and normals' axes from -1 to 1 as 0 to 1, by `stored_as`. An unlit
+// material's base color, and black for the rest, which it doesn't read: a glTF one without
+// normals has +Z everywhere.
 float4 surface_shown(uint show, Material material, float3 interpolated, float4 tangent, bool front,
                      float4 color, float4 surface, float2 mapped, float occlusion,
                      float3 emission) {
     if (show == SHOW_BASE_COLOR) {
         return color;
+    }
+    if ((material.flags & UNLIT) != 0) {
+        return float4(0.0, 0.0, 0.0, color.a);
     }
     if (show == SHOW_EMISSION) {
         return float4(emission, color.a);

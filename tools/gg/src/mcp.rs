@@ -29,7 +29,8 @@ Y green, Z blue), `surface_normal` (the same without the map), `metallic`, `roug
 1) and `occlusion` (each 0 to 1 as byte / 255, gray), `emission` (as `base_color`, past 1 shown as \
 1), `specular_color` (what it reflects head-on, as `base_color`), `direct_light` (the frame's \
 lights', shadows and all), `sky_light`, `reflection`, `diffuse_light` and `specular_light` (the \
-light it diffuses and reflects, of all three), each light exposed and tonemapped as the view's. Or \
+light it diffuses and reflects, of all three), each light exposed and tonemapped as the view's. An \
+unlit material shows its base color, and black for the rest. Or \
 an image the frame makes, by debug name: any other string, as `view depth`, or `{\"image\": name}` \
 (at most 64 bytes), read by its kind: colors as they are, HDR tonemapped, depth as 1 + log2(depth) \
 / 24 (white at the near plane, a 24th darker per doubling of distance, black where nothing drew), \
@@ -472,7 +473,8 @@ const TOOLS: &[Tool] = &[
                       units in front of the viewpoint, not from it, null where nothing drew or \
                       without a perspective; `entity`, `{id, name}` as `pick` answers; \
                       `quantized`: values are 8-bit, good to about 1/255, `distance` to about 3%. \
-                      Every value is null for a pixel outside the view.",
+                      Every value is null for a pixel outside the view. On an unlit material, \
+                      each part of shading but `base_color` is 0, and normals [-1, -1, -1].",
         properties: || {
             json!({
                 "at": numbers(2, "The pixel, [x, y] from the view's top left, not negative, as a \

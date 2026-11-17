@@ -8072,26 +8072,27 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
     let value = |value: f32| (value * 255.0).round() as u8;
     let encoded_color = [encoded(0.5), encoded(0.25), encoded(1.0)];
     let up = [128, 128, 255];
+    // The unlit square, the second, shows its base color alone.
     let parts = [
         (
             Channel::BaseColor,
             [encoded_color, encoded_color, encoded_color],
         ),
-        (Channel::Normal, [up; 3]),
-        (Channel::SurfaceNormal, [up; 3]),
-        (Channel::Metallic, [[value(0.25); 3], [255; 3], [0; 3]]),
+        (Channel::Normal, [up, [0; 3], up]),
+        (Channel::SurfaceNormal, [up, [0; 3], up]),
+        (Channel::Metallic, [[value(0.25); 3], [0; 3], [0; 3]]),
         (
             Channel::Roughness,
-            [[value(0.75); 3], [255; 3], [value(0.5); 3]],
+            [[value(0.75); 3], [0; 3], [value(0.5); 3]],
         ),
-        (Channel::Occlusion, [[255; 3]; 3]),
+        (Channel::Occlusion, [[255; 3], [0; 3], [255; 3]]),
         (Channel::Emission, [[encoded(0.5), 0, 0], [0; 3], [0; 3]]),
         // 0.04 mixed with the color by how metallic it is, and the specular color.
         (
             Channel::SpecularColor,
             [
                 [encoded(0.155), encoded(0.0925), encoded(0.28)],
-                encoded_color,
+                [0; 3],
                 [encoded(0.04); 3],
             ],
         ),

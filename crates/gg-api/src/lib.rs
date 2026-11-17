@@ -1053,7 +1053,8 @@ impl Pass {
 /// `{"image":"view depth"}`. It shows as drawn, without antialiasing's offset or the metered
 /// exposure. A part of shading shows nothing after it (no antialiasing, fog, depth of field, motion
 /// blur, bloom, grade, lens or sky, black behind what's drawn); what draws without lit shading, as
-/// sprites, text and particles, draws as usual. An image takes the whole view, alone, from a frame
+/// sprites, text and particles, draws as usual. An unlit material shows its base color, and black
+/// for the rest, which it doesn't read. An image takes the whole view, alone, from a frame
 /// drawn as the game's but for antialiasing, so every pass's images but antialiasing's are there,
 /// as `images` lists them.
 ///
@@ -1084,7 +1085,7 @@ pub enum Shown {
     /// specular color. Read as [`Shown::BaseColor`].
     SpecularColor,
     /// The light the frame's lights shade it with, the sun's among them, shadows and all, exposed
-    /// and tonemapped as the view's light is; none on an unlit material.
+    /// and tonemapped as the view's light is.
     DirectLight,
     /// The sky's diffuse and specular light, darkened by occlusion. It and the next three read as
     /// [`Shown::DirectLight`].
