@@ -36,7 +36,10 @@ jobs:
           # with Vulkan 1.4, and the validation layer 1.4.309. Elsewhere they're skipped: on ARM64
           # too, as lavapipe takes most of a job's minutes, and the ARM64 jobs' tests check the
           # simulations' hashes without it.
-          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie" }
+          # `lint`: fmt, the clippies and the layering rules here alone, as they're alike on every
+          # platform but in code built for one; Windows x86-64 runs the plain clippy for its own.
+          # The other jobs only test: macOS's few lines of its own go unlinted, at 10x the minutes.
+          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie", lint: all }
           # The steps that run on one runner alone, in two parts beside Linux x86-64's gates rather
           # than after them, each about as long as the gates: in one job they made the run's longest
           # by far. A part runs none of the gates, and caches its own dependencies, which it builds
@@ -44,7 +47,7 @@ jobs:
           - { name: Linux x86-64 runs, runner: ubuntu-24.04, container: "debian:trixie", part: runs }
           - { name: Linux x86-64 shipping, runner: ubuntu-24.04, container: "debian:trixie", part: shipping }
           - { name: Linux ARM64, runner: ubuntu-24.04-arm, container: "debian:trixie", skip-gpu-tests: "1" }
-          - { name: Windows x86-64, runner: windows-2025, skip-gpu-tests: "1" }
+          - { name: Windows x86-64, runner: windows-2025, skip-gpu-tests: "1", lint: clippy }
           - { name: Windows ARM64, runner: windows-11-arm, skip-gpu-tests: "1" }
           - { name: macOS ARM64, runner: macos-15, skip-gpu-tests: "1" }
     runs-on: ${{ matrix.runner }}
@@ -86,12 +89,12 @@ jobs:
           cache-key: ${{ matrix.part }}
       # AGENTS.md's gates, kept by --locked to the versions Cargo.lock pins.
       - run: cargo fmt --all --check
-        if: ${{ !matrix.part }}
+        if: matrix.lint == 'all'
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-        if: ${{ !matrix.part }}
+        if: matrix.lint
       # With Tracy's C++ client compiled in, as the `tracy` feature builds it.
       - run: cargo clippy --workspace --all-targets --locked --features sandbox/tracy -- -D warnings
-        if: ${{ !matrix.part }}
+        if: matrix.lint == 'all'
       # The shipping configuration, the player and the games without `dev`, whose gg-engine leaves it
       # out: on one runner, as what `dev` leaves out is alike on every platform.
       - name: Check the shipping configuration
@@ -340,23 +343,17 @@ jobs:
           cargo gg new probe
           cargo gg check probe
           (cd games/probe && cargo gg check)
-
-  layering:
-    name: Layering rules
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
-    timeout-minutes: 10
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-        with:
-          cache: false
+      # The layering rules and the licenses deny.toml allows, last, and even after a gate failed,
+      # so that one run reports both.
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        if: ${{ !cancelled() && matrix.lint == 'all' }}
         with:
           tool: cargo-deny@0.20.2
-      - run: cargo deny --locked check bans
+      - run: cargo deny --locked check bans licenses
+        if: ${{ !cancelled() && matrix.lint == 'all' }}
       # Games depend on the engine, never the other way round: no crate, app or tool reads a game's
       # folder, its tests included, which keep what they read in their own `tests`.
       - name: Check that nothing of the engine reads a game's folder
+        if: ${{ !cancelled() && matrix.lint == 'all' }}
         run: |
           ! git grep -n '\.\./games/' -- crates apps tools

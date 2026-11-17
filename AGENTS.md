@@ -135,12 +135,12 @@ showcase` rewrites them and the demo's live recording's alone. gg-engine's `phys
 `animation/` (three) and `navigation/` (one) hold more, edited by hand. A difference on some
 platforms alone is a bug. Some changes need a new live recording, as the demo's AGENTS.md says.
 
-CI ([ci.yml](.github/workflows/ci.yml)) runs the gates for every push of more than docs, on Windows
-and Linux (x86-64 and ARM64) and macOS (ARM64). The GPU tests on lavapipe, the shipping and doc
-gates, headless runs of the apps and the demo's peers, the demo and player as they ship, the games
-`gg new` makes inside the workspace and out, and the layering check run on Linux x86-64 alone; the
-other jobs set `GG_SKIP_GPU_TESTS`. lavapipe has no transfer queue: after changing uploads, run the
-GPU tests on a GPU with one, such as NVIDIA's.
+CI ([ci.yml](.github/workflows/ci.yml)) runs the tests for every push of more than docs, on Windows
+and Linux (x86-64 and ARM64) and macOS (ARM64), and the plain clippy on Windows x86-64. The other
+gates, the GPU tests on lavapipe, headless runs of the apps and the demo's peers, the demo and
+player as they ship, the games `gg new` makes inside the workspace and out, and the layering and
+license checks run on Linux x86-64 alone; the other jobs set `GG_SKIP_GPU_TESTS`. lavapipe has no
+transfer queue: after changing uploads, run the GPU tests on a GPU with one, such as NVIDIA's.
 Minutes are billed, macOS at ten times Linux: push a branch to probe CI only for what another OS
 could break, and run [ship.yml](.github/workflows/ship.yml) only when asked.
 

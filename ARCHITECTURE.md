@@ -147,7 +147,7 @@ Game code is Rust, as fast and unrestricted as the engine's own. Each game is a 
 [project](#project-state), which `gg new` makes. Game crates deny `unsafe`, so a bug in game code
 panics rather than corrupting memory. The engine's demos and test beds are workspace members in
 `games/`, so one change can span engine and game; the engine's code and tests depend on none of
-them, as CI's layering job checks. A game made for players, as the flagship, is a game of its own.
+them, as CI's layering check confirms. A game made for players, as the flagship, is a game of its own.
 
 - **A game of its own is a workspace of its own**, which `gg new <NAME> --engine <ENGINE>` makes
   outside the engine's. It depends on the engine by a checkout's path, or by git at a revision its

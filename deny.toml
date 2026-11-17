@@ -51,8 +51,8 @@ deny = [
 ]
 
 # The licenses a dependency may come under: those the graph had when the policy was set. Check with
-# `cargo deny check licenses`. Adding a license is the owner's decision, as shipped games link
-# these crates.
+# `cargo deny check licenses`; CI runs it. Adding a license is the owner's decision, as shipped
+# games link these crates.
 [licenses]
 allow = [
     "Apache-2.0",
