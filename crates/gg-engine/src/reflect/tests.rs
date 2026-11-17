@@ -70,7 +70,7 @@ impl Component for Everything {
     }
 }
 
-impl crate::Writable for Everything {}
+impl crate::ecs::Writable for Everything {}
 
 pub(crate) fn everything() -> Everything {
     Everything {

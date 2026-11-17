@@ -723,7 +723,7 @@ impl crate::Component for Lamp {
     }
 }
 
-impl crate::Writable for Lamp {}
+impl crate::ecs::Writable for Lamp {}
 
 /// Three lamps, the first two lit by code, and an entity without one.
 pub(in crate::ecs) fn lamps() -> (World, [Entity; 3], Entity) {
@@ -908,7 +908,7 @@ impl crate::Component for Slots {
     }
 }
 
-impl crate::Writable for Slots {}
+impl crate::ecs::Writable for Slots {}
 
 /// - A set that takes an element out of a list leaves each later element its own opaque state,
 ///   not its predecessor's; one that puts an element back (as an undo does) does too.
@@ -1010,7 +1010,7 @@ impl crate::Component for Rigged {
     }
 }
 
-impl crate::Writable for Rigged {}
+impl crate::ecs::Writable for Rigged {}
 
 /// Undoing a set that switched away from a variant with opaque state restores that field alone,
 /// state included. The rest of the component stays as code left it: a swapped-in handle, a

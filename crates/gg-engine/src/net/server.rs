@@ -641,6 +641,7 @@ mod tests {
     use crate::Context;
     use crate::args::Net;
     use crate::dirs::tests::Scratch;
+    use crate::ecs::WorldHash;
     use crate::layer::Stack;
     use crate::main_loop::Stepper;
     use crate::reflect::Reflect;
@@ -649,7 +650,7 @@ mod tests {
         AnimationParam, AnimationState, AnimationStates, BlendPoint, BodyType, BoxCollider3D,
         CapsuleCollider3D, CharacterController3D, Entity, Model, NavAgent, NavMeshVolume, Owner,
         ParamCondition, ParamTest, ParamValue, Parent, ParticleEmitter, Playback, RigidBody3D,
-        SphereCollider3D, StateMotion, StateTransition, Tick, Transform, WorldHash, step_animation,
+        SphereCollider3D, StateMotion, StateTransition, Tick, Transform, step_animation,
         step_navigation, step_physics,
     };
 
@@ -1338,7 +1339,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct Gate(Arc<std::sync::Mutex<()>>);
 
-    impl crate::Saved for Gate {
+    impl crate::ecs::Saved for Gate {
         const NAME: &'static str = "Gate";
 
         fn save(&self, _: &World) -> Result<String> {

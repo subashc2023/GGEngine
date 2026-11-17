@@ -18,7 +18,7 @@ use crate::package::Files;
 pub use crate::package::{Kind, Writer};
 
 /// Font `name`'s file at `path`, baked as [`Context::add_font`](crate::Context::add_font) bakes
-/// it, on the threads [`start_jobs`](crate::start_jobs) starts.
+/// it, on the threads [`jobs::start`](crate::jobs::start) starts.
 ///
 /// Fails as `add_font` does.
 pub fn bake_font(name: &str, path: &Path) -> Result<Vec<u8>> {

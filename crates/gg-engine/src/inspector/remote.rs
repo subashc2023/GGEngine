@@ -45,8 +45,9 @@ mod imp {
     use super::super::link::{Linking, Picking};
     use super::super::{Edit, Gesture, Inspector, Pass, Placed, Step};
     use crate::api::json::{self, Remote as Names};
+    use crate::ecs::Pose;
     use crate::reflect::{Reflect, Type, Types, Value};
-    use crate::{EntityId, Name, Pose, Transform};
+    use crate::{EntityId, Name, Transform};
 
     /// How long the connection waits to connect. It waits for each answer as long as it takes: a
     /// script stopped in the game holds answers while debugged, and `gg run` ends a game that
@@ -738,7 +739,7 @@ mod imp {
         /// their last reads and the sets waiting for the game, but those under another. `None`
         /// until a read of each, the active one too, has come since it was picked.
         ///
-        /// [`InspectorLink::along`]: crate::InspectorLink::along
+        /// [`InspectorLink::along`]: crate::inspector::InspectorLink::along
         pub(in super::super) fn along(&self, picks: &[EntityId]) -> Option<Vec<Placed>> {
             let &active = picks.last()?;
             let mut along = Vec::new();

@@ -300,9 +300,10 @@ mod tests {
     use gg_renderer::{Mipmaps, Textures};
 
     use super::*;
+    use crate::ecs::Writable;
     use crate::ecs::ops::tests::{Fixture, Sealed, fixture};
     use crate::reflect::tests::{Everything, Form, Handle, everything};
-    use crate::{Sampler, Sprite, Transform, Writable};
+    use crate::{Sampler, Sprite, Transform};
 
     /// Values a hash tells apart only by where one field ends and the next begins.
     #[derive(Clone, Default, crate::Component)]

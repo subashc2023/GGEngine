@@ -6,8 +6,9 @@
 
 use gg_core::{Error, Result};
 
+use crate::ecs::{Log, Operation};
 use crate::reflect::{self, Ident, Value};
-use crate::{EntityId, Log, Operation, World};
+use crate::{EntityId, World};
 
 /// An edit, as an author asks for it.
 #[derive(Clone, Debug, PartialEq)]

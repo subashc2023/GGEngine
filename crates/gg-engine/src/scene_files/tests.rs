@@ -8,12 +8,13 @@ use crate::args::Net;
 use crate::cells::CellState;
 use crate::cells::tests::{id_of, look_at, scene as cells_scene, xs};
 use crate::dirs::tests::Scratch;
+use crate::ecs::Operation;
 use crate::edits::Edit;
 use crate::layer::{Offered, Stack};
 use crate::net::{DELAY, Lockstep};
 use crate::reflect::Value;
 use crate::snapshot::{self, Run, Snapshot};
-use crate::{Context, Entity, ModelNode, ModelRoot, Operation, Reflect, Tick, Transform, World};
+use crate::{Context, Entity, ModelNode, ModelRoot, Reflect, Tick, Transform, World};
 
 /// Writes `text` at `path`, stamped `later` seconds past now, so a look sees it changed whatever
 /// the clock's grain.
@@ -399,7 +400,7 @@ fn an_undo_of_its_files_save_brings_back_what_it_deleted_owned() {
     let mut loaded = World::seeded(5);
     loaded.register::<Transform>().expect("registered");
     loaded
-        .load_scene(&crate::read_scene(&main).expect("read"))
+        .load_scene(&crate::ecs::read_scene(&main).expect("read"))
         .expect("loaded");
     let [a_at, a1_at] = [a_id, a1_id].map(|id| loaded.entity(id).expect("saved"));
     assert_eq!(loaded.parent(a1_at).expect("alive"), Some(a_at));
@@ -454,7 +455,7 @@ fn a_save_writes_what_the_open_scene_owns_which_the_watch_applies_nothing_of() {
     open_scene::save(&mut cx, None).expect("saved");
     assert_eq!(cx.world().hash(), hash, "no world changed");
     let path = dir.0.join("scenes").join("main.ron");
-    let text = crate::read_scene(&path).expect("read");
+    let text = crate::ecs::read_scene(&path).expect("read");
     let d = cx.world().entity(made[0]).expect("alive");
     assert_eq!(text, cx.world().save_entities(&[a, d]).expect("saved"));
     assert_eq!(cx.scenes.files[0].text, text);
@@ -528,7 +529,7 @@ fn a_save_is_refused_what_would_lose_an_edit_and_saves_as_another_file() {
         refused.to_string().contains(&main.display().to_string()),
         "{refused}"
     );
-    assert_eq!(crate::read_scene(&main).expect("read"), edited, "kept");
+    assert_eq!(crate::ecs::read_scene(&main).expect("read"), edited, "kept");
     look_now(&mut cx, &mut stack);
     assert_eq!(x(cx.world(), ids[0]), 1.0);
     let resolve = |cx: &Context, path: &str| open_scene::resolve(cx, Path::new(path), false);
@@ -538,7 +539,7 @@ fn a_save_is_refused_what_would_lose_an_edit_and_saves_as_another_file() {
     let to = resolve(&cx, "scenes/copy.ron").expect("in the scenes folder");
     open_scene::save(&mut cx, Some(to)).expect("saved as");
     let copy = dir.0.join("scenes").join("copy.ron");
-    assert_eq!(crate::read_scene(&copy).expect("read"), edited);
+    assert_eq!(crate::ecs::read_scene(&copy).expect("read"), edited);
     assert_eq!(open_scene::title(&cx), Some("scenes/copy.ron"));
     let watching: Vec<&str> = cx
         .scenes
@@ -567,7 +568,7 @@ fn a_save_while_a_copy_plays_writes_the_world_as_edited() {
     stack.play(&mut cx, 0);
     apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 7.0)]);
     open_scene::save(&mut cx, None).expect("saved");
-    let text = crate::read_scene(&dir.0.join("scenes").join("main.ron")).expect("read");
+    let text = crate::ecs::read_scene(&dir.0.join("scenes").join("main.ron")).expect("read");
     let mut loaded = World::seeded(5);
     loaded.register::<Transform>().expect("registered");
     loaded.load_scene(&text).expect("loaded");
@@ -603,7 +604,7 @@ fn new_empties_the_open_scene_and_starts_history_afresh() {
     assert_eq!(refused.code(), "scene.unsaved", "{refused}");
     open_scene::check_unsaved(&mut cx, 0, true).expect("discarded");
     let main = dir.0.join("scenes").join("main.ron");
-    let text = crate::read_scene(&main).expect("read");
+    let text = crate::ecs::read_scene(&main).expect("read");
     let serial = cx.world().serial();
     open_scene::new(&mut cx, &mut stack).expect("emptied");
     let world = cx.world();
@@ -621,7 +622,7 @@ fn new_empties_the_open_scene_and_starts_history_afresh() {
     assert_eq!(client(&mut cx, &mut stack, undo), Done::Stepped(None));
     assert_eq!((open_scene::title(&cx), cx.scenes.files.len()), (None, 0));
     assert_eq!(
-        crate::read_scene(&main).expect("read"),
+        crate::ecs::read_scene(&main).expect("read"),
         text,
         "on disk as it was"
     );
@@ -1048,7 +1049,7 @@ fn bring_cells_in(cx: &mut Context) {
 }
 
 fn file_ids(path: &Path) -> Vec<u64> {
-    let text = crate::read_scene(path).expect("read");
+    let text = crate::ecs::read_scene(path).expect("read");
     let ids = World::scene_ids(&text).expect("a scene");
     ids.into_iter().map(EntityId::get).collect()
 }
@@ -1067,7 +1068,7 @@ fn a_world_s_save_writes_each_cell_s_file_as_its_entities_stand() {
     bring_cells_in(&mut cx);
     assert!(!open_scene::unsaved(&mut cx, 0), "as loaded");
     let cell = |x: i32| scenes.join(format!("cells/{x}_0_0.ron"));
-    let far = crate::read_scene(&cell(100)).expect("read");
+    let far = crate::ecs::read_scene(&cell(100)).expect("read");
     let operations = vec![set_x(id_of(1), 16.0), set_x(id_of(0), 25.0)];
     apply(&mut cx, &mut stack, "agent", operations);
     assert!(open_scene::unsaved(&mut cx, 0));
@@ -1078,12 +1079,16 @@ fn a_world_s_save_writes_each_cell_s_file_as_its_entities_stand() {
     assert_eq!(file_ids(&cell(1)), [one]);
     assert_eq!(file_ids(&cell(2)), [zero, two], "moved in");
     assert_eq!(file_ids(&scenes.join("main.ron")), [0xa0, OWN]);
-    let text = crate::read_scene(&cell(1)).expect("read");
+    let text = crate::ecs::read_scene(&cell(1)).expect("read");
     assert!(
         text.contains("16.0") && !text.contains("Streamed"),
         "{text}"
     );
-    assert_eq!(crate::read_scene(&cell(100)).expect("read"), far, "out");
+    assert_eq!(
+        crate::ecs::read_scene(&cell(100)).expect("read"),
+        far,
+        "out"
+    );
     let duplicate = Operation::Duplicate {
         entity: id_of(1),
         copies: Vec::new(),
@@ -1191,16 +1196,16 @@ fn a_world_s_save_is_refused_what_would_lose_a_cell_s_file() {
     let mut stack = Stack::default();
     bring_cells_in(&mut cx);
     let main = scenes.join("main.ron");
-    let text = crate::read_scene(&main).expect("read");
+    let text = crate::ecs::read_scene(&main).expect("read");
     let one = scenes.join("cells/1_0_0.ron");
     let theirs = cells_scene(&[(id_of(1).get(), 17.0)]);
     save(&one, &theirs, 2);
     apply(&mut cx, &mut stack, "agent", vec![set_x(id_of(1), 16.0)]);
     let refused = open_scene::save(&mut cx, None).expect_err("refused");
     assert_eq!(refused.code(), "scene.changed", "{refused:#}");
-    assert_eq!(crate::read_scene(&one).expect("read"), theirs);
+    assert_eq!(crate::ecs::read_scene(&one).expect("read"), theirs);
     assert_eq!(
-        crate::read_scene(&main).expect("read"),
+        crate::ecs::read_scene(&main).expect("read"),
         text,
         "nothing written"
     );

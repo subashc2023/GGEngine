@@ -209,13 +209,13 @@ fn the_crossing_replays_to_its_hashes() {
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("can't read {}: {error}", path.display()));
     if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
-        let rewritten = gg_engine::Replay::rewrite(app(), &text);
+        let rewritten = gg_engine::recording::Replay::rewrite(app(), &text);
         fs::write(&path, rewritten.unwrap_or_else(|error| panic!("{error:#}"))).expect("written");
         println!("wrote {}", path.display());
         return;
     }
     assert!(text.ends_with("\nend\n"), "the recording has its end");
-    let mut replay = gg_engine::Replay::new(app(), &text);
+    let mut replay = gg_engine::recording::Replay::new(app(), &text);
     let replay = replay.as_mut().unwrap_or_else(|error| panic!("{error:#}"));
     let mut ticks = 0;
     // Each flier's cells, at the ends of its way: the east one's starting near the origin and

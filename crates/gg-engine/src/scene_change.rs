@@ -7,7 +7,8 @@
 
 use gg_core::{Error, Result};
 
-use crate::{Entity, Saved, World};
+use crate::ecs::Saved;
+use crate::{Entity, World};
 
 /// The scene a layer's tick asked for, by path from the asset root. A resource holding none
 /// between ticks, so no snapshot holds one; no hash, recording or scene reads it.

@@ -1,5 +1,5 @@
 //! The job system: rayon-core's thread pool, which a tick's systems hand rows to through
-//! [`join`]. The ticks' thread is the pool's first, so it runs jobs while it waits. Outside the
+//! `join`. The ticks' thread is the pool's first, so it runs jobs while it waits. Outside the
 //! pool (tests' threads, a one-thread run) jobs run in turn on the calling thread.
 
 use std::num::NonZeroUsize;

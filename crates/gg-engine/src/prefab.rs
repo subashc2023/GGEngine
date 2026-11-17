@@ -104,8 +104,8 @@ pub(crate) struct Saved {
 #[cfg(feature = "dev")]
 impl crate::Context {
     /// Saves the entity `id` and its descendants as a new prefab, as [`World::save_prefab`] writes
-    /// it; linking the entity to it with [`Operation::Link`](crate::Operation::Link) makes it an
-    /// instance under its subtree's IDs. The file is new, written whole or not at all, over
+    /// it; linking the entity to it with [`Operation::Link`](crate::ecs::Operation::Link) makes it
+    /// an instance under its subtree's IDs. The file is new, written whole or not at all, over
     /// nothing. It goes at `path` (absolute or from the asset root, in a folder the asset scan
     /// reaches, ending in `.prefab`), or else in `prefabs/` under the root (made if missing),
     /// named after the entity's [`Name`](crate::Name) in at most [`STEM`] lowercase letters,
@@ -357,8 +357,9 @@ mod tests {
 
     use super::*;
     use crate::dirs::tests::Scratch;
+    use crate::ecs::{Log, Operation};
     use crate::scene_files::tests as scenes;
-    use crate::{Context, Log, Name, Operation};
+    use crate::{Context, Name};
 
     /// A prefab saved without a path is named after its entity, in characters and a length every
     /// OS takes.

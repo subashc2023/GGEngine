@@ -23,9 +23,10 @@ use super::{
     BodyType, Contact, ContactEvent, Finite, Link, Links, Outline, kept, kept_collider, unfinite,
 };
 use crate::draw::Poses;
+use crate::ecs::Saved;
 use crate::model::{ModelRoot, Surface};
 use crate::recording::text;
-use crate::{Component, Entity, EntityId, Error, Reflect, Result, Saved, Tick, Transform, World};
+use crate::{Component, Entity, EntityId, Error, Reflect, Result, Tick, Transform, World};
 
 mod character;
 mod joint;

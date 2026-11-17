@@ -855,8 +855,9 @@ mod tests {
     use super::*;
     use crate::ecs::id::linked;
     use crate::ecs::id::tests::check_ids;
+    use crate::ecs::{Log, Operation};
     use crate::reflect::Reflect;
-    use crate::{Context, Log, Name, Operation};
+    use crate::{Context, Name};
 
     #[derive(Clone, Debug, PartialEq, crate::Component)]
     struct Lamp {

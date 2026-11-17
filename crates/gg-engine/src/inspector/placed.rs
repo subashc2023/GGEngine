@@ -3,12 +3,13 @@
 
 use gg_core::math::DVec3;
 
-use crate::{EntityId, Pose, Transform};
+use crate::ecs::Pose;
+use crate::{EntityId, Transform};
 
 /// Where a remote Inspector's pick is in the game's world, as the game's last read gave it. For a
 /// tool's handles, as [`World::pose`] gives an entity of an app's own world.
 ///
-/// Given by [`InspectorLink::placed`](crate::InspectorLink::placed).
+/// Given by [`InspectorLink::placed`](crate::inspector::InspectorLink::placed).
 ///
 /// [`World::pose`]: crate::World::pose
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use super::*;
 use crate::dirs::tests::Scratch;
+use crate::ecs::WorldHash;
 use crate::layer::{Commands, Stack};
 use crate::package::{Files, Kind, Package, Writer};
 use crate::recording::{Recorder, Replay};
 use crate::reflect::Reflect;
-use crate::{App, Context, EntityId, Layer, Tick, WorldHash};
+use crate::{App, Context, EntityId, Layer, Tick};
 
 /// A command of [`Levels`]'s: asks for the scene of this path from the asset root.
 #[derive(Reflect)]
@@ -408,7 +409,7 @@ fn edits_from_before_a_change_refuse_to_undo_and_a_save_reaches_the_next_change(
     let one = EntityId::new(1).expect("an ID");
     let set = |x: f32| Edit::Apply {
         author: "agent".to_owned(),
-        operations: vec![crate::Operation::Set {
+        operations: vec![crate::ecs::Operation::Set {
             entity: one,
             component: "Transform".into(),
             path: "translation.x".to_owned(),

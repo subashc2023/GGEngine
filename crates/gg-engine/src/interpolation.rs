@@ -319,10 +319,10 @@ mod tests {
 
     use super::*;
     use crate::draw::{Scratch, draw_world};
+    use crate::ecs::{Log, Operation};
     use crate::font::Fonts;
     use crate::placed::Placed;
     use crate::transform::from_origin;
-    use crate::{Log, Operation};
 
     fn at(x: f32, z: f32) -> Transform {
         Transform {

@@ -36,10 +36,9 @@ use link::{Linked, Linking, Picking, links_field};
 pub use placed::Placed;
 use remote::Remote;
 
+use crate::ecs::{Log, Operation};
 use crate::reflect::{Meta, Shape, Type, Value};
-use crate::{
-    Commands, Context, EntityId, Layer, Log, Name, Operation, Reflect, Tick, Transform, Ui, World,
-};
+use crate::{Commands, Context, EntityId, Layer, Name, Reflect, Tick, Transform, Ui, World};
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
 /// `.overlay(gg_engine::Inspector::default())`.

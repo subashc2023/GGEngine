@@ -41,7 +41,8 @@ use gg_core::{Error, Result};
 
 use super::MAX_WORLD;
 use crate::cells::{Cell, Seen};
-use crate::{Parent, World, WorldHash};
+use crate::ecs::WorldHash;
+use crate::{Parent, World};
 
 /// The level zstd compresses states at: its quick default, as states go out each tick.
 const LEVEL: i32 = 3;
@@ -515,8 +516,9 @@ mod tests {
 
     use super::*;
     use crate::cells::CellState;
+    use crate::ecs::{Log, Operation, Saved};
     use crate::reflect::tests::everything;
-    use crate::{Log, Operation, Owner, Saved, Transform};
+    use crate::{Owner, Transform};
 
     /// A resource that saves itself.
     #[derive(Clone)]

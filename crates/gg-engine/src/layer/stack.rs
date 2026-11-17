@@ -638,9 +638,9 @@ impl Stack {
     pub(crate) fn rewrite(
         &mut self,
         cx: &mut Context,
-        apply: impl FnOnce(&mut World, &mut crate::Log) -> Result<()>,
+        apply: impl FnOnce(&mut World, &mut crate::ecs::Log) -> Result<()>,
     ) -> Result<()> {
-        let mut log = crate::Log::default();
+        let mut log = crate::ecs::Log::default();
         if let Err(error) = apply(&mut cx.world, &mut log) {
             // What applied before the refusal, which a refusal of the log's own undoes already.
             let _ = log.undo(&mut cx.world);

@@ -7,13 +7,12 @@
 
 use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
+use gg_engine::ecs::Pose;
 use gg_engine::egui::{self, Color32, Painter, Pos2, Rgba, Shape, Stroke};
 use gg_engine::grid;
 use gg_engine::math::{DMat3, DVec3, Mat3, Mat4, Quat, Vec2, Vec3, Vec4, libm};
 use gg_engine::reflect::Value;
-use gg_engine::{
-    EntityId, Event, Key, MouseButton, Pose, Projection, Transform, Viewpoint, Viewport,
-};
+use gg_engine::{EntityId, Event, Key, MouseButton, Projection, Transform, Viewpoint, Viewport};
 
 use crate::camera::{Screen, Space, Tool};
 

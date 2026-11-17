@@ -14,12 +14,13 @@ use gg_renderer::{Projection, Viewpoint};
 use tracing::warn;
 
 use crate::draw::Poses;
+use crate::ecs::Writable;
 use crate::interpolation::Past;
 use crate::placed::Placed;
 use crate::reflect::{self, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
 use crate::{
     Actions, Binding, Component, Context, Entity, EntityId, Event, Key, MouseButton, Source, Stick,
-    Transform, Trigger, World, Writable,
+    Transform, Trigger, World,
 };
 
 /// The game's view, while [`primary`](Self::primary) and no layer sets a viewpoint.
@@ -641,8 +642,9 @@ mod tests {
 
     use super::*;
     use crate::draw::{Scratch, draw_world};
+    use crate::ecs::{Log, Operation};
     use crate::font::Fonts;
-    use crate::{Entity, Log, Name, Operation, Scroll};
+    use crate::{Entity, Name, Scroll};
 
     /// `height` tall, from 1 behind to 1 in front.
     fn orthographic(height: f32) -> Projection {

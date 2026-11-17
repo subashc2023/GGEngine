@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{Physics3D, Rapier, vector};
 use crate::draw::Poses;
+use crate::ecs::Writable;
 use crate::physics::{Link, joined, lines_between, warn_unjoined};
-use crate::{Component, Entity, Reflect, World, Writable};
+use crate::{Component, Entity, Reflect, World};
 
 /// What a [`Joint3D`] lets its bodies do. Anchors and axis are in each body's space.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
@@ -602,8 +603,8 @@ mod tests {
         world.set_parent(under, Some(hung)).expect("no cycle");
         step(&mut world, 4);
         let id = world.id(hung).expect("alive");
-        let mut log = crate::Log::default();
-        let delete = crate::Operation::Delete { entity: id };
+        let mut log = crate::ecs::Log::default();
+        let delete = crate::ecs::Operation::Delete { entity: id };
         log.apply(&mut world, delete.clone()).expect("deleted");
         // As its author gave it, as the Inspector's undo names it.
         assert_eq!(log.undoable(), Some(&[delete][..]));

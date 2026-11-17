@@ -275,7 +275,7 @@ mod watch {
                 continue;
             }
             // Being written, or held by its writer: a later look reads it, its stamp unchanged.
-            let Ok(text) = crate::read_scene(&file.path) else {
+            let Ok(text) = crate::ecs::read_scene(&file.path) else {
                 continue;
             };
             file.stamp = stamp;
@@ -488,9 +488,10 @@ mod open_scene {
 
     use super::{Open, SceneFile, same_file};
     use crate::cells::{Cell, CellState, MadeCells};
+    use crate::ecs::Operation;
     use crate::ecs::{SceneEdit, text_digest};
     use crate::layer::Stack;
-    use crate::{Context, Entity, EntityId, Operation, World};
+    use crate::{Context, Entity, EntityId, World};
     use crate::{package, perf};
 
     /// The scene file `path`, absolute or relative to the asset root, names for the tool API's
@@ -735,7 +736,7 @@ mod open_scene {
             // What the game made of a cell has no file to compare.
             let file = file.filter(|_| cached.iter().any(|file| file.author == author));
             let refused = match file.as_deref() {
-                Some(file) => crate::read_scene(&path)
+                Some(file) => crate::ecs::read_scene(&path)
                     .ok()
                     .filter(|now| now != file)
                     .map(|_| {
@@ -791,7 +792,7 @@ mod open_scene {
     /// `scene.changed`, naming the file, for a save to the open scene's file while the file holds
     /// another text than the one last applied, as after an edit the watch hasn't applied yet, or
     /// refused, so the edit isn't lost; as `cell_saves` fails; and as [`World::save_entities`]
-    /// fails. After writing some files, fails as [`write_scene`](crate::write_scene) does.
+    /// fails. After writing some files, fails as [`write_scene`](crate::ecs::write_scene) does.
     pub(crate) fn save(cx: &mut Context, to: Option<(PathBuf, String)>) -> Result<()> {
         let _zone = gg_core::zone!();
         let cached = cached_as_edited(cx);
@@ -814,7 +815,7 @@ mod open_scene {
             }
         };
         if let Some(file) = file.filter(|_| own)
-            && let Ok(text) = crate::read_scene(&path)
+            && let Ok(text) = crate::ecs::read_scene(&path)
             && text != file.text
         {
             let message = format!(
@@ -834,9 +835,9 @@ mod open_scene {
         // The cells' files first, so a write that fails leaves an entity moved between the
         // world's file and a cell's in both, which a load refuses, rather than in neither.
         for (_, file) in &cells {
-            crate::write_scene(&file.path, &file.text)?;
+            crate::ecs::write_scene(&file.path, &file.text)?;
         }
-        crate::write_scene(&path, &text)?;
+        crate::ecs::write_scene(&path, &text)?;
         let gone = claimed(files, open).into_iter();
         let made: Vec<EntityId> = gone.filter(|&id| world.entity(id).is_none()).collect();
         let (entities, old) = (owned.len(), open.author.clone());
@@ -956,9 +957,10 @@ mod open_scene {
     ///
     /// Fails with `scene.unsaved` as [`check_unsaved`] does, unless `discard`; with
     /// `scene.watched` for a file that another scene file the game loaded has, but the open one;
-    /// as [`read_scene`](crate::read_scene) fails; as the text's load would, the path beginning its
-    /// message; and with `ecs.id_taken` for an ID it gives that an entity neither the open scene
-    /// nor its world's cells hold has ([`held`]), a model's node going with its root.
+    /// as [`read_scene`](crate::ecs::read_scene) fails; as the text's load would, the path
+    /// beginning its message; and with `ecs.id_taken` for an ID it gives that an entity neither
+    /// the open scene nor its world's cells hold has ([`held`]), a model's node going with its
+    /// root.
     pub(crate) fn check_open(
         cx: &mut Context,
         file: (PathBuf, String),
@@ -976,7 +978,7 @@ mod open_scene {
         if let Some(other) = others.find(|other| same_file(&path, &other.path)) {
             return Err(watched(other));
         }
-        let text = crate::read_scene(&path)?;
+        let text = crate::ecs::read_scene(&path)?;
         // Load what it names first, as a scene's load does.
         let _ = cx.load_scene_assets(&text);
         let cached = cached_as_edited(cx);

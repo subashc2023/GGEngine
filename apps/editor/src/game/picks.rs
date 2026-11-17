@@ -8,9 +8,10 @@ use gg_api::asset::{AssetKind, Meta};
 use gg_api::probe::Probe;
 use gg_engine::egui::{self, Response};
 use gg_engine::grid::{self};
+use gg_engine::inspector::InspectorLink;
 use gg_engine::math::{DVec3, Vec2};
 use gg_engine::reflect::{self, Reflect};
-use gg_engine::{EntityId, InspectorLink, Name, Transform, Viewport};
+use gg_engine::{EntityId, Name, Transform, Viewport};
 
 use crate::assets::Dragged;
 use crate::camera::Tool;

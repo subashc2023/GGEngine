@@ -10,7 +10,8 @@ use super::connection::Reply;
 use super::failure;
 use crate::api::json;
 use crate::bounds;
-use crate::{Context, Entity, EntityId, Pose, PrefabRoot, World};
+use crate::ecs::Pose;
+use crate::{Context, Entity, EntityId, PrefabRoot, World};
 
 /// An `assets` waiting for a look at the asset root (numbered by `Context::ask_assets`), and its
 /// page.

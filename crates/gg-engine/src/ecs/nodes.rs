@@ -260,10 +260,11 @@ mod tests {
     use gg_core::math::Vec3;
 
     use super::*;
+    use crate::ecs::Operation;
     use crate::ecs::id::tests::check_ids;
     use crate::model::tests::{added, imported};
     use crate::reflect::{Reflect, Value};
-    use crate::{Context, Name, Operation};
+    use crate::{Context, Name};
 
     /// A context with model "m", of [`imported`], and a root spawned.
     fn spawned() -> (Context, Model, Entity) {

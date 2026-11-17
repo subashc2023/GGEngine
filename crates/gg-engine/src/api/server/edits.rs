@@ -11,10 +11,11 @@ use super::connection::Reply;
 use super::{Api, failure};
 use crate::api::json;
 use crate::assets::Asset;
+use crate::ecs::Operation;
 use crate::edits::Done;
 use crate::layer::{Offered, Stack};
 use crate::reflect::{self, Ident, Type};
-use crate::{Context, Entity, EntityId, Font, Model, Operation, Prefab, Texture, World};
+use crate::{Context, Entity, EntityId, Font, Model, Prefab, Texture, World};
 
 /// The request of an edit or patch offered to a lockstep session, which its answer reads.
 pub(super) enum Offer {

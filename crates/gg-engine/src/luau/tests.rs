@@ -406,8 +406,8 @@ fn what_comes_back_from_before_a_reload_holds_its_fields_as_they_are_now() {
         world.set_field(entity, "Step", "by", &by).expect("set");
     }
     let deleted = world.id(deleted).expect("alive");
-    let mut log = crate::Log::default();
-    let delete = crate::Operation::Delete { entity: deleted };
+    let mut log = crate::ecs::Log::default();
+    let delete = crate::ecs::Operation::Delete { entity: deleted };
     log.apply_all(world, vec![delete]).expect("deleted");
     let mut stack = crate::layer::Stack::default();
     stack.play(&mut cx, 0);

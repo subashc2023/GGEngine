@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     let start = Instant::now();
     // Files cook on the job system's threads, and fonts bake there as a run's do.
     let threads = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
-    let cooked = gg_engine::start_jobs(threads).and_then(|()| cook::cook(&project, &package));
+    let cooked = gg_engine::jobs::start(threads).and_then(|()| cook::cook(&project, &package));
     let cooked = match cooked {
         Ok(cooked) => cooked,
         Err(error) => {

@@ -46,7 +46,7 @@ impl World {
     }
 
     /// The default of component type `component`: [`Types::default_value`], with what's opaque
-    /// from [`Component::base`], so it works as an [`Operation::Add`](crate::Operation::Add)
+    /// from [`Component::base`], so it works as an [`Operation::Add`](crate::ecs::Operation::Add)
     /// value. It's the same each call, unless a script redeclares the type.
     ///
     /// Fails with `reflect.unknown_type` if no component type is named `component`; with
@@ -1259,7 +1259,7 @@ mod tests {
     }
 
     impl<T: Reflect + Clone> Component for Posing<T> {}
-    impl<T: Reflect + Clone> crate::Writable for Posing<T> {}
+    impl<T: Reflect + Clone> crate::ecs::Writable for Posing<T> {}
 
     /// Tools read a child's parent by name, but only the world sets it, even if the entity has
     /// none.

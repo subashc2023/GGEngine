@@ -517,7 +517,7 @@ fn main() {
     for threads in [1, 4] {
         if threads > 1 {
             let threads = NonZeroUsize::new(threads).expect("nonzero");
-            gg_engine::start_jobs(threads).expect("the job system's threads start");
+            gg_engine::jobs::start(threads).expect("the job system's threads start");
             sleep_the_ticks_thread(cx.world_mut());
         }
         ticks(&mut movers, &mut cx, &mut number, WARM_UP);

@@ -1,6 +1,7 @@
 //! Scripts: components that act, each for the entity it's on, at its layer's ticks.
 
-use crate::{Entity, Tick, World, Writable};
+use crate::ecs::Writable;
+use crate::{Entity, Tick, World};
 
 /// A component that acts: a layer's tick runs it for each entity that has one, with
 /// [`run_scripts`].
@@ -14,7 +15,8 @@ use crate::{Entity, Tick, World, Writable};
 ///
 /// Scripts run one entity at a time on the tick's thread, since each gets the whole world. A kind
 /// of entity a game has thousands of is faster as a system over a query, which
-/// [`par_for_each`](crate::QueryIterMut::par_for_each) splits across the job system's threads.
+/// [`par_for_each`](crate::ecs::QueryIterMut::par_for_each) splits across the job system's
+/// threads.
 pub trait Script: Writable {
     /// Runs the script for `entity` at `tick`. It reads and sets its own state through `world`'s
     /// typed calls on `entity`, and can change anything a system can: spawn and despawn entities,

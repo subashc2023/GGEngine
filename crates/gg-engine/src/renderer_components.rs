@@ -11,10 +11,11 @@ use gg_renderer::{
     Texture, Tonemapper,
 };
 
+use crate::ecs::Writable;
 use crate::reflect::{
     self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
 };
-use crate::{Component, Entity, Writable};
+use crate::{Component, Entity};
 
 impl Component for Sprite {}
 impl Writable for Sprite {}

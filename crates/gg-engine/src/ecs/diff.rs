@@ -85,7 +85,7 @@ impl Difference {
 
 impl World {
     /// The first place this world's content and `other`'s differ, as their hashes'
-    /// [`content`](crate::WorldHash::content) tells them apart.
+    /// [`content`](crate::ecs::WorldHash::content) tells them apart.
     ///
     /// The walk goes by entity ID, component type name, then fields in declared order, down
     /// through structs, lists, arrays and vectors. Options, variants and quaternions compare
@@ -959,7 +959,7 @@ mod tests {
         let new = file.save_scene(&[a, c, e]).expect("saved");
         let [e_id, f_id] = [e, f].map(|entity| file.id(entity).expect("alive"));
         let before = world.dump();
-        let mut log = crate::Log::default();
+        let mut log = crate::ecs::Log::default();
         let SceneEdit::Creates(creates) = world.scene_edit(Some(&old), &new).expect("an edit")
         else {
             panic!("the new entities first");
@@ -1079,7 +1079,7 @@ mod tests {
         else {
             panic!("nothing to make: n's parent is gone");
         };
-        crate::Log::default()
+        crate::ecs::Log::default()
             .apply_all(&mut world, changes)
             .expect("applied");
         assert!(

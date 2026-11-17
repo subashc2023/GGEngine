@@ -916,8 +916,9 @@ mod tests {
     use crate::ecs::hierarchy::tests::check_links;
     use crate::ecs::id::tests::{check_ids, vacated};
     use crate::ecs::ops::tests::{Sealed, fixture};
+    use crate::ecs::{Log, Operation, Saved, Writable};
     use crate::reflect::tests::{Everything, same_snapshots, snapshot};
-    use crate::{Component, Log, Operation, Reflect, Saved, Sprite, Transform, Writable};
+    use crate::{Component, Reflect, Sprite, Transform};
 
     fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
         (1..).zip(text.lines())

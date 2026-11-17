@@ -3,8 +3,9 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_api::view::Reader;
+use gg_engine::api::{api_viewpoint, engine_viewpoint};
 use gg_engine::grid::Plane;
-use gg_engine::{Context, EntityId, Viewpoint, Viewport, api_viewpoint, engine_viewpoint};
+use gg_engine::{Context, EntityId, Viewpoint, Viewport};
 use serde_json::json;
 use tracing::info;
 

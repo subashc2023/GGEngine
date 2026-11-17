@@ -8,13 +8,12 @@ use crate::dirs::tests::Scratch;
 use crate::ecs::hierarchy::tests::check_links;
 use crate::ecs::id::tests::check_ids;
 use crate::ecs::id::{IdStream, placed};
+use crate::ecs::{Log, Operation};
 use crate::reflect::Value;
 use crate::reflect::tests::{
     Everything, Form, Handle, Inner, Pair, Unit, everything, same, same_snapshots, snapshot,
 };
-use crate::{
-    Component, Entity, EntityId, Log, Operation, Parent, Reflect, Sampler, Sprite, Transform, World,
-};
+use crate::{Component, Entity, EntityId, Parent, Reflect, Sampler, Sprite, Transform, World};
 
 /// A grid's cell.
 #[derive(Clone, Debug, PartialEq, crate::Component)]
@@ -658,7 +657,7 @@ impl Component for Kept {
     }
 }
 
-impl crate::Writable for Kept {}
+impl crate::ecs::Writable for Kept {}
 
 /// A field named as no scene names one.
 #[derive(Clone, crate::Component)]

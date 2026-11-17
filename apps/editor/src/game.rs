@@ -139,11 +139,12 @@ use std::time::{Duration, Instant};
 
 use gg_api::InputEvent;
 use gg_api::view::Reader;
+use gg_engine::dock::Docked;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
+use gg_engine::inspector::InspectorLink;
 use gg_engine::math::DVec3;
 use gg_engine::{
-    App, Context, Docked, EntityId, Event, Inspector, InspectorLink, Layer, PerfPanel, Ui,
-    Viewpoint, Viewport,
+    App, Context, EntityId, Event, Inspector, Layer, PerfPanel, Ui, Viewpoint, Viewport,
 };
 use serde_json::{Value, json};
 use tracing::warn;

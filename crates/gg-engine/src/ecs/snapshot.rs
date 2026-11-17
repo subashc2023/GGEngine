@@ -138,13 +138,14 @@ mod tests {
     use gg_core::Result;
 
     use super::*;
+    use crate::ecs::Log;
     use crate::ecs::hierarchy::tests::check_links;
     use crate::ecs::id::tests::{check_ids, vacated};
     use crate::ecs::log::tests::random;
     use crate::ecs::ops::tests::{Sealed, fixture};
     use crate::ecs::tests::Rng;
     use crate::reflect::tests::{Everything, everything, same_snapshots, snapshot};
-    use crate::{Entity, Log, Parent, Sprite, Transform};
+    use crate::{Entity, Parent, Sprite, Transform};
 
     /// A type no entity has until a snapshot is taken, so a table of it is made since.
     #[derive(Clone, Copy, crate::Component)]

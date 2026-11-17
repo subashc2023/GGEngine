@@ -39,7 +39,9 @@ extern crate self as gg_engine;
 
 mod actions;
 mod animation;
-mod api;
+// The tool API's viewpoints, for tools that show the game's view, like the editor.
+#[doc(hidden)]
+pub mod api;
 mod args;
 #[cfg(feature = "dev")]
 mod asset_watch;
@@ -57,16 +59,16 @@ mod chrome;
 pub mod cook;
 mod cooked;
 #[cfg(feature = "dev")]
-mod dialog;
+pub mod dialog;
 mod dirs;
 // Without `dev`'s UI, `none.rs` holds the dock's items games name, doing nothing.
 #[cfg(feature = "dev")]
-mod dock;
+pub mod dock;
 #[cfg(not(feature = "dev"))]
 #[path = "dock/none.rs"]
-mod dock;
+pub mod dock;
 mod draw;
-mod ecs;
+pub mod ecs;
 mod edits;
 mod environment;
 mod event;
@@ -74,7 +76,7 @@ mod font;
 mod frame_rate;
 mod game_ui;
 mod gltf;
-mod grant;
+pub mod grant;
 pub mod grid;
 #[cfg(feature = "dev")]
 mod hot_reload;
@@ -85,12 +87,14 @@ mod input;
 mod interrupt;
 // Without `dev`'s UI, `none.rs` holds the Inspector's items games name, doing nothing.
 #[cfg(feature = "dev")]
-mod inspector;
+pub mod inspector;
 #[cfg(not(feature = "dev"))]
 #[path = "inspector/none.rs"]
-mod inspector;
+pub mod inspector;
 mod interpolation;
-mod jobs;
+// For tests and the cooker.
+#[doc(hidden)]
+pub mod jobs;
 mod layer;
 mod lens;
 mod light;
@@ -119,7 +123,9 @@ mod physics;
 mod pipeline_cache;
 mod placed;
 mod prefab;
-mod recording;
+// For tests, which replay recordings.
+#[doc(hidden)]
+pub mod recording;
 pub mod reflect;
 mod render_thread;
 mod renderer_components;
@@ -172,25 +178,16 @@ pub use animation::{
     ParamCondition, ParamTest, ParamValue, Play, Playback, StateMotion, StateTransition, Tween,
     TweenValue, Tweens, step_animation,
 };
-// The tool API's viewpoints, for tools that show the game's view, like the editor. Hidden: only
-// tools use them, like `cook`.
-#[cfg(feature = "dev")]
-#[doc(hidden)]
-pub use api::{api_viewpoint, engine_viewpoint};
 pub use audio::{Bus, Music, Place, Sound};
 pub use camera::{
     Camera, CameraAction, FlyAction, FlyCameraController, OrthographicCameraController,
 };
 pub use canvas::{CANVAS_HEIGHT, Canvas};
 pub use cells::{Cell, Cells, Streamed, Viewer};
-#[cfg(feature = "dev")]
-pub use dialog::{FileDialog, Picks};
-pub use dock::{Docked, Ui};
-pub use ecs::{
-    Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Pose, Query,
-    QueryIter, QueryIterMut, ReadOnlyQuery, Resource, Saved, World, WorldHash, Writable,
-    read_scene, write_scene,
-};
+#[doc(inline)]
+pub use dock::Ui;
+#[doc(inline)]
+pub use ecs::{Bundle, Component, Entity, EntityId, Parent, Query, Resource, World};
 /// The UI library [`Layer::ui`] draws with. Apps use it from here to share the engine's version.
 /// A build without `dev` has no UI but keeps it for its types.
 pub use egui;
@@ -217,11 +214,11 @@ pub use gg_renderer::{
     AmbientOcclusion, Antialiasing, Blend, Circle, Fog, Grade, Mesh, Projection, Reflections,
     Sampler, Shader, Sprite, SpriteSheet, Streaming, Texture, Tonemapper, Viewpoint, Viewport,
 };
-pub use grant::{Capability, Grant};
+#[doc(inline)]
+pub use grant::Grant;
 pub use input::Input;
-pub use inspector::{Inspector, InspectorLink, Placed};
-#[doc(hidden)]
-pub use jobs::{on_threads, start as start_jobs};
+#[doc(inline)]
+pub use inspector::Inspector;
 use layer::Stack;
 pub use layer::{Commands, Context, Layer, Loading, Pick, Tick, Window};
 pub use lens::{DepthOfField, Lens, MotionBlur};
@@ -243,8 +240,6 @@ pub use physics::{
 };
 pub use prefab::{Prefab, PrefabRoot};
 use recording::Recorder;
-#[doc(hidden)]
-pub use recording::Replay;
 pub use reflect::Reflect;
 pub use script::{Script, run_scripts};
 pub use sky::{Atmosphere, Sky};
@@ -280,7 +275,7 @@ pub struct App {
     view_panel: Option<&'static str>,
     /// Where panels first dock, in the app's order.
     #[cfg(feature = "dev")]
-    docked: Vec<(&'static str, Docked)>,
+    docked: Vec<(&'static str, dock::Docked)>,
     /// In points.
     window_size: [u32; 2],
     /// A PNG's bytes.
@@ -603,7 +598,8 @@ impl App {
     /// Entities a fifth of the rest, and Performance the bottom half of the Inspector's:
     ///
     /// ```
-    /// use gg_engine::{App, Docked};
+    /// use gg_engine::App;
+    /// use gg_engine::dock::Docked;
     ///
     /// let app = App::new("Editor")
     ///     .custom_title_bar()
@@ -613,7 +609,7 @@ impl App {
     ///     .dock("Performance", Docked::Below("Inspector", 0.5));
     /// ```
     #[must_use]
-    pub fn dock(self, panel: &'static str, docked: Docked) -> Self {
+    pub fn dock(self, panel: &'static str, docked: dock::Docked) -> Self {
         let _ = (panel, docked);
         Self {
             #[cfg(feature = "dev")]

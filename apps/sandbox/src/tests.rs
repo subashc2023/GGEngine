@@ -16,7 +16,7 @@ fn world() -> World {
 
 /// The grid's text, from its scene.
 fn grid_text() -> String {
-    gg_engine::read_scene(&scene("grid.ron")).unwrap_or_else(|error| panic!("{error:#}"))
+    gg_engine::ecs::read_scene(&scene("grid.ron")).unwrap_or_else(|error| panic!("{error:#}"))
 }
 
 /// The grid's scene loads and saves to its own bytes, so a sandbox type changing under it fails
@@ -224,7 +224,7 @@ fn the_simulation_gives_its_reference_hashes() {
     let run = simulate();
     let again = "; the simulation goes another way each run, or on more threads than one, so no \
                  reference holds";
-    let on_four = gg_engine::on_threads(4, simulate);
+    let on_four = gg_engine::jobs::on_threads(4, simulate);
     first_difference(
         &run,
         &on_four,

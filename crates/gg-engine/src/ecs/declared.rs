@@ -397,7 +397,8 @@ mod tests {
     /// fields of the same name and kind keep values, the rest take defaults.
     #[test]
     fn a_type_declared_again_has_its_rows_and_those_put_back_hold_its_fields_as_they_are() {
-        use crate::{Log, Operation, Transform};
+        use crate::Transform;
+        use crate::ecs::{Log, Operation};
 
         let mut world = World::default();
         let fields = vec![

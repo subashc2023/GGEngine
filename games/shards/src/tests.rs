@@ -461,7 +461,7 @@ fn script(shards: &mut Shards, world: &World, number: u64) {
 #[test]
 fn the_simulation_gives_its_reference_hashes() {
     let run = simulate();
-    let on_four = gg_engine::on_threads(4, simulate);
+    let on_four = gg_engine::jobs::on_threads(4, simulate);
     assert_eq!(
         run.iter().zip(&on_four).position(|(a, b)| a != b),
         None,
@@ -524,13 +524,13 @@ fn the_live_recording_replays_to_its_hashes() {
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("can't read {}: {error}", path.display()));
     if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
-        let rewritten = gg_engine::Replay::rewrite(app(), &text);
+        let rewritten = gg_engine::recording::Replay::rewrite(app(), &text);
         fs::write(&path, rewritten.unwrap_or_else(|error| panic!("{error:#}"))).expect("written");
         println!("wrote {}", path.display());
         return;
     }
     assert!(text.ends_with("\nend\n"), "the recording has its end");
-    let mut replay = gg_engine::Replay::new(app(), &text);
+    let mut replay = gg_engine::recording::Replay::new(app(), &text);
     let replay = replay.as_mut().unwrap_or_else(|error| panic!("{error:#}"));
     let mut ticks = 0;
     while let Some(tick) = replay.step().unwrap_or_else(|error| panic!("{error:#}")) {
@@ -579,7 +579,7 @@ fn the_live_recording_replays_from_the_games_package() {
     let app = app()
         .package(&package)
         .unwrap_or_else(|error| panic!("{error:#}"));
-    let mut replay = gg_engine::Replay::new(app, &text);
+    let mut replay = gg_engine::recording::Replay::new(app, &text);
     let replay = replay.as_mut().unwrap_or_else(|error| panic!("{error:#}"));
     while replay
         .step()
@@ -614,8 +614,8 @@ fn a_forced_divergence_names_its_tick_entity_and_field() {
         .find_map(|line| line.split_once(' ')?.0.parse::<u64>().ok());
     let tick = tick.expect("the command's tick");
     let changed: String = lines.iter().map(|line| format!("{line}\n")).collect();
-    let mut original = gg_engine::Replay::new(app(), &text).expect("attached");
-    let mut copy = gg_engine::Replay::new(app(), &changed).expect("attached");
+    let mut original = gg_engine::recording::Replay::new(app(), &text).expect("attached");
+    let mut copy = gg_engine::recording::Replay::new(app(), &changed).expect("attached");
     let diverged = loop {
         let ran = original.step().expect("the recording replays");
         let ran = ran.expect("the copy goes another way before the end");

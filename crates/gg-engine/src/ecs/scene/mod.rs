@@ -151,7 +151,7 @@ impl World {
     }
 
     /// `root` and its descendants as canonical prefab text. Linking `root` to it
-    /// ([`Operation::Link`](crate::Operation::Link)) makes `root` an instance that keeps its
+    /// ([`Operation::Link`](crate::ecs::Operation::Link)) makes `root` an instance that keeps its
     /// entities as they are, under their IDs.
     ///
     /// - Each of the prefab's own entities, `root` too, gets the local ID that the instance rooted

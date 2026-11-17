@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gg_core::{Error, Result};
 
 pub use by_name::Entities;
-pub use declared::Kind;
+pub(crate) use declared::Kind;
 pub use diff::Difference;
 #[cfg(feature = "dev")]
 pub(crate) use diff::SceneEdit;
@@ -136,8 +136,8 @@ pub trait Component: Reflect + Clone {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component that code changes",
     note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`, or with \
-            `impl gg_engine::Writable` beside its own `impl Component`; the world keeps `Parent`, \
-            which `World::set_parent` changes"
+            `impl gg_engine::ecs::Writable` beside its own `impl Component`; the world keeps \
+            `Parent`, which `World::set_parent` changes"
 )]
 pub trait Writable: Component {}
 

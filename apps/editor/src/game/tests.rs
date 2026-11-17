@@ -22,7 +22,7 @@ use crate::look::Parts;
 use crate::overlay::Mode;
 use crate::tests::{SCALE, VIEW, reading};
 use crate::view::{OUTLINE, OUTLINE_WIDTH};
-use gg_engine::api_viewpoint;
+use gg_engine::api::api_viewpoint;
 
 /// The game runs embedded and starts stopped either way; `--release-game` adds `--release` before
 /// the game's own arguments.

@@ -143,17 +143,17 @@ fn grid(world: &World) -> Vec<Entity> {
     cells.map(|(cell, _)| cell).collect()
 }
 
-/// Saves the grid to `scenes/grid.ron` through [`gg_engine::write_scene`], so a save cut short
-/// leaves the last grid whole.
+/// Saves the grid to `scenes/grid.ron` through [`gg_engine::ecs::write_scene`], so a save cut
+/// short leaves the last grid whole.
 fn save_grid(world: &World) -> Result<(), Error> {
     let text = world.save_scene(&grid(world))?;
-    gg_engine::write_scene(&scene("grid.ron"), &text)
+    gg_engine::ecs::write_scene(&scene("grid.ron"), &text)
 }
 
 /// The text of `scenes/grid.ron`, or `None` after logging why it can't be read.
 fn read_grid() -> Option<String> {
     let path = scene("grid.ron");
-    match gg_engine::read_scene(&path) {
+    match gg_engine::ecs::read_scene(&path) {
         Ok(text) => Some(text),
         Err(error) => {
             error!(code = error.code(), path = %path.display(), "{error:#}");

@@ -50,6 +50,7 @@ use gg_renderer::MAX_PICKS;
 use tracing::{info, warn};
 
 use super::{Shown, json};
+use crate::ecs::Operation;
 use crate::edits::{Done, Edit};
 use crate::layer::Stack;
 use crate::luau::Debugger;
@@ -57,7 +58,7 @@ use crate::main_loop::Stepper;
 use crate::net::Ticket;
 use crate::scene_files;
 use crate::snapshot::Run;
-use crate::{Context, Operation, patch};
+use crate::{Context, patch};
 use connection::{Reply, accept};
 use edits::{Offer, answer_done, assets_named, operations, save_prefab, words};
 use files::{Taken, Writing, write_pngs, write_snapshots};

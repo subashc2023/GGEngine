@@ -1273,7 +1273,7 @@ pub(super) mod tests {
     #[test]
     #[cfg(feature = "dev")]
     fn a_world_saved_whole_with_characters_steps_as_it_did() {
-        use crate::Saved as _;
+        use crate::ecs::Saved as _;
 
         let mut world = World::seeded(7);
         world.register_saved::<Physics3D>().expect("saved");

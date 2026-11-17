@@ -24,10 +24,11 @@ use super::lockstep::UNSENT;
 use super::secure::{Opened, Sealer};
 use super::*;
 use crate::args::{Listen, Toward};
+use crate::ecs::Operation;
 use crate::layer::Stack;
 use crate::package::Files;
 use crate::testing::Codes;
-use crate::{Component, Context, Layer, Operation, Reflect, Tick};
+use crate::{Component, Context, Layer, Reflect, Tick};
 
 #[derive(Clone, Component)]
 pub(super) struct Score {
@@ -2967,7 +2968,7 @@ fn a_renewal_refuses_every_log_s_entries_from_before() {
     let world = cx.world_mut();
     let gone = world.spawn(crate::Transform::IDENTITY);
     let id = world.id(gone).expect("an ID");
-    let mut log = crate::Log::default();
+    let mut log = crate::ecs::Log::default();
     let delete = Operation::Delete { entity: id };
     log.apply(world, delete).expect("deleted");
     let renew = Edit::from_value(&Edit::Renew.to_value()).expect("an edit");

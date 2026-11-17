@@ -5,7 +5,8 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use gg_api::{Failure, Scene, SceneAction};
-use gg_engine::{Context, FileDialog, Picks};
+use gg_engine::Context;
+use gg_engine::dialog::{FileDialog, Picks};
 use tracing::warn;
 
 use crate::file::{Choice, Item, Message};
@@ -13,7 +14,9 @@ use crate::look::Part;
 
 use super::{Game, Level};
 #[cfg(doc)]
-use gg_engine::{Event, InspectorLink, Layer};
+use gg_engine::inspector::InspectorLink;
+#[cfg(doc)]
+use gg_engine::{Event, Layer};
 
 /// A File menu `scene` request, and whether it's sent: once the Inspector has nothing waiting for
 /// the game, as [`InspectorLink::idle`] says, so the game has its edits first.

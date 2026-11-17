@@ -3,7 +3,8 @@
 use std::mem;
 use std::path::{Path, PathBuf};
 
-use gg_engine::{Context, FileDialog, Picks};
+use gg_engine::Context;
+use gg_engine::dialog::{FileDialog, Picks};
 use tracing::info;
 
 use crate::hub::{self};

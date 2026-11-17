@@ -83,7 +83,7 @@ fn expand(input: &DeriveInput, component: bool) -> syn::Result<TokenStream> {
     let component = component.then(|| {
         quote! {
             impl ::gg_engine::Component for #ident {}
-            impl ::gg_engine::Writable for #ident {}
+            impl ::gg_engine::ecs::Writable for #ident {}
         }
     });
     Ok(quote! {

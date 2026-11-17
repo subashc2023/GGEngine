@@ -58,13 +58,14 @@ use std::sync::Arc;
 use gg_core::{Error, Result};
 use tracing::{info, warn};
 
+use crate::World;
 use crate::assets::Asset;
 use crate::cells::Seen;
+use crate::ecs::WorldHash;
 use crate::luau::ModText;
 use crate::recording::text::{Text, read_mod, read_named};
 use crate::reflect::Value;
 use crate::scene_files::{Open, SceneFile};
-use crate::{World, WorldHash};
 
 /// A snapshot file's first line: the format and its version. A change to its lines or its values'
 /// text that old files can't be read by bumps the version.

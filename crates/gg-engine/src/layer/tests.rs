@@ -3295,7 +3295,7 @@ fn stop_brings_back_the_world_as_edited_that_play_held() {
     let id = cx.world().id(hero).expect("alive");
     let set = |x: f32| Edit::Apply {
         author: "test".to_owned(),
-        operations: vec![crate::Operation::Set {
+        operations: vec![crate::ecs::Operation::Set {
             entity: id,
             component: "Transform".into(),
             path: "translation.x".to_owned(),
@@ -3339,9 +3339,9 @@ fn stop_brings_back_the_world_as_edited_that_play_held() {
 #[test]
 fn a_file_dialog_without_a_window_picks_nothing() {
     let mut cx = Context::seeded(0);
-    let dialog = crate::FileDialog {
+    let dialog = crate::dialog::FileDialog {
         title: "Save the scene as",
-        picks: crate::Picks::Save,
+        picks: crate::dialog::Picks::Save,
         filter: Some(("Scenes", &["ron"])),
         directory: Some(Path::new("scenes")),
         file_name: Some("grid.ron"),

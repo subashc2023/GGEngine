@@ -48,9 +48,9 @@ impl Context {
     }
 
     /// Loads the scene file at `path` into the world as the layer attaches
-    /// ([`World::load_scene`] of what [`read_scene`](crate::read_scene) reads), and returns its
-    /// roots. It first loads each texture, model, font and prefab the scene names, by ID or path
-    /// from the asset root, that no layer has added ([`add_texture`](Self::add_texture),
+    /// ([`World::load_scene`] of what [`read_scene`](crate::ecs::read_scene) reads), and returns
+    /// its roots. It first loads each texture, model, font and prefab the scene names, by ID or
+    /// path from the asset root, that no layer has added ([`add_texture`](Self::add_texture),
     /// [`add_model`](Self::add_model), [`add_font`](Self::add_font),
     /// [`add_prefab`](Self::add_prefab)).
     ///

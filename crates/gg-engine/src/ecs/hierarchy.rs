@@ -35,7 +35,7 @@ use crate::reflect::Reflect;
 /// # Ok::<(), gg_engine::Error>(())
 /// ```
 ///
-/// It isn't [`Writable`](crate::Writable), so code that would change it doesn't compile:
+/// It isn't [`Writable`](crate::ecs::Writable), so code that would change it doesn't compile:
 ///
 /// ```compile_fail,E0277
 /// # let mut world = gg_engine::World::default();
@@ -876,7 +876,7 @@ pub(super) mod tests {
         let id = |world: &World, entity| world.id(entity).expect("alive");
         let before = state(&world);
         let seen = world.pose(child).expect("alive").matrix;
-        let mut log = crate::Log::default();
+        let mut log = crate::ecs::Log::default();
         for parent in [Some(to), None] {
             let operations =
                 world.reparent_in_place(id(&world, child), parent.map(|p| id(&world, p)));

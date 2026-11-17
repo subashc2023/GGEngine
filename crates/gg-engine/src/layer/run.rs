@@ -596,7 +596,10 @@ impl Context {
     /// finishing the frame it has. No frame's time counts the pause: the next update gets none,
     /// as the first after a restore from minimized does.
     #[cfg(feature = "dev")]
-    pub fn pick_file(&mut self, dialog: &crate::FileDialog<'_>) -> Option<std::path::PathBuf> {
+    pub fn pick_file(
+        &mut self,
+        dialog: &crate::dialog::FileDialog<'_>,
+    ) -> Option<std::path::PathBuf> {
         let Some(window) = &self.window else {
             tracing::debug!(
                 code = "engine.no_dialog",

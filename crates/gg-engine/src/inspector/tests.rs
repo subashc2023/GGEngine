@@ -4357,7 +4357,7 @@ mod remote {
         let expected = Placed {
             id: hero_id,
             local: Transform::IDENTITY,
-            space: crate::Pose::IDENTITY,
+            space: crate::ecs::Pose::IDENTITY,
             bounds: None,
             node: false,
             generation: 1,

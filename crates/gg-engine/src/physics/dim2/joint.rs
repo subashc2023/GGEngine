@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{Physics2D, Rapier, vector};
 use crate::draw::Poses;
+use crate::ecs::Writable;
 use crate::physics::{Link, joined, lines_between, warn_unjoined};
-use crate::{Component, Entity, Reflect, World, Writable};
+use crate::{Component, Entity, Reflect, World};
 
 /// What a [`Joint2D`] lets its bodies do. Anchors are in each body's space.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]

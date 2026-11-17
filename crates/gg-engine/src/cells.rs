@@ -15,9 +15,10 @@ use gg_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::ecs::Saved;
 use crate::ecs::{Parsed, text_digest};
 use crate::package::{self, Files};
-use crate::{Component, Entity, EntityId, Owner, Saved, Transform, World};
+use crate::{Component, Entity, EntityId, Owner, Transform, World};
 
 /// The most cells in a world at once. Past it the nearest come in and the run warns (`cells.full`),
 /// so a too-wide radius can't load a world into memory.

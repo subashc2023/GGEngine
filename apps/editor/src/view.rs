@@ -6,8 +6,9 @@ use std::ops::ControlFlow;
 
 use gg_engine::egui::{self, Align2, CursorIcon};
 use gg_engine::grid;
+use gg_engine::inspector::InspectorLink;
 use gg_engine::math::{DVec3, Vec2, Vec3, Vec4};
-use gg_engine::{Context, Event, Input, InspectorLink, Key, Ui, Viewpoint, Viewport};
+use gg_engine::{Context, Event, Input, Key, Ui, Viewpoint, Viewport};
 
 use crate::camera::{Move, OrbitCamera, Screen, Side, Tool};
 use crate::handles::{Aim, Along, Handles, Picked, Reading, Reply, Sight};
@@ -174,7 +175,7 @@ impl<T, F> ViewTools<T, F> {
     pub fn frame(&mut self, picked: &Picked) {
         let placed =
             (self.link.along()).unwrap_or_else(|| self.link.placed().into_iter().collect());
-        let origin = |local: &gg_engine::Transform, parent: &gg_engine::Pose| {
+        let origin = |local: &gg_engine::Transform, parent: &gg_engine::ecs::Pose| {
             (parent.matrix).transform_point3(local.translation)
         };
         let spheres = placed
@@ -411,9 +412,10 @@ mod tests {
 
     use std::f32::consts::FRAC_PI_4;
 
+    use gg_engine::ecs::Pose;
     use gg_engine::math::{DAffine3, Quat};
     use gg_engine::reflect::Value;
-    use gg_engine::{EntityId, Inspector, MouseButton, Pick, Pose, Projection, Scroll, Transform};
+    use gg_engine::{EntityId, Inspector, MouseButton, Pick, Projection, Scroll, Transform};
 
     use super::*;
     use crate::camera::Space;

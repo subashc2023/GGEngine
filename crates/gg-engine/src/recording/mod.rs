@@ -25,7 +25,7 @@
 //! - Each loaded mod: manifest text, then each script's path and text. A replay runs these, not
 //!   the installed mods.
 //! - The world's hash at attach: content, then layout.
-//! - Per tick, commands as `>`, the applying layer's index and the value as [`text`] writes it;
+//! - Per tick, commands as `>`, the applying layer's index and the value as `text` writes it;
 //!   then the tick's number and the world's hash after it.
 //! - `end`, once the run ended.
 //!
@@ -57,10 +57,11 @@ use tracing::{error, info, warn};
 use crate::args::Dump;
 use crate::assets::Counts;
 use crate::cells::Cell;
+use crate::ecs::WorldHash;
 use crate::edits::Edit;
 use crate::layer::Commands;
 use crate::luau::ModText;
-use crate::{App, BUILD, Context, Tick, World, WorldHash, perf};
+use crate::{App, BUILD, Context, Tick, World, perf};
 use text::Text;
 
 /// A recording's first line. A change to its lines or values' text takes the version up.
@@ -1209,7 +1210,7 @@ mod tests {
             texture: cx.world().assets().texture(edited),
             ..Sprite::default()
         };
-        let create = crate::Operation::Create {
+        let create = crate::ecs::Operation::Create {
             entity: None,
             parent: None,
             components: vec![("Sprite".into(), sprite.to_value())],
@@ -1387,7 +1388,7 @@ mod tests {
             let edit = match (frame, made) {
                 (2, _) => Edit::Apply {
                     author: author(),
-                    operations: vec![crate::Operation::Create {
+                    operations: vec![crate::ecs::Operation::Create {
                         entity: None,
                         parent: None,
                         components: vec![("Transform".into(), Transform::IDENTITY.to_value())],
@@ -1396,7 +1397,7 @@ mod tests {
                 (5 | 6, Some(made)) => Edit::Amend {
                     author: author(),
                     gesture: 7,
-                    operations: vec![crate::Operation::Set {
+                    operations: vec![crate::ecs::Operation::Set {
                         entity: made,
                         component: "Transform".into(),
                         path: "translation.y".to_owned(),
@@ -1405,7 +1406,7 @@ mod tests {
                 },
                 (7, _) => Edit::Apply {
                     author: author(),
-                    operations: vec![crate::Operation::Delete {
+                    operations: vec![crate::ecs::Operation::Delete {
                         entity: "0000000000000001".parse().expect("an ID"),
                     }],
                 },
