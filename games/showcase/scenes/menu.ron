@@ -13,6 +13,37 @@
                 scale: (1.6, 1.6, 1.6),
             ),
         ),
+        "5cd3b2c513ca9fb5": (
+            Environment: (
+                exposure: 15.0,
+                adaptation: None,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: ClearColor,
+                sky_luminance: 30000.0,
+                bloom: 0.0,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: None,
+                fog: None,
+                reflections: None,
+                depth_of_field: None,
+                motion_blur: None,
+                lens: (
+                    vignette: 0.0,
+                    chromatic_aberration: 0.0,
+                    grain: 0.0,
+                ),
+            ),
+            Name: ("Environment"),
+        ),
         "5e6a268532f77b1d": (
             Bob: (
                 height: 0.4,
