@@ -242,7 +242,7 @@ impl Shaders {
     ///   The frame's data is `struct Frame { float3 camera; float time; float exposure; uint
     ///   light_count; Light* lights; Material* materials; float4 eye; uint sky; uint irradiance;
     ///   uint specular; uint specular_levels; uint brdf; float sky_luminance; Shadows shadows;
-    ///   Clusters clusters; uint ambient_occlusion; uint unused; Fog fog; Aerial aerial; Reflected
+    ///   Clusters clusters; uint ambient_occlusion; uint show; Fog fog; Aerial aerial; Reflected
     ///   reflections; }`, or a struct of as many of its first fields: the engine adds fields at its
     ///   end. `shaders/mesh.slang` declares it and its structs, and says what each field holds and
     ///   when it's 0. Beyond that:
