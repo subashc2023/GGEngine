@@ -84,7 +84,7 @@
 //!   as `gg probe` does, pausing a playing game for its captures. The numbers show beside the pixel
 //!   until Escape, another probe or another tool.
 //!
-//! # The look and frame rates
+//! # The look and frame rate limits
 //!
 //! - The editor's camera, the pick's outline, the grid, the colliders' switch, what the view shows
 //!   in place of its light, and the passes left out go to the game as parts of its
@@ -92,9 +92,8 @@
 //!   such as an agent, sets.
 //! - The view's list shows, after shading's parts, the images the game's frame makes, as the API's
 //!   `images` answers as the list opens.
-//! - The title bar's settings show frame rates at the view's bottom right
-//!   ([`rates`](crate::rates)). Their frame rate limit caps the game, as the look's `max_fps`,
-//!   which the editor takes from another client too. The editor presents at the display's rate.
+//! - The title bar's settings limit the editor's frame rate, at the display's by default, and the
+//!   game's, as the look's `max_fps`, which the editor takes from another client too.
 //! - The Performance panel shows the game's frames first, as each frame's memory carries them.
 //!
 //! # Drag and drop
@@ -160,7 +159,6 @@ use crate::handles::Sight;
 use crate::hub::{self, Hub};
 use crate::look::{Looking, Part};
 use crate::overlay::{self, Toolbar};
-use crate::rates::Rates;
 use crate::scenes::{self, Scenes};
 use crate::view::{self, ViewTools};
 use frames::{Measures, Wants, wants};
@@ -307,9 +305,8 @@ struct Game {
     /// Why the game, or the editor, refused the File menu's last request, until it's dismissed.
     message: Option<Message>,
     measures: Measures,
-    rates: Rates,
-    /// The cap on the game's frames, as the settings' frame rate limit last said or another client
-    /// set it.
+    /// The cap on the game's frames, as the settings' game frame rate limit last said or another
+    /// client set it.
     max_fps: Option<NonZeroU32>,
 }
 
@@ -396,7 +393,6 @@ impl Game {
             closing: Closing::No,
             message: None,
             measures: Measures::default(),
-            rates: Rates::default(),
             max_fps: None,
         }
     }
@@ -408,7 +404,6 @@ impl Layer for Game {
     fn attach(&mut self, cx: &mut Context) {
         self.hub.read(cx);
         self.view.toolbar.read(cx);
-        self.rates.read(cx);
         match self.dir.clone() {
             Some(dir) => {
                 self.hub.opened(&dir);
@@ -437,7 +432,7 @@ impl Layer for Game {
         self.view.camera.update(dt);
         self.frame_asked();
         self.changes(wants(&self.view));
-        // The settings' frame rate limit caps the game; one another client set shows there.
+        // The settings' game frame rate limit caps the game; one another client set shows there.
         let max_fps = cx.game_max_fps();
         if max_fps != self.max_fps {
             self.max_fps = max_fps;
@@ -490,8 +485,6 @@ impl Layer for Game {
         // showed the previous frame's viewpoint in a third of the game's frames, and twice the
         // step in the next.
         self.take_frame(cx);
-        let published = self.reader.as_ref().map(Reader::published);
-        self.rates.see(Instant::now(), published);
         let driving = !self.view.toolbar.world_camera;
         self.view.shown = self.seen.filter(|_| driving);
         // The File menu's request and a close's status wait for the game to answer the Inspector's
@@ -564,7 +557,6 @@ impl Layer for Game {
         if to_hub {
             self.hub.asked = true;
         }
-        self.rates.settings(ui, cx);
         // The hub, over the panels, which go on showing the open project behind it.
         if self.hub_shows() {
             let current = self.dir.clone();
@@ -681,7 +673,6 @@ impl Layer for Game {
         let alt = view::alt_down(cx.input());
         self.view.paint(ui, sight, alt, picked.as_ref(), name);
         if let Some(view) = ui.view() {
-            self.rates.paint(ui.egui(), &view);
             if let Some(probing) = &self.probing {
                 let points = ui.egui().pixels_per_point();
                 let [x, y] = probing.at.map(|axis| axis as f32 / points);
