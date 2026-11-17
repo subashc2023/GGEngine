@@ -39,7 +39,7 @@ use crate::{App, BUILD};
 /// Embedded (`--embedded`), it also steps in real time, with no UI, playing sound and keeping the
 /// pipeline cache. Its view fills its image at the size its client asks for. Each frame waits for
 /// the client to take it ([`api::pace`]); until one has it published, frames come a tick apart or
-/// more.
+/// more. A layer's exit while a copy plays stops the copy ([`api::stop_at_exit`]).
 pub(crate) fn run_headless(
     app: &mut App,
     args: &Args,
@@ -112,6 +112,12 @@ pub(crate) fn run_headless(
             if api::serve(&mut api, &mut cx, &mut app.stack, &mut stepper) {
                 debug!("A tool asked the run to end");
                 break;
+            }
+            if embedded
+                && cx.exiting()
+                && api::stop_at_exit(&mut api, &mut cx, &mut app.stack, &mut stepper)
+            {
+                debug!("A layer asked the run to end while a copy played: the copy stopped");
             }
             if cx.exiting() {
                 debug!("A layer asked the run to end");

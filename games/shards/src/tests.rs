@@ -285,7 +285,8 @@ fn the_keys_queue_commands_for_the_runs_own_player() {
 /// Escape opens the menu, letting go of the disc's steer. While it's open, the keys move its focus,
 /// wrapping at either end, and choose, rather than steer and dash. Enter on New match queues one
 /// and closes the menu; Space on Resume closes it without a dash; each closing steers the disc as
-/// the keys are held. Escape also closes it, and Quit asks the run to end.
+/// the keys are held. Escape also closes it, and Quit asks the run to end. A world brought back,
+/// as Quit's in the editor does, closes it too.
 #[test]
 fn the_menu_takes_the_keys_while_its_open() {
     let (mut cx, mut shards) = attached(0x5eed);
@@ -342,6 +343,9 @@ fn the_menu_takes_the_keys_while_its_open() {
     press(&mut shards, &mut cx, Key::ArrowUp);
     press(&mut shards, &mut cx, Key::Enter);
     assert!(cx.exiting(), "Quit ends the run");
+    assert_eq!(shards.menu, Some(ITEMS.len() - 1), "open at Quit");
+    shards.restored(&mut cx);
+    assert_eq!(shards.menu, None, "closed as the world came back");
 }
 
 /// The music plays from the game's load, quieter while the menu's open, and full again once it

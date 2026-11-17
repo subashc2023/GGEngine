@@ -1,31 +1,45 @@
 //! A run embedded in a tool, as the editor embeds a game. Once a client has the view published to
 //! memory it made, a frame comes as the client takes the last, at the size it asks for, with the
 //! viewpoint and look it drew with, and the client's input reaches the layers, until it asks the
-//! run to end. It needs a GPU and the validation layer, as the GPU tests do, and runs in a process
-//! of its own, since a process starts the log once.
+//! run to end. A layer's exit while a copy of the world as edited plays stops the copy instead. It
+//! needs a GPU and the validation layer, as the GPU tests do, and runs in a process of its own,
+//! since a process starts the log once.
 #![cfg(feature = "dev")]
 
+use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gg_api::view::{Frame, Reader};
-use gg_api::{Captured, Client, Looked, Session};
-use gg_engine::{App, Context, Key, Layer, Tick};
+use gg_api::{Captured, Client, Looked, Session, Status};
+use gg_engine::{App, Context, Event, Key, Layer, Tick};
 use serde_json::{Value, json};
 
 /// How long to wait before failing rather than hanging: a debug build under validation starts
 /// slowly.
 const DEADLINE: Duration = Duration::from_secs(60);
 
-/// Clears the view to green, or to red while W is held.
+/// Clears the view to green, or to red while W is held. Q is the game's Quit.
 struct Lit;
 
 impl Layer for Lit {
     fn update(&mut self, cx: &mut Context, _: Duration) {
         let held = cx.input().key_down(Key::KeyW);
         cx.set_clear_color(if held { RED } else { GREEN });
+    }
+
+    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+        if let Event::Key {
+            key: Key::KeyQ,
+            pressed: true,
+            ..
+        } = event
+        {
+            cx.exit();
+        }
+        ControlFlow::Continue(())
     }
 }
 
@@ -147,6 +161,26 @@ fn check(client: &mut Client) {
         paused < playing + Tick::DT / 2,
         "frames {paused:?} apart at the least paused, {playing:?} playing"
     );
+
+    // The game's Quit while a copy plays stops the copy, as the editor's Stop does, and frames go
+    // on, until the client's `quit`.
+    client.call("stop", Value::Null).expect("stopped");
+    client.call("play", Value::Null).expect("a copy plays");
+    let quit = json!({"events": [{"key": {"key": "KeyQ", "pressed": true}}]});
+    client.call("input", quit).expect("the input");
+    let start = Instant::now();
+    while !(client.call_as::<Status>("status", Value::Null))
+        .expect("the status")
+        .stopped
+    {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the Quit never stopped the copy"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let last = reader.published();
+    take_until(&mut reader, |frame, _| frame.number > last);
 }
 
 /// The shortest time, by the run's clock, between the starts of consecutive frames among the next

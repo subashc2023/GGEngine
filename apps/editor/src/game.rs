@@ -50,6 +50,7 @@
 //! - Stop ends the input at once and brings back the world as edited with its edits' history, as
 //!   `stop` does. The view goes to the editor's camera, as at any client's `stop` that no Play
 //!   clicked since follows.
+//! - A game's Quit ([`Context::exit`]) in Play or Simulate stops it, as Stop does.
 //! - Stopped, the camera switch shows the game's camera, as at start and after a New or an Open.
 //!   The input stays the editor's; the view turns to the editor's camera once that takes some.
 //!

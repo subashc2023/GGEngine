@@ -559,7 +559,8 @@ impl Context {
     }
 
     /// Ends the run before its next frame, as closing its window does when no layer handles that;
-    /// for a game's Quit.
+    /// for a game's Quit. Embedded in a tool, as in the editor's Play, it stops a copy of the world
+    /// as edited that plays instead, as the tool API's `stop` does.
     pub fn exit(&mut self) {
         self.exiting = true;
     }
@@ -567,6 +568,17 @@ impl Context {
     /// Whether a layer has asked the run to end, by [`exit`](Self::exit) or [`fail`](Self::fail).
     pub fn exiting(&self) -> bool {
         self.exiting
+    }
+
+    /// Takes back an [`exit`](Self::exit), but not a [`fail`](Self::fail), for
+    /// [`api::stop_at_exit`](crate::api::stop_at_exit). Returns whether it took one back.
+    #[cfg(feature = "dev")]
+    pub(crate) fn take_back_exit(&mut self) -> bool {
+        let taken = self.exiting && !self.failed;
+        if taken {
+            self.exiting = false;
+        }
+        taken
     }
 
     /// Like [`exit`](Self::exit), but logs `error` at once by its code. For what a layer can't go

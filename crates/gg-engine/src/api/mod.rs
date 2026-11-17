@@ -193,6 +193,28 @@ pub(crate) fn serve(
     false
 }
 
+/// For an embedded run: as a layer asks the run to end ([`Context::exit`]) while a copy of the
+/// world as edited plays, stops the copy as `stop` does, and the run goes on. So a game's Quit ends
+/// the editor's Play, as Unreal's Quit Game ends Play In Editor. A [`Context::fail`] still ends
+/// the run. Returns whether it stopped a copy.
+pub(crate) fn stop_at_exit(
+    api: &mut Option<Api>,
+    cx: &mut Context,
+    stack: &mut Stack,
+    stepper: &mut Stepper,
+) -> bool {
+    #[cfg(feature = "dev")]
+    if let Some(api) = api
+        && cx.dev.edited.is_some()
+        && cx.take_back_exit()
+    {
+        api.stop(cx, stack, stepper);
+        return true;
+    }
+    let _ = (api, cx, stack, stepper);
+    false
+}
+
 /// Like [`serve`], between frames while they pause. Requests that need frames fail with
 /// `api.paused`.
 pub(crate) fn serve_paused(

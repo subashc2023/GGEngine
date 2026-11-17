@@ -924,7 +924,7 @@ impl Api {
     /// Stops the playing game, as `stop` asks of a run that can stop: brings back the world as
     /// edited, if a copy plays, at its ticks ([`Stack::stop`]); runs no ticks from then on; fails
     /// the waiting `step`s with `api.stopped`.
-    fn stop(&mut self, cx: &mut Context, stack: &mut Stack, stepper: &mut Stepper) {
+    pub(super) fn stop(&mut self, cx: &mut Context, stack: &mut Stack, stepper: &mut Stepper) {
         if let Some(ticks) = stack.stop(cx) {
             stepper.jump_to(ticks);
         }

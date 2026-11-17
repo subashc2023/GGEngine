@@ -285,8 +285,10 @@ impl Layer for Shards {
     }
 
     /// Takes back which player this run steers, which the world a joiner or client takes from its
-    /// host or server doesn't say. Lets go of what was held as the world was taken.
+    /// host or server doesn't say. Lets go of what was held as the world was taken, and closes the
+    /// menu, as after its Quit stops the editor's Play.
     fn restored(&mut self, cx: &mut Context) {
+        self.menu = None;
         self.player = cx.player().unwrap_or(0);
         let player = self.player;
         self.commands.push(Command::Steer {
