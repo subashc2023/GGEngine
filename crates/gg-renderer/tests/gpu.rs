@@ -105,6 +105,7 @@ fn main() -> ExitCode {
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
+        a_masked_textures_coverage_holds_as_it_shrinks,
         fog_dims_and_lights_as_its_integral_says,
         fog_of_no_density_or_opacity_changes_nothing,
         fogged_scenes_match_their_reference,
@@ -8398,6 +8399,70 @@ fn a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel() {
             "the ball reflects {sums:?} as it moves by quarters of a pixel"
         );
     }
+    shut_down(renderer);
+}
+
+/// A masked texture of scattered leaves covers about the same share of its square at 8 pixels
+/// across as at 64, its texels': its levels' alpha is scaled to keep the share at the cutoff,
+/// where averaged alpha would fall under it and draw almost nothing.
+fn a_masked_textures_coverage_holds_as_it_shrinks() {
+    const SIZE: u32 = 64;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 0.5,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    // Three texels in ten opaque, scattered by a hash (lowbias32).
+    let hash = |mut x: u32| {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb_352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846c_a68b);
+        x ^ (x >> 16)
+    };
+    let leaves: Vec<u8> = (0..SIZE * SIZE)
+        .flat_map(|i| [255, 255, 255, if hash(i) % 10 < 3 { 255 } else { 0 }])
+        .collect();
+    let mipmaps = Mipmaps::Coverage { cutoff: 128 };
+    let leaves = stores
+        .textures
+        .add("leaves", [SIZE, SIZE], &leaves, mipmaps);
+    let material = stores.materials.add(&Material {
+        color_texture: Sampled::of(leaves.expect("a texture")),
+        alpha: AlphaMode::Mask { cutoff: 0.5 },
+        unlit: true,
+        ..Material::default()
+    });
+    let square = model_square(&mut stores.meshes);
+    let draw = MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+    let viewport = filling([SIZE, SIZE]);
+    // The share of the square's pixels drawn, `across` pixels a side, on pixels' edges.
+    let mut covered = |across: u32| {
+        let mut draws = Draws::default();
+        let scale = Vec3::splat(across as f32 / SIZE as f32);
+        draws.push_draw(Mat4::from_scale(scale), &draw, 1);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+        let frame = frame_pixels(&mut renderer);
+        let drawn = frame
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[0] > 128);
+        drawn.count() as f32 / (across * across) as f32
+    };
+    let [large, small] = [SIZE, 8].map(&mut covered);
+    assert!(large > 0.25, "the leaves cover {large} at {SIZE} pixels");
+    assert!(
+        (small - large).abs() < 0.1,
+        "the leaves cover {large} at {SIZE} pixels and {small} at 8"
+    );
     shut_down(renderer);
 }
 

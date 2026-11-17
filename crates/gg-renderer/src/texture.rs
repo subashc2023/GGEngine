@@ -40,6 +40,10 @@ pub enum Mipmaps {
     /// Each level averages the last's colors weighted by alpha, so transparent pixels' colors don't
     /// bleed, and its alpha: for textures whose alpha is coverage, as masked or blended materials'.
     AlphaWeighted,
+    /// As `AlphaWeighted`, with each level's alpha scaled so the share of its texels at or above
+    /// `cutoff` (an alpha byte) comes nearest the first level's: for a masked material's colors,
+    /// whose thin parts would otherwise fall under the cutoff and vanish at a distance.
+    Coverage { cutoff: u8 },
 }
 
 /// What a texture's texels are.
@@ -488,26 +492,37 @@ fn check_pixels(name: &str, size: [u32; 2], pixels: &[u8], texels: Texels) -> Re
 /// didn't.
 #[doc(hidden)]
 pub fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
-    let weighted = match mipmaps {
+    let (weighted, cutoff) = match mipmaps {
         Mipmaps::None => return,
-        Mipmaps::Averaged => false,
-        Mipmaps::AlphaWeighted => true,
+        Mipmaps::Averaged => (false, None),
+        Mipmaps::AlphaWeighted => (true, None),
+        // At 0 every texel is covered, whatever its alpha.
+        Mipmaps::Coverage { cutoff } => (true, Some(cutoff).filter(|&cutoff| cutoff > 0)),
     };
     let _zone = gg_core::zone!();
     let decode: [f32; 256] = array::from_fn(|byte| srgb_to_linear(byte as f32 / 255.0));
     let encoder = Encoder::new();
     let encode = |linear| encoder.encode(linear);
-    let append = |pixels: &mut Vec<u8>, level: &[[f32; 4]]| {
-        for &[r, g, b, a] in level {
-            let alpha = (a * 255.0).round() as u8;
-            pixels.extend_from_slice(&[encode(r), encode(g), encode(b), alpha]);
-        }
-    };
     let mut sizes = mip_sizes(size[0], size[1]);
     let first_size = sizes.next().expect("a chain has its first level");
     let Some(mut from) = sizes.next() else {
         // A pixel across and down: the whole chain.
         return;
+    };
+    let coverage = cutoff.map(|cutoff| {
+        let first = pixels.as_chunks::<4>().0;
+        let covered = first.iter().filter(|texel| texel[3] >= cutoff).count();
+        (cutoff, covered as f64 / first.len() as f64)
+    });
+    // Levels stay unscaled, each made from the last's averages; only what's stored is scaled.
+    let append = |pixels: &mut Vec<u8>, level: &[[f32; 4]]| {
+        let scale = coverage.map_or(1.0, |(cutoff, coverage)| {
+            coverage_scale(level, cutoff, coverage)
+        });
+        for &[r, g, b, a] in level {
+            let alpha = (a * scale * 255.0).round() as u8;
+            pixels.extend_from_slice(&[encode(r), encode(g), encode(b), alpha]);
+        }
     };
     reserve_levels(pixels, from);
     let first = pixels.as_chunks::<4>().0;
@@ -635,6 +650,29 @@ fn shrink(
         }
     }
     level
+}
+
+/// The scale for `level`'s alphas that brings the share of its texels stored at or above `cutoff` (a
+/// byte, 1 or more) nearest `coverage`, nearest 1 among those that do. As Castaño's "Computing alpha
+/// mipmaps" (2010), by a histogram rather than a search. A texel stored as byte `t` unscaled is at
+/// least `t - 0.5` over 255, so scaling by `(cutoff - 0.5) / (t - 0.5)` stores every texel from `t`
+/// up at `cutoff` or more, and every one below under it.
+fn coverage_scale(level: &[[f32; 4]], cutoff: u8, coverage: f64) -> f32 {
+    let mut counts = [0; 256];
+    for &[.., alpha] in level {
+        counts[usize::from((alpha * 255.0).round() as u8)] += 1;
+    }
+    // From `t`: the texels stored at `t` or more, up to 256's none.
+    let mut from = [0_usize; 257];
+    for t in (0..256).rev() {
+        from[t] = from[t + 1] + counts[t];
+    }
+    let wanted = (coverage * level.len() as f64).round() as usize;
+    let cutoff = usize::from(cutoff);
+    let t = (1..=256)
+        .min_by_key(|&t| (from[t].abs_diff(wanted), t.abs_diff(cutoff)))
+        .expect("a byte from 1");
+    (cutoff as f32 - 0.5) / (t as f32 - 0.5)
 }
 
 /// The texels along a side of `from` that the next level's texel `i` covers, with weights adding to
@@ -1093,6 +1131,49 @@ mod tests {
         // All transparent: colors average plainly rather than dividing by 0.
         let clear = [[255, 0, 0, 0], [0, 0, 255, 0]].concat();
         assert_eq!(levels(&clear, [2, 1], AlphaWeighted), [188, 0, 188, 0]);
+    }
+
+    /// A masked texture's levels keep its share of texels at the cutoff, as near as each level's
+    /// texels allow, where averaged alpha falls under it; colors are `AlphaWeighted`'s.
+    #[test]
+    fn coverage_levels_keep_the_share_at_the_cutoff() {
+        // Leaves: three texels in ten opaque, scattered by a hash (lowbias32).
+        let hash = |mut x: u32| {
+            x ^= x >> 16;
+            x = x.wrapping_mul(0x7feb_352d);
+            x ^= x >> 15;
+            x = x.wrapping_mul(0x846c_a68b);
+            x ^ (x >> 16)
+        };
+        let pixels: Vec<u8> = (0..64 * 64)
+            .flat_map(|i| [40, 160, 40, if hash(i) % 10 < 3 { 255 } else { 0 }])
+            .collect();
+        let cutoff = 128;
+        // Each level's share of texels at the cutoff, and its colors, largest first.
+        let made = |mipmaps| {
+            let chain = [pixels.clone(), levels(&pixels, [64, 64], mipmaps)].concat();
+            let mut texels = chain.as_chunks::<4>().0;
+            let mut shares = Vec::new();
+            for [width, height] in mip_sizes(64, 64) {
+                let level;
+                (level, texels) = texels.split_at((width * height) as usize);
+                let covered = level.iter().filter(|texel| texel[3] >= cutoff).count();
+                shares.push(covered as f64 / level.len() as f64);
+            }
+            let colors: Vec<_> = chain.chunks(4).map(|texel| &texel[..3]).collect();
+            (shares, colors.concat())
+        };
+        let (kept, kept_colors) = made(Mipmaps::Coverage { cutoff });
+        let (plain, plain_colors) = made(Mipmaps::AlphaWeighted);
+        // Down to 4 by 4: smaller levels' few texels can't come near a share of 0.3.
+        let (larger, _) = kept.split_at(kept.len() - 2);
+        assert!(
+            larger.iter().all(|share| (share - kept[0]).abs() < 0.1),
+            "{kept:?}"
+        );
+        // Averaged, 8 by 8's texels each hold under half, a third on average.
+        assert!(plain[3] < 0.05, "{plain:?}");
+        assert_eq!(kept_colors, plain_colors);
     }
 
     #[test]
