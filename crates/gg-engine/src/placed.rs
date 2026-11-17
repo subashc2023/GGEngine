@@ -93,9 +93,9 @@ impl Placed {
     /// Places `world`'s entities that changed since last placed, or all in another world: each
     /// whose transform or parent changed or that joined a table (as spawning or giving a
     /// transform or parent does), and what each carries, from the topmost changed. A root
-    /// carrying nothing, in a table without component `held`, is only marked placed again (see
-    /// [`kept`](Self::kept)). Cost follows what changed and what it carries, apart from a look over
-    /// each table's marks.
+    /// carrying nothing, in a table without component `held`, is left to its transform: not
+    /// placed, nor among [`changed`](Self::changed) (see [`kept`](Self::kept)). Cost follows what
+    /// changed and what it carries, apart from a look over each table's marks.
     pub(crate) fn place(&mut self, world: &World, held: Option<ComponentId>) {
         let _zone = gg_core::zone!();
         let since = match self.seen {
@@ -137,7 +137,8 @@ impl Placed {
     }
 
     /// Adds `entity`, which changed, to `list` to place; or, if `own` (its table's roots draw by
-    /// their transforms) and it carries nothing, marks it placed again without placing it.
+    /// their transforms) and it carries nothing, only notes it in its slot: its place is its
+    /// transform's.
     fn add(&mut self, world: &World, own: bool, entity: Entity, list: &mut Vec<Entity>) {
         let carries = || {
             let mut children = world.children(entity).expect("a row's entity is alive");
@@ -148,15 +149,8 @@ impl Placed {
             return;
         }
         let slot = entity.slot();
-        // Another of its table's marks may have found it this pass.
-        if self.placed[slot] == self.pass {
-            return;
-        }
-        self.placed[slot] = self.pass;
-        self.again[slot] = self.pass;
         self.entities[slot] = entity;
         self.own[slot] = true;
-        self.changed.push(entity);
     }
 
     /// Finds where entities on their way between ticks draw this frame, with what they carry:
@@ -304,7 +298,8 @@ impl Placed {
         }
     }
 
-    /// The entities the latest placing placed again.
+    /// The entities the latest placing placed again. Roots it left to their transforms aren't
+    /// among them: their tables' marks say they changed.
     pub(crate) fn changed(&self) -> &[Entity] {
         &self.changed
     }
@@ -439,7 +434,8 @@ mod tests {
 
     /// A placing kept between frames places each entity as a fresh one and `World::pose` do, bit
     /// for bit, as transforms and parents change and entities come, go, gain and lose transforms.
-    /// It places again only what changed and what it carries, or all of another world.
+    /// It places again, and lists, only what changed and what it carries, or all of another world;
+    /// roots carrying nothing it leaves to their transforms, unlisted.
     #[test]
     fn a_kept_placing_places_as_a_fresh_one_does() {
         let mut world = World::default();
@@ -466,7 +462,7 @@ mod tests {
         world.remove::<Transform>(a).expect("alive");
         assert_eq!(place(&mut world, &mut kept, &all), sorted([a, b, c, d]));
         world.insert(bare, at(0.0, -3.0)).expect("alive");
-        assert_eq!(place(&mut world, &mut kept, &all), sorted([bare]));
+        assert_eq!(place(&mut world, &mut kept, &all), []);
         // A root without a parent leaves no mark but joining another table.
         world.remove::<Transform>(root).expect("alive");
         assert_eq!(
@@ -481,12 +477,8 @@ mod tests {
         assert_eq!(place(&mut world, &mut kept, &all), []);
         let f = world.spawn(at(2.0, 2.0));
         assert!(kept.kept(&world, f).is_none(), "its slot was another's");
-        assert_eq!(place(&mut world, &mut kept, &all), sorted([f]));
-
-        let copy = world.clone();
-        world.clone_from(&copy);
         let all = [root, bare, f];
-        assert_eq!(place(&mut world, &mut kept, &all), sorted(all));
+        assert_eq!(place(&mut world, &mut kept, &all), []);
 
         // `f`, a root carrying nothing in `a`'s old slot, is left unplaced: where its transform
         // now puts it, as a skin asks of a joint, and under where it now is for a child it gains.
@@ -497,12 +489,16 @@ mod tests {
                 .x = x;
         };
         moved(&mut world, f, 5.0);
-        assert_eq!(place(&mut world, &mut kept, &all), sorted([f]));
+        assert_eq!(place(&mut world, &mut kept, &all), []);
         let g = world.spawn(at(0.5, -0.5));
         world.set_parent(g, Some(f)).expect("no cycle");
         let all = [root, bare, f, g];
         assert_eq!(place(&mut world, &mut kept, &all), sorted([g]));
         moved(&mut world, f, -1.0);
+        assert_eq!(place(&mut world, &mut kept, &all), sorted([f, g]));
+
+        let copy = world.clone();
+        world.clone_from(&copy);
         assert_eq!(place(&mut world, &mut kept, &all), sorted([f, g]));
     }
 

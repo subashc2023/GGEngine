@@ -291,8 +291,8 @@ mod tests {
     }
 
     /// Kept lights equal those found afresh, across frames that change nothing, move a carrier,
-    /// change a light, move one between ticks and after, carry one on its way through frames
-    /// between ticks, and remove one.
+    /// change a light, move one, move one between ticks and after, carry one on its way through
+    /// frames between ticks, and remove one.
     #[test]
     fn kept_lights_are_found_again_as_they_change() {
         let mut world = World::default();
@@ -308,7 +308,7 @@ mod tests {
         let (mut past, mut placed, mut kept) = (Past::default(), Placed::default(), Lit::default());
         let mut started = 0;
         type Change = fn(&mut World, [Entity; 3]);
-        let frames: [(&str, bool, f32, Change); 10] = [
+        let frames: [(&str, bool, f32, Change); 11] = [
             ("the first", false, 1.0, |_, _| {}),
             ("nothing", false, 1.0, |_, _| {}),
             ("a carrier moved", false, 1.0, |world, [_, parent, _]| {
@@ -320,6 +320,15 @@ mod tests {
             }),
             ("a light changed", false, 1.0, |world, [lone, ..]| {
                 world.get_mut::<Light>(lone).expect("alive").intensity = 3.0;
+            }),
+            // Placing leaves a root carrying nothing out of `placed_again`: its table's marks alone
+            // say it moved.
+            ("one moved", false, 1.0, |world, [lone, ..]| {
+                world
+                    .get_mut::<Transform>(lone)
+                    .expect("alive")
+                    .translation
+                    .z = 1.0;
             }),
             ("one moved in a tick", true, 0.5, |world, [lone, ..]| {
                 world
