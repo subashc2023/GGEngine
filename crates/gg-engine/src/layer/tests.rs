@@ -2196,7 +2196,7 @@ fn a_ui_added_by_its_id_reloads_as_its_file_changes() {
         [2.0, 1.0],
         "its texture's size"
     );
-    ui.set_text(&mut cx, "score", "120").expect("a text");
+    ui.set_text_fmt(&mut cx, "score", 120).expect("a text");
     let refused = |set: Result<()>| set.expect_err("refused").code();
     assert_eq!(refused(ui.set_text(&mut cx, "scores", "1")), "ui.no_node");
     assert_eq!(refused(ui.set_text(&mut cx, "logo", "1")), "ui.wrong_kind");

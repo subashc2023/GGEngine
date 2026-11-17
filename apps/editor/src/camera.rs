@@ -280,7 +280,7 @@ impl OrbitCamera {
     pub fn new() -> Self {
         let key = Source::Key;
         let mut actions = Actions::default();
-        let bound = [
+        let bound = actions.bind_all([
             (Action::Fly, Binding::WASD),
             // Q counterclockwise, as the 2D camera controller turns.
             (
@@ -293,9 +293,7 @@ impl OrbitCamera {
             (Action::Fast, Binding::Button(key(Key::ShiftLeft))),
             (Action::Fast, Binding::Button(key(Key::ShiftRight))),
             (Action::Home, Binding::Button(key(Key::Home))),
-        ]
-        .into_iter()
-        .try_for_each(|(action, binding)| actions.bind(action, binding));
+        ]);
         bound.expect("the camera's bindings are each of one kind, of other keys");
         Self {
             pose: Pose::start(),

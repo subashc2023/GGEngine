@@ -75,6 +75,12 @@ impl Binding {
         y: [Source::Key(Key::KeyS), Source::Key(Key::KeyW)],
     };
 
+    /// The arrow keys as a pair of axes, like [`WASD`](Self::WASD).
+    pub const ARROWS: Self = Self::Axis2 {
+        x: [Source::Key(Key::ArrowLeft), Source::Key(Key::ArrowRight)],
+        y: [Source::Key(Key::ArrowDown), Source::Key(Key::ArrowUp)],
+    };
+
     /// A stick as a pair of axes.
     pub const fn stick(stick: Stick) -> Self {
         Self::Axis2 {
@@ -246,6 +252,13 @@ impl<A: Copy + Eq + Debug> Actions<A> {
             .count();
         self.held.reserve(distinct.saturating_sub(self.held.len()));
         Ok(())
+    }
+
+    /// Binds each action to its binding, in order, as [`bind`](Self::bind) does.
+    ///
+    /// Fails as `bind` does at the first it refuses; those before stay bound.
+    pub fn bind_all(&mut self, bindings: impl IntoIterator<Item = (A, Binding)>) -> Result<()> {
+        (bindings.into_iter()).try_for_each(|(action, binding)| self.bind(action, binding))
     }
 
     /// Removes `action`'s bindings and value, so it can be bound again. No change is given: a held

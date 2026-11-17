@@ -134,8 +134,7 @@ fn app() -> App {
     let app = App::new("Showcase")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    let app = app.layer(Showcase::new()).overlay(gg_engine::PerfPanel);
-    app.overlay(gg_engine::Inspector::default())
+    app.layer(Showcase::new()).dev_panels()
 }
 
 /// The game's scripts, by their paths from its directory. Each declares the component it is.
@@ -541,17 +540,8 @@ impl Assets {
 /// Registers the game's own components with `world`, so that its scenes, the Inspector's Add
 /// Component and the tool API know them before any entity has one.
 fn register(world: &mut World) -> Result<(), Error> {
-    world.register::<Chime>()?;
-    world.register::<Burster>()?;
-    world.register::<Jukebox>()?;
-    world.register::<Hud>()?;
-    world.register::<Menu>()?;
-    world.register::<Widgets>()?;
-    world.register::<Plasma>()?;
-    world.register::<Look>()?;
-    world.register::<StateLabel>()?;
-    world.register::<Tether>()?;
-    world.register::<Launch>()
+    world.register_all::<(Chime, Burster, Jukebox, Hud, Menu, Widgets, Plasma, Look)>()?;
+    world.register_all::<(StateLabel, Tether, Launch)>()
 }
 
 /// The game's layer. A script, an asset or the start scene that doesn't load ends the run.
@@ -580,22 +570,16 @@ struct Showcase {
 impl Showcase {
     fn new() -> Self {
         let mut actions = Actions::default();
-        let arrows = Binding::Axis2 {
-            x: [Key::ArrowLeft, Key::ArrowRight].map(Source::Key),
-            y: [Key::ArrowDown, Key::ArrowUp].map(Source::Key),
-        };
-        let bound = [
+        let bound = actions.bind_all([
             (Act::Walk, Binding::WASD),
-            (Act::Walk, arrows),
+            (Act::Walk, Binding::ARROWS),
             (Act::Walk, Binding::stick(Stick::Left)),
             (Act::Jump, Binding::Button(Source::Key(Key::Space))),
             (
                 Act::Jump,
                 Binding::Button(Source::PadButton(PadButton::South)),
             ),
-        ]
-        .into_iter()
-        .try_for_each(|(action, binding)| actions.bind(action, binding));
+        ]);
         bound.expect("the game's bindings are each of one kind, of other sources");
         Self {
             scripts: Scripts::new().expect("Luau starts"),
@@ -893,7 +877,7 @@ impl Layer for Showcase {
         let shown = widgets.map(|widgets| write_changed(widgets, &mut self.text));
         widgets_ui.set_input(cx, shown.is_some());
         if shown.is_some() {
-            drive_widgets(cx, widgets_ui, &mut self.text);
+            drive_widgets(cx, widgets_ui, &self.text);
         }
     }
 
@@ -996,13 +980,9 @@ impl Layer for Showcase {
 /// longer names goes unset: the file says what shows.
 fn drive_menu(cx: &mut Context, ui: GameUi, menu: &Menu, text: &mut String) {
     let seconds = (Tick::DT * menu.ticks).as_secs();
-    text.clear();
-    let written = write!(text, "{:02}:{:02}", seconds / 60, seconds % 60);
-    written.expect("a string takes any text");
-    let _ = ui.set_text(cx, "clock", text);
-    text.clear();
-    write!(text, "{}", menu.presses).expect("a string takes any text");
-    let _ = ui.set_text(cx, "presses", text);
+    let clock = format_args!("{:02}:{:02}", seconds / 60, seconds % 60);
+    let _ = ui.set_text_fmt(cx, "clock", clock);
+    let _ = ui.set_text_fmt(cx, "presses", menu.presses);
     let label = |text: &mut String, name: &str| {
         text.clear();
         let capitals = name.chars().map(|c| match c {
@@ -1026,13 +1006,11 @@ fn drive_menu(cx: &mut Context, ui: GameUi, menu: &Menu, text: &mut String) {
 
 /// Draws the widgets' UI, its last line `text` as [`write_changed`] wrote it. A node the UI's file
 /// no longer names goes unset, as the menu's do.
-fn drive_widgets(cx: &mut Context, ui: GameUi, text: &mut String) {
+fn drive_widgets(cx: &mut Context, ui: GameUi, text: &str) {
     let _ = ui.set_text(cx, "changed", text);
     if let Ok(UiValue::Number(volume)) = ui.value(cx, "volume") {
-        text.clear();
-        let written = write!(text, "{:.0}%", volume * 100.0);
-        written.expect("a string takes any text");
-        let _ = ui.set_text(cx, "volume_value", text);
+        let percent = format_args!("{:.0}%", volume * 100.0);
+        let _ = ui.set_text_fmt(cx, "volume_value", percent);
     }
     ui.draw(cx);
 }

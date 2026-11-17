@@ -10,7 +10,7 @@ use gg_core::{Error, Result};
 use super::declared::{self, Declared, Kind};
 use super::id::Named;
 use super::table::{AnyColumn, ComponentId, Table};
-use super::{Component, Entity, Location, Parent, World};
+use super::{Bundle, Component, Entity, Location, Parent, World};
 use crate::reflect::{self, Ident, Reflect, Resolved, Shape, Type, Types, Value};
 use crate::{ModelNode, ModelRoot, PrefabRoot};
 
@@ -28,6 +28,14 @@ impl World {
     ///   ([`Component::exclusive`]).
     pub fn register<T: Component>(&mut self) -> Result<()> {
         self.components.register::<T>().map(drop)
+    }
+
+    /// Registers each type of `B`, a component or a tuple of up to 8, in order, as
+    /// [`register`](Self::register) does: `world.register_all::<(Player, Score)>()`.
+    ///
+    /// Fails as `register` does at the first it refuses; those before stay registered.
+    pub fn register_all<B: Bundle>(&mut self) -> Result<()> {
+        B::register(self)
     }
 
     /// Refuses, from now on, a Rust type that hasn't registered, as mods load in the world.

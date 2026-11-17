@@ -35,6 +35,8 @@ pub(crate) struct Uis {
     /// Whether a UI took the event ([`GameUi::event`]); the layer stack reads it as the layer
     /// handling the event.
     pub(super) consumed: bool,
+    /// What [`GameUi::set_text_fmt`] writes, kept for its room.
+    pub(super) written: String,
 }
 
 /// A UI's file, shared by the UIs added from it: its name (asset ID, else path, as for a texture),

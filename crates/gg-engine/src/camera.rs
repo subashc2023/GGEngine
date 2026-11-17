@@ -422,14 +422,12 @@ impl OrthographicCameraController {
             negative: Source::PadTrigger(Trigger::Right),
             positive: Source::PadTrigger(Trigger::Left),
         };
-        let bound = [
+        let bound = actions.bind_all([
             (CameraAction::Move, Binding::WASD),
             (CameraAction::Move, Binding::stick(Stick::Right)),
             (CameraAction::Turn, turn),
             (CameraAction::Turn, triggers),
-        ]
-        .into_iter()
-        .try_for_each(|(action, binding)| actions.bind(action, binding));
+        ]);
         bound.expect("the controller's own bindings are each of one kind, of other sources");
         Self {
             viewpoint,
@@ -557,7 +555,7 @@ impl FlyCameraController {
             negative: Source::PadTrigger(Trigger::Left),
             positive: Source::PadTrigger(Trigger::Right),
         };
-        let bound = [
+        let bound = actions.bind_all([
             (FlyAction::Move, Binding::WASD),
             (FlyAction::Move, Binding::stick(Stick::Left)),
             (FlyAction::Rise, rise),
@@ -567,9 +565,7 @@ impl FlyCameraController {
                 FlyAction::Drag,
                 Binding::Button(Source::Button(MouseButton::Right)),
             ),
-        ]
-        .into_iter()
-        .try_for_each(|(action, binding)| actions.bind(action, binding));
+        ]);
         bound.expect("the controller's own bindings are each of one kind, of other sources");
         Self {
             viewpoint,
@@ -1246,11 +1242,7 @@ mod tests {
         let mut cx = Context::new(None);
         let mut controller = OrthographicCameraController::new(viewpoint());
         controller.actions.unbind(CameraAction::Move);
-        let arrows = Binding::Axis2 {
-            x: [Key::ArrowLeft, Key::ArrowRight].map(Source::Key),
-            y: [Key::ArrowDown, Key::ArrowUp].map(Source::Key),
-        };
-        let bound = controller.actions.bind(CameraAction::Move, arrows);
+        let bound = controller.actions.bind(CameraAction::Move, Binding::ARROWS);
         bound.expect("the arrows are free");
         hold(&mut controller, &mut cx, &[Key::KeyW]);
         controller.update(&mut cx, Duration::from_secs(1));

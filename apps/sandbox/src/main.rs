@@ -24,8 +24,7 @@ fn main() -> ExitCode {
 fn app() -> App {
     let app = App::new("Sandbox").root(env!("CARGO_MANIFEST_DIR"));
     let app = app.custom_title_bar();
-    let app = app.layer(Sandbox::new()).overlay(gg_engine::PerfPanel);
-    app.overlay(gg_engine::Inspector::default())
+    app.layer(Sandbox::new()).dev_panels()
 }
 
 /// The swarm's depth, behind the grid's 0.2 in its scene. The camera sees from 1 behind it to 1 in
@@ -125,8 +124,7 @@ struct GridCell {
 }
 
 fn register(world: &mut World) -> Result<(), Error> {
-    world.register::<Drifter>()?;
-    world.register::<GridCell>()
+    world.register_all::<(Drifter, GridCell)>()
 }
 
 /// The sandbox's scene `name`: `grid.ron` is the grid, 10 by 10 squares 2 units across.

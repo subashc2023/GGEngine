@@ -39,6 +39,8 @@ mod tests;
 mod uis;
 mod widgets;
 
+use std::fmt::{self, Write as _};
+use std::mem;
 use std::sync::Arc;
 
 use gg_core::math::{Vec2, Vec4};
@@ -755,6 +757,19 @@ impl GameUi {
         }
         state.set[found].text = true;
         Ok(())
+    }
+
+    /// Like [`set_text`](Self::set_text), with `text` formatted into a string the UIs keep, so
+    /// setting a number each frame allocates nothing: `ui.set_text_fmt(cx, "score", score)`.
+    ///
+    /// Fails as `set_text` does.
+    pub fn set_text_fmt(self, cx: &mut Context, name: &str, text: impl fmt::Display) -> Result<()> {
+        let mut written = mem::take(&mut cx.ui_parts().uis.written);
+        written.clear();
+        write!(written, "{text}").expect("a string takes any text");
+        let set = self.set_text(cx, name, &written);
+        cx.ui_parts().uis.written = written;
+        set
     }
 
     /// Shows or hides the node named `name` and what's under it from now on, kept when the file is

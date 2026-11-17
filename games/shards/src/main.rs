@@ -50,8 +50,7 @@ fn app() -> App {
     let app = App::new("Shards")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    let app = app.layer(Shards::new()).overlay(gg_engine::PerfPanel);
-    app.overlay(gg_engine::Inspector::default())
+    app.layer(Shards::new()).dev_panels()
 }
 
 /// How far the arena's inside reaches from its middle, across and up.
@@ -234,19 +233,15 @@ struct Shards {
 impl Shards {
     fn new() -> Self {
         let mut actions = Actions::default();
-        let arrows = Binding::Axis2 {
-            x: [Key::ArrowLeft, Key::ArrowRight].map(Source::Key),
-            y: [Key::ArrowDown, Key::ArrowUp].map(Source::Key),
-        };
         let d_pad = Binding::Axis2 {
             x: [PadButton::DPadLeft, PadButton::DPadRight].map(Source::PadButton),
             y: [PadButton::DPadDown, PadButton::DPadUp].map(Source::PadButton),
         };
         let key = |key| Binding::Button(Source::Key(key));
         let pad = |button| Binding::Button(Source::PadButton(button));
-        let bound = [
+        let bound = actions.bind_all([
             (Act::Steer, Binding::WASD),
-            (Act::Steer, arrows),
+            (Act::Steer, Binding::ARROWS),
             (Act::Steer, Binding::stick(Stick::Left)),
             (Act::Steer, d_pad),
             (Act::Dash, key(Key::Space)),
@@ -262,9 +257,7 @@ impl Shards {
             (Act::Choose, key(Key::Enter)),
             (Act::Choose, key(Key::Space)),
             (Act::Choose, pad(PadButton::South)),
-        ]
-        .into_iter()
-        .try_for_each(|(action, binding)| actions.bind(action, binding));
+        ]);
         bound.expect("the game's bindings are each of one kind, of other sources");
         Self {
             player: 0,
@@ -491,9 +484,7 @@ impl Layer for Shards {
 /// Registers the game's components, so its scene and the tool API know them before any entity has
 /// one.
 fn register(world: &mut World) -> Result<(), Error> {
-    world.register::<Player>()?;
-    world.register::<Shard>()?;
-    world.register::<Match>()
+    world.register_all::<(Player, Shard, Match)>()
 }
 
 /// Builds what the arena's scene doesn't hold: the camera, the match, the players and the first

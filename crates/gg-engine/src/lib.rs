@@ -527,6 +527,12 @@ impl App {
         self
     }
 
+    /// Adds the [`PerfPanel`] and [`Inspector`] overlays, in that order.
+    #[must_use]
+    pub fn dev_panels(self) -> Self {
+        self.overlay(PerfPanel).overlay(Inspector::default())
+    }
+
     /// Has the UI draw the app's window frames instead of the OS: for tools, which want the room.
     /// Games keep the OS's frame, as does a build without `dev`. On macOS the OS keeps its buttons
     /// and edges.

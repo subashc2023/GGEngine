@@ -978,6 +978,9 @@ const _: () = {
 
 /// What only this module implements.
 mod seal {
+    use gg_core::Result;
+
+    use super::World;
     use super::table::{ComponentId, Components, Table};
 
     pub trait Bundle: Send + Sync + 'static {
@@ -989,6 +992,9 @@ mod seal {
 
         /// Pushes its components onto their columns of `table`, whose ids are `ids`, in its order.
         fn push(self, table: &mut Table, ids: &[ComponentId]);
+
+        /// [`World::register_all`].
+        fn register(world: &mut World) -> Result<()>;
     }
 }
 
@@ -1002,6 +1008,10 @@ impl<T: Writable> seal::Bundle for T {
     fn push(self, table: &mut Table, ids: &[ComponentId]) {
         table.push(ids[0], self);
     }
+
+    fn register(world: &mut World) -> Result<()> {
+        world.register::<T>()
+    }
 }
 
 impl<T: Writable> Bundle for T {}
@@ -1012,6 +1022,10 @@ impl seal::Bundle for () {
     fn ids(_: &mut Components, _: &mut [ComponentId]) {}
 
     fn push(self, _: &mut Table, _: &[ComponentId]) {}
+
+    fn register(_: &mut World) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl Bundle for () {}
@@ -1027,6 +1041,11 @@ macro_rules! tuple_bundle {
 
             fn push(self, table: &mut Table, ids: &[ComponentId]) {
                 $(table.push(ids[$i], self.$i);)+
+            }
+
+            fn register(world: &mut World) -> Result<()> {
+                $(world.register::<$T>()?;)+
+                Ok(())
             }
         }
 
