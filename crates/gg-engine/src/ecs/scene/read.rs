@@ -407,6 +407,55 @@ pub(super) fn ids(text: &str) -> Result<Vec<EntityId>> {
     keys.entities.keys().map(|id| id.parse()).collect()
 }
 
+/// The folders scene `text`'s worlds keep their cells' files in, from the asset root.
+///
+/// They're in ID order, read from its syntax alone, for a tool to list those files as a world's
+/// cells, not as scenes. A [`Cells`](crate::Cells) a prefab gives, or one without its folder,
+/// gives none.
+///
+/// Fails with `scene.syntax` for text that isn't a scene's RON or enables RON's extensions.
+#[cfg(feature = "dev")]
+pub fn cells_folders(text: &str) -> Result<Vec<String>> {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer};
+
+    #[derive(Deserialize)]
+    struct Scene {
+        entities: BTreeMap<String, Components>,
+    }
+    // The rest go unread.
+    #[derive(Deserialize)]
+    struct Components {
+        #[serde(rename = "Cells", default, deserialize_with = "given")]
+        cells: Option<Cells>,
+    }
+    #[derive(Deserialize)]
+    struct Cells {
+        #[serde(default, deserialize_with = "given")]
+        folder: Option<String>,
+    }
+    /// A value written bare, as scenes write them, which `ron` reads as an `Option` only in
+    /// `Some(...)`.
+    fn given<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+        value: D,
+    ) -> std::result::Result<Option<T>, D::Error> {
+        T::deserialize(value).map(Some)
+    }
+
+    let mut deserializer = deserializer(text)?;
+    let scene = Scene::deserialize(&mut deserializer).and_then(|scene| {
+        deserializer.end()?;
+        Ok(scene)
+    });
+    let scene = scene.map_err(|error| syntax(&deserializer.span_error(error)))?;
+    let cells = scene
+        .entities
+        .into_values()
+        .filter_map(|entity| entity.cells);
+    Ok(cells.filter_map(|cells| cells.folder).collect())
+}
+
 /// The `Parent` item of an entity that would be its own ancestor, if any.
 fn cycle(entities: &[Loaded]) -> Option<u32> {
     const NEW: u8 = 0;

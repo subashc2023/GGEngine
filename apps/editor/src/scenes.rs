@@ -4,16 +4,20 @@
 //! - The open scene's row is lit, and marked while it has unsaved edits. The start scene's is
 //!   tagged.
 //! - New, as the File menu's.
-//! - An open world of cells, as the tool API's `cells` reads it, is tagged. Its cells are listed
-//!   only under it, folded, each marked while it's in and while a save would write its file. A
-//!   click on one frames it in the editor's camera.
+//! - A world's cells' files aren't listed as scenes: its file names their folder, or the tool
+//!   API's `cells` does while it's open.
+//! - An open world of cells, as `cells` reads it, is tagged. Its cells are listed under it,
+//!   folded, each marked while it's in and while a save would write its file. A click on one
+//!   frames it in the editor's camera.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use gg_api::WorldCells;
+use gg_engine::ecs::{cells_folders, read_scene};
 use gg_engine::egui::{
     self, Align, Atom, Button, CollapsingHeader, Layout, ScrollArea, Shape, Stroke, Vec2, vec2,
 };
@@ -44,13 +48,17 @@ pub struct Scenes {
     /// The start scene, as the asset root names it.
     start: Option<String>,
     listed: Option<Listed>,
+    /// Each scene file's [`cells_folders`] as last read, and when it was modified then.
+    worlds: HashMap<PathBuf, (SystemTime, Vec<String>)>,
 }
 
-/// The scenes as last listed: each folder's in the manifest's order, and why each folder that
-/// couldn't be listed couldn't.
+/// The scenes as last listed: each folder's in the manifest's order, their worlds' cells' folders,
+/// and why each folder that couldn't be listed couldn't.
 struct Listed {
     at: Instant,
     scenes: Vec<Scene>,
+    /// As the asset root names them, each with a `/` after.
+    cells: Vec<String>,
     unlisted: Vec<String>,
 }
 
@@ -73,6 +81,7 @@ impl Scenes {
             folders,
             start,
             listed: None,
+            worlds: HashMap::new(),
         }
     }
 
@@ -99,9 +108,12 @@ impl Scenes {
         }
         let listed = self.listed.as_ref()?;
         let mut chosen = None;
-        // A world's cells' files are its cells, listed under it.
-        let folder = cells.map(|cells| format!("{}/", cells.folder));
-        let in_folder = |scene: &Scene| folder.as_ref().is_some_and(|f| scene.name.starts_with(f));
+        // A world's cells' files are its cells, listed under it while it's open.
+        let world = cells.map(|cells| format!("{}/", cells.folder));
+        let in_folder = |scene: &Scene| {
+            let mut folders = listed.cells.iter().chain(&world);
+            folders.any(|folder| scene.name.starts_with(folder.as_str()))
+        };
         let scenes = || listed.scenes.iter().filter(|scene| !in_folder(scene));
         ui.horizontal(|ui| {
             match scenes().count() {
@@ -197,9 +209,51 @@ impl Scenes {
         }
         self.listed = Some(Listed {
             at: now,
+            cells: self.cells(&scenes),
             scenes,
             unlisted,
         });
+    }
+
+    /// The folders `scenes`' worlds keep their cells' files in, each with a `/` after, as their
+    /// files say ([`cells_folders`]). It reads a file only if it changed since it last did, and
+    /// isn't a cell. One that doesn't read as a scene has no cells; opening it says why.
+    fn cells(&mut self, scenes: &[Scene]) -> Vec<String> {
+        let mut by_depth: Vec<&Scene> = scenes.iter().collect();
+        // A world's cells, in a folder under it, are known as cells before they'd be read.
+        by_depth.sort_by_key(|scene| scene.name.matches('/').count());
+        let mut folders: Vec<String> = Vec::new();
+        let mut worlds = HashMap::new();
+        for scene in by_depth {
+            if folders
+                .iter()
+                .any(|folder| scene.name.starts_with(folder.as_str()))
+            {
+                continue;
+            }
+            let Ok(modified) = fs::metadata(&scene.path).and_then(|file| file.modified()) else {
+                continue;
+            };
+            let known = self.worlds.remove(&scene.path);
+            let found = match known.filter(|(read, _)| *read == modified) {
+                Some((_, found)) => found,
+                // Only a text that says `Cells` is parsed: a debug build parsed the showcase's 44
+                // scenes in 219 ms, its 2 worlds in 21.
+                None => read_scene(&scene.path)
+                    .and_then(|text| {
+                        if text.contains("Cells") {
+                            cells_folders(&text)
+                        } else {
+                            Ok(Vec::new())
+                        }
+                    })
+                    .unwrap_or_default(),
+            };
+            folders.extend(found.iter().map(|folder| format!("{folder}/")));
+            worlds.insert(scene.path.clone(), (modified, found));
+        }
+        self.worlds = worlds;
+        folders
     }
 }
 
@@ -412,6 +466,57 @@ mod tests {
             click(&mut panel, true, find(&shown, "New").center()),
             Some(Chosen::New)
         );
+    }
+
+    /// A world's cells' files aren't listed as scenes while its file names their folder, though no
+    /// world is open. Once it no longer does, they are.
+    #[test]
+    fn a_worlds_cells_files_are_not_scenes() {
+        let scratch = Scratch::new("scenes-world");
+        let folders = root(&scratch);
+        fs::create_dir_all(scratch.0.join("scenes/world")).expect("made");
+        for cell in ["0_0_0", "1_0_0"] {
+            let path = scratch.0.join(format!("scenes/world/{cell}.ron"));
+            fs::write(path, "(\n    entities: {},\n)\n").expect("written");
+        }
+        let world = scratch.0.join("scenes/world.ron");
+        let cells = r#"(
+    entities: {
+        "00000000000000a0": (
+            Cells: (
+                folder: "scenes/world",
+                size: 10.0,
+            ),
+        ),
+    },
+)
+"#;
+        fs::write(&world, cells).expect("written");
+        let mut panel = Scenes::new(scratch.0.clone(), folders, None);
+        let ctx = egui::Context::default();
+        let shown = |panel: &mut Scenes| {
+            panel.list(Instant::now());
+            frame(&ctx, panel, (true, None), Vec::new()).1
+        };
+        let listed = shown(&mut panel);
+        find(&listed, "5 scenes");
+        find(&listed, "world");
+        assert!(
+            !listed.iter().any(|(text, _)| text.contains("world/")),
+            "{listed:?}"
+        );
+        // Its time moved on, as a rewrite within a tick of the file system's clock wouldn't.
+        let modified = fs::metadata(&world).and_then(|file| file.modified());
+        fs::write(&world, "(\n    entities: {},\n)\n").expect("written");
+        let file = fs::File::options()
+            .write(true)
+            .open(&world)
+            .expect("opened");
+        let later = modified.expect("modified") + Duration::from_secs(2);
+        file.set_modified(later).expect("set");
+        let listed = shown(&mut panel);
+        find(&listed, "7 scenes");
+        find(&listed, "world/1_0_0");
     }
 
     /// The open world's row is tagged, its cells' files listed only under it, folded until its

@@ -25,6 +25,8 @@
 //! - Values nest at most [`MAX_DEPTH`] levels.
 
 mod read;
+#[cfg(feature = "dev")]
+pub use read::cells_folders;
 mod template;
 #[cfg(test)]
 pub(super) mod tests;

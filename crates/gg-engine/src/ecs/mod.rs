@@ -58,6 +58,8 @@ pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 use resources::Resources;
 pub use resources::{Resource, Saved};
+#[cfg(feature = "dev")]
+pub use scene::cells_folders;
 pub(crate) use scene::read_scene_from;
 pub(crate) use scene::{MAX_DEPTH, Parsed, float, quote};
 pub use scene::{read_scene, write_scene};

@@ -392,6 +392,44 @@ fn exactly_the_entities_given_save_and_a_texts_ids_read_from_its_syntax() {
     }
 }
 
+/// A scene's worlds' cells' folders read from its syntax alone, in ID order, whatever types it
+/// names. A `Cells` without its folder gives none.
+#[cfg(feature = "dev")]
+#[test]
+fn a_scenes_cells_folders_read_from_its_syntax() {
+    let text = r#"(
+    entities: {
+        "00000000000000b0": (
+            Cells: (
+                folder: "scenes/b",
+                size: 8.0,
+            ),
+            Gone: (),
+        ),
+        "00000000000000a0": (
+            Cells: (
+                folder: "scenes/a",
+            ),
+        ),
+        "00000000000000c0": (
+            Cells: (
+                size: 8.0,
+            ),
+        ),
+        "00000000000000d0": (
+            Name: ("none"),
+        ),
+    },
+)
+"#;
+    let folders = super::cells_folders(text).expect("read");
+    assert_eq!(folders, ["scenes/a", "scenes/b"]);
+    for text in ["(entities: {", "#![enable(implicit_some)]\n(entities: {})"] {
+        let error = super::cells_folders(text).expect_err(text);
+        assert_eq!(error.code(), "scene.syntax", "{text}: {error}");
+    }
+}
+
 #[test]
 fn a_refused_scene_changes_nothing_and_says_where() {
     let about = |path: &str| format!("can't load `{path}` of entity 9f86d081884c7d65: ");
