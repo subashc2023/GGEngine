@@ -11,9 +11,7 @@
 
 use std::process::ExitCode;
 
-use gg_engine::{
-    App, Context, Layer, Scripts, Tick, World, step_animation, step_navigation, step_physics,
-};
+use gg_engine::prelude::*;
 
 fn main() -> ExitCode {
     gg_engine::run(App::new("Player").from_package().layer(Player::default()))

@@ -251,6 +251,17 @@ pub use sky::{Atmosphere, Sky};
 use snapshot::Snapshot;
 pub use transform::Transform;
 
+/// What most games name, for `use gg_engine::prelude::*;`.
+pub mod prelude {
+    pub use crate::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+    pub use crate::{
+        Actions, Align, App, Binding, Blend, Bus, Change, Commands, Component, Context, Entity,
+        Error, Event, Font, Key, Layer, Mesh, MouseButton, PadButton, Place, Projection, Reflect,
+        Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Transform, World,
+        step_animation, step_navigation, step_physics,
+    };
+}
+
 const BUILD: &str = if cfg!(debug_assertions) {
     "debug"
 } else {

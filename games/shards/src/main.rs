@@ -35,12 +35,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_engine::math::{DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::DVec3;
+use gg_engine::prelude::*;
 use gg_engine::{
-    Actions, Align, App, Binding, Blend, BodyType, Bus, Camera, Change, Circle, CircleCollider2D,
-    Commands, Component, Context, Entity, Error, Event, Font, Grant, Key, Layer, Mesh, Mods,
-    MouseButton, Name, Owner, PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D,
-    Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Transform, World, step_physics,
+    BodyType, Camera, Circle, CircleCollider2D, Grant, Mods, Name, Owner, Physics2D, RigidBody2D,
 };
 
 fn main() -> ExitCode {

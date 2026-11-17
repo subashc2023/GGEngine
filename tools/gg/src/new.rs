@@ -85,7 +85,7 @@ const MAIN: &str = r#"//! {name}, a game made with GGEngine.
 
 use std::process::ExitCode;
 
-use gg_engine::{App, Context, Layer};
+use gg_engine::prelude::*;
 
 fn main() -> ExitCode {
     gg_engine::run(app())

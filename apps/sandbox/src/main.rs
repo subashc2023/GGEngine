@@ -10,13 +10,10 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use gg_engine::Error;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
-use gg_engine::math::{self, EulerRot, Quat, Vec2, Vec3};
-use gg_engine::{
-    App, Commands, Component, Context, Entity, Event, Layer, OrthographicCameraController,
-    Projection, Reflect, Sprite, Tick, Transform, Ui, Viewpoint, World,
-};
+use gg_engine::math::{self, EulerRot};
+use gg_engine::prelude::*;
+use gg_engine::{OrthographicCameraController, Ui, Viewpoint};
 use tracing::{error, info};
 
 fn main() -> ExitCode {
