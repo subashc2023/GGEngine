@@ -1,6 +1,7 @@
-//! A probe: what shading takes and makes at one pixel of a game's view, for `gg probe` and the
-//! editor's Probe tool. It reads captures of the pixel, one per part of shading, a `pick` and a
-//! `look`, all of one world.
+//! A probe: what shading takes and makes at one pixel of a game's view.
+//!
+//! For `gg probe` and the editor's Probe tool. It reads captures of the pixel, one per part of
+//! shading, a `pick` and a `look`, all of one world.
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -88,9 +89,11 @@ pub struct Probe {
     pub quantized: String,
 }
 
-/// Probes pixel `at` of the game's view as shown, or its own with `own`, through `call`. It pauses
-/// a playing game meanwhile ([`while_paused`]), so that all is of one world, and takes a frame per
-/// capture: the view as shown, each of [`SHADING`] and the depth; then a `pick` and a `look`.
+/// Probes pixel `at` of the game's view as shown, or its own with `own`, through `call`.
+///
+/// It pauses a playing game meanwhile ([`while_paused`]), so that all is of one world, and takes a
+/// frame per capture: the view as shown, each of [`SHADING`] and the depth; then a `pick` and a
+/// `look`.
 ///
 /// Fails as the calls do, and with `api.protocol` for an answer that isn't what the API says.
 pub fn probe(

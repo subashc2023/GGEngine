@@ -1,6 +1,8 @@
-//! For a game's build script: the digest of the source its code is compiled from. A session's hello
-//! names the build by it and the package's digest, so that runs of one source join whatever built
-//! them, and others are refused (ARCHITECTURE.md's Networking). A game's `build.rs` is
+//! For a game's build script: the digest of the source its code is compiled from.
+//!
+//! A session's hello names the build by it and the package's digest, so that runs of one source
+//! join whatever built them, and others are refused (ARCHITECTURE.md's Networking). A game's
+//! `build.rs` is
 //!
 //! ```no_run
 //! fn main() -> Result<(), gg_api::Failure> {
@@ -53,10 +55,11 @@ use crate::{Failure, Project};
 
 mod resource;
 
-/// For a game's build script, tells cargo `GG_SOURCE`, the digest in 16 hex digits; to rerun as any
-/// file it reads changes, the manifest and icon among them; with an icon, `GG_ICON`, its absolute
-/// path; and for a Windows target built by MSVC, to link `gg.res`, the resource file it writes in
-/// `OUT_DIR`.
+/// For a game's build script: tells cargo its source digest and, with an icon, the icon.
+///
+/// It sets `GG_SOURCE`, the digest in 16 hex digits; reruns as any file it reads changes, the
+/// manifest and icon among them; with an icon, sets `GG_ICON`, its absolute path; and for a Windows
+/// target built by MSVC, links `gg.res`, the resource file it writes in `OUT_DIR`.
 ///
 /// # Errors
 ///
@@ -153,9 +156,11 @@ fn check_icon(path: &Path, png: &[u8]) -> Result<(), Failure> {
     }
 }
 
-/// For gg-engine's build script: checks that Luau's C++ (mlua's, through luau0-src and cc) compiles
-/// for `target` on `host` with `-ffp-contract=off`, which fuses no multiplication into an addition,
-/// so that scripts give the same bits everywhere. `var` reads an environment variable.
+/// For gg-engine's build script: checks that Luau's C++ compiles for `target` on `host` with
+/// `-ffp-contract=off`.
+///
+/// The flag fuses no multiplication into an addition, so that scripts give the same bits
+/// everywhere. Luau's C++ is mlua's, through luau0-src and cc. `var` reads an environment variable.
 ///
 /// The flag must come from `LUAU_CXXFLAGS`, the one variable luau0-src rebuilds Luau for; cc, its
 /// cargo metadata off, reports none of its own. cc 1.9 passes luau0-src's flags, then its own

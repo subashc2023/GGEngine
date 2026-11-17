@@ -1,6 +1,7 @@
-//! Assets' ID files, `<file>.meta` beside each texture, model, font, prefab and UI under a game's
-//! asset root, which name an asset beyond its file's name (ARCHITECTURE.md's Project state): their
-//! text, and the scan that finds them.
+//! Assets' ID files (`<file>.meta`) and the scan that finds them.
+//!
+//! An ID file sits beside each texture, model, font, prefab and UI under a game's asset root and
+//! names the asset beyond its file's name (ARCHITECTURE.md's Project state).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -115,10 +116,11 @@ impl AssetKind {
     }
 }
 
-/// An asset's ID file, `<file>.meta` beside it: canonical RON, a part to a line, as
-/// [`text`](Self::text) writes it: `(`, `    id: "5f3c9a1e07b2d846",`, `)`. `id` is required; a
-/// part added later, as import settings will be, takes its default where a file leaves it out; an
-/// unknown part is refused.
+/// An asset's ID file, `<file>.meta` beside it.
+///
+/// Canonical RON, a part to a line, as [`text`](Self::text) writes it: `(`,
+/// `    id: "5f3c9a1e07b2d846",`, `)`. `id` is required; a part added later, as import settings will
+/// be, takes its default where a file leaves it out; an unknown part is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meta {
     pub id: AssetId,
@@ -193,11 +195,13 @@ pub struct Scan {
     pub unread: Vec<Unread>,
 }
 
-/// An asset [`scan`] found: its path from the root, `/` between parts, such as `assets/stone.png`;
-/// the file, as the scan reached it; its stamp, `None` if its listing gave none; its kind; and its
-/// ID file: `None` if there's none, or what it holds, or why it doesn't. That's `asset.bad_meta`
-/// for one that doesn't read or isn't a regular file, and `asset.meta_case` for one whose name
-/// matches only ignoring case, whose path from the root `misnamed` gives.
+/// An asset [`scan`] found.
+///
+/// Its path from the root, `/` between parts, such as `assets/stone.png`; the file, as the scan
+/// reached it; its stamp, `None` if its listing gave none; its kind; and its ID file: `None` if
+/// there's none, or what it holds, or why it doesn't. That's `asset.bad_meta` for one that doesn't
+/// read or isn't a regular file, and `asset.meta_case` for one whose name matches only ignoring
+/// case, whose path from the root `misnamed` gives.
 #[derive(Debug, PartialEq)]
 pub struct Scanned {
     pub path: String,
@@ -208,9 +212,11 @@ pub struct Scanned {
     pub misnamed: Option<String>,
 }
 
-/// An ID file whose asset isn't there as a regular file, though a link or a folder of its name,
-/// which the scan doesn't take, may be: its path from the root, such as `assets/gone.png.meta`; the
-/// file, as the scan reached it; its asset's kind; and what it holds, or why it doesn't read.
+/// An ID file whose asset isn't there as a regular file.
+///
+/// A link or a folder of the asset's name, which the scan doesn't take, may be. Holds the path from
+/// the root, such as `assets/gone.png.meta`; the file, as the scan reached it; its asset's kind;
+/// and what it holds, or why it doesn't read.
 #[derive(Debug, PartialEq)]
 pub struct Orphan {
     pub path: String,
@@ -227,8 +233,9 @@ pub struct Unread {
     pub error: String,
 }
 
-/// Scans the asset root `root` for textures, models, fonts, prefabs and UIs and their ID files, in
-/// every folder under it but those starting `.`, those named `target`, and at its top
+/// Scans the asset root `root` for assets and their ID files.
+///
+/// It looks in every folder under it but those starting `.`, those named `target`, and at its top
 /// [`UNBUILT`]'s, which a package's root holds. It never goes through a link, and finds each ID
 /// file by its exact name: asking the file system instead would answer otherwise on Windows' and
 /// macOS's, which ignore case, than on Linux's.
@@ -352,10 +359,11 @@ pub fn files(root: &Path) -> (Vec<Found>, Vec<Unread>) {
     (found, unread)
 }
 
-/// Whether [`scan`] and [`files`] reach the file at `path` from the asset root, by the names on the
-/// way: none hidden, and no folder they skip as built, so that an asset a game writes there is in
-/// the next scan and its package. A link on the way, which they never go through, is the caller's
-/// to look for, as a path the disk resolved has none.
+/// Whether [`scan`] and [`files`] reach the file at `path` from the asset root, by its names.
+///
+/// None hidden, and no folder they skip as built, so that an asset a game writes there is in the
+/// next scan and its package. A link on the way, which they never go through, is the caller's to
+/// look for, as a path the disk resolved has none.
 pub fn reached(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
     let (_, folders) = parts.split_last().expect("a split gives a part at least");

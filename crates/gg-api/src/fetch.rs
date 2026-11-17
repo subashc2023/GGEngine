@@ -1,7 +1,9 @@
-//! A project's fetch list, `fetch.ron` beside its manifest: the files its game uses that its
-//! repository doesn't hold, as models whose licenses keep them out. `gg fetch` fetches each from a
-//! folder at a URL pinned to what it holds, as a repository's at a commit, checks its SHA-256, and
-//! puts it in a project folder the repository ignores.
+//! A project's fetch list, `fetch.ron` beside its manifest.
+//!
+//! It names the files its game uses that its repository doesn't hold, as models whose licenses keep
+//! them out. `gg fetch` fetches each from a folder at a URL pinned to what it holds, as a
+//! repository's at a commit, checks its SHA-256, and puts it in a project folder the repository
+//! ignores.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

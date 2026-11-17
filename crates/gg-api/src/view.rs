@@ -1,6 +1,8 @@
-//! A game's view as it renders, shared with a client: memory the client makes and names in a
-//! `view` request, which the game writes each frame into and the client reads from, neither
-//! waiting for the other. It holds a triple buffer of pixels: the slot the game writes, the one the
+//! A game's view as it renders, shared with a client.
+//!
+//! The memory is made and named by the client in a `view` request; the game writes each frame into
+//! it and the client reads from it, neither waiting for the other. It holds a triple buffer of
+//! pixels: the slot the game writes, the one the
 //! client reads, and the latest published. The game swaps its slot for the latest as it publishes,
 //! and the client its own as it takes, each by one atomic exchange, so that neither touches a slot
 //! the other has. A header before them holds what both read: the size the client asks for, the
