@@ -6,8 +6,11 @@ use gg_api::{Fetch, Project};
 use gg_engine::Transform;
 use gg_engine::math::{DVec3, Quat, Vec3};
 use gg_engine::reflect::Value;
+use gg_engine::{ParticleEmitter, UiValue};
 
 use super::*;
+use crate::components::{Burster, Chime, MAX_PITCH, Plasma, StateLabel};
+use crate::systems::RING;
 
 /// The game's project's directory.
 fn dir() -> &'static Path {
