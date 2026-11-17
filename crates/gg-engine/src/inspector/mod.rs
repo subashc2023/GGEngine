@@ -1,13 +1,14 @@
-//! The inspector: the Entities panel, which lists the world's entities as the tree of its
-//! hierarchy and creates, duplicates and deletes them, and the Inspector panel, which shows the
-//! picked entity's components, edits their fields, and adds and removes them. It reaches the world
-//! only through its by-name calls, IDs and hierarchy, as the tool API will, so an editor can show
-//! it for a game in another process. It names entities by their names, where they have one, and
-//! their IDs. Its edits and operations are its commands: the panels queue them, its next tick
-//! makes them, and a recording keeps them. Its link lets another layer pick and edit as the panels
-//! do. A remote Inspector shows a game's world in another process through the tool API, and edits
-//! it through the API. Development builds alone have the UI (`dev`): a build without it has
-//! `none.rs` in its place.
+//! The inspector: the Entities and Inspector panels.
+//!
+//! The Entities panel lists the world's entities as the tree of its hierarchy and creates,
+//! duplicates and deletes them. The Inspector panel shows the picked entity's components, edits
+//! their fields, and adds and removes them. It reaches the world only through its by-name calls,
+//! IDs and hierarchy, as the tool API will, so an editor can show it for a game in another process.
+//! It names entities by their names, where they have one, and their IDs. Its edits and operations
+//! are its commands: the panels queue them, its next tick makes them, and a recording keeps them.
+//! Its link lets another layer pick and edit as the panels do. A remote Inspector shows a game's
+//! world in another process through the tool API, and edits it through the API. Development builds
+//! alone have the UI (`dev`): a build without it has `none.rs` in its place.
 
 mod commands;
 mod entities;

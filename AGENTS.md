@@ -36,7 +36,8 @@ ARCHITECTURE.md: check the rest yourself.
 A crate's docs are its root `//!` and its items' docs (`cargo doc --no-deps --open`, or the source).
 
 - What games use (`App`, `Layer`, `Context`, `Ui`, the world, assets, input): [gg-engine's
-  root](crates/gg-engine/src/lib.rs). Working in it: [its AGENTS.md](crates/gg-engine/AGENTS.md).
+  root](crates/gg-engine/src/lib.rs) and its `prelude`. Working in it: [its
+  AGENTS.md](crates/gg-engine/AGENTS.md).
 - Rendering: [ARCHITECTURE.md's Rendering](ARCHITECTURE.md#rendering), [gg-renderer's
   root](crates/gg-renderer/src/lib.rs), and each shader's header in [its
   shaders](crates/gg-renderer/shaders). Vulkan: [gg-gpu's root](crates/gg-gpu/src/lib.rs).
@@ -77,7 +78,7 @@ cargo test -p gg-renderer --test gpu -- picks    # the GPU tests whose names con
 cargo gg help                                    # every command; `cargo gg help <command>` for one
 cargo gg run sandbox                             # supervised, serving the tool API
 cargo gg run --peers 2 [-- --rollback]           # in games/shards: a host and a joiner
-cargo gg new <NAME>                              # a new game in games/NAME
+cargo gg new <NAME>                              # a new game in games/NAME: a square keys move
 cargo install --locked --path tools/gg           # `gg`, for games of their own
 gg new <NAME> --engine <ENGINE>                  # outside: ./NAME; ENGINE a checkout or URL#REV
 cargo run -p cook -- games/shards target/debug/gg-shards.ggpk   # for a build --no-default-features

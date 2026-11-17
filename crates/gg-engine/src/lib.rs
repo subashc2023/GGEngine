@@ -685,9 +685,10 @@ pub fn run(app: App) -> ExitCode {
     run_args(app, started, &program, argv)
 }
 
-/// Like [`run`], with `args` in place of the process's arguments after its name. For tests, whose
-/// own are their harness's, and apps that take their own flags first, like the editor. `--help`'s
-/// usage names the program after the app.
+/// Like [`run`], with `args` in place of the process's arguments after its name.
+///
+/// For tests, whose own are their harness's, and apps that take their own flags first, like the
+/// editor. `--help`'s usage names the program after the app.
 pub fn run_with(app: App, args: impl IntoIterator<Item = impl Into<OsString>>) -> ExitCode {
     let program = app.name.to_lowercase();
     let args = args.into_iter().map(Into::into);

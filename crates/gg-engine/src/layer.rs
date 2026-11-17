@@ -198,9 +198,10 @@ pub trait Layer {
     }
 }
 
-/// A layer's type-erased queue of commands, from [`Layer::commands`]. The engine reads it each
-/// tick to record and fills it to replay, each command as a reflection [`Value`]. A `Vec` of a
-/// [`Reflect`] type, such as an enum that derives it, is one.
+/// A layer's type-erased queue of commands, from [`Layer::commands`].
+///
+/// The engine reads it each tick to record and fills it to replay, each command as a reflection
+/// [`Value`]. A `Vec` of a [`Reflect`] type, such as an enum that derives it, is one.
 pub trait Commands {
     /// How many are queued.
     fn len(&self) -> usize;

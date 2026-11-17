@@ -1,7 +1,9 @@
-//! A build without `dev`: the dock items games name, so game code, layers' `ui` included, compiles
-//! unchanged and draws nothing. [`Ui`] has no values and `dev`'s signatures; its methods never run,
-//! as the engine has no `Ui` to give [`Layer::ui`](crate::Layer::ui). [`Docked`] is `dev`'s, and
-//! [`App::dock`](crate::App::dock) ignores it.
+//! A build without `dev`: the dock items games name, which draw nothing.
+//!
+//! Game code, layers' `ui` included, compiles unchanged. [`Ui`] has no values and `dev`'s
+//! signatures; its methods never run, as the engine has no `Ui` to give
+//! [`Layer::ui`](crate::Layer::ui). [`Docked`] is `dev`'s, and [`App::dock`](crate::App::dock)
+//! ignores it.
 
 use std::convert::Infallible;
 use std::fmt::Debug;

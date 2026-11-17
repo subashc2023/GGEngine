@@ -1,6 +1,7 @@
-//! Docking: panels layers show. Users arrange them in tabs and splits around the central area,
-//! tear them into windows, close and reopen them, and save layouts by name. Only `dev` builds have
-//! it; others have `none.rs`.
+//! Docking: panels layers show.
+//!
+//! Users arrange them in tabs and splits around the central area, tear them into windows, close and
+//! reopen them, and save layouts by name. Only `dev` builds have it; others have `none.rs`.
 
 mod docked;
 mod file;
