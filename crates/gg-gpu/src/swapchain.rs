@@ -16,6 +16,8 @@ pub struct Swapchain {
     raw: vk::SwapchainKHR,
     format: vk::SurfaceFormatKHR,
     present_mode: vk::PresentModeKHR,
+    /// The surface's, which [`Swapchain::set_vsync`] chooses from.
+    present_modes: Vec<vk::PresentModeKHR>,
     /// Signaled by each paced acquire once the display has let go of the image; reset after the
     /// wait on it.
     available: vk::Fence,
@@ -101,6 +103,7 @@ impl Swapchain {
             raw: vk::SwapchainKHR::null(),
             format,
             present_mode,
+            present_modes,
             available,
             available_owed: false,
             extent: vk::Extent2D::default(),
@@ -137,6 +140,17 @@ impl Swapchain {
         self.window_extent = vk::Extent2D { width, height };
         if self.window_extent != self.extent {
             self.stale = true;
+        }
+    }
+
+    /// Presents at the display's refresh rate from the next frame with `vsync`, or as fast as
+    /// frames render without, as [`Swapchain::new`] says. A change rebuilds the swapchain.
+    pub fn set_vsync(&mut self, vsync: bool) {
+        let mode = choose_present_mode(&self.present_modes, vsync);
+        if mode != self.present_mode {
+            self.present_mode = mode;
+            self.stale = true;
+            info!(window = self.surface.name(), present_mode = ?mode, "Present mode changed");
         }
     }
 
@@ -245,6 +259,7 @@ impl Swapchain {
         if !modes.contains(&self.present_mode) {
             self.present_mode = vk::PresentModeKHR::FIFO;
         }
+        self.present_modes = modes;
         // The lost surface goes here, after the swapchain made on it.
         self.surface = surface;
         self.surface_lost = false;

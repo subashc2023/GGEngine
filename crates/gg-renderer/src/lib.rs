@@ -452,6 +452,23 @@ impl Renderer {
         }
     }
 
+    /// Whether windows present at the display's refresh rate ([`Renderer::set_vsync`]).
+    pub fn vsync(&self) -> bool {
+        self.vsync
+    }
+
+    /// Presents every window at the display's refresh rate from the next frame with `vsync`, or
+    /// as fast as frames render without, as [`Settings::vsync`] says. Headless, it does nothing.
+    pub fn set_vsync(&mut self, vsync: bool) {
+        self.vsync = vsync;
+        if let Output::Window(swapchain) = &mut self.output {
+            swapchain.set_vsync(vsync);
+        }
+        for window in &mut self.windows {
+            window.set_vsync(vsync);
+        }
+    }
+
     /// Renders a frame from `data` with `ui` over it, draws each other window's UI from `windows`
     /// over black, and presents them all. `windows` is in the order egui ran their passes, before
     /// `ui`'s: the order of their texture changes. A window not open, or with no swapchain image
