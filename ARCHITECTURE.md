@@ -244,7 +244,7 @@ server](crates/gg-engine/src/api/server.rs) how a game answers.
   through the game's window: only Windows and X11 let a process embed another's window, which it
   can't draw over. An embedded run (`--embedded`) renders at the client's size, a frame once the
   client has taken the last, and no faster than the look's cap. The editor takes one a display
-  refresh (`App::embeds_game`), and its frame rate limit sets the cap. Clients share one look,
+  refresh by default (`App::embeds_game`), and its game limit sets the cap. Clients share one look,
   part by part, the last setter of each winning: viewpoint, outline, grid, colliders, what shows in
   place of the light, passes left out, the cap. Extraction drops a pass left out, so the world is
   unchanged and the renderer has nothing to skip. Each frame carries its viewpoint and the look's

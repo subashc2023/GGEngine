@@ -350,6 +350,9 @@ pub struct Context {
     input: Input,
     cursor_grabbed: bool,
     max_fps: Option<NonZeroU32>,
+    /// Whether a windowed run presents at the display's refresh rate, as `--vsync` or the title
+    /// bar's settings' Match monitor set; the window hands it to the renderer each frame.
+    vsync: bool,
     clear_color: [f32; 4],
     /// Set in place of the world's environment's, as
     /// [`set_antialiasing`](Self::set_antialiasing) says.
@@ -578,6 +581,11 @@ pub(crate) struct Dev {
     /// the cap the settings set on that game.
     pub(crate) embeds_game: bool,
     pub(crate) game_max_fps: Option<std::num::NonZeroU32>,
+    /// Whether that cap follows the window's monitor's refresh rate, the settings' Match monitor,
+    /// until another cap replaces it.
+    pub(crate) game_matches_monitor: bool,
+    /// The window's monitor's refresh rate, in whole frames a second, if the system says.
+    pub(crate) refresh_rate: Option<std::num::NonZeroU32>,
 }
 
 #[cfg(feature = "dev")]
@@ -598,6 +606,8 @@ impl Dev {
             game_perf: None,
             embeds_game: false,
             game_max_fps: None,
+            game_matches_monitor: false,
+            refresh_rate: None,
         }
     }
 

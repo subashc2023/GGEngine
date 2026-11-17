@@ -25,6 +25,8 @@ use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 #[cfg(feature = "dev")]
 use winit::keyboard::{Key, NamedKey};
+#[cfg(feature = "dev")]
+use winit::monitor::MonitorHandle;
 use winit::window::{Icon, Window, WindowId};
 
 use crate::api::{self, Api, Waited, Waiting};
@@ -125,6 +127,8 @@ pub(crate) fn run(
         view_input,
         #[cfg(feature = "dev")]
         viewports: None,
+        #[cfg(feature = "dev")]
+        monitor: None,
         gamepads: Gamepads::default(),
         clipboard: Clipboard::default(),
         cx: Context::new(None),
@@ -189,6 +193,10 @@ struct Handler<'a> {
     /// The windows panels tear off into.
     #[cfg(feature = "dev")]
     viewports: Option<Viewports>,
+    /// The main window's monitor, as it last moved, whose refresh rate the settings' Match monitor
+    /// caps a game at.
+    #[cfg(feature = "dev")]
+    monitor: Option<MonitorHandle>,
     /// Opened with the window: Windows gives a pad's input only to a focused window.
     gamepads: Gamepads,
     clipboard: Clipboard,
@@ -274,19 +282,23 @@ impl Handler<'_> {
             ));
         }
         self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app, true);
-        // What the settings kept; a flag overrides it for the run. In an app that embeds a game, it
-        // caps the game.
+        // What the settings kept, else the app's default, as vsync and a cap; flags override it
+        // for the run.
         #[cfg(feature = "dev")]
-        let kept = match frame_rate::kept(&self.cx) {
-            kept if self.app.embeds_game => {
-                self.cx.set_game_max_fps(kept);
-                None
-            }
-            kept => kept,
+        let kept = {
+            self.monitor = window.current_monitor();
+            let rate = frame_rate::refresh_rate(self.monitor.as_ref());
+            frame_rate::set_refresh_rate(&mut self.cx, rate);
+            frame_rate::start(&mut self.cx)
         };
         #[cfg(not(feature = "dev"))]
-        let kept = None;
-        self.cx.set_max_fps(self.args.max_fps.or(kept));
+        let kept = (self.app.embeds_game, None);
+        let (vsync, max) = match (self.args.vsync, self.args.max_fps) {
+            (false, None) => kept,
+            flags => flags,
+        };
+        self.cx.set_vsync(vsync);
+        self.cx.set_max_fps(max);
         api::debug(&self.api, &mut self.cx);
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
@@ -442,6 +454,7 @@ impl Handler<'_> {
             if let Some(size) = self.resized.take() {
                 renderer.resize(size.width, size.height);
             }
+            renderer.set_vsync(self.cx.vsync());
             #[cfg(feature = "dev")]
             let (view, windows) = match &mut output {
                 Some(output) => {
@@ -594,6 +607,21 @@ impl Handler<'_> {
         if self.dispatch(&Event::CloseRequested).is_continue() {
             debug!("Window closed");
             event_loop.exit();
+        }
+    }
+
+    /// Notes the main window's monitor's refresh rate once it moves to another monitor
+    /// ([`frame_rate::set_refresh_rate`]). Reading the rate asks the system, so not at each move.
+    #[cfg(feature = "dev")]
+    fn follow_monitor(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let monitor = window.current_monitor();
+        if monitor != self.monitor {
+            let rate = frame_rate::refresh_rate(monitor.as_ref());
+            frame_rate::set_refresh_rate(&mut self.cx, rate);
+            self.monitor = monitor;
         }
     }
 
@@ -824,6 +852,8 @@ impl ApplicationHandler for Handler<'_> {
                 // frames, and the two requests make one.
                 self.request_frame(event_loop);
             }
+            #[cfg(feature = "dev")]
+            WindowEvent::Moved(_) => self.follow_monitor(),
             // Untraced, as `dispatch` leaves out cursor moves.
             #[cfg(feature = "dev")]
             WindowEvent::CursorMoved { .. } if kept => {}

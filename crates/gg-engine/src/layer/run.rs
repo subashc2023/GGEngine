@@ -234,6 +234,7 @@ impl Context {
             input: Input::default(),
             cursor_grabbed: false,
             max_fps: None,
+            vsync: false,
             clear_color: [0.02, 0.02, 0.02, 1.0],
             antialiasing: None,
             viewpoint: None,
@@ -555,12 +556,26 @@ impl Context {
     /// burst follows a slow frame. Ticks go on in real time however fast frames come.
     ///
     /// `--max-fps` sets it at the start; in a development build the title bar's settings
-    /// ([`Ui::settings`](crate::Ui::settings)) set it and keep it for the user, but in an app that
-    /// embeds a game, where they set [`game_max_fps`](Self::game_max_fps). Headless runs (as fast
-    /// as they can, or `--real-time`) ignore it, and embedded ones take their tool's cap
+    /// ([`Ui::settings`](crate::Ui::settings)) set it and keep it for the user, and in an app that
+    /// embeds a game, [`game_max_fps`](Self::game_max_fps) too. Headless runs (as fast as they
+    /// can, or `--real-time`) ignore it, and embedded ones take their tool's cap
     /// ([`gg_api::Look::max_fps`]).
     pub fn set_max_fps(&mut self, max: Option<NonZeroU32>) {
         self.max_fps = max;
+    }
+
+    /// Whether a windowed run presents at the display's refresh rate ([`set_vsync`]).
+    ///
+    /// [`set_vsync`]: Self::set_vsync
+    pub(crate) fn vsync(&self) -> bool {
+        self.vsync
+    }
+
+    /// Presents at the display's refresh rate from the next frame, or as fast as frames render.
+    /// `--vsync` sets it at the start, and the settings' Match monitor after. Changing it rebuilds
+    /// the swapchain.
+    pub(crate) fn set_vsync(&mut self, vsync: bool) {
+        self.vsync = vsync;
     }
 
     /// The cap on frames a second the title bar's settings set on the game an app shows
@@ -571,10 +586,14 @@ impl Context {
         self.dev.game_max_fps
     }
 
-    /// Sets [`game_max_fps`](Self::game_max_fps), as when another client caps the game.
+    /// Sets [`game_max_fps`](Self::game_max_fps), as when another client caps the game. Another
+    /// cap than the one in force ends the settings' Match monitor.
     #[cfg(feature = "dev")]
     pub fn set_game_max_fps(&mut self, max: Option<NonZeroU32>) {
-        self.dev.game_max_fps = max;
+        if max != self.dev.game_max_fps {
+            self.dev.game_max_fps = max;
+            self.dev.game_matches_monitor = false;
+        }
     }
 
     /// Ends the run before its next frame, as closing its window does when no layer handles that;

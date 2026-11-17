@@ -184,9 +184,10 @@ Options:
   --gpu <NAME>        Use the GPU whose name contains NAME, such as `amd`
   --validation        Run under Vulkan validation (the default in debug builds)
   --no-validation     Run without it (the default in release builds)
-  --vsync             Present at the display's refresh rate, rather than uncapped
-  --max-fps <N>       In a window, render at most N frames a second, in place of the cap a
-                      development build's title bar keeps; an embedded run goes at its tool's pace
+  --vsync             Present at the display's refresh rate, in place of the frame rate limit a
+                      development build's title bar keeps
+  --max-fps <N>       In a window, render at most N frames a second, in place of that limit; an
+                      embedded run goes at its tool's pace
   --threads <N>       Run the simulation's jobs on N threads, the main one among them (CPUs less 1)
   --mods <DIR>        Run DIR's mods, not those a windowed run runs from the game's per-user folder
   --package <PATH>    Read the asset root's files from the package at PATH, which `tools/cook`

@@ -844,7 +844,9 @@ pub(crate) fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         app_name: app.name,
         validation: args.validation,
         gpu: args.gpu.as_deref(),
-        vsync: args.vsync,
+        // An app that embeds a game starts at the display's rate, its limit's default
+        // (`frame_rate::start`).
+        vsync: args.vsync || app.embeds_game,
         uploads: None,
         mesh_shaders: None,
         visibility_buffer: true,
@@ -867,6 +869,9 @@ pub(crate) struct Ran {
     validation: Option<Validation>,
     gpu: Option<String>,
     gpu_memory: Option<u64>,
+    /// Whether its windows presented at the display's refresh rate as it ended, which the title
+    /// bar's settings switch.
+    vsync: bool,
     /// What the frames' arenas held as the run ended, and the most a frame took.
     arenas: Arenas,
     /// The GPU memory the frames' own images, the view's among them, held as the run ended.
@@ -899,6 +904,7 @@ impl Ran {
         let gpu_memory = renderer
             .as_ref()
             .map(|renderer| renderer.memory_budget().usage);
+        let vsync = renderer.as_ref().is_some_and(Renderer::vsync);
         let arenas = renderer.as_ref().map(Renderer::arenas).unwrap_or_default();
         let transient_bytes = (renderer.as_ref())
             .map(Renderer::transient_bytes)
@@ -911,6 +917,7 @@ impl Ran {
             validation,
             gpu,
             gpu_memory,
+            vsync,
             arenas,
             transient_bytes,
             memory_peak: memory::resident().peak,
@@ -972,7 +979,7 @@ impl Ran {
             build = BUILD,
             headless = args.headless,
             embedded = args.embedded,
-            vsync = args.vsync,
+            vsync = self.vsync,
             validated = self.validated(),
             "Frame times"
         );

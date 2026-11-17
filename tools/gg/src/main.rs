@@ -350,8 +350,8 @@ back to the game:
 - `skip`, the passes the view leaves out, to narrow down which one makes what it shows:
   {\"skip\":[\"reflections\",\"shadows\"]}, of `ambient_occlusion`, `reflections`, `shadows`, `fog`,
   `bloom`, `depth_of_field`, `motion_blur`, `antialiasing`, `grade`, `lens` and `adaptation`;
-- `max_fps`, the most frames a second a game embedded in a tool renders, as the editor's frame rate
-  limit sets it: {\"max_fps\":10}.
+- `max_fps`, the most frames a second a game embedded in a tool renders, as the editor's game frame
+  rate limit sets it: {\"max_fps\":10}.
 ",
             },
             Help {

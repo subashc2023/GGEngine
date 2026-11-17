@@ -601,8 +601,9 @@ impl App {
         }
     }
 
-    /// Marks a tool that shows a game it embeds, as the editor shows its Play: it presents at the
-    /// display's refresh rate, as `--vsync` does.
+    /// Marks a tool that shows a game it embeds, as the editor shows its Play. Its own frame rate
+    /// limit starts at Match monitor, presenting at the display's refresh rate as `--vsync` does,
+    /// unless its title bar's settings kept another. They limit the game's too.
     ///
     /// The embedded game renders a frame each time the tool takes one, so the tool's rate is the
     /// game's ceiling.
@@ -718,7 +719,7 @@ fn run_args(
     program: &str,
     args: impl IntoIterator<Item = OsString>,
 ) -> ExitCode {
-    let mut args = match args::parse(args) {
+    let args = match args::parse(args) {
         Ok(Some(args)) => args,
         Ok(None) => {
             print!("{}", args::usage(program));
@@ -733,7 +734,6 @@ fn run_args(
             return ExitCode::from(2);
         }
     };
-    args.vsync |= app.embeds_game;
 
     // An embedded run's tool reads events through the tool API's `logs`; stderr would show each
     // twice.

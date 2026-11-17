@@ -130,6 +130,12 @@ pub(crate) struct TitleBar {
     pressed: bool,
     /// The same for the settings, and how many groups were added this pass (a line parts them).
     settings: Option<egui::Ui>,
+    /// Whether the settings show: here rather than in egui's memory, which holds one popup at a
+    /// time, so a dropdown's list opens over them without closing them.
+    settings_open: bool,
+    /// Whether egui showed a popup as the last pass ended, whose closing click leaves the settings
+    /// open: a click opening one this pass, as the drawer's button, still closes them.
+    popup_shown: bool,
     settings_height: f32,
     settings_added: usize,
     /// The controls' Ui, their width last pass (which centers them), and whether any were added
@@ -171,6 +177,8 @@ impl TitleBar {
             drawer_height: 0.0,
             pressed: false,
             settings: None,
+            settings_open: false,
+            popup_shown: false,
             settings_height: 0.0,
             settings_added: 0,
             middle: None,
@@ -244,14 +252,15 @@ impl TitleBar {
                 // Left of the toggles, which `end` draws.
                 if self.chrome != Chrome::Os {
                     let gear = Rect::from_min_size(pos2(end, bar.min.y), vec2(TOOL, bar.height()));
-                    let open = Popup::is_id_open(&ctx, settings_id());
+                    let open = self.settings_open;
                     let button = tool(&mut ui, gear, Tool::Settings, open, true);
                     // Before the settings show, so a gear click while open closes them instead of
                     // closing them as a click outside and reopening them.
                     if button.on_hover_text("Settings").clicked() {
-                        Popup::toggle_id(&ctx, settings_id());
+                        self.settings_open = !open;
                     }
-                    self.settings = self.show_settings(&ui, gear);
+                    let settings = self.show_settings(&ui, gear);
+                    self.settings = settings;
                 }
                 self.ui = Some(ui);
             });
@@ -329,16 +338,22 @@ impl TitleBar {
     }
 
     /// Shows the settings while open, below `gear`, over the dock. They close on the gear,
-    /// Escape and a click outside.
-    fn show_settings(&self, ui: &egui::Ui, gear: Rect) -> Option<egui::Ui> {
+    /// Escape and a click outside, but not while a popup shows, such as a dropdown's list in them:
+    /// that click closes it alone.
+    fn show_settings(&mut self, ui: &egui::Ui, gear: Rect) -> Option<egui::Ui> {
         let height = self.settings_height;
+        let close = if self.popup_shown {
+            PopupCloseBehavior::IgnoreClicks
+        } else {
+            PopupCloseBehavior::CloseOnClickOutside
+        };
         let mut settings = None;
         Popup::new(settings_id(), ui.ctx().clone(), gear, ui.layer_id())
-            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .close_behavior(close)
             .layout(Layout::top_down(Align::Min))
             .align(RectAlign::BOTTOM_END)
             .align_alternatives(&[])
-            .open_memory(None)
+            .open_bool(&mut self.settings_open)
             .show(|ui| {
                 ui.set_width(SETTINGS);
                 ui.set_min_height(height);
@@ -381,6 +396,7 @@ impl TitleBar {
         let settings = self.settings.take();
         let mut ui = self.ui.take()?;
         let ctx = ui.ctx().clone();
+        self.popup_shown = Popup::is_any_open(&ctx);
         // As below, a pass the settings outgrew is redone.
         if let Some(settings) = settings {
             let height = settings.min_rect().height();
@@ -551,7 +567,8 @@ impl TitleBar {
         if self.chrome == Chrome::Drawn {
             edges(&ctx);
         }
-        if self.chrome == Chrome::InWindowsFrame && !covered(&ctx, bar) {
+        // The settings are open outside egui's memory.
+        if self.chrome == Chrome::InWindowsFrame && !self.settings_open && !covered(&ctx, bar) {
             self.caption = Some(caption);
         }
         toggled
@@ -1003,7 +1020,7 @@ mod tests {
         }
 
         fn settings_open(&self) -> bool {
-            Popup::is_id_open(&self.ctx, settings_id())
+            self.bar.settings_open
         }
 
         fn escape(&mut self) {
