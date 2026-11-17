@@ -3,6 +3,7 @@
 //! builds read them again as their files change, replacing meshes and textures under the same
 //! handles.
 
+use std::iter;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -634,10 +635,11 @@ fn material(read: &gltf::Material, images: &[(Texture, Texels)]) -> Material {
 }
 
 /// What image `image` of `primitives`' model holds, so the texels its levels are made from: a map
-/// (by the first slot sampling it), levels averaging its values; or colors, alpha-weighted where
-/// a masked or blended material samples them as base color (alpha is then coverage), else plainly
-/// averaged (opaque materials ignore alpha in glTF; emitted too). Reading the model left no image
-/// sampled as two of these.
+/// (by the first slot sampling it), levels averaging its values; or colors. Colors are
+/// alpha-weighted where a masked or blended material samples them as base color (alpha is then
+/// coverage), and keep their share at the cutoff if every such material is masked at one alpha
+/// byte (vertex colors aside); else plainly averaged (opaque materials ignore alpha in glTF;
+/// emitted too). Reading the model left no image sampled as two of these.
 pub(crate) fn texels(primitives: &[Primitive], image: usize) -> Texels {
     let mut uses = (primitives.iter()).flat_map(|primitive| {
         let material = &primitive.material;
@@ -648,21 +650,36 @@ pub(crate) fn texels(primitives: &[Primitive], image: usize) -> Texels {
         });
         sampled.map(move |slot| (slot, material))
     });
-    let covers = |(slot, material): (Slot, &gltf::Material)| {
-        let blends = matches!(material.alpha, AlphaMode::Mask { .. } | AlphaMode::Blend);
-        slot == Slot::Color && blends
-    };
     let Some(first) = uses.next() else {
         return Texels::Color(Mipmaps::Averaged);
     };
     if let Some(map) = first.1.map(first.0) {
         return Texels::Map(map);
     }
-    if covers(first) || uses.any(covers) {
-        Texels::Color(Mipmaps::AlphaWeighted)
-    } else {
-        Texels::Color(Mipmaps::Averaged)
+    // Each use reading alpha as coverage: a masked one's cutoff byte, or `None` for one blending
+    // or never drawn.
+    let mut cutoffs = iter::once(first)
+        .chain(uses)
+        .filter_map(|(slot, material)| match (slot, material.alpha) {
+            (Slot::Color, AlphaMode::Mask { cutoff }) => {
+                Some(cutoff_byte(cutoff, material.color[3]))
+            }
+            (Slot::Color, AlphaMode::Blend) => Some(None),
+            _ => None,
+        });
+    match cutoffs.next() {
+        None => Texels::Color(Mipmaps::Averaged),
+        Some(Some(cutoff)) if cutoffs.all(|other| other == Some(cutoff)) => {
+            Texels::Color(Mipmaps::Coverage { cutoff })
+        }
+        Some(_) => Texels::Color(Mipmaps::AlphaWeighted),
     }
+}
+
+/// The least alpha byte a masked material of `cutoff` and base color factor alpha `factor` draws,
+/// as its shaders compare them; `None` if it draws none.
+fn cutoff_byte(cutoff: f32, factor: f32) -> Option<u8> {
+    (0..=255).find(|&byte| f32::from(byte) / 255.0 * factor >= cutoff)
 }
 
 #[cfg(test)]
@@ -1021,8 +1038,24 @@ pub(crate) mod tests {
     fn images_hold_what_their_materials_sample_them_as() {
         let Imported { mut primitives, .. } = imported();
         let colors = |mipmaps| Texels::Color(mipmaps);
-        assert_eq!(texels(&primitives, 0), colors(Mipmaps::AlphaWeighted));
+        // Masked at 0.5: from 128, 127.5 up.
+        let masked = colors(Mipmaps::Coverage { cutoff: 128 });
+        assert_eq!(texels(&primitives, 0), masked);
         assert_eq!(texels(&primitives, 1), colors(Mipmaps::Averaged));
+        // Opaque, the second's alpha is unread; masked at another cutoff, or blended, it's no one
+        // cutoff's.
+        primitives[1].material.textures = primitives[0].material.textures;
+        assert_eq!(texels(&primitives, 0), masked);
+        primitives[1].material.alpha = AlphaMode::Mask { cutoff: 0.25 };
+        assert_eq!(texels(&primitives, 0), colors(Mipmaps::AlphaWeighted));
+        // At 0.5 under a factor's alpha of 0.5, as at 1 under 1: both draw from 255.
+        primitives[0].material.color[3] = 0.5;
+        primitives[1].material.alpha = AlphaMode::Mask { cutoff: 1.0 };
+        let full = colors(Mipmaps::Coverage { cutoff: 255 });
+        assert_eq!(texels(&primitives, 0), full);
+        primitives[1].material.alpha = AlphaMode::Blend;
+        assert_eq!(texels(&primitives, 0), colors(Mipmaps::AlphaWeighted));
+        let Imported { mut primitives, .. } = imported();
         primitives[1].material.alpha = AlphaMode::Blend;
         assert_eq!(texels(&primitives, 1), colors(Mipmaps::AlphaWeighted));
         let textures = &mut primitives[1].material.textures;

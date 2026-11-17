@@ -123,7 +123,8 @@ pub fn read_model(name: &str, path: &Path) -> Result<Imported> {
 /// What image `image` of `model` holds, which decides its mips and compression as in a run.
 ///
 /// It is either a data map (averaged levels), or colors (alpha-weighted if a masked or blended
-/// material samples them, else plainly averaged).
+/// material samples them, keeping their share at the cutoff if all are masked at one; else plainly
+/// averaged).
 pub fn texels(model: &Imported, image: usize) -> Texels {
     crate::model::texels(&model.primitives, image)
 }
