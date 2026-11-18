@@ -134,12 +134,14 @@ struct ShadedPasses {
 ///   any may be, draw their depth alone into an image of their own.
 /// - Reflecting, a compute pass finds the visibility buffer's normals, as its shading turns them,
 ///   and the depth-only runs draw theirs where they're nearest. The rays are traced about these.
+/// - Reflecting, the culled runs draw the depth of their far sides ([`Way::BackFaces`]).
 /// - Without a visibility buffer, the view's two passes draw every culled run's depth alone, and a
 ///   pass after draws the view shaded.
 struct EarlyPasses {
     depth: Option<PassId>,
     normals: Option<(PassId, ImageId)>,
     drawn_normals: Option<(PassId, ImageId)>,
+    back: Option<(PassId, ImageId)>,
     ao: Option<ao::Plan>,
     reflections: Option<reflections::Plan>,
     view: Option<PassId>,
@@ -917,6 +919,11 @@ fn plan_view(
                 let draw = culled(cull.as_ref(), draw).clear(normals, [0.0; 4]);
                 (draw.keep(opaque_depth).add(), normals)
             });
+        let back = traced.is_some().then(|| {
+            let back = graph.depth("opaque back depth", size);
+            let draw = skinned(skin, graph.render(label!("opaque back faces")));
+            (culled(cull.as_ref(), draw).depth(back).add(), back)
+        });
         let alone = opaque_depth.unwrap_or(depth);
         let depths = [if visibility.is_some() { depth } else { alone }, alone];
         let ao = occluded.map(|_| {
@@ -931,6 +938,7 @@ fn plan_view(
             depth: rest,
             normals,
             drawn_normals,
+            back,
             ao,
             reflections,
             view: None,
@@ -1301,19 +1309,29 @@ impl Recorder<'_> {
         let draw_depth = |pass: &mut gg_gpu::Pass<'_, '_>, runs: Runs<'_>, beside_visibility| {
             draw_alone(pass, runs, Way::Depth { beside_visibility })
         };
-        // Reflecting, in `pass`, the normals of the culled runs `plan` kept in both view passes
-        // whose depth alone was drawn, where they're nearest: all of them, or, `beside_visibility`,
-        // those drawn other than into it.
-        let draw_normals =
-            |frame: &mut gg_gpu::Frame<'_>, pass, plan: &CullPlan, beside_visibility| {
-                let mut pass =
-                    (frame.render(pass)).expect("the graph's own images are always there");
-                for slot in [FIRST, plan.second()] {
-                    let way = Way::Normals { beside_visibility };
-                    draw_alone(&mut pass, Runs::Culled(plan, slot), way)?;
-                }
-                Ok::<_, Error>(())
-            };
+        // Reflecting, in `pass`, the culled runs `plan` kept in both view passes, as `way` draws
+        // them: their normals or their far sides' depth.
+        let draw_kept = |frame: &mut gg_gpu::Frame<'_>, pass, plan: &CullPlan, way| {
+            let mut pass = (frame.render(pass)).expect("the graph's own images are always there");
+            for slot in [FIRST, plan.second()] {
+                draw_alone(&mut pass, Runs::Culled(plan, slot), way)?;
+            }
+            Ok::<_, Error>(())
+        };
+        // The normals of the culled runs whose depth alone was drawn, where they're nearest: all of
+        // them, or, `beside_visibility`, those drawn other than into it; then the far sides.
+        let draw_reflected = |frame: &mut gg_gpu::Frame<'_>,
+                              early: &EarlyPasses,
+                              plan: &CullPlan,
+                              beside_visibility| {
+            if let Some((drawn, _)) = early.drawn_normals {
+                draw_kept(frame, drawn, plan, Way::Normals { beside_visibility })?;
+            }
+            if let Some((back, _)) = early.back {
+                draw_kept(frame, back, plan, Way::BackFaces)?;
+            }
+            Ok::<_, Error>(())
+        };
         let shades = view.shaded.as_ref().zip(view.cull.as_ref());
         // Beside a visibility buffer, as ShadedPasses says; else with ambient occlusion or
         // reflections, as EarlyPasses says; else the view's first pass alone, taking the culled
@@ -1370,9 +1388,7 @@ impl Recorder<'_> {
                     };
                     self.meshes.find_normals(&mut pass, plan, &view)?;
                 }
-                if let Some((drawn, _)) = early.drawn_normals {
-                    draw_normals(frame, drawn, plan, true)?;
-                }
+                draw_reflected(frame, early, plan, true)?;
                 record_early(frame, early)?;
             }
             let mut shade = frame.compute(shaded.shade);
@@ -1402,9 +1418,7 @@ impl Recorder<'_> {
             let mut pass = (frame.render(second)).expect("the graph's own images are always there");
             draw_depth(&mut pass, Runs::Culled(plan, plan.second()), false)?;
             drop(pass);
-            if let Some((drawn, _)) = early.drawn_normals {
-                draw_normals(frame, drawn, plan, false)?;
-            }
+            draw_reflected(frame, early, plan, false)?;
             record_early(frame, early)?;
             let shading = early.view.expect(
                 "the view draws after the occlusion and the reflections without a \

@@ -5,7 +5,7 @@ use gg_core::Result;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 #[cfg(doc)]
 use gg_gpu::Format;
-use gg_gpu::{Frame, Pass};
+use gg_gpu::{Faces, Frame, Pass};
 
 use super::{CullPlan, FIRST, GpuMesh, Lods, MeshPass};
 use crate::draws::Run;
@@ -152,7 +152,7 @@ impl MeshPass {
                 continue;
             }
             // A run culled by meshlets draws by its shader's meshlet geometry.
-            let by_meshlets = culled_run.is_some_and(|run| self.culling.by_meshlets(run));
+            let by_meshlets = culled_run.is_some_and(|run| self.by_meshlets(run, way));
             let (geometry, depth_only) = match &shader.meshlets {
                 Some((geometry, depth_only)) if by_meshlets => (geometry, depth_only),
                 _ => (&shader.pipeline, &shader.depth_only),
@@ -190,6 +190,12 @@ impl MeshPass {
                     }
                     normals
                 }
+                (Way::BackFaces, _) => {
+                    let Some(depth_only) = depth_only else {
+                        continue;
+                    };
+                    &depth_only.view
+                }
                 (Way::Visibility, Some(visible)) => visible,
                 (Way::Visibility, None) => continue,
             };
@@ -208,6 +214,11 @@ impl MeshPass {
                 pass.set_pipeline(pipeline);
                 bound = Some((shader_index, by_meshlets));
             }
+            let run_faces = match (way, run_faces) {
+                (Way::BackFaces, Faces::CounterClockwise) => Faces::Clockwise,
+                (Way::BackFaces, Faces::Clockwise) => Faces::CounterClockwise,
+                _ => run_faces,
+            };
             if faces != Some(run_faces) {
                 pass.set_faces(run_faces);
                 faces = Some(run_faces);
@@ -230,8 +241,7 @@ impl MeshPass {
             pass.begin_label(&shader.label);
             match (culled, culled_run, run) {
                 (Some(culled), Some(culled_run), _) => {
-                    let visibility = way == Way::Visibility;
-                    self.draw_culled(pass, mesh, push, culled, culled_run, visibility);
+                    self.draw_culled(pass, mesh, push, culled, culled_run, way);
                 }
                 (_, _, Some(run)) => {
                     let instances = Instances {
@@ -249,6 +259,12 @@ impl MeshPass {
             pass.set_scissor([0, 0], view);
         }
         Ok(drawn)
+    }
+
+    /// Whether culled run `run` draws by its kept meshlets as `way` draws: if the culling kept
+    /// them, but its far sides by its levels' indices, as the culling drops meshlets facing away.
+    pub(super) fn by_meshlets(&self, run: usize, way: Way) -> bool {
+        way != Way::BackFaces && self.culling.by_meshlets(run)
     }
 }
 
@@ -298,6 +314,10 @@ pub(crate) enum Way {
     /// model shaders' normals pipelines; beside a visibility buffer, not those it covers.
     /// Reflections find the rest's from depth.
     Normals { beside_visibility: bool },
+    /// The depth of the far sides of what's opaque, for reflections: culled runs, by the depth
+    /// pipelines of those that write depth, with faces flipped; meshlet runs by their levels'
+    /// indices. Double-sided runs draw both sides, covering what's behind them.
+    BackFaces,
     /// Into a visibility buffer: culled runs drawn by meshlets, of the opaque and masked model
     /// shaders.
     Visibility,

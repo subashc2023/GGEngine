@@ -17,7 +17,7 @@ use gg_gpu::{
 
 use super::draw::{LodView, Uploaded};
 use super::scene::SceneRun;
-use super::{GpuMesh, GpuShader, Held, MAX_LEVELS, MeshPass, PlacedMeshlets, Push};
+use super::{GpuMesh, GpuShader, Held, MAX_LEVELS, MeshPass, PlacedMeshlets, Push, Way};
 use crate::shadow::CASCADES;
 use crate::{Draws, MeshDraw, halves};
 
@@ -1017,9 +1017,9 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Draws what view `slot` of `plan` kept of culled run `run`, with `push`'s mesh: a draw per
-    /// level, as its commands say, or its kept meshlets, into the visibility buffer if
-    /// `visibility`.
+    /// Draws what view `slot` of `plan` kept of culled run `run`, with `push`'s mesh, as `way`
+    /// draws: a draw per level, as its commands say, or its kept meshlets
+    /// ([`MeshPass::by_meshlets`]).
     pub(super) fn draw_culled(
         &self,
         pass: &mut Pass<'_, '_>,
@@ -1027,10 +1027,10 @@ impl MeshPass {
         push: Push,
         (plan, slot): (&CullPlan, usize),
         run: usize,
-        visibility: bool,
+        way: Way,
     ) {
         let culling = &self.culling;
-        let index = run as u32;
+        let (index, by_meshlets) = (run as u32, self.by_meshlets(run, way));
         let run = &culling.runs[run];
         let [transforms, ids, params] =
             culling.kept(pass.address(plan.instances), plan.views as u64, PREVIOUS);
@@ -1055,14 +1055,14 @@ impl MeshPass {
             previous,
             ..push
         };
-        if run.meshlets != NO_MESHLETS {
+        if by_meshlets {
             // Its draw's eight words, then the meshlets it keeps, which the shader reads.
             let draw = (plan.meshlets_at(slot as usize) + u64::from(run.meshlet_draw)) * 4;
             // Which run, and which of the game's view's passes, as `Push::draw` says.
             let second = slot as usize == plan.second();
             let push = Push {
                 meshlets: pass.address(plan.commands) + draw,
-                draw: if visibility {
+                draw: if way == Way::Visibility {
                     1 + 2 * index + u32::from(second)
                 } else {
                     0

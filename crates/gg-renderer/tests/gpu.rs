@@ -107,6 +107,7 @@ fn main() -> ExitCode {
         a_rough_balls_reflection_holds_still_as_the_view_turns,
         a_rough_reflection_takes_in_its_own_surface_alone,
         normals_images_show_as_normals,
+        the_back_depth_holds_closed_meshes_far_sides,
         the_traced_reflection_is_unblurred,
         reflection_rays_tell_why_a_ray_misses,
         views_show_parts_of_shading_and_images_in_place_of_light,
@@ -184,6 +185,7 @@ fn main() -> ExitCode {
         reflections_leave_what_they_dont_take_as_it_is,
         reflections_mirror_about_the_shading_normal,
         normals_images_show_as_normals,
+        the_back_depth_holds_closed_meshes_far_sides,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
@@ -8256,6 +8258,85 @@ fn normals_images_show_as_normals() {
         assert!(
             close(got, normal),
             "{name} shows the {what} as {got:?}, not {normal:?}"
+        );
+    }
+    shut_down(renderer);
+}
+
+/// [`backdrop_scene`]'s floor and wall under two balls 0.5 in radius, the right one drawn mirrored,
+/// in the depth of what's opaque and of its back faces, as [`Show::Image`] shows depth: at each
+/// ball's middle, as far as its front and its back. The floor and wall hide nothing facing away, so
+/// they have no back depth.
+fn the_back_depth_holds_closed_meshes_far_sides() {
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 64;
+    const RADIUS: f32 = 0.5;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    let gray = Vec4::new(0.5, 0.5, 0.5, 1.0);
+    let (at, size) = (Vec3::new(3.0, 0.0, -4.0), Vec2::splat(0.1));
+    let (mut draws, viewpoint) = backdrop_scene(&mut stores, 0.1, gray, at, size, gray);
+    let ball = sphere(&mut stores.meshes, RADIUS, 24, 48);
+    let white = stores.materials.add(&Material {
+        color: Vec4::ONE,
+        unlit: true,
+        ..Material::default()
+    });
+    let draw = MeshDraw::with_material(ball, white, &stores.materials, &mut stores.shaders);
+    let centers = [Vec3::new(-0.8, 0.5, 2.5), Vec3::new(0.8, 0.5, 2.5)];
+    for (center, x) in centers.into_iter().zip([1.0, -1.0]) {
+        let scale = Vec3::new(x, 1.0, 1.0);
+        let transform = Mat4::from_scale_rotation_translation(scale, Quat::IDENTITY, center);
+        draws.push_draw(transform, &draw, 0);
+    }
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    // The first frame keeps the colors the second traces against, which draws the back faces.
+    let mut shown = |name| {
+        for show in [None, Some(Show::Image(name))] {
+            let data = RenderData {
+                reflections: Some(Reflections::default()),
+                show,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(&mut renderer, data);
+        }
+        frame_pixels(&mut renderer)
+    };
+    let (front, back) = (shown("view depth"), shown("opaque back depth"));
+    // A depth is the near plane's distance over the distance ahead.
+    let Projection::Perspective { near, .. } = viewpoint.projection else {
+        unreachable!("the backdrop's view has perspective");
+    };
+    let shade = |ahead: f32| 255.0 * (1.0 + math::libm::log2f(near / ahead) / 24.0);
+    let eye = viewpoint.position.as_vec3();
+    for center in centers {
+        let at = pixel_of(viewpoint, [WIDTH, HEIGHT], center);
+        let way = center - eye;
+        let ahead = way.normalize().dot(viewpoint.rotation * Vec3::NEG_Z);
+        let sides = [
+            ("front", &front, way.length() - RADIUS),
+            ("back", &back, way.length() + RADIUS),
+        ];
+        for (side, image, along) in sides {
+            let got = f32::from(pixel_at(image, WIDTH, at)[0]);
+            let expected = shade(along * ahead);
+            assert!(
+                (got - expected).abs() <= 2.0,
+                "the ball at {center} shows its {side} as {got}, not {expected}"
+            );
+        }
+    }
+    // The floor between the balls, and the wall over them.
+    for (what, point) in [
+        ("floor", Vec3::new(0.0, 0.0, 1.0)),
+        ("wall", Vec3::new(-3.0, 3.0, -5.0)),
+    ] {
+        let at = pixel_of(viewpoint, [WIDTH, HEIGHT], point);
+        let (front, back) = (pixel_at(&front, WIDTH, at), pixel_at(&back, WIDTH, at));
+        assert!(
+            front[0] > 0 && back == [0, 0, 0, 255],
+            "the {what} shows as {front:?} in front, {back:?} behind"
         );
     }
     shut_down(renderer);

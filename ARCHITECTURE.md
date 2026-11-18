@@ -769,6 +769,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 | Occlusion cull | Builds the depth pyramid from the first pass, culls the rest against it | `depth pyramid`, `cull choose second` … `cull meshlets second` | `mesh/cull.rs` |
 | View, second pass | What came into view | `view visibility second`, `opaque depth second` or `view second` | `lib.rs` |
 | Early depth, normals | Beside a visibility buffer, depth of what draws forward; normals for reflections | `opaque depth`, `view normals`, `opaque normals` | `lib.rs`, `mesh/visibility.rs` |
+| Back faces | For reflections, depth of the far sides of what the view's passes kept | `opaque back faces` (`opaque back depth`) | `frame.rs`, `mesh/draw.rs` |
 | Ambient occlusion | XeGTAO from the depth, denoised, accumulated over frames | `ambient occlusion prefilter`, `ambient occlusion`, `ambient occlusion denoise` | `ao.rs` |
 | Reflections | Mirror rays traced through a nearest-depth pyramid; levels of them and their surfaces, which shading blurs them by | `reflections depth`, `reflections`, `reflections blur` | `reflections.rs` |
 | Shading | Shades the visibility buffer, then draws the rest: sky, other opaque runs, what blends, canvas. Without a buffer, the forward `view` pass | `view shading`, `view rest`, `view` | `mesh/visibility.rs`, `mesh.rs` |
@@ -852,6 +853,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
   buffer, the view's two passes draw depth alone and a third draws everything shaded, since a
   game's opaque shader may discard and two pipelines aren't bound to place a vertex alike. So
   forward opaque vertices draw twice, and the model shaders' a third time for reflections' normals.
+  Reflecting, every culled run draws once more, its far sides' depth, by indices.
 - Reflections are traced before shading, from depth, so the visibility buffer's shading and forward
   shaders take them alike, by one sample. A composite after shading would need normal, roughness
   and specular weight in images that every pipeline, games' too, would have to draw. Rays sampled
