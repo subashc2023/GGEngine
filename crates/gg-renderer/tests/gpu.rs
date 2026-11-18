@@ -110,6 +110,7 @@ fn main() -> ExitCode {
         the_back_depth_holds_closed_meshes_far_sides,
         a_balls_hidden_side_shows_in_the_floor,
         rays_go_on_past_what_they_pass_behind,
+        a_ray_into_a_balls_outline_takes_its_colors,
         the_traced_reflection_is_unblurred,
         reflection_rays_tell_why_a_ray_misses,
         views_show_parts_of_shading_and_images_in_place_of_light,
@@ -8385,11 +8386,14 @@ fn the_traced_reflection_is_unblurred() {
 /// The view the ball tests see: 380 by 256, [`backdrop_scene`]'s.
 const BALL_VIEW: [u32; 2] = [380, 256];
 
-/// [`backdrop_scene`]'s floor, 0.05 rough, and gray wall, under an unlit red ball of `radius` resting
-/// on the floor at `at`, double-sided if `double_sided`. Rendered settled, then the frame keeping
-/// the colors the trace reads: returns, as 8-bit frames, the traced reflection and the rays'
-/// outcomes ([`Channel::ReflectionRays`]), and the view.
-fn ball_on_mirror(radius: f32, at: Vec3, double_sided: bool) -> ([Vec<u8>; 2], Viewpoint) {
+/// The ball tests' red ball's color.
+const BALL_RED: Vec4 = Vec4::new(0.8, 0.1, 0.1, 1.0);
+
+/// [`backdrop_scene`]'s floor, 0.05 rough, and gray wall, under unlit balls, each of a radius,
+/// resting on the floor at a point, and of a color; double-sided if `double_sided`. Rendered
+/// settled, then the frame keeping the colors the trace reads: returns, as 8-bit frames, the traced
+/// reflection and the rays' outcomes ([`Channel::ReflectionRays`]), and the view.
+fn ball_on_mirror(balls: &[(f32, Vec3, Vec4)], double_sided: bool) -> ([Vec<u8>; 2], Viewpoint) {
     let mut renderer = renderer(BALL_VIEW[0], BALL_VIEW[1]);
     let mut stores = Stores::default();
     let viewport = filling(BALL_VIEW);
@@ -8397,15 +8401,17 @@ fn ball_on_mirror(radius: f32, at: Vec3, double_sided: bool) -> ([Vec<u8>; 2], V
     // The backdrop's square, small, off to the side.
     let (square, size) = (Vec3::new(4.0, 0.0, -4.0), Vec2::splat(0.1));
     let (mut draws, viewpoint) = backdrop_scene(&mut stores, 0.05, gray, square, size, gray);
-    let ball = sphere(&mut stores.meshes, radius, 48, 96);
-    let material = stores.materials.add(&Material {
-        color: Vec4::new(0.8, 0.1, 0.1, 1.0),
-        unlit: true,
-        double_sided,
-        ..Material::default()
-    });
-    let draw = MeshDraw::with_material(ball, material, &stores.materials, &mut stores.shaders);
-    draws.push_draw(Mat4::from_translation(at + Vec3::Y * radius), &draw, 0);
+    for &(radius, at, color) in balls {
+        let ball = sphere(&mut stores.meshes, radius, 48, 96);
+        let material = stores.materials.add(&Material {
+            color,
+            unlit: true,
+            double_sided,
+            ..Material::default()
+        });
+        let draw = MeshDraw::with_material(ball, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(Mat4::from_translation(at + Vec3::Y * radius), &draw, 0);
+    }
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     let shown = [Channel::TracedReflection, Channel::ReflectionRays].map(|channel| {
         for show in [None, Some(Show::Shading(channel))] {
@@ -8432,7 +8438,8 @@ fn ball_on_mirror(radius: f32, at: Vec3, double_sided: bool) -> ([Vec<u8>; 2], V
 fn a_balls_hidden_side_shows_in_the_floor() {
     let [width, height] = BALL_VIEW;
     for double_sided in [false, true] {
-        let ([traced, rays], viewpoint) = ball_on_mirror(1.0, Vec3::ZERO, double_sided);
+        let ([traced, rays], viewpoint) =
+            ball_on_mirror(&[(1.0, Vec3::ZERO, BALL_RED)], double_sided);
         let at = |image: &[u8], x, y| pixel_at(image, width, [x, y]);
         let [middle, center] = pixel_of(viewpoint, BALL_VIEW, Vec3::Y);
         // The first row below the ball in column `x`: unlit, it shows no rays.
@@ -8480,13 +8487,35 @@ fn a_balls_hidden_side_shows_in_the_floor() {
 /// [`ball_on_mirror`]'s ball, 0.5 in radius: the floor beside its mirror, whose ray passes behind
 /// it, mirrors the wall, trusted over 0.9. That ray was dropped, as far behind the ball's front.
 fn rays_go_on_past_what_they_pass_behind() {
-    let ([traced, rays], viewpoint) = ball_on_mirror(0.5, Vec3::new(0.0, 0.0, 1.0), false);
+    let ball = (0.5, Vec3::new(0.0, 0.0, 1.0), BALL_RED);
+    let ([traced, rays], viewpoint) = ball_on_mirror(&[ball], false);
     let beside = pixel_of(viewpoint, BALL_VIEW, Vec3::new(-0.45, 0.0, 0.82));
     let [ray, color] = [&rays, &traced].map(|image| pixel_at(image, BALL_VIEW[0], beside));
     assert!(
         ray[1] > 229 && ray[0] < 26 && color[0].abs_diff(color[2]) < 8 && color[1] > 100,
         "beside the ball's mirror, the ray shows {ray:?} and finds {color:?}"
     );
+}
+
+/// [`ball_on_mirror`]'s red ball, 0.5 in radius, before a green one it partly hides. Floor rays
+/// passing behind the red ball come into the green one at the red one's outline, and take the green
+/// one's colors: 16 pixels mix the two, a pixel a row where their mirrors meet, as a filtered edge
+/// does. They took the outline's colors, about half red, in bands up to 4 wide: 289 pixels.
+fn a_ray_into_a_balls_outline_takes_its_colors() {
+    let green = Vec4::new(0.1, 0.8, 0.1, 1.0);
+    let balls = [
+        (0.5, Vec3::new(0.0, 0.0, 1.0), BALL_RED),
+        (0.5, Vec3::new(0.5, 0.0, -0.5), green),
+    ];
+    let ([traced, _], _) = ball_on_mirror(&balls, false);
+    // Red and green at once, which neither ball, the gray wall nor the sky shows.
+    let mixed = traced
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|[r, g, b, _]| *r > b.saturating_add(30) && *g > b.saturating_add(30))
+        .count();
+    assert!(mixed < 50, "{mixed} pixels mix the balls' colors");
 }
 
 /// [`backdrop_scene`]'s smooth floor's rays, as [`Channel::ReflectionRays`] colors them. Green: one

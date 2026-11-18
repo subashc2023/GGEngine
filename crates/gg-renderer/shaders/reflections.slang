@@ -21,7 +21,8 @@
 // It finds a pixel's interval from front to back, not all that's behind the front, so a ray goes
 // on past what it passes behind, as Voxagon's "A better depth buffer for raymarching" says:
 // https://blog.voxagon.se/2017/11/22/a-better-depth-buffer-for-raymarching.html
-// Within a closed mesh's interval it takes the front's colors, which stand in for its hidden side.
+// Within a closed mesh's interval it takes the front's colors, which stand in for its hidden side;
+// past the outline it came in by, as the outline mixes them with what's behind it.
 // Positions are in pixels across and down, and the view's depth. View space is ao.slang's: X right,
 // Y up and Z ahead, so depth is positive.
 //
@@ -128,6 +129,8 @@ static const float DISTANCE_FADE = 0.25;
 // How far behind the front, as a share of its depth, a back face must be to bound it: nearer, it's
 // the front drawn again, as a double-sided mesh draws both its sides.
 static const float SAME_SURFACE = 1.0e-4;
+// How many pixels past a closed mesh's outline a ray that came in there takes its colors.
+static const uint INSET = 2;
 
 // The back depth at `pixel` that bounds what shows there, of front depth `front`: the nearest back
 // faces', where they're behind it, a closed mesh's far side; else 0, none. A back face nearer than
@@ -377,6 +380,34 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     float surface = nearest_at(trace, 0, hit);
     bool closed = closed_back(hit, surface) > 0.0;
     bool apart = any(abs(stopped.xy - origin.xy) >= 2.0);
+    // A ray that came into a closed mesh behind its front came in from the side, at its outline,
+    // whose colors mix the mesh's with what's behind it, by the antialiasing and the colors'
+    // filter. So they're taken at the middle of a pixel as far as `INSET` on, while the ray is still
+    // inside, and in the same mesh, as far as its intervals overlap. One that came in through the
+    // front takes them where it did.
+    float2 from = stopped.xy;
+    if (found && apart && closed && stopped.z < surface * (1.0 - SAME_SURFACE)) {
+        // A pixel a step. Apart, the ray moved 2 pixels at least, so its whole way spans 2 or more.
+        float3 per_pixel = way / max(abs(way.x), abs(way.y));
+        float2 last = bounds_at(trace, 0, hit);
+        for (uint i = 1; i <= INSET; i++) {
+            float3 on = stopped + float(i) * per_pixel;
+            if (any(on.xy < 0.0) || any(on.xy >= size)) {
+                break;
+            }
+            int2 next = int2(on.xy);
+            float2 bounds = bounds_at(trace, 0, next);
+            bool inside = on.z <= bounds.x && on.z >= bounds.y;
+            bool overlaps = bounds.y <= last.x && last.y <= bounds.x;
+            if (!inside || !overlaps || !(closed_back(next, bounds.x) > 0.0)) {
+                break;
+            }
+            hit = next;
+            surface = bounds.x;
+            last = bounds;
+        }
+        from = float2(hit) + 0.5;
+    }
     // Turned back. Or why `march` found nothing, as its checks tell: the end passed, the view
     // left, or else its steps taken. Or what it found: the surface itself, or nothing opaque.
     float3 outcome = float3(0.0, 1.0, 1.0);
@@ -389,7 +420,7 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
             : float3(1.0);
     }
     if (found && apart && surface > 0.0) {
-        float3 seen = position(trace, stopped.xy / size, view_depth(trace, surface));
+        float3 seen = position(trace, from / size, view_depth(trace, surface));
         float3 facing = surface_normal(trace, hit, position(trace, (float2(hit) + 0.5) / size,
                                                             view_depth(trace, surface)), surface);
         outcome = float3(1.0, 0.0, 1.0);
