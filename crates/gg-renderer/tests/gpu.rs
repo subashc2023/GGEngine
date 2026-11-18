@@ -8426,8 +8426,9 @@ fn ball_on_mirror(radius: f32, at: Vec3, double_sided: bool) -> ([Vec<u8>; 2], V
 /// underside, which the view doesn't show, as a whole disc. Down the column through its middle, 20
 /// pixels from the first whose ray leaves its own surface are trusted over 0.9 and red. Across 60
 /// columns, the row where the red starts steps at most 2 pixels. Rays passing more than the
-/// thickness behind its front were dropped, in rings and spikes stepping 6. A double-sided ball,
-/// which may be open, is taken to be that thick, and drops some.
+/// thickness behind its front were dropped, in rings and spikes stepping 6. Fewer than 1 in 1,000
+/// of the floor's rays take their last step; 64 steps left 8. A double-sided ball, which may be
+/// open, is taken to be that thick, and drops some.
 fn a_balls_hidden_side_shows_in_the_floor() {
     let [width, height] = BALL_VIEW;
     for double_sided in [false, true] {
@@ -8465,6 +8466,14 @@ fn a_balls_hidden_side_shows_in_the_floor() {
         let rows: Vec<_> = (middle - 30..=middle + 30).map(starts).collect();
         let step = rows.windows(2).map(|pair| pair[0].abs_diff(pair[1])).max();
         assert!(step <= Some(2), "the ball's mirror starts at rows {rows:?}");
+        // Rays going on past the ball step at the finest levels beside it.
+        let pixels = rays.as_chunks::<4>().0;
+        let traced = pixels.iter().filter(|pixel| pixel[..3] != [0; 3]).count();
+        let last_step = pixels.iter().filter(|pixel| pixel[..3] == [255; 3]).count();
+        assert!(
+            last_step * 1000 < traced,
+            "{last_step} of the floor's {traced} rays took their last step"
+        );
     }
 }
 
