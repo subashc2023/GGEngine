@@ -348,6 +348,21 @@ impl Kept {
         &self.runs
     }
 
+    /// Each instance in draw order: its run, its transform and its parameters' first word.
+    pub(crate) fn instances(&self) -> impl Iterator<Item = (&SceneRun, Mat4, u32)> + '_ {
+        self.runs.iter().flat_map(move |run| {
+            let slots = &self.order[run.first as usize..(run.first + run.count) as usize];
+            slots.iter().map(move |&slot| {
+                let record = &self.records[slot as usize];
+                (
+                    run,
+                    Mat4::from_cols_array(&record.transform),
+                    record.params[0],
+                )
+            })
+        })
+    }
+
     /// Writes to its GPU tables what changed since last time: changed records at their slots, and
     /// the whole order if it changed; or every record, into a new table, if slots outgrew the old
     /// or none existed. Before the frame's passes, which read them.

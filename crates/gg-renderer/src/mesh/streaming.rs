@@ -7,7 +7,7 @@ use gg_core::{Error, Result};
 use gg_gpu::{Device, Frame, GpuBuffer, MemoryBudget, Texture as GpuTexture, TextureFormat};
 use tracing::{debug, warn};
 
-use super::registry::MeshletParts;
+use super::registry::{MeshletParts, Positions};
 use super::{Change, GpuMesh, Held, Lods, MeshPass};
 use crate::packed::MeshletBounds;
 use crate::texture::{self, Map, Texels};
@@ -209,6 +209,7 @@ enum Asset {
         lods: Lods,
         meshlets: Option<MeshletParts>,
         skinned: Option<u32>,
+        positions: Option<Box<Positions>>,
         /// Once there's room. Boxed to keep the queue's items small.
         buffers: Option<Box<(GpuBuffer, GpuBuffer)>>,
     },
@@ -392,6 +393,9 @@ impl MeshPass {
     /// - If they come from another `Meshes` or `Textures` than earlier ones.
     pub(crate) fn upload(&mut self, frame: &mut Frame<'_>, uploads: &mut Uploads) -> Result<()> {
         let _zone = gg_core::zone!();
+        let changes = !(uploads.meshes.is_empty()
+            && uploads.textures.is_empty()
+            && uploads.materials.is_empty());
         self.stand_ins.write(frame)?;
         for change in uploads.meshes.drain(..) {
             self.mesh_changed(change);
@@ -401,7 +405,10 @@ impl MeshPass {
         }
         (self.materials).write(&self.device, frame, &mut uploads.materials)?;
         self.scene.write(&self.device, frame)?;
+        let queued = self.streaming.len();
         self.stream(frame)?;
+        // What's drawable leaves the queue.
+        self.uploaded = changes || self.streaming.len() < queued;
         // The meshlets of meshes that became drawable.
         self.meshlet_table.write(&self.device, frame)
     }
@@ -458,6 +465,7 @@ impl MeshPass {
                 lods: added.lods,
                 meshlets: added.meshlets,
                 skinned: added.skinned,
+                positions: added.positions,
                 buffers: None,
             },
         });
@@ -579,6 +587,7 @@ impl MeshPass {
                 lods,
                 meshlets,
                 skinned,
+                positions,
                 buffers,
             } => {
                 if buffers.is_none() {
@@ -641,6 +650,7 @@ impl MeshPass {
                         levels: parts.levels,
                     }),
                     skinned: *skinned,
+                    positions: positions.take().map(|positions| *positions),
                 };
                 let held = &mut meshes[item.index as usize];
                 // Draws' sizes are checked against it: its own type, as only the `Meshes` that

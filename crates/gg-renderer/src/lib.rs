@@ -16,6 +16,8 @@
 //! - Ambient occlusion from the view's depth, and reflections traced through it, in place of
 //!   specular light.
 //! - Opaque and masked meshes by their meshlets, shaded from a visibility buffer.
+//! - In place of the view's light, paths traced through its models, a reference for it, on GPUs
+//!   with ray queries.
 //! - Height fog, a game's UI in the view's space, and the UI over the view.
 //!
 //! The view is drawn in HDR, its exposure adapting to the light it meters. It's antialiased against
@@ -60,6 +62,7 @@ mod taa;
 mod text;
 mod texture;
 mod tonemap;
+mod trace;
 mod ui;
 mod view;
 mod viewpoint;
@@ -140,6 +143,7 @@ use sky::{SkyLight, SkyPass};
 use smaa::SmaaPass;
 use taa::TaaPass;
 use tonemap::TonemapPass;
+use trace::TracePass;
 use ui::UiPass;
 use view::{OutlinePass, ViewPass};
 
@@ -175,6 +179,12 @@ pub struct Renderer {
     /// which it warned of.
     show: Option<ShowPass>,
     missing: Option<String>,
+    /// Made by the first frame that traces paths. `traced` is the paths a pixel took in the last
+    /// frame, if it traced; `no_ray_query`, whether frames asking to trace without ray queries
+    /// were warned of.
+    trace: Option<TracePass>,
+    traced: Option<u32>,
+    no_ray_query: bool,
     /// What [`Renderer::images`] gives.
     images: Vec<FrameImage>,
     /// Made by the first frame with a sky.
@@ -272,7 +282,7 @@ impl Renderer {
             Some(&surface),
             settings.uploads,
             settings.mesh_shaders,
-            None,
+            settings.ray_query,
         )?;
         let swapchain = Swapchain::new(&device, surface, width, height, settings.vsync)?;
         Self::new(&instance, &device, Output::Window(swapchain), settings)
@@ -312,7 +322,7 @@ impl Renderer {
             None,
             settings.uploads,
             settings.mesh_shaders,
-            None,
+            settings.ray_query,
         )?;
         let image = ColorImage::new(&device, width, height, OFFSCREEN)?;
         let output = Output::Offscreen(image, [width, height]);
@@ -360,6 +370,9 @@ impl Renderer {
             smaa: None,
             show: None,
             missing: None,
+            trace: None,
+            traced: None,
+            no_ray_query: false,
             images: Vec::new(),
             sky: None,
             sky_light: SkyLight::default(),
@@ -610,6 +623,13 @@ impl Renderer {
     /// None for a frame with no view to draw; empty before such a frame.
     pub fn images(&self) -> &[FrameImage] {
         &self.images
+    }
+
+    /// How many paths each pixel of the last frame took, if it showed [`Show::PathTraced`] on a
+    /// GPU with ray queries. It rises by up to a few each frame to the samples asked for, and starts
+    /// over as what the paths read changes, as `Show::PathTraced` says.
+    pub fn path_traced(&self) -> Option<u32> {
+        self.traced
     }
 
     /// The GPU's name, such as `NVIDIA GeForce RTX 4090`.

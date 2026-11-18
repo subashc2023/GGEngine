@@ -849,6 +849,7 @@ pub(crate) fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         vsync: args.vsync || app.embeds_game,
         uploads: None,
         mesh_shaders: None,
+        ray_query: None,
         visibility_buffer: true,
         upload_budget: gg_renderer::DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,

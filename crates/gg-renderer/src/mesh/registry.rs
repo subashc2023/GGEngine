@@ -234,6 +234,18 @@ pub(crate) struct Added {
     pub(super) meshlets: Option<MeshletParts>,
     /// A skinned model's mesh's vertex count, which the skin pass moves.
     pub(super) skinned: Option<u32>,
+    /// An unskinned model's mesh's positions, which the path tracer reads in place. Boxed to keep
+    /// changes small.
+    pub(super) positions: Option<Box<Positions>>,
+}
+
+/// A model mesh's packed positions, as acceleration structures read them in place: from its
+/// buffer's first vertex, after the header, `count` of them, each at `offset + step * counts`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Positions {
+    pub(crate) offset: Vec3,
+    pub(crate) step: f32,
+    pub(crate) count: u32,
 }
 
 /// What culls a mesh's meshlets, kept apart from its buffer: their bounds, and each level's
@@ -261,6 +273,14 @@ impl Added {
             }),
             skinned: (!model.skin.is_empty()).then(|| {
                 u32::try_from(model.vertices.len()).expect("a mesh's vertices have 32-bit indices")
+            }),
+            positions: model.skin.is_empty().then(|| {
+                Box::new(Positions {
+                    offset: model.packing.offset,
+                    step: model.packing.step,
+                    count: u32::try_from(model.vertices.len())
+                        .expect("a mesh's vertices have 32-bit indices"),
+                })
             }),
         }
     }
@@ -402,6 +422,7 @@ impl Meshes {
             lods,
             meshlets: None,
             skinned: None,
+            positions: None,
         }));
         Mesh::new(index)
     }
@@ -474,6 +495,7 @@ impl Meshes {
             lods,
             meshlets: None,
             skinned: None,
+            positions: None,
         });
         Ok(())
     }

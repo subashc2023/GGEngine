@@ -47,9 +47,9 @@ macro_rules! run {
 fn main() -> ExitCode {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
     // SAFETY: no other thread exists yet.
-    if unsafe { harness::begin("renderer-gpu-tests", &dir) }.is_none() {
+    let Some(log) = (unsafe { harness::begin("renderer-gpu-tests", &dir) }) else {
         return ExitCode::SUCCESS;
-    }
+    };
 
     let mut tests = Tests::from_args();
     run!(
@@ -83,6 +83,9 @@ fn main() -> ExitCode {
         a_uniform_sky_lights_white_as_itself,
         the_sky_shows_each_way_behind_the_world,
         sky_lit_spheres_match_their_reference,
+        path_traced_metal_reflects_all_of_a_furnace,
+        path_traced_sunlight_matches_the_rasters,
+        path_traced_light_accumulates_until_the_view_moves,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
         atmospheres_match_their_references,
@@ -165,6 +168,9 @@ fn main() -> ExitCode {
         smaa_blends_along_diagonals_by_how_much_they_cover,
         smaa_blends_light_up_to_a_half_floats_brightest,
     );
+    tests.run("path_traced_without_ray_queries_shows_black", || {
+        path_traced_without_ray_queries_shows_black(&log);
+    });
     // Models' shading again, by meshlets through the visibility buffer, against the same
     // references.
     CUT_MESHLETS.store(true, Ordering::Relaxed);
@@ -252,6 +258,7 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
         vsync: false,
         uploads,
         mesh_shaders: None,
+        ray_query: None,
         visibility_buffer: true,
         upload_budget: DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,
@@ -6651,6 +6658,272 @@ fn sky_lit_spheres_match_their_reference() {
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "sky_lit_spheres", SIZE, SIZE);
+}
+
+/// A renderer of `width` by `height` pixels tracing rays through ray queries, or `None`, printed,
+/// on a GPU without them.
+fn tracing_renderer(width: u32, height: u32) -> Option<Renderer> {
+    let settings = Settings {
+        ray_query: Some(true),
+        ..settings(None)
+    };
+    match Renderer::headless_on(&harness::instance(), &settings, width, height) {
+        Ok(renderer) => Some(renderer),
+        Err(error) => {
+            assert_eq!(error.code(), "gpu.no_ray_query", "{error:#}");
+            println!("path traced tests skipped: {error}");
+            None
+        }
+    }
+}
+
+/// Renders the stores' frame showing paths traced, `samples` a pixel, until each pixel has taken
+/// them all, and returns its pixels.
+fn traced(
+    renderer: &mut Renderer,
+    stores: &mut Stores,
+    viewport: Viewport,
+    viewpoint: Viewpoint,
+    draws: &Draws,
+    samples: u32,
+) -> Vec<u8> {
+    for _ in 0..=samples {
+        let data = RenderData {
+            show: Some(Show::PathTraced { samples }),
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(renderer, data);
+        if renderer.path_traced() == Some(samples) {
+            return frame_pixels(renderer);
+        }
+    }
+    panic!(
+        "{:?} of {samples} paths a pixel after {samples} frames",
+        renderer.path_traced()
+    );
+}
+
+/// The linear mean of each channel over the square of pixels `2 * half + 1` across about `center`,
+/// in a frame `width` pixels wide.
+fn linear_mean(frame: &[u8], width: u32, center: [u32; 2], half: u32) -> Vec3 {
+    let mut sum = Vec3::ZERO;
+    for y in center[1] - half..=center[1] + half {
+        for x in center[0] - half..=center[0] + half {
+            let [r, g, b, _] = pixel_at(frame, width, [x, y]);
+            sum += Vec3::new(decoded(r), decoded(g), decoded(b));
+        }
+    }
+    sum / ((2 * half + 1) * (2 * half + 1)) as f32
+}
+
+/// A furnace of metal: white metal spheres, so Fresnel 1 at every angle, at roughness 0.1 to 1,
+/// under a sky of one color and no lights. GGX with Turquin's compensation reflects all the light
+/// reaching it, so each sphere shows the sky's light, within 2%. A rough black dielectric beside
+/// them shows far less, so the rays found the spheres. It fails on GGX sampled wrongly, a wrong
+/// density, biased roulette or no compensation, whose loss grows with roughness.
+fn path_traced_metal_reflects_all_of_a_furnace() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 40;
+    const SPHERES: u32 = 6;
+    let Some(mut renderer) = tracing_renderer(WIDTH, HEIGHT) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    const SKY: f32 = 0.5;
+    let sky = sky_texture(&mut stores.textures, [8, 4], |_, _| [SKY; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    // 6 units across, the spheres a unit apart.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 0.0, 10.0),
+        projection: Projection::Orthographic {
+            height: 1.0,
+            near: 1.0,
+            far: 20.0,
+        },
+        ..Viewpoint::default()
+    };
+    let ball = sphere(&mut stores.meshes, 0.45, 24, 48);
+    let mut draws = Draws::default();
+    for i in 0..SPHERES {
+        let material = if i + 1 < SPHERES {
+            Material {
+                color: Vec4::ONE,
+                workflow: metallic(1.0, 0.1 + 0.9 * i as f32 / (SPHERES - 2) as f32),
+                ..Material::default()
+            }
+        } else {
+            Material {
+                color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+                workflow: metallic(0.0, 1.0),
+                ..Material::default()
+            }
+        };
+        let material = stores.materials.add(&material);
+        let draw = MeshDraw::with_material(ball, material, &stores.materials, &mut stores.shaders);
+        let at = Vec3::new(i as f32 - (SPHERES - 1) as f32 / 2.0, 0.0, 0.0);
+        draws.push_draw(Mat4::from_translation(at), &draw, 0);
+    }
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let frame = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 64);
+    let middle = |i: u32| [WIDTH / SPHERES * i + WIDTH / SPHERES / 2, HEIGHT / 2];
+    for i in 0..SPHERES - 1 {
+        let mean = linear_mean(&frame, WIDTH, middle(i), 4);
+        let off = (mean / SKY - 1.0).abs().max_element();
+        assert!(
+            off < 0.02,
+            "sphere {i} shows {mean}, {off:.3} off the sky's {SKY}"
+        );
+    }
+    let black = linear_mean(&frame, WIDTH, middle(SPHERES - 1), 4);
+    assert!(
+        black.max_element() < 0.5 * SKY,
+        "the black sphere shows {black}"
+    );
+}
+
+/// The sun alone on a plane, rough gray: no sky, so the plane sees nothing else, and no shadows,
+/// so the raster's light is its BRDF times the sun's. The paths traced, through the same BRDF,
+/// agree with it within 1%.
+fn path_traced_sunlight_matches_the_rasters() {
+    const SIZE: u32 = 64;
+    let Some(mut renderer) = tracing_renderer(SIZE, SIZE) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let gray = Material {
+        color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+        workflow: metallic(0.0, 0.5),
+        ..Material::default()
+    };
+    let gray = stores.materials.add(&gray);
+    let floor = MeshDraw::with_material(square, gray, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 0);
+    stores.lights = vec![Light {
+        color: Vec3::splat(2.0),
+        ..sun(Vec3::new(0.3, -1.0, 0.2), None)
+    }];
+    // Down at the floor, from the side: the specular highlight changes across it.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 3.0, 4.0),
+        rotation: Quat::from_rotation_x(-0.6),
+        projection: Projection::Perspective {
+            fov: PI / 4.0,
+            near: 0.1,
+        },
+    };
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    let raster = frame_pixels(&mut renderer);
+    let traced = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 16);
+    for center in [[16, 40], [32, 32], [48, 24]] {
+        let [raster, traced] = [&raster, &traced].map(|frame| linear_mean(frame, SIZE, center, 6));
+        let off = (traced / raster - 1.0).abs().max_element();
+        assert!(
+            off < 0.01,
+            "at {center:?}, traced {traced} and raster {raster}: {off:.4} off"
+        );
+    }
+}
+
+/// Paths accumulate: a white diffuse floor, seen straight down, under a sky bright over half its
+/// azimuths and black over the rest, so every path brings the bright half's light or none and every
+/// pixel expects the same. Its pixels vary about 4 times less at 256 paths a pixel than at 64. A
+/// moved viewpoint starts the count over.
+fn path_traced_light_accumulates_until_the_view_moves() {
+    const SIZE: u32 = 64;
+    let Some(mut renderer) = tracing_renderer(SIZE, SIZE) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [16, 8], |x, _| {
+        if x < 8 { [0.6; 3] } else { [0.0; 3] }
+    });
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let square = model_square(&mut stores.meshes);
+    // Diffuse alone: a specular color of 0 reflects nothing.
+    let white = Material {
+        color: Vec4::ONE,
+        workflow: Workflow::SpecularGlossiness {
+            specular: Vec3::ZERO,
+            glossiness: 0.0,
+        },
+        ..Material::default()
+    };
+    let white = stores.materials.add(&white);
+    let floor = MeshDraw::with_material(square, white, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 0);
+    let viewpoint = looking_down(Vec3::new(0.0, 2.0, 0.0), 4.0, 4.0);
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let variance = |frame: &[u8]| {
+        let values: Vec<f32> = frame.chunks(4).map(|pixel| decoded(pixel[1])).collect();
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        values.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / values.len() as f32
+    };
+    let few = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 64);
+    let many = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 256);
+    let ratio = variance(&few) / variance(&many);
+    assert!(
+        (3.4..4.6).contains(&ratio),
+        "variance fell {ratio:.2} times"
+    );
+    let moved = looking_down(Vec3::new(0.1, 2.0, 0.0), 4.0, 4.0);
+    let data = RenderData {
+        show: Some(Show::PathTraced { samples: 256 }),
+        ..stores.data(viewport, moved, &draws)
+    };
+    render_without_ui(&mut renderer, data);
+    assert!(
+        renderer.path_traced().is_some_and(|taken| taken < 256),
+        "{:?} paths a pixel after the view moved",
+        renderer.path_traced()
+    );
+}
+
+/// Without ray queries, a view showing paths traced shows black, warning `renderer.no_ray_query`
+/// once however many frames ask, and says no path was traced.
+fn path_traced_without_ray_queries_shows_black(log: &Path) {
+    const SIZE: u32 = 8;
+    let settings = Settings {
+        ray_query: Some(false),
+        ..settings(None)
+    };
+    let mut renderer =
+        Renderer::headless_on(&harness::instance(), &settings, SIZE, SIZE).expect("a renderer");
+    let mut stores = Stores::default();
+    let draws = Draws::default();
+    let viewport = filling([SIZE, SIZE]);
+    let viewpoint = Viewpoint::default();
+    let warned = || {
+        let log = std::fs::read_to_string(log).expect("the JSON log");
+        log.matches("\"code\":\"renderer.no_ray_query\"").count()
+    };
+    let before = warned();
+    for _ in 0..3 {
+        let data = RenderData {
+            show: Some(Show::PathTraced { samples: 4 }),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    assert_eq!(renderer.path_traced(), None);
+    let frame = frame_pixels(&mut renderer);
+    assert!(
+        frame.chunks(4).all(|pixel| pixel == [0, 0, 0, 255]),
+        "the view isn't black"
+    );
+    assert_eq!(warned() - before, 1, "warned once");
 }
 
 /// The ambient occlusion tests' scene: a floor, walls, spheres ([`BALL`] the large one), a masked

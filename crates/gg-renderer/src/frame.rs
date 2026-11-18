@@ -30,6 +30,7 @@ use crate::sky::{SkyData, SkyPass, Source};
 use crate::smaa::SmaaPass;
 use crate::taa::TaaPass;
 use crate::tonemap::TonemapPass;
+use crate::trace::{self, TracePass};
 use crate::view::{OutlinePass, OutlinePlan};
 use crate::{
     AmbientOcclusion, Antialiasing, Channel, DrawCounts, Fog, FrameImage, Light, MotionBlur,
@@ -105,8 +106,11 @@ struct ViewPasses {
     /// Draws the canvas in its own pass if antialiasing, keeping for reflections, metering, blurs,
     /// bloom, the grade or a lens follow the view's last pass. Otherwise that pass draws it.
     canvas: Option<PassId>,
-    /// Shows an image the frame makes in the view's place.
+    /// Shows an image the frame makes in the view's place, or black for paths traced without ray
+    /// queries.
     show: Option<show::Plan>,
+    /// Traces paths in the view's place.
+    trace: Option<trace::Plan>,
     /// What the tonemap pass samples: the view after all its passes, with its canvas, or an image
     /// shown in its place.
     shown: ImageId,
@@ -191,6 +195,8 @@ struct Viewing<'a> {
     antialiased: bool,
     smaa: bool,
     image_shown: Option<&'a str>,
+    /// Whether the view shows paths traced: `Some(true)` on a device with ray queries.
+    path_traced: Option<bool>,
     atmosphere: Option<atmosphere::Seen>,
     shining: &'a [Light],
     sky: Option<(Source, f32)>,
@@ -219,6 +225,7 @@ struct Recorder<'a> {
     taa: &'a mut TaaPass,
     smaa: &'a Option<SmaaPass>,
     show: &'a Option<ShowPass>,
+    trace: &'a mut Option<TracePass>,
     sky: &'a Option<SkyPass>,
     atmosphere: &'a Option<AtmospherePass>,
     view_read: &'a mut u64,
@@ -356,6 +363,31 @@ impl Renderer {
         }
         if image_shown.is_none() {
             self.missing = None;
+        }
+        // Paths traced on a device with ray queries; else black, warned of once while frames ask.
+        let samples = match data.show {
+            Some(Show::PathTraced { samples }) if renders_view => Some(samples),
+            _ => None,
+        };
+        let ray_query = self.device.ray_query();
+        let path_traced = samples.map(|_| ray_query);
+        if path_traced == Some(false) {
+            if !self.no_ray_query {
+                warn!(
+                    code = "renderer.no_ray_query",
+                    gpu = self.device.name(),
+                    "the view shows paths traced, but the GPU has no ray queries: it shows black"
+                );
+                self.no_ray_query = true;
+            }
+            if self.show.is_none() {
+                self.show = Some(ShowPass::new(&self.device)?);
+            }
+        } else {
+            self.no_ray_query = false;
+        }
+        if path_traced == Some(true) && self.trace.is_none() {
+            self.trace = Some(TracePass::new(&self.device)?);
         }
         let (jitter, view_projection) = if antialiased {
             self.history.prepare(&self.device, data.viewport.size)?;
@@ -499,6 +531,7 @@ impl Renderer {
             antialiased,
             smaa,
             image_shown,
+            path_traced,
             atmosphere,
             shining,
             sky,
@@ -580,6 +613,20 @@ impl Renderer {
         self.exposed = exposure;
         debug_assert_eq!(number, frame.number(), "the frame begun is the one planned");
         self.meshes.upload(&mut frame, data.uploads)?;
+        if let (Some(samples), Some(true), Some(trace)) = (samples, path_traced, &mut self.trace) {
+            let seen = trace::Seen {
+                number,
+                size,
+                clip_from_world: unjittered,
+                lights: bytemuck::cast_slice(self.lighting.lights()),
+                sky: sky.map(|(_, luminance)| luminance),
+                prefiltered: plan.is_some(),
+                exposure,
+                uploaded: self.meshes.uploaded(),
+                samples,
+            };
+            trace.prepare(&mut frame, &self.meshes, data.draws, &seen)?;
+        }
         self.ui.write_textures(&mut frame)?;
         if let Some(smaa) = &mut self.smaa {
             smaa.write_textures(&mut frame)?;
@@ -630,6 +677,7 @@ impl Renderer {
                     taa: &mut self.taa,
                     smaa: &self.smaa,
                     show: &self.show,
+                    trace: &mut self.trace,
                     sky: &self.sky,
                     atmosphere: &self.atmosphere,
                     view_read: &mut self.view_read,
@@ -681,6 +729,9 @@ impl Renderer {
         };
         // The GPU's counts come back with the frame two later, which adds them.
         self.counted[(number % 2) as usize] = (number, counts, culled);
+        self.traced = (path_traced == Some(true))
+            .then(|| self.trace.as_ref().map(TracePass::taken))
+            .flatten();
         let mut pass = (frame.render(frame_pass)).expect("a frame's first target has an image");
         let view = view.map(|(shown, size)| {
             let image = match shown {
@@ -763,6 +814,7 @@ fn plan_view(
         antialiased,
         smaa,
         image_shown,
+        path_traced,
         atmosphere,
         shining,
         tables,
@@ -1047,15 +1099,25 @@ fn plan_view(
     if data.list_images {
         show::list(images, graph, unlisted);
     }
-    // An image the frame makes in place of all that, the last of its name added so far.
-    let show = image_shown.map(|name| {
-        let found = graph.image_named(name);
-        show_missing(missing, name, found.is_some());
-        ShowPass::plan(graph, found, size)
+    // An image the frame makes in place of all that, the last of its name added so far; or paths
+    // traced, sampling the sky's light where the frame prefilters it, or black without ray queries.
+    let show = match (image_shown, path_traced) {
+        (Some(name), _) => {
+            let found = graph.image_named(name);
+            show_missing(missing, name, found.is_some());
+            Some(ShowPass::plan(graph, found, size))
+        }
+        (None, Some(false)) => Some(ShowPass::plan(graph, None, size)),
+        (None, _) => None,
+    };
+    let trace = (path_traced == Some(true)).then(|| {
+        let sky = plan.iter().flat_map(sky::Plan::sampled);
+        TracePass::plan(graph, size, sky)
     });
-    let (shown, tonemapper) = match &show {
-        Some(plan) => (plan.shown(), plan.tonemapper(data.tonemapper)),
-        None => (shown, data.tonemapper),
+    let (shown, tonemapper) = match (&show, &trace) {
+        (Some(plan), _) => (plan.shown(), plan.tonemapper(data.tonemapper)),
+        (None, Some(plan)) => (plan.shown(), data.tonemapper),
+        (None, None) => (shown, data.tonemapper),
     };
     let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
     // Cleared as a graph's own image is first written, though the pass writes every pixel.
@@ -1093,6 +1155,7 @@ fn plan_view(
         lens,
         canvas,
         show,
+        trace,
         shown,
         tonemap,
         tonemapper,
@@ -1615,6 +1678,10 @@ impl Recorder<'_> {
                 .as_ref()
                 .expect("made by the frame that planned it");
             pass.record(frame, plan);
+        }
+        if let Some(plan) = &view.trace {
+            let trace = (self.trace.as_mut()).expect("made by the frame that planned it");
+            trace.record(frame, plan, |sampled| view_data(sampled).0)?;
         }
         if let Some(read) = view.read_ids {
             let picked = self.picks.take(frame.number(), Some(size));

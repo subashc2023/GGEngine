@@ -108,6 +108,14 @@ pub struct TlasInstance {
     pub blas: u64,
 }
 
+impl TlasInstance {
+    /// In `offset_and_flags`: rays that cull back faces find this instance's too
+    /// (`VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR`). Without it, its fronts are the
+    /// triangles wound counterclockwise in its BLAS's right-handed space, as glTF winds them,
+    /// whatever its transform: the facing is its BLAS's, which rays find, as the RTX 4090 shows.
+    pub const BOTH_FACES: u32 = 0x1 << 24;
+}
+
 /// An acceleration structure and the buffer it lives in.
 pub(crate) struct Structure {
     device: Arc<Device>,

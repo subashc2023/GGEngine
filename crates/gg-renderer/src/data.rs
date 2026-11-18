@@ -301,6 +301,10 @@ pub struct Settings<'a> {
     /// each; `shaders/model.slang` says how. Mesh shaders the GPU lacks keep the renderer from
     /// starting (`gpu.no_mesh_shaders`).
     pub mesh_shaders: Option<bool>,
+    /// Trace rays through ray queries or not, rather than as the GPU can, to test each: what
+    /// [`Show::PathTraced`] needs. Ray queries the GPU lacks keep the renderer from starting
+    /// (`gpu.no_ray_query`).
+    pub ray_query: Option<bool>,
     /// Shade models' opaque and masked materials drawn by meshlets from a visibility buffer, as
     /// `shaders/visibility.slang` says, or, to test or measure each, as everything else draws.
     pub visibility_buffer: bool,

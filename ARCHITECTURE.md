@@ -757,7 +757,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 
 | Pass | What it does | Labels (images) | Code |
 |---|---|---|---|
-| Writes and uploads | Material table, the scene's changed records, streamed meshes and textures, recorded before any pass | | `lib.rs`, gg-gpu `frame/upload.rs` |
+| Writes and uploads | Material table, the scene's changed records, streamed meshes and textures, recorded before any pass; tracing paths, BLASes, instances and the TLAS | `build BLAS`, `build TLAS` | `lib.rs`, `trace.rs`, gg-gpu `frame/upload.rs`, `frame/builds.rs` |
 | Atmosphere | Its tables, every frame it shows | `atmosphere transmittance`, `… multiple scattering`, `… sky view`, `… aerial perspective` | `atmosphere.rs` |
 | Sky light | Prefilters the sky into diffuse and specular cubes, and once the split sum's table, only as the sky changes | `sky cube`, `sky levels`, `sky light`, `split sum` | `sky.rs` |
 | Skin | Moves skinned meshes' vertices by their joints | `skin` (`skinned vertices`) | `skin.rs` |
@@ -783,6 +783,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 | Lens | Chromatic aberration, vignette, grain | `lens` (`view lensed`) | `lens.rs` |
 | Canvas | The game's UI, in the view's pixels, where a pass above follows the view's last | `canvas` | `lib.rs` |
 | Show | An image, by its debug name, in place of the view's light | `show` (`view shown`) | `show.rs` |
+| Path trace | Paths through the opaque and masked models, in place of the view's light | `path trace` (`path traced`) | `trace.rs` |
 | Picks | Reads the IDs at picked pixels | `read ids` | `pick.rs` |
 | Tonemap | Into 8-bit sRGB, dithered | `tonemap` (`view`) | `tonemap.rs` |
 | Outline | Row distances, then band and glow | `outline distances`, `outline` | `view.rs` |
@@ -863,6 +864,25 @@ that are images. Paths are under `crates/gg-renderer/src/`.
   face bounds the depth, as for open and double-sided meshes, a constant thickness stands in. The
   back faces cost another depth-only draw of what the view kept; a second depth layer, or rays
   traced in the world, would show what's behind the first.
+
+### Reference path tracer
+
+A path tracer over the scene the raster draws is the reference the raster's light is checked
+against by numbers, in tests and by agents ([`trace.rs`](crates/gg-renderer/src/trace.rs)); it's
+not a mode games ship with.
+
+- Ray queries in a compute pass, on devices that have them. The TLAS is reached by address, as
+  buffers are, so nothing is bound; that needs `shaderInt64`.
+- A BLAS per model mesh's level 0 reads its packed vertices in place, the packing as the build's
+  transform. The CPU gathers the instances, the scene's and the frame's draws', each frame that
+  traces: a frame that doesn't costs nothing.
+- Paths by next-event estimation of the lights, which are deltas, and BSDF sampling of the sky,
+  which leaves out a sun a light stands for. GGX is energy-compensated (Turquin) for every light,
+  so the raster's uncompensated highlights show as a measured difference, not a hidden one.
+- Light accumulates over frames until the samples asked for, and starts over as anything it reads
+  changes.
+- It sees opaque and masked models alone: no fog, haze, blending, skinned meshes or games' own
+  shaders. Without ray queries, as on KosmicKrisp, it shows black and says so.
 
 ### Antialiasing and post-processing
 

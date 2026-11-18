@@ -5,12 +5,12 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use gg_core::Result;
-use gg_core::math::Vec3;
+use gg_core::math::{Mat4, Vec3};
 #[cfg(doc)]
 use gg_gpu::Format;
-use gg_gpu::{ComputePipeline, Device, GpuBuffer, Pipeline};
+use gg_gpu::{ComputePipeline, Device, Faces, GpuBuffer, Pipeline};
 
-use crate::shader;
+use crate::{Draws, shader};
 
 mod cull;
 mod draw;
@@ -26,7 +26,7 @@ pub(crate) use cull::{COUNTS, CullPlan, CullView, FIRST, counts};
 #[cfg(test)]
 pub(crate) use cull::{GATHER_SPIRV, PYRAMID_SPIRV};
 pub(crate) use draw::{FrameData, Push, Runs, Way};
-pub(crate) use registry::{Change, bad_mesh, check, check_lods};
+pub(crate) use registry::{Change, Positions, bad_mesh, check, check_lods};
 pub use registry::{Lod, Lods, MAX_LEVELS, Mesh, MeshDraw, Meshes};
 pub(crate) use scene::Change as SceneChange;
 pub use scene::Scene;
@@ -71,6 +71,9 @@ pub(crate) struct MeshPass {
     skinned: Vec<u64>,
     /// The meshes `skinned` holds an address for.
     skinned_set: Vec<u32>,
+    /// Whether the last frame's uploads changed what's drawn: a mesh, texture or material came,
+    /// changed or went.
+    uploaded: bool,
 }
 
 struct GpuShader {
@@ -112,6 +115,8 @@ struct GpuMesh {
     meshlets: Option<PlacedMeshlets>,
     /// For a skinned model's mesh, its vertex count, which the skin pass moves.
     skinned: Option<u32>,
+    /// For an unskinned model's mesh, its positions, which the path tracer reads in place.
+    positions: Option<Positions>,
 }
 
 /// What the pass holds for a mesh handle: nothing while it streams, what it draws with, or nothing
@@ -158,6 +163,7 @@ impl MeshPass {
             },
             skinned: Vec::new(),
             skinned_set: Vec::new(),
+            uploaded: false,
         })
     }
 
@@ -198,6 +204,83 @@ impl MeshPass {
     pub(crate) fn moved(&mut self, by: Vec3) {
         self.scene.moved(by);
     }
+
+    /// Whether the last frame's uploads changed what's drawn: a mesh, texture or material came,
+    /// changed or went.
+    pub(crate) fn uploaded(&self) -> bool {
+        self.uploaded
+    }
+
+    /// What the path tracer reads of drawable mesh `index`, if it's an unskinned model's.
+    pub(crate) fn traced_mesh(&self, index: u32) -> Option<TracedMesh<'_>> {
+        let mesh = self.meshes.get(index as usize)?.ready()?;
+        let level = mesh.lods.levels.first()?;
+        Some(TracedMesh {
+            vertices: &mesh.vertices,
+            indices: &mesh.indices,
+            first_index: level.start,
+            triangles: level.count / 3,
+            positions: mesh.positions?,
+        })
+    }
+
+    /// Puts into `out` the instances the path tracer traces: the scene's, then `draws`', of the
+    /// engine's opaque and masked model shaders. A mesh not yet drawable is in, which
+    /// [`traced_mesh`](Self::traced_mesh) leaves out.
+    pub(crate) fn traced_instances(&self, draws: &Draws, out: &mut Vec<TracedInstance>) {
+        out.clear();
+        let traced = |shader: u32| {
+            (self.shaders.get(shader as usize))
+                .and_then(Option::as_ref)
+                .filter(|shader| shader.meshlets.is_some())
+        };
+        for (run, transform, material) in self.scene.instances() {
+            if traced(run.shader).is_some() {
+                out.push(TracedInstance {
+                    mesh: run.mesh,
+                    transform,
+                    material,
+                    both_faces: run.faces == Faces::Both,
+                });
+            }
+        }
+        for run in draws.runs.iter().filter(|run| run.particles.is_none()) {
+            let Some(shader) = traced(run.shader) else {
+                continue;
+            };
+            let params = &draws.params[run.params.clone()];
+            for (i, &transform) in draws.transforms[run.instances.clone()].iter().enumerate() {
+                let at = i * shader.params_size;
+                let material = bytemuck::pod_read_unaligned(&params[at..at + 4]);
+                out.push(TracedInstance {
+                    mesh: run.mesh,
+                    transform,
+                    material,
+                    both_faces: run.faces == Faces::Both,
+                });
+            }
+        }
+    }
+}
+
+/// What the path tracer reads of a drawable model mesh: its buffers, its level 0's indices, and its
+/// positions.
+pub(crate) struct TracedMesh<'a> {
+    pub(crate) vertices: &'a GpuBuffer,
+    pub(crate) indices: &'a GpuBuffer,
+    pub(crate) first_index: u32,
+    pub(crate) triangles: u32,
+    pub(crate) positions: Positions,
+}
+
+/// An instance the path tracer traces: its mesh, transform, material, and whether rays find its
+/// back faces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TracedInstance {
+    pub(crate) mesh: u32,
+    pub(crate) transform: Mat4,
+    pub(crate) material: u32,
+    pub(crate) both_faces: bool,
 }
 
 #[cfg(test)]

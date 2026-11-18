@@ -34,6 +34,12 @@ pub enum Show<'a> {
     ///
     /// One the frame doesn't make shows black, warning `renderer.no_image` once.
     Image(&'a str),
+    /// The view's light as paths traced through its opaque and masked models find it, `samples`
+    /// paths a pixel: a reference for the light the view shades, shown as a light channel is.
+    /// `shaders/trace.slang` says what it computes and leaves out, and
+    /// [`Renderer::path_traced`](crate::Renderer::path_traced) how far it's got. Black without ray
+    /// queries, warning `renderer.no_ray_query` once.
+    PathTraced { samples: u32 },
 }
 
 /// An image a frame made that [`Show::Image`] finds, as [`Renderer::images`] lists them.
@@ -154,12 +160,11 @@ pub(crate) fn showing(data: RenderData<'_>) -> RenderData<'_> {
             antialiasing: Antialiasing::None,
             ..data
         },
-        Some(Show::Shading(channel)) => RenderData {
+        Some(show @ (Show::Shading(_) | Show::PathTraced { .. })) => RenderData {
             clear_color: [0.0, 0.0, 0.0, 1.0],
-            tonemapper: if channel.light() {
-                data.tonemapper
-            } else {
-                Tonemapper::None
+            tonemapper: match show {
+                Show::Shading(channel) if !channel.light() => Tonemapper::None,
+                _ => data.tonemapper,
             },
             antialiasing: Antialiasing::None,
             bloom: 0.0,

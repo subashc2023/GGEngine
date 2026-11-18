@@ -123,7 +123,7 @@ struct Header {
 }
 
 /// How many vertices' room a [`Header`] takes: `HEADER` in `shaders/model.slang`.
-const HEADER_VERTICES: usize = 2;
+pub(crate) const HEADER_VERTICES: usize = 2;
 
 const _: () = assert!(size_of::<Header>() == HEADER_VERTICES * size_of::<PackedVertex>());
 
