@@ -47,6 +47,9 @@ pub(super) struct Candidate {
     pub(super) memory_budget: bool,
     /// Whether it draws through mesh shaders (`VK_EXT_mesh_shader`), with `geometryShader`.
     pub(super) mesh_shaders: bool,
+    /// Whether compute shaders trace rays: `VK_KHR_ray_query` and `VK_KHR_acceleration_structure`,
+    /// with `shaderInt64` and packed vertices as builds' input.
+    pub(super) ray_query: bool,
     /// Whether its samplers filter anisotropically: every GPU but lavapipe (llvmpipe), Mesa's
     /// CPU driver. Its anisotropic filter returns NaN where a texture coordinate's derivatives
     /// are 0, as across triangles whose corners share their coordinates (flat-colored and
@@ -240,6 +243,19 @@ impl Candidate {
             mesh_shaders: properties.api_version >= REQUIRED_VERSION
                 && has_extension(&extensions, vk::EXT_MESH_SHADER_NAME)
                 && core.geometry_shader == vk::TRUE,
+            // As with mesh shaders, the extensions require their features (`accelerationStructure`
+            // and `rayQuery`), so those aren't queried. Shaders that take a TLAS by address declare
+            // SPIR-V's Int64, which `shaderInt64` gives.
+            ray_query: properties.api_version >= REQUIRED_VERSION
+                && [
+                    vk::KHR_ACCELERATION_STRUCTURE_NAME,
+                    vk::KHR_RAY_QUERY_NAME,
+                    vk::KHR_DEFERRED_HOST_OPERATIONS_NAME,
+                ]
+                .iter()
+                .all(|name| has_extension(&extensions, name))
+                && core.shader_int64 == vk::TRUE
+                && builds_from_packed_vertices(instance, physical),
             anisotropy: driver_id != vk::DriverId::MESA_LLVMPIPE,
             problem,
         }
@@ -270,6 +286,25 @@ impl Candidate {
             }
             Some(wanted) => Ok(wanted),
             None => Ok(self.mesh_shaders),
+        }
+    }
+
+    /// Whether compute shaders trace rays: as `wanted` says, else if the GPU can.
+    ///
+    /// Fails with `gpu.no_ray_query` if they're wanted and the GPU can't.
+    pub(super) fn ray_query(&self, wanted: Option<bool>) -> Result<bool> {
+        match wanted {
+            Some(true) if !self.ray_query => {
+                let message = format!(
+                    "ray queries were asked for, but {} hasn't them (VK_KHR_ray_query and \
+                     VK_KHR_acceleration_structure), shaderInt64, or R16G16B16A16_UNORM as \
+                     acceleration-structure vertices",
+                    self.name
+                );
+                Err(Error::new("gpu.no_ray_query", message))
+            }
+            Some(wanted) => Ok(wanted),
+            None => Ok(self.ray_query),
         }
     }
 
@@ -333,6 +368,25 @@ fn has_depth(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
         | vk::FormatFeatureFlags2::SAMPLED_IMAGE
         | vk::FormatFeatureFlags2::SAMPLED_IMAGE_DEPTH_COMPARISON;
     features3.optimal_tiling_features.contains(needed)
+}
+
+/// Whether acceleration structures build from R16G16B16A16_UNORM vertices, as models pack their
+/// positions, which BLASes read in place. Called for Vulkan 1.3 or later, whose format properties
+/// tell it.
+fn builds_from_packed_vertices(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
+    let mut features3 = vk::FormatProperties3::default();
+    let mut properties = vk::FormatProperties2::default().push_next(&mut features3);
+    // SAFETY: the physical device came from this instance, whose Vulkan 1.3 has format properties
+    // 3, and the properties outlive the call.
+    unsafe {
+        instance.raw().get_physical_device_format_properties2(
+            physical,
+            vk::Format::R16G16B16A16_UNORM,
+            &mut properties,
+        );
+    }
+    (features3.buffer_features)
+        .contains(vk::FormatFeatureFlags2::ACCELERATION_STRUCTURE_VERTEX_BUFFER_KHR)
 }
 
 /// The device's extensions; none, if they can't be listed.
@@ -571,6 +625,7 @@ mod tests {
             memory: vk::PhysicalDeviceMemoryProperties::default(),
             memory_budget: false,
             mesh_shaders: false,
+            ray_query: false,
             anisotropy: true,
             problem: None,
         }
@@ -734,5 +789,24 @@ mod tests {
         let error = without.mesh_shaders(Some(true)).expect_err("none");
         assert_eq!(error.code(), "gpu.no_mesh_shaders");
         assert!(error.to_string().contains("Some GPU has none"), "{error}");
+    }
+
+    #[test]
+    fn ray_queries_are_used_where_the_gpu_has_them_unless_asked_otherwise() {
+        let gpu = |ray_query| Candidate {
+            ray_query,
+            ..candidate(0, "Some GPU", vk::PhysicalDeviceType::DISCRETE_GPU, 8192)
+        };
+        let (with, without) = (gpu(true), gpu(false));
+        let used = |gpu: &Candidate, wanted| gpu.ray_query(wanted).expect("a choice");
+        assert!(used(&with, None) && used(&with, Some(true)));
+        assert!(!used(&with, Some(false)));
+        assert!(!used(&without, None) && !used(&without, Some(false)));
+        let error = without.ray_query(Some(true)).expect_err("none");
+        assert_eq!(error.code(), "gpu.no_ray_query");
+        assert!(
+            error.to_string().contains("Some GPU hasn't them"),
+            "{error}"
+        );
     }
 }

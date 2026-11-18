@@ -185,10 +185,14 @@ impl GpuBuffer {
     /// If `size` is 0, which Vulkan doesn't allow.
     pub fn new(device: &Arc<Device>, size: u64, name: &str) -> Result<Self> {
         assert!(size > 0, "a buffer holds at least a byte");
-        let usage = vk::BufferUsageFlags::INDEX_BUFFER
+        let mut usage = vk::BufferUsageFlags::INDEX_BUFFER
             | vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::TRANSFER_DST;
+        // Meshes' vertices and indices, and TLASes' instances, are builds' input.
+        if device.ray_query() {
+            usage |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
+        }
         Ok(Self {
             buffer: Buffer::new(device, size, usage, Memory::Gpu, name)?,
             copied: 0,

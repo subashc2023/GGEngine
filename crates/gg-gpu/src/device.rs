@@ -192,6 +192,8 @@ pub struct Device {
     /// RenderDoc, for a device it can capture: one its layer is active on.
     renderdoc: Option<&'static RenderDoc>,
     mesh_shader_fn: Option<ext::mesh_shader::Device>,
+    /// The acceleration structures' functions, for a device that traces rays.
+    acceleration_structure_fn: Option<khr::acceleration_structure::Device>,
 }
 
 /// A device queue. Vulkan lets one thread at a time use a queue, hence the lock.
@@ -211,12 +213,13 @@ impl Device {
     /// Opens the best GPU that supports Vulkan 1.4 and, given a surface, can present to it.
     /// Given `gpu`, only GPUs whose names contain it, ignoring case, are considered. Discrete
     /// GPUs come first, then integrated ones; among equals, the one with the most memory. It
-    /// uploads by `uploads`, if given, else by the GPU's best way, and draws through mesh shaders
-    /// as `mesh_shaders` says, if given, else if the GPU has them.
+    /// uploads by `uploads`, if given, else by the GPU's best way, draws through mesh shaders
+    /// as `mesh_shaders` says, if given, else if the GPU has them, and traces rays from compute
+    /// shaders as `ray_query` says, if given, else if the GPU can.
     ///
     /// Fails with `gpu.no_device` if no GPU can run the engine, `gpu.no_upload_path` if the GPU
-    /// hasn't the upload path asked for, and `gpu.no_mesh_shaders` if it hasn't the mesh shaders
-    /// asked for.
+    /// hasn't the upload path asked for, `gpu.no_mesh_shaders` if it hasn't the mesh shaders
+    /// asked for, and `gpu.no_ray_query` if it hasn't the ray queries asked for.
     ///
     /// # Panics
     ///
@@ -227,6 +230,7 @@ impl Device {
         surface: Option<&Surface>,
         uploads: Option<UploadPath>,
         mesh_shaders: Option<bool>,
+        ray_query: Option<bool>,
     ) -> Result<Arc<Self>> {
         let _zone = gg_core::zone!();
         if let Some(surface) = surface {
@@ -252,6 +256,7 @@ impl Device {
                 transfer = candidate.transfer,
                 compute = candidate.compute,
                 host_image_copy = candidate.host_copy.name(),
+                ray_query = candidate.ray_query,
                 problem = candidate.problem.as_deref(),
                 "GPU found"
             );
@@ -259,6 +264,7 @@ impl Device {
         let chosen = pick(&candidates, gpu)?;
         let uploads = chosen.upload_path(uploads)?;
         let mesh_shaders = chosen.mesh_shaders(mesh_shaders)?;
+        let ray_query = chosen.ray_query(ray_query)?;
         let physical = chosen.physical;
         let graphics = chosen
             .graphics
@@ -300,6 +306,15 @@ impl Device {
         if mesh_shaders {
             extensions.push(vk::EXT_MESH_SHADER_NAME.as_ptr());
         }
+        // Acceleration structures require deferred host operations, though builds here don't
+        // defer.
+        if ray_query {
+            extensions.extend([
+                vk::KHR_ACCELERATION_STRUCTURE_NAME.as_ptr(),
+                vk::KHR_RAY_QUERY_NAME.as_ptr(),
+                vk::KHR_DEFERRED_HOST_OPERATIONS_NAME.as_ptr(),
+            ]);
+        }
         // Scalar block layout lets shaders read vertices laid out as `#[repr(C)]` lays them out.
         let mut vulkan12 = bindless_features()
             .timeline_semaphore(true)
@@ -311,12 +326,18 @@ impl Device {
         let mut host_image_copy =
             vk::PhysicalDeviceHostImageCopyFeaturesEXT::default().host_image_copy(true);
         let mut mesh_shader = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
+        let mut acceleration_structure =
+            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+                .acceleration_structure(true);
+        let mut ray_query_features =
+            vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
         // Features, in order, for: models' textures, which recede from the camera; passes that
         // render IDs beside colors, whose targets blend apart as integers don't blend; games'
         // cooked textures, compressed as BC7; compute shaders that pick storage images from the
         // bindless set by a pushed index; shadow maps, whose casters between the light and the
         // near plane still cast; indirect draws whose instances start where their commands say;
-        // and, with mesh shaders, the fragment shaders behind them that read primitives' IDs.
+        // with mesh shaders, the fragment shaders behind them that read primitives' IDs; and,
+        // with ray queries, shaders that take a TLAS by its 64-bit address.
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
             .independent_blend(true)
@@ -324,7 +345,8 @@ impl Device {
             .shader_storage_image_array_dynamic_indexing(true)
             .depth_clamp(true)
             .draw_indirect_first_instance(true)
-            .geometry_shader(mesh_shaders);
+            .geometry_shader(mesh_shaders)
+            .shader_int64(ray_query);
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
@@ -337,12 +359,18 @@ impl Device {
         if mesh_shaders {
             create_info = create_info.push_next(&mut mesh_shader);
         }
+        if ray_query {
+            create_info = create_info
+                .push_next(&mut acceleration_structure)
+                .push_next(&mut ray_query_features);
+        }
         // SAFETY: the physical device came from this instance. Every Vulkan 1.4 device has these
         // features but the bindless ones, BC texture compression, depth clamp, host image copy,
-        // and mesh and geometry shaders, which `Candidate::new` checked (Vulkan 1.4 requires
-        // sampler anisotropy, independent blending, dynamic indexing of storage images and
-        // indirect draws' first instance, in vk.xml's feature requirements). The create info's
-        // pointers outlive the call.
+        // mesh and geometry shaders, ray queries, acceleration structures and 64-bit integers in
+        // shaders, which `Candidate::new` checked (Vulkan 1.4 requires sampler anisotropy,
+        // independent blending, dynamic indexing of storage images and indirect draws' first
+        // instance, and the extensions their features, in vk.xml's feature requirements). The
+        // create info's pointers outlive the call.
         let raw = unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(
             vk_failed(
                 "vkCreateDevice",
@@ -417,6 +445,8 @@ impl Device {
             renderdoc,
             mesh_shader_fn: mesh_shaders
                 .then(|| ext::mesh_shader::Device::new(instance.raw(), &raw)),
+            acceleration_structure_fn: ray_query
+                .then(|| khr::acceleration_structure::Device::new(instance.raw(), &raw)),
             debug_utils,
             swapchain_fn: surface.map(|_| khr::swapchain::Device::new(instance.raw(), &raw)),
             instance: instance.clone(),
@@ -453,6 +483,7 @@ impl Device {
             uploads = %uploads,
             compute_queue = compute.is_some(),
             mesh_shaders,
+            ray_query,
             memory_budget = chosen.memory_budget,
             "GPU selected"
         );
@@ -479,6 +510,11 @@ impl Device {
     /// The mesh shaders' functions, for a device that draws through them.
     pub(crate) fn mesh_shader_fn(&self) -> Option<&ext::mesh_shader::Device> {
         self.mesh_shader_fn.as_ref()
+    }
+
+    /// Whether compute shaders trace rays through acceleration structures (`VK_KHR_ray_query`).
+    pub fn ray_query(&self) -> bool {
+        self.acceleration_structure_fn.is_some()
     }
 
     /// How much of the GPU's own memory (its device-local heaps) is in use, by this process and

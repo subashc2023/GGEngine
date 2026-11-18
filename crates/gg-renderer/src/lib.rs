@@ -272,6 +272,7 @@ impl Renderer {
             Some(&surface),
             settings.uploads,
             settings.mesh_shaders,
+            None,
         )?;
         let swapchain = Swapchain::new(&device, surface, width, height, settings.vsync)?;
         Self::new(&instance, &device, Output::Window(swapchain), settings)
@@ -311,6 +312,7 @@ impl Renderer {
             None,
             settings.uploads,
             settings.mesh_shaders,
+            None,
         )?;
         let image = ColorImage::new(&device, width, height, OFFSCREEN)?;
         let output = Output::Offscreen(image, [width, height]);

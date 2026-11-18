@@ -111,7 +111,7 @@ fn instance() -> Arc<Instance> {
 
 /// A device of the best GPU, as it draws best.
 fn device(instance: &Arc<Instance>) -> Arc<Device> {
-    Device::new(instance, None, None, None, None).expect("a GPU that supports Vulkan 1.4")
+    Device::new(instance, None, None, None, None, None).expect("a GPU that supports Vulkan 1.4")
 }
 
 /// A point of a texture, and the color the GPU should read there.
@@ -1653,7 +1653,7 @@ fn streamed_textures_can_be_written_over_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
     for path in UploadPath::ALL {
-        let device = match Device::new(&instance, None, None, Some(path), None) {
+        let device = match Device::new(&instance, None, None, Some(path), None, None) {
             Ok(device) => device,
             Err(error) => {
                 assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
@@ -1728,7 +1728,7 @@ fn bc7_textures_stream_and_decode_on_every_path() {
     let validation = instance.validation();
     let spirv = sampling_spirv();
     for path in UploadPath::ALL {
-        let device = match Device::new(&instance, None, None, Some(path), None) {
+        let device = match Device::new(&instance, None, None, Some(path), None, None) {
             Ok(device) => device,
             Err(error) => {
                 assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
@@ -1821,7 +1821,7 @@ fn textures_refill_between_rgba8_and_bc7_on_every_path() {
     let validation = instance.validation();
     let spirv = sampling_spirv();
     for path in UploadPath::ALL {
-        let device = match Device::new(&instance, None, None, Some(path), None) {
+        let device = match Device::new(&instance, None, None, Some(path), None, None) {
             Ok(device) => device,
             Err(error) => {
                 assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
@@ -1924,7 +1924,7 @@ fn textures_and_buffers_stream_by_parts_on_every_path() {
     let validation = instance.validation();
     let spirv = sampling_spirv();
     for path in UploadPath::ALL {
-        let device = match Device::new(&instance, None, None, Some(path), None) {
+        let device = match Device::new(&instance, None, None, Some(path), None, None) {
             Ok(device) => device,
             Err(error) => {
                 assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
