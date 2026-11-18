@@ -10,7 +10,6 @@ use std::sync::Arc;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use gg_core::Result;
-use gg_core::math::Vec3;
 
 use crate::buffer::Buffer;
 use crate::device::Retired;
@@ -31,6 +30,11 @@ impl Blas {
 }
 
 /// What a [`Blas`] is built from: triangles of packed vertices, read in place.
+///
+/// A position is four 16-bit unsigned counts, and the BLAS holds the first three read as UNORM,
+/// each 0 to 1: its instances' transforms take them into the world. The BLAS has no transform of
+/// its own, as lavapipe (Mesa 25.0) multiplies one's offset by the fourth count, which models
+/// fill with the bitangent's sign.
 pub struct Triangles<'a> {
     /// The buffer holding the vertices, where the first one's position starts in bytes, the bytes
     /// from one vertex to the next, and how many there are.
@@ -38,10 +42,6 @@ pub struct Triangles<'a> {
     pub first_vertex: u64,
     pub vertex_stride: u64,
     pub vertex_count: u32,
-    /// What takes a position's 16-bit unsigned counts (the fourth ignored) into the mesh's space:
-    /// `offset + step * counts`.
-    pub offset: Vec3,
-    pub step: f32,
     /// The buffer holding the indices (32-bit), where they start in bytes, and how many triangles.
     pub indices: &'a GpuBuffer,
     pub first_index: u64,

@@ -873,9 +873,9 @@ not a mode games ship with.
 
 - Ray queries in a compute pass, on devices that have them. The TLAS is reached by address, as
   buffers are, so nothing is bound; that needs `shaderInt64`.
-- A BLAS per model mesh's level 0 reads its packed vertices in place, the packing as the build's
-  transform. The CPU gathers the instances, the scene's and the frame's draws', each frame that
-  traces: a frame that doesn't costs nothing.
+- A BLAS per model mesh's level 0 reads its packed vertices in place, as counts; each instance's
+  transform unpacks them. The CPU gathers the instances, the scene's and the frame's draws', each
+  frame that traces: a frame that doesn't costs nothing.
 - Paths by next-event estimation of the lights, which are deltas, and BSDF sampling of the sky,
   which leaves out a sun a light stands for. GGX is energy-compensated (Turquin) for every light,
   so the raster's uncompensated highlights show as a measured difference, not a hidden one.

@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use ash::vk;
 use gg_core::label;
-use gg_core::math::Vec3;
 use gg_gpu::harness::{self, Tests, check};
 use gg_gpu::{
     Arenas, Blend, COMPARISON_SAMPLER, ColorImage, ComputePipeline, Device, Format, Frame, Frames,
@@ -935,10 +934,15 @@ fn rays_find_a_blas_of_packed_vertices() {
     let mut tlas = Tlas::new(&device, "test TLAS").expect("a TLAS");
     assert_eq!(tlas.address(), 0, "no build, no address");
     let mut blas = None;
-    // The shown instance, custom index 5, at `shown`; the hidden, 6, at x = 10.
+    // The shown instance, custom index 5, at `shown`; the hidden, 6, at x = 10. Each takes the
+    // quad's counts, 0 to 1, to -1 to 1 across and down, at z = 2, then moves it there.
     let placed = |shown: [f32; 3], blas: u64| {
         let at = |[x, y, z]: [f32; 3], index: u32, mask: u32| TlasInstance {
-            transform: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, z]],
+            transform: [
+                [2.0, 0.0, 0.0, x - 1.0],
+                [0.0, 2.0, 0.0, y - 1.0],
+                [0.0, 0.0, 2.0, z + 2.0],
+            ],
             index_and_mask: index | mask << 24,
             offset_and_flags: 0,
             blas,
@@ -962,14 +966,11 @@ fn rays_find_a_blas_of_packed_vertices() {
             frame
                 .write_buffer(&mut index_buffer, 0, indices)
                 .expect("indices");
-            // From -1 to 1 across and down, at z = 2.
             let quad = Triangles {
                 vertices: &vertex_buffer,
                 first_vertex: 24,
                 vertex_stride: 24,
                 vertex_count: 4,
-                offset: Vec3::new(-1.0, -1.0, 2.0),
-                step: 2.0 / f32::from(full),
                 indices: &index_buffer,
                 first_index: 12,
                 triangles: 2,

@@ -928,16 +928,12 @@ impl Arena {
     /// 16-byte blocks among them), a transfer queue's copies and the data types shaders read.
     const ALIGNMENT: u64 = 16;
 
-    /// The arena of slot `slot`'s frames, whose first buffer holds 1 MiB. With `ray_query`, builds
-    /// read it too, as they read BLASes' transforms.
-    pub(super) fn frame(slot: u64, ray_query: bool) -> Self {
-        let mut usage = vk::BufferUsageFlags::INDEX_BUFFER
+    /// The arena of slot `slot`'s frames, whose first buffer holds 1 MiB.
+    pub(super) fn frame(slot: u64) -> Self {
+        let usage = vk::BufferUsageFlags::INDEX_BUFFER
             | vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::TRANSFER_SRC;
-        if ray_query {
-            usage |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
-        }
         Self::new(
             usage,
             Memory::Upload,

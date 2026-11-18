@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use bytemuck::{NoUninit, Pod, Zeroable};
-use gg_core::math::Mat4;
+use gg_core::math::{Mat4, Vec3};
 use gg_core::{Result, label};
 use gg_gpu::{
     Blas, BufferId, ComputePass, ComputePipeline, Device, Frame, GpuBuffer, Graph, ImageId, PassId,
@@ -230,8 +230,6 @@ impl TracePass {
                     first_vertex: HEADER_VERTICES as u64 * stride,
                     vertex_stride: stride,
                     vertex_count: mesh.positions.count,
-                    offset: mesh.positions.offset,
-                    step: mesh.positions.step,
                     indices: mesh.indices,
                     first_index,
                     triangles: mesh.triangles,
@@ -242,7 +240,11 @@ impl TracePass {
             }
             let (_, blas) = self.blases[index].as_ref().expect("just built");
             let row = self.next_traced.len() as u32;
-            let [x, y, z, w] = found.transform.to_cols_array_2d();
+            // Its BLAS holds the counts read as UNORM (`Triangles`): to the mesh's space, as
+            // `unpack` takes them, then to the world.
+            let mesh_from_counts = Mat4::from_translation(mesh.positions.offset)
+                * Mat4::from_scale(Vec3::splat(mesh.positions.step * 65535.0));
+            let [x, y, z, w] = (found.transform * mesh_from_counts).to_cols_array_2d();
             let transform = [0, 1, 2].map(|r| [x[r], y[r], z[r], w[r]]);
             let faces = if found.both_faces {
                 TlasInstance::BOTH_FACES

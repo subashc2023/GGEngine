@@ -154,12 +154,15 @@ Hit nearest(RaytracingAccelerationStructure tlas, Material* materials, float3 or
     RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES> query;
     query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
     proceed(query, materials);
-    Hit hit;
+    Hit hit = {};
     hit.found = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
-    hit.instance = query.CommittedInstanceID();
-    hit.primitive = query.CommittedPrimitiveIndex();
-    hit.weights = query.CommittedTriangleBarycentrics();
-    hit.object_to_world = query.CommittedObjectToWorld3x4();
+    // Only of a hit: a miss's are undefined, and lavapipe reads them through a null instance.
+    if (hit.found) {
+        hit.instance = query.CommittedInstanceID();
+        hit.primitive = query.CommittedPrimitiveIndex();
+        hit.weights = query.CommittedTriangleBarycentrics();
+        hit.object_to_world = query.CommittedObjectToWorld3x4();
+    }
     return hit;
 }
 
@@ -201,8 +204,18 @@ Found found(Material* materials, Hit hit, float3 direction) {
     Vertex a = unpack(header, ((PackedVertex*)words)[HEADER + index.x]);
     Vertex b = unpack(header, ((PackedVertex*)words)[HEADER + index.y]);
     Vertex c = unpack(header, ((PackedVertex*)words)[HEADER + index.z]);
-    float4x4 transform = float4x4(hit.object_to_world[0], hit.object_to_world[1],
-                                  hit.object_to_world[2], float4(0.0, 0.0, 0.0, 1.0));
+    // The instance's transform takes the counts its BLAS holds, read as UNORM (trace.rs); this
+    // one takes the mesh's positions, `offset + steps * step`.
+    float scale = header.step * 65535.0;
+    float3 moved = -header.offset / scale;
+    float4x4 counts_from_mesh = float4x4(
+        1.0 / scale, 0.0, 0.0, moved.x,
+        0.0, 1.0 / scale, 0.0, moved.y,
+        0.0, 0.0, 1.0 / scale, moved.z,
+        0.0, 0.0, 0.0, 1.0);
+    float4x4 transform = mul(float4x4(hit.object_to_world[0], hit.object_to_world[1],
+                                      hit.object_to_world[2], float4(0.0, 0.0, 0.0, 1.0)),
+                             counts_from_mesh);
     Turned ta = turned(a, transform);
     Turned tb = turned(b, transform);
     Turned tc = turned(c, transform);

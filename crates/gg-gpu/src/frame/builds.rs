@@ -29,8 +29,6 @@ impl Frame<'_> {
             first_vertex,
             vertex_stride,
             vertex_count,
-            offset,
-            step,
             indices,
             first_index,
             triangles: count,
@@ -67,15 +65,6 @@ impl Frame<'_> {
             "vertices start on a 2-byte boundary and indices on a 4-byte one, not {first_vertex} \
              and {first_index}"
         );
-        // The counts read as UNORM, so 65535 is 1.
-        let scale = step * 65535.0;
-        let transform: [f32; 12] = [
-            scale, 0.0, 0.0, offset.x, //
-            0.0, scale, 0.0, offset.y, //
-            0.0, 0.0, scale, offset.z,
-        ];
-        // At a multiple of 16, as builds need of transforms.
-        let transform = self.upload(bytemuck::cast_slice(&transform))?.address();
         let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
             .vertex_format(vk::Format::R16G16B16A16_UNORM)
             .vertex_data(vk::DeviceOrHostAddressConstKHR {
@@ -86,9 +75,6 @@ impl Frame<'_> {
             .index_type(vk::IndexType::UINT32)
             .index_data(vk::DeviceOrHostAddressConstKHR {
                 device_address: indices.address() + first_index,
-            })
-            .transform_data(vk::DeviceOrHostAddressConstKHR {
-                device_address: transform,
             });
         let flags = if opaque {
             vk::GeometryFlagsKHR::OPAQUE
@@ -112,11 +98,10 @@ impl Frame<'_> {
             .scratch_data(vk::DeviceOrHostAddressKHR {
                 device_address: scratch.address,
             });
-        // SAFETY: the commands are recording outside a pass. The structure, scratch, transform
-        // and buffers live until the frame has finished, as they retire by frames and the arena is
-        // reset only after; their addresses are aligned and the ranges fit, as checked above. The
-        // structure and scratch are new, and what wrote the buffers made its writes visible to
-        // builds, as `buffer_readers` has them.
+        // SAFETY: the commands are recording outside a pass. The structure, scratch and buffers
+        // live until the frame has finished, as they retire by frames; their addresses are
+        // aligned and the ranges fit, as checked above. The structure and scratch are new, and
+        // what wrote the buffers made its writes visible to builds, as `buffer_readers` has them.
         unsafe {
             device.begin_label(commands, c"build BLAS");
             record_build(&device, commands, &info, count);

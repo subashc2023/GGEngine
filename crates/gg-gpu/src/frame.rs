@@ -318,9 +318,7 @@ impl Frames {
             plan: Plan::default(),
             batch_commands: Vec::new(),
             buffers_written: false,
-            arenas: (0..FRAMES_IN_FLIGHT)
-                .map(|slot| Arena::frame(slot, device.ray_query()))
-                .collect(),
+            arenas: (0..FRAMES_IN_FLIGHT).map(Arena::frame).collect(),
             staging: Arena::staging(),
             transfer_timeline: vk::Semaphore::null(),
             transfers_submitted: 0,
