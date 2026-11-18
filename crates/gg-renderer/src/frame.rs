@@ -149,8 +149,8 @@ impl EarlyPasses {
     /// What the view's shading passes sample: the ambient occlusion and reflections the view has.
     fn sampled(&self) -> [Option<ImageId>; 3] {
         let reflected = (self.reflections.as_ref()).map(reflections::Plan::sampled);
-        let [colors, spread] = [0, 1].map(|i| reflected.map(|images| images[i]));
-        [self.ao.as_ref().map(ao::Plan::image), colors, spread]
+        let [colors, surfaces] = [0, 1].map(|i| reflected.map(|images| images[i]));
+        [self.ao.as_ref().map(ao::Plan::image), colors, surfaces]
     }
 }
 
@@ -457,7 +457,7 @@ impl Renderer {
         // The reflections' images are the targets after those, then the ambient occlusion's
         // history's.
         let reflections_first = resolved + resolves;
-        let reflects = if reflected.is_some() { 2 } else { 0 };
+        let reflects = if reflected.is_some() { 3 } else { 0 };
         let occlusion_first = reflections_first + reflects;
         let occludes = if occluded.is_some() { 2 } else { 0 };
         // First the atmosphere's tables, if the frame shows one, which the view samples and its

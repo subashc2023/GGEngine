@@ -770,7 +770,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 | View, second pass | What came into view | `view visibility second`, `opaque depth second` or `view second` | `lib.rs` |
 | Early depth, normals | Beside a visibility buffer, depth of what draws forward; normals for reflections | `opaque depth`, `view normals`, `opaque normals` | `lib.rs`, `mesh/visibility.rs` |
 | Ambient occlusion | XeGTAO from the depth, denoised, accumulated over frames | `ambient occlusion prefilter`, `ambient occlusion`, `ambient occlusion denoise` | `ao.rs` |
-| Reflections | Mirror rays traced through a nearest-depth pyramid | `reflections depth`, `reflections`, `reflections blur` (`reflections spread`) | `reflections.rs` |
+| Reflections | Mirror rays traced through a nearest-depth pyramid; levels of them and their surfaces, which shading blurs them by | `reflections depth`, `reflections`, `reflections blur` | `reflections.rs` |
 | Shading | Shades the visibility buffer, then draws the rest: sky, other opaque runs, what blends, canvas. Without a buffer, the forward `view` pass | `view shading`, `view rest`, `view` | `mesh/visibility.rs`, `mesh.rs` |
 | Fog | Fogs what's opaque from depth; what blends then draws, fogging itself | `fog`, `view blended` | `fog.rs` |
 | Antialiasing | TAA's resolve, or SMAA | `taa resolve` (`view resolved`); `smaa edges`, `smaa weights`, `smaa blend` (`view antialiased`) | `taa.rs`, `smaa.rs` |

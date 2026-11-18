@@ -1,9 +1,9 @@
 //! Screen-space reflections: what the view shows, seen in the mirror of each opaque point.
 //! `shaders/reflections.slang` traces them through the view's depth in compute passes, after the
 //! opaque depth and before shading. Shading takes a reflection in place of the sky's specular light
-//! where a ray found something, blurred by roughness. Rays trace against the view's colors as the
-//! frame before showed them, which a pass of their own keeps each frame, once the view is drawn and
-//! resolved.
+//! where a ray found something, blurred by roughness over the surfaces round it that face as its
+//! own does. Rays trace against the view's colors as the frame before showed them, which a pass of
+//! their own keeps each frame, once the view is drawn and resolved.
 //!
 //! Each ray mirrors its point's shading normal, where an earlier pass found it: from the visibility
 //! buffer ([`MeshPass::find_normals`]), or drawn by the model shaders beside their depth
@@ -33,8 +33,10 @@ const GROUP: u32 = 8;
 /// view 2,048 pixels on its longer side to a texel.
 const MOST_LEVELS: usize = 12;
 
-/// The reflections' levels, each half the last: the last's texels are 64 pixels a side, as wide as
-/// shading blurs a reflection. A wider lobe takes the sky's light, by [`Reflections::roughness`].
+/// The reflections' levels, each half the last: `REFLECTED_LEVELS` in `shaders/shading.slang`. The
+/// last's texels are 64 pixels a side, which blur a point by about 45 pixels (a standard
+/// deviation), as wide as shading blurs a reflection. A wider lobe takes the sky's light, by
+/// [`Reflections::roughness`].
 const LEVELS: u32 = 7;
 
 /// The reflections' images at a view of `size`: its sides rounded up to the last level's texel, so
@@ -89,7 +91,7 @@ impl Reflections {
 #[derive(Clone, Copy, Debug, Default, PartialEq, NoUninit)]
 pub(crate) struct ReflectionData {
     colors: u32,
-    spread: u32,
+    surfaces: u32,
     roughness: f32,
     unused: u32,
 }
@@ -107,7 +109,7 @@ struct Trace {
     size: [u32; 2],
     colors: u32,
     target: u32,
-    spread: u32,
+    surfaces: u32,
     levels: u32,
     distance: f32,
     thickness: f32,
@@ -128,6 +130,7 @@ struct Push {
     source_size: [u32; 2],
     source: u32,
     target: u32,
+    surfaces: [u32; 2],
 }
 
 /// The size of depth pyramid level `level`: the view's halved that many times, rounded up.
@@ -155,12 +158,13 @@ fn pyramid(size: [u32; 2]) -> (usize, [u32; MOST_LEVELS], u64) {
 }
 
 /// The reflections' images, kept from frame to frame: the view's colors as the last reflecting
-/// frame kept them, and the view's reflections, in levels, [`padded`]. Remade when the view's size
-/// changes, dropped by a frame without reflections; either forgets how the last frame drew the kept
-/// colors. Apart from [`ReflectionPass`] because a frame takes them as targets while recording.
+/// frame kept them, and the view's reflections and their surfaces, in levels, [`padded`]. Remade
+/// when the view's size changes, dropped by a frame without reflections; either forgets how the
+/// last frame drew the kept colors. Apart from [`ReflectionPass`] because a frame takes them as
+/// targets while recording.
 #[derive(Default)]
 pub(crate) struct Images {
-    images: Option<[StorageImage; 2]>,
+    images: Option<[StorageImage; 3]>,
     last: Option<Kept>,
 }
 
@@ -192,8 +196,9 @@ impl Images {
         }
         self.forget();
         let kept = StorageImage::new(device, size, 1, false, "reflections kept")?;
-        let reflected = StorageImage::new(device, padded(size), LEVELS, false, "reflections")?;
-        self.images = Some([kept, reflected]);
+        let in_levels = |name| StorageImage::new(device, padded(size), LEVELS, false, name);
+        let surfaces = in_levels("reflections surfaces")?;
+        self.images = Some([kept, in_levels("reflections")?, surfaces]);
         Ok(())
     }
 
@@ -266,15 +271,15 @@ pub(crate) struct Plan {
     levels: [Option<PassId>; MOST_LEVELS],
     kept: ImageId,
     reflected: ImageId,
-    spread: ImageId,
+    surfaces: ImageId,
     trace: PassId,
     blurs: [PassId; LEVELS as usize - 1],
 }
 
 impl Plan {
-    /// What shading samples: the reflections and how far each spreads.
+    /// What shading samples: the reflections and their surfaces.
     pub(crate) fn sampled(&self) -> [ImageId; 2] {
-        [self.reflected, self.spread]
+        [self.reflected, self.surfaces]
     }
 
     /// The reflections' part of the frame's data, for `settings`, through the indices `sampled`
@@ -286,7 +291,7 @@ impl Plan {
     ) -> ReflectionData {
         ReflectionData {
             colors: sampled(self.reflected),
-            spread: sampled(self.spread),
+            surfaces: sampled(self.surfaces),
             roughness: settings.roughness,
             unused: 0,
         }
@@ -327,10 +332,9 @@ impl ReflectionPass {
     /// Declares in `graph` the reflections at `size`, from `depths` (the nearest is what's opaque,
     /// the first the visibility buffer's where there is one) and the shading `normals` an earlier
     /// pass found. They trace against the colors the frame before kept in the [`Images`]' first, at
-    /// target `first`, into its second, at `first + 1`. The passes:
+    /// target `first`, into its second and third, at `first + 1` and `first + 2`. The passes:
     /// - the depth pyramid's levels, in a buffer of the graph's;
-    /// - the trace, into the reflections' first level, and how far each spreads, into an image of
-    ///   the graph's;
+    /// - the trace, into the first level of the reflections and of their surfaces;
     /// - the blurs of the levels after.
     pub(crate) fn plan(
         graph: &mut Graph,
@@ -356,16 +360,17 @@ impl ReflectionPass {
         }
         let kept = graph.target(first);
         let reflected = graph.target(first + 1);
-        let spread = graph.scalar("reflections spread", size);
+        let surfaces = graph.target(first + 2);
         let trace = (graph.compute(label!("reflections")))
             .read_buffer(pyramid)
             .sample(kept);
         let sampled = distinct.iter().chain(normals.iter().flatten());
         let trace = sampled.fold(trace, |trace, &image| trace.sample(image));
-        let trace = trace.overwrite(reflected).overwrite(spread).add();
+        let trace = trace.overwrite(reflected).overwrite(surfaces).add();
         let blurs = std::array::from_fn(|_| {
             (graph.compute(label!("reflections blur")))
                 .write(reflected)
+                .write(surfaces)
                 .add()
         });
         Plan {
@@ -376,7 +381,7 @@ impl ReflectionPass {
             levels,
             kept,
             reflected,
-            spread,
+            surfaces,
             trace,
             blurs,
         }
@@ -455,7 +460,7 @@ impl ReflectionPass {
             size: plan.size,
             colors: pass.sampled(plan.kept),
             target: pass.storage(plan.reflected, 0),
-            spread: pass.storage(plan.spread, 0),
+            surfaces: pass.storage(plan.surfaces, 0),
             levels: count as u32,
             distance: seen.settings.distance,
             thickness: seen.settings.thickness,
@@ -487,6 +492,7 @@ impl ReflectionPass {
                 source_size: finer,
                 source: pass.storage(plan.reflected, level - 1),
                 target: pass.storage(plan.reflected, level),
+                surfaces: [level - 1, level].map(|level| pass.storage(plan.surfaces, level)),
                 ..Push::default()
             };
             pass.set_pipeline(&self.blur);

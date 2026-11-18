@@ -103,6 +103,8 @@ fn main() -> ExitCode {
         reflections_leave_what_they_dont_take_as_it_is,
         reflections_mirror_about_the_shading_normal,
         reflections_blur_in_place_at_any_view_size,
+        a_rough_reflection_slides_with_the_view,
+        a_rough_reflection_takes_in_its_own_surface_alone,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
@@ -7882,36 +7884,28 @@ fn mirror_about_the_shading_normal(beside_cut: bool) {
     shut_down(renderer);
 }
 
-/// [`reflection_scene`] 380 pixels across, whose halvings drop a column from 95: the blue panel's
-/// mirror on a rough strip, the reflection alone, centers across where it does on a smooth one.
-/// Sampled as if levels that dropped columns still spanned the view, the blur would shift it
-/// right, more the farther right it is: 25 pixels here.
+/// [`reflection_scene`]'s blue panel in a rough strip's mirror, the reflection alone, 380 pixels
+/// across and 384: halvings of the first drop a column from 95, of the second none. The narrower
+/// view shows all 2 pixels further left, the mirror's middle too. Sampled as if levels that dropped
+/// columns still spanned the view, the blur would shift the narrower's right, more the farther
+/// right: 25 pixels here.
 fn reflections_blur_in_place_at_any_view_size() {
-    const WIDTH: u32 = 380;
     const HEIGHT: u32 = 256;
-    let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut stores = Stores::default();
-    let viewport = filling([WIDTH, HEIGHT]);
     // Where the panel's mirror centers across in the view's right half, weighed by how much bluer
     // than red and green it shows, and that weight.
-    let mut center = |roughness: f32| {
-        let scene = reflection_scene(&mut stores, [0.05, 0.05, roughness], None);
+    let center = |width: u32| {
+        let mut renderer = renderer(width, HEIGHT);
+        let mut stores = Stores::default();
+        let viewport = filling([width, HEIGHT]);
+        let scene = reflection_scene(&mut stores, [0.05, 0.05, 0.4], None);
         let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
         settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
-        // The first frame keeps the colors the second, the reflection alone, traces against.
-        for show in [None, Some(Show::Shading(Channel::Reflection))] {
-            let data = RenderData {
-                reflections: Some(Reflections::default()),
-                show,
-                ..stores.data(viewport, viewpoint, draws)
-            };
-            render_without_ui(&mut renderer, data);
-        }
-        let frame = frame_pixels(&mut renderer);
+        let shown = reflection_alone(&mut renderer, &mut stores, viewport, viewpoint, draws);
+        shut_down(renderer);
         let (mut sum, mut weight) = (0.0, 0.0);
-        for y in 0..HEIGHT {
-            for x in WIDTH / 2..WIDTH {
-                let [r, g, b, _] = pixel_at(&frame, WIDTH, [x, y]).map(decoded);
+        for (i, [r, g, b]) in (0_u32..).zip(shown) {
+            let x = i % width;
+            if x >= width / 2 {
                 let blue = (b - r.max(g)).max(0.0);
                 sum += blue * (x as f32 + 0.5);
                 weight += blue;
@@ -7919,17 +7913,173 @@ fn reflections_blur_in_place_at_any_view_size() {
         }
         (sum / weight, weight)
     };
-    let (sharp, seen) = center(0.05);
-    let (rough, spread) = center(0.4);
+    let (narrower, seen) = center(380);
+    let (wider, _) = center(384);
+    assert!(seen > 5.0, "the panel's mirror weighs {seen}");
     assert!(
-        seen > 5.0 && spread > 5.0,
-        "the panel's mirror weighs {seen} smooth and {spread} rough"
+        (narrower + 2.0 - wider).abs() < 1.0,
+        "the panel's mirror centers at {narrower} 380 pixels across, at {wider} 384 across"
     );
-    // Within 8 pixels: a ray that finds nothing blurs as far as where it left the view, which
-    // spreads the mirror into the strip unevenly.
+}
+
+/// The blur tests' scene, for a view 380 by 256: a metal floor, rough as `roughness` says, before
+/// an unlit wall of `wall` 9 units ahead, and an unlit square of `color` facing the camera, `size`
+/// across and up from `at`, which looks on from 1.2 up, as over [`reflection_scene`]'s.
+fn backdrop_scene(
+    stores: &mut Stores,
+    roughness: f32,
+    wall: Vec4,
+    at: Vec3,
+    size: Vec2,
+    color: Vec4,
+) -> (Draws, Viewpoint) {
+    let sky = sky_texture(&mut stores.textures, [128, 64], |_, _| [0.5; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let square = model_square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    let mut add = |stores: &mut Stores, material: &Material, transform| {
+        let material = stores.materials.add(material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(transform, &draw, 0);
+    };
+    let floor = Material {
+        color: Vec4::new(0.9, 0.9, 0.9, 1.0),
+        workflow: metallic(1.0, roughness),
+        ..Material::default()
+    };
+    let flat = Quat::from_rotation_x(-FRAC_PI_2);
+    let under = Vec3::new(0.0, 0.0, -3.0);
+    let floor_at = Mat4::from_scale_rotation_translation(Vec3::new(12.0, 14.0, 1.0), flat, under);
+    add(stores, &floor, floor_at);
+    let unlit = |color| Material {
+        color,
+        unlit: true,
+        ..Material::default()
+    };
+    let standing = |size: Vec2, at: Vec3| {
+        let middle = at + Vec3::Y * size.y / 2.0;
+        Mat4::from_scale_rotation_translation(size.extend(1.0), Quat::IDENTITY, middle)
+    };
+    let behind = Vec3::new(0.0, 0.0, -5.0);
+    add(stores, &unlit(wall), standing(Vec2::new(12.0, 4.0), behind));
+    add(stores, &unlit(color), standing(size, at));
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 1.2, 4.0),
+        rotation: Quat::from_rotation_x(-0.2),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.1,
+        },
+    };
+    (draws, viewpoint)
+}
+
+/// Renders a frame of `draws` from `viewpoint` keeping the view's colors, and then the reflection
+/// alone, traced against them, as linear light.
+fn reflection_alone(
+    renderer: &mut Renderer,
+    stores: &mut Stores,
+    viewport: Viewport,
+    viewpoint: Viewpoint,
+    draws: &Draws,
+) -> Vec<[f32; 3]> {
+    for show in [None, Some(Show::Shading(Channel::Reflection))] {
+        let data = RenderData {
+            reflections: Some(Reflections::default()),
+            show,
+            ..stores.data(viewport, viewpoint, draws)
+        };
+        render_without_ui(renderer, data);
+    }
+    let frame = frame_pixels(renderer);
+    let pixels = frame.as_chunks::<4>().0.iter();
+    pixels
+        .map(|pixel| [0, 1, 2].map(|c| decoded(pixel[c])))
+        .collect()
+}
+
+/// [`backdrop_scene`]'s white bar, 0.1 wide and 1.5 up, before a black wall, in the floor's mirror
+/// as the camera steps right 2 pixels at a time over 16: on a rough floor, the reflection alone, the
+/// mirror's middle moves each step as a smooth floor's does. Levels of 2 by 2 means would hold it at
+/// a coarse texel's middle, then jump it to the next: a grid the reflection steps across as the view
+/// moves. A blur as wide as each pixel's own lobe, which varies, can hold it a pixel off a smooth
+/// floor's, as it does here, where it blurs about 14 pixels.
+fn a_rough_reflection_slides_with_the_view() {
+    const WIDTH: u32 = 380;
+    const HEIGHT: u32 = 256;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    let (black, white) = (Vec4::new(0.0, 0.0, 0.0, 1.0), Vec4::ONE);
+    let (at, size) = (Vec3::new(0.5, 1.5, -3.5), Vec2::new(0.1, 1.5));
+    let (rough, viewpoint) = backdrop_scene(&mut stores, 0.3, black, at, size, white);
+    let (smooth, _) = backdrop_scene(&mut stores, 0.05, black, at, size, white);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &rough);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &smooth);
+    // Where the bar's mirror centers across, weighed by its red light.
+    let mut center = |draws: &Draws, viewpoint| {
+        let shown = reflection_alone(&mut renderer, &mut stores, viewport, viewpoint, draws);
+        let (mut sum, mut weight) = (0.0, 0.0);
+        for (i, [r, _, _]) in (0_u32..).zip(shown) {
+            sum += r * ((i % WIDTH) as f32 + 0.5);
+            weight += r;
+        }
+        sum / weight
+    };
+    // Two pixels at the bar's mirror, about 7.8 units off, where a unit a unit away is 128 /
+    // tan(30°) pixels.
+    let step = 2.0 * 7.8 / (128.0 / math::libm::tanf(PI / 6.0));
+    let centers: Vec<_> = (0..8)
+        .map(|k| {
+            let moved = Viewpoint {
+                position: viewpoint.position + DVec3::X * f64::from(k as f32 * step),
+                ..viewpoint
+            };
+            (center(&rough, moved), center(&smooth, moved))
+        })
+        .collect();
+    let (first, last) = (centers[0].1, centers[7].1);
     assert!(
-        (rough - sharp).abs() < 8.0,
-        "the panel's mirror centers at {rough} on a rough strip, at {sharp} on a smooth one"
+        (first - last).abs() > 8.0,
+        "the bar's mirror moved from {first} to {last}"
+    );
+    for (k, pair) in centers.windows(2).enumerate() {
+        let [(rough, smooth), (rough_next, smooth_next)] = [pair[0], pair[1]];
+        let [moved, moved_smooth] = [rough_next - rough, smooth_next - smooth];
+        assert!(
+            (moved - moved_smooth).abs() < 0.75,
+            "at step {k}, the bar's mirror moves {moved} on a rough floor, {moved_smooth} on a \
+             smooth one: {centers:?}"
+        );
+    }
+    shut_down(renderer);
+}
+
+/// [`backdrop_scene`]'s rough floor mirroring the wall beside a post 0.6 wide, as blue as the wall,
+/// whose own rays turn back toward the view and find nothing: the reflection alone shows the wall's
+/// mirror as bright 3 pixels beside the post as 60 pixels further off. Blurring in the post's
+/// pixels, of another surface, would dim it beside the post by their trust of 0.
+fn a_rough_reflection_takes_in_its_own_surface_alone() {
+    const WIDTH: u32 = 380;
+    const HEIGHT: u32 = 256;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    let (at, blue) = (Vec3::new(0.5, 0.0, -1.0), Vec4::new(0.2, 0.4, 0.9, 1.0));
+    let (draws, viewpoint) = backdrop_scene(&mut stores, 0.4, blue, at, Vec2::splat(0.6), blue);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let shown = reflection_alone(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    // The post's left side, halfway up.
+    let [x, y] = pixel_of(viewpoint, [WIDTH, HEIGHT], at + Vec3::new(-0.3, 0.3, 0.0));
+    let blue = |x: u32| shown[(y * WIDTH + x) as usize][2];
+    let (beside, off) = (blue(x - 3), blue(x - 63));
+    assert!(
+        off > 0.1 && beside > 0.9 * off,
+        "the wall's mirror shows {beside} blue beside the post, {off} further off"
     );
     shut_down(renderer);
 }

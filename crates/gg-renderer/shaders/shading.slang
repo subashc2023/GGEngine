@@ -366,34 +366,146 @@ float filtered_roughness(float roughness, float3 across, float3 down) {
 // The share of `Reflected::roughness`, below it, over which the view's reflections fade into the
 // sky's specular light.
 static const float ROUGHNESS_FADE = 0.25;
+// The reflections' levels: `LEVELS` in src/reflections.rs.
+static const uint REFLECTED_LEVELS = 7;
+// A reflection's blur in pixels, as a standard deviation, per pixel its lobe's tangent spreads and
+// per unit of GGX's alpha: a Gaussian's as wide at half its height as GGX's narrow lobe about the
+// mirror way, whose half width there is 2 alpha sqrt(sqrt(2) - 1).
+static const float BLUR_PER_ALPHA = 1.093;
+
+// What a level of the reflections holds round a pixel: sums of light times its trust, of trust, of
+// the share covered, and of spread times trust.
+struct Around {
+    float3 light;
+    float trust;
+    float covered;
+    float spread;
+};
+
+// Level `level` of the reflections (`colors`) and their surfaces round `pixel`, read smoothly: a
+// quadratic B-spline over the 3 by 3 texels nearest it, each weighed by how alike the normal it
+// holds is to `normal`, by the eighth power of their cosine: low enough that a ball's own
+// reflection blurs over its curve. Weighed texel by texel, it stays continuous as the texels it
+// reads change, however the weights differ.
+Around around(Texture2D colors, Texture2D surfaces, uint2 pixel, uint level, float3 normal) {
+    uint width;
+    uint height;
+    colors.GetDimensions(width, height);
+    int2 size = int2(uint2(width, height) >> level);
+    // The pixel's middle in the level's texels, from the first texel's middle, and how far it is
+    // from the nearest texel's.
+    float2 at = (float2(pixel) + 0.5) / exp2(float(level)) - 0.5;
+    float2 nearest = floor(at + 0.5);
+    float2 t = at - nearest;
+    float2 weights[3] = { 0.5 * (0.5 - t) * (0.5 - t), 0.75 - t * t, 0.5 * (0.5 + t) * (0.5 + t) };
+    Around sum = { float3(0.0), 0.0, 0.0, 0.0 };
+    for (int y = 0; y < 3; y++) {
+        for (int x = 0; x < 3; x++) {
+            int2 texel = int2(nearest) + int2(x - 1, y - 1);
+            if (any(texel < 0) || any(texel >= size)) {
+                continue;
+            }
+            float4 color = colors.Load(int3(texel, int(level)));
+            float4 surface = surfaces.Load(int3(texel, int(level)));
+            // The normals' mean is as long as the share covered, where they're alike.
+            float covered = length(surface.xyz);
+            float alike = covered > 0.0 ? saturate(dot(surface.xyz, normal) / covered) : 0.0;
+            alike *= alike;
+            alike *= alike;
+            float weight = weights[x].x * weights[y].y * alike * alike;
+            sum.light += weight * color.rgb;
+            sum.trust += weight * color.a;
+            sum.covered += weight * covered;
+            sum.spread += weight * surface.w;
+        }
+    }
+    return sum;
+}
+
+// `around`'s light times its trust, and its trust, per pixel covered; `own` where too little alike
+// is round it.
+float4 mean_of(Around around, float4 own) {
+    return around.covered > 1.0e-4 ? float4(around.light, around.trust) / around.covered : own;
+}
+
+// The variance, in pixels squared, of a point's blur at level `level` past the first: of the
+// binomial means down to it, a quarter of 4^level less 1, and of the quadratic B-spline over its
+// texels, a quarter of 4^level.
+float level_variance(uint level) {
+    float texels = exp2(2.0 * float(level));
+    return 0.25 * (texels - 1.0) + 0.25 * texels;
+}
 
 // The view's reflection at `pixel` (reflections.slang): RGB the light its mirror ray found,
 // exposed, blurred by the lobe; alpha the share of the sky's specular light it replaces, fading out
-// toward `Reflected::roughness`; 0 for none. The lobe: a cone of the angle Uludag gives Blinn-Phong
-// of the power matching GGX's alpha ("Hi-Z Screen-Space Cone-Traced Reflections", GPU Pro 5,
-// 2014), read at the level as wide as its footprint where the ray hit.
+// toward `Reflected::roughness`; 0 for none.
+//
+// The blur has the variance of a Gaussian as wide as GGX's lobe at the ray's hit or, where it found
+// nothing, at those round it that did: the pixel's own reflection and the levels, mixed to that
+// variance. It takes in only surfaces facing as the pixel's does, and its share is their mean
+// trust.
 float4 reflection(Frame frame, uint2 pixel, float roughness) {
     Reflected reflected = frame.reflections;
     if (reflected.colors == 0) {
         return float4(0.0);
     }
     float fade = saturate((reflected.roughness - roughness) / (reflected.roughness * ROUGHNESS_FADE));
-    float alpha = roughness * roughness;
-    float power = 2.0 / (alpha * alpha) - 2.0;
-    float cosine = pow(0.244, 1.0 / (power + 1.0));
-    float tangent = sqrt(max(1.0 - cosine * cosine, 0.0)) / cosine;
-    float spread = textures[reflected.spread].Load(int3(int2(pixel), 0)).r;
-    float level = log2(max(2.0 * spread * tangent, 1.0));
-    Texture2D colors = textures[reflected.colors];
-    uint width;
-    uint height;
-    colors.GetDimensions(width, height);
-    float2 uv = (float2(pixel) + 0.5) / float2(width, height);
-    float4 found = colors.SampleLevel(samplers[LINEAR_CLAMP], uv, level);
-    if (!(found.a > 0.0)) {
+    if (!(fade > 0.0)) {
         return float4(0.0);
     }
-    return float4(found.rgb / found.a, found.a * fade);
+    Texture2D colors = textures[reflected.colors];
+    Texture2D surfaces = textures[reflected.surfaces];
+    int3 at = int3(int2(pixel), 0);
+    float4 own = colors.Load(at);
+    float4 surface = surfaces.Load(at);
+    // None where the trace found nothing opaque.
+    if (!(dot(surface.xyz, surface.xyz) > 0.0)) {
+        return float4(0.0);
+    }
+    float3 normal = normalize(surface.xyz);
+    float spread;
+    if (own.a > 0.0) {
+        spread = surface.w / own.a;
+    } else {
+        // As far as those round it that found something, as the last level holds them.
+        uint width;
+        uint height;
+        colors.GetDimensions(width, height);
+        float2 uv = (float2(pixel) + 0.5) / float2(width, height);
+        float last = float(REFLECTED_LEVELS - 1);
+        SamplerState clamp_ = samplers[LINEAR_CLAMP];
+        float trust = colors.SampleLevel(clamp_, uv, last).a;
+        if (!(trust > 0.0)) {
+            return float4(0.0);
+        }
+        spread = surfaces.SampleLevel(clamp_, uv, last).w / trust;
+    }
+    float blur = BLUR_PER_ALPHA * roughness * roughness * spread;
+    float variance = blur * blur;
+    // The coarser of the two blurs mixed; the finer is the level before, or the pixel's own
+    // reflection, of no variance, before the second.
+    uint upper = 1;
+    while (upper < REFLECTED_LEVELS - 1 && level_variance(upper) < variance) {
+        upper++;
+    }
+    float below = upper == 1 ? 0.0 : level_variance(upper - 1);
+    float f = saturate((variance - below) / (level_variance(upper) - below));
+    float4 mean = float4(0.0);
+    for (uint i = 0; i < 2; i++) {
+        uint level = upper - 1 + i;
+        float share = i == 0 ? 1.0 - f : f;
+        // Each read only where it adds a visible share.
+        if (share > 1.0 / 1024.0) {
+            float4 blurred = level == 0
+                ? own
+                : mean_of(around(colors, surfaces, pixel, level, normal), own);
+            mean += share * blurred;
+        }
+    }
+    if (!(mean.a > 0.0)) {
+        return float4(0.0);
+    }
+    return float4(mean.rgb / mean.a, mean.a * fade);
 }
 
 // A point in no cluster.

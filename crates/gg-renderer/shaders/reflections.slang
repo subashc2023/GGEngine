@@ -6,10 +6,11 @@
 // Passes, a pixel a thread:
 // - `depth_main` and `reduce_main`: a pyramid of the nearest depth, each level's sides half the
 //   last's, rounded up, so texel `c` of level `n` covers pixels `c * 2^n` to `(c + 1) * 2^n`.
-// - `trace_main`: each pixel's mirror ray through the pyramid, into the reflections' first level.
-//   Their image is the view's padded to whole texels of their last level, so each level's texel
-//   `c` covers pixels `c * 2^n` to `(c + 1) * 2^n`, where shading samples it.
-// - `blur_main`: the reflections' coarser levels, which shading samples to blur them.
+// - `trace_main`: each pixel's mirror ray through the pyramid, into the first level of the
+//   reflections and of their surfaces, which shading tells apart by. Their images are the view's
+//   padded to whole texels of their last level, so each level's texel `c` covers pixels `c * 2^n`
+//   to `(c + 1) * 2^n`, where shading samples it.
+// - `blur_main`: the coarser levels of both, which shading samples to blur a reflection.
 // - `keep_main`: the drawn, resolved view's colors, for the next frame's rays.
 //
 // The trace is AMD's FidelityFX SSSR's, under the MIT license; functions follow its
@@ -33,7 +34,6 @@
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(1, 0)]] SamplerState samplers[];
 [[vk::binding(2, 0)]] [format("rgba16f")] RWTexture2DArray<float4> storage[];
-[[vk::binding(2, 0)]] [format("r32f")] RWTexture2DArray<float> scalars[];
 
 // The most levels the pyramid has: `MOST_LEVELS` in src/reflections.rs.
 static const uint MOST_LEVELS = 12;
@@ -53,11 +53,11 @@ struct Trace {
     float depth_add;
     // In pixels.
     uint2 size;
-    // The colors the frame before kept, a bindless texture; the storage slots of the reflections'
-    // first level and of their spread.
+    // The colors the frame before kept, a bindless texture; the storage slots of the first level of
+    // the reflections and of their surfaces.
     uint colors;
     uint target;
-    uint spread;
+    uint surfaces;
     // The pyramid's levels.
     uint levels;
     // A ray's reach, in world units, and how far behind what the depth shows it may pass and still
@@ -90,6 +90,8 @@ struct Push {
     uint source;
     // What's written: the pyramid level's start, or a storage slot.
     uint target;
+    // The blurs': the storage slots of the surfaces' level read and level written.
+    uint2 surfaces;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -261,10 +263,11 @@ bool all_finite(float3 v) {
 }
 
 // Each pixel's mirror ray, into the reflections' first level: the colors found times their trust,
-// and that trust; 0 where nothing was found or nothing opaque is. And its spread, in pixels per
-// unit of a lobe's angle's tangent: `t / (d + t)` of the pixels a unit spans a unit ahead, for a
-// point `d` from the eye and its hit, or where it stopped, `t` from the point, as a mirror shows
-// what it reflects `d + t` away.
+// and that trust; 0 where nothing was found or nothing opaque is. And into their surfaces' first
+// level: the pixel's normal in the view, and its ray's spread times that trust, 0 where nothing
+// opaque is. The spread is in pixels per unit of a lobe's angle's tangent: `t / (d + t)` of the
+// pixels a unit spans a unit ahead, for a point `d` from the eye and its hit `t` from the point, as
+// a mirror shows what it reflects `d + t` away.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void trace_main(uint3 thread: SV_DispatchThreadID) {
@@ -275,6 +278,7 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     // The padding past the view, which the blurs read: nothing there.
     if (any(pixel >= trace.size)) {
         storage[trace.target][to] = float4(0.0);
+        storage[trace.surfaces][to] = float4(0.0);
         return;
     }
     float z = nearest_at(trace, 0, int2(pixel));
@@ -289,7 +293,7 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     // sides.
     if (!opaque || !all_finite(normal)) {
         storage[trace.target][to] = float4(0.0);
-        scalars[trace.spread][to] = 0.0;
+        storage[trace.surfaces][to] = float4(0.0);
         return;
     }
     float3 view = normalize(center);
@@ -351,28 +355,44 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     // Kept a number, which shading picks a level by, as `min` keeps no NaN on every device.
     bool kept = all_finite(float3(spread, trust, 0.0));
     storage[trace.target][to] = kept ? float4(color * trust, trust) : float4(0.0);
-    scalars[trace.spread][to] = kept ? spread : 0.0;
+    storage[trace.surfaces][to] = float4(normal, kept ? spread * trust : 0.0);
 }
 
-// The level read's texel at `at`, clamped.
-float4 finer_at(uint2 at) {
-    at = min(at, push.source_size - 1);
-    return storage[push.source][uint3(at, 0)];
+// Storage slot `slot`'s texel at `at`, of the level read; nothing past its sides.
+float4 finer_at(uint slot, int2 at) {
+    if (any(at < 0) || any(at >= int2(push.source_size))) {
+        return float4(0.0);
+    }
+    return storage[slot][uint3(uint2(at), 0)];
 }
 
-// A later level of the reflections, each texel the mean of the 2 by 2 under it: of their colors
-// times their trust, and of their trust, which shading divides the first by again.
+// A later level of the reflections and of their surfaces, each texel the binomial mean of the 4 by
+// 4 under it, weighed 1, 3, 3, 1 each way: of the reflections' colors times their trust, and their
+// trust; of the surfaces' normals, as long as the share covered where they're alike, and their
+// spreads times their trust. Each keeps the middle of what it averages, which a 2 by 2 mean moves
+// to its texel's, so a reflection read from it slides with the view rather than jumping a texel at
+// a time.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void blur_main(uint3 thread: SV_DispatchThreadID) {
     uint2 at = thread.xy;
-    if (at.x >= push.size.x || at.y >= push.size.y) {
+    if (any(at >= push.size)) {
         return;
     }
-    uint2 under = at * 2;
-    float4 sum = finer_at(under) + finer_at(under + uint2(1, 0)) + finer_at(under + uint2(0, 1))
-        + finer_at(under + uint2(1, 1));
-    storage[push.target][uint3(at, 0)] = sum / 4.0;
+    static const float WEIGHTS[4] = { 1.0, 3.0, 3.0, 1.0 };
+    int2 first = int2(at) * 2 - 1;
+    float4 colors = float4(0.0);
+    float4 surfaces = float4(0.0);
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            float weight = WEIGHTS[x] * WEIGHTS[y];
+            int2 under = first + int2(x, y);
+            colors += weight * finer_at(push.source, under);
+            surfaces += weight * finer_at(push.surfaces.x, under);
+        }
+    }
+    storage[push.target][uint3(at, 0)] = colors / 64.0;
+    storage[push.surfaces.y][uint3(at, 0)] = surfaces / 64.0;
 }
 
 // The view's colors, as the frame drew and resolved them, kept for the next frame's rays.
