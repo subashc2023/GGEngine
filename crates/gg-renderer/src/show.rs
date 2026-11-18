@@ -28,7 +28,7 @@ pub enum Show<'a> {
     /// - Colors as they are, HDR ones through the tonemapper.
     /// - Depth as `1 + log2(depth) / 24`.
     /// - IDs and a visibility buffer as a color per value.
-    /// - Motion as a normal is.
+    /// - Motion and normals as [`Channel::Normal`] stores a normal.
     /// - A one-float pixel as its value.
     /// - Values as [`Channel`] says the view stores them.
     ///
@@ -179,6 +179,7 @@ fn kind(kind: ImageKind) -> u32 {
         ImageKind::Visibility => 5,
         ImageKind::Depth => 6,
         ImageKind::Scalar => 7,
+        ImageKind::Normals => 8,
     }
 }
 

@@ -904,7 +904,7 @@ fn plan_view(
         });
         let normals = (visibility.filter(|_| traced.is_some()).zip(cull.as_ref())).map(
             |(visibility, cull)| {
-                let normals = graph.hdr("view normals", size);
+                let normals = graph.normals("view normals", size);
                 let find = graph.compute(label!("view normals")).sample(visibility);
                 (cull.shaded(find).overwrite(normals).add(), normals)
             },
@@ -912,7 +912,7 @@ fn plan_view(
         let drawn_normals = opaque_depth
             .filter(|_| traced.is_some())
             .map(|opaque_depth| {
-                let normals = graph.hdr("opaque normals", size);
+                let normals = graph.normals("opaque normals", size);
                 let draw = skinned(skin, graph.render(label!("opaque normals")));
                 let draw = culled(cull.as_ref(), draw).clear(normals, [0.0; 4]);
                 (draw.keep(opaque_depth).add(), normals)

@@ -5,7 +5,7 @@
 // - Depth: `1 + log2(depth) / 24`, white at the near plane (reversed depth 1), a 24th darker per
 //   doubling of distance, black where nothing drew (0).
 // - IDs and visibility: a color per value, black for 0.
-// - Motion: as normals, each axis's -1 to 1 as 0 to 1.
+// - Motion and normals: each axis's -1 to 1 as 0 to 1.
 // - Scalars: the value.
 // - No kind, which the frame doesn't make: black.
 //
@@ -30,6 +30,7 @@ static const uint MOTION = 4;
 static const uint VISIBILITY = 5;
 static const uint DEPTH = 6;
 static const uint SCALAR = 7;
+static const uint NORMALS = 8;
 
 struct Push {
     // The view's size, the image (a bindless texture) and the target (a bindless storage image).
@@ -86,7 +87,7 @@ void show_main(uint3 pixel: SV_DispatchThreadID) {
         Texture2D image = textures[push.source];
         image.GetDimensions(texels.x, texels.y);
         float3 value = image.Load(texel_at(pixel.xy, texels)).rgb;
-        if (push.kind == MOTION) {
+        if (push.kind == MOTION || push.kind == NORMALS) {
             shown = stored_as(value * 0.5 + 0.5);
         } else {
             // NaN shows as none, as in common.slang's `finite`.

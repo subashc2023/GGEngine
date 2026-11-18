@@ -39,10 +39,10 @@ pub const MAX_BUFFER_READS: usize = 4;
 /// nothing.
 ///
 /// Its own images ([`Graph::color`], [`Graph::hdr`], [`Graph::ids`], [`Graph::motion`],
-/// [`Graph::visibility`], [`Graph::depth`], [`Graph::scalar`]) last for a frame. Each is undefined
-/// until a pass writes it, so its first use writes it whole, and passes whose uses of two of them
-/// don't overlap may find them in the same memory. The frames keep them for the frames after,
-/// which add them alike, by name, kind and size.
+/// [`Graph::visibility`], [`Graph::depth`], [`Graph::scalar`], [`Graph::normals`]) last for a
+/// frame. Each is undefined until a pass writes it, so its first use writes it whole, and passes
+/// whose uses of two of them don't overlap may find them in the same memory. The frames keep them
+/// for the frames after, which add them alike, by name, kind and size.
 ///
 /// Its own buffers ([`Graph::buffer`]) last from frame to frame: the frames keep each for the
 /// frames after that add one of its name no larger, holding what the last of them left there.
@@ -114,13 +114,18 @@ pub enum ImageKind {
     /// the view's ambient occlusion is. Vulkan requires every device to store to the format from
     /// shaders and to sample it.
     Scalar,
+    /// Unit normals in RGB, as [`Hdr`]'s format and uses, so passes render and write them alike;
+    /// a show reads them as normals rather than light.
+    ///
+    /// [`Hdr`]: Self::Hdr
+    Normals,
 }
 
 impl ImageKind {
     pub(crate) const fn format(self) -> vk::Format {
         match self {
             Self::Color => ColorImage::FORMAT.color,
-            Self::Hdr | Self::Motion => vk::Format::R16G16B16A16_SFLOAT,
+            Self::Hdr | Self::Motion | Self::Normals => vk::Format::R16G16B16A16_SFLOAT,
             Self::Ids | Self::Visibility => vk::Format::R32G32_UINT,
             Self::Depth => vk::Format::D32_SFLOAT,
             Self::Scalar => vk::Format::R32_SFLOAT,
@@ -137,7 +142,7 @@ impl ImageKind {
             }
             // Never read back: a frame reads back what it shows. Vulkan requires every device to
             // support storage in the format, which compute passes write.
-            Self::Hdr | Self::Motion => {
+            Self::Hdr | Self::Motion | Self::Normals => {
                 vk::ImageUsageFlags::COLOR_ATTACHMENT
                     | vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::STORAGE
@@ -159,7 +164,8 @@ impl ImageKind {
             | Self::Ids
             | Self::Motion
             | Self::Visibility
-            | Self::Scalar => COLOR_RANGE,
+            | Self::Scalar
+            | Self::Normals => COLOR_RANGE,
             Self::Depth => DEPTH_RANGE,
         }
     }
@@ -485,6 +491,16 @@ impl Graph {
         self.transient(name, ImageKind::Scalar, size)
     }
 
+    /// A graph image of unit normals, `size` pixels, named `name`, made and used as
+    /// [`Graph::hdr`]'s: passes draw into it and compute passes write it as storage.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
+    pub fn normals(&mut self, name: &'static str, size: [u32; 2]) -> ImageId {
+        self.transient(name, ImageKind::Normals, size)
+    }
+
     /// The graph's own images added so far, in order, each with its debug name, kind and size.
     /// [`Graph::image_named`] finds the last of a name.
     pub fn images(&self) -> impl Iterator<Item = (&'static str, ImageKind, [u32; 2])> + '_ {
@@ -758,9 +774,13 @@ impl RenderPass<'_> {
             Some(ImageKind::Motion) => Use::Motion { kept: true },
             Some(ImageKind::Depth) => Use::Depth { kept: true },
             None
-            | Some(ImageKind::Color | ImageKind::Hdr | ImageKind::Visibility | ImageKind::Scalar) => {
-                Use::Color(None)
-            }
+            | Some(
+                ImageKind::Color
+                | ImageKind::Hdr
+                | ImageKind::Normals
+                | ImageKind::Visibility
+                | ImageKind::Scalar,
+            ) => Use::Color(None),
         };
         self.with(image, use_)
     }
@@ -862,7 +882,10 @@ impl RenderPass<'_> {
                 Use::Color(clear) if kind == Some(ImageKind::Visibility) => {
                     clear.is_none_or(|clear| clear == [0.0; 4])
                 }
-                Use::Color(_) => matches!(kind, None | Some(ImageKind::Color | ImageKind::Hdr)),
+                Use::Color(_) => matches!(
+                    kind,
+                    None | Some(ImageKind::Color | ImageKind::Hdr | ImageKind::Normals)
+                ),
                 Use::Ids { .. } => kind == Some(ImageKind::Ids),
                 Use::Motion { .. } => kind == Some(ImageKind::Motion),
                 Use::Depth { .. } => kind == Some(ImageKind::Depth),

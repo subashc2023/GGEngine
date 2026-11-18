@@ -412,6 +412,7 @@ fn frame_image(image: &gg_renderer::FrameImage) -> gg_api::FrameImage {
             ImageKind::Visibility => Api::Visibility,
             ImageKind::Depth => Api::Depth,
             ImageKind::Scalar => Api::Scalar,
+            ImageKind::Normals => Api::Normals,
         },
         size: image.size,
     }

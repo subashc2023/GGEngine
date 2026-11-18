@@ -105,6 +105,7 @@ fn main() -> ExitCode {
         reflections_blur_in_place_at_any_view_size,
         a_rough_reflection_slides_with_the_view,
         a_rough_reflection_takes_in_its_own_surface_alone,
+        normals_images_show_as_normals,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
@@ -179,6 +180,7 @@ fn main() -> ExitCode {
         reflections_mirror_what_lights_light_under_a_dark_sky,
         reflections_leave_what_they_dont_take_as_it_is,
         reflections_mirror_about_the_shading_normal,
+        normals_images_show_as_normals,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
@@ -8081,6 +8083,47 @@ fn a_rough_reflection_takes_in_its_own_surface_alone() {
         off > 0.1 && beside > 0.9 * off,
         "the wall's mirror shows {beside} blue beside the post, {off} further off"
     );
+    shut_down(renderer);
+}
+
+/// [`backdrop_scene`]'s floor and wall in the normals reflections trace from, the visibility
+/// buffer's or the model shaders', shown as [`Channel::Normal`] shows a normal: up, and toward the
+/// view. Shown as light, the axes of 0 would be black.
+fn normals_images_show_as_normals() {
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 64;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    let gray = Vec4::new(0.5, 0.5, 0.5, 1.0);
+    let (at, size) = (Vec3::new(0.0, 0.0, -1.0), Vec2::splat(0.6));
+    let (draws, viewpoint) = backdrop_scene(&mut stores, 0.1, gray, at, size, gray);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let name = if CUT_MESHLETS.load(Ordering::Relaxed) {
+        "view normals"
+    } else {
+        "opaque normals"
+    };
+    // The first frame keeps the colors the second traces against, which makes the normals.
+    for show in [None, Some(Show::Image(name))] {
+        let data = RenderData {
+            reflections: Some(Reflections::default()),
+            show,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    let shown = frame_pixels(&mut renderer);
+    for (what, point, normal) in [
+        ("floor", Vec3::new(-1.5, 0.0, 1.0), [128, 255, 128, 255]),
+        ("wall", Vec3::new(-3.0, 3.0, -5.0), [128, 128, 255, 255]),
+    ] {
+        let got = pixel_at(&shown, WIDTH, pixel_of(viewpoint, [WIDTH, HEIGHT], point));
+        assert!(
+            close(got, normal),
+            "{name} shows the {what} as {got:?}, not {normal:?}"
+        );
+    }
     shut_down(renderer);
 }
 

@@ -1102,8 +1102,8 @@ pub enum Shown {
     /// An image the frame makes, by debug name, read by its kind: colors as they are, high dynamic
     /// range tonemapped as the view's light is; depth as `1 + log2(depth) / 24`, white at the near
     /// plane and a 24th darker each time the distance doubles, black where nothing drew; IDs and a
-    /// visibility buffer a color per value, black for 0; motion as normals are, in world units, -1
-    /// to 1; one float a pixel as its value. An image the frame doesn't make shows black, warning
+    /// visibility buffer a color per value, black for 0; motion, in world units, and normals read as
+    /// [`Shown::Normal`], -1 to 1; one float a pixel as its value. An image the frame doesn't make shows black, warning
     /// `renderer.no_image`.
     Image(String),
 }
@@ -1215,6 +1215,7 @@ pub enum ImageKind {
     Visibility,
     Depth,
     Scalar,
+    Normals,
 }
 
 /// What `entities` takes: those with component `with`, or all, in the order queries find them,
@@ -2546,6 +2547,7 @@ mod tests {
             ImageKind::Visibility,
             ImageKind::Depth,
             ImageKind::Scalar,
+            ImageKind::Normals,
         ];
         let names = kinds.map(|kind| serde_json::to_value(kind).expect("a name"));
         let want = [
@@ -2556,6 +2558,7 @@ mod tests {
             "visibility",
             "depth",
             "scalar",
+            "normals",
         ];
         assert_eq!(names, want.map(|name| serde_json::json!(name)));
     }

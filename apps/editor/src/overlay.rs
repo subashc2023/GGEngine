@@ -91,6 +91,7 @@ fn kind_label(kind: ImageKind) -> &'static str {
         ImageKind::Visibility => "a visibility buffer, a color for each value",
         ImageKind::Depth => "depth",
         ImageKind::Scalar => "a value a pixel",
+        ImageKind::Normals => "normals, each axis's -1 to 1 as 0 to 1",
     }
 }
 
