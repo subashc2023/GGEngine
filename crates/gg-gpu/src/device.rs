@@ -37,6 +37,8 @@ pub(crate) enum Retired {
     /// once nothing holds them.
     Slot(u32),
     Pipeline(vk::Pipeline),
+    /// An acceleration structure. It's retired before the buffer it lives in, so it goes first.
+    AccelerationStructure(vk::AccelerationStructureKHR),
 }
 
 /// Retired resources, each with the last frame and the last submission of copies that may use
@@ -194,6 +196,8 @@ pub struct Device {
     mesh_shader_fn: Option<ext::mesh_shader::Device>,
     /// The acceleration structures' functions, for a device that traces rays.
     acceleration_structure_fn: Option<khr::acceleration_structure::Device>,
+    /// `minAccelerationStructureScratchOffsetAlignment`, for a device that traces rays; else 0.
+    scratch_alignment: u64,
 }
 
 /// A device queue. Vulkan lets one thread at a time use a queue, hence the lock.
@@ -314,6 +318,13 @@ impl Device {
                 vk::KHR_RAY_QUERY_NAME.as_ptr(),
                 vk::KHR_DEFERRED_HOST_OPERATIONS_NAME.as_ptr(),
             ]);
+            // Where the GPU has it, without its features: Slang 2025.23.2, the Vulkan SDK
+            // 1.4.335's, declares SPV_KHR_ray_tracing in every shader with ray queries, which
+            // validation then refuses without it (VUID-VkShaderModuleCreateInfo-pCode-08742). Until
+            // Slang 2026.11 is required, as docs/PLAN.md's row says.
+            if chosen.ray_tracing_pipeline {
+                extensions.push(vk::KHR_RAY_TRACING_PIPELINE_NAME.as_ptr());
+            }
         }
         // Scalar block layout lets shaders read vertices laid out as `#[repr(C)]` lays them out.
         let mut vulkan12 = bindless_features()
@@ -447,6 +458,11 @@ impl Device {
                 .then(|| ext::mesh_shader::Device::new(instance.raw(), &raw)),
             acceleration_structure_fn: ray_query
                 .then(|| khr::acceleration_structure::Device::new(instance.raw(), &raw)),
+            scratch_alignment: if ray_query {
+                scratch_alignment(instance, physical)
+            } else {
+                0
+            },
             debug_utils,
             swapchain_fn: surface.map(|_| khr::swapchain::Device::new(instance.raw(), &raw)),
             instance: instance.clone(),
@@ -512,9 +528,25 @@ impl Device {
         self.mesh_shader_fn.as_ref()
     }
 
-    /// Whether compute shaders trace rays through acceleration structures (`VK_KHR_ray_query`).
+    /// Whether compute shaders trace rays through acceleration structures (`VK_KHR_ray_query`),
+    /// which [`Blas`](crate::Blas) and [`Tlas`](crate::Tlas) need.
     pub fn ray_query(&self) -> bool {
         self.acceleration_structure_fn.is_some()
+    }
+
+    /// The acceleration structures' functions.
+    ///
+    /// # Panics
+    ///
+    /// If the device has no ray queries.
+    pub(crate) fn acceleration_structure_fn(&self) -> &khr::acceleration_structure::Device {
+        (self.acceleration_structure_fn.as_ref())
+            .expect("only a device with ray queries has acceleration structures")
+    }
+
+    /// What builds' scratch addresses are multiples of; 0 without ray queries.
+    pub(crate) fn scratch_alignment(&self) -> u64 {
+        self.scratch_alignment
     }
 
     /// How much of the GPU's own memory (its device-local heaps) is in use, by this process and
@@ -834,6 +866,9 @@ impl Device {
                 Retired::Memory(allocation) => self.allocator.free_memory(allocation),
                 Retired::Slot(slot) => self.bindless.remove(slot),
                 Retired::Pipeline(pipeline) => self.raw.destroy_pipeline(pipeline, None),
+                Retired::AccelerationStructure(structure) => self
+                    .acceleration_structure_fn()
+                    .destroy_acceleration_structure(structure, None),
             }
         }
     }
@@ -1200,6 +1235,18 @@ fn has_bindless(features: &vk::PhysicalDeviceVulkan12Features<'_>) -> bool {
     ]
     .iter()
     .all(|&feature| feature == vk::TRUE)
+}
+
+/// What a GPU with acceleration structures aligns builds' scratch to.
+fn scratch_alignment(instance: &Instance, physical: vk::PhysicalDevice) -> u64 {
+    let mut structures = vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut structures);
+    // SAFETY: the physical device came from this instance and has the extension whose properties
+    // these are; they outlive the call.
+    unsafe {
+        (instance.raw()).get_physical_device_properties2(physical, &mut properties);
+    }
+    u64::from(structures.min_acceleration_structure_scratch_offset_alignment)
 }
 
 /// RenderDoc, if its layer is active on the GPU, as the tools active on it report (logged at

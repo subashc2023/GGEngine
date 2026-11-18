@@ -49,6 +49,20 @@ const BUFFER_READS: vk::AccessFlags2 = vk::AccessFlags2::from_raw(
     vk::AccessFlags2::SHADER_STORAGE_READ.as_raw() | vk::AccessFlags2::INDEX_READ.as_raw(),
 );
 
+/// The stages that read buffers on `device`, and what they read: [`BUFFER_READERS`] and
+/// [`BUFFER_READS`], and on a device with ray queries, acceleration-structure builds, which read
+/// meshes and instances as shader reads.
+fn buffer_readers(device: &Device) -> (vk::PipelineStageFlags2, vk::AccessFlags2) {
+    if device.ray_query() {
+        (
+            BUFFER_READERS | vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR,
+            BUFFER_READS | vk::AccessFlags2::SHADER_READ,
+        )
+    } else {
+        (BUFFER_READERS, BUFFER_READS)
+    }
+}
+
 /// The least a part of a buffer takes, and what each part but the last is a multiple of. Vulkan
 /// needs no alignment of a buffer copy's offsets or size, on a transfer-only queue either (only a
 /// copy into an image needs its buffer offset a multiple of 4 there,
@@ -229,9 +243,10 @@ impl<'a> Frame<'a> {
         // Earlier frames on this queue may still read the buffer (after the compute queue's passes
         // read of it, which each frame's last batch here waits for), and an earlier write may
         // still be copying into it: the copy waits for both.
+        let (readers, reads) = buffer_readers(&self.frames.device);
         let (src_stage, src_access) = if written {
             (
-                BUFFER_READERS | vk::PipelineStageFlags2::COPY,
+                readers | vk::PipelineStageFlags2::COPY,
                 vk::AccessFlags2::TRANSFER_WRITE,
             )
         } else {
@@ -245,8 +260,8 @@ impl<'a> Frame<'a> {
         let to_read = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(BUFFER_READERS)
-            .dst_access_mask(BUFFER_READS);
+            .dst_stage_mask(readers)
+            .dst_access_mask(reads);
         // A pass on the compute queue waits for the batch the copy is in.
         self.frames.buffers_written = true;
         let device = &self.frames.device;
@@ -574,11 +589,12 @@ impl<'a> Frame<'a> {
                 // A pass on the compute queue waits for the batch the copy is in.
                 self.frames.buffers_written = true;
                 let device = &self.frames.device;
+                let (readers, reads) = buffer_readers(device);
                 let to_read = vk::MemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COPY)
                     .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                    .dst_stage_mask(BUFFER_READERS)
-                    .dst_access_mask(BUFFER_READS);
+                    .dst_stage_mask(readers)
+                    .dst_access_mask(reads);
                 let raw = device.raw();
                 // SAFETY: the commands are recording outside a pass, the region fits the buffer,
                 // and the staged bytes and the buffer live until the frame has finished: staging
@@ -912,12 +928,16 @@ impl Arena {
     /// 16-byte blocks among them), a transfer queue's copies and the data types shaders read.
     const ALIGNMENT: u64 = 16;
 
-    /// The arena of slot `slot`'s frames, whose first buffer holds 1 MiB.
-    pub(super) fn frame(slot: u64) -> Self {
-        let usage = vk::BufferUsageFlags::INDEX_BUFFER
+    /// The arena of slot `slot`'s frames, whose first buffer holds 1 MiB. With `ray_query`, builds
+    /// read it too, as they read BLASes' transforms.
+    pub(super) fn frame(slot: u64, ray_query: bool) -> Self {
+        let mut usage = vk::BufferUsageFlags::INDEX_BUFFER
             | vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::TRANSFER_SRC;
+        if ray_query {
+            usage |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
+        }
         Self::new(
             usage,
             Memory::Upload,

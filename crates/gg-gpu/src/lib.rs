@@ -1,13 +1,14 @@
 //! The Vulkan layer, built on `ash`: instance and device setup, memory, buffers and images,
-//! bindless descriptors, pipelines, swapchains, synchronization and submission, RenderDoc
-//! captures, and the render graph, which places a frame's barriers and makes its own images and
-//! buffers.
+//! bindless descriptors, pipelines, acceleration structures, swapchains, synchronization and
+//! submission, RenderDoc captures, and the render graph, which places a frame's barriers and makes
+//! its own images and buffers.
 //!
 //! `gg-renderer` is its only client; the engine reaches the GPU through the renderer.
 
 // Vulkan through ash is an unsafe API; wrapping it in safe types is this crate's job.
 #![allow(unsafe_code)]
 
+mod accel;
 mod bindless;
 mod buffer;
 mod capture;
@@ -32,6 +33,7 @@ use std::fmt;
 use ash::vk;
 use gg_core::Error;
 
+pub use accel::{Blas, Tlas, TlasInstance, Triangles};
 pub use bindless::{COMPARISON_SAMPLER, PLACED_TEXTURES, Sampler, Wrap};
 pub use buffer::GpuBuffer;
 pub use capture::Capture;

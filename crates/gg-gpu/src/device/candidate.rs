@@ -50,6 +50,9 @@ pub(super) struct Candidate {
     /// Whether compute shaders trace rays: `VK_KHR_ray_query` and `VK_KHR_acceleration_structure`,
     /// with `shaderInt64` and packed vertices as builds' input.
     pub(super) ray_query: bool,
+    /// Whether it lists `VK_KHR_ray_tracing_pipeline`, which Slang before 2026.11 declares the
+    /// SPIR-V extension of beside ray queries.
+    pub(super) ray_tracing_pipeline: bool,
     /// Whether its samplers filter anisotropically: every GPU but lavapipe (llvmpipe), Mesa's
     /// CPU driver. Its anisotropic filter returns NaN where a texture coordinate's derivatives
     /// are 0, as across triangles whose corners share their coordinates (flat-colored and
@@ -256,6 +259,7 @@ impl Candidate {
                 .all(|name| has_extension(&extensions, name))
                 && core.shader_int64 == vk::TRUE
                 && builds_from_packed_vertices(instance, physical),
+            ray_tracing_pipeline: has_extension(&extensions, vk::KHR_RAY_TRACING_PIPELINE_NAME),
             anisotropy: driver_id != vk::DriverId::MESA_LLVMPIPE,
             problem,
         }
@@ -626,6 +630,7 @@ mod tests {
             memory_budget: false,
             mesh_shaders: false,
             ray_query: false,
+            ray_tracing_pipeline: false,
             anisotropy: true,
             problem: None,
         }

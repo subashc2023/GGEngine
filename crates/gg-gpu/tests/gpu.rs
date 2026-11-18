@@ -15,11 +15,13 @@ use std::sync::Arc;
 
 use ash::vk;
 use gg_core::label;
+use gg_core::math::Vec3;
 use gg_gpu::harness::{self, Tests, check};
 use gg_gpu::{
     Arenas, Blend, COMPARISON_SAMPLER, ColorImage, ComputePipeline, Device, Format, Frame, Frames,
     GpuBuffer, Graph, GraphicsDesc, Instance, InstanceDesc, MAX_READS, PLACED_TEXTURES, Pass,
-    PassId, Pipeline, Sampler, StorageImage, Target, Texture, TextureFormat, UploadPath, mip_sizes,
+    PassId, Pipeline, Sampler, StorageImage, Target, Texture, TextureFormat, Tlas, TlasInstance,
+    Triangles, UploadPath, mip_sizes,
 };
 
 /// Runs each test through `tests` by its name, with the arguments written after it, if any.
@@ -46,6 +48,7 @@ fn main() -> ExitCode {
         compute_passes_write_buffers_that_draws_take_commands_from,
         graph_buffers_hold_zeros_where_nothing_wrote,
         compute_queue_passes_run_beside_the_graphics_queues,
+        rays_find_a_blas_of_packed_vertices,
         passes_over_keep_what_their_target_holds,
         images_read_back_once_their_frame_has_finished,
         dropped_images_free_their_slots,
@@ -880,6 +883,181 @@ fn graph_buffers_hold_zeros_where_nothing_wrote() {
     assert_eq!(read_last, [0; 48]);
 
     drop((frames, image, write, device, instance));
+    check(&validation);
+}
+
+/// Rays from a compute shader (`tests/shaders/trace.slang`) find a BLAS of a quad packed as
+/// models pack it, read in place, through a TLAS of two instances, one hidden by its mask. The
+/// TLAS is rebuilt every frame, the shown instance moved from the second on, and each frame's hits
+/// come back two frames later. Under synchronization validation.
+fn rays_find_a_blas_of_packed_vertices() {
+    const RAYS: usize = 8;
+    let instance = instance();
+    let validation = instance.validation();
+    let device = device(&instance);
+    if !device.ray_query() {
+        println!("ray queries skipped: {} has none", device.name());
+        return;
+    }
+    let spirv = spirv("trace", &[("trace_main", "compute")]);
+    let trace = ComputePipeline::new(&device, "trace", &spirv, c"trace_main").expect("a pipeline");
+    let mut image = ColorImage::new(&device, 1, 1, "trace target").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let mut graph = Graph::default();
+    let hits = graph.buffer("test hits", RAYS as u64 * 24);
+    let traced = graph.compute(label!("trace")).write_buffer(hits).add();
+    let read = graph.read_back(label!("read hits"), hits);
+
+    // Vertices of 24 bytes, as models' are: a position's counts, then the bitangent's sign, which
+    // builds ignore, then bytes they don't read. One before the quad's four, which isn't its.
+    let vertex = |x: u16, y: u16, sign: u16| {
+        let mut vertex = [0xff; 24];
+        vertex[..8].copy_from_slice(bytemuck::cast_slice(&[x, y, 0, sign]));
+        vertex
+    };
+    let full = u16::MAX;
+    let vertices = [
+        vertex(7, 7, 7),
+        vertex(0, 0, 0),
+        vertex(full, 0, full),
+        vertex(full, full, 0),
+        vertex(0, full, full),
+    ]
+    .concat();
+    // Three indices before the quad's, which aren't its.
+    let indices: &[u32] = &[9, 9, 9, 0, 1, 2, 0, 2, 3];
+    let indices: &[u8] = bytemuck::cast_slice(indices);
+    let buffer =
+        |bytes: usize, name| GpuBuffer::new(&device, bytes as u64, name).expect("a buffer");
+    let mut vertex_buffer = buffer(vertices.len(), "test quad vertices");
+    let mut index_buffer = buffer(indices.len(), "test quad indices");
+    let mut instances = buffer(2 * size_of::<TlasInstance>(), "test instances");
+    let mut tlas = Tlas::new(&device, "test TLAS").expect("a TLAS");
+    assert_eq!(tlas.address(), 0, "no build, no address");
+    let mut blas = None;
+    // The shown instance, custom index 5, at `shown`; the hidden, 6, at x = 10.
+    let placed = |shown: [f32; 3], blas: u64| {
+        let at = |[x, y, z]: [f32; 3], index: u32, mask: u32| TlasInstance {
+            transform: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, z]],
+            index_and_mask: index | mask << 24,
+            offset_and_flags: 0,
+            blas,
+        };
+        [at(shown, 5, 0xff), at([10.0, 0.0, -7.0], 6, 0)]
+    };
+    let mut found = Vec::new();
+    for i in 0..4 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)], &graph)
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        let (number, bytes) = frame.buffer_read("test hits");
+        if number > 0 {
+            found.push(bytes.to_vec());
+        }
+        if i == 0 {
+            frame
+                .write_buffer(&mut vertex_buffer, 0, &vertices)
+                .expect("vertices");
+            frame
+                .write_buffer(&mut index_buffer, 0, indices)
+                .expect("indices");
+            // From -1 to 1 across and down, at z = 2.
+            let quad = Triangles {
+                vertices: &vertex_buffer,
+                first_vertex: 24,
+                vertex_stride: 24,
+                vertex_count: 4,
+                offset: Vec3::new(-1.0, -1.0, 2.0),
+                step: 2.0 / f32::from(full),
+                indices: &index_buffer,
+                first_index: 12,
+                triangles: 2,
+                opaque: true,
+            };
+            blas = Some(frame.build_blas(&quad, "test quad").expect("a BLAS"));
+        }
+        let blas = blas.as_ref().expect("built in the first frame").address();
+        // At z = -5, then moved half across and one farther.
+        let shown = if i == 0 {
+            [0.0, 0.0, -7.0]
+        } else {
+            [0.5, 0.0, -8.0]
+        };
+        let placed = placed(shown, blas);
+        let placed: &[u8] = bytemuck::cast_slice(&placed);
+        frame
+            .write_buffer(&mut instances, 0, placed)
+            .expect("instances");
+        frame
+            .build_tlas(&mut tlas, &instances, 0, 2)
+            .expect("a TLAS");
+        assert_ne!(tlas.address(), 0, "built");
+        {
+            let mut pass = frame.compute(traced);
+            pass.set_pipeline(&trace);
+            let addresses = [tlas.address(), pass.address(hits)];
+            pass.push_constants(&addresses.map(u64::to_ne_bytes).concat());
+            pass.dispatch([1, 1, 1]);
+        }
+        frame.read_back(read).expect("a read back");
+        frame.submit().expect("the frame's submission");
+    }
+
+    // Each ray's custom index, triangle, distance and second and third corners' weights; `None`
+    // for a miss. A point (x, y) of the quad is in its first triangle, (-1, -1), (1, -1), (1, 1),
+    // below the diagonal, with weights ((x - y) / 2, (y + 1) / 2); in its second, (-1, -1), (1, 1),
+    // (-1, 1), above it, with weights ((x + 1) / 2, (y - x) / 2).
+    type Hit = Option<(u32, u32, f32, f32, f32)>;
+    let hit = |primitive, t, u, v| Some((5, primitive, t, u, v));
+    let expected: [[Hit; RAYS]; 2] = [
+        [
+            hit(0, 5.0, 0.5, 0.25),
+            hit(1, 5.0, 0.375, 0.375),
+            None,
+            None,
+            None,
+            None,
+            hit(1, 5.0, 0.05, 0.35),
+            hit(1, 5.0, 0.6, 0.35),
+        ],
+        [
+            hit(0, 6.0, 0.25, 0.25),
+            hit(1, 6.0, 0.125, 0.625),
+            hit(0, 6.0, 0.375, 0.5),
+            None,
+            None,
+            None,
+            None,
+            hit(1, 6.0, 0.35, 0.6),
+        ],
+    ];
+    assert_eq!(found.len(), 2, "two frames' hits read back");
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+    for (frame, (bytes, expected)) in found.iter().zip(&expected).enumerate() {
+        let words: &[u32] = bytemuck::cast_slice(bytes);
+        for (ray, (words, expected)) in words.chunks(6).zip(expected).enumerate() {
+            let &[is_hit, index, primitive, t, u, v] = words else {
+                unreachable!("6 words a ray")
+            };
+            let [t, u, v] = [t, u, v].map(f32::from_bits);
+            let found = (is_hit == 1).then_some((index, primitive, t, u, v));
+            let matches = match (found, expected) {
+                (None, None) => true,
+                (Some((i, p, t, u, v)), Some((ei, ep, et, eu, ev))) => {
+                    i == *ei && p == *ep && near(t, *et) && near(u, *eu) && near(v, *ev)
+                }
+                _ => false,
+            };
+            assert!(
+                matches,
+                "frame {frame}'s ray {ray} found {found:?}, not {expected:?}"
+            );
+        }
+    }
+
+    drop((frames, image, trace, tlas, blas, instances, index_buffer));
+    drop((vertex_buffer, device, instance));
     check(&validation);
 }
 

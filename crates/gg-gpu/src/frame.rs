@@ -11,8 +11,11 @@
 //!   resources once it has finished, finds them read.
 //! - On a device that uploads through a transfer queue, a frame's copies go in a submission of
 //!   their own, paced by another timeline that no frame waits for.
+//! - On a device with ray queries, it builds acceleration structures before its passes, as
+//!   `builds` says.
 
 mod batches;
+mod builds;
 mod compute;
 pub(crate) mod graph;
 mod pass;
@@ -315,7 +318,9 @@ impl Frames {
             plan: Plan::default(),
             batch_commands: Vec::new(),
             buffers_written: false,
-            arenas: (0..FRAMES_IN_FLIGHT).map(Arena::frame).collect(),
+            arenas: (0..FRAMES_IN_FLIGHT)
+                .map(|slot| Arena::frame(slot, device.ray_query()))
+                .collect(),
             staging: Arena::staging(),
             transfer_timeline: vk::Semaphore::null(),
             transfers_submitted: 0,
@@ -566,6 +571,7 @@ impl Frames {
             queue: Queue::Graphics,
             rendering: false,
             pass_begun: false,
+            built: false,
         }))
     }
 
@@ -992,6 +998,9 @@ pub struct Frame<'a> {
     /// bindless set at once, which every pass recorded before it would sample as the frame is
     /// submitted, before what makes the image ready.
     pass_begun: bool,
+    /// Whether the frame has built acceleration structures that no barrier has yet made visible
+    /// to ray queries: they're made visible together, before the first pass.
+    built: bool,
 }
 
 impl<'a> Frame<'a> {
@@ -1060,6 +1069,7 @@ impl<'a> Frame<'a> {
             decl.label
         );
         self.next += 1;
+        self.finish_builds();
         self.pass_begun = true;
         let plan = &self.frames.plan;
         let batch = plan.of_pass[pass.0 as usize];
@@ -1485,6 +1495,9 @@ impl<'a> Frame<'a> {
         // Set first, so dropping the frame after a failure doesn't submit it again.
         self.submitted = true;
         self.frames.recording = false;
+        if !self.rendering {
+            self.finish_builds();
+        }
         let sent = if self.rendering {
             Err(Error::new(
                 "gpu.pass_forgotten",
