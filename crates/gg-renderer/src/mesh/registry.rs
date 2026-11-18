@@ -318,6 +318,18 @@ impl Meshes {
         Mesh::new(index)
     }
 
+    /// The engine's meshes added so far when first asked for, each with its name and index, as
+    /// [`Shaders::engine`](crate::Shaders::engine) gives the engine's shaders.
+    pub fn engine(&self) -> impl Iterator<Item = (&'static str, u32)> + use<> {
+        self.grid.map(|index| ("grid", index)).into_iter()
+    }
+
+    /// Adds the engine's mesh `name` (as [`engine`](Self::engine) names it) as a draw first asking
+    /// for it would, unless it's added already. Gives its index; `None` for no such name.
+    pub fn add_engine(&mut self, name: &str) -> Option<u32> {
+        (name == "grid").then(|| self.grid().index)
+    }
+
     /// Adds a mesh of triangles, three of `indices` each, indexing `vertices`; `name` names it in
     /// errors and captures. Shaders for `V` draw it ([`Shaders::add`](crate::Shaders::add)). It has
     /// one level of detail and no sphere, as it can't read positions, so it's never culled.

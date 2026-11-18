@@ -222,6 +222,10 @@ impl Context {
     /// them, so a texture's index, which what's opaque holds, is what it was. A path outside the
     /// root, which only a layer gives, stands in.
     ///
+    /// It adds again each shader and mesh the engine added when first asked for, and notes it,
+    /// where that run noted it ([`note_engine`](Self::note_engine)): that run's frames added it,
+    /// which this run hasn't drawn yet, shifting the indices of what came after it.
+    ///
     /// It removes again what that run removed: a texture, model or mesh by its line's index,
     /// while this run's notes are the snapshot's up to that line. A texture or model goes only if
     /// the one at its index loaded from the line's path and isn't removed already.
@@ -235,6 +239,26 @@ impl Context {
         for (at, line) in lines.iter().enumerate().skip(common) {
             match snapshot::again(line) {
                 Some(Again::Load(asset)) => self.load_named([asset], true),
+                Some(Again::Engine { mesh, index, name }) => {
+                    let added = if mesh {
+                        self.meshes.add_engine(name)
+                    } else {
+                        self.shaders.add_engine(name)
+                    };
+                    // Noted alone, once, as `note_engine` noted it: another this run's layers
+                    // added as they loaded has its own line next.
+                    let noted = self.assets.added().iter().any(|note| **note == **line);
+                    if added == Some(index) && !noted {
+                        self.add_assets(|assets| assets.note(line.clone()));
+                    } else {
+                        debug!(
+                            line = &**line,
+                            ?added,
+                            "Not noted again, as the run's assets part from the snapshot's before \
+                             it"
+                        );
+                    }
+                }
                 // The removal's index may be another asset's if this run's assets part from the
                 // snapshot's before it, as when newer layers add another first.
                 Some(_) if !lined_up => debug!(

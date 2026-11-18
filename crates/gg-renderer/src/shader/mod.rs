@@ -88,12 +88,23 @@ pub struct Shaders {
     count: u32,
     /// Never handed out again.
     removed: HashSet<u32>,
-    /// Handles of the engine's shaders added when first asked for: the model shaders (opaque,
-    /// masked, blended), then circle, line, grid and text.
-    lazy: [Option<u32>; 7],
+    /// Handles of the engine's shaders added when first asked for, by [`LAZY`]'s slots.
+    lazy: [Option<u32>; LAZY.len()],
     /// Games' shaders in order added, less those removed.
     sources: Vec<ShaderSource>,
 }
+
+/// The names of the engine's shaders added when first asked for, by slot: the model shaders, then
+/// circle, line, grid and text.
+const LAZY: [&str; 7] = [
+    "model",
+    "model masked",
+    "model blended",
+    "circle",
+    "line",
+    "grid",
+    "text",
+];
 
 /// A change to a renderer's shaders, carried by [`Uploads::take`](crate::Uploads::take).
 pub(crate) enum Change {
@@ -490,10 +501,10 @@ impl Shaders {
     /// like a game's when first asked for: a renderer without models makes no pipeline for it, and
     /// games' handles come where they would have.
     pub(crate) fn model(&mut self, alpha: AlphaMode) -> Shader<PackedVertex, model::Params> {
-        let (slot, name, spirv, blend) = match alpha {
-            AlphaMode::Opaque => (0, "model", model::OPAQUE_SPIRV, Blend::Opaque),
-            AlphaMode::Mask { .. } => (1, "model masked", model::MASKED_SPIRV, Blend::Opaque),
-            AlphaMode::Blend => (2, "model blended", model::BLENDED_SPIRV, Blend::Alpha),
+        let (slot, spirv, blend) = match alpha {
+            AlphaMode::Opaque => (0, model::OPAQUE_SPIRV, Blend::Opaque),
+            AlphaMode::Mask { .. } => (1, model::MASKED_SPIRV, Blend::Opaque),
+            AlphaMode::Blend => (2, model::BLENDED_SPIRV, Blend::Alpha),
         };
         let shadow = matches!(alpha, AlphaMode::Mask { .. }).then_some(model::MASKED_SHADOW_SPIRV);
         // Blended draws go in order, by indices.
@@ -520,7 +531,7 @@ impl Shaders {
             }),
             AlphaMode::Blend => None,
         };
-        self.lazy(slot, name, spirv, shadow, meshlets.as_ref(), blend, true)
+        self.lazy(slot, spirv, shadow, meshlets.as_ref(), blend, true)
     }
 
     /// Adds the engine's model shader for each alpha mode not yet asked for, as
@@ -540,35 +551,56 @@ impl Shaders {
 
     /// Added when first asked for, as the model shaders are.
     pub(crate) fn circle(&mut self) -> Shader<Corner, circle::Params> {
-        self.lazy(3, "circle", circle::SPIRV, None, None, Blend::Alpha, true)
+        self.lazy(3, circle::SPIRV, None, None, Blend::Alpha, true)
     }
 
     /// Added when first asked for, as the model shaders are.
     pub(crate) fn line(&mut self) -> Shader<Corner, line::Params> {
-        self.lazy(4, "line", line::SPIRV, None, None, Blend::Alpha, true)
+        self.lazy(4, line::SPIRV, None, None, Blend::Alpha, true)
     }
 
     /// Added when first asked for, as the model shaders are.
     pub(crate) fn grid(&mut self) -> Shader<Vec2, grid::Params> {
-        self.lazy(5, "grid", grid::SPIRV, None, None, Blend::Alpha, false)
+        self.lazy(5, grid::SPIRV, None, None, Blend::Alpha, false)
     }
 
     /// Added when first asked for, as the model shaders are.
     pub(crate) fn text(&mut self) -> Shader<Corner, text::Params> {
-        self.lazy(6, "text", text::SPIRV, None, None, Blend::Alpha, true)
+        self.lazy(6, text::SPIRV, None, None, Blend::Alpha, true)
+    }
+
+    /// The engine's shaders added so far when first asked for, each with its name and index, in
+    /// the order added. Each added later takes the next index, shifting those of games' shaders
+    /// added after it: a restored run adds them again in place ([`add_engine`](Self::add_engine)).
+    pub fn engine(&self) -> impl Iterator<Item = (&'static str, u32)> + use<> {
+        let mut added: [_; LAZY.len()] =
+            std::array::from_fn(|slot| self.lazy[slot].map(|index| (index, LAZY[slot])));
+        added.sort_unstable();
+        let added = added.into_iter().flatten();
+        added.map(|(index, name)| (name, index))
+    }
+
+    /// Adds the engine's shader `name` (as [`engine`](Self::engine) names it) as a draw first
+    /// asking for it would, unless it's added already. Gives its index; `None` for no such name.
+    pub fn add_engine(&mut self, name: &str) -> Option<u32> {
+        let shader = match LAZY.iter().position(|&lazy| lazy == name)? {
+            0 => self.model(AlphaMode::Opaque).index,
+            1 => self.model(AlphaMode::Mask { cutoff: 0.5 }).index,
+            2 => self.model(AlphaMode::Blend).index,
+            3 => self.circle().index,
+            4 => self.line().index,
+            5 => self.grid().index,
+            _ => self.text().index,
+        };
+        Some(shader)
     }
 
     /// The engine's shader in `lazy`'s `slot`, added when first asked for, then the same. `shadow`
     /// draws its shadows cut out and `meshlets` its meshlets, if it has them; `ids` is as
     /// [`Added::ids`] says.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "each says what one of the shaders is"
-    )]
     fn lazy<V, P>(
         &mut self,
         slot: usize,
-        name: &str,
         spirv: &[u8],
         shadow: Option<&[u8]>,
         meshlets: Option<&model::MeshletSpirv>,
@@ -580,7 +612,7 @@ impl Shaders {
             None => {
                 let (spirv, shadow) = (spirv.to_vec(), shadow.map(<[u8]>::to_vec));
                 let types = Types::of::<V, P>();
-                let index = self.push(name, spirv, shadow, meshlets, blend, ids, types);
+                let index = self.push(LAZY[slot], spirv, shadow, meshlets, blend, ids, types);
                 *self.lazy[slot].insert(index)
             }
         };
@@ -594,7 +626,7 @@ impl Default for Shaders {
             changes: Vec::new(),
             count: 0,
             removed: HashSet::new(),
-            lazy: [None; 7],
+            lazy: [None; LAZY.len()],
             sources: Vec::new(),
         };
         let types = Types::of::<Corner, Params>();

@@ -4,7 +4,8 @@
 //!
 //! - the app, the engine and build, and the layers from the bottom up;
 //! - the ticks run, and the world's hash;
-//! - the assets the layers added, which name what's opaque in the world;
+//! - the assets the layers added and removed, which name what's opaque in the world, and the
+//!   shaders and meshes the engine added when first asked for, among them in order;
 //! - each texture's name where its run named it otherwise than by path (as by ID), with the path.
 //!   Values name textures by these. A run that names them otherwise (after an ID file changed)
 //!   reads them so; a lockstep joiner takes them as its own, as its host's world comes so;
@@ -32,7 +33,8 @@
 //! layers Sandbox PerfPanel Inspector
 //! ticks 1234
 //! hash 58183b6352a09a44 fb695ce29daa8479
-//! asset texture 1 1 2 assets/checkerboard.png
+//! asset engine shader 1 text
+//! asset texture 1 2 2 assets/checkerboard.png
 //! named List([String("5f3c9a1e07b2d846"), String("assets/checkerboard.png")])
 //! script List([String("scripts/spin.luau"), String("local Spin = ...")])
 //! mod List([String("(name: \"rainbow\", ..."), String("rainbow.luau"), String("local ...")])
@@ -303,19 +305,37 @@ fn world_hash(text: &str) -> Option<WorldHash> {
 ///   `texture 1 1 2 assets/logo.png`. A model's line has its two types' names and sizes after the
 ///   path, whatever build wrote them;
 /// - a removal of a texture or model by index and path (`removed texture 2 assets/logo.png`), or
-///   of a mesh by index (`removed mesh 3`).
+///   of a mesh by index (`removed mesh 3`);
+/// - a shader or mesh the engine added when first asked for, by index and name
+///   (`engine shader 5 text`, `engine mesh 2 grid`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Again<'a> {
     Load(Asset<&'a str>),
     RemoveTexture(u32, &'a str),
     RemoveModel(usize, &'a str),
     RemoveMesh(u32),
+    Engine {
+        mesh: bool,
+        index: u32,
+        name: &'a str,
+    },
 }
 
 /// What a restored run takes again of `line`. `None` for a mesh's or shader's, which its layers
 /// add as they load.
 pub(crate) fn again(line: &str) -> Option<Again<'_>> {
     let (kind, rest) = line.split_once(' ')?;
+    if kind == "engine" {
+        let (kind, rest) = rest.split_once(' ')?;
+        let (index, name) = rest.split_once(' ')?;
+        let mesh = match kind {
+            "shader" => false,
+            "mesh" => true,
+            _ => return None,
+        };
+        let index = index.parse().ok()?;
+        return Some(Again::Engine { mesh, index, name });
+    }
     if kind == "removed" {
         let (kind, rest) = rest.split_once(' ')?;
         let (index, path) = match rest.split_once(' ') {
@@ -640,9 +660,10 @@ impl Snapshot {
         })
     }
 
-    /// The `asset` lines, in order: what its run's layers added and removed, and what it loaded
-    /// where text named it. A restored run takes them again before its world, past what its own
-    /// layers noted alike ([`Context::load_restored`](crate::Context::load_restored)).
+    /// The `asset` lines, in order: what its run's layers added and removed, what it loaded where
+    /// text named it, and what the engine added when first asked for. A restored run takes them
+    /// again before its world, past what its own layers noted alike
+    /// ([`Context::load_restored`](crate::Context::load_restored)).
     pub(crate) fn added(&self) -> &[String] {
         &self.assets
     }
@@ -673,7 +694,7 @@ impl Snapshot {
                     | Asset::Prefab(path),
                 )) => path,
                 Some(Again::RemoveTexture(_, path) | Again::RemoveModel(_, path)) => path,
-                Some(Again::RemoveMesh(_)) | None => continue,
+                Some(Again::RemoveMesh(_) | Again::Engine { .. }) | None => continue,
             };
             let Some(now) = moved.get(path) else {
                 continue;
@@ -847,11 +868,11 @@ mod tests {
     }
 
     /// `asset` lines give a texture's, model's or font's path (spaces included; a model's with
-    /// any types), or a removal's index and path (a mesh's, index alone); a mesh's or shader's,
-    /// nothing.
+    /// any types), a removal's index and path (a mesh's, index alone), or an engine's shader's or
+    /// mesh's index and name; a mesh's or shader's, nothing.
     #[test]
     fn asset_lines_give_what_a_restore_takes_again() {
-        use Again::{Load, RemoveMesh, RemoveModel, RemoveTexture};
+        use Again::{Engine, Load, RemoveMesh, RemoveModel, RemoveTexture};
         let model = format!(
             "model 3 4 2 assets/a truck.glb {}",
             crate::layer::model_types()
@@ -887,6 +908,24 @@ mod tests {
             ("removed mesh 3 floor", None),
             ("removed texture two a.png", None),
             ("removed shader 1", None),
+            (
+                "engine shader 2 model masked",
+                Some(Engine {
+                    mesh: false,
+                    index: 2,
+                    name: "model masked",
+                }),
+            ),
+            (
+                "engine mesh 1 grid",
+                Some(Engine {
+                    mesh: true,
+                    index: 1,
+                    name: "grid",
+                }),
+            ),
+            ("engine shader five text", None),
+            ("engine texture 1 white", None),
         ];
         for (line, taken) in lines {
             assert_eq!(again(line), taken, "{line}");
@@ -1267,6 +1306,44 @@ mod tests {
             notes,
             "removed again already"
         );
+    }
+
+    /// What's opaque comes back though the snapshot's run drew a circle between two loads, which
+    /// added the engine's circle shader: the restored run adds it again at its note, so the
+    /// texture's note, and every index after it, are the snapshot's.
+    #[test]
+    fn what_is_opaque_comes_back_after_a_frame_drew_between_loads() {
+        let dir = Scratch::new("snapshot-drew");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(root.join("assets/stone.png"), png).expect("a PNG");
+        // The layers' load.
+        let load = |cx: &mut Context| {
+            let tri = cx.add_mesh("tri", &[[0.0f32; 3]; 3], &[0, 1, 2]);
+            tri.expect("a mesh")
+        };
+        let mut saved = Context::seeded(3).root(root.clone());
+        let tri = load(&mut saved);
+        saved.draw_circle(crate::math::Mat4::IDENTITY, crate::Circle::default());
+        saved.load_named([Asset::Texture("assets/stone.png")], false);
+        let draw = MeshDraw::from_parts(tri.index(), 0, false, false, &[]).expect("a draw");
+        let drawn = saved.world_mut().spawn((Transform::IDENTITY, draw));
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
+        let snapshot = snapshot.expect("read");
+
+        let mut restored = Context::seeded(4).root(root);
+        load(&mut restored);
+        restored.load_restored(snapshot.added());
+        let notes = restored.world().assets().added();
+        assert_eq!(notes, saved.world().assets().added(), "every note alike");
+        snapshot
+            .restore(restored.world_mut(), &[])
+            .expect("restored");
+        assert_eq!(restored.world().get::<MeshDraw>(drawn), Some(&draw));
     }
 
     /// A removal is taken again only while the restored run's notes match the snapshot's up to it,

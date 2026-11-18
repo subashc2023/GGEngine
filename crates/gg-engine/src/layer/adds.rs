@@ -498,10 +498,8 @@ impl Context {
             model.index(),
             self.assets.model_path(model)
         );
-        self.add_assets(|assets| {
-            assets.remove_model(model);
-            assets.note(note);
-        });
+        self.add_assets(|assets| assets.remove_model(model));
+        self.note(note);
     }
 
     /// Why `texture` isn't removable (see [`remove_texture`](Self::remove_texture)); `None` if it
@@ -552,19 +550,17 @@ impl Context {
             .path(texture)
             .expect("a texture removed is named");
         let note = noted.then(|| format!("removed texture {} {path}", texture.index()));
-        self.add_assets(|assets| {
-            assets.remove_texture(texture);
-            if let Some(note) = note {
-                assets.note(note);
-            }
-        });
+        self.add_assets(|assets| assets.remove_texture(texture));
+        if let Some(note) = note {
+            self.note(note);
+        }
     }
 
     /// Removes the mesh of index `index` unless it's removed already (see
     /// [`remove_mesh`](Self::remove_mesh)), noting it by index among what the layers added.
     pub(super) fn drop_mesh(&mut self, index: u32) {
         if self.meshes.remove_index(index) {
-            self.add_assets(|assets| assets.note(format!("removed mesh {index}")));
+            self.note(format!("removed mesh {index}"));
         }
     }
 
@@ -823,7 +819,42 @@ impl Context {
     pub(super) fn added(&mut self, kind: &str, what: &str) {
         let (meshes, shaders) = (self.meshes.count(), self.shaders.count());
         let added = format!("{kind} {meshes} {shaders} {} {what}", self.textures.count());
-        self.add_assets(|assets| assets.note(added));
+        self.note(added);
+    }
+
+    /// Notes `line` among what the layers added and removed, after
+    /// [`note_engine`](Self::note_engine)'s notes. Every note goes through here but the engine's
+    /// that [`load_restored`](Self::load_restored) takes again.
+    fn note(&mut self, line: String) {
+        self.note_engine();
+        self.add_assets(|assets| assets.note(line));
+    }
+
+    /// Notes each shader and mesh the engine added when first asked for that no note names yet, as
+    /// `engine shader 5 text`: shaders, then meshes, each in the order added. Each shifted the
+    /// indices of what was added after it, which a restored run's frames don't, so that run adds
+    /// it again at its note ([`load_restored`](Self::load_restored)).
+    fn note_engine(&mut self) {
+        let added = self.assets.added();
+        // Only this and `load_restored` note the engine's, once each and at its index, so a count
+        // tells whether any is new. Scanning the notes for each note is quadratic in them over a
+        // run: fine for hundreds; count them in `Assets` if runs note many thousands.
+        let noted = added.iter().filter(|line| line.starts_with("engine "));
+        if noted.count() == self.shaders.engine().count() + self.meshes.engine().count() {
+            return;
+        }
+        let shaders = self.shaders.engine();
+        let shaders = shaders.map(|(name, at)| format!("engine shader {at} {name}"));
+        let meshes = self.meshes.engine();
+        let meshes = meshes.map(|(name, at)| format!("engine mesh {at} {name}"));
+        let new: Vec<String> = (shaders.chain(meshes))
+            .filter(|line| !added.iter().any(|noted| **noted == **line))
+            .collect();
+        self.add_assets(|assets| {
+            for line in new {
+                assets.note(line);
+            }
+        });
     }
 
     /// Has `path` name `texture`, which another path to its file added before (see
