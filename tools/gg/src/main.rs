@@ -317,10 +317,10 @@ Parts of shading: `base_color`, `normal`, `surface_normal`, `metallic`, `roughne
 `emission`, `specular_color` (what it reflects head-on), `direct_light`, `sky_light`, `reflection`,
 `traced_reflection` (before its blur, at any roughness, black where its ray found nothing),
 `reflection_rays` (why each ray found what it did: green trusted, red passed behind what's there,
-orange out of the last frame's view, magenta a back face, gray nothing opaque, yellow its own
-surface, cyan turned back, navy past its reach, blue off the view, white out of steps),
-`diffuse_light` and `specular_light` (the light it diffuses and reflects, of all three). An unlit
-material shows its base color, and black for the rest.
+orange out of the last frame's view, magenta from behind a surface no back face bounds, gray
+nothing opaque, yellow its own surface, cyan turned back, navy past its reach, blue off the view,
+white out of steps), `diffuse_light` and `specular_light` (the light it diffuses and reflects, of
+all three). An unlit material shows its base color, and black for the rest.
 ",
             },
             Help {
