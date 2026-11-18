@@ -104,6 +104,7 @@ fn main() -> ExitCode {
         reflections_mirror_about_the_shading_normal,
         reflections_blur_in_place_at_any_view_size,
         a_rough_reflection_slides_with_the_view,
+        a_rough_balls_reflection_holds_still_as_the_view_turns,
         a_rough_reflection_takes_in_its_own_surface_alone,
         normals_images_show_as_normals,
         the_traced_reflection_is_unblurred,
@@ -8077,6 +8078,112 @@ fn a_rough_reflection_slides_with_the_view() {
              smooth one: {centers:?}"
         );
     }
+    shut_down(renderer);
+}
+
+/// A metal ball 0.5 rough, 86 pixels across, beside a white unlit ball 0.5 off, over
+/// [`backdrop_scene`]'s floor, too rough to reflect, and black wall, as the view turns right 2
+/// pixels at a time over 64: the reflection alone, the white ball's light on the metal one neither
+/// brightens and dims nor wanders over it, past a steady drift as perspective stretches the view's
+/// sides. A flat mirror's blur, 3 times as wide on this ball, read levels whose texels span a
+/// third of it, and swam as it moved under them.
+fn a_rough_balls_reflection_holds_still_as_the_view_turns() {
+    const WIDTH: u32 = 380;
+    const HEIGHT: u32 = 256;
+    const STEPS: usize = 32;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    let black = Vec4::new(0.0, 0.0, 0.0, 1.0);
+    // The backdrop's square, small and as black as the wall.
+    let (at, size) = (Vec3::new(0.0, 0.0, -4.0), Vec2::splat(0.1));
+    let (mut draws, viewpoint) = backdrop_scene(&mut stores, 0.7, black, at, size, black);
+    // A dark sky: the white ball's light alone, not the floor's too.
+    let sky = stores.sky.expect("the scene's sky");
+    stores.sky = Some(Sky {
+        luminance: 0.0,
+        ..sky
+    });
+    let center = Vec3::new(0.0, 0.5, 1.5);
+    let metal = Material {
+        color: Vec4::ONE,
+        workflow: metallic(1.0, 0.5),
+        ..Material::default()
+    };
+    let white = Material {
+        color: Vec4::ONE,
+        unlit: true,
+        ..Material::default()
+    };
+    for (radius, x, material) in [(0.5, 0.0, metal), (0.4, 1.4, white)] {
+        let ball = sphere(&mut stores.meshes, radius, 24, 48);
+        let material = stores.materials.add(&material);
+        let draw = MeshDraw::with_material(ball, material, &stores.materials, &mut stores.shaders);
+        draws.push_draw(Mat4::from_translation(center + Vec3::X * x), &draw, 0);
+    }
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    // Two pixels at the view's middle, where a unit a unit away is 128 / tan(30°) pixels.
+    let step = 2.0 * math::libm::tanf(PI / 6.0) / 128.0;
+    let seen: Vec<_> = (0..STEPS)
+        .map(|k| {
+            let turned = Viewpoint {
+                rotation: Quat::from_rotation_y(-step * k as f32) * viewpoint.rotation,
+                ..viewpoint
+            };
+            let shown = reflection_alone(
+                &mut renderer,
+                &mut stores,
+                viewport,
+                turned,
+                &draws,
+                Channel::Reflection,
+            );
+            // The ball's light, and how far right of its middle that light centers.
+            let (mut light, mut across) = (0.0, 0.0);
+            for (i, [r, _, _]) in (0_u32..).zip(shown) {
+                light += r;
+                across += r * ((i % WIDTH) as f32 + 0.5);
+            }
+            let clip = turned.view_projection(WIDTH as f32 / HEIGHT as f32) * center.extend(1.0);
+            let middle = (clip.x / clip.w + 1.0) / 2.0 * WIDTH as f32;
+            (light, across / light - middle)
+        })
+        .collect();
+    // How far the values stray, at most, from the parabola that fits them best over the steps: a
+    // swim's cycles, which a steady drift doesn't have.
+    let stray = |values: &[f32]| {
+        let middle = (STEPS - 1) as f32 / 2.0;
+        let xs = || (0..STEPS).map(|k| k as f32 - middle);
+        let mean_square = xs().map(|x| x * x).sum::<f32>() / STEPS as f32;
+        // 1, x and x² less its mean are orthogonal over steps even about the middle: each fits
+        // apart.
+        let basis = |x: f32| [1.0, x, x * x - mean_square];
+        let fit: [f32; 3] = std::array::from_fn(|i| {
+            let (along, squares) = xs()
+                .zip(values)
+                .fold((0.0, 0.0), |(along, squares), (x, v)| {
+                    let b = basis(x)[i];
+                    (along + b * v, squares + b * b)
+                });
+            along / squares
+        });
+        xs().zip(values)
+            .map(|(x, v)| (v - basis(x).iter().zip(fit).map(|(b, c)| b * c).sum::<f32>()).abs())
+            .fold(0.0, f32::max)
+    };
+    let lights: Vec<_> = seen.iter().map(|(light, _)| *light).collect();
+    let mean = lights.iter().sum::<f32>() / STEPS as f32;
+    let pulse = stray(&lights) / mean;
+    let wander = stray(&seen.iter().map(|(_, off)| *off).collect::<Vec<_>>());
+    assert!(
+        mean > 10.0,
+        "the metal ball shows {mean} of the white ball's light"
+    );
+    assert!(
+        pulse < 0.09 && wander < 0.6,
+        "as the view turns, the ball's light strays {pulse} of its mean and its middle {wander} \
+         pixels from steady: {seen:?}"
+    );
     shut_down(renderer);
 }
 

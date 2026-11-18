@@ -436,14 +436,41 @@ float level_variance(uint level) {
     return 0.25 * (texels - 1.0) + 0.25 * texels;
 }
 
+// The level of the surfaces `curve` reads: texels of 4 pixels, whose mean normals smooth out a
+// normal map's finer bumps but follow a ball a few dozen pixels across.
+static const uint CURVE_LEVEL = 2;
+
+// How fast the surface at `pixel`, of normal `normal`, turns, in radians a pixel across and down:
+// from its mean normals a texel of `CURVE_LEVEL` to either side, `normal` where none is.
+float2 curve(Texture2D surfaces, uint2 pixel, float3 normal) {
+    uint width;
+    uint height;
+    surfaces.GetDimensions(width, height);
+    float2 texel = 1.0 / float2(width, height);
+    float2 uv = (float2(pixel) + 0.5) * texel;
+    float span = exp2(float(CURVE_LEVEL));
+    SamplerState clamp_ = samplers[LINEAR_CLAMP];
+    static const float2 WAYS[4] = { float2(-1.0, 0.0), float2(1.0, 0.0), float2(0.0, -1.0),
+                                    float2(0.0, 1.0) };
+    float3 sides[4];
+    for (uint i = 0; i < 4; i++) {
+        float2 side = uv + WAYS[i] * span * texel;
+        float3 mean = surfaces.SampleLevel(clamp_, side, float(CURVE_LEVEL)).xyz;
+        sides[i] = dot(mean, mean) > 1.0e-8 ? normalize(mean) : normal;
+    }
+    // Chords, as near the angles as a pixel's turn needs.
+    return float2(length(sides[1] - sides[0]), length(sides[3] - sides[2])) / (2.0 * span);
+}
+
 // The view's reflection at `pixel` (reflections.slang): RGB the light its mirror ray found,
 // exposed, blurred by the lobe; alpha the share of the sky's specular light it replaces, fading out
 // toward `Reflected::roughness`; 0 for none. Where `Frame::show` asks, the first level as it is.
 //
 // The blur has the variance of a Gaussian as wide as GGX's lobe at the ray's hit or, where it found
 // nothing, at those round it that did: the pixel's own reflection and the levels, mixed to that
-// variance. It takes in only surfaces facing as the pixel's does, and its share is their mean
-// trust.
+// variance. On a curve the lobe spans fewer pixels: a ball's reflection stays on its side facing
+// what it shows, read from levels fine enough not to swim as the view turns. It takes in only
+// surfaces facing as the pixel's does, and its share is their mean trust.
 float4 reflection(Frame frame, uint2 pixel, float roughness) {
     Reflected reflected = frame.reflections;
     if (reflected.colors == 0) {
@@ -485,6 +512,11 @@ float4 reflection(Frame frame, uint2 pixel, float roughness) {
         }
         spread = surfaces.SampleLevel(clamp_, uv, last).w / trust;
     }
+    // The trace's spread is a flat mirror's. On a curve, each pixel spans more of the lobe's tangent:
+    // twice the normal's turn more, as a mirror's rays turn twice as fast. The blur, round, takes the
+    // geometric mean of the spreads across and down, as wide as the lobe's footprint's area.
+    float2 spreads = 1.0 / (1.0 / spread + 2.0 * curve(surfaces, pixel, normal));
+    spread = sqrt(spreads.x * spreads.y);
     float blur = BLUR_PER_ALPHA * roughness * roughness * spread;
     float variance = blur * blur;
     // The coarser of the two blurs mixed; the finer is the level before, or the pixel's own

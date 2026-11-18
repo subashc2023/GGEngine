@@ -270,7 +270,7 @@ bool all_finite(float3 v) {
 // level: the pixel's normal in the view, and its ray's spread times that trust, 0 where nothing
 // opaque is. The spread is in pixels per unit of a lobe's angle's tangent: `t / (d + t)` of the
 // pixels a unit spans a unit ahead, for a point `d` from the eye and its hit `t` from the point, as
-// a mirror shows what it reflects `d + t` away.
+// a flat mirror shows what it reflects `d + t` away; shading narrows it where the surface curves.
 //
 // Where `Trace::rays` asks, the first level holds each ray's outcome instead, by `stored_as`, as
 // `Channel::ReflectionRays` lists them: red how far behind what's there it passed, green its trust,
