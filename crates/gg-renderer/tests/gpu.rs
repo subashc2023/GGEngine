@@ -108,6 +108,8 @@ fn main() -> ExitCode {
         a_rough_reflection_takes_in_its_own_surface_alone,
         normals_images_show_as_normals,
         the_back_depth_holds_closed_meshes_far_sides,
+        a_balls_hidden_side_shows_in_the_floor,
+        rays_go_on_past_what_they_pass_behind,
         the_traced_reflection_is_unblurred,
         reflection_rays_tell_why_a_ray_misses,
         views_show_parts_of_shading_and_images_in_place_of_light,
@@ -8380,9 +8382,109 @@ fn the_traced_reflection_is_unblurred() {
     shut_down(renderer);
 }
 
+/// The view the ball tests see: 380 by 256, [`backdrop_scene`]'s.
+const BALL_VIEW: [u32; 2] = [380, 256];
+
+/// [`backdrop_scene`]'s floor, 0.05 rough, and gray wall, under an unlit red ball of `radius` resting
+/// on the floor at `at`, double-sided if `double_sided`. Rendered settled, then the frame keeping
+/// the colors the trace reads: returns, as 8-bit frames, the traced reflection and the rays'
+/// outcomes ([`Channel::ReflectionRays`]), and the view.
+fn ball_on_mirror(radius: f32, at: Vec3, double_sided: bool) -> ([Vec<u8>; 2], Viewpoint) {
+    let mut renderer = renderer(BALL_VIEW[0], BALL_VIEW[1]);
+    let mut stores = Stores::default();
+    let viewport = filling(BALL_VIEW);
+    let gray = Vec4::new(0.5, 0.5, 0.5, 1.0);
+    // The backdrop's square, small, off to the side.
+    let (square, size) = (Vec3::new(4.0, 0.0, -4.0), Vec2::splat(0.1));
+    let (mut draws, viewpoint) = backdrop_scene(&mut stores, 0.05, gray, square, size, gray);
+    let ball = sphere(&mut stores.meshes, radius, 48, 96);
+    let material = stores.materials.add(&Material {
+        color: Vec4::new(0.8, 0.1, 0.1, 1.0),
+        unlit: true,
+        double_sided,
+        ..Material::default()
+    });
+    let draw = MeshDraw::with_material(ball, material, &stores.materials, &mut stores.shaders);
+    draws.push_draw(Mat4::from_translation(at + Vec3::Y * radius), &draw, 0);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let shown = [Channel::TracedReflection, Channel::ReflectionRays].map(|channel| {
+        for show in [None, Some(Show::Shading(channel))] {
+            let data = RenderData {
+                reflections: Some(Reflections::default()),
+                show,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(&mut renderer, data);
+        }
+        frame_pixels(&mut renderer)
+    });
+    shut_down(renderer);
+    (shown, viewpoint)
+}
+
+/// [`ball_on_mirror`]'s ball, 1 in radius: below where it touches the floor, the floor mirrors its
+/// underside, which the view doesn't show, as a whole disc. Down the column through its middle, 20
+/// pixels from the first whose ray leaves its own surface are trusted over 0.9 and red. Across 60
+/// columns, the row where the red starts steps at most 2 pixels. Rays passing more than the
+/// thickness behind its front were dropped, in rings and spikes stepping 6. A double-sided ball,
+/// which may be open, is taken to be that thick, and drops some.
+fn a_balls_hidden_side_shows_in_the_floor() {
+    let [width, height] = BALL_VIEW;
+    for double_sided in [false, true] {
+        let ([traced, rays], viewpoint) = ball_on_mirror(1.0, Vec3::ZERO, double_sided);
+        let at = |image: &[u8], x, y| pixel_at(image, width, [x, y]);
+        let [middle, center] = pixel_of(viewpoint, BALL_VIEW, Vec3::Y);
+        // The first row below the ball in column `x`: unlit, it shows no rays.
+        let below = |x| (center..height).find(|&y| at(&rays, x, y)[..3] != [0; 3]);
+        let below = |x| below(x).expect("the floor below the ball");
+        let own = [255, 255, 0];
+        let first = (below(middle)..height).find(|&y| at(&rays, middle, y)[..3] != own);
+        let first = first.expect("rays leaving the floor below the ball");
+        let column: Vec<_> = (first..first + 20)
+            .map(|y| (at(&rays, middle, y), at(&traced, middle, y)))
+            .collect();
+        let red = |color: [u8; 4]| color[0] > color[1].saturating_add(40);
+        let trusted = |&(ray, color): &([u8; 4], [u8; 4])| ray[1] > 229 && red(color);
+        if double_sided {
+            assert!(
+                !column.iter().all(trusted),
+                "the double-sided ball's underside shows (ray, color) {column:?}"
+            );
+            continue;
+        }
+        assert!(
+            column.iter().all(trusted),
+            "the ball's underside shows (ray, color) {column:?}"
+        );
+        // The row where the ball's mirror starts, in column `x`.
+        let starts = |x| {
+            (below(x)..height)
+                .find(|&y| red(at(&traced, x, y)))
+                .expect("the ball's mirror")
+        };
+        let rows: Vec<_> = (middle - 30..=middle + 30).map(starts).collect();
+        let step = rows.windows(2).map(|pair| pair[0].abs_diff(pair[1])).max();
+        assert!(step <= Some(2), "the ball's mirror starts at rows {rows:?}");
+    }
+}
+
+/// [`ball_on_mirror`]'s ball, 0.5 in radius: the floor beside its mirror, whose ray passes behind
+/// it, mirrors the wall, trusted over 0.9. That ray was dropped, as far behind the ball's front.
+fn rays_go_on_past_what_they_pass_behind() {
+    let ([traced, rays], viewpoint) = ball_on_mirror(0.5, Vec3::new(0.0, 0.0, 1.0), false);
+    let beside = pixel_of(viewpoint, BALL_VIEW, Vec3::new(-0.45, 0.0, 0.82));
+    let [ray, color] = [&rays, &traced].map(|image| pixel_at(image, BALL_VIEW[0], beside));
+    assert!(
+        ray[1] > 229 && ray[0] < 26 && color[0].abs_diff(color[2]) < 8 && color[1] > 100,
+        "beside the ball's mirror, the ray shows {ray:?} and finds {color:?}"
+    );
+}
+
 /// [`backdrop_scene`]'s smooth floor's rays, as [`Channel::ReflectionRays`] colors them. Green: one
-/// to the wall, found and trusted. Red: one passing under a square standing over the floor, then
-/// behind its depth. Blue: one from near the camera, over the wall, out of the view.
+/// to the wall, found and trusted. Navy: one passing under a square standing over the floor, then
+/// behind it, which no back face bounds, past its thickness: it goes on, and the wall where it
+/// lands is behind the square, so it passes its reach. Blue: one from near the camera, over the
+/// wall, out of the view.
 fn reflection_rays_tell_why_a_ray_misses() {
     const WIDTH: u32 = 380;
     const HEIGHT: u32 = 256;
@@ -8409,7 +8511,7 @@ fn reflection_rays_tell_why_a_ray_misses() {
     let behind = pixel(Vec3::new(0.0, -0.6, -1.0));
     let near = pixel(Vec3::new(-1.0, 0.0, 2.3));
     assert!(
-        wall[1] > 200 && wall[0] < 50 && behind[0] > 200 && behind[1] < 50,
+        wall[1] > 200 && wall[0] < 50 && close(behind, [0, 0, 128, 255]),
         "the wall's ray shows {wall:?}, the one behind the square {behind:?}"
     );
     assert!(close(near, [0, 0, 255, 255]), "the near ray shows {near:?}");

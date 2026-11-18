@@ -932,8 +932,10 @@ fn plan_view(
         });
         // Each depth's, as they pair.
         let found = [normals, drawn_normals].map(|pair| pair.map(|(_, normals)| normals));
-        let reflections =
-            (traced).map(|_| ReflectionPass::plan(graph, reflections_first, depths, found, size));
+        // The back faces are drawn whenever the view traces reflections.
+        let reflections = back.map(|(_, back)| {
+            ReflectionPass::plan(graph, reflections_first, depths, back, found, size)
+        });
         let mut early = EarlyPasses {
             depth: rest,
             normals,

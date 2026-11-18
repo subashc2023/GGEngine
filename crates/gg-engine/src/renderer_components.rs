@@ -1071,7 +1071,9 @@ impl Reflect for Reflections {
                     None,
                     base.thickness,
                     "How far behind what the view shows a ray may pass and still find it, in the \
-                     world's units: how thick what the view's depth shows is taken to be.",
+                     world's units, where no back face bounds it: how thick open and double-sided \
+                     meshes are taken to be. One-sided meshes are as thick as their back faces \
+                     show.",
                 ),
                 field(
                     "roughness",

@@ -4,8 +4,10 @@
 // bloom, grade and canvas.
 //
 // Passes, a pixel a thread:
-// - `depth_main` and `reduce_main`: a pyramid of the nearest depth, each level's sides half the
-//   last's, rounded up, so texel `c` of level `n` covers pixels `c * 2^n` to `(c + 1) * 2^n`.
+// - `depth_main` and `reduce_main`: a pyramid of the nearest front depth and the farthest back,
+//   each level's sides half the last's, rounded up, so texel `c` of level `n` covers pixels
+//   `c * 2^n` to `(c + 1) * 2^n`. A pixel's back is its back faces' depth where that bounds what
+//   shows there, a closed mesh's far side; else its front moved `thickness` farther.
 // - `trace_main`: each pixel's mirror ray through the pyramid, into the first level of the
 //   reflections and of their surfaces, which shading tells apart by. Their images are the view's
 //   padded to whole texels of their last level, so each level's texel `c` covers pixels `c * 2^n`
@@ -16,6 +18,10 @@
 // The trace is AMD's FidelityFX SSSR's, under the MIT license; functions follow its
 // `FFX_SSSR_HierarchicalRaymarch` and `FFX_SSSR_ValidateHit`:
 // https://github.com/GPUOpen-Effects/FidelityFX-SSSR/blob/master/ffx-sssr/ffx_sssr.h
+// It finds a pixel's interval from front to back, not all that's behind the front, so a ray goes
+// on past what it passes behind, as Voxagon's "A better depth buffer for raymarching" says:
+// https://blog.voxagon.se/2017/11/22/a-better-depth-buffer-for-raymarching.html
+// Within a closed mesh's interval it takes the front's colors, which stand in for its hidden side.
 // Positions are in pixels across and down, and the view's depth. View space is ao.slang's: X right,
 // Y up and Z ahead, so depth is positive.
 //
@@ -61,7 +67,7 @@ struct Trace {
     // The pyramid's levels.
     uint levels;
     // A ray's reach, in world units, and how far behind what the depth shows it may pass and still
-    // find it.
+    // find it where no back face bounds it.
     float distance;
     float thickness;
     // Where each level starts in the pyramid, in texels.
@@ -78,8 +84,9 @@ struct Trace {
 };
 
 struct Push {
-    // Every level of the pyramid, end to end, each row by row.
-    float* pyramid;
+    // Every level of the pyramid, end to end, each row by row: the nearest front, then the farthest
+    // back.
+    float2* pyramid;
     // What `trace_main` reads.
     Trace* trace;
     // Bindless textures, the view's two depths; the nearer is what's opaque.
@@ -95,6 +102,12 @@ struct Push {
     uint target;
     // The blurs': the storage slots of the surfaces' level read and level written.
     uint2 surfaces;
+    // The depth of the nearest back faces, a bindless texture.
+    uint back;
+    // The first level's: `Trace`'s, to move a front `thickness` farther.
+    float depth_mul;
+    float depth_add;
+    float thickness;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -110,8 +123,20 @@ static const float NUDGE = 0.005;
 // ray's reach over which they fade toward its end.
 static const float EDGE_FADE = 0.05;
 static const float DISTANCE_FADE = 0.25;
+// How far behind the front, as a share of its depth, a back face must be to bound it: nearer, it's
+// the front drawn again, as a double-sided mesh draws both its sides.
+static const float SAME_SURFACE = 1.0e-4;
 
-// The nearer of the view's two depths at the first level's texel `at`.
+// The back depth at `pixel` that bounds what shows there, of front depth `front`: the nearest back
+// faces', where they're behind it, a closed mesh's far side; else 0, none. A back face nearer than
+// the front is an open mesh's, or one the camera is inside.
+float closed_back(int2 pixel, float front) {
+    float back = depths[push.back].Load(int3(pixel, 0));
+    return back < front * (1.0 - SAME_SURFACE) ? back : 0.0;
+}
+
+// The first level's texel `at`: the nearer of the view's two depths, and its back. Where nothing
+// opaque is, the back is above every depth, so it bounds no coarser texel.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void depth_main(uint3 thread: SV_DispatchThreadID) {
@@ -122,16 +147,24 @@ void depth_main(uint3 thread: SV_DispatchThreadID) {
     float a = depths[push.depths.x].Load(int3(int2(at), 0));
     float b = depths[push.depths.y].Load(int3(int2(at), 0));
     // Reversed: the nearer is the greater, and 0, where nothing opaque drew, infinitely far.
-    push.pyramid[push.target + at.y * push.size.x + at.x] = max(a, b);
+    float front = max(a, b);
+    float back = closed_back(int2(at), front);
+    if (front == 0.0) {
+        back = FLOAT_MAX;
+    } else if (back == 0.0) {
+        float farther = push.depth_mul / (push.depth_add + front) + push.thickness;
+        back = push.depth_mul / farther - push.depth_add;
+    }
+    push.pyramid[push.target + at.y * push.size.x + at.x] = float2(front, back);
 }
 
 // The level read's texel at `at`, clamped.
-float below_at(uint2 at) {
+float2 below_at(uint2 at) {
     at = min(at, push.source_size - 1);
     return push.pyramid[push.source + at.y * push.source_size.x + at.x];
 }
 
-// A level after the first, each texel the nearest of the 2 by 2 under it.
+// A level after the first, each texel the nearest front and farthest back of the 2 by 2 under it.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void reduce_main(uint3 thread: SV_DispatchThreadID) {
@@ -140,9 +173,12 @@ void reduce_main(uint3 thread: SV_DispatchThreadID) {
         return;
     }
     uint2 under = at * 2;
-    float nearest = max(max(below_at(under), below_at(under + uint2(1, 0))),
-                        max(below_at(under + uint2(0, 1)), below_at(under + uint2(1, 1))));
-    push.pyramid[push.target + at.y * push.size.x + at.x] = nearest;
+    float2 a = below_at(under);
+    float2 b = below_at(under + uint2(1, 0));
+    float2 c = below_at(under + uint2(0, 1));
+    float2 d = below_at(under + uint2(1, 1));
+    float2 bounds = float2(max(max(a.x, b.x), max(c.x, d.x)), min(min(a.y, b.y), min(c.y, d.y)));
+    push.pyramid[push.target + at.y * push.size.x + at.x] = bounds;
 }
 
 // Level `level`'s size: the view's halved that many times, rounded up.
@@ -150,11 +186,16 @@ uint2 level_size(Trace trace, uint level) {
     return (trace.size + (1u << level) - 1) >> level;
 }
 
-// The nearest depth over level `level`'s texel `texel`, clamped.
-float nearest_at(Trace trace, uint level, int2 texel) {
+// The nearest front and farthest back over level `level`'s texel `texel`, clamped.
+float2 bounds_at(Trace trace, uint level, int2 texel) {
     uint2 size = level_size(trace, level);
     uint2 at = uint2(clamp(texel, int2(0), int2(size) - 1));
     return push.pyramid[trace.starts[level] + at.y * size.x + at.x];
+}
+
+// The nearest depth over level `level`'s texel `texel`, clamped.
+float nearest_at(Trace trace, uint level, int2 texel) {
+    return bounds_at(trace, level, texel).x;
 }
 
 float view_depth(Trace trace, float z) {
@@ -222,8 +263,9 @@ float3 surface_normal(Trace trace, int2 pixel, float3 center, float z) {
 }
 
 // FFX_SSSR_HierarchicalRaymarch, from the pyramid's first level: whether the ray from `origin`
-// along `way`, in pixels and depth, finds something before it leaves the view, passes its end or
-// takes its last step. `t`, where it stops, runs from 0 at the origin to 1 at the end.
+// along `way`, in pixels and depth, comes between a pixel's front and back before it leaves the
+// view, passes its end or takes its last step. `t`, where it stops, runs from 0 at the origin to 1
+// at the end. Texels it's in front of or behind, it skips.
 bool march(Trace trace, float3 origin, float3 way, out float t) {
     float3 inverse = float3(way.x != 0.0 ? 1.0 / way.x : FLOAT_MAX,
                             way.y != 0.0 ? 1.0 / way.y : FLOAT_MAX,
@@ -244,17 +286,20 @@ bool march(Trace trace, float3 origin, float3 way, out float t) {
         }
         float texel = float(1u << uint(level));
         float2 cell = floor(at.xy / texel);
-        float surface = nearest_at(trace, uint(level), int2(cell));
-        // Where it leaves the texel's sides, and reaches the depth of its nearest surface, which,
-        // the depth reversed, only a ray going away from the view can.
-        float3 planes = float3((cell + side) * texel + nudge, surface);
+        float2 bounds = bounds_at(trace, uint(level), int2(cell));
+        bool above = bounds.x < at.z;
+        bool beneath = at.z < bounds.y;
+        // Where it leaves the texel's sides, and reaches its nearest front or farthest back, which,
+        // the depth reversed, only a ray going away from the view can from above, and one coming
+        // toward it from beneath.
+        float3 planes = float3((cell + side) * texel + nudge, above ? bounds.x : bounds.y);
         float3 ts = (planes - origin) * inverse;
-        ts.z = way.z < 0.0 ? ts.z : FLOAT_MAX;
+        ts.z = (above ? way.z < 0.0 : way.z > 0.0) ? ts.z : FLOAT_MAX;
         float least = min(min(ts.x, ts.y), ts.z);
-        bool above = surface < at.z;
-        // Compared by their bits, as FidelityFX does: whether the least is the surface's.
-        bool skipped = asuint(least) != asuint(ts.z) && above;
-        t = above ? least : t;
+        bool outside = above || beneath;
+        // Compared by their bits, as FidelityFX does: whether the least is the depth's.
+        bool skipped = asuint(least) != asuint(ts.z) && outside;
+        t = outside ? least : t;
         level = skipped ? min(level + 1, top) : level - 1;
     }
     return level < 0 && t <= 1.0;
@@ -323,9 +368,12 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     float trust = 0.0;
     float3 color = float3(0.0);
     // FFX_SSSR_ValidateHit: what's found as far as two pixels from where the ray set out is the
-    // surface itself; the sky isn't found, nor what the ray finds from behind.
+    // surface itself; the sky isn't found. Inside a closed mesh, the ray found it wherever it came
+    // in. Elsewhere, it isn't found from behind, and is trusted less the farther behind the ray
+    // passed.
     int2 hit = int2(stopped.xy);
     float surface = nearest_at(trace, 0, hit);
+    bool closed = closed_back(hit, surface) > 0.0;
     bool apart = any(abs(stopped.xy - origin.xy) >= 2.0);
     // Turned back. Or why `march` found nothing, as its checks tell: the end passed, the view
     // left, or else its steps taken. Or what it found: the surface itself, or nothing opaque.
@@ -343,19 +391,20 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
         float3 facing = surface_normal(trace, hit, position(trace, (float2(hit) + 0.5) / size,
                                                             view_depth(trace, surface)), surface);
         outcome = float3(1.0, 0.0, 1.0);
-        if (dot(facing, ray) <= 0.0) {
-            // Trusted less the farther behind what's there the ray passed, toward the view's edges,
-            // and toward the ray's reach.
-            float behind = 1.0 - smoothstep(0.0, trace.thickness, length(seen - reached));
+        if (closed || dot(facing, ray) <= 0.0) {
+            // Trusted less toward the view's edges and toward the ray's reach. Where no back face
+            // bounds it, it found the front, the less the farther behind it the ray passed.
+            float behind = closed ? 1.0
+                : 1.0 - smoothstep(0.0, trace.thickness, length(seen - reached));
+            reached = closed ? reached : seen;
             float2 uv = stopped.xy / size;
             float2 margin = EDGE_FADE * float2(size.y / size.x, 1.0);
             float2 border = smoothstep(float2(0.0), margin, uv)
                 * (1.0 - smoothstep(1.0 - margin, float2(1.0), uv));
-            float traveled = length(seen - center);
+            float traveled = length(reached - center);
             float far = saturate((trace.distance - traveled) / (trace.distance * DISTANCE_FADE));
             trust = behind * behind * border.x * border.y * far * away;
             outcome = float3(1.0 - behind * behind, trust, 0.0);
-            reached = seen;
             // What the frame before kept where the hit showed then, at this frame's exposure;
             // nothing where it was out of that view.
             float4 then = mul(trace.previous_clip_from_view, float4(seen, 1.0));

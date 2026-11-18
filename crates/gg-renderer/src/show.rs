@@ -112,7 +112,7 @@ pub enum Channel {
     ///
     /// - Red how far behind what's there it passed, green its trust: a trusted hit green.
     /// - Orange: found where the frame before didn't show, whose colors it reads.
-    /// - Magenta: found a surface from behind.
+    /// - Magenta: found from behind a surface no back face bounds.
     /// - Gray: found nothing opaque.
     /// - Yellow: found its own surface, within 2 pixels.
     /// - Cyan: turned back toward the view.

@@ -771,7 +771,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 | Early depth, normals | Beside a visibility buffer, depth of what draws forward; normals for reflections | `opaque depth`, `view normals`, `opaque normals` | `lib.rs`, `mesh/visibility.rs` |
 | Back faces | For reflections, depth of the far sides of what the view's passes kept | `opaque back faces` (`opaque back depth`) | `frame.rs`, `mesh/draw.rs` |
 | Ambient occlusion | XeGTAO from the depth, denoised, accumulated over frames | `ambient occlusion prefilter`, `ambient occlusion`, `ambient occlusion denoise` | `ao.rs` |
-| Reflections | Mirror rays traced through a nearest-depth pyramid; levels of them and their surfaces, which shading blurs them by | `reflections depth`, `reflections`, `reflections blur` | `reflections.rs` |
+| Reflections | Mirror rays traced through a pyramid of the nearest front and farthest back depths; levels of them and their surfaces, which shading blurs them by | `reflections depth`, `reflections`, `reflections blur` | `reflections.rs` |
 | Shading | Shades the visibility buffer, then draws the rest: sky, other opaque runs, what blends, canvas. Without a buffer, the forward `view` pass | `view shading`, `view rest`, `view` | `mesh/visibility.rs`, `mesh.rs` |
 | Fog | Fogs what's opaque from depth; what blends then draws, fogging itself | `fog`, `view blended` | `fog.rs` |
 | Antialiasing | TAA's resolve, or SMAA | `taa resolve` (`view resolved`); `smaa edges`, `smaa weights`, `smaa blend` (`view antialiased`) | `taa.rs`, `smaa.rs` |
@@ -858,6 +858,11 @@ that are images. Paths are under `crates/gg-renderer/src/`.
   shaders take them alike, by one sample. A composite after shading would need normal, roughness
   and specular weight in images that every pipeline, games' too, would have to draw. Rays sampled
   from GGX by roughness would need roughness before the trace, and a denoiser.
+- A ray hits between the depth and the nearest back faces behind it, so closed meshes' hidden
+  sides reflect, in their fronts' colors, and rays go on past what they pass behind. Where no back
+  face bounds the depth, as for open and double-sided meshes, a constant thickness stands in. The
+  back faces cost another depth-only draw of what the view kept; a second depth layer, or rays
+  traced in the world, would show what's behind the first.
 
 ### Antialiasing and post-processing
 

@@ -1107,7 +1107,7 @@ pub enum Shown {
     ///
     /// - Red how far behind what's there it passed, green how far it's trusted: a trusted hit green.
     /// - Orange: found where the frame before didn't show, whose light it reads.
-    /// - Magenta: found a surface from behind.
+    /// - Magenta: found from behind a surface no back face bounds.
     /// - Gray: found nothing opaque.
     /// - Yellow: found its own surface, within 2 pixels.
     /// - Cyan: turned back toward the view.

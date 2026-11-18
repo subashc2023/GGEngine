@@ -9,8 +9,14 @@
 //! buffer ([`MeshPass::find_normals`]), or drawn by the model shaders beside their depth
 //! ([`Way::Normals`]). Elsewhere it mirrors the depth's normal.
 //!
+//! A ray hits where it passes between what the depth shows and the depth of the back faces behind
+//! it ([`Way::BackFaces`]), so it finds closed meshes' hidden sides, in their fronts' colors, and
+//! goes on past what it passes behind. Where no back face bounds what shows, as for open or
+//! double-sided meshes, it's taken to be [`Reflections::thickness`] thick.
+//!
 //! [`MeshPass::find_normals`]: crate::mesh::MeshPass::find_normals
 //! [`Way::Normals`]: crate::mesh::Way::Normals
+//! [`Way::BackFaces`]: crate::mesh::Way::BackFaces
 
 use std::sync::Arc;
 
@@ -57,9 +63,10 @@ pub struct Reflections {
     /// How far a ray reaches, in world units, fading over its last quarter. 100 by default. Not
     /// positive and finite: nothing reflects, and none of it runs.
     pub distance: f32,
-    /// How far behind the depth a ray may pass and still hit, in world units: how thick what the
-    /// depth shows is taken to be, fading with distance. 0.25 by default. Not positive and finite:
-    /// nothing reflects, and none of it runs.
+    /// How far behind the depth a ray may pass and still hit, in world units, where no back face
+    /// bounds it: how thick open and double-sided meshes are taken to be, fading with distance.
+    /// One-sided meshes are taken to be as thick as their back faces show. 0.25 by default. Not
+    /// positive and finite: nothing reflects, and none of it runs.
     pub thickness: f32,
     /// The roughness past which a surface takes the sky's specular light alone, fading over the
     /// last quarter. 0.6 by default, past which a reflection would blur wider than shading blurs
@@ -132,6 +139,10 @@ struct Push {
     source: u32,
     target: u32,
     surfaces: [u32; 2],
+    back: u32,
+    depth_mul: f32,
+    depth_add: f32,
+    thickness: f32,
 }
 
 /// The size of depth pyramid level `level`: the view's halved that many times, rounded up.
@@ -140,7 +151,8 @@ fn level_size(size: [u32; 2], level: usize) -> [u32; 2] {
 }
 
 /// The depth pyramid at `size`: levels halving the view, rounded up, until one is a texel or there
-/// are [`MOST_LEVELS`]. Returns their count, where each starts in texels, and their total bytes.
+/// are [`MOST_LEVELS`], of two floats a texel. Returns their count, where each starts in texels,
+/// and their total bytes.
 fn pyramid(size: [u32; 2]) -> (usize, [u32; MOST_LEVELS], u64) {
     let mut starts = [0; MOST_LEVELS];
     let mut start = 0;
@@ -155,7 +167,7 @@ fn pyramid(size: [u32; 2]) -> (usize, [u32; MOST_LEVELS], u64) {
             break;
         }
     }
-    (count, starts, start * 4)
+    (count, starts, start * 8)
 }
 
 /// The reflections' images, kept from frame to frame: the view's colors as the last reflecting
@@ -267,6 +279,7 @@ pub(crate) struct ReflectionPass {
 pub(crate) struct Plan {
     size: [u32; 2],
     depths: [ImageId; 2],
+    back: ImageId,
     normals: [Option<ImageId>; 2],
     pyramid: BufferId,
     levels: [Option<PassId>; MOST_LEVELS],
@@ -333,9 +346,11 @@ impl ReflectionPass {
     }
 
     /// Declares in `graph` the reflections at `size`, from `depths` (the nearest is what's opaque,
-    /// the first the visibility buffer's where there is one) and the shading `normals` an earlier
-    /// pass found. They trace against the colors the frame before kept in the [`Images`]' first, at
-    /// target `first`, into its second and third, at `first + 1` and `first + 2`. The passes:
+    /// the first the visibility buffer's where there is one), the depth of what's opaque's nearest
+    /// back faces ([`Way::BackFaces`](crate::mesh::Way::BackFaces)), and the shading `normals` an
+    /// earlier pass found. They trace against the colors the frame before kept in the [`Images`]'
+    /// first, at target `first`, into its second and third, at `first + 1` and `first + 2`. The
+    /// passes:
     /// - the depth pyramid's levels, in a buffer of the graph's;
     /// - the trace, into the first level of the reflections and of their surfaces;
     /// - the blurs of the levels after.
@@ -343,6 +358,7 @@ impl ReflectionPass {
         graph: &mut Graph,
         first: usize,
         depths: [ImageId; 2],
+        back: ImageId,
         normals: [Option<ImageId>; 2],
         size: [u32; 2],
     ) -> Plan {
@@ -354,9 +370,7 @@ impl ReflectionPass {
         for (i, level) in levels.iter_mut().take(count).enumerate() {
             let pass = graph.compute(label!("reflections depth"));
             let pass = match i {
-                0 => distinct
-                    .iter()
-                    .fold(pass, |pass, &depth| pass.sample(depth)),
+                0 => (distinct.iter().chain([&back])).fold(pass, |pass, &depth| pass.sample(depth)),
                 _ => pass,
             };
             *level = Some(pass.write_buffer(pyramid).add());
@@ -366,7 +380,8 @@ impl ReflectionPass {
         let surfaces = graph.target(first + 2);
         let trace = (graph.compute(label!("reflections")))
             .read_buffer(pyramid)
-            .sample(kept);
+            .sample(kept)
+            .sample(back);
         let sampled = distinct.iter().chain(normals.iter().flatten());
         let trace = sampled.fold(trace, |trace, &image| trace.sample(image));
         let trace = trace.overwrite(reflected).overwrite(surfaces).add();
@@ -379,6 +394,7 @@ impl ReflectionPass {
         Plan {
             size,
             depths,
+            back,
             normals,
             pyramid,
             levels,
@@ -415,6 +431,12 @@ impl ReflectionPass {
     pub(crate) fn record(&self, frame: &mut Frame<'_>, plan: &Plan, seen: &Seen) -> Result<()> {
         let (count, starts, _) = pyramid(plan.size);
         let dispatch = |size: [u32; 2]| [size[0].div_ceil(GROUP), size[1].div_ceil(GROUP), 1];
+        let Unprojection {
+            view_mul,
+            view_add,
+            depth_mul,
+            depth_add,
+        } = Unprojection::new(seen.clip_from_view);
         for (level, &pass) in plan.levels.iter().flatten().enumerate() {
             let mut pass = frame.compute(pass);
             let size = level_size(plan.size, level);
@@ -423,6 +445,10 @@ impl ReflectionPass {
                     pyramid: pass.address(plan.pyramid),
                     depths: plan.depths.map(|depth| pass.sampled(depth)),
                     size,
+                    back: pass.sampled(plan.back),
+                    depth_mul,
+                    depth_add,
+                    thickness: seen.settings.thickness,
                     ..Push::default()
                 },
                 _ => Push {
@@ -442,12 +468,6 @@ impl ReflectionPass {
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(dispatch(size));
         }
-        let Unprojection {
-            view_mul,
-            view_add,
-            depth_mul,
-            depth_add,
-        } = Unprojection::new(seen.clip_from_view);
         // The shader's view space has Z ahead; the world's views look down -Z.
         let ahead = Mat4::from_scale(Vec3::new(1.0, 1.0, -1.0));
         let mut pass = frame.compute(plan.trace);
@@ -478,6 +498,7 @@ impl ReflectionPass {
             trace: pass.upload(bytemuck::bytes_of(&trace))?.address(),
             depths: plan.depths.map(|depth| pass.sampled(depth)),
             size: plan.size,
+            back: pass.sampled(plan.back),
             ..Push::default()
         };
         pass.set_pipeline(&self.trace);
@@ -560,7 +581,7 @@ mod tests {
         // 5 by 3, 3 by 2, 2 by 1, 1 by 1.
         assert_eq!(count, 4);
         assert_eq!(starts[..4], [0, 15, 21, 23]);
-        assert_eq!(bytes, 24 * 4);
+        assert_eq!(bytes, 24 * 8);
         assert_eq!(pyramid([1, 1]).0, 1);
         let (count, starts, _) = pyramid([1280, 720]);
         assert_eq!(count, 12);
