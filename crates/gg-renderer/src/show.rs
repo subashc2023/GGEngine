@@ -108,6 +108,17 @@ pub enum Channel {
     /// The view's reflection as traced, before its blur: the light its ray found times its trust.
     /// Every opaque point's, whatever its roughness.
     TracedReflection,
+    /// Why each opaque point's reflection ray found what it did, or nothing, by color:
+    ///
+    /// - Red how far behind what's there it passed, green its trust: a trusted hit green.
+    /// - Orange: found where the frame before didn't show, whose colors it reads.
+    /// - Magenta: found a surface from behind.
+    /// - Gray: found nothing opaque.
+    /// - Yellow: found its own surface, within 2 pixels.
+    /// - Cyan: turned back toward the view.
+    /// - Navy: passed its reach. Blue: left the view. White: took its last step.
+    /// - Black: nothing opaque, or the view has no reflections.
+    ReflectionRays,
 }
 
 impl Channel {

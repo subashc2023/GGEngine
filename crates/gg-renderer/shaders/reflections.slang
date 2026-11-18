@@ -71,7 +71,10 @@ struct Trace {
     // Bindless textures, or 0 for none: world-space normals of what drew each of `Push`'s two
     // depths, alpha 1 where there's one.
     uint normals[2];
-    uint unused[3];
+    // Not 0: the first level holds each ray's outcome, `trace_main` says how, for
+    // `Channel::ReflectionRays`.
+    uint rays;
+    uint unused[2];
 };
 
 struct Push {
@@ -268,6 +271,10 @@ bool all_finite(float3 v) {
 // opaque is. The spread is in pixels per unit of a lobe's angle's tangent: `t / (d + t)` of the
 // pixels a unit spans a unit ahead, for a point `d` from the eye and its hit `t` from the point, as
 // a mirror shows what it reflects `d + t` away.
+//
+// Where `Trace::rays` asks, the first level holds each ray's outcome instead, by `stored_as`, as
+// `Channel::ReflectionRays` lists them: red how far behind what's there it passed, green its trust,
+// where it found something trusted; flat colors where it found nothing, or nothing it trusts.
 [shader("compute")]
 [numthreads(GROUP, GROUP, 1)]
 void trace_main(uint3 thread: SV_DispatchThreadID) {
@@ -320,10 +327,22 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     int2 hit = int2(stopped.xy);
     float surface = nearest_at(trace, 0, hit);
     bool apart = any(abs(stopped.xy - origin.xy) >= 2.0);
+    // Turned back. Or why `march` found nothing, as its checks tell: the end passed, the view
+    // left, or else its steps taken. Or what it found: the surface itself, or nothing opaque.
+    float3 outcome = float3(0.0, 1.0, 1.0);
+    if (away > 0.0) {
+        float3 at = origin + t * way;
+        bool left = any(at.xy < 0.0) || any(at.xy >= size);
+        outcome = found ? (apart ? float3(0.5) : float3(1.0, 1.0, 0.0))
+            : t > 1.0 ? float3(0.0, 0.0, 0.5)
+            : left ? float3(0.0, 0.0, 1.0)
+            : float3(1.0);
+    }
     if (found && apart && surface > 0.0) {
         float3 seen = position(trace, stopped.xy / size, view_depth(trace, surface));
         float3 facing = surface_normal(trace, hit, position(trace, (float2(hit) + 0.5) / size,
                                                             view_depth(trace, surface)), surface);
+        outcome = float3(1.0, 0.0, 1.0);
         if (dot(facing, ray) <= 0.0) {
             // Trusted less the farther behind what's there the ray passed, toward the view's edges,
             // and toward the ray's reach.
@@ -335,6 +354,7 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
             float traveled = length(seen - center);
             float far = saturate((trace.distance - traveled) / (trace.distance * DISTANCE_FADE));
             trust = behind * behind * border.x * border.y * far * away;
+            outcome = float3(1.0 - behind * behind, trust, 0.0);
             reached = seen;
             // What the frame before kept where the hit showed then, at this frame's exposure;
             // nothing where it was out of that view.
@@ -346,6 +366,7 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
                 color = finite(found * trace.scale);
             } else {
                 trust = 0.0;
+                outcome = float3(1.0, 0.5, 0.0);
             }
         }
     }
@@ -354,7 +375,9 @@ void trace_main(uint3 thread: SV_DispatchThreadID) {
     float spread = min(distance / (length(center) + distance), 1.0) * per_unit;
     // Kept a number, which shading picks a level by, as `min` keeps no NaN on every device.
     bool kept = all_finite(float3(spread, trust, 0.0));
-    storage[trace.target][to] = kept ? float4(color * trust, trust) : float4(0.0);
+    storage[trace.target][to] = trace.rays != 0 ? float4(stored_as(outcome), 1.0)
+        : kept ? float4(color * trust, trust)
+        : float4(0.0);
     storage[trace.surfaces][to] = float4(normal, kept ? spread * trust : 0.0);
 }
 

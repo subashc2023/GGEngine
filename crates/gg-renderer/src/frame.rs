@@ -32,10 +32,10 @@ use crate::taa::TaaPass;
 use crate::tonemap::TonemapPass;
 use crate::view::{OutlinePass, OutlinePlan};
 use crate::{
-    AmbientOcclusion, Antialiasing, DrawCounts, Fog, FrameImage, Light, MotionBlur, OFFSCREEN,
-    Outline, Output, Pixels, Projection, Reflections, RenderData, Renderer, Show, Tonemapper, Ui,
-    Viewport, ao, atmosphere, bloom, depth_of_field, exposure, fog, lens, mesh, motion_blur,
-    reflections, show, sky, smaa, taa, ui,
+    AmbientOcclusion, Antialiasing, Channel, DrawCounts, Fog, FrameImage, Light, MotionBlur,
+    OFFSCREEN, Outline, Output, Pixels, Projection, Reflections, RenderData, Renderer, Show,
+    Tonemapper, Ui, Viewport, ao, atmosphere, bloom, depth_of_field, exposure, fog, lens, mesh,
+    motion_blur, reflections, show, sky, smaa, taa, ui,
 };
 
 /// Warns that the view shows image `name`, which the frame doesn't make, unless it's `found`.
@@ -1277,6 +1277,7 @@ impl Recorder<'_> {
                     kept_clip_from_world,
                     kept_scale: exposure::rescale(exposure, kept),
                     settings,
+                    rays: matches!(data.show, Some(Show::Shading(Channel::ReflectionRays))),
                 },
             );
         // The occlusion and reflections `early` has: the frame's next passes.

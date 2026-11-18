@@ -57,6 +57,7 @@ const CHANNELS: &[(&str, Option<Shown>)] = &[
     ("Sky light", Some(Shown::SkyLight)),
     ("Reflection", Some(Shown::Reflection)),
     ("Traced reflection", Some(Shown::TracedReflection)),
+    ("Reflection rays", Some(Shown::ReflectionRays)),
     ("Diffuse light", Some(Shown::DiffuseLight)),
     ("Specular light", Some(Shown::SpecularLight)),
 ];
@@ -1585,6 +1586,7 @@ mod tests {
             (Shown::DiffuseLight, "Diffuse light"),
             (Shown::SpecularLight, "Specular light"),
             (Shown::TracedReflection, "Traced reflection"),
+            (Shown::ReflectionRays, "Reflection rays"),
         ] {
             let mut toolbar = Toolbar {
                 show: Some(show),

@@ -449,8 +449,9 @@ float4 reflection(Frame frame, uint2 pixel, float roughness) {
     if (reflected.colors == 0) {
         return float4(0.0);
     }
-    // Shown as traced: the first level, light times trust, unblurred, whatever the roughness.
-    if (frame.show == SHOW_TRACED_REFLECTION) {
+    // Shown as traced, whatever the roughness: the first level, light times trust, unblurred, or
+    // each ray's outcome.
+    if (frame.show > SHOW_SPECULAR_LIGHT) {
         return textures[reflected.colors].Load(int3(int2(pixel), 0));
     }
     float fade = saturate((reflected.roughness - roughness) / (reflected.roughness * ROUGHNESS_FADE));
@@ -578,6 +579,7 @@ static const uint SHOW_REFLECTION = 11;
 static const uint SHOW_DIFFUSE_LIGHT = 12;
 static const uint SHOW_SPECULAR_LIGHT = 13;
 static const uint SHOW_TRACED_REFLECTION = 14;
+static const uint SHOW_REFLECTION_RAYS = 15;
 
 // What `material` reflects head-on, of base color `base` where its surface map holds `surface`: a
 // specular-glossiness material's specular color, or 0.04 mixed with `base` by how metallic it is.

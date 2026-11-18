@@ -1103,6 +1103,17 @@ pub enum Shown {
     /// times how far it's trusted, black where it found nothing. Every opaque surface's, whatever
     /// its roughness. Read as [`Shown::DirectLight`].
     TracedReflection,
+    /// Why each opaque surface's reflection ray found what it did, or nothing, by color:
+    ///
+    /// - Red how far behind what's there it passed, green how far it's trusted: a trusted hit green.
+    /// - Orange: found where the frame before didn't show, whose light it reads.
+    /// - Magenta: found a surface from behind.
+    /// - Gray: found nothing opaque.
+    /// - Yellow: found its own surface, within 2 pixels.
+    /// - Cyan: turned back toward the view.
+    /// - Navy: passed its reach. Blue: left the view. White: took its last step.
+    /// - Black: nothing opaque, or the view has no reflections.
+    ReflectionRays,
     /// An image the frame makes, by debug name, read by its kind: colors as they are, high dynamic
     /// range tonemapped as the view's light is; depth as `1 + log2(depth) / 24`, white at the near
     /// plane and a 24th darker each time the distance doubles, black where nothing drew; IDs and a
@@ -2468,6 +2479,7 @@ mod tests {
             (r#""diffuse_light""#, Shown::DiffuseLight),
             (r#""specular_light""#, Shown::SpecularLight),
             (r#""traced_reflection""#, Shown::TracedReflection),
+            (r#""reflection_rays""#, Shown::ReflectionRays),
             (
                 r#"{"image": "view depth"}"#,
                 Shown::Image("view depth".to_owned()),

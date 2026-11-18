@@ -117,6 +117,7 @@ impl Shown {
             Api::DiffuseLight => Channel::DiffuseLight,
             Api::SpecularLight => Channel::SpecularLight,
             Api::TracedReflection => Channel::TracedReflection,
+            Api::ReflectionRays => Channel::ReflectionRays,
         };
         Self::Shading(channel)
     }

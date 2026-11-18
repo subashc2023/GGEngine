@@ -116,7 +116,8 @@ struct Trace {
     starts: [u32; MOST_LEVELS],
     scale: f32,
     normals: [u32; 2],
-    unused: [u32; 3],
+    rays: u32,
+    unused: [u32; 2],
 }
 
 /// `Push` in `shaders/reflections.slang`, field for field, for every pass.
@@ -308,13 +309,15 @@ pub(crate) struct Keep {
 
 /// How a frame draws the view, for its reflections: `clip_from_view` is a perspective, with
 /// antialiasing's offset. Also the kept colors' clip space, from [`Images::traced_against`], and
-/// their rescale to this frame's exposure (its exposure over theirs).
+/// their rescale to this frame's exposure (its exposure over theirs). `rays`: whether the trace
+/// writes each ray's outcome in place of what it found, for [`crate::Channel::ReflectionRays`].
 pub(crate) struct Seen {
     pub(crate) clip_from_view: Mat4,
     pub(crate) world_from_view: Mat4,
     pub(crate) kept_clip_from_world: Mat4,
     pub(crate) kept_scale: f32,
     pub(crate) settings: Reflections,
+    pub(crate) rays: bool,
 }
 
 impl ReflectionPass {
@@ -467,7 +470,8 @@ impl ReflectionPass {
             starts,
             scale: seen.kept_scale,
             normals,
-            unused: [0; 3],
+            rays: seen.rays.into(),
+            unused: [0; 2],
         };
         let push = Push {
             pyramid: pass.address(plan.pyramid),

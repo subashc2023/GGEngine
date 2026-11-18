@@ -107,6 +107,7 @@ fn main() -> ExitCode {
         a_rough_reflection_takes_in_its_own_surface_alone,
         normals_images_show_as_normals,
         the_traced_reflection_is_unblurred,
+        reflection_rays_tell_why_a_ray_misses,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
@@ -8188,6 +8189,42 @@ fn the_traced_reflection_is_unblurred() {
         traced.1 > 0.1 && traced.0 <= 5 && blurred.0 >= 12,
         "the bar's mirror shows (pixels, brightest) {traced:?} as traced, {blurred:?} blurred"
     );
+    shut_down(renderer);
+}
+
+/// [`backdrop_scene`]'s smooth floor's rays, as [`Channel::ReflectionRays`] colors them. Green: one
+/// to the wall, found and trusted. Red: one passing under a square standing over the floor, then
+/// behind its depth. Blue: one from near the camera, over the wall, out of the view.
+fn reflection_rays_tell_why_a_ray_misses() {
+    const WIDTH: u32 = 380;
+    const HEIGHT: u32 = 256;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    let gray = Vec4::new(0.5, 0.5, 0.5, 1.0);
+    let (at, size) = (Vec3::new(0.0, 1.0, -1.0), Vec2::ONE);
+    let (draws, viewpoint) = backdrop_scene(&mut stores, 0.1, gray, at, size, gray);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    // The first frame keeps the colors the second's trace reads.
+    for show in [None, Some(Show::Shading(Channel::ReflectionRays))] {
+        let data = RenderData {
+            reflections: Some(Reflections::default()),
+            show,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    let shown = frame_pixels(&mut renderer);
+    // The floor where it mirrors the wall 2 up, and the point under the square; and near the camera.
+    let pixel = |at| pixel_at(&shown, WIDTH, pixel_of(viewpoint, [WIDTH, HEIGHT], at));
+    let wall = pixel(Vec3::new(-3.0, -2.0, -5.0));
+    let behind = pixel(Vec3::new(0.0, -0.6, -1.0));
+    let near = pixel(Vec3::new(-1.0, 0.0, 2.3));
+    assert!(
+        wall[1] > 200 && wall[0] < 50 && behind[0] > 200 && behind[1] < 50,
+        "the wall's ray shows {wall:?}, the one behind the square {behind:?}"
+    );
+    assert!(close(near, [0, 0, 255, 255]), "the near ray shows {near:?}");
     shut_down(renderer);
 }
 
