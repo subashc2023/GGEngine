@@ -436,10 +436,16 @@ impl Toolbar {
                     },
                 };
                 // As tall as the window, past egui's default, so that the parts and the first
-                // images show without scrolling.
+                // images show without scrolling. egui opens an area no taller than its style's
+                // default area, 400 points, whatever the list asks: as tall as the window while
+                // this one opens.
+                let ctx = ui.ctx().clone();
+                let tall = ctx.content_rect().height();
+                let default_area = ctx.global_style().spacing.default_area_size;
+                ctx.global_style_mut(|style| style.spacing.default_area_size.y = tall);
                 let list = egui::ComboBox::from_id_salt("toolbar show")
                     .selected_text(selected)
-                    .height(ui.ctx().content_rect().height())
+                    .height(tall)
                     .show_ui(ui, |ui| {
                         for (label, shown) in CHANNELS {
                             ui.selectable_value(&mut self.show, shown.clone(), *label);
@@ -459,12 +465,13 @@ impl Toolbar {
                                 .on_hover_text(tip);
                         }
                     })
-                    .response
-                    .on_hover_text(
-                        "What the view shows in place of its light, to see how it's made: a part of \
-                         its shading, or an image its frame makes, as the game lists them as the \
-                         list opens; agents can set it too",
-                    );
+                    .response;
+                ctx.global_style_mut(|style| style.spacing.default_area_size = default_area);
+                let list = list.on_hover_text(
+                    "What the view shows in place of its light, to see how it's made: a part of \
+                     its shading, or an image its frame makes, as the game lists them as the list \
+                     opens; agents can set it too",
+                );
                 // Asked as the pointer comes over the list, so that they're there as it opens,
                 // which sizes it to them, and again as it opens.
                 let hovered = list.hovered();
