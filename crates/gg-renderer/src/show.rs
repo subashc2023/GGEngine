@@ -105,6 +105,9 @@ pub enum Channel {
     /// Reflected light: the frame's lights' highlights, the sky's specular light and the view's
     /// reflections.
     SpecularLight,
+    /// The view's reflection as traced, before its blur: the light its ray found times its trust.
+    /// Every opaque point's, whatever its roughness.
+    TracedReflection,
 }
 
 impl Channel {
@@ -123,6 +126,7 @@ impl Channel {
                 | Self::Reflection
                 | Self::DiffuseLight
                 | Self::SpecularLight
+                | Self::TracedReflection
         )
     }
 }

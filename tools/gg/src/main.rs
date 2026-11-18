@@ -315,6 +315,7 @@ keeps the newest 32.
                plays, and print an array of the answers; PATH refuses them
 Parts of shading: `base_color`, `normal`, `surface_normal`, `metallic`, `roughness`, `occlusion`,
 `emission`, `specular_color` (what it reflects head-on), `direct_light`, `sky_light`, `reflection`,
+`traced_reflection` (before its blur, at any roughness, black where its ray found nothing),
 `diffuse_light` and `specular_light` (the light it diffuses and reflects, of all three). An unlit
 material shows its base color, and black for the rest.
 ",

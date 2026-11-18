@@ -438,7 +438,7 @@ float level_variance(uint level) {
 
 // The view's reflection at `pixel` (reflections.slang): RGB the light its mirror ray found,
 // exposed, blurred by the lobe; alpha the share of the sky's specular light it replaces, fading out
-// toward `Reflected::roughness`; 0 for none.
+// toward `Reflected::roughness`; 0 for none. Where `Frame::show` asks, the first level as it is.
 //
 // The blur has the variance of a Gaussian as wide as GGX's lobe at the ray's hit or, where it found
 // nothing, at those round it that did: the pixel's own reflection and the levels, mixed to that
@@ -448,6 +448,10 @@ float4 reflection(Frame frame, uint2 pixel, float roughness) {
     Reflected reflected = frame.reflections;
     if (reflected.colors == 0) {
         return float4(0.0);
+    }
+    // Shown as traced: the first level, light times trust, unblurred, whatever the roughness.
+    if (frame.show == SHOW_TRACED_REFLECTION) {
+        return textures[reflected.colors].Load(int3(int2(pixel), 0));
     }
     float fade = saturate((reflected.roughness - roughness) / (reflected.roughness * ROUGHNESS_FADE));
     if (!(fade > 0.0)) {
@@ -558,7 +562,7 @@ float3 shading_normal(Material material, float3 interpolated, float4 tangent, bo
 
 // What the view shows in place of its light, `Frame::show`, numbered as `Channel` in src/show.rs:
 // 0 its light; below `SHOW_DIRECT_LIGHT`, an input of shading (`surface_shown`); from there, a
-// part of its light.
+// part of its light; past `SHOW_SPECULAR_LIGHT`, what `reflection` returns, as it says.
 static const uint SHOW_LIGHT = 0;
 static const uint SHOW_BASE_COLOR = 1;
 static const uint SHOW_NORMAL = 2;
@@ -573,6 +577,7 @@ static const uint SHOW_SKY_LIGHT = 10;
 static const uint SHOW_REFLECTION = 11;
 static const uint SHOW_DIFFUSE_LIGHT = 12;
 static const uint SHOW_SPECULAR_LIGHT = 13;
+static const uint SHOW_TRACED_REFLECTION = 14;
 
 // What `material` reflects head-on, of base color `base` where its surface map holds `surface`: a
 // specular-glossiness material's specular color, or 0.04 mixed with `base` by how metallic it is.
@@ -629,6 +634,10 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
     if (frame.show != SHOW_LIGHT && frame.show < SHOW_DIRECT_LIGHT) {
         return surface_shown(frame.show, material, interpolated, tangent, front, color, surface,
                              roughness, mapped, occlusion, emission);
+    }
+    if (frame.show > SHOW_SPECULAR_LIGHT) {
+        bool unlit = (material.flags & UNLIT) != 0;
+        return float4(unlit ? float3(0.0) : min(reflection.rgb, BRIGHTEST), color.a);
     }
     if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
         return frame.show == SHOW_LIGHT ? color : float4(0.0, 0.0, 0.0, color.a);

@@ -28,8 +28,9 @@ the point faces in the world, with its normal map: each axis -1 to 1 as byte / 2
 Y green, Z blue), `surface_normal` (the same without the map), `metallic`, `roughness` (0.045 to \
 1) and `occlusion` (each 0 to 1 as byte / 255, gray), `emission` (as `base_color`, past 1 shown as \
 1), `specular_color` (what it reflects head-on, as `base_color`), `direct_light` (the frame's \
-lights', shadows and all), `sky_light`, `reflection`, `diffuse_light` and `specular_light` (the \
-light it diffuses and reflects, of all three), each light exposed and tonemapped as the view's. An \
+lights', shadows and all), `sky_light`, `reflection`, `traced_reflection` (before its blur, at any \
+roughness, black where its ray found nothing), `diffuse_light` and `specular_light` (the light it \
+diffuses and reflects, of all three), each light exposed and tonemapped as the view's. An \
 unlit material shows its base color, and black for the rest. Or \
 an image the frame makes, by debug name: any other string, as `view depth`, or `{\"image\": name}` \
 (at most 64 bytes), read by its kind: colors as they are, HDR tonemapped, depth as 1 + log2(depth) \
@@ -1211,6 +1212,7 @@ mod tests {
             Shown::Reflection,
             Shown::DiffuseLight,
             Shown::SpecularLight,
+            Shown::TracedReflection,
         ];
         for description in [&capture["description"], &look["description"]] {
             let description = description.as_str().expect("described");

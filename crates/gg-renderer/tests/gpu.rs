@@ -106,6 +106,7 @@ fn main() -> ExitCode {
         a_rough_reflection_slides_with_the_view,
         a_rough_reflection_takes_in_its_own_surface_alone,
         normals_images_show_as_normals,
+        the_traced_reflection_is_unblurred,
         views_show_parts_of_shading_and_images_in_place_of_light,
         the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect,
         a_small_smooth_balls_highlight_holds_as_it_moves_within_a_pixel,
@@ -7902,7 +7903,15 @@ fn reflections_blur_in_place_at_any_view_size() {
         let scene = reflection_scene(&mut stores, [0.05, 0.05, 0.4], None);
         let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
         settle(&mut renderer, &mut stores, viewport, viewpoint, draws);
-        let shown = reflection_alone(&mut renderer, &mut stores, viewport, viewpoint, draws);
+        let reflection = Channel::Reflection;
+        let shown = reflection_alone(
+            &mut renderer,
+            &mut stores,
+            viewport,
+            viewpoint,
+            draws,
+            reflection,
+        );
         shut_down(renderer);
         let (mut sum, mut weight) = (0.0, 0.0);
         for (i, [r, g, b]) in (0_u32..).zip(shown) {
@@ -7981,15 +7990,16 @@ fn backdrop_scene(
 }
 
 /// Renders a frame of `draws` from `viewpoint` keeping the view's colors, and then the reflection
-/// alone, traced against them, as linear light.
+/// alone, traced against them, as linear light: as shading takes it, or as traced (`channel`).
 fn reflection_alone(
     renderer: &mut Renderer,
     stores: &mut Stores,
     viewport: Viewport,
     viewpoint: Viewpoint,
     draws: &Draws,
+    channel: Channel,
 ) -> Vec<[f32; 3]> {
-    for show in [None, Some(Show::Shading(Channel::Reflection))] {
+    for show in [None, Some(Show::Shading(channel))] {
         let data = RenderData {
             reflections: Some(Reflections::default()),
             show,
@@ -8024,7 +8034,15 @@ fn a_rough_reflection_slides_with_the_view() {
     settle(&mut renderer, &mut stores, viewport, viewpoint, &smooth);
     // Where the bar's mirror centers across, weighed by its red light.
     let mut center = |draws: &Draws, viewpoint| {
-        let shown = reflection_alone(&mut renderer, &mut stores, viewport, viewpoint, draws);
+        let reflection = Channel::Reflection;
+        let shown = reflection_alone(
+            &mut renderer,
+            &mut stores,
+            viewport,
+            viewpoint,
+            draws,
+            reflection,
+        );
         let (mut sum, mut weight) = (0.0, 0.0);
         for (i, [r, _, _]) in (0_u32..).zip(shown) {
             sum += r * ((i % WIDTH) as f32 + 0.5);
@@ -8074,7 +8092,15 @@ fn a_rough_reflection_takes_in_its_own_surface_alone() {
     let (at, blue) = (Vec3::new(0.5, 0.0, -1.0), Vec4::new(0.2, 0.4, 0.9, 1.0));
     let (draws, viewpoint) = backdrop_scene(&mut stores, 0.4, blue, at, Vec2::splat(0.6), blue);
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-    let shown = reflection_alone(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let reflection = Channel::Reflection;
+    let shown = reflection_alone(
+        &mut renderer,
+        &mut stores,
+        viewport,
+        viewpoint,
+        &draws,
+        reflection,
+    );
     // The post's left side, halfway up.
     let [x, y] = pixel_of(viewpoint, [WIDTH, HEIGHT], at + Vec3::new(-0.3, 0.3, 0.0));
     let blue = |x: u32| shown[(y * WIDTH + x) as usize][2];
@@ -8124,6 +8150,44 @@ fn normals_images_show_as_normals() {
             "{name} shows the {what} as {got:?}, not {normal:?}"
         );
     }
+    shut_down(renderer);
+}
+
+/// [`a_rough_reflection_slides_with_the_view`]'s white bar, in a floor of roughness 0.4's mirror:
+/// as traced, about as wide as the bar shows (3 pixels); as shading blurs it, several times wider.
+/// Counted along the row through the mirror's middle, the pixels over a tenth of its brightest.
+fn the_traced_reflection_is_unblurred() {
+    const WIDTH: u32 = 380;
+    const HEIGHT: u32 = 256;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    let (black, white) = (Vec4::new(0.0, 0.0, 0.0, 1.0), Vec4::ONE);
+    let (at, size) = (Vec3::new(0.5, 1.5, -3.5), Vec2::new(0.1, 1.5));
+    let (draws, viewpoint) = backdrop_scene(&mut stores, 0.4, black, at, size, white);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mirrored = Vec3::new(0.5, -2.25, -3.5);
+    let [_, y] = pixel_of(viewpoint, [WIDTH, HEIGHT], mirrored);
+    let mut wide = |channel| {
+        let shown = reflection_alone(
+            &mut renderer,
+            &mut stores,
+            viewport,
+            viewpoint,
+            &draws,
+            channel,
+        );
+        let row = &shown[(y * WIDTH) as usize..((y + 1) * WIDTH) as usize];
+        let brightest = row.iter().map(|[r, _, _]| *r).fold(0.0, f32::max);
+        let wide = row.iter().filter(|[r, _, _]| *r > brightest / 10.0).count();
+        (wide, brightest)
+    };
+    let traced = wide(Channel::TracedReflection);
+    let blurred = wide(Channel::Reflection);
+    assert!(
+        traced.1 > 0.1 && traced.0 <= 5 && blurred.0 >= 12,
+        "the bar's mirror shows (pixels, brightest) {traced:?} as traced, {blurred:?} blurred"
+    );
     shut_down(renderer);
 }
 

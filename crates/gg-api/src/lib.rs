@@ -1099,6 +1099,10 @@ pub enum Shown {
     /// The light it reflects: the frame's lights' highlights, the sky's specular light and the
     /// view's reflection.
     SpecularLight,
+    /// The view's reflection as its ray found it, before the blur by roughness: the light found
+    /// times how far it's trusted, black where it found nothing. Every opaque surface's, whatever
+    /// its roughness. Read as [`Shown::DirectLight`].
+    TracedReflection,
     /// An image the frame makes, by debug name, read by its kind: colors as they are, high dynamic
     /// range tonemapped as the view's light is; depth as `1 + log2(depth) / 24`, white at the near
     /// plane and a 24th darker each time the distance doubles, black where nothing drew; IDs and a
@@ -2463,6 +2467,7 @@ mod tests {
             (r#""specular_color""#, Shown::SpecularColor),
             (r#""diffuse_light""#, Shown::DiffuseLight),
             (r#""specular_light""#, Shown::SpecularLight),
+            (r#""traced_reflection""#, Shown::TracedReflection),
             (
                 r#"{"image": "view depth"}"#,
                 Shown::Image("view depth".to_owned()),
