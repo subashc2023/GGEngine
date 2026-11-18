@@ -276,19 +276,22 @@ struct Surface {
     float3 diffuse_color;
     float3 f0;
     float alpha2;
-    // 1, or 0 where the view shows diffuse light alone; a diffuse color of 0 shows specular alone.
-    float specular_weight;
+    // What specular light is scaled by: 1, or 0 where the view shows diffuse light alone (a
+    // diffuse color of 0 shows specular alone); the path tracer's energy compensation.
+    float3 specular_weight;
 };
 
-// The light the frame's `i`th light reflects from `surface` toward the view, before the exposure.
-float3 reflected(Frame frame, Surface surface, uint i) {
+// The light the frame's `i`th light shines on `world`, before its shadows and the exposure, and
+// which way it comes from, `to_light`.
+float3 arriving(Frame frame, uint i, float3 world, out float3 to_light) {
+    // Loaded here: passed in as a `Light`, it lost the lights' address in `lit`'s cluster loop on
+    // AMD's driver (25.10.30) under slangc 2026.20.
     Light light = frame.lights[i];
     float3 radiance = light.color;
-    float3 to_light;
     if (light.kind == 0) {
         to_light = -light.direction;
     } else {
-        float3 between = light.position - surface.world;
+        float3 between = light.position - world;
         // Kept off 0 at the light itself.
         float distance2 = max(dot(between, between), 1e-4);
         to_light = between * rsqrt(distance2);
@@ -302,14 +305,13 @@ float3 reflected(Frame frame, Surface surface, uint i) {
             + light.angle_offset);
         radiance *= cone * cone;
     }
+    return radiance;
+}
+
+// What `surface` reflects toward its view of light from `to_light`, at a cosine of `n_dot_l` to its
+// normal, per unit of that light: its BRDF, Lambertian diffuse and GGX specular.
+float3 brdf(Surface surface, float3 to_light, float n_dot_l) {
     float3 normal = surface.normal;
-    float n_dot_l = dot(normal, to_light);
-    if (n_dot_l <= 0.0) {
-        return float3(0.0);
-    }
-    if (i == frame.shadows.light) {
-        radiance *= shadowed(frame.shadows, surface.world, surface.surface_normal, to_light);
-    }
     float3 view = surface.view;
     float n_dot_v = surface.n_dot_v;
     float alpha2 = surface.alpha2;
@@ -325,7 +327,21 @@ float3 reflected(Frame frame, Surface surface, uint i) {
             + n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha2) + alpha2));
     float3 specular = fresnel * (distribution * visibility * surface.specular_weight);
     float3 diffuse = (1.0 - fresnel) * surface.diffuse_color / PI;
-    return (diffuse + specular) * radiance * n_dot_l;
+    return diffuse + specular;
+}
+
+// The light the frame's `i`th light reflects from `surface` toward the view, before the exposure.
+float3 reflected(Frame frame, Surface surface, uint i) {
+    float3 to_light;
+    float3 radiance = arriving(frame, i, surface.world, to_light);
+    float n_dot_l = dot(surface.normal, to_light);
+    if (n_dot_l <= 0.0) {
+        return float3(0.0);
+    }
+    if (i == frame.shadows.light) {
+        radiance *= shadowed(frame.shadows, surface.world, surface.surface_normal, to_light);
+    }
+    return brdf(surface, to_light, n_dot_l) * radiance * n_dot_l;
 }
 
 // The ambient light's share reaching `pixel`: the less of the view's ambient occlusion and the
@@ -657,6 +673,30 @@ float4 surface_shown(uint show, Material material, float3 interpolated, float4 t
     return float4(stored_as(value), color.a);
 }
 
+// What the lights shade at `world` of a point of `material` seen from `view`, with `lit`'s
+// arguments (`base`, its color's RGB); `metallic`: how metallic it is, 0 for specular-glossiness.
+Surface surface_of(Material material, float3 world, float3 view, float3 interpolated,
+                   float4 tangent, bool front, float3 base, float4 surface, float roughness,
+                   float2 mapped, out float metallic) {
+    Surface out;
+    out.world = world;
+    out.normal = shading_normal(material, interpolated, tangent, front, mapped, out.surface_normal);
+    out.view = view;
+    out.n_dot_v = max(dot(out.normal, view), 1e-4);
+    out.f0 = specular_color(material, base, surface);
+    if ((material.flags & SPECULAR_GLOSSINESS) != 0) {
+        metallic = 0.0;
+        out.diffuse_color = base * (1.0 - max(max(out.f0.r, out.f0.g), out.f0.b));
+    } else {
+        metallic = saturate(material.metallic * surface.b);
+        out.diffuse_color = base * (1.0 - metallic);
+    }
+    float alpha = roughness * roughness;
+    out.alpha2 = alpha * alpha;
+    out.specular_weight = float3(1.0);
+    return out;
+}
+
 // The color of a point of `material`, lit or unlit. `front`: whether its triangle shows the side
 // its mesh winds counterclockwise, which a mirroring transform reverses. `color` (vertices' and
 // factor's in), `surface`, `mapped` (X and Y, -1 to 1), `occlusion`, `emission`: its maps there.
@@ -676,38 +716,23 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
     if ((frame.light_count == 0 && frame.specular_levels == 0) || (material.flags & UNLIT) != 0) {
         return frame.show == SHOW_LIGHT ? color : float4(0.0, 0.0, 0.0, color.a);
     }
-    float3 surface_normal;
-    float3 normal = shading_normal(material, interpolated, tangent, front, mapped, surface_normal);
-    // What it diffuses and reflects head-on, for the lights; for the sky's light, a dielectric's,
-    // which `sky_light` mixes with a metal's by how metallic it is.
-    float metallic = 0.0;
-    float3 diffuse_color;
-    float3 f0 = specular_color(material, color.rgb, surface);
-    float3 sky_diffuse;
-    float3 sky_f0;
-    if ((material.flags & SPECULAR_GLOSSINESS) != 0) {
-        diffuse_color = color.rgb * (1.0 - max(max(f0.r, f0.g), f0.b));
-        sky_diffuse = diffuse_color;
-        sky_f0 = f0;
-    } else {
-        metallic = saturate(material.metallic * surface.b);
-        diffuse_color = color.rgb * (1.0 - metallic);
-        sky_diffuse = color.rgb;
-        sky_f0 = float3(0.04);
-    }
-    float alpha = roughness * roughness;
     float3 view = normalize(frame.eye.xyz - world * frame.eye.w);
-    Surface lit;
-    lit.world = world;
-    lit.normal = normal;
-    lit.surface_normal = surface_normal;
-    lit.view = view;
-    lit.n_dot_v = max(dot(normal, view), 1e-4);
+    float metallic;
+    Surface lit = surface_of(material, world, view, interpolated, tangent, front, color.rgb,
+                             surface, roughness, mapped, metallic);
+    float3 normal = lit.normal;
+    // For the sky's light, a dielectric's colors, which `sky_light` mixes with a metal's by how
+    // metallic it is.
+    bool glossy = (material.flags & SPECULAR_GLOSSINESS) != 0;
+    float3 sky_diffuse = glossy ? lit.diffuse_color : color.rgb;
+    float3 sky_f0 = glossy ? lit.f0 : float3(0.04);
     // Showing diffuse or specular light alone, the lights shade without the other.
-    lit.diffuse_color = frame.show == SHOW_SPECULAR_LIGHT ? float3(0.0) : diffuse_color;
-    lit.f0 = f0;
-    lit.alpha2 = alpha * alpha;
-    lit.specular_weight = frame.show == SHOW_DIFFUSE_LIGHT ? 0.0 : 1.0;
+    if (frame.show == SHOW_SPECULAR_LIGHT) {
+        lit.diffuse_color = float3(0.0);
+    }
+    if (frame.show == SHOW_DIFFUSE_LIGHT) {
+        lit.specular_weight = float3(0.0);
+    }
     float3 light_sum = float3(0.0);
     Clusters clusters = frame.clusters;
     for (uint i = 0; i < clusters.everywhere; i++) {
