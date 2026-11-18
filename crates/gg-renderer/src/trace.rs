@@ -249,10 +249,15 @@ impl TracePass {
             } else {
                 0
             };
+            let mask = if found.masked {
+                TlasInstance::NOT_OPAQUE
+            } else {
+                0
+            };
             self.next_instances.push(TlasInstance {
                 transform,
                 index_and_mask: row | 0xFF << 24,
-                offset_and_flags: faces,
+                offset_and_flags: faces | mask,
                 blas: blas.address(),
             });
             self.next_traced.push(Traced {

@@ -86,6 +86,7 @@ fn main() -> ExitCode {
         path_traced_metal_reflects_all_of_a_furnace,
         path_traced_sunlight_matches_the_rasters,
         path_traced_light_accumulates_until_the_view_moves,
+        path_traced_masks_cover_as_the_raster_draws_them,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
         atmospheres_match_their_references,
@@ -6888,6 +6889,83 @@ fn path_traced_light_accumulates_until_the_view_moves() {
         renderer.path_traced().is_some_and(|taken| taken < 256),
         "{:?} paths a pixel after the view moved",
         renderer.path_traced()
+    );
+}
+
+/// A fence of bars, a masked unlit black square whose texture's alpha is 0 between its bars, up close
+/// under a sky of one color: the share of the view it covers, traced, is within 0.05 of the
+/// raster's, which draws each pixel's center. Its holes show the sky, and its bars hide it, so rays
+/// test a masked material's candidates by its cutoff.
+fn path_traced_masks_cover_as_the_raster_draws_them() {
+    const SIZE: u32 = 64;
+    const BARS: u32 = 8;
+    let Some(mut renderer) = tracing_renderer(SIZE, SIZE) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    const SKY: f32 = 0.5;
+    let sky = sky_texture(&mut stores.textures, [8, 4], |_, _| [SKY; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    // Each bar a texel of alpha 1, a texel of 0 between them; nearest, so the edges are sharp.
+    let texels: Vec<u8> = (0..2 * BARS)
+        .flat_map(|x| [0, 0, 0, if x % 2 == 0 { 255 } else { 0 }])
+        .collect();
+    let bars = (stores.textures).add("bars", [2 * BARS, 1], &texels, Texels::Color(Mipmaps::None));
+    let fence = Material {
+        color_texture: Sampled {
+            texture: bars.expect("a texture"),
+            nearest: true,
+            wrap: Wrap::Clamp,
+        },
+        alpha: AlphaMode::Mask { cutoff: 0.5 },
+        unlit: true,
+        ..Material::default()
+    };
+    let fence = stores.materials.add(&fence);
+    let square = model_square(&mut stores.meshes);
+    let fence = MeshDraw::with_material(square, fence, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    // Filling the view, a little turned, so bars' edges fall between pixels' centers.
+    let turned = Quat::from_rotation_z(0.1);
+    draws.push_draw(
+        Mat4::from_rotation_translation(turned, Vec3::ZERO) * Mat4::from_scale(Vec3::splat(2.0)),
+        &fence,
+        0,
+    );
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 0.0, 5.0),
+        projection: Projection::Orthographic {
+            height: 1.2,
+            near: 1.0,
+            far: 10.0,
+        },
+        ..Viewpoint::default()
+    };
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    let raster = frame_pixels(&mut renderer);
+    let traced = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 64);
+    // How much of each pixel hides the sky, from its light.
+    let covered = |frame: &[u8]| {
+        let pixels = frame.chunks(4);
+        let count = pixels.len() as f32;
+        pixels
+            .map(|pixel| 1.0 - decoded(pixel[1]) / SKY)
+            .sum::<f32>()
+            / count
+    };
+    let [raster, traced] = [&raster, &traced].map(|frame| covered(frame));
+    assert!(
+        (0.3..0.7).contains(&raster),
+        "the raster's fence covers {raster:.3} of the view"
+    );
+    assert!(
+        (traced - raster).abs() < 0.05,
+        "the fence covers {traced:.3} of the view traced, {raster:.3} drawn"
     );
 }
 

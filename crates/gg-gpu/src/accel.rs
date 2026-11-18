@@ -114,6 +114,9 @@ impl TlasInstance {
     /// triangles wound counterclockwise in its BLAS's right-handed space, as glTF winds them,
     /// whatever its transform: the facing is its BLAS's, which rays find, as the RTX 4090 shows.
     pub const BOTH_FACES: u32 = 0x1 << 24;
+    /// In `offset_and_flags`: its triangles are candidates that shaders accept or not, whatever its
+    /// BLAS says (`VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR`), as masked materials need.
+    pub const NOT_OPAQUE: u32 = 0x8 << 24;
 }
 
 /// An acceleration structure and the buffer it lives in.

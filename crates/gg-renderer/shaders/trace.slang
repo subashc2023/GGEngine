@@ -16,6 +16,8 @@
 //   microfacet models", 2019) for the light GGX's single scattering loses.
 // - The first hit antialiased by jittering each path within its pixel.
 // - Back faces culled but where a material is double-sided, as the view's draws cull them.
+// - A masked material's triangles hit where its alpha, at level 0, is at least its cutoff, as the
+//   masked shader draws them.
 //
 // `Traced`, `Trace` and `TracePush` match `Traced`, `TraceData` and `TracePush` in src/trace.rs
 // field for field.
@@ -104,8 +106,46 @@ struct Hit {
     float3x4 object_to_world;
 };
 
+// `material`'s map `which` at `uv`, level 0.
+float4 sampled_at(Material material, uint which, float2 uv) {
+    return sampled_by(material, which, uv, float2(0.0), float2(0.0));
+}
+
+// Whether candidate `primitive` of the instance of custom index `instance`, a masked material's
+// triangle, covers where its second and third corners weigh `weights`: where its alpha, its color
+// map's at level 0 times its factor's and its vertices', is at least its cutoff.
+bool covers(Material* materials, uint instance, uint primitive, float2 weights) {
+    Traced traced = push.traced[instance];
+    uint* words = bit_cast<uint*>(traced.vertices);
+    Header header = *(Header*)words;
+    uint* indices = bit_cast<uint*>(traced.indices);
+    uint first = 3 * primitive;
+    uint3 index = uint3(indices[first], indices[first + 1], indices[first + 2]);
+    Vertex a = unpack(header, ((PackedVertex*)words)[HEADER + index.x]);
+    Vertex b = unpack(header, ((PackedVertex*)words)[HEADER + index.y]);
+    Vertex c = unpack(header, ((PackedVertex*)words)[HEADER + index.z]);
+    float3 w = float3(1.0 - weights.x - weights.y, weights);
+    float2 uv = w.x * a.uv + w.y * b.uv + w.z * c.uv;
+    float alpha = w.x * a.color.a + w.y * b.color.a + w.z * c.color.a;
+    Material material = materials[traced.material];
+    alpha *= sampled_at(material, 0, uv).a * material.color.a;
+    return alpha >= material.cutoff;
+}
+
+// Commits `query`'s candidates that cover, as `covers` says, until it ends.
+void proceed<let Flags : uint>(inout RayQuery<Flags> query, Material* materials) {
+    while (query.Proceed()) {
+        if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE
+            && covers(materials, query.CandidateInstanceID(), query.CandidatePrimitiveIndex(),
+                      query.CandidateTriangleBarycentrics())) {
+            query.CommitNonOpaqueTriangleHit();
+        }
+    }
+}
+
 // The nearest front face `direction` finds from `origin`, or a double-sided material's back face.
-Hit nearest(RaytracingAccelerationStructure tlas, float3 origin, float3 direction) {
+Hit nearest(RaytracingAccelerationStructure tlas, Material* materials, float3 origin,
+            float3 direction) {
     RayDesc ray;
     ray.Origin = origin;
     ray.Direction = direction;
@@ -113,8 +153,7 @@ Hit nearest(RaytracingAccelerationStructure tlas, float3 origin, float3 directio
     ray.TMax = FARTHEST;
     RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES> query;
     query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
-    while (query.Proceed()) {
-    }
+    proceed(query, materials);
     Hit hit;
     hit.found = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     hit.instance = query.CommittedInstanceID();
@@ -125,8 +164,8 @@ Hit nearest(RaytracingAccelerationStructure tlas, float3 origin, float3 directio
 }
 
 // Whether nothing is within `reach` of `origin` along `direction`.
-bool unoccluded(RaytracingAccelerationStructure tlas, float3 origin, float3 direction,
-                float reach) {
+bool unoccluded(RaytracingAccelerationStructure tlas, Material* materials, float3 origin,
+                float3 direction, float reach) {
     RayDesc ray;
     ray.Origin = origin;
     ray.Direction = direction;
@@ -134,8 +173,7 @@ bool unoccluded(RaytracingAccelerationStructure tlas, float3 origin, float3 dire
     ray.TMax = reach;
     RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
     query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFF, ray);
-    while (query.Proceed()) {
-    }
+    proceed(query, materials);
     return query.CommittedStatus() == COMMITTED_NOTHING;
 }
 
@@ -185,11 +223,6 @@ Found found(Material* materials, Hit hit, float3 direction) {
     return out;
 }
 
-// `material`'s map `which` at `uv`, level 0.
-float4 sampled_at(Material material, uint which, float2 uv) {
-    return sampled_by(material, which, uv, float2(0.0), float2(0.0));
-}
-
 // An orthonormal basis about unit `n` (Duff et al., "Building an Orthonormal Basis, Revisited",
 // 2017).
 void basis(float3 n, out float3 t, out float3 b) {
@@ -227,7 +260,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
     float3 light = float3(0.0);
     float3 throughput = float3(1.0);
     for (uint bounce = 0; bounce < MOST_BOUNCES; bounce++) {
-        Hit hit = nearest(tlas, origin, direction);
+        Hit hit = nearest(tlas, frame.materials, origin, direction);
         if (!hit.found) {
             if (frame.specular_levels > 0) {
                 float3 sky = cubes[frame.specular].SampleLevel(clamp_, direction, 0.0).rgb;
@@ -269,7 +302,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
             }
             Light shining = frame.lights[i];
             float reach = shining.kind == 0 ? FARTHEST : length(shining.position - from);
-            if (unoccluded(tlas, from, to_light, reach)) {
+            if (unoccluded(tlas, frame.materials, from, to_light, reach)) {
                 light += throughput * brdf(lit, to_light, n_dot_l) * arrived * n_dot_l;
             }
         }

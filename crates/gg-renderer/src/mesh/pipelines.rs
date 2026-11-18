@@ -255,6 +255,7 @@ impl MeshPass {
                         vertex_size: added.vertex_size,
                         params_size: added.params_size,
                         writes_depth,
+                        masked: added.meshlets.is_some() && added.shadow.is_some(),
                     }));
                 }
             }

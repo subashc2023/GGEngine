@@ -92,6 +92,9 @@ struct GpuShader {
     params_size: usize,
     /// As [`shader::writes_depth`] says.
     writes_depth: bool,
+    /// Whether it's the engine's masked model shader, whose draws the path tracer tests by their
+    /// materials' cutoffs.
+    masked: bool,
 }
 
 /// Draws a shader's depth alone: into a shadow map, clamped to the map's near side and set back by
@@ -241,6 +244,7 @@ impl MeshPass {
                     transform,
                     material,
                     both_faces: run.faces == Faces::Both,
+                    masked: traced(run.shader).is_some_and(|shader| shader.masked),
                 });
             }
         }
@@ -257,6 +261,7 @@ impl MeshPass {
                     transform,
                     material,
                     both_faces: run.faces == Faces::Both,
+                    masked: shader.masked,
                 });
             }
         }
@@ -273,14 +278,15 @@ pub(crate) struct TracedMesh<'a> {
     pub(crate) positions: Positions,
 }
 
-/// An instance the path tracer traces: its mesh, transform, material, and whether rays find its
-/// back faces.
+/// An instance the path tracer traces: its mesh, transform, material, whether rays find its back
+/// faces, and whether its material's cutoff masks it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TracedInstance {
     pub(crate) mesh: u32,
     pub(crate) transform: Mat4,
     pub(crate) material: u32,
     pub(crate) both_faces: bool,
+    pub(crate) masked: bool,
 }
 
 #[cfg(test)]
