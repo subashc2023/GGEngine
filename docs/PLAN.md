@@ -35,6 +35,9 @@ Each phase's milestones, and what each deferred, are in git history.
   outside the workspace, Foxball deleted, the docs checked against the code (2026-11-15)
 - **A polish sweep**: a README, leaner docs and comments, crates untangled, a prelude and `gg new`'s
   game, faster frames and tests, cheaper CI (2026-11-17)
+- **A reference path tracer**: ray queries, BLASes of packed vertices, `path_traced` shown and
+  captured through the tool API, its tests on lavapipe (2026-11-18); its check of the raster's sky
+  light is under Open
 
 ## Open
 
@@ -57,8 +60,13 @@ the Vulkan SDK (`otool -L`), and logs its load time and memory. With it, by hand
 - the 16 Bistros on a Mac, meshlets drawn through vertex shaders, against a frame time set there;
 - [DEFECTS.md](DEFECTS.md)'s macOS rows: minimized windows, and the first start's 6.2 s.
 
-Later: upscalers (DLSS, FSR, XeSS), and ray-traced effects where the driver has ray tracing (no
-macOS driver does).
+The path tracer closes once a GPU test holds the raster's sky light to it: open ground under a
+graded sky, five roughness strips, within a bound per strip. Dielectrics are within 2.2% of it;
+the two roughest strips of a colored metal are off by 9% and 21%, past the 5% proposed, as the
+open question below says.
+
+Later: upscalers (DLSS, FSR, XeSS), and ray-traced effects (GI, reflections) over the path
+tracer's scene where the GPU has ray queries (no macOS driver does).
 
 ## Deferred
 
@@ -267,3 +275,9 @@ Defects are in [DEFECTS.md](DEFECTS.md).
   deleted: Shards by its flags (`--relay`, the host printing its code), or Shards given a Host and
   Join menu. Recommendation: Shards by flags, as the match measures the network, which a menu
   doesn't change, and `Context::host` and `join` have tests of their own. Decide before the match.
+- What closes the gap between the raster's sky light on rough colored metals and the path
+  tracer's. Under a uniform sky half of it is the multiple-scattering models: the tracer's Turquin
+  scales the energy lost by F0, the raster's Fdez-Agüera by a series in F_avg, and Kulla-Conty's
+  F_avg sits nearer the raster's. The split sum's directional error is the rest. Recommendation:
+  Kulla-Conty's F_avg in the tracer, then the split sum's error fixed or kept in DEFECTS.md with
+  the bound the test holds. Decide before the path tracer closes.
