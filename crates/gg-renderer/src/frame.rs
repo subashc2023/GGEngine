@@ -1299,11 +1299,12 @@ impl Recorder<'_> {
             .and_then(|early| early.ao.as_ref())
             .map(ao::Plan::image);
         let reflections = early.and_then(|early| early.reflections.as_ref());
+        let sky_data = |sampled: &dyn Fn(ImageId) -> u32| match (&plan, sky) {
+            (Some(plan), Some((_, luminance))) => Some(plan.data(sampled, luminance)),
+            _ => held,
+        };
         let view_data = |sampled: &dyn Fn(ImageId) -> u32| {
-            let lit = match (&plan, sky) {
-                (Some(plan), Some((_, luminance))) => Some(plan.data(sampled, luminance)),
-                _ => held,
-            };
+            let lit = sky_data(sampled);
             let shadows = (view.shadows.as_ref())
                 .map(|shadows| shadows.cascades.data(shadows.maps.map(sampled)));
             let sky = lit.map(|sky| sky.luminance);
@@ -1328,6 +1329,14 @@ impl Recorder<'_> {
                 ..shared
             };
             (shared, lit)
+        };
+        // The path tracer's: of what the view samples, the sky's light alone, which its pass
+        // samples. Paths find shadows, occlusion and reflections by their rays, and leave the haze
+        // out. The lights as uploaded, not as the binning pass copies them, which it doesn't wait
+        // for.
+        let traced_data = |sampled: &dyn Fn(ImageId) -> u32| FrameData {
+            sky: sky_data(sampled).unwrap_or_default(),
+            ..shared
         };
         // The ambient occlusion's and reflections' view-to-clip matrix, off by the frame's offset
         // as it's drawn, and the reflections' view-to-world.
@@ -1681,7 +1690,7 @@ impl Recorder<'_> {
         }
         if let Some(plan) = &view.trace {
             let trace = (self.trace.as_mut()).expect("made by the frame that planned it");
-            trace.record(frame, plan, |sampled| view_data(sampled).0)?;
+            trace.record(frame, plan, traced_data)?;
         }
         if let Some(read) = view.read_ids {
             let picked = self.picks.take(frame.number(), Some(size));

@@ -85,6 +85,7 @@ fn main() -> ExitCode {
         sky_lit_spheres_match_their_reference,
         path_traced_metal_reflects_all_of_a_furnace,
         path_traced_sunlight_matches_the_rasters,
+        path_traced_light_leaves_the_rasters_passes_alone,
         path_traced_light_accumulates_until_the_view_moves,
         path_traced_masks_cover_as_the_raster_draws_them,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
@@ -6831,6 +6832,62 @@ fn path_traced_sunlight_matches_the_rasters() {
             "at {center:?}, traced {traced} and raster {raster}: {off:.4} off"
         );
     }
+}
+
+/// Paths traced read nothing the view's raster passes make: a sunlit floor under an atmosphere
+/// traces the same with the sun's shadow maps, ambient occlusion and reflections as without them.
+fn path_traced_light_leaves_the_rasters_passes_alone() {
+    const SIZE: u32 = 32;
+    let traced_floor = |passes: bool| {
+        let mut renderer = tracing_renderer(SIZE, SIZE)?;
+        let mut stores = Stores {
+            atmosphere: Some(Atmosphere::EARTH),
+            lights: vec![sun(Vec3::new(0.3, -1.0, 0.2), passes.then_some(20.0))],
+            ambient_occlusion: passes.then(AmbientOcclusion::default),
+            reflections: passes.then(Reflections::default),
+            ..Stores::default()
+        };
+        let square = model_square(&mut stores.meshes);
+        let gray = Material {
+            color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            workflow: metallic(0.0, 0.5),
+            ..Material::default()
+        };
+        let gray = stores.materials.add(&gray);
+        let floor = MeshDraw::with_material(square, gray, &stores.materials, &mut stores.shaders);
+        let mut draws = Draws::default();
+        draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 0);
+        let viewpoint = Viewpoint {
+            position: DVec3::new(0.0, 3.0, 4.0),
+            rotation: Quat::from_rotation_x(-0.6),
+            projection: Projection::Perspective {
+                fov: PI / 4.0,
+                near: 0.1,
+            },
+        };
+        let viewport = filling([SIZE, SIZE]);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        Some(traced(
+            &mut renderer,
+            &mut stores,
+            viewport,
+            viewpoint,
+            &draws,
+            4,
+        ))
+    };
+    let Some(without) = traced_floor(false) else {
+        return;
+    };
+    let with = traced_floor(true).expect("a GPU with ray queries once");
+    assert!(
+        without.iter().any(|&byte| byte > 0),
+        "the floor shows nothing"
+    );
+    assert!(
+        with == without,
+        "the raster's passes changed the paths traced"
+    );
 }
 
 /// Paths accumulate: a white diffuse floor, seen straight down, under a sky bright over half its
