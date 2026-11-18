@@ -115,9 +115,10 @@ struct Push {
 // Pixels across and down a workgroup: `GROUP` in src/reflections.rs.
 static const uint GROUP = 8;
 // The most steps a ray takes, texel to texel at any level. Between one surface's back and another's
-// front, a ray steps at the finest levels: 64 left rays passing behind the showcase's glowing orb
-// short of the wall past it.
-static const uint MOST_STEPS = 128;
+// front, as along an outline, a ray steps at the finest level, two steps a pixel: 128 left 8% of
+// Bistro's rays short, in streaks of the sky's light; 1,024 almost none, for 0.7 ms more on an RTX
+// 4090 at 2465 by 1410.
+static const uint MOST_STEPS = 1024;
 // The largest float short of infinity, FidelityFX's FFX_SSSR_FLOAT_MAX.
 static const float FLOAT_MAX = 3.402823466e38;
 // How far past a texel's edge a ray steps into the next, in pixels, as FidelityFX's `uv_offset`.
