@@ -92,6 +92,7 @@ impl Look {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Shown {
     Shading(gg_renderer::Channel),
+    PathTraced,
     Image(std::sync::Arc<str>),
 }
 
@@ -103,6 +104,7 @@ impl Shown {
         use gg_renderer::Channel;
         let channel = match shown {
             Api::Image(name) => return Self::Image(name.as_str().into()),
+            Api::PathTraced => return Self::PathTraced,
             Api::BaseColor => Channel::BaseColor,
             Api::Normal => Channel::Normal,
             Api::SurfaceNormal => Channel::SurfaceNormal,
@@ -126,6 +128,9 @@ impl Shown {
     pub(crate) fn show(&self) -> gg_renderer::Show<'_> {
         match self {
             Self::Shading(channel) => gg_renderer::Show::Shading(*channel),
+            Self::PathTraced => gg_renderer::Show::PathTraced {
+                samples: gg_api::PATH_SAMPLES,
+            },
             Self::Image(name) => gg_renderer::Show::Image(name),
         }
     }

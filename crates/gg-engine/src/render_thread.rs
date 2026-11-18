@@ -104,6 +104,10 @@ pub(crate) struct Extracted {
     /// The view it read back, if asked and rendered.
     #[cfg(feature = "dev")]
     pub(crate) captured: Option<Result<Shot>>,
+    /// How many paths each pixel had taken, if it showed paths traced on a GPU with ray queries
+    /// ([`Renderer::path_traced`]).
+    #[cfg(feature = "dev")]
+    pub(crate) path_traced: Option<u32>,
     /// The client the view is published to, as the tool API's `view` asked.
     #[cfg(feature = "dev")]
     pub(crate) publish: Option<Publish>,
@@ -197,6 +201,8 @@ impl Default for Extracted {
             capture: false,
             #[cfg(feature = "dev")]
             captured: None,
+            #[cfg(feature = "dev")]
+            path_traced: None,
             #[cfg(feature = "dev")]
             publish: None,
             #[cfg(feature = "dev")]
@@ -331,6 +337,10 @@ impl Render for Renderer {
         #[cfg(feature = "dev")]
         if list_images && rendered {
             frame.images = Some(self.images().to_vec());
+        }
+        #[cfg(feature = "dev")]
+        {
+            frame.path_traced = self.path_traced().filter(|_| rendered);
         }
         #[cfg(feature = "dev")]
         let (waited, publish) = if read_view && rendered {

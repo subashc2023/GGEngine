@@ -24,7 +24,7 @@ use super::connection::{
 };
 use super::files::{engine_named, prune};
 use super::parse::{METHODS, MOST_STEPS, parse};
-use super::view::CAPTURE_WAIT;
+use super::view::{CAPTURE_WAIT, TRACE_WAIT};
 use super::world::listed;
 use crate::api::Waiting;
 use crate::args::Net;
@@ -2927,6 +2927,67 @@ fn a_capture_waits_within_its_bound_for_assets_to_stream() {
         Some((2, Some(false))),
         "once nothing is on its way"
     );
+    assert!(!frame.capture, "nothing rides once both are answered");
+}
+
+/// A capture of paths traced rides on while the frames' pixels have taken fewer than
+/// [`gg_api::PATH_SAMPLES`], and takes the first that has taken them all. One that has waited past
+/// its bound fails, saying how many they took.
+#[test]
+fn a_capture_of_paths_traced_waits_for_their_samples() {
+    let (mut api, _) = started("Api Traced Captures");
+    let mut cx = Context::seeded(13);
+    let mut stepper = Stepper::default();
+    let mut frame = Extracted::default();
+    let dir = Scratch::new("api-traced-capture");
+    fs::create_dir_all(&dir.0).expect("a directory");
+    let (to, answers) = mpsc::channel();
+    let past = TRACE_WAIT + Duration::from_secs(1);
+    let long_ago = Instant::now()
+        .checked_sub(past)
+        .expect("a time that long ago");
+    for (id, since) in [(1, long_ago), (2, Instant::now())] {
+        api.asked.push(Capturing {
+            reply: reply(id, &to),
+            path: Some(dir.0.join(format!("{id}.png"))),
+            at: None,
+            own: false,
+            show: Some(Shown::PathTraced),
+            since,
+        });
+    }
+    // The next answer: its capture's ID, and its error's code if it failed.
+    let answer = |timeout| {
+        let (line, _) = answers.recv_timeout(timeout).ok()?;
+        let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
+        let id = answer["id"].as_u64().expect("its ID");
+        let code = answer["error"]["code"].as_str().map(str::to_owned);
+        Some((
+            id,
+            code,
+            answer["error"]["message"].as_str().map(str::to_owned),
+        ))
+    };
+    // As the renderer reads back each frame riding with captures: paths short of their samples,
+    // then all of them.
+    for taken in [4, 512, gg_api::PATH_SAMPLES] {
+        api.serve(&mut cx, &mut Stack::default(), &mut stepper);
+        api.frame_back(&mut frame, &cx, stepper.ticks);
+        assert!(frame.capture, "a capture rides with the frame");
+        frame.path_traced = Some(taken);
+        frame.captured = Some(Ok(Shot {
+            size: [1, 1],
+            pixels: vec![0; 4],
+        }));
+    }
+    let (id, code, message) = answer(DEADLINE).expect("an answer past its bound");
+    assert_eq!((id, code.as_deref()), (1, Some("api.path_traced")));
+    let message = message.expect("a message");
+    assert!(message.contains("took 4 of 1024"), "{message}");
+    assert_eq!(answer(Duration::from_millis(200)), None, "waiting still");
+    api.frame_back(&mut frame, &cx, stepper.ticks);
+    let (id, code, _) = answer(DEADLINE).expect("an answer once all are taken");
+    assert_eq!((id, code), (2, None));
     assert!(!frame.capture, "nothing rides once both are answered");
 }
 

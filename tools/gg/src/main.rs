@@ -320,7 +320,9 @@ Parts of shading: `base_color`, `normal`, `surface_normal`, `metallic`, `roughne
 orange out of the last frame's view, magenta from behind a surface no back face bounds, gray
 nothing opaque, yellow its own surface, cyan turned back, navy past its reach, blue off the view,
 white out of steps), `diffuse_light` and `specular_light` (the light it diffuses and reflects, of
-all three). An unlit material shows its base color, and black for the rest.
+all three). An unlit material shows its base color, and black for the rest. Or `path_traced`: the
+light as 1,024 paths a pixel traced through its models find it, a reference for the rest, black
+without ray queries; a capture waits up to 25 s for them.
 ",
             },
             Help {

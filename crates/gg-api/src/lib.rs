@@ -1114,6 +1114,14 @@ pub enum Shown {
     /// - Navy: passed its reach. Blue: left the view. White: took its last step.
     /// - Black: nothing opaque, or the view has no reflections.
     ReflectionRays,
+    /// The view's light as paths traced through its opaque and masked models find it,
+    /// [`PATH_SAMPLES`] a pixel: a reference for the light the view shades, read as
+    /// [`Shown::DirectLight`]. It leaves out fog, haze, what blends, skinned meshes and games' own
+    /// shaders. The view's look grows less noisy frame by frame. A capture waits until every pixel
+    /// has taken them, at most 25 s, then fails with `api.path_traced`, saying how many each took.
+    /// Black where the GPU has no ray queries, as KosmicKrisp hasn't, warning
+    /// `renderer.no_ray_query`.
+    PathTraced,
     /// An image the frame makes, by debug name, read by its kind: colors as they are, high dynamic
     /// range tonemapped as the view's light is; depth as `1 + log2(depth) / 24`, white at the near
     /// plane and a 24th darker each time the distance doubles, black where nothing drew; IDs and a
@@ -1125,6 +1133,9 @@ pub enum Shown {
 
 /// The most bytes a [`Shown::Image`]'s name has.
 pub const MOST_IMAGE_NAME: usize = 64;
+
+/// The paths a pixel takes when the view shows [`Shown::PathTraced`].
+pub const PATH_SAMPLES: u32 = 1_024;
 
 /// What `look` answers: the look once set, each part `None` where it's the game's own.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2480,6 +2491,7 @@ mod tests {
             (r#""specular_light""#, Shown::SpecularLight),
             (r#""traced_reflection""#, Shown::TracedReflection),
             (r#""reflection_rays""#, Shown::ReflectionRays),
+            (r#""path_traced""#, Shown::PathTraced),
             (
                 r#"{"image": "view depth"}"#,
                 Shown::Image("view depth".to_owned()),

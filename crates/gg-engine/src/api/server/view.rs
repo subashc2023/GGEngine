@@ -27,6 +27,10 @@ use crate::{Context, EntityId, Event, Key, MouseButton, Scroll};
 /// still decoding or streaming. Then it takes the next frame anyway, saying so.
 pub(super) const CAPTURE_WAIT: Duration = Duration::from_secs(10);
 
+/// The longest a `capture` of paths traced waits for every pixel's [`gg_api::PATH_SAMPLES`]: under
+/// gg's 30 s for an answer. Then it fails, saying how many each took.
+pub(super) const TRACE_WAIT: Duration = Duration::from_secs(25);
+
 /// A `pick` awaiting its answer. `within` is [`gg_api::Pick::within`]; `ticket` comes once the
 /// asking frame gives it; `named` answers the entity's name, for a connection granted `read` of
 /// `Name`.
@@ -143,7 +147,9 @@ impl Api {
     /// - Takes the view read back, if it rode with captures and rendered, for a thread to write
     ///   each capture's PNG and answer. Only if every texture and mesh added before is there, none
     ///   decoding or streaming; else only for captures that waited [`CAPTURE_WAIT`], saying so.
-    ///   The rest ride on with the next frame.
+    ///   Showing paths traced, only once every pixel has taken [`gg_api::PATH_SAMPLES`]; those
+    ///   that waited [`TRACE_WAIT`] fail with `api.path_traced`. The rest ride on with the next
+    ///   frame.
     /// - Answers picks whose answers came back into `cx`, naming each entity as `cx`'s world does
     ///   now.
     /// - Has the next frame handed off (by `cx`, showing the world after `ticks` ticks) read its
@@ -181,11 +187,29 @@ impl Api {
         let back = (frame.captured.take()).map(|shot| shot.map(Arc::new));
         let streaming = frame.loading > 0 || !frame.streaming.is_empty();
         self.film_back(back.as_ref(), streaming, frame.viewpoint);
+        // Paths traced short of their samples.
+        let tracing = (frame.path_traced).filter(|&taken| taken < gg_api::PATH_SAMPLES);
         match back {
             Some(Ok(shot)) => {
                 let now = Instant::now();
+                if let Some(taken) = tracing {
+                    let late = (self.riding).extract_if(.., |capturing| {
+                        now.duration_since(capturing.since) >= TRACE_WAIT
+                    });
+                    for capturing in late {
+                        let message = format!(
+                            "the view's paths traced took {taken} of {} a pixel in {} s; a \
+                             smaller view or a faster GPU takes them sooner",
+                            gg_api::PATH_SAMPLES,
+                            TRACE_WAIT.as_secs()
+                        );
+                        let error = gg_core::Error::new("api.path_traced", message);
+                        capturing.reply.send(Err(failure(&error)));
+                    }
+                }
                 let taken = (self.riding).extract_if(.., |capturing| {
-                    !streaming || now.duration_since(capturing.since) >= CAPTURE_WAIT
+                    tracing.is_none()
+                        && (!streaming || now.duration_since(capturing.since) >= CAPTURE_WAIT)
                 });
                 for Capturing {
                     reply, path, at, ..

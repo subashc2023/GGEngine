@@ -35,7 +35,9 @@ behind a surface no back face bounds, gray nothing opaque, yellow its own surfac
 back, navy past its reach, blue off the view, white out of steps), `diffuse_light` and \
 `specular_light` (the light it diffuses and reflects, of all three), each light exposed and \
 tonemapped as the view's. An \
-unlit material shows its base color, and black for the rest. Or \
+unlit material shows its base color, and black for the rest. Or `path_traced`: the light as \
+1,024 paths a pixel traced through its models find it, a reference for the rest, black without \
+ray queries; a capture waits up to 25 s for them. Or \
 an image the frame makes, by debug name: any other string, as `view depth`, or `{\"image\": name}` \
 (at most 64 bytes), read by its kind: colors as they are, HDR tonemapped, depth as 1 + log2(depth) \
 / 24 (white at the near plane, a 24th darker per doubling of distance, black where nothing drew), \
@@ -1218,6 +1220,7 @@ mod tests {
             Shown::SpecularLight,
             Shown::TracedReflection,
             Shown::ReflectionRays,
+            Shown::PathTraced,
         ];
         for description in [&capture["description"], &look["description"]] {
             let description = description.as_str().expect("described");

@@ -60,6 +60,7 @@ const CHANNELS: &[(&str, Option<Shown>)] = &[
     ("Reflection rays", Some(Shown::ReflectionRays)),
     ("Diffuse light", Some(Shown::DiffuseLight)),
     ("Specular light", Some(Shown::SpecularLight)),
+    ("Path traced", Some(Shown::PathTraced)),
 ];
 
 /// The list's own names for the frame's images, by debug name; the rest go by theirs.
