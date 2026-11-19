@@ -93,6 +93,7 @@ fn main() -> ExitCode {
         path_traced_light_accumulates_until_the_view_moves,
         path_traced_masks_cover_as_the_raster_draws_them,
         path_traced_emission_shows_but_lights_nothing,
+        path_traced_light_is_even_where_a_normal_map_turns_from_the_view,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
         a_skys_bright_cloud_isnt_its_sun,
@@ -7453,6 +7454,63 @@ fn path_traced_emission_shows_but_lights_nothing() {
         "the mirror shows {mirror}"
     );
     assert!(floor.max_element() < 0.01, "the floor shows {floor}");
+}
+
+/// A white floor whose normal map tilts its normal 64 degrees away from the view, seen from above at
+/// 45 degrees under a sky of one color: every pixel expects the same light, and none of them traced
+/// is 3 times their median (1.7 here). Picking the diffuse lobe by the reflectance toward the view,
+/// nearly 1 there, takes it once in thousands of paths and weighs it thousands of times: specks on
+/// a floor whose median is nearly black.
+fn path_traced_light_is_even_where_a_normal_map_turns_from_the_view() {
+    const SIZE: u32 = 32;
+    let Some(mut renderer) = tracing_renderer(SIZE, SIZE) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let sky = sky_texture(&mut stores.textures, [8, 4], |_, _| [0.5; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+        rotation: 0.0,
+    });
+    // A Y of 242/255, as a normal map holds it, about 0.9: toward the square's +Y, the world's -Z.
+    let pixels = [[128, 242, 255, 255]; 16];
+    let texels = Texels::Map(Map::Normal);
+    let added = (stores.textures).add("tilted", [4, 4], pixels.as_flattened(), texels);
+    let white = Material {
+        color: Vec4::ONE,
+        workflow: metallic(0.0, 0.5),
+        normal_texture: Some(Sampled::of(added.expect("a map"))),
+        ..Material::default()
+    };
+    let white = stores.materials.add(&white);
+    let square = model_square(&mut stores.meshes);
+    let floor = MeshDraw::with_material(square, white, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 0);
+    // From +Z, down at 45 degrees, orthographic, so every point is seen at one angle.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 10.0, 10.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_4),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: 1.0,
+            far: 30.0,
+        },
+    };
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let frame = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 64);
+    let mut lights: Vec<f32> = (frame.as_chunks::<4>().0.iter())
+        .map(|&[r, g, b, _]| luminance(Vec3::new(decoded(r), decoded(g), decoded(b))))
+        .collect();
+    lights.sort_by(f32::total_cmp);
+    let median = lights[lights.len() / 2];
+    let brightest = lights[lights.len() - 1];
+    assert!(
+        median > 0.01 && brightest < 3.0 * median,
+        "the floor's brightest pixel is {brightest}, its median {median}"
+    );
 }
 
 /// Without ray queries, a view showing paths traced shows black, warning `renderer.no_ray_query`

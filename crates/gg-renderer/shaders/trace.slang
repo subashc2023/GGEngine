@@ -429,10 +429,12 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
                 light += throughput * (brdf(lit, to_light, n_dot_l) * n_dot_l + later) * arrived;
             }
         }
-        // The next way: one lobe, picked by its estimated share, its light over the chance.
-        float3 fresnel = schlick(lit.f0, lit.n_dot_v);
-        float specular_share = luminance(fresnel);
-        float diffuse_share = luminance(lit.diffuse_color * (1.0 - fresnel));
+        // The next way: one lobe, picked by its estimated share, its light over the chance. The
+        // diffuse's share takes the reflectance head-on, which bounds its weight. The reflectance
+        // toward the view is nearly 1 where a normal map turns the normal from it: the diffuse
+        // would be taken once in thousands of paths and weighed thousands of times.
+        float specular_share = luminance(schlick(lit.f0, lit.n_dot_v));
+        float diffuse_share = luminance(lit.diffuse_color * (1.0 - lit.f0));
         if (specular_share + diffuse_share <= 0.0) {
             break;
         }
