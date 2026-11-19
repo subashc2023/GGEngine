@@ -92,6 +92,7 @@ fn main() -> ExitCode {
         path_traced_light_leaves_the_rasters_passes_alone,
         path_traced_light_accumulates_until_the_view_moves,
         path_traced_masks_cover_as_the_raster_draws_them,
+        path_traced_emission_shows_but_lights_nothing,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
         atmospheres_match_their_references,
@@ -7375,6 +7376,68 @@ fn path_traced_masks_cover_as_the_raster_draws_them() {
         (traced - raster).abs() < 0.05,
         "the fence covers {traced:.3} of the view traced, {raster:.3} drawn"
     );
+}
+
+/// A white diffuse floor, seen straight down, with a mirror on it and a glowing square over it,
+/// under a glowing ceiling behind the view, no lights and no sky. Traced, the square shows its
+/// emission and the mirror the ceiling's, but the floor stays black, as the raster lights nothing
+/// by emission.
+fn path_traced_emission_shows_but_lights_nothing() {
+    const SIZE: u32 = 64;
+    const GLOW: f32 = 0.5;
+    let Some(mut renderer) = tracing_renderer(SIZE, SIZE) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let materials = [
+        // A black metal reflects nothing, so it shows its emission alone.
+        Material {
+            color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            workflow: metallic(1.0, 1.0),
+            emissive: Vec3::splat(GLOW),
+            double_sided: true,
+            ..Material::default()
+        },
+        // Diffuse alone: a specular color of 0 reflects nothing.
+        Material {
+            color: Vec4::ONE,
+            workflow: Workflow::SpecularGlossiness {
+                specular: Vec3::ZERO,
+                glossiness: 0.0,
+            },
+            ..Material::default()
+        },
+        Material {
+            workflow: metallic(1.0, 0.1),
+            ..Material::default()
+        },
+    ];
+    let [glowing, floor, mirror] = materials.map(|material| {
+        let material = stores.materials.add(&material);
+        MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders)
+    });
+    let mut draws = Draws::default();
+    // 16 pixels a unit; the view's primary rays start at 1 and the ceiling is above them.
+    draws.push_draw(facing_up(40.0, Vec3::new(0.0, 3.0, 0.0)), &glowing, 0);
+    draws.push_draw(facing_up(1.0, Vec3::new(-1.0, 0.5, 0.0)), &glowing, 0);
+    draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 0);
+    draws.push_draw(facing_up(1.0, Vec3::new(1.0, 0.01, 0.0)), &mirror, 0);
+    let viewpoint = looking_down(Vec3::new(0.0, 2.0, 0.0), 4.0, 4.0);
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let frame = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 64);
+    let [square, mirror, floor] =
+        [[16, 32], [48, 32], [32, 52]].map(|center| linear_mean(&frame, SIZE, center, 4));
+    assert!(
+        (square - Vec3::splat(GLOW)).abs().max_element() < 0.02,
+        "the glowing square shows {square}"
+    );
+    assert!(
+        (mirror - Vec3::splat(GLOW)).abs().max_element() < 0.03,
+        "the mirror shows {mirror}"
+    );
+    assert!(floor.max_element() < 0.01, "the floor shows {floor}");
 }
 
 /// Without ray queries, a view showing paths traced shows black, warning `renderer.no_ray_query`

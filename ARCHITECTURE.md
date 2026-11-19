@@ -884,7 +884,8 @@ not a mode games ship with.
   transform unpacks them. The CPU gathers the instances, the scene's and the frame's draws', each
   frame that traces: a frame that doesn't costs nothing.
 - Paths by next-event estimation of the lights, which are deltas, and BSDF sampling of the sky,
-  which leaves out a sun a light stands for. GGX's specular light scattered more than once is
+  which leaves out a sun a light stands for. Emission shows only on paths whose every bounce was
+  specular, as the raster lights nothing by it. GGX's specular light scattered more than once is
   exact, by Heitz et al.'s random walk on the microsurface, for the sky and every light. The
   raster's fits are held to it, so what they miss shows as measured differences.
 - Light accumulates over frames until the samples asked for, and starts over as anything it reads

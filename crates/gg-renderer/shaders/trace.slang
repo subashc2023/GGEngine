@@ -10,6 +10,8 @@
 // - Then a bounce: the walk's way out (below), or the cosine, picked by their estimated shares.
 // - The sky's light (its specular cube's level 0) where a path escapes, emission where it hits it,
 //   and an unlit material's color, each over the exposure, as the view shows them already exposed.
+// - Emission and unlit colors only on paths whose every bounce took the specular lobe, as the
+//   raster shows them: directly and in reflections, lighting nothing; lights stand for what glows.
 // - Materials as shading.slang's `surface_of` reads them, their maps at level 0, by its `brdf`.
 //   Specular light scattered more than once, which `brdf`'s GGX loses, by Heitz et al.'s random
 //   walk on the microsurface (`walked`): exact, where compensations such as Turquin's and the
@@ -371,6 +373,8 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
     SamplerState clamp_ = samplers[LINEAR_CLAMP];
     float3 light = float3(0.0);
     float3 throughput = float3(1.0);
+    // Whether every bounce so far took the specular lobe.
+    bool shown = true;
     for (uint bounce = 0; bounce < MOST_BOUNCES; bounce++) {
         Hit hit = nearest(tlas, frame.materials, origin, direction);
         if (!hit.found) {
@@ -384,13 +388,17 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
         Material material = at.material;
         float4 color = sampled_at(material, 0, at.uv) * material.color * at.color;
         if ((material.flags & UNLIT) != 0) {
-            light += throughput * color.rgb / frame.exposure;
+            if (shown) {
+                light += throughput * color.rgb / frame.exposure;
+            }
             break;
         }
         float4 surface = sampled_at(material, 1, at.uv);
         float2 mapped = sampled_at(material, 2, at.uv).xy * 2.0 - 1.0;
-        float3 emission = sampled_at(material, 4, at.uv).rgb * material.emissive;
-        light += throughput * emission / frame.exposure;
+        if (shown) {
+            float3 emission = sampled_at(material, 4, at.uv).rgb * material.emissive;
+            light += throughput * emission / frame.exposure;
+        }
         float roughness = roughness_of(material, surface);
         float metallic;
         Surface lit = surface_of(material, at.world, -direction, at.normal, at.tangent, at.front,
@@ -445,6 +453,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
             float3 halfway = normalize(v + l);
             throughput *= (1.0 - schlick(lit.f0, dot(v, halfway))) * lit.diffuse_color
                 / (1.0 - specular_chance);
+            shown = false;
         }
         float3 out_way = t * l.x + b * l.y + lit.normal * l.z;
         if (l.z <= 0.0 || dot(out_way, geometric) <= 0.0) {
