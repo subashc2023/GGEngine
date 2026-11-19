@@ -9,9 +9,10 @@
 [[vk::binding(1, 0)]] SamplerState samplers[];
 
 struct Push {
-    // From clip space to the ways the view sees, as points whose way from the origin is the way.
-    // With perspective, the inverse of the projection and rotation, without translation; for an
-    // orthographic projection, a matrix taking every point to its one way.
+    // From clip space to the ways the view sees, turned back by the sky's rotation into the
+    // image's, as points whose way from the origin is the way. With perspective, the inverse of the
+    // projection and rotation, without translation; for an orthographic projection, a matrix taking
+    // every point to its one way.
     float4x4 world_from_clip;
     // The sky's texture in the bindless set.
     uint sky;

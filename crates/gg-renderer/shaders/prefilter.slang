@@ -48,7 +48,8 @@ struct Push {
     float roughness;
     // Samples per texel.
     uint samples;
-    uint unused;
+    // How far the image sky is turned, as `Sky::rotation` in src/sky.rs says.
+    float rotation;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -216,9 +217,10 @@ void sun_main(uint3 id: SV_DispatchThreadID) {
     }
 }
 
-// The sky into a cube's first level: each texel the mean of four points of the image across it.
-// It leaves out a found sun, which lights as a light: each point within `SUN_REACH` of it is kept
-// to the sky's median round it, keeping its hue, as `sun_main` summed what's past that.
+// The sky into a cube's first level: each texel the mean of four points of the image across it,
+// turned by its rotation, so the cube holds the world's ways. It leaves out a found sun, which
+// lights as a light: each point within `SUN_REACH` of it is kept to the sky's median round it,
+// keeping its hue, as `sun_main` summed what's past that.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cube_main(uint3 id: SV_DispatchThreadID) {
@@ -229,10 +231,15 @@ void cube_main(uint3 id: SV_DispatchThreadID) {
     SamplerState repeat = samplers[LINEAR_REPEAT];
     Sun sun = push.sun[0];
     bool leaves = sun.found != 0;
+    float turn_cos = cos(push.rotation);
+    float turn_sin = sin(push.rotation);
     float3 sum = float3(0.0);
     for (uint i = 0; i < 4; i++) {
         float2 at = float2(id.xy) + float2(0.25 + 0.5 * (i & 1), 0.25 + 0.5 * (i >> 1));
-        float3 direction = cube_direction(id.z, at, float(push.size));
+        float3 world = cube_direction(id.z, at, float(push.size));
+        // Turned back about +Y, from the world's way to the image's, where the sun was found.
+        float3 direction = float3(turn_cos * world.x - turn_sin * world.z, world.y,
+                                  turn_sin * world.x + turn_cos * world.z);
         float3 color = equirect(sky, repeat, float2(push.source_size), direction);
         float bright = luminance(color);
         if (leaves && dot(direction, sun.peak) >= cos(SUN_REACH) && bright > sun.median) {

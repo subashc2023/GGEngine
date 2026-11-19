@@ -1,5 +1,5 @@
 //! The sky: an equirectangular image of the world around, shown behind it and lighting it. Compute
-//! passes prefilter it in the first frame that shows an image:
+//! passes prefilter it in the first frame that shows an image or a turn of it:
 //! - into a cube, each level averaging the one before;
 //! - from that, Lambert's diffuse light, and GGX's specular at each step of roughness;
 //! - once, the split sum's table.
@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
-use gg_core::math::{Vec2, Vec3, libm, to_degrees};
+use gg_core::math::{Mat4, Quat, Vec2, Vec3, libm, to_degrees};
 use gg_core::{Result, label};
 use gg_gpu::{
     Blend, BufferId, ComputePipeline, Device, Format, Frame, Graph, GraphicsDesc, ImageId, Pass,
@@ -77,6 +77,15 @@ impl Found {
             range: None,
             shadow_distance,
         }
+    }
+
+    /// It as `source` shows it: an image sky turned by its rotation.
+    fn turned(self, source: &Source) -> Found {
+        let Source::Image { sky, .. } = source else {
+            return self;
+        };
+        let way = Quat::from_rotation_y(sky.rotation) * self.way;
+        Found { way, ..self }
     }
 }
 
@@ -158,6 +167,9 @@ pub struct Sky {
     /// The luminance in cd/m² a texel of 1 stands for: the image's colors are multiplied by it
     /// before exposure, as lit shading multiplies light in lux and candela.
     pub luminance: f32,
+    /// How far the image is turned about +Y, in radians, counterclockwise seen from above (+X
+    /// toward -Z), its sun with it. A turn prefilters it again, searching its sun again too.
+    pub rotation: f32,
 }
 
 /// What a frame prefilters the sky's light from.
@@ -175,19 +187,23 @@ pub(crate) enum Source {
 
 impl Source {
     /// Whether light prefiltered from `held` stands for this: the same showing of the same image,
-    /// or an atmosphere [near](Lit::near) it.
+    /// turned alike, or an atmosphere [near](Lit::near) it.
     fn held_by(&self, held: &Source) -> bool {
         match (self, held) {
-            (
-                Source::Image { sky, shown, .. },
-                Source::Image {
-                    sky: was,
-                    shown: then,
-                    ..
-                },
-            ) => sky.texture.index == was.texture.index && shown == then,
+            (Source::Image { sky, .. }, Source::Image { sky: was, .. }) => {
+                self.showing() == held.showing() && sky.rotation == was.rotation
+            }
             (Source::Atmosphere(lit), Source::Atmosphere(was)) => lit.near(was),
             _ => false,
+        }
+    }
+
+    /// An image sky's texture and how many times its slot has changed image: what its sun is found
+    /// from, however it's turned. `None` for the atmosphere.
+    fn showing(&self) -> Option<(u32, u64)> {
+        match self {
+            Source::Image { sky, shown, .. } => Some((sky.texture.index, *shown)),
+            Source::Atmosphere(_) => None,
         }
     }
 
@@ -229,7 +245,7 @@ struct PrefilterPush {
     size: u32,
     roughness: f32,
     samples: u32,
-    unused: u32,
+    rotation: f32,
 }
 
 /// `Push` in `shaders/sky.slang`, field for field.
@@ -308,7 +324,7 @@ impl SkyPass {
             size: 0,
             roughness: 0.0,
             samples: 0,
-            unused: 0,
+            rotation: 0.0,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch([1, 1, 1]);
@@ -325,7 +341,7 @@ impl SkyPass {
             size: face,
             roughness: 0.0,
             samples: 0,
-            unused: 0,
+            rotation: sky.rotation,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch([face.div_ceil(GROUP), face.div_ceil(GROUP), 6]);
@@ -350,7 +366,7 @@ impl SkyPass {
                 size,
                 roughness: 0.0,
                 samples: 0,
-                unused: 0,
+                rotation: 0.0,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(size, 6));
@@ -375,7 +391,7 @@ impl SkyPass {
                 size,
                 roughness,
                 samples: plan.samples[0],
-                unused: 0,
+                rotation: 0.0,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(size, 6));
@@ -389,7 +405,7 @@ impl SkyPass {
             size: IRRADIANCE,
             roughness: 0.0,
             samples: plan.samples[1],
-            unused: 0,
+            rotation: 0.0,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch(groups(IRRADIANCE, 6));
@@ -405,16 +421,16 @@ impl SkyPass {
                 size: TABLE,
                 roughness: 0.0,
                 samples: TABLE_SAMPLES,
-                unused: 0,
+                rotation: 0.0,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(TABLE, 1));
         }
     }
 
-    /// Draws the sky, its texture `sky` times `scale`, behind everything the pass draws after it,
-    /// over the whole target. It's seen from `viewpoint` at `aspect` (width over height), offset by
-    /// antialiasing's `jitter` in normalized coordinates.
+    /// Draws `sky` behind everything the pass draws after it, over the whole target, its colors
+    /// times its luminance and `exposure`'s light scale. It's seen from `viewpoint` at `aspect`
+    /// (width over height), offset by antialiasing's `jitter` in normalized coordinates.
     ///
     /// # Panics
     ///
@@ -425,16 +441,19 @@ impl SkyPass {
         viewpoint: &Viewpoint,
         aspect: f32,
         jitter: Vec2,
-        sky: u32,
-        scale: f32,
+        sky: &Sky,
+        exposure: f32,
     ) {
         pass.begin_label(c"sky");
         pass.set_pipeline(&self.draw);
         let push = DrawPush {
-            // Back from where the offset drew each pixel's way.
-            world_from_clip: viewpoint.ways_from_clip(aspect) * taa::jitter(-jitter),
-            sky,
-            scale,
+            // Back from where the offset drew each pixel's way, then from the world's ways to the
+            // image's.
+            world_from_clip: Mat4::from_rotation_y(-sky.rotation)
+                * viewpoint.ways_from_clip(aspect)
+                * taa::jitter(-jitter),
+            sky: sky.texture.index,
+            scale: sky.luminance * exposure,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.draw(3, 1);
@@ -658,16 +677,17 @@ impl SkyLight {
 pub(crate) struct SkySun {
     /// The frame that last found an image sky's sun, and that sky, until its readback comes.
     finding: Option<(u64, Source)>,
-    /// The image sky whose sun last read back, and that sun, if it has one.
+    /// The image sky whose sun last read back, and that sun, if it has one, unturned.
     found: Option<(Source, Option<Found>)>,
 }
 
 impl SkySun {
-    /// The sun of `source`, an image sky, once its readback has come and if it has one.
+    /// The sun of `source`, an image sky, turned as it is, once its readback has come and if it
+    /// has one. A turn relights at once by the sun held, while the search again reads back.
     pub(crate) fn of(&self, source: &Source) -> Option<Found> {
         let (held, sun) = self.found.as_ref()?;
-        let image = matches!(source, Source::Image { .. });
-        (image && source.held_by(held)).then_some(*sun).flatten()
+        let shown = source.showing().is_some() && source.showing() == held.showing();
+        Some(sun.filter(|_| shown)?.turned(source))
     }
 
     /// Notes that frame `number` has prefiltered by `plan`, finding an image sky's sun.
@@ -677,8 +697,9 @@ impl SkySun {
         }
     }
 
-    /// Takes the sun the frame two before `frame` found and read back, if it did: `Some(None)` for
-    /// a sky without one.
+    /// Takes the sun the frame two before `frame` found and read back, turned as that sky was, if
+    /// it did and that showing of its image hadn't found it already: `Some(None)` for a sky without
+    /// one. A sky turned searches again, finding the same.
     pub(crate) fn read(&mut self, frame: &Frame<'_>) -> Option<Option<Found>> {
         let (number, source) = self.finding?;
         let (read, bytes) = frame.buffer_read(SUN);
@@ -687,8 +708,10 @@ impl SkySun {
         }
         self.finding = None;
         let sun = found(bytes)?;
+        let again = (self.found)
+            .is_some_and(|(held, was)| held.showing() == source.showing() && was == sun);
         self.found = Some((source, sun));
-        Some(sun)
+        (!again).then_some(sun.map(|sun| sun.turned(&source)))
     }
 }
 

@@ -96,6 +96,7 @@ fn main() -> ExitCode {
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
         a_skys_bright_cloud_isnt_its_sun,
+        a_turned_sky_shows_and_lights_as_its_image_turned,
         atmospheres_match_their_references,
         the_suns_disk_shows_the_transmittance,
         the_haze_dims_and_lights_what_is_far,
@@ -4541,6 +4542,7 @@ fn exposure_adapts_frame_by_frame_from_a_bright_view_to_a_dark_one() {
         stores.sky = Some(Sky {
             texture: sky,
             luminance: math::libm::exp2f(log2),
+            rotation: 0.0,
         });
     };
     lit(&mut stores, BRIGHT);
@@ -4651,6 +4653,7 @@ fn exposure_meters_between_its_percentiles() {
         stores.sky = Some(Sky {
             texture,
             luminance: 1.0,
+            rotation: 0.0,
         });
     };
     shown(&mut stores, black);
@@ -4766,6 +4769,7 @@ fn a_looks_exposure_adapts_apart_from_the_games_own() {
         stores.sky = Some(Sky {
             texture: sky,
             luminance: math::libm::exp2f(log2),
+            rotation: 0.0,
         });
     };
     lit(&mut stores, BRIGHT);
@@ -4849,6 +4853,7 @@ fn an_exposure_jump_under_antialiasing_leaves_no_ghost() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 4000.0,
+        rotation: 0.0,
     });
     let viewport = filling([SIZE, SIZE]);
     // About a texel a pixel.
@@ -4926,6 +4931,7 @@ fn adapted_frames_match_their_reference() {
         stores.sky = Some(Sky {
             texture: sky,
             luminance: 4000.0 * dimmed,
+            rotation: 0.0,
         });
         stores.lights = vec![Light {
             color: Vec3::splat(100_000.0 * dimmed),
@@ -6413,6 +6419,7 @@ fn a_uniform_sky_lights_white_as_itself() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 0.25,
+        rotation: 0.0,
     });
     let half_occluded = stores.textures.add(
         "occlusion",
@@ -6538,6 +6545,7 @@ fn the_sky_shows_each_way_behind_the_world() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 8.0,
+        rotation: 0.0,
     });
     let draws = Draws::default();
     let viewport = filling([SIZE, SIZE]);
@@ -6644,6 +6652,7 @@ fn sky_lit_spheres_match_their_reference() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     let sphere = sphere(&mut stores.meshes, 0.42, 24, 48);
     let mut draws = Draws::default();
@@ -6747,6 +6756,7 @@ fn path_traced_metal_reflects_all_of_a_furnace() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     // 6 units across, the spheres a unit apart.
     let viewpoint = Viewpoint {
@@ -6836,6 +6846,7 @@ fn path_traced_rough_metal_scatters_as_its_microsurface() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     // The directional albedo at 45 degrees.
     let albedo = Vec3::new(0.8176, 0.6610, 0.4117);
@@ -7013,6 +7024,7 @@ fn graded_sky(textures: &mut Textures) -> Sky {
     Sky {
         texture,
         luminance: 1.0,
+        rotation: 0.0,
     }
 }
 
@@ -7259,6 +7271,7 @@ fn path_traced_light_accumulates_until_the_view_moves() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     let square = model_square(&mut stores.meshes);
     // Diffuse alone: a specular color of 0 reflects nothing.
@@ -7318,6 +7331,7 @@ fn path_traced_masks_cover_as_the_raster_draws_them() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     // Each bar a texel of alpha 1, a texel of 0 between them; nearest, so the edges are sharp.
     let texels: Vec<u8> = (0..2 * BARS)
@@ -7635,6 +7649,7 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     let scene = occlusion_scene(&mut stores);
     let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
@@ -7732,6 +7747,7 @@ fn ambient_occlusion_darkens_what_comes_into_view_in_the_second_pass() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     stores.ambient_occlusion = Some(AmbientOcclusion::default());
     let scene = occlusion_scene(&mut stores);
@@ -7784,6 +7800,7 @@ fn ambient_occlusion_averages_its_noise_away() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     let scene = occlusion_scene(&mut stores);
     let (viewpoint, draws) = (scene.viewpoint, &scene.draws);
@@ -7977,6 +7994,7 @@ fn floor_and_ball(stores: &mut Stores) -> (MeshDraw, MeshDraw) {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     let model = model_square(&mut stores.meshes);
     let ball = sphere(&mut stores.meshes, 1.0, 24, 48);
@@ -8209,6 +8227,7 @@ fn ambient_occlusion_leaves_the_lights_alone() {
     let sky = Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     };
     stores.sky = Some(sky);
     stores.lights = vec![Light {
@@ -8296,6 +8315,7 @@ fn reflection_scene(
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     let square = model_square(&mut stores.meshes);
     let ball = sphere(&mut stores.meshes, 0.5, 24, 48);
@@ -8780,6 +8800,7 @@ fn backdrop_scene(
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     let square = model_square(&mut stores.meshes);
     let mut draws = Draws::default();
@@ -9404,6 +9425,7 @@ fn specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 0.25,
+        rotation: 0.0,
     });
     let half = stores.textures.add(
         "occlusion",
@@ -9509,6 +9531,7 @@ fn views_show_parts_of_shading_and_images_in_place_of_light() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 0.25,
+        rotation: 0.0,
     });
     stores.lights = vec![Light {
         kind: LightKind::Directional,
@@ -9744,6 +9767,7 @@ fn the_light_shows_as_what_surfaces_diffuse_and_what_they_reflect() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 0.25,
+        rotation: 0.0,
     });
     // From the viewpoint, so each highlight faces it.
     stores.lights = vec![Light {
@@ -10086,6 +10110,7 @@ fn specular_glossiness_shades_as_its_metallic_roughness_equal() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0,
+        rotation: 0.0,
     });
     let sun = Light {
         kind: LightKind::Directional,
@@ -10260,6 +10285,7 @@ fn a_skys_sun_lights_once() {
         stores.sky = Some(Sky {
             texture: sky,
             luminance,
+            rotation: 0.0,
         });
         stores.lights = vec![other];
         let given_way = floor_shows(&mut renderer, &mut stores);
@@ -10325,6 +10351,7 @@ fn a_skys_bright_cloud_isnt_its_sun() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 1.0e6,
+        rotation: 0.0,
     });
     stores.lights = vec![Light {
         color: Vec3::splat(1.0e5),
@@ -10364,6 +10391,111 @@ fn a_skys_bright_cloud_isnt_its_sun() {
         "lit by the light and the sky, the floor shows {clouded:?} under the cloud, too near \
          {clear:?} under the clear sky"
     );
+    shut_down(renderer);
+}
+
+/// An image sky turned a quarter turn shows and lights as one whose image is turned in its texels:
+/// behind the world, by the light from all around, and by its sun, which shadows. A turn relights
+/// in the frame it's made, the sun held while it's searched for again.
+fn a_turned_sky_shows_and_lights_as_its_image_turned() {
+    const SIZE: u32 = 64;
+    const SKY: [u32; 2] = [512, 256];
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    // A sun 61° up toward +X, as `a_skys_sun_lights_once`'s, and a brighter quarter from +Z to -X,
+    // not a sun. Each texel shows the one `shift` along: at 128, a quarter turn counterclockwise
+    // seen from above, the sun toward -Z.
+    let texel = |shift: u32| {
+        move |x: u32, y: u32| {
+            let x = (x + shift) % SKY[0];
+            if [x, y] == [256, 40] {
+                [6260.0; 3]
+            } else if x >= 384 {
+                [0.4; 3]
+            } else {
+                [0.1; 3]
+            }
+        }
+    };
+    // A floor, a unit plate 2 above its middle, and a ball to its left, lit by the sky alone: a
+    // directional light gives way to the sun, which shadows as far as it would.
+    let square = model_square(&mut stores.meshes);
+    let ball = sphere(&mut stores.meshes, 0.5, 24, 48);
+    let white = Material {
+        color: Vec4::ONE,
+        workflow: metallic(0.0, 1.0),
+        ..Material::default()
+    };
+    let white = stores.materials.add(&white);
+    let mut draws = Draws::default();
+    for (mesh, placed) in [
+        (square, facing_up(20.0, Vec3::ZERO)),
+        (square, facing_up(1.0, Vec3::new(0.0, 2.0, 0.0))),
+        (ball, Mat4::from_translation(Vec3::new(0.0, 0.5, -2.0))),
+    ] {
+        let draw = MeshDraw::with_material(mesh, white, &stores.materials, &mut stores.shaders);
+        draws.push_draw(placed, &draw, 0);
+    }
+    stores.lights = vec![sun(Vec3::NEG_Y, Some(100.0))];
+    // From behind the plate, 15° down toward +X: the floor, the shadows, the ball, and the sky
+    // from +X to +Z, the brighter quarter's turned, above the horizon.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(-6.0, 3.0, 0.0),
+        rotation: Quat::from_rotation_y(-FRAC_PI_2) * Quat::from_rotation_x(-0.26),
+        projection: Projection::Perspective {
+            fov: 1.2,
+            near: 0.5,
+        },
+    };
+    let viewport = filling([SIZE, SIZE]);
+    // A texel of 1 is 10⁶ cd/m², exposed as `a_skys_sun_lights_once` exposes it.
+    let shows = |renderer: &mut Renderer, stores: &mut Stores, frames: u32| {
+        for _ in 0..frames {
+            let data = RenderData {
+                exposure: 2.0e-6,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(renderer, data);
+        }
+        frame_pixels(renderer)
+    };
+    let sky = sky_texture(&mut stores.textures, SKY, texel(128));
+    let at = |rotation| Sky {
+        texture: sky,
+        luminance: 1.0e6,
+        rotation,
+    };
+    // The sun reads back two frames after the sky's prefiltered, and lights from the frame after.
+    stores.sky = Some(at(0.0));
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let turned = shows(&mut renderer, &mut stores, 6);
+    let unturned = sky_pixels(SKY, texel(0));
+    let replaced = (stores.textures).replace("sky", sky, SKY, unturned, Texels::Hdr);
+    replaced.expect("the sky unturned");
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let before = shows(&mut renderer, &mut stores, 6);
+    stores.sky = Some(at(FRAC_PI_2));
+    let in_the_turn = shows(&mut renderer, &mut stores, 1);
+    let after = shows(&mut renderer, &mut stores, 6);
+    let differ = |got: &[u8], want: &[u8]| {
+        let [got, want] = [got, want].map(|frame| frame.as_chunks::<4>().0);
+        (got.iter().zip(want)).position(|(&got, &want)| !close(got, want))
+    };
+    assert!(
+        differ(&before, &turned).is_some(),
+        "the sky unturned shows as its image turned: the view sees nothing a turn moves"
+    );
+    for (when, frame) in [("in the turn's frame", &in_the_turn), ("after", &after)] {
+        if let Some(i) = differ(frame, &turned) {
+            let at = [i as u32 % SIZE, i as u32 / SIZE];
+            panic!(
+                "{when}, the sky turned a quarter shows {:?} at {at:?}, where its image turned \
+                 shows {:?}",
+                pixel_at(frame, SIZE, at),
+                pixel_at(&turned, SIZE, at)
+            );
+        }
+    }
     shut_down(renderer);
 }
 
@@ -10845,6 +10977,7 @@ impl FoggedScene {
         stores.sky = Some(Sky {
             texture: sky,
             luminance: 1.0,
+            rotation: 0.0,
         });
         stores.lights = vec![Light {
             kind: LightKind::Directional,
@@ -11523,6 +11656,7 @@ fn an_image_sky_renders_as_it_did_before_an_atmosphere() {
     stores.sky = Some(Sky {
         texture: sky,
         luminance: 8000.0,
+        rotation: 0.0,
     });
     stores.lights = vec![Light {
         color: Vec3::splat(100_000.0),
@@ -11928,6 +12062,7 @@ fn occlusion_culled(occluded: bool) {
             stores.sky = Some(Sky {
                 texture: sky,
                 luminance: 1.0,
+                rotation: 0.0,
             });
             stores.ambient_occlusion = Some(AmbientOcclusion::default());
         }
@@ -12790,6 +12925,7 @@ fn a_far_scene_draws_as_at_the_origin_through_its_origins_move() {
         stores.sky = Some(Sky {
             texture: sky,
             luminance: 0.6,
+            rotation: 0.0,
         });
         stores.ambient_occlusion = Some(AmbientOcclusion::default());
         let viewport = filling([SIZE, SIZE]);

@@ -850,8 +850,8 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 - A sky is an image or an atmosphere, prefiltered on the GPU only as it changes. A sky and its sun
   are one: the atmosphere is made from the brightest shining directional light; an image's sun,
   found by contrast with the sky round it, lights as a directional light in place of the frame's,
-  shadowing as far as the brightest of them would. Swapping an image relights the world with no
-  light to aim. Either sky's light leaves its sun out.
+  shadowing as far as the brightest of them would. Swapping an image, or turning it about up,
+  relights the world with no light to aim. Either sky's light leaves its sun out.
 - An image's sun is found on the GPU and read back, so it lights from the fourth frame showing the
   image; until then the directional lights do. Finding it on the CPU would need the image's texels
   there, and BC6H decoded.

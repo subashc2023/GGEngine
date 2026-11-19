@@ -21,6 +21,7 @@
                 antialiasing: Taa,
                 sky: ClearColor,
                 sky_luminance: 30000.0,
+                sky_rotation: 0.0,
                 bloom: 0.0,
                 grade: (
                     temperature: 0.0,

@@ -32,6 +32,7 @@
                     sun_size: 0.00935,
                 )),
                 sky_luminance: 30000.0,
+                sky_rotation: 0.0,
                 bloom: 0.04,
                 grade: (
                     temperature: 0.0,

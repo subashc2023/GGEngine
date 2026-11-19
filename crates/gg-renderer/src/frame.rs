@@ -504,9 +504,9 @@ impl Renderer {
         // sky's cube is made from.
         let tables = atmosphere.as_ref().map(|_| AtmospherePass::plan(graph));
         // Then the sky's prefiltering, in the first frame to render the view since: its texture
-        // came to show its image; or, for the atmosphere, its sun turned or the viewer rose or fell
-        // past what the light holds. Its images are the targets after those. Other frames reuse
-        // the light.
+        // came to show its image, or it turned; or, for the atmosphere, its sun turned or the
+        // viewer rose or fell past what the light holds. Its images are the targets after those.
+        // Other frames reuse the light.
         let plan = match sky {
             Some((source, _)) if !self.sky_light.holds(&source) => {
                 let first = occlusion_first + occludes;
@@ -1537,10 +1537,12 @@ impl Recorder<'_> {
                 disk: seen.disk(),
             };
             made.draw(&mut pass, &data.viewpoint, aspect, jitter, &drawn);
-        } else if draws_sky && let Some(SkyData { sky, luminance, .. }) = lit {
+        } else if draws_sky
+            && lit.is_some()
+            && let Some((Source::Image { sky, .. }, _)) = sky
+        {
             let drawn = self.sky.as_ref().expect("made for a sky to show");
-            let scale = luminance * exposure;
-            drawn.draw(&mut pass, &data.viewpoint, aspect, jitter, sky, scale);
+            drawn.draw(&mut pass, &data.viewpoint, aspect, jitter, &sky, exposure);
         }
         let way = Way::Shaded {
             beside_visibility: shades.is_some(),

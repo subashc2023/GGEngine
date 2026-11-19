@@ -37,6 +37,10 @@ pub struct Environment {
     /// day's exposure. An atmosphere uses its sun's.
     #[reflect(default = 30_000.0)]
     pub sky_luminance: f32,
+    /// How far an image sky is turned about +Y, in radians, counterclockwise seen from above: what
+    /// shows behind the world, its light and its sun turn together, aiming the sun. 0 by default.
+    #[reflect(degrees)]
+    pub sky_rotation: f32,
     /// Bloom, from 0 for none to 1. Before tonemapping and a game's canvas, colors are lerped by
     /// this toward a weighted mean of progressively blurrier copies: light spreads, none is
     /// added. 0.04 (default) is a subtle glow round what's far brighter than white.
@@ -79,6 +83,7 @@ impl Default for Environment {
             antialiasing: Antialiasing::default(),
             sky: Sky::ClearColor,
             sky_luminance: 30_000.0,
+            sky_rotation: 0.0,
             bloom: 0.04,
             grade: Grade::IDENTITY,
             ambient_occlusion: Some(AmbientOcclusion::default()),
@@ -104,6 +109,7 @@ impl Environment {
             Sky::Image(texture) => Some(gg_renderer::Sky {
                 texture,
                 luminance: self.sky_luminance,
+                rotation: self.sky_rotation,
             }),
             Sky::ClearColor | Sky::Atmosphere(_) => None,
         }
@@ -407,19 +413,21 @@ mod tests {
         assert_eq!(filmed.lens.rendered().grain, 0.1);
     }
 
-    /// An environment hands the renderer its image sky at its luminance, or its atmosphere; never
-    /// both, and neither without a sky.
+    /// An environment hands the renderer its image sky at its luminance and rotation, or its
+    /// atmosphere; never both, and neither without a sky.
     #[test]
     fn an_environment_hands_the_renderer_its_image_sky_or_its_atmosphere() {
         let with = |sky| Environment {
             sky,
             sky_luminance: 8000.0,
+            sky_rotation: 1.5,
             ..Environment::default()
         };
         let image = with(Sky::Image(gg_renderer::Texture::WHITE));
         let shown = gg_renderer::Sky {
             texture: gg_renderer::Texture::WHITE,
             luminance: 8000.0,
+            rotation: 1.5,
         };
         assert_eq!((image.sky(), image.atmosphere()), (Some(shown), None));
         let hazy = crate::Atmosphere {
