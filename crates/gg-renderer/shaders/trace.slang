@@ -5,8 +5,8 @@
 //
 // Unidirectional path tracing, at most `MOST_BOUNCES` bounces, Russian roulette after
 // `SURE_BOUNCES`:
-// - At each hit, every light by next-event estimation, with a shadow ray: the frame's lights are
-//   deltas, and the sky holds no sun a directional light stands for.
+// - At each hit, every light whose light reaches it by next-event estimation, with a shadow ray:
+//   the frame's lights are deltas, and the sky holds no sun a directional light stands for.
 // - Then a bounce: the walk's way out (below), or the cosine, picked by their estimated shares.
 // - The sky's light (its specular cube's level 0) where a path escapes, emission where it hits it,
 //   and an unlit material's color, each over the exposure, as the view shows them already exposed.
@@ -408,7 +408,9 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
             float3 to_light;
             float3 arrived = arriving(frame, i, at.world, to_light);
             float n_dot_l = dot(lit.normal, to_light);
-            if (n_dot_l <= 0.0 || dot(geometric, to_light) <= 0.0) {
+            // Lights out of range or cone skipped: under Bistro's 96 point lights, their shadow
+            // rays and walks would be most of a path's cost.
+            if (n_dot_l <= 0.0 || dot(geometric, to_light) <= 0.0 || !any(arrived > 0.0)) {
                 continue;
             }
             Light shining = frame.lights[i];
