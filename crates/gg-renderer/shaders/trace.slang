@@ -71,7 +71,9 @@ struct TracePush {
 
 // How many pixels across and down a workgroup takes: `GROUP` in src/trace.rs.
 static const uint GROUP = 8;
-static const uint MOST_BOUNCES = 8;
+// Roulette ends nearly every path before it: at 8, a closed room of albedo 0.8 loses 0.8^8 of its
+// light, 17%.
+static const uint MOST_BOUNCES = 64;
 static const uint SURE_BOUNCES = 3;
 // The most the roughness floor rises to. At 0.4, Bistro keeps half again as many specks by its
 // manhole; at 1, it loses nearly twice the light there, for a tenth fewer. Cycles' Filter Glossy,

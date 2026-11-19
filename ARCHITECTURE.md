@@ -893,6 +893,8 @@ not a mode games ship with.
   specular, as the raster lights nothing by it. GGX's specular light scattered more than once is
   exact, by Heitz et al.'s random walk on the microsurface, for the sky and every light. The
   raster's fits are held to it, so what they miss shows as measured differences.
+- Russian roulette ends paths after 3 bounces, unbiased, and a cap at 64 nearly never does: one at
+  8 left a closed room of albedo 0.8 17% dark.
 - After a bounce, surfaces are at least as rough as the roughest the path has bounced off, up to
   0.5; a diffuse bounce counts as roughest. A smooth surface's light, onto a rougher one or seen in
   it, would come in a few paths in thousands, as specks; blurred, it comes in many. The raster's

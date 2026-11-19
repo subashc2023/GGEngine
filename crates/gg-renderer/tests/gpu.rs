@@ -86,6 +86,7 @@ fn main() -> ExitCode {
         path_traced_metal_reflects_all_of_a_furnace,
         path_traced_rough_metal_scatters_as_its_microsurface,
         path_traced_half_metal_shades_as_gltf_mixes_it,
+        path_traced_light_bounces_until_it_leaves_a_box_of_white_metal,
         path_traced_sunlight_matches_the_rasters,
         the_rasters_sky_light_matches_paths_traced,
         the_rasters_sky_light_matches_paths_traced_at_grazing,
@@ -6935,6 +6936,62 @@ fn path_traced_half_metal_shades_as_gltf_mixes_it() {
         ..sun(Vec3::new(0.5, -1.0, 0.0), None)
     }];
     check(&mut stores, "the sun", toward_sun * SUN);
+}
+
+/// A box of white metal at roughness 1, open toward the camera, under a sky of one color. Its walls
+/// lose no light, so the sky's light shows however many bounces a path takes to leave. The back
+/// wall shows the sky within 2%. Paths cut at 8 bounces show it 22% dark.
+fn path_traced_light_bounces_until_it_leaves_a_box_of_white_metal() {
+    const SIZE: u32 = 32;
+    let Some(mut renderer) = tracing_renderer(SIZE, SIZE) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    const SKY: f32 = 0.5;
+    let sky = sky_texture(&mut stores.textures, [8, 4], |_, _| [SKY; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+        rotation: 0.0,
+    });
+    let square = model_square(&mut stores.meshes);
+    let white_metal = Material {
+        color: Vec4::ONE,
+        workflow: metallic(1.0, 1.0),
+        ..Material::default()
+    };
+    let white_metal = stores.materials.add(&white_metal);
+    let wall = MeshDraw::with_material(square, white_metal, &stores.materials, &mut stores.shaders);
+    // Two units across about the origin, each wall facing in, open toward +Z.
+    let mut draws = Draws::default();
+    for (turned, at) in [
+        (Quat::IDENTITY, Vec3::NEG_Z),
+        (Quat::from_rotation_x(-FRAC_PI_2), Vec3::NEG_Y),
+        (Quat::from_rotation_x(FRAC_PI_2), Vec3::Y),
+        (Quat::from_rotation_y(FRAC_PI_2), Vec3::NEG_X),
+        (Quat::from_rotation_y(-FRAC_PI_2), Vec3::X),
+    ] {
+        let placed = Mat4::from_scale_rotation_translation(Vec3::new(2.0, 2.0, 1.0), turned, at);
+        draws.push_draw(placed, &wall, 0);
+    }
+    // From the open side's middle, seeing the back wall alone.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 0.0, 1.0),
+        projection: Projection::Perspective {
+            fov: FRAC_PI_4,
+            near: 0.1,
+        },
+        ..Viewpoint::default()
+    };
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let frame = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 64);
+    let mean = linear_mean(&frame, SIZE, [SIZE / 2, SIZE / 2], 8);
+    let off = (mean / SKY - 1.0).abs().max_element();
+    assert!(
+        off < 0.02,
+        "the back wall shows {mean}, {off:.3} off the sky's {SKY}"
+    );
 }
 
 /// The sun alone on a plane, rough gray: no sky, so the plane sees nothing else, and no shadows,
