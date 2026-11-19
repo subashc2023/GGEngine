@@ -10,9 +10,8 @@
 // - Light falloff by KHR_lights_punctual's reference.
 // - Roughness widened by how far the normal turns across the pixel (`filtered_roughness`), so a
 //   highlight narrower than a pixel spreads over it rather than flickering as it moves.
-// - The sky's prefiltered light by the split sum, with Fdez-Agüera's roughness-dependent Fresnel
-//   and multiple scattering ("A Multiple-Scattering Microfacet Model for Real-Time Image-based
-//   Lighting", 2019), as glTF-Sample-Renderer's ibl.glsl and pbr.frag have it (at df3e51cb).
+// - The sky's prefiltered light by the split sum, plus the light scattered more than once
+//   (`scattered`).
 // - Occlusion, the map's and the view's, darkens only the sky's light (`ambient`).
 // - The view's reflections replace the sky's specular light where found (`reflection`).
 // - The shadow-casting light lights only what its shadow maps see.
@@ -164,14 +163,33 @@ float pow5(float x) {
     return x2 * x2 * x;
 }
 
+// `scattered`'s q and w, by roughness's powers 0 to 2 down and the cosine's across.
+static const float3x3 AGAIN = float3x3(-0.0282046, 1.94727, -2.29303,
+                                       -0.78294, -1.61628, 3.18146,
+                                       0.935368, 0.218868, -1.10924);
+static const float3x3 FLOOR = float3x3(1.05864, -1.45373, 0.426679,
+                                       -2.12867, 3.427, -1.24309,
+                                       1.15171, -2.08858, 0.874591);
+
+// What GGX reflects past its first scattering at a cosine of `n_dot` from all ways in, given
+// `missed`, that at F0 1: 1 less the single scattering's albedo there. Kulla and Conty's form
+// ("Revisiting Physically Based Shading at Imageworks", 2017), missed (1 - q) F² / (1 - q F) with
+// F = F0 + (1 - F0) w, where they take q as 1 less the albedo's mean and w as 1/21. Here q and w
+// are quadratics fitted to trace.slang's walk: within 0.31% of the albedo for F0 0.2 and up, and
+// 0.19% of the single scattering's below. At F0 1 it's `missed`, so nothing is lost.
+float3 scattered(float3 f0, float roughness, float n_dot, float missed) {
+    float3 by_roughness = float3(1.0, roughness, roughness * roughness);
+    float3 by_cosine = float3(1.0, n_dot, n_dot * n_dot);
+    float q = dot(by_roughness, mul(AGAIN, by_cosine));
+    float3 f = f0 + (1.0 - f0) * dot(by_roughness, mul(FLOOR, by_cosine));
+    return missed * (1.0 - q) * f * f / (1.0 - q * f);
+}
+
 // How much of the sky's light GGX reflects at a cosine of `n_dot_v`, by the split sum's `table`
-// there: once, with roughness-dependent Fresnel, plus multiple scattering.
+// there: once, plus `scattered`.
 float3 sky_reflectance(float3 f0, float roughness, float n_dot_v, float2 table) {
-    float3 rough = max(float3(1.0 - roughness), f0) - f0;
-    float3 once = (f0 + rough * pow5(1.0 - n_dot_v)) * table.x + table.y;
-    float missed = 1.0 - (table.x + table.y);
-    float3 average = f0 + (1.0 - f0) / 21.0;
-    return once + missed * once * average / (1.0 - average * missed);
+    float3 once = f0 * table.x + table.y;
+    return once + scattered(f0, roughness, n_dot_v, 1.0 - (table.x + table.y));
 }
 
 // Lagarde and de Rousiers' specular occlusion ("Moving Frostbite to Physically Based Rendering",

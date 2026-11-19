@@ -6383,8 +6383,8 @@ fn sky_pixels(size: [u32; 2], texel: impl Fn(u32, u32) -> [f32; 3]) -> Vec<u8> {
     pixels
 }
 
-/// Squares under a uniform sky of 0.5, no lights. Fdez-Agüera's multiple scattering keeps a white
-/// surface's reflection whole, so every white one shows 0.5; a smooth colored metal, its color of
+/// Squares under a uniform sky of 0.5, no lights. Multiple scattering keeps a white surface's
+/// reflection whole, so every white one shows 0.5; a smooth colored metal, its color of
 /// it; a half occlusion map, half; unlit, its color. A new sky image prefilters again once it
 /// shows.
 fn a_uniform_sky_lights_white_as_itself() {
@@ -6915,12 +6915,12 @@ fn the_rasters_sky_light_matches_paths_traced() {
     let mut stores = Stores::default();
     let [width, height] = [128, 64];
     let sky = sky_texture(&mut stores.textures, [width, height], |x, y| {
-        // How far up, from -1 straight down to 1 straight up, and round, from 0 at +X.
+        // How far up, from -1 straight down to 1 straight up, and round, from 0 at -X.
         let up = 1.0 - 2.0 * (y as f32 + 0.5) / height as f32;
         let round = (x as f32 + 0.5) / width as f32;
         if up > 0.0 {
             let pale = 1.0 - up;
-            // Brighter toward +X, so the lobes' reach round the sky shows.
+            // Brighter toward -X, so the lobes' reach round the sky shows.
             let bright = 1.0 + 0.5 * math::libm::cosf(2.0 * PI * round);
             [
                 (0.2 + 0.5 * pale) * bright,
@@ -7004,9 +7004,9 @@ fn the_rasters_sky_light_matches_paths_traced() {
 
 /// How far the raster's sky light may stray from the paths', as a share of their luminance.
 const SKY_LIGHT_ERROR: f32 = 0.05;
-/// The same for the metal strips, by roughness: rough ones miss by 6.3% and 15.5%, as
-/// docs/DEFECTS.md keeps.
-const METAL_SKY_LIGHT_ERROR: [f32; 5] = [0.05, 0.05, 0.05, 0.08, 0.17];
+/// The same for the metal strips, by roughness: the roughest misses by 9.3%, as docs/DEFECTS.md
+/// keeps.
+const METAL_SKY_LIGHT_ERROR: [f32; 5] = [0.05, 0.05, 0.05, 0.05, 0.11];
 
 /// Rec. 709's luminance of linear `color`.
 fn luminance(color: Vec3) -> f32 {
