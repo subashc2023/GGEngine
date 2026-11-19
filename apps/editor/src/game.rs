@@ -23,7 +23,8 @@
 //! - The title bar shows how the run goes, and while a game serves, whether it's stopped, playing
 //!   or simulating, and paused. It learns that from the game's answers and a `status` every quarter
 //!   second, which catches other clients' changes and a wait at a script's stop.
-//! - Its middle holds Play, Simulate, Stop and Step ([`overlay::show_run`]).
+//! - Its middle holds Play, Simulate, Stop and Step, then Render, which path traces the view
+//!   ([`overlay::show_run`]).
 //!
 //! # The hub
 //!
@@ -593,6 +594,7 @@ impl Layer for Game {
             (scene, tip)
         });
         let (paused, serves) = (self.paused, self.talker.is_some());
+        let traced = self.view.toolbar.show == Some(gg_api::Shown::PathTraced);
         // None over the hub, where the bar shows the title.
         let bar = !self.hub_shows();
         let title_bar = |ui: &mut egui::Ui| {
@@ -600,7 +602,8 @@ impl Layer for Game {
                 ui.label(scene).on_hover_text(tip);
             }
             ui.label(label);
-            let clicked = ui.add_enabled_ui(serves, |ui| overlay::show_run(ui, mode, paused));
+            let run = |ui: &mut egui::Ui| overlay::show_run(ui, mode, paused, traced);
+            let clicked = ui.add_enabled_ui(serves, run);
             clicked.inner
         };
         let clicked = bar.then(|| ui.title_bar(title_bar)).flatten();

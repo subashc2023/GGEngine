@@ -360,6 +360,19 @@ fn the_controls_pause_resume_and_step_the_game() {
     }
 }
 
+/// Render has the view show paths traced in place of what the list showed, and its light again,
+/// asking the game nothing but the look.
+#[test]
+fn render_traces_the_view_and_lights_it_again() {
+    let (mut game, ends) = serving();
+    game.view.toolbar.show = Some(gg_api::Shown::Normal);
+    for (traced, shown) in [(true, Some(gg_api::Shown::PathTraced)), (false, None)] {
+        assert!(!game.click(overlay::Clicked::Render(traced)), "no keys");
+        assert_eq!(game.wanted(1.0).show, shown);
+    }
+    assert_eq!(methods(&ends), [] as [&str; 0]);
+}
+
 /// Another client's `play`, `pause` and `stop` reach the editor in its `status` polls. Playing:
 /// Play or Simulate lights as the camera switch says, and in Play the view's input goes to the
 /// game. Stopped: the view turns to the editor's camera, unsent input dropped and the game letting

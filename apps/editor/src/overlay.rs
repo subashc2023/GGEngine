@@ -1,4 +1,5 @@
-//! What the editor draws over its view, and the title bar's run controls ([`show_run`]):
+//! What the editor draws over its view, and the title bar's run controls and Render
+//! ([`show_run`]):
 //!
 //! - the toolbar, at the top left or where its grip moves it ([`Toolbar::show`]);
 //! - the gizmo, at the top right, which shows and turns the camera's facing ([`gizmo`]);
@@ -41,7 +42,7 @@ const LABEL: f32 = 18.0;
 const INSET: f32 = 8.0;
 
 /// The list of what the view shows, before its images, as the toolbar names them: the game's own
-/// light, `None`, then the parts of its shading.
+/// light, `None`, then the parts of its shading. Paths traced are the title bar's Render.
 const CHANNELS: &[(&str, Option<Shown>)] = &[
     ("Lit", None),
     ("Base color", Some(Shown::BaseColor)),
@@ -60,7 +61,6 @@ const CHANNELS: &[(&str, Option<Shown>)] = &[
     ("Reflection rays", Some(Shown::ReflectionRays)),
     ("Diffuse light", Some(Shown::DiffuseLight)),
     ("Specular light", Some(Shown::SpecularLight)),
-    ("Path traced", Some(Shown::PathTraced)),
 ];
 
 /// The list's own names for the frame's images, by debug name; the rest go by theirs.
@@ -430,11 +430,12 @@ impl Toolbar {
                     self.colliders = !self.colliders;
                 }
                 // An image shows by its label, or its name, whether the list has it or not, as one
-                // another client shows may not be.
+                // another client shows may not be. Render's paths aren't listed.
                 let selected = match (CHANNELS.iter()).find(|(_, shown)| *shown == self.show) {
                     Some((label, _)) => (*label).to_owned(),
                     None => match &self.show {
                         Some(Shown::Image(name)) => image_label(name).to_owned(),
+                        Some(Shown::PathTraced) => "Path traced".to_owned(),
                         _ => "Lit".to_owned(),
                     },
                 };
@@ -548,17 +549,19 @@ fn grip(ui: &mut egui::Ui) {
 }
 
 /// What a click of the run controls asks: Play or Simulate, which play the game, or switch between
-/// them while it plays; Stop, as [`Mode::Edit`]; a pause, a resume or a step.
+/// them while it plays; Stop, as [`Mode::Edit`]; a pause, a resume or a step; or Render's, the view
+/// path traced, or, `false`, lit again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Clicked {
     To(Mode),
     Pause,
     Resume,
     Step,
+    Render(bool),
 }
 
 /// Draws the run controls in the title bar's middle, as other editors' are, each with a tooltip,
-/// for `current` and `paused`. Returns what a click asks.
+/// for `current` and `paused`, then Render, lit while `traced`. Returns what a click asks.
 ///
 /// - Play: plays the game while it's stopped; while it plays, pauses it, or resumes it while
 ///   paused.
@@ -566,7 +569,8 @@ pub enum Clicked {
 ///   switches between the two while it plays.
 /// - Stop: while it plays.
 /// - Step: while it's paused or stopped.
-pub fn show_run(ui: &mut egui::Ui, current: Mode, paused: bool) -> Option<Clicked> {
+/// - Render: the view's light path traced, or lit again, whether the game plays or not.
+pub fn show_run(ui: &mut egui::Ui, current: Mode, paused: bool, traced: bool) -> Option<Clicked> {
     let stopped = current == Mode::Edit;
     let (icon, tip, play) = match (stopped, paused) {
         (true, _) => (
@@ -628,6 +632,21 @@ pub fn show_run(ui: &mut egui::Ui, current: Mode, paused: bool) -> Option<Clicke
     if step.clicked() {
         clicked = Some(Clicked::Step);
     }
+    // Set apart: it changes what the view shows, not how the game runs.
+    ui.add_space(ICON);
+    let tip = if traced {
+        "Rendering: the view's light is path traced. A click shows the game's own again"
+    } else {
+        "Render: the view's light path traced, less noisy frame by frame, starting over as the \
+         camera or the world moves. It leaves out fog, haze, what blends, skinned meshes and games' \
+         own shaders"
+    };
+    if icon_button(ui, Icon::Render, traced)
+        .on_hover_text(tip)
+        .clicked()
+    {
+        clicked = Some(Clicked::Render(!traced));
+    }
     clicked
 }
 
@@ -682,6 +701,8 @@ enum Icon {
     Stop,
     /// A triangle pointing right against a bar, as a player's skip.
     Step,
+    /// A disc, as a rendered ball.
+    Render,
     /// A chevron pointing left, toward the grip.
     Fold,
     /// A chevron pointing right, away from the grip.
@@ -804,6 +825,9 @@ impl Icon {
             Self::Stop => {
                 let square = Rect::from_min_max(at(3.0, 3.0), at(13.0, 13.0));
                 painter.rect_filled(square, 1.0, color);
+            }
+            Self::Render => {
+                painter.circle_filled(at(8.0, 8.0), 6.0 * scale, color);
             }
             Self::Fold => {
                 let chevron = vec![at(10.5, 3.0), at(5.5, 8.0), at(10.5, 13.0)];
@@ -1347,14 +1371,17 @@ mod tests {
         assert_eq!(shown, grip + by);
     }
 
-    /// What a click of title bar control `i` (Play, Simulate, Stop, Step) asks, for `current` and
-    /// `paused`: a pass each to move, press and let go, the controls from (10, 10).
-    fn click_control(current: Mode, paused: bool, i: usize) -> Option<Clicked> {
+    /// What a click of title bar control `i` (Play, Simulate, Stop, Step, Render) asks, for
+    /// `current`, `paused` and `traced`: a pass each to move, press and let go, the controls from
+    /// (10, 10).
+    fn click_control(current: Mode, paused: bool, traced: bool, i: usize) -> Option<Clicked> {
         let ctx = egui::Context::default();
         let spacing = ctx.global_style().spacing.clone();
         let width = ICON + 2.0 * spacing.button_padding.x;
         let height = (ICON + 2.0 * spacing.button_padding.y).max(spacing.interact_size.y);
-        let across = i as f32 * (width + spacing.item_spacing.x) + width / 2.0;
+        // Render is set apart by an icon's side.
+        let apart = if i == 4 { ICON } else { 0.0 };
+        let across = i as f32 * (width + spacing.item_spacing.x) + apart + width / 2.0;
         let at = pos2(10.0 + across, 10.0 + height / 2.0);
         let button = |pressed| egui::Event::PointerButton {
             pos: at,
@@ -1374,7 +1401,7 @@ mod tests {
                 let row = UiBuilder::new()
                     .max_rect(place)
                     .layout(egui::Layout::left_to_right(egui::Align::Center));
-                let shown = ui.scope_builder(row, |ui| show_run(ui, current, paused));
+                let shown = ui.scope_builder(row, |ui| show_run(ui, current, paused, traced));
                 clicked = clicked.or(shown.inner);
             });
             output.textures_delta.clear();
@@ -1384,10 +1411,10 @@ mod tests {
 
     /// The run controls, as other editors' are. Stopped: Play and Simulate play, Stop is off, Step
     /// steps. Playing: Play pauses, Simulate switches cameras, Stop stops, Step is off. Paused:
-    /// Play resumes, Step steps.
+    /// Play resumes, Step steps. Render switches paths traced on and off throughout.
     #[test]
-    fn the_title_bars_controls_play_pause_stop_and_step_as_the_game_runs() {
-        use Clicked::{Pause, Resume, Step, To};
+    fn the_title_bars_controls_play_pause_stop_step_and_render_as_the_game_runs() {
+        use Clicked::{Pause, Render, Resume, Step, To};
         let stopped = [
             Some(To(Mode::Play)),
             Some(To(Mode::Simulate)),
@@ -1428,8 +1455,10 @@ mod tests {
                 ],
             ),
         ] {
-            let clicked = [0, 1, 2, 3].map(|i| click_control(current, paused, i));
+            let clicked = [0, 1, 2, 3].map(|i| click_control(current, paused, false, i));
             assert_eq!(clicked, expected, "{current:?}, paused {paused}");
+            let rendered = [false, true].map(|traced| click_control(current, paused, traced, 4));
+            assert_eq!(rendered, [Some(Render(true)), Some(Render(false))]);
         }
     }
 

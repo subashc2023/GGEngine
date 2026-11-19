@@ -1,6 +1,7 @@
-//! The title bar's run controls, Play, Simulate, Stop and Step, and what the title bar says.
+//! The title bar's run controls, Play, Simulate, Stop and Step, then Render, and what the title bar
+//! says.
 
-use gg_api::InputEvent;
+use gg_api::{InputEvent, Shown};
 use serde_json::Value;
 
 use crate::overlay::{self, Mode};
@@ -26,9 +27,9 @@ impl Game {
     }
 
     /// Does what a click of the title bar's controls asks while a game serves, as
-    /// [`run`](Self::run) and [`step`](Self::step) say, or pauses or resumes it. Returns whether
-    /// the view gets the keys: for Play, and Resume in Play, which also grab again what Shift+F1
-    /// let go of.
+    /// [`run`](Self::run) and [`step`](Self::step) say, or pauses or resumes it. Render sets what
+    /// the view shows, which goes to the game with the look. Returns whether the view gets the
+    /// keys: for Play, and Resume in Play, which also grab again what Shift+F1 let go of.
     pub(super) fn click(&mut self, clicked: overlay::Clicked) -> bool {
         let resumes_play = clicked == overlay::Clicked::Resume && self.mode() == Mode::Play;
         let plays = clicked == overlay::Clicked::To(Mode::Play) || resumes_play;
@@ -40,6 +41,9 @@ impl Game {
             overlay::Clicked::Pause => self.ask("pause"),
             overlay::Clicked::Resume => self.ask("resume"),
             overlay::Clicked::Step => self.step(),
+            overlay::Clicked::Render(traced) => {
+                self.view.toolbar.show = traced.then_some(Shown::PathTraced);
+            }
         }
         plays
     }
