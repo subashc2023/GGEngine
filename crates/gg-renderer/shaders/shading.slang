@@ -10,7 +10,7 @@
 // - Light falloff by KHR_lights_punctual's reference.
 // - Roughness widened by how far the normal turns across the pixel (`filtered_roughness`), so a
 //   highlight narrower than a pixel spreads over it rather than flickering as it moves.
-// - The sky's prefiltered light by the split sum.
+// - The sky's prefiltered light by the split sum, looked up toward the normal as roughness grows.
 // - GGX's light scattered more than once, which glTF's BRDF loses, fitted to trace.slang's walk:
 //   the sky's in its reflectance (`scattered`), the lights' by Kulla and Conty's lobe
 //   (`reflected`).
@@ -245,7 +245,12 @@ float3 sky_light(Frame frame, float3 diffuse_color, float3 f0, float3 metal, flo
     float3 diffuse = cubes[frame.irradiance].SampleLevel(clamp_, normal, 0.0).rgb * diffuse_color
         * occlusion;
     float level = roughness * float(frame.specular_levels - 1);
-    float3 reflected = reflect(-view, normal);
+    // The cube's lobes are about their texels' ways, but a rough surface's isn't about the mirror
+    // way: it leans toward the normal, where the mirror way's would reach below the horizon.
+    // Filament's dominant direction (getSpecularDominantDirection) takes the mirror way toward the
+    // normal by alpha squared.
+    float alpha = roughness * roughness;
+    float3 reflected = lerp(reflect(-view, normal), normal, alpha * alpha);
     float3 specular = cubes[frame.specular].SampleLevel(clamp_, reflected, level).rgb
         * (specular_occlusion(n_dot_v, occlusion, roughness) * (1.0 - taken));
     float2 table = textures[frame.brdf].SampleLevel(clamp_, float2(n_dot_v, roughness), 0.0).rg;

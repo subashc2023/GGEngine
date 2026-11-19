@@ -7007,9 +7007,8 @@ fn the_rasters_sky_light_matches_paths_traced() {
 
 /// How far the raster's sky light may stray from the paths', as a share of their luminance.
 const SKY_LIGHT_ERROR: f32 = 0.05;
-/// The same for the metal strips, by roughness: the roughest misses by 9.3%, as docs/DEFECTS.md
-/// keeps.
-const METAL_SKY_LIGHT_ERROR: [f32; 5] = [0.05, 0.05, 0.05, 0.05, 0.11];
+/// The same for the metal strips, by roughness: 0.75's misses by 5.4%, as docs/DEFECTS.md keeps.
+const METAL_SKY_LIGHT_ERROR: [f32; 5] = [0.05, 0.05, 0.05, 0.07, 0.05];
 
 /// The raster's lights checked against the path tracer's on rough colored metal: open ground in
 /// strips of roughness 0.5, 0.75 and 1, seen from above at 45 degrees, lit by one sun at a time, in
