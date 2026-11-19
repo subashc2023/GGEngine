@@ -13,8 +13,7 @@
 // - The sky's prefiltered light by the split sum, looked up toward the normal as roughness grows.
 //   Its diffuse loses to Fresnel what glTF's BRDF does (`diffuse_fresnel`).
 // - GGX's light scattered more than once, which glTF's BRDF loses, fitted to trace.slang's walk:
-//   the sky's in its reflectance (`scattered`), the lights' by Kulla and Conty's lobe
-//   (`reflected`).
+//   the sky's in its reflectance (`scattered`), the lights' by Kulla and Conty's lobe (`lobe`).
 // - Occlusion, the map's and the view's, darkens only the sky's light (`ambient`).
 // - The view's reflections replace the sky's specular light where found (`reflection`).
 // - The shadow-casting light lights only what its shadow maps see.
@@ -197,15 +196,31 @@ static const float4 MISSED[5] = {
     float4(2.65828, -4.88738, -19.527, 12.4488),
 };
 
-// 1 less the single scattering's albedo at F0 1, at a cosine of `n_dot` and `alpha`: the split
-// sum's 1 - (A + B), without its table, which only a sky makes. A polynomial in alpha and
-// s = n_dot / (n_dot + alpha), by which Smith's masking goes, fitted to prefilter.slang's sum:
-// within 0.004.
-float missed(float n_dot, float alpha) {
-    float s = n_dot / (n_dot + alpha);
-    float4 by_s = MISSED[0] + s * (MISSED[1] + s * (MISSED[2] + s * (MISSED[3] + s * MISSED[4])));
+// `MISSED` at one alpha, a quartic in s: its coefficients for s's powers 0 to 3 (`low`) and 4.
+struct MissedFit {
+    float alpha;
+    float4 low;
+    float high;
+};
+
+MissedFit missed_fit(float alpha) {
     float4 by_alpha = float4(1.0, alpha, alpha * alpha, alpha * alpha * alpha);
-    return max(dot(by_alpha, by_s), 0.0);
+    MissedFit fit;
+    fit.alpha = alpha;
+    fit.low = float4(dot(by_alpha, MISSED[0]), dot(by_alpha, MISSED[1]), dot(by_alpha, MISSED[2]),
+                     dot(by_alpha, MISSED[3]));
+    fit.high = dot(by_alpha, MISSED[4]);
+    return fit;
+}
+
+// 1 less the single scattering's albedo at F0 1, at a cosine of `n_dot` and `fit`'s alpha: the
+// split sum's 1 - (A + B), without its table, which only a sky makes. A polynomial in alpha and
+// s = n_dot / (n_dot + alpha), by which Smith's masking goes, fitted to prefilter.slang's sum:
+// within 0.004. Alpha's terms are taken once (`missed_fit`): the lights' lobe takes this per light.
+float missed(MissedFit fit, float n_dot) {
+    float s = n_dot / (n_dot + fit.alpha);
+    float4 c = fit.low;
+    return max(c.x + s * (c.y + s * (c.z + s * (c.w + s * fit.high))), 0.0);
 }
 
 // The least roughness the lights' lobe of light scattered more than once takes its shape at.
@@ -348,10 +363,8 @@ struct Surface {
     // What specular light is scaled by: 1, or 0 where the view shows diffuse light alone (a
     // diffuse color of 0 shows specular alone).
     float3 specular_weight;
-    // The lights' lobe of light scattered more than once (`reflected`) but its shape, `missed` at
-    // the light's cosine and `lobe_alpha`.
-    float3 lobe;
-    float lobe_alpha;
+    // The shape of the lights' lobe of light scattered more than once (`reflected`).
+    MissedFit lobe_fit;
 };
 
 // The light the frame's `i`th light shines on `world`, before its shadows and the exposure, and
@@ -403,13 +416,10 @@ float3 brdf(Surface surface, float3 to_light, float n_dot_l) {
     return diffuse + specular;
 }
 
-// The light the frame's `i`th light reflects from `surface` toward the view, before the exposure:
-// `brdf`'s single scattering, and Kulla and Conty's lobe of what scatters more than once.
-// `scattered` at the view times `missed` at the light, over pi and `missed`'s mean, so the lights
-// of every way sum to `scattered`. Against trace.slang's walk, which paths take in its place:
-// within 12% at roughness 0.75 and 1. Smoother surfaces glow with lights behind them, where they
-// reflect little: 37% over at 0.5.
-float3 reflected(Frame frame, Surface surface, uint i) {
+// The light the frame's `i`th light reflects from `surface` toward the view by `brdf`'s single
+// scattering, before the exposure. Adds to `spread` that light times `missed` at its cosine, the
+// shape of Kulla and Conty's lobe of what scatters more than once, which `lobe` scales.
+float3 reflected(Frame frame, Surface surface, uint i, inout float3 spread) {
     float3 to_light;
     float3 radiance = arriving(frame, i, surface.world, to_light);
     float n_dot_l = dot(surface.normal, to_light);
@@ -419,8 +429,22 @@ float3 reflected(Frame frame, Surface surface, uint i) {
     if (i == frame.shadows.light) {
         radiance *= shadowed(frame.shadows, surface.world, surface.surface_normal, to_light);
     }
-    float3 lobe = surface.lobe * surface.specular_weight * missed(n_dot_l, surface.lobe_alpha);
-    return (brdf(surface, to_light, n_dot_l) + lobe) * radiance * n_dot_l;
+    float3 received = radiance * n_dot_l;
+    spread += received * missed(surface.lobe_fit, n_dot_l);
+    return brdf(surface, to_light, n_dot_l) * received;
+}
+
+// What Kulla and Conty's lobe reflects per unit of `reflected`'s `spread`: `scattered` at the view
+// over pi and `missed`'s mean, so the lights of every way sum to `scattered`. Taken once, after the
+// lights, as alpha's terms are (`missed_fit`): the lobe costs Bistro's view pass 3%, half what it
+// cost taken per light. Against trace.slang's walk, which paths take in its place: within 12% at
+// roughness 0.75 and 1. Smoother surfaces glow with lights behind them, where they reflect little:
+// 37% over at 0.5.
+float3 lobe(Surface surface, float roughness) {
+    float missed_here = missed(missed_fit(roughness * roughness), surface.n_dot_v);
+    float lobe_roughness = max(roughness, LEAST_LOBE_ROUGHNESS);
+    return scattered(surface.f0, roughness, surface.n_dot_v, missed_here) * surface.specular_weight
+        / (PI * missed_mean(lobe_roughness));
 }
 
 // The ambient light's share reaching `pixel`: the less of the view's ambient occlusion and the
@@ -774,9 +798,7 @@ Surface surface_of(Material material, float3 world, float3 view, float3 interpol
     out.alpha2 = alpha * alpha;
     out.specular_weight = float3(1.0);
     float lobe_roughness = max(roughness, LEAST_LOBE_ROUGHNESS);
-    out.lobe_alpha = lobe_roughness * lobe_roughness;
-    out.lobe = scattered(out.f0, roughness, out.n_dot_v, missed(out.n_dot_v, alpha))
-        / (PI * missed_mean(lobe_roughness));
+    out.lobe_fit = missed_fit(lobe_roughness * lobe_roughness);
     return out;
 }
 
@@ -817,14 +839,15 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
         lit.specular_weight = float3(0.0);
     }
     float3 light_sum = float3(0.0);
+    float3 spread = float3(0.0);
     Clusters clusters = frame.clusters;
     for (uint i = 0; i < clusters.everywhere; i++) {
-        light_sum += reflected(frame, lit, i);
+        light_sum += reflected(frame, lit, i, spread);
     }
     uint found = cluster(clusters, world);
     if (found == NO_CLUSTER) {
         for (uint i = clusters.everywhere; i < frame.light_count; i++) {
-            light_sum += reflected(frame, lit, i);
+            light_sum += reflected(frame, lit, i, spread);
         }
     } else {
         // Through the lights' address, which the bits follow (`Clusters` says why), by a pointer
@@ -839,12 +862,12 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
             while (bits != 0) {
                 uint bit = firstbitlow(bits);
                 bits &= bits - 1;
-                light_sum += reflected(frame, lit, clusters.everywhere + word * 32 + bit);
+                light_sum += reflected(frame, lit, clusters.everywhere + word * 32 + bit, spread);
             }
         }
     }
     float n_dot_v = lit.n_dot_v;
-    float3 direct = light_sum;
+    float3 direct = light_sum + spread * lobe(lit, roughness);
     // The view's reflection, already exposed (the trace takes it to this frame's exposure), so
     // neither the sky's luminance nor the exposure scales it: in place of its share of the sky's
     // specular light, times that light's reflectance.

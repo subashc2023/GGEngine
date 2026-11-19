@@ -7093,7 +7093,7 @@ const METAL_SKY_LIGHT_ERROR: [f32; 5] = [0.05, 0.05, 0.05, 0.07, 0.05];
 /// The raster's lights checked against the path tracer's on rough colored metal: open ground in
 /// strips of roughness 0.5, 0.75 and 1, seen from above at 45 degrees, lit by one sun at a time, in
 /// the view's mirror way and then across it. Paths walk the microsurface, so they hold the raster's
-/// light scattered more than once (`reflected`'s lobe) to it. Each strip's mean light is within
+/// light scattered more than once (shading.slang's `lobe`) to it. Each strip's mean light is within
 /// [`LIGHTS_ERROR`] of the paths' at 64 a pixel. Without the lobe, the roughest strips are 55% and
 /// 58% dark.
 fn the_rasters_lights_match_paths_traced() {
