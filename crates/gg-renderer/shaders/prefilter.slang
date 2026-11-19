@@ -1,6 +1,6 @@
 // The sky's prefiltering, in compute passes, as Khronos's glTF Sample Renderer prefilters an
 // environment (source/shaders/ibl_filtering.frag, at commit df3e51cb):
-// - an image sky's sun, found by contrast with the sky round it, which a light stands for;
+// - an image sky's sun, found by contrast with the sky round it, which lights as a light;
 // - the sky's equirectangular image into a cube, each level averaging the one before;
 // - from that cube, Lambert's diffuse light, cosine-weighted, and GGX's specular at each level, a
 //   step of roughness each. Both importance sample the cube's levels by the solid angle a sample
@@ -48,8 +48,7 @@ struct Push {
     float roughness;
     // Samples per texel.
     uint samples;
-    // 1 if the cube leaves out a found sun, as a directional light stands for it.
-    uint leaves;
+    uint unused;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -103,8 +102,8 @@ groupshared float3 weighted[SUN_GROUP];
 
 // The image sky's sun, by one workgroup, so its sums come out alike from run to run: its brightest
 // texel, the median of the sky round it, and, if that texel is a sun's, what the texels near it add
-// over that median. A scan of every texel, then of the rows near it: about a millisecond for a 1K
-// sky on an RTX 4090. Past 4K, the scan would take a workgroup's partial result each, then a reduce.
+// over that median. A scan of every texel, then of the rows near it: 0.3 ms for a 1K sky on an RTX
+// 4090. Past 4K, the scan would take a workgroup's partial result each, then a reduce.
 [shader("compute")]
 [numthreads(SUN_GROUP, 1, 1)]
 void sun_main(uint3 id: SV_DispatchThreadID) {
@@ -218,8 +217,8 @@ void sun_main(uint3 id: SV_DispatchThreadID) {
 }
 
 // The sky into a cube's first level: each texel the mean of four points of the image across it.
-// Where it leaves out a found sun, each point within `SUN_REACH` of it is kept to the sky's
-// median round it, keeping its hue, as `sun_main` summed what's past that.
+// It leaves out a found sun, which lights as a light: each point within `SUN_REACH` of it is kept
+// to the sky's median round it, keeping its hue, as `sun_main` summed what's past that.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cube_main(uint3 id: SV_DispatchThreadID) {
@@ -229,7 +228,7 @@ void cube_main(uint3 id: SV_DispatchThreadID) {
     Texture2D sky = textures[push.source];
     SamplerState repeat = samplers[LINEAR_REPEAT];
     Sun sun = push.sun[0];
-    bool leaves = push.leaves != 0 && sun.found != 0;
+    bool leaves = sun.found != 0;
     float3 sum = float3(0.0);
     for (uint i = 0; i < 4; i++) {
         float2 at = float2(id.xy) + float2(0.25 + 0.5 * (i & 1), 0.25 + 0.5 * (i >> 1));

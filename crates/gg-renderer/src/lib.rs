@@ -139,7 +139,7 @@ use pick::Picks;
 use reflections::ReflectionPass;
 use show::ShowPass;
 use skin::Skinning;
-use sky::{SkyLight, SkyPass};
+use sky::{SkyLight, SkyPass, SkySun};
 use smaa::SmaaPass;
 use taa::TaaPass;
 use tonemap::TonemapPass;
@@ -191,9 +191,12 @@ pub struct Renderer {
     sky: Option<SkyPass>,
     /// Apart from the sky's pipelines, as frames take its images as targets while recording.
     sky_light: SkyLight,
+    /// An image sky's sun, as frames find it and read it back.
+    sky_sun: SkySun,
     /// Made by the first frame with an atmosphere.
     atmosphere: Option<AtmospherePass>,
-    /// The frame's lights, an atmosphere's sun dimmed by the air. Kept across frames.
+    /// The frame's lights, an atmosphere's sun dimmed by the air, or an image sky's sun in place of
+    /// the directional lights. Kept across frames.
     sunlit: Vec<Light>,
     /// Declared afresh each frame, in the last's memory.
     graph: Graph,
@@ -376,6 +379,7 @@ impl Renderer {
             images: Vec::new(),
             sky: None,
             sky_light: SkyLight::default(),
+            sky_sun: SkySun::default(),
             atmosphere: None,
             sunlit: Vec::new(),
             graph: Graph::default(),

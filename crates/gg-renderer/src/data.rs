@@ -173,7 +173,8 @@ pub struct RenderData<'a> {
     pub time: f32,
     /// The view's lights, which shaders read ([`Shaders::add`]). Without lights or a sky, models'
     /// materials draw unlit, by base color alone. The brightest directional light with a shadow
-    /// distance casts shadows ([`Light::shadow_distance`]).
+    /// distance casts shadows ([`Light::shadow_distance`]). Under an image sky with a sun, its sun
+    /// lights in place of the directional lights, as [`Sky`] says.
     pub lights: &'a [Light],
     /// What the view shows behind the world, in place of the clear color, and is lit by from all
     /// around; shaders read it too. It applies from the first frame that renders the view once its

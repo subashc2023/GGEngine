@@ -23,7 +23,7 @@ use crate::motion_blur::MotionBlurPass;
 use crate::particles::{ParticlePass, ParticlePlan};
 use crate::pick::Picks;
 use crate::reflections::{ReflectionData, ReflectionPass};
-use crate::shadow::{CASCADES, Cascades, MAP_SIZE, ShadowData};
+use crate::shadow::{self, CASCADES, Cascades, MAP_SIZE, ShadowData};
 use crate::show::ShowPass;
 use crate::skin::{SkinPlan, Skinning};
 use crate::sky::{SkyData, SkyPass, Source};
@@ -33,10 +33,10 @@ use crate::tonemap::TonemapPass;
 use crate::trace::{self, TracePass};
 use crate::view::{OutlinePass, OutlinePlan};
 use crate::{
-    AmbientOcclusion, Antialiasing, Channel, DrawCounts, Fog, FrameImage, Light, MotionBlur,
-    OFFSCREEN, Outline, Output, Pixels, Projection, Reflections, RenderData, Renderer, Show,
-    Tonemapper, Ui, Viewport, ao, atmosphere, bloom, depth_of_field, exposure, fog, lens, mesh,
-    motion_blur, reflections, show, sky, smaa, taa, ui,
+    AmbientOcclusion, Antialiasing, Channel, DrawCounts, Fog, FrameImage, Light, LightKind,
+    MotionBlur, OFFSCREEN, Outline, Output, Pixels, Projection, Reflections, RenderData, Renderer,
+    Show, Tonemapper, Ui, Viewport, ao, atmosphere, bloom, depth_of_field, exposure, fog, lens,
+    mesh, motion_blur, reflections, show, sky, smaa, taa, ui,
 };
 
 /// Warns that the view shows image `name`, which the frame doesn't make, unless it's `found`.
@@ -401,35 +401,42 @@ impl Renderer {
         {
             *image = ColorImage::new(&self.device, size[0], size[1], OFFSCREEN)?;
         }
-        // The atmosphere shown in place of an image sky, if any, and the frame's lights, its sun's
-        // dimmed by the air toward the viewer.
+        // The atmosphere shown in place of an image sky, if any.
         let atmosphere = (data.atmosphere.filter(|_| renders_view))
             .map(|atmosphere| atmosphere::Seen::new(atmosphere, data.lights, &altitude));
-        let shining = match &atmosphere {
-            Some(seen) if seen.dims() => {
+        // What the sky's light is prefiltered from, and what a texel of 1 stands for: the
+        // atmosphere, of a sun of illuminance 1; or the image sky, while its slot shows its own
+        // image, with that image's size and how many times the slot has changed image.
+        let sky = match &atmosphere {
+            Some(seen) => Some((Source::Atmosphere(seen.lit()), seen.illuminance())),
+            None => data.sky.filter(|_| renders_view).and_then(|sky| {
+                let (size, shown) = self.meshes.texture_shown(sky.texture)?;
+                Some((Source::Image { sky, size, shown }, sky.luminance))
+            }),
+        };
+        // The frame's lights: the atmosphere's sun dimmed by the air toward the viewer; or the
+        // image sky's sun, once read back, in place of the directional lights, shadowing as far as
+        // the brightest of them would.
+        let image_sun = sky.and_then(|(source, luminance)| {
+            let reach = shadow::caster(data.lights).map(|(_, _, distance)| distance);
+            Some(self.sky_sun.of(&source)?.light(luminance, reach))
+        });
+        let shining = match (&atmosphere, image_sun) {
+            (Some(seen), _) if seen.dims() => {
                 self.sunlit.clear();
                 self.sunlit.extend_from_slice(data.lights);
                 seen.dim(&mut self.sunlit);
                 &self.sunlit[..]
             }
+            (_, Some(sun)) => {
+                self.sunlit.clear();
+                self.sunlit.push(sun);
+                let others =
+                    (data.lights.iter()).filter(|light| light.kind != LightKind::Directional);
+                self.sunlit.extend(others);
+                &self.sunlit[..]
+            }
             _ => data.lights,
-        };
-        // What the sky's light is prefiltered from, and what a texel of 1 stands for: the
-        // atmosphere, of a sun of illuminance 1; or the image sky, while its slot shows its own
-        // image, with that image's size, how many times the slot has changed image, and whether
-        // its light leaves out its sun, as a directional light stands for it.
-        let sky = match &atmosphere {
-            Some(seen) => Some((Source::Atmosphere(seen.lit()), seen.illuminance())),
-            None => data.sky.filter(|_| renders_view).and_then(|sky| {
-                let (size, shown) = self.meshes.texture_shown(sky.texture)?;
-                let source = Source::Image {
-                    sky,
-                    size,
-                    shown,
-                    leaves: sky::stood_for(shining),
-                };
-                Some((source, sky.luminance))
-            }),
         };
         if sky.is_some() && self.sky.is_none() {
             self.sky = Some(SkyPass::new(&self.device)?);
@@ -497,9 +504,9 @@ impl Renderer {
         // sky's cube is made from.
         let tables = atmosphere.as_ref().map(|_| AtmospherePass::plan(graph));
         // Then the sky's prefiltering, in the first frame to render the view since: its texture
-        // came to show its image; a directional light came to stand for its sun or ceased to; or,
-        // for the atmosphere, its sun turned or the viewer rose or fell past what the light holds.
-        // Its images are the targets after those. Other frames reuse the light.
+        // came to show its image; or, for the atmosphere, its sun turned or the viewer rose or fell
+        // past what the light holds. Its images are the targets after those. Other frames reuse
+        // the light.
         let plan = match sky {
             Some((source, _)) if !self.sky_light.holds(&source) => {
                 let first = occlusion_first + occludes;
@@ -606,6 +613,10 @@ impl Renderer {
                 adapting.meter(metered, mean);
             }
         }
+        // The image sky's sun that frame found, which lights from the next frame on.
+        if let (Some(sun), Some((_, luminance))) = (self.sky_sun.read(&frame), sky) {
+            sky::report(sun, luminance, data.lights);
+        }
         let adapting = &mut self.adapting[usize::from(data.looked)];
         let exposure = adapting.step(data.adaptation, data.exposure, number, data.time);
         self.exposed = exposure;
@@ -651,7 +662,7 @@ impl Renderer {
                         .expect("made for an atmosphere to show");
                     made.cube(&mut frame, plan, tables, air);
                 }
-                _ => pass.image_to_cube(&mut frame, plan),
+                _ => pass.image_to_cube(&mut frame, plan)?,
             }
             pass.prefilter(&mut frame, plan);
         }
@@ -775,6 +786,7 @@ impl Renderer {
         frame.submit()?;
         if let Some(plan) = &plan {
             self.sky_light.prefiltered(plan);
+            self.sky_sun.prefiltered(plan, number);
         }
         if keeps {
             self.reflected.kept(number, size, unjittered, self.exposed);
@@ -837,11 +849,11 @@ fn plan_view(
     let particle_plan = particles.plan(graph, data.draws);
     let born = particle_plan.as_ref();
     let aspect = data.viewport.aspect();
-    // From the lights as they shine outside an atmosphere, so its sun casts shadows while it's up
-    // however dim, and none once it's set.
+    // From the lights as they shine, an image sky's sun among them, but outside a risen
+    // atmosphere, so its sun casts shadows while it's up however dim, and none once it's set.
     let casters = match &atmosphere {
-        Some(seen) if seen.set() => shining,
-        _ => data.lights,
+        Some(seen) if !seen.set() => data.lights,
+        _ => shining,
     };
     let cascades = Cascades::fit(casters, &data.viewpoint, aspect);
     let mut cull = (meshes.cull_bounds(data.draws))

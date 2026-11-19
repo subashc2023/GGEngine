@@ -42,6 +42,30 @@ const MARGIN: f32 = 8.0;
 /// The share of their reach after which the shadows fade, so they end without an edge.
 const FADE_FROM: f32 = 0.9;
 
+/// The brightest shadow caster among `lights` (the first among equals): its index, its unit
+/// direction and its shadow distance. A caster is directional, has some light, shines some way, and
+/// has a finite, positive shadow distance.
+pub(crate) fn caster(lights: &[Light]) -> Option<(usize, Vec3, f32)> {
+    let luminance = |light: &Light| light.color.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    (lights.iter().enumerate())
+        .filter_map(|(i, light)| {
+            let distance = light.shadow_distance?;
+            let direction = light.direction.try_normalize()?;
+            let casts = light.kind == LightKind::Directional
+                && light.color.cmpgt(Vec3::ZERO).any()
+                && distance > 0.0
+                && distance.is_finite();
+            casts.then_some((i, direction, distance))
+        })
+        .reduce(|best, next| {
+            if luminance(&lights[next.0]) > luminance(&lights[best.0]) {
+                next
+            } else {
+                best
+            }
+        })
+}
+
 /// A light's shadow cascades, fitted to the view.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Cascades {
@@ -60,29 +84,10 @@ pub(crate) struct Cascades {
 }
 
 impl Cascades {
-    /// The cascades of the brightest shadow caster among `lights` (the first among equals), fitted
-    /// to `viewpoint` at `aspect` (width over height). A caster is directional, has some light,
-    /// shines some way, and has a finite, positive shadow distance. `None` if none casts, or the
-    /// view sees nothing within the distance.
+    /// The cascades of [`caster`]'s light among `lights`, fitted to `viewpoint` at `aspect` (width
+    /// over height). `None` if none casts, or the view sees nothing within the distance.
     pub(crate) fn fit(lights: &[Light], viewpoint: &Viewpoint, aspect: f32) -> Option<Self> {
-        let luminance = |light: &Light| light.color.dot(Vec3::new(0.2126, 0.7152, 0.0722));
-        let (light, direction, distance) = (lights.iter().enumerate())
-            .filter_map(|(i, light)| {
-                let distance = light.shadow_distance?;
-                let direction = light.direction.try_normalize()?;
-                let casts = light.kind == LightKind::Directional
-                    && light.color.cmpgt(Vec3::ZERO).any()
-                    && distance > 0.0
-                    && distance.is_finite();
-                casts.then_some((i, direction, distance))
-            })
-            .reduce(|best, next| {
-                if luminance(&lights[next.0]) > luminance(&lights[best.0]) {
-                    next
-                } else {
-                    best
-                }
-            })?;
+        let (light, direction, distance) = caster(lights)?;
         // Any up but one along the light.
         let up = if direction.y.abs() > 0.99 {
             Vec3::Z

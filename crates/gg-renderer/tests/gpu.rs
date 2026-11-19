@@ -10182,27 +10182,22 @@ fn specular_glossiness_shades_as_its_metallic_roughness_equal() {
     shut_down(renderer);
 }
 
-/// A sky's sun texel lights a floor through the sky's light alone; with a light for the sun, the
-/// sky's light leaves it out, the floor as under the sunless sky. Prefiltered again as the light
-/// comes and goes. Alike for a sun past 10⁷ cd/m² and one a thousandth as bright, which is found by
-/// contrast with the sky round it alone.
+/// A sky's sun lights once, as a light of what it adds over the sky round it: a floor under a
+/// plate shows as under the sunless sky lit by that light, the plate's shadow falling away from the
+/// sun. A directional light shining another way gives way to it; without one, the sun casts no
+/// shadow. Alike for a sun past 10⁷ cd/m² and one a thousandth as bright, found by contrast alone.
 fn a_skys_sun_lights_once() {
-    const SIZE: u32 = 8;
+    const SIZE: u32 = 64;
     const SKY: [u32; 2] = [512, 256];
-    const SUN: [u32; 2] = [256, 64];
+    const SUN: [u32; 2] = [256, 40];
     let mut renderer = renderer(SIZE, SIZE);
     let mut stores = Stores::default();
-    let viewpoint = Viewpoint {
-        position: DVec3::new(0.0, 5.0, 0.0),
-        rotation: Quat::from_rotation_x(-FRAC_PI_2),
-        projection: Projection::Orthographic {
-            height: 1.0,
-            near: 0.5,
-            far: 10.0,
-        },
-    };
-    // The texel's 6,260, over about 1.07 × 10⁻⁴ sr, lights the floor about as much as the sky's
-    // 0.1; the sky's light keeps it to that 0.1.
+    let viewpoint = looking_down(Vec3::new(0.0, 5.0, 0.0), 8.0, 21.0);
+    let viewport = filling([SIZE, SIZE]);
+    // The floor's pixel at `x`, `z` from the origin, the view's center.
+    let at = |x: f32, z: f32| [(32.0 + 8.0 * x) as u32, (32.0 + 8.0 * z) as u32];
+    // The texel's 6,260, over about 7.2 × 10⁻⁵ sr, lights the floor more than the sky's 0.1; the
+    // sky's light keeps it to that 0.1.
     let texel = |sun: bool| {
         move |x, y| {
             if sun && [x, y] == SUN {
@@ -10213,11 +10208,15 @@ fn a_skys_sun_lights_once() {
         }
     };
     let sky = sky_texture(&mut stores.textures, SKY, texel(true));
-    // Toward the sun's texel's center, as the image maps ways.
+    // Toward the sun's texel's center, as the image maps ways, 61° up and along +X; and the solid
+    // angle the texel covers.
     let across = ((SUN[0] as f32 + 0.5) / SKY[0] as f32 - 0.5) * 2.0 * PI;
     let down = (SUN[1] as f32 + 0.5) / SKY[1] as f32 * PI;
     let (sin, cos) = (math::libm::sinf, math::libm::cosf);
     let to_sun = Vec3::new(cos(across) * sin(down), cos(down), sin(across) * sin(down));
+    let solid_angle = 2.0 * PI * PI / (SKY[0] * SKY[1]) as f32 * sin(down);
+    // A floor, and a unit plate 2 above its middle: the sun shadows the floor about a unit along
+    // -X, the other light a unit along -Z.
     let square = model_square(&mut stores.meshes);
     let white = Material {
         color: Vec4::ONE,
@@ -10225,87 +10224,90 @@ fn a_skys_sun_lights_once() {
         ..Material::default()
     };
     let white = stores.materials.add(&white);
-    let floor = MeshDraw::with_material(square, white, &stores.materials, &mut stores.shaders);
+    let draw = MeshDraw::with_material(square, white, &stores.materials, &mut stores.shaders);
     let mut draws = Draws::default();
-    draws.push_draw(facing_up(2.0, Vec3::ZERO), &floor, 0);
-    let viewport = filling([SIZE, SIZE]);
+    draws.push_draw(facing_up(20.0, Vec3::ZERO), &draw, 0);
+    draws.push_draw(facing_up(1.0, Vec3::new(0.0, 2.0, 0.0)), &draw, 0);
+    let [from_sun, from_other, open] = [at(-1.1, 0.0), at(0.0, -1.0), at(2.0, 2.0)];
     // A texel of 1 is 10⁶ cd/m², then 10³: the sun's 6.26 × 10⁹, then 6.26 × 10⁶.
     for scale in [1.0, 1.0e-3] {
+        let luminance = 1.0e6 * scale;
+        // The light the sun stands for, and one twice as bright another way.
+        let found = Light {
+            color: Vec3::splat((6260.0 - 0.1) * solid_angle * luminance),
+            ..sun(-to_sun, Some(100.0))
+        };
+        let other = Light {
+            color: found.color * 2.0,
+            ..sun(Vec3::new(0.0, -2.0, -1.0), Some(100.0))
+        };
+        // The sky at 0.2 on the floor. The sun reads back two frames after the sky's prefiltered,
+        // and lights from the frame after.
+        let floor_shows = |renderer: &mut Renderer, stores: &mut Stores| {
+            settle(renderer, stores, viewport, viewpoint, &draws);
+            for _ in 0..6 {
+                let data = RenderData {
+                    exposure: 2.0e-6 / scale,
+                    ..stores.data(viewport, viewpoint, &draws)
+                };
+                render_without_ui(renderer, data);
+            }
+            frame_pixels(renderer)
+        };
         let with = sky_pixels(SKY, texel(true));
         let replaced = (stores.textures).replace("sky", sky, SKY, with, Texels::Hdr);
         replaced.expect("a sky with its sun");
         stores.sky = Some(Sky {
             texture: sky,
-            luminance: 1.0e6 * scale,
+            luminance,
         });
-        let sun = Light {
-            kind: LightKind::Directional,
-            position: Vec3::ZERO,
-            direction: -to_sun,
-            color: Vec3::splat(6.0e5 * scale),
-            range: None,
-            shadow_distance: None,
-        };
-        // The sky at 0.2 on the floor.
-        let floor_shows = |renderer: &mut Renderer, stores: &mut Stores| {
-            let data = RenderData {
-                exposure: 2.0e-6 / scale,
-                ..stores.data(viewport, viewpoint, &draws)
-            };
-            render_without_ui(renderer, data);
-            pixel_at(&frame_pixels(renderer), SIZE, [SIZE / 2, SIZE / 2])
-        };
-        stores.lights = vec![sun];
-        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-        let lit_with_sun = floor_shows(&mut renderer, &mut stores);
+        stores.lights = vec![other];
+        let given_way = floor_shows(&mut renderer, &mut stores);
         stores.lights.clear();
-        let with_sun = floor_shows(&mut renderer, &mut stores);
+        let alone = floor_shows(&mut renderer, &mut stores);
         let without = sky_pixels(SKY, texel(false));
         let replaced = (stores.textures).replace("sky", sky, SKY, without, Texels::Hdr);
         replaced.expect("a sky without its sun");
-        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
-        let without_sun = floor_shows(&mut renderer, &mut stores);
-        stores.lights = vec![sun];
-        let lit_without_sun = floor_shows(&mut renderer, &mut stores);
+        stores.lights = vec![found];
+        let lit = floor_shows(&mut renderer, &mut stores);
+        let pixel = |frame: &[u8], at| pixel_at(frame, SIZE, at);
         assert!(
-            close(lit_with_sun, lit_without_sun),
-            "at {scale}, lit by the light that stands for its sun, the floor shows \
-             {lit_with_sun:?} under the sky with its sun and {lit_without_sun:?} under the sky \
-             without"
+            pixel(&lit, from_sun)[0] + 32 <= pixel(&lit, open)[0],
+            "at {scale}, lit by the light the sun stands for, the plate's shadow shows {:?}, too \
+             near the open floor's {:?}",
+            pixel(&lit, from_sun),
+            pixel(&lit, open)
         );
+        for (name, at) in [("sun's", from_sun), ("other's", from_other), ("open", open)] {
+            let [got, want] = [pixel(&given_way, at), pixel(&lit, at)];
+            assert!(
+                close(got, want),
+                "at {scale}, under the sky with its sun and a light another way, the floor shows \
+                 {got:?} at the {name} shadow, where under the sunless sky lit by the sun's light \
+                 it shows {want:?}"
+            );
+        }
+        let [shadowless, want] = [pixel(&alone, from_sun), pixel(&lit, open)];
         assert!(
-            with_sun[0] >= without_sun[0] + 32,
-            "at {scale}, lit by the sky alone, the floor shows {with_sun:?} under the sky with its \
-             sun, too near {without_sun:?} under the sky without"
-        );
-        assert!(
-            lit_without_sun[0] >= without_sun[0] + 32,
-            "at {scale}, the light lights the floor, {lit_without_sun:?}, much as the sun does: \
-             {without_sun:?} without it"
+            close(shadowless, want),
+            "at {scale}, under the sky with its sun alone, the floor shows {shadowless:?} where \
+             the plate would shadow it, not the open floor's {want:?}"
         );
     }
     shut_down(renderer);
 }
 
-/// A cloud's lit edge, 20 times the sky round it, isn't a sun: with a directional light shining,
-/// the sky's light keeps it whole. The light shines from below, lighting nothing the view shows.
+/// A cloud's lit edge, 20 times the sky round it, isn't a sun: the sky's light keeps it whole, and
+/// a directional light lights as given, the cloud adding to it.
 fn a_skys_bright_cloud_isnt_its_sun() {
     const SIZE: u32 = 8;
     const SKY: [u32; 2] = [512, 256];
     let mut renderer = renderer(SIZE, SIZE);
     let mut stores = Stores::default();
-    let viewpoint = Viewpoint {
-        position: DVec3::new(0.0, 5.0, 0.0),
-        rotation: Quat::from_rotation_x(-FRAC_PI_2),
-        projection: Projection::Orthographic {
-            height: 1.0,
-            near: 0.5,
-            far: 10.0,
-        },
-    };
+    let viewpoint = looking_down(Vec3::new(0.0, 5.0, 0.0), 1.0, 10.0);
     // 16 texels square round (256, 64), 45° up: its middle 20 times the sky, the rest 19, so the
-    // middle is the brightest texel and the 4° round it, which a sun would lose, most of the cloud.
-    // It adds about a ninth to the floor's light.
+    // middle is the brightest texel and the 4° round it, which a sun would take, most of the cloud.
+    // It adds about a tenth to the sky's light on the floor.
     let texel = |cloud: bool| {
         move |x: u32, y: u32| {
             if cloud && (248..264).contains(&x) && (56..72).contains(&y) {
@@ -10324,14 +10326,10 @@ fn a_skys_bright_cloud_isnt_its_sun() {
         texture: sky,
         luminance: 1.0e6,
     });
-    let below = Light {
-        kind: LightKind::Directional,
-        position: Vec3::ZERO,
-        direction: Vec3::Y,
-        color: Vec3::splat(6.0e5),
-        range: None,
-        shadow_distance: None,
-    };
+    stores.lights = vec![Light {
+        color: Vec3::splat(1.0e5),
+        ..sun(Vec3::NEG_Y, None)
+    }];
     let square = model_square(&mut stores.meshes);
     let white = Material {
         color: Vec4::ONE,
@@ -10343,31 +10341,28 @@ fn a_skys_bright_cloud_isnt_its_sun() {
     let mut draws = Draws::default();
     draws.push_draw(facing_up(2.0, Vec3::ZERO), &floor, 0);
     let viewport = filling([SIZE, SIZE]);
-    // The sky at 0.2 on the floor.
+    // The sky at 0.2 on the floor, the light about 0.06 more. A sun would read back two frames
+    // after the sky's prefiltered, and light from the frame after.
     let floor_shows = |renderer: &mut Renderer, stores: &mut Stores| {
         settle(renderer, stores, viewport, viewpoint, &draws);
-        let data = RenderData {
-            exposure: 2.0e-6,
-            ..stores.data(viewport, viewpoint, &draws)
-        };
-        render_without_ui(renderer, data);
+        for _ in 0..6 {
+            let data = RenderData {
+                exposure: 2.0e-6,
+                ..stores.data(viewport, viewpoint, &draws)
+            };
+            render_without_ui(renderer, data);
+        }
         pixel_at(&frame_pixels(renderer), SIZE, [SIZE / 2, SIZE / 2])
     };
     let clouded = floor_shows(&mut renderer, &mut stores);
-    stores.lights = vec![below];
-    let lit = floor_shows(&mut renderer, &mut stores);
     let clear = sky_pixels(SKY, texel(false));
     let replaced = (stores.textures).replace("sky", sky, SKY, clear, Texels::Hdr);
     replaced.expect("a sky without its cloud");
     let clear = floor_shows(&mut renderer, &mut stores);
     assert!(
         clouded[0] >= clear[0] + 4,
-        "the cloud lights the floor, {clouded:?}, little more than the clear sky does, {clear:?}"
-    );
-    assert!(
-        close(lit, clouded),
-        "with a light shining, the floor shows {lit:?} under the cloud, where without it shows \
-         {clouded:?}"
+        "lit by the light and the sky, the floor shows {clouded:?} under the cloud, too near \
+         {clear:?} under the clear sky"
     );
     shut_down(renderer);
 }

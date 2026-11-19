@@ -759,7 +759,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 |---|---|---|---|
 | Writes and uploads | Material table, the scene's changed records, streamed meshes and textures, recorded before any pass; tracing paths, BLASes, instances and the TLAS | `build BLAS`, `build TLAS` | `lib.rs`, `trace.rs`, gg-gpu `frame/upload.rs`, `frame/builds.rs` |
 | Atmosphere | Its tables, every frame it shows | `atmosphere transmittance`, `… multiple scattering`, `… sky view`, `… aerial perspective` | `atmosphere.rs` |
-| Sky light | Finds an image sky's sun; prefilters the sky into diffuse and specular cubes, and once the split sum's table, only as the sky changes | `sky sun`, `sky cube`, `sky levels`, `sky light`, `split sum` | `sky.rs` |
+| Sky light | Finds an image sky's sun and reads it back; prefilters the sky into diffuse and specular cubes, and once the split sum's table, only as the sky changes | `sky sun`, `read sky sun`, `sky cube`, `sky levels`, `sky light`, `split sum` | `sky.rs` |
 | Skin | Moves skinned meshes' vertices by their joints | `skin` (`skinned vertices`) | `skin.rs` |
 | Particle births | Writes the frame's births into the particle pool | `particle pool growth`, `particles moved`, `particles` | `particles.rs` |
 | Cull | Gathers opaque instances, culls them for the view and each cascade, picks levels, culls meshlets; on the compute queue | `cull gather`, `cull choose`, `cull offsets`, `cull write`, `cull meshlets` | `mesh/cull.rs` |
@@ -847,10 +847,14 @@ that are images. Paths are under `crates/gg-renderer/src/`.
   white sky shows 2.6% less than it.
 - One directional light casts shadows, the brightest that casts, in four cascades kept steady in
   the world as the view moves.
-- A sky is an image or an atmosphere, prefiltered on the GPU only as it changes. A sky's sun lights
-  once: with a directional light standing for it, the sky's light leaves out the sun, an image's
-  found by contrast with the sky round it. That light should shine from where the sky shows its
-  sun.
+- A sky is an image or an atmosphere, prefiltered on the GPU only as it changes. A sky and its sun
+  are one: the atmosphere is made from the brightest shining directional light; an image's sun,
+  found by contrast with the sky round it, lights as a directional light in place of the frame's,
+  shadowing as far as the brightest of them would. Swapping an image relights the world with no
+  light to aim. Either sky's light leaves its sun out.
+- An image's sun is found on the GPU and read back, so it lights from the fourth frame showing the
+  image; until then the directional lights do. Finding it on the CPU would need the image's texels
+  there, and BC6H decoded.
 - The atmosphere is Hillaire's. Its shaders work in kilometers above the ground, not radii, at
   which f32s are half a meter apart, so every GPU finds what's near the ground alike. The sun's
   light reaching the world is dimmed on the CPU, once a frame. A set sun casts no shadows; the
@@ -885,7 +889,7 @@ not a mode games ship with.
   transform unpacks them. The CPU gathers the instances, the scene's and the frame's draws', each
   frame that traces: a frame that doesn't costs nothing.
 - Paths by next-event estimation of the lights, which are deltas, and BSDF sampling of the sky,
-  which leaves out a sun a light stands for. Emission shows only on paths whose every bounce was
+  which leaves out its sun, a light. Emission shows only on paths whose every bounce was
   specular, as the raster lights nothing by it. GGX's specular light scattered more than once is
   exact, by Heitz et al.'s random walk on the microsurface, for the sky and every light. The
   raster's fits are held to it, so what they miss shows as measured differences.

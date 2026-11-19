@@ -14,7 +14,8 @@ use crate::{Component, Parent, Reflect, Transform, World};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum LightKind {
     /// Like the sun: all one way, along the entity's -Z. Lux, what reaches a surface facing it,
-    /// wherever it is.
+    /// wherever it is. Under an image sky with a sun, it gives way to that sun, as
+    /// [`Sky::Image`](crate::Sky::Image) says.
     #[default]
     Directional,
     /// From the entity, every way alike. Candela, falling with the square of distance.

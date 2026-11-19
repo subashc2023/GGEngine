@@ -17,9 +17,11 @@ pub enum Sky {
     /// luminance. Its middle column faces +X, a quarter across faces -Z, its top row is up: as in
     /// Khronos's glTF Sample Viewer and three.js.
     ///
-    /// Its sun lights once. With a shining directional light standing for the sun, the sky's light
-    /// leaves out the sun, found by contrast with the sky round it, so the sun lights through that
-    /// light alone. It should shine from where the sky shows the sun.
+    /// Its sun, found by contrast with the sky round it, lights as a directional light, from where
+    /// the sky shows it, as bright as it shows it. The world's directional lights give way to it,
+    /// and it casts shadows as far as the brightest of them would. The sky's light leaves it out. A
+    /// sky without a sun, as an overcast one, lights by all of itself, and directional lights light
+    /// as they are.
     Image(Texture),
     /// Hillaire's atmosphere, made from the world's brightest shining directional light, the sun.
     /// The sun's disk is drawn where it shines from, red and dim as it sets, gone at night when the

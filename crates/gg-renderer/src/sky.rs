@@ -10,12 +10,13 @@
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
-use gg_core::math::{Vec2, Vec3};
+use gg_core::math::{Vec2, Vec3, libm, to_degrees};
 use gg_core::{Result, label};
 use gg_gpu::{
     Blend, BufferId, ComputePipeline, Device, Format, Frame, Graph, GraphicsDesc, ImageId, Pass,
     PassId, Pipeline, StorageImage, Target,
 };
+use tracing::{info, warn};
 
 use crate::atmosphere::{self, Lit};
 use crate::{Light, LightKind, Texture, Viewpoint, taa};
@@ -55,21 +56,97 @@ const GROUP: u32 = 8;
 const SUN: &str = "sky sun";
 const SUN_BYTES: u64 = 48;
 
-/// Whether a directional light among `lights` shines, standing for an image sky's sun.
-pub(crate) fn stood_for(lights: &[Light]) -> bool {
-    lights.iter().any(|light| {
+/// An image sky's sun as its prefiltering found it: what it adds over the sky round it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Found {
+    /// A unit vector toward it.
+    pub(crate) way: Vec3,
+    /// Its illuminance facing it, in the sky's units: lux over the sky's luminance.
+    pub(crate) color: Vec3,
+}
+
+impl Found {
+    /// The directional light it lights by under a sky whose texel of 1 stands for `luminance`,
+    /// casting shadows `shadow_distance` ahead, if given.
+    pub(crate) fn light(&self, luminance: f32, shadow_distance: Option<f32>) -> Light {
+        Light {
+            kind: LightKind::Directional,
+            position: Vec3::ZERO,
+            direction: -self.way,
+            color: self.color * luminance,
+            range: None,
+            shadow_distance,
+        }
+    }
+}
+
+/// A readback of an image sky's sun, `Sun` in `shaders/prefilter.slang`: `Some(None)` for a sky
+/// without one, or one of no light or not finite; `None` for no readback.
+fn found(read: &[u8]) -> Option<Option<Found>> {
+    let (words, _) = read.as_chunks::<4>();
+    let words: &[[u8; 4]; 12] = words.first_chunk()?;
+    let float = |i: usize| f32::from_ne_bytes(words[i]);
+    let vector = |i: usize| Vec3::new(float(i), float(i + 1), float(i + 2));
+    let found = u32::from_ne_bytes(words[3]) != 0;
+    let (way, color) = (vector(4).try_normalize(), vector(8));
+    let lights = color.is_finite() && color.cmpgt(Vec3::ZERO).any();
+    Some(
+        way.filter(|_| found && lights)
+            .map(|way| Found { way, color }),
+    )
+}
+
+/// Logs an image sky's sun as read back, under a sky whose texel of 1 stands for `luminance`: its
+/// illuminance and how high it is, or that it has none. Warns of the directional lights among
+/// `lights` it lights in place of, by the brightest's angle from it and illuminance.
+pub(crate) fn report(sun: Option<Found>, luminance: f32, lights: &[Light]) {
+    let lux = |color: Vec3| color.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    let Some(sun) = sun else {
+        info!(
+            code = "renderer.sky_sun",
+            found = false,
+            "the image sky has no sun, so it lights by all of itself"
+        );
+        return;
+    };
+    let sky_lux = lux(sun.color) * luminance;
+    let elevation = to_degrees(libm::asinf(sun.way.y.clamp(-1.0, 1.0)));
+    info!(
+        code = "renderer.sky_sun",
+        found = true,
+        lux = sky_lux,
+        elevation,
+        "the image sky's sun lights as a light"
+    );
+    let shines = |light: &&Light| {
         light.kind == LightKind::Directional
             && light.color.cmpgt(Vec3::ZERO).any()
             && light.direction.try_normalize().is_some()
-    })
+    };
+    let given_way = lights.iter().filter(shines).count();
+    let brightest =
+        (lights.iter().filter(shines)).max_by(|a, b| lux(a.color).total_cmp(&lux(b.color)));
+    if let Some(light) = brightest {
+        let toward = -light.direction.normalize();
+        let off = to_degrees(libm::acosf(toward.dot(sun.way).clamp(-1.0, 1.0)));
+        warn!(
+            code = "renderer.sky_sun_replaces",
+            lights = given_way,
+            off,
+            lux = lux(light.color),
+            sky_lux,
+            "directional lights under an image sky give way to its sun"
+        );
+    }
 }
 
 /// The sky a frame shows, as [`RenderData::sky`](crate::RenderData::sky) gives it.
 ///
-/// Its sun lights once: a shining directional light stands for it, and casts the shadows the sky's
-/// light can't. The sky's light then leaves out the sun, found by contrast: its brightest texel, if
-/// at least 100 times the median of the sky 6° to 12° round it, and within 4° of that, what's past
-/// the median. Without such a light, the sky lights by all of it.
+/// Its sun lights once, as a light: its brightest texel, if at least 100 times the median of the sky
+/// 6° to 12° round it, and within 4° of that, what's past the median. The sky's light leaves it
+/// out. It lights in place of the frame's directional lights, casting shadows as far as the
+/// brightest of them would, from the fourth frame showing the image; until then they light. A sky
+/// without a sun, as an overcast one, lights by all of itself.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sky {
     /// Its equirectangular image of the world around: the center column toward +X, a quarter across
@@ -86,13 +163,11 @@ pub struct Sky {
 /// What a frame prefilters the sky's light from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Source {
-    /// An image sky, its texture shown for the `shown`th time, `size` texels across and down; its
-    /// light `leaves` out its sun if a directional light stands for it, as [`stood_for`] says.
+    /// An image sky, its texture shown for the `shown`th time, `size` texels across and down.
     Image {
         sky: Sky,
         size: [u32; 2],
         shown: u64,
-        leaves: bool,
     },
     /// The atmosphere, as the frame lights and sees it.
     Atmosphere(Lit),
@@ -100,20 +175,17 @@ pub(crate) enum Source {
 
 impl Source {
     /// Whether light prefiltered from `held` stands for this: the same showing of the same image,
-    /// leaving out its sun alike, or an atmosphere [near](Lit::near) it.
+    /// or an atmosphere [near](Lit::near) it.
     fn held_by(&self, held: &Source) -> bool {
         match (self, held) {
             (
-                Source::Image {
-                    sky, shown, leaves, ..
-                },
+                Source::Image { sky, shown, .. },
                 Source::Image {
                     sky: was,
                     shown: then,
-                    leaves: left,
                     ..
                 },
-            ) => sky.texture.index == was.texture.index && shown == then && leaves == left,
+            ) => sky.texture.index == was.texture.index && shown == then,
             (Source::Atmosphere(lit), Source::Atmosphere(was)) => lit.near(was),
             _ => false,
         }
@@ -157,7 +229,7 @@ struct PrefilterPush {
     size: u32,
     roughness: f32,
     samples: u32,
-    leaves: u32,
+    unused: u32,
 }
 
 /// `Push` in `shaders/sky.slang`, field for field.
@@ -211,19 +283,18 @@ impl SkyPass {
         })
     }
 
-    /// Records `plan`'s passes that find an image sky's sun and turn the sky into the cube's first
-    /// level, the next of `frame`'s graph.
+    /// Records `plan`'s passes that find an image sky's sun, read it back, and turn the sky into the
+    /// cube's first level, the next of `frame`'s graph.
+    ///
+    /// # Errors
+    ///
+    /// - The frames' readback buffer can't be made, as [`Frame::read_back`] says.
     ///
     /// # Panics
     ///
     /// - The plan's sky isn't an image.
-    pub(crate) fn image_to_cube(&self, frame: &mut Frame<'_>, plan: &Plan) {
-        let (
-            Source::Image {
-                sky, size, leaves, ..
-            },
-            Some((sun, find)),
-        ) = (plan.source, plan.sun)
+    pub(crate) fn image_to_cube(&self, frame: &mut Frame<'_>, plan: &Plan) -> Result<()> {
+        let (Source::Image { sky, size, .. }, Some((sun, find, read))) = (plan.source, plan.sun)
         else {
             panic!("an image sky is turned into a cube, and the plan's isn't one");
         };
@@ -237,11 +308,12 @@ impl SkyPass {
             size: 0,
             roughness: 0.0,
             samples: 0,
-            leaves: 0,
+            unused: 0,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch([1, 1, 1]);
         drop(pass);
+        frame.read_back(read)?;
         let face = plan.cube_face;
         let mut pass = frame.compute(plan.to_cube);
         pass.set_pipeline(&self.cube);
@@ -253,10 +325,11 @@ impl SkyPass {
             size: face,
             roughness: 0.0,
             samples: 0,
-            leaves: u32::from(leaves),
+            unused: 0,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch([face.div_ceil(GROUP), face.div_ceil(GROUP), 6]);
+        Ok(())
     }
 
     /// Records `plan`'s passes after the cube's first level, the next of `frame`'s graph:
@@ -277,7 +350,7 @@ impl SkyPass {
                 size,
                 roughness: 0.0,
                 samples: 0,
-                leaves: 0,
+                unused: 0,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(size, 6));
@@ -302,7 +375,7 @@ impl SkyPass {
                 size,
                 roughness,
                 samples: plan.samples[0],
-                leaves: 0,
+                unused: 0,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(size, 6));
@@ -316,7 +389,7 @@ impl SkyPass {
             size: IRRADIANCE,
             roughness: 0.0,
             samples: plan.samples[1],
-            leaves: 0,
+            unused: 0,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.dispatch(groups(IRRADIANCE, 6));
@@ -332,7 +405,7 @@ impl SkyPass {
                 size: TABLE,
                 roughness: 0.0,
                 samples: TABLE_SAMPLES,
-                leaves: 0,
+                unused: 0,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.dispatch(groups(TABLE, 1));
@@ -379,8 +452,9 @@ pub(crate) struct Plan {
     specular_levels: u32,
     /// The cube, the specular light, the diffuse light and the table, among the frame's targets.
     images: [ImageId; 4],
-    /// For an image sky, the buffer its sun is found into and the pass that finds it.
-    sun: Option<(BufferId, PassId)>,
+    /// For an image sky, the buffer its sun is found into, the pass that finds it, and its
+    /// readback.
+    sun: Option<(BufferId, PassId, PassId)>,
     to_cube: PassId,
     /// A pass per level after the cube's first, as many as it has, so a frame that prefilters
     /// again, as the atmosphere's sun turns, allocates nothing.
@@ -456,8 +530,9 @@ impl SkyLight {
     }
 
     /// Makes what a frame needs to prefilter `source`, and adds the passes to `graph`: first, for
-    /// an image sky, the pass finding its sun into a buffer the cube's first level reads. Their
-    /// images are the frame's targets from `first` on, in [`SkyLight::targets`]' order:
+    /// an image sky, the pass finding its sun into a buffer the cube's first level reads, and its
+    /// readback. Their images are the frame's targets from `first` on, in [`SkyLight::targets`]'
+    /// order:
     /// - the cube, sized as [`MOST_CUBE`] says, or [`atmosphere::CUBE`] for the atmosphere, with
     ///   its full chain of levels. Its first level's pass samples `sampled`, if given: the
     ///   atmosphere's sky table;
@@ -509,10 +584,8 @@ impl SkyLight {
         let [cube, specular, irradiance, table] = images;
         let sun = matches!(source, Source::Image { .. }).then(|| {
             let sun = graph.buffer(SUN, SUN_BYTES);
-            (
-                sun,
-                graph.compute(label!("sky sun")).write_buffer(sun).add(),
-            )
+            let find = graph.compute(label!("sky sun")).write_buffer(sun).add();
+            (sun, find, graph.read_back(label!("read sky sun"), sun))
         });
         let to_cube = graph.compute(label!("sky cube")).write(cube);
         let to_cube = match sampled {
@@ -520,7 +593,7 @@ impl SkyLight {
             None => to_cube,
         };
         let to_cube = match sun {
-            Some((sun, _)) => to_cube.read_buffer(sun),
+            Some((sun, ..)) => to_cube.read_buffer(sun),
             None => to_cube,
         }
         .add();
@@ -576,5 +649,79 @@ impl SkyLight {
         if let Source::Image { .. } = plan.source {
             self.cube = None;
         }
+    }
+}
+
+/// An image sky's sun, as frames that prefilter it find it and read it back two frames later. Apart
+/// from [`SkyLight`], whose images a frame holds as targets while the readback comes.
+#[derive(Default)]
+pub(crate) struct SkySun {
+    /// The frame that last found an image sky's sun, and that sky, until its readback comes.
+    finding: Option<(u64, Source)>,
+    /// The image sky whose sun last read back, and that sun, if it has one.
+    found: Option<(Source, Option<Found>)>,
+}
+
+impl SkySun {
+    /// The sun of `source`, an image sky, once its readback has come and if it has one.
+    pub(crate) fn of(&self, source: &Source) -> Option<Found> {
+        let (held, sun) = self.found.as_ref()?;
+        let image = matches!(source, Source::Image { .. });
+        (image && source.held_by(held)).then_some(*sun).flatten()
+    }
+
+    /// Notes that frame `number` has prefiltered by `plan`, finding an image sky's sun.
+    pub(crate) fn prefiltered(&mut self, plan: &Plan, number: u64) {
+        if let Source::Image { .. } = plan.source {
+            self.finding = Some((number, plan.source));
+        }
+    }
+
+    /// Takes the sun the frame two before `frame` found and read back, if it did: `Some(None)` for
+    /// a sky without one.
+    pub(crate) fn read(&mut self, frame: &Frame<'_>) -> Option<Option<Found>> {
+        let (number, source) = self.finding?;
+        let (read, bytes) = frame.buffer_read(SUN);
+        if read != number {
+            return None;
+        }
+        self.finding = None;
+        let sun = found(bytes)?;
+        self.found = Some((source, sun));
+        Some(sun)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// As `sun_main` writes it: a found sun's way, made a unit vector, and color; none if not
+    /// found, of no light, or of no way.
+    #[test]
+    fn a_found_sun_reads_back_as_its_way_and_color() {
+        let bytes = |found: u32, way: [f32; 3], color: [f32; 3]| {
+            let mut words = [0u32; 12];
+            words[3] = found;
+            for i in 0..3 {
+                words[4 + i] = way[i].to_bits();
+                words[8 + i] = color[i].to_bits();
+            }
+            words.map(u32::to_ne_bytes).concat()
+        };
+        let sun = found(&bytes(1, [0.0, 2.0, 0.0], [0.5, 0.4, 0.3]));
+        let up = Found {
+            way: Vec3::Y,
+            color: Vec3::new(0.5, 0.4, 0.3),
+        };
+        assert_eq!(sun, Some(Some(up)));
+        let light = up.light(1000.0, Some(50.0));
+        assert_eq!(light.direction, Vec3::NEG_Y);
+        assert_eq!(light.color, Vec3::new(500.0, 400.0, 300.0));
+        assert_eq!(found(&bytes(0, [0.0, 1.0, 0.0], [1.0; 3])), Some(None));
+        assert_eq!(found(&bytes(1, [0.0, 1.0, 0.0], [0.0; 3])), Some(None));
+        assert_eq!(found(&bytes(1, [0.0; 3], [1.0; 3])), Some(None));
+        assert_eq!(found(&bytes(1, [0.0, 1.0, 0.0], [f32::NAN; 3])), Some(None));
+        assert_eq!(found(&[]), None);
     }
 }
