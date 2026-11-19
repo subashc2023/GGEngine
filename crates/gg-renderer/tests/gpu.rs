@@ -84,7 +84,9 @@ fn main() -> ExitCode {
         the_sky_shows_each_way_behind_the_world,
         sky_lit_spheres_match_their_reference,
         path_traced_metal_reflects_all_of_a_furnace,
+        path_traced_rough_metal_scatters_as_its_microsurface,
         path_traced_sunlight_matches_the_rasters,
+        the_rasters_sky_light_matches_paths_traced,
         path_traced_light_leaves_the_rasters_passes_alone,
         path_traced_light_accumulates_until_the_view_moves,
         path_traced_masks_cover_as_the_raster_draws_them,
@@ -6719,10 +6721,10 @@ fn linear_mean(frame: &[u8], width: u32, center: [u32; 2], half: u32) -> Vec3 {
 }
 
 /// A furnace of metal: white metal spheres, so Fresnel 1 at every angle, at roughness 0.1 to 1,
-/// under a sky of one color and no lights. GGX with Turquin's compensation reflects all the light
-/// reaching it, so each sphere shows the sky's light, within 2%. A rough black dielectric beside
-/// them shows far less, so the rays found the spheres. It fails on GGX sampled wrongly, a wrong
-/// density, biased roulette or no compensation, whose loss grows with roughness.
+/// under a sky of one color and no lights. GGX scattering as often as it does reflects all the
+/// light reaching it, so each sphere shows the sky's light, within 2%. A rough black dielectric
+/// beside them shows far less, so the rays found the spheres. It fails on GGX sampled wrongly,
+/// biased roulette, or walks that lose light, whose loss grows with roughness.
 fn path_traced_metal_reflects_all_of_a_furnace() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 40;
@@ -6787,6 +6789,69 @@ fn path_traced_metal_reflects_all_of_a_furnace() {
     );
 }
 
+/// Open ground of rough colored metal, seen at 45 degrees, traced under a sky of one color, then
+/// under the sun alone, against Heitz et al.'s random walk on its microsurface run offline: uniform
+/// heights, Schlick's Fresnel at each scattering, four million paths in double precision, each
+/// mean to 0.03%. Within 2% each channel.
+/// It fails on Turquin's compensation, 6% and 10% off in the sky's green and blue and 15% and 11%
+/// in the sun's red and green.
+fn path_traced_rough_metal_scatters_as_its_microsurface() {
+    const SIZE: u32 = 32;
+    let Some(mut renderer) = tracing_renderer(SIZE, SIZE) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let metal = Material {
+        color: Vec4::new(0.9, 0.8, 0.6, 1.0),
+        workflow: metallic(1.0, 1.0),
+        ..Material::default()
+    };
+    let metal = stores.materials.add(&metal);
+    let floor = MeshDraw::with_material(square, metal, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 0);
+    // Down at 45 degrees, orthographic, so every point is seen at one angle.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 10.0, 10.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_4),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: 1.0,
+            far: 30.0,
+        },
+    };
+    let viewport = filling([SIZE, SIZE]);
+    const SKY: f32 = 0.5;
+    let sky = sky_texture(&mut stores.textures, [8, 4], |_, _| [SKY; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    // The directional albedo at 45 degrees.
+    let albedo = Vec3::new(0.8176, 0.6610, 0.4117);
+    // The sun, across the view's way, 63 degrees up; the BRDF times the cosine toward it.
+    const SUN: f32 = 2.0;
+    let toward_sun = Vec3::new(0.2345, 0.1858, 0.1110);
+    let mut check = |stores: &mut Stores, what: &str, expected: Vec3| {
+        settle(&mut renderer, stores, viewport, viewpoint, &draws);
+        let frame = traced(&mut renderer, stores, viewport, viewpoint, &draws, 64);
+        let mean = linear_mean(&frame, SIZE, [SIZE / 2, SIZE / 2], 8);
+        let off = (mean / expected - 1.0).abs().max_element();
+        assert!(
+            off < 0.02,
+            "{what}: {mean} against {expected}, {off:.3} off"
+        );
+    };
+    check(&mut stores, "the sky", albedo * SKY);
+    stores.sky = None;
+    stores.lights = vec![Light {
+        color: Vec3::splat(SUN),
+        ..sun(Vec3::new(0.5, -1.0, 0.0), None)
+    }];
+    check(&mut stores, "the sun", toward_sun * SUN);
+}
+
 /// The sun alone on a plane, rough gray: no sky, so the plane sees nothing else, and no shadows,
 /// so the raster's light is its BRDF times the sun's. The paths traced, through the same BRDF,
 /// agree with it within 1%.
@@ -6832,6 +6897,120 @@ fn path_traced_sunlight_matches_the_rasters() {
             "at {center:?}, traced {traced} and raster {raster}: {off:.4} off"
         );
     }
+}
+
+/// The raster's sky light checked against the path tracer's: open ground under a graded image sky,
+/// in strips of roughness 0 to 1, near ones metal and far ones a gray dielectric, seen from above
+/// at 45 degrees. Nothing but the sky lights it, so the raster's split sum and its irradiance stand
+/// against paths that sample the sky itself. Each strip's mean light is within
+/// [`SKY_LIGHT_ERROR`] of the paths' at 256 a pixel, the rough metals' within their miss, which
+/// docs/DEFECTS.md keeps.
+fn the_rasters_sky_light_matches_paths_traced() {
+    const WIDTH: u32 = 200;
+    const HEIGHT: u32 = 80;
+    const STRIPS: u32 = 5;
+    let Some(mut renderer) = tracing_renderer(WIDTH, HEIGHT) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let [width, height] = [128, 64];
+    let sky = sky_texture(&mut stores.textures, [width, height], |x, y| {
+        // How far up, from -1 straight down to 1 straight up, and round, from 0 at +X.
+        let up = 1.0 - 2.0 * (y as f32 + 0.5) / height as f32;
+        let round = (x as f32 + 0.5) / width as f32;
+        if up > 0.0 {
+            let pale = 1.0 - up;
+            // Brighter toward +X, so the lobes' reach round the sky shows.
+            let bright = 1.0 + 0.5 * math::libm::cosf(2.0 * PI * round);
+            [
+                (0.2 + 0.5 * pale) * bright,
+                (0.35 + 0.4 * pale) * bright,
+                0.8 * bright,
+            ]
+        } else {
+            [0.12, 0.09, 0.06]
+        }
+    });
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+    });
+    let square = model_square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    let roughness = |i: u32| i as f32 / (STRIPS - 1) as f32;
+    for (row, z) in [(0, 1.5), (1, -1.5)] {
+        for i in 0..STRIPS {
+            let material = Material {
+                color: if row == 0 {
+                    Vec4::new(0.9, 0.8, 0.6, 1.0)
+                } else {
+                    Vec4::new(0.5, 0.5, 0.5, 1.0)
+                },
+                workflow: metallic(if row == 0 { 1.0 } else { 0.0 }, roughness(i)),
+                ..Material::default()
+            };
+            let material = stores.materials.add(&material);
+            let draw =
+                MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+            let at = Vec3::new(2.0 * i as f32 - 4.0, 0.0, z);
+            let strip = Mat4::from_translation(at)
+                * Mat4::from_rotation_x(-FRAC_PI_2)
+                * Mat4::from_scale(Vec3::new(2.0, 3.0, 1.0));
+            draws.push_draw(strip, &draw, 0);
+        }
+    }
+    // Down at 45 degrees, orthographic, so every point of a strip is seen at one angle.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 10.0, 10.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_4),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: 1.0,
+            far: 30.0,
+        },
+    };
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    let raster = frame_pixels(&mut renderer);
+    let traced = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 256);
+    let mut missed = Vec::new();
+    for (row, y) in [("metal", HEIGHT * 3 / 4), ("dielectric", HEIGHT / 4)] {
+        for i in 0..STRIPS {
+            let center = [WIDTH / STRIPS * i + WIDTH / STRIPS / 2, y];
+            let [raster, traced] =
+                [&raster, &traced].map(|frame| linear_mean(frame, WIDTH, center, 5));
+            let off = luminance(raster) / luminance(traced) - 1.0;
+            let bound = if row == "metal" {
+                METAL_SKY_LIGHT_ERROR[i as usize]
+            } else {
+                SKY_LIGHT_ERROR
+            };
+            if off.abs() >= bound {
+                missed.push(format!(
+                    "{row} at roughness {:.2}: {:+.1}%",
+                    roughness(i),
+                    100.0 * off
+                ));
+            }
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "the raster's sky light misses by: {}",
+        missed.join("; ")
+    );
+}
+
+/// How far the raster's sky light may stray from the paths', as a share of their luminance.
+const SKY_LIGHT_ERROR: f32 = 0.05;
+/// The same for the metal strips, by roughness: rough ones miss by 6.3% and 15.5%, as
+/// docs/DEFECTS.md keeps.
+const METAL_SKY_LIGHT_ERROR: [f32; 5] = [0.05, 0.05, 0.05, 0.08, 0.17];
+
+/// Rec. 709's luminance of linear `color`.
+fn luminance(color: Vec3) -> f32 {
+    color.dot(Vec3::new(0.2126, 0.7152, 0.0722))
 }
 
 /// Paths traced read nothing the view's raster passes make: a sunlit floor under an atmosphere

@@ -7,13 +7,13 @@
 // `SURE_BOUNCES`:
 // - At each hit, every light by next-event estimation, with a shadow ray: the frame's lights are
 //   deltas, and the sky holds no sun a directional light stands for.
-// - Then a bounce by the BRDF's sampling: GGX's visible normals (Dupuy and Benyoub, "Sampling
-//   Visible GGX Normals with Spherical Caps", 2023) or the cosine, picked by their estimated shares.
+// - Then a bounce: the walk's way out (below), or the cosine, picked by their estimated shares.
 // - The sky's light (its specular cube's level 0) where a path escapes, emission where it hits it,
 //   and an unlit material's color, each over the exposure, as the view shows them already exposed.
-// - Materials as shading.slang's `surface_of` reads them, their maps at level 0, by its `brdf`,
-//   with Turquin's energy compensation ("Practical multiple scattering compensation for
-//   microfacet models", 2019) for the light GGX's single scattering loses.
+// - Materials as shading.slang's `surface_of` reads them, their maps at level 0, by its `brdf`.
+//   Specular light scattered more than once, which `brdf`'s GGX loses, by Heitz et al.'s random
+//   walk on the microsurface (`walked`): exact, where compensations such as Turquin's and the
+//   raster's Fdez-Agüera's are 10% off for a rough colored metal.
 // - The first hit antialiased by jittering each path within its pixel.
 // - Back faces culled but where a material is double-sided, as the view's draws cull them.
 // - A masked material's triangles hit where its alpha, at level 0, is at least its cutoff, as the
@@ -246,7 +246,9 @@ void basis(float3 n, out float3 t, out float3 b) {
     b = float3(c, s + n.y * n.y * a, -n.y);
 }
 
-// A normal of GGX's of `alpha` visible from `v`, about +Z, from two uniform numbers `u`.
+// A normal of GGX's of `alpha` visible from `v`, about +Z, from two uniform numbers `u` (Dupuy and
+// Benyoub, "Sampling Visible GGX Normals with Spherical Caps", 2023). `v` may be below the horizon,
+// as a walk's are: its density, v·h over π on the sphere, holds for any `v`.
 float3 visible_normal(float3 v, float alpha, float2 u) {
     float3 stretched = normalize(float3(alpha * v.x, alpha * v.y, v.z));
     float phi = 2.0 * PI * u.x;
@@ -256,14 +258,111 @@ float3 visible_normal(float3 v, float alpha, float2 u) {
     return normalize(float3(alpha * h.x, alpha * h.y, max(h.z, 0.0)));
 }
 
-// The density of `l` sampled by `visible_normal`'s reflection of `v`, about +Z: the visible
-// normals' over 4 v·h, which is G1(v) D(h) over 4 n·v.
-float specular_density(float3 v, float3 l, float alpha2) {
-    float3 h = normalize(v + l);
-    float spread = h.z * h.z * (alpha2 - 1.0) + 1.0;
-    float distribution = alpha2 / (PI * spread * spread);
-    float masking = 2.0 * v.z / (v.z + sqrt(alpha2 + (1.0 - alpha2) * v.z * v.z));
-    return masking * distribution / (4.0 * v.z);
+// Schlick's Fresnel of head-on color `f0` at cosine `c` to the normal.
+float3 schlick(float3 f0, float c) {
+    return f0 + (1.0 - f0) * pow5(1.0 - saturate(c));
+}
+
+// Specular light on a GGX microsurface by Heitz et al.'s random walk ("Multiple-Scattering
+// Microfacet BSDFs with the Smith Model", 2016, its conductor): heights uniform from -1 to 1,
+// directions about +Z. A walk from the top meets the surface where Smith's masking says, reflects
+// off a normal visible from where it came, by Schlick's Fresnel, and leaves or meets it again. Its
+// first scattering is `brdf`'s specular.
+
+// The most scatterings a walk takes: rough GGX's need more than 8 for 0.02% of their light, 16 for
+// none of a million paths.
+static const uint MOST_SCATTERINGS = 16;
+// The height of a walk that left: above every height of the surface.
+static const float LEFT = 2.0;
+
+// Smith's Λ of GGX of `alpha2` toward unit `w`, either side of the horizon: Λ(-w) = -1 - Λ(w).
+float smith_lambda(float3 w, float alpha2) {
+    float z2 = w.z * w.z;
+    float root = sqrt(1.0 + alpha2 * (1.0 - z2) / z2);
+    return w.z > 0.0 ? 0.5 * (root - 1.0) : -0.5 * (root + 1.0);
+}
+
+// The share of the surface's heights below `h`.
+float below(float h) {
+    return saturate(0.5 * (h + 1.0));
+}
+
+// Where a walk going `w` from height `h` next meets the surface, or `LEFT`, from uniform `u`. Going
+// up, it leaves with the chance nothing above masks it, Smith's G1 at `h`: below(h)^Λ(w).
+float next_height(float3 w, float h, float alpha2, float u) {
+    if (w.z > 0.9999) {
+        return LEFT;
+    }
+    if (w.z < -0.9999) {
+        return 2.0 * u * below(h) - 1.0;
+    }
+    if (abs(w.z) < 0.0001) {
+        return h;
+    }
+    float lambda = smith_lambda(w, alpha2);
+    if (w.z > 0.0 && u > 1.0 - pow(below(h), lambda)) {
+        return LEFT;
+    }
+    return clamp(2.0 * below(h) / pow(1.0 - u, 1.0 / lambda) - 1.0, -1.0, 1.0);
+}
+
+// A way `l` out of the surface from view `v` by one walk, and what of the light arriving along it
+// reaches `v`, its scatterings' Fresnel: the BRDF times the cosine over the density of `l`. False
+// where the walk hasn't left after `MOST_SCATTERINGS`.
+bool walked(float3 v, float alpha2, float3 f0, inout Random random, out float3 l,
+            out float3 carried) {
+    float alpha = sqrt(alpha2);
+    l = -v;
+    carried = float3(1.0);
+    float h = 1.0;
+    for (uint i = 0; i <= MOST_SCATTERINGS; i++) {
+        h = next_height(l, h, alpha2, next(random));
+        if (h == LEFT) {
+            return true;
+        }
+        if (i == MOST_SCATTERINGS) {
+            break;
+        }
+        float3 from = -l;
+        float3 m = visible_normal(from, alpha, float2(next(random), next(random)));
+        carried *= schlick(f0, dot(from, m));
+        l = reflect(l, m);
+    }
+    return false;
+}
+
+// The light from `l` that one walk from view `v` reflects toward `v` after its first scattering,
+// per unit of that light: the BRDF past `brdf`'s specular, times the cosine, as an estimate whose
+// mean is exact. At each scattering, the share its normals visible from where it came reflect
+// toward `l`, times the chance nothing above masks `l`.
+float3 scattered_later(float3 v, float3 l, float alpha2, float3 f0, inout Random random) {
+    float alpha = sqrt(alpha2);
+    float lambda = smith_lambda(l, alpha2);
+    float3 way = -v;
+    float3 carried = float3(1.0);
+    float3 sum = float3(0.0);
+    float h = 1.0;
+    for (uint i = 0; i < MOST_SCATTERINGS; i++) {
+        h = next_height(way, h, alpha2, next(random));
+        if (h == LEFT) {
+            break;
+        }
+        float3 from = -way;
+        float3 m = normalize(from + l);
+        float c = dot(from, m);
+        if (i > 0 && m.z > 0.0 && c > 0.0) {
+            float spread = m.z * m.z * (alpha2 - 1.0) + 1.0;
+            float distribution = alpha2 / (PI * spread * spread);
+            // The surface's area seen from `from`, by which its visible normals' density divides.
+            float seen = 0.5 * (from.z + sqrt(from.z * from.z + (1.0 - from.z * from.z) * alpha2));
+            float unmasked = l.z > 0.9999 ? 1.0 : pow(below(h), lambda);
+            sum += carried * schlick(f0, c) * (distribution / (4.0 * seen) * unmasked);
+        }
+        float3 next_normal = visible_normal(from, alpha, float2(next(random), next(random)));
+        carried *= schlick(f0, dot(from, next_normal));
+        way = reflect(way, next_normal);
+    }
+    return sum;
 }
 
 // The light one path from `origin` along `direction` brings, unexposed.
@@ -296,16 +395,15 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
         float metallic;
         Surface lit = surface_of(material, at.world, -direction, at.normal, at.tangent, at.front,
                                  color.rgb, surface, roughness, mapped, metallic);
-        // Single scattering's albedo at F0 of 1, by the split sum's table, which a frame has with
-        // a sky alone; without one, uncompensated.
-        if (frame.specular_levels > 0) {
-            float2 table =
-                textures[frame.brdf].SampleLevel(clamp_, float2(lit.n_dot_v, roughness), 0.0).rg;
-            lit.specular_weight = 1.0 + lit.f0 * (1.0 / (table.x + table.y) - 1.0);
-        }
         // Facing the side the ray came from.
         float3 geometric = at.front ? at.geometric : -at.geometric;
         float3 from = offset_ray(at.world, geometric);
+        // Ways about the shading normal, for the walk.
+        float3 t;
+        float3 b;
+        basis(lit.normal, t, b);
+        float3 view = -direction;
+        float3 v = normalize(float3(dot(view, t), dot(view, b), lit.n_dot_v));
         for (uint i = 0; i < frame.light_count; i++) {
             float3 to_light;
             float3 arrived = arriving(frame, i, at.world, to_light);
@@ -316,39 +414,40 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
             Light shining = frame.lights[i];
             float reach = shining.kind == 0 ? FARTHEST : length(shining.position - from);
             if (unoccluded(tlas, frame.materials, from, to_light, reach)) {
-                light += throughput * brdf(lit, to_light, n_dot_l) * arrived * n_dot_l;
+                float3 l = float3(dot(to_light, t), dot(to_light, b), n_dot_l);
+                float3 later = scattered_later(v, l, lit.alpha2, lit.f0, random);
+                light += throughput * (brdf(lit, to_light, n_dot_l) * n_dot_l + later) * arrived;
             }
         }
-        // The next way, about the shading normal.
-        float3 t;
-        float3 b;
-        basis(lit.normal, t, b);
-        float3 view = -direction;
-        float3 v = float3(dot(view, t), dot(view, b), lit.n_dot_v);
-        v = normalize(v);
-        float3 fresnel = lit.f0 + (1.0 - lit.f0) * pow5(1.0 - lit.n_dot_v);
-        float specular_share = luminance(fresnel * lit.specular_weight);
+        // The next way: one lobe, picked by its estimated share, its light over the chance.
+        float3 fresnel = schlick(lit.f0, lit.n_dot_v);
+        float specular_share = luminance(fresnel);
         float diffuse_share = luminance(lit.diffuse_color * (1.0 - fresnel));
         if (specular_share + diffuse_share <= 0.0) {
             break;
         }
         float specular_chance = specular_share / (specular_share + diffuse_share);
-        float2 u = float2(next(random), next(random));
         float3 l;
         if (next(random) < specular_chance) {
-            l = reflect(-v, visible_normal(v, sqrt(lit.alpha2), u));
+            float3 carried;
+            if (!walked(v, lit.alpha2, lit.f0, random, l, carried)) {
+                break;
+            }
+            throughput *= carried / specular_chance;
         } else {
+            float2 u = float2(next(random), next(random));
             float r = sqrt(u.x);
             float phi = 2.0 * PI * u.y;
             l = float3(r * cos(phi), r * sin(phi), sqrt(1.0 - u.x));
+            // `brdf`'s diffuse over the cosine's density, l.z over π.
+            float3 halfway = normalize(v + l);
+            throughput *= (1.0 - schlick(lit.f0, dot(v, halfway))) * lit.diffuse_color
+                / (1.0 - specular_chance);
         }
         float3 out_way = t * l.x + b * l.y + lit.normal * l.z;
         if (l.z <= 0.0 || dot(out_way, geometric) <= 0.0) {
             break;
         }
-        float density = specular_chance * specular_density(v, l, lit.alpha2)
-            + (1.0 - specular_chance) * l.z / PI;
-        throughput *= brdf(lit, out_way, l.z) * (l.z / density);
         if (bounce + 1 >= SURE_BOUNCES) {
             float kept = min(max(max(throughput.r, throughput.g), throughput.b), 0.95);
             if (next(random) >= kept) {

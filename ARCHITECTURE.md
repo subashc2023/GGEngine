@@ -877,8 +877,10 @@ not a mode games ship with.
   transform unpacks them. The CPU gathers the instances, the scene's and the frame's draws', each
   frame that traces: a frame that doesn't costs nothing.
 - Paths by next-event estimation of the lights, which are deltas, and BSDF sampling of the sky,
-  which leaves out a sun a light stands for. GGX is energy-compensated (Turquin) for every light,
-  so the raster's uncompensated highlights show as a measured difference, not a hidden one.
+  which leaves out a sun a light stands for. GGX's specular light scattered more than once is
+  exact, by Heitz et al.'s random walk on the microsurface, for the sky and every light. So the
+  raster's compensation of the sky's light, and its uncompensated highlights, show as measured
+  differences; compensations such as Turquin's are themselves 10% off for rough colored metals.
 - Light accumulates over frames until the samples asked for, and starts over as anything it reads
   changes.
 - It sees opaque and masked models alone: no fog, haze, blending, skinned meshes or games' own

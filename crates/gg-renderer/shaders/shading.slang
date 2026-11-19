@@ -277,7 +277,7 @@ struct Surface {
     float3 f0;
     float alpha2;
     // What specular light is scaled by: 1, or 0 where the view shows diffuse light alone (a
-    // diffuse color of 0 shows specular alone); the path tracer's energy compensation.
+    // diffuse color of 0 shows specular alone).
     float3 specular_weight;
 };
 
