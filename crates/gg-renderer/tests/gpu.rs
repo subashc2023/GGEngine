@@ -94,6 +94,7 @@ fn main() -> ExitCode {
         path_traced_masks_cover_as_the_raster_draws_them,
         path_traced_emission_shows_but_lights_nothing,
         path_traced_light_is_even_where_a_normal_map_turns_from_the_view,
+        path_traced_light_is_even_off_a_mirror_after_a_rough_bounce,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
         a_skys_sun_lights_once,
         a_skys_bright_cloud_isnt_its_sun,
@@ -7511,6 +7512,65 @@ fn path_traced_light_is_even_where_a_normal_map_turns_from_the_view() {
         median > 0.01 && brightest < 3.0 * median,
         "the floor's brightest pixel is {brightest}, its median {median}"
     );
+}
+
+/// A floor under a white mirror of roughness 0.05, tilted to face down and toward a level sun,
+/// which it reflects straight down. The sun, from just under the floor's horizon, lights the floor
+/// nothing directly: its light is the mirror's, the same under all of the mirror. Paths bouncing
+/// off the floor find it in the mirror's sunlit peak: unless the mirror turns rougher then, a few
+/// in thousands bring all of it. Traced, no pixel is 3 times the floor's median, on a white diffuse
+/// floor and on a white metal one of roughness 0.5. The mirror sends the diffuse floor at least the
+/// sun's over π: its median is over 90% of that.
+fn path_traced_light_is_even_off_a_mirror_after_a_rough_bounce() {
+    const SIZE: u32 = 32;
+    let traced_floor = |workflow: Workflow| {
+        let mut renderer = tracing_renderer(SIZE, SIZE)?;
+        let mut stores = Stores::default();
+        let square = model_square(&mut stores.meshes);
+        let [floor, mirror] = [workflow, metallic(1.0, 0.05)].map(|workflow| {
+            let material = Material {
+                color: Vec4::ONE,
+                workflow,
+                ..Material::default()
+            };
+            let material = stores.materials.add(&material);
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders)
+        });
+        let mut draws = Draws::default();
+        draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 0);
+        // On the plane y = 6 - x, from x = -10 to 5.5, facing down and toward -X.
+        let tilted = Quat::from_rotation_z(3.0 * FRAC_PI_4) * Quat::from_rotation_x(-FRAC_PI_2);
+        let size = Vec3::new(15.5 * SQRT_2, 40.0, 1.0);
+        let at = Vec3::new(-2.25, 8.25, 0.0);
+        let placed = Mat4::from_scale_rotation_translation(size, tilted, at);
+        draws.push_draw(placed, &mirror, 0);
+        // Toward +X and a little up, behind the floor's face.
+        stores.lights = vec![sun(Vec3::new(1.0, 0.02, 0.0), None)];
+        // From above, through the mirror's back, which is culled.
+        let viewpoint = looking_down(Vec3::new(0.0, 20.0, 0.0), 4.0, 22.0);
+        let viewport = filling([SIZE, SIZE]);
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        let frame = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 64);
+        let mut lights: Vec<f32> = (frame.as_chunks::<4>().0.iter())
+            .map(|&[r, g, b, _]| luminance(Vec3::new(decoded(r), decoded(g), decoded(b))))
+            .collect();
+        lights.sort_by(f32::total_cmp);
+        Some((lights[lights.len() / 2], lights[lights.len() - 1]))
+    };
+    // Diffuse alone: a specular color of 0 reflects nothing.
+    let diffuse = Workflow::SpecularGlossiness {
+        specular: Vec3::ZERO,
+        glossiness: 0.0,
+    };
+    for (floor, least) in [(diffuse, 0.9 / PI), (metallic(1.0, 0.5), 0.0)] {
+        let Some((median, brightest)) = traced_floor(floor) else {
+            return;
+        };
+        assert!(
+            median > least && brightest < 3.0 * median,
+            "on {floor:?}, the floor's brightest pixel is {brightest}, its median {median}"
+        );
+    }
 }
 
 /// Without ray queries, a view showing paths traced shows black, warning `renderer.no_ray_query`

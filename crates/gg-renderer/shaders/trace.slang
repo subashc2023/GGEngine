@@ -16,6 +16,11 @@
 //   Specular light scattered more than once, which `brdf`'s GGX loses, by Heitz et al.'s random
 //   walk on the microsurface (`walked`): exact, where compensations such as Turquin's and the
 //   raster's Fdez-Agüera's are 10% off for a rough colored metal.
+// - After a bounce, surfaces at least as rough as the roughest the path has bounced off, a diffuse
+//   bounce the roughest, up to `MOST_ROUGHNESS_FLOOR`: path space regularization (Kaplanyan and
+//   Dachsbacher, 2013). A rough bounce rarely finds a smooth surface's peak toward a light, so a
+//   few paths bring all its light: specks. It blurs that light, which the raster's diffuse light
+//   leaves out and its reflections show only as the view sees it.
 // - The first hit antialiased by jittering each path within its pixel.
 // - Back faces culled but where a material is double-sided, as the view's draws cull them.
 // - A masked material's triangles hit where its alpha, at level 0, is at least its cutoff, as the
@@ -68,6 +73,10 @@ struct TracePush {
 static const uint GROUP = 8;
 static const uint MOST_BOUNCES = 8;
 static const uint SURE_BOUNCES = 3;
+// The most the roughness floor rises to. At 0.4, Bistro keeps half again as many specks by its
+// manhole; at 1, it loses nearly twice the light there, for a tenth fewer. Cycles' Filter Glossy,
+// at its default, floors GGX's alpha after a diffuse bounce at 0.41 or more; this, at 0.25.
+static const float MOST_ROUGHNESS_FLOOR = 0.5;
 
 // PCG's 32-bit generator (O'Neill, 2014), its state seeded by `pcg2d` from the pixel and the path.
 struct Random {
@@ -375,6 +384,9 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
     float3 throughput = float3(1.0);
     // Whether every bounce so far took the specular lobe.
     bool shown = true;
+    // How rough surfaces are at least: the roughest the path has bounced off, a diffuse bounce the
+    // roughest, up to `MOST_ROUGHNESS_FLOOR`. It never falls, as each surface is at least it.
+    float least_roughness = 0.0;
     for (uint bounce = 0; bounce < MOST_BOUNCES; bounce++) {
         Hit hit = nearest(tlas, frame.materials, origin, direction);
         if (!hit.found) {
@@ -399,7 +411,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
             float3 emission = sampled_at(material, 4, at.uv).rgb * material.emissive;
             light += throughput * emission / frame.exposure;
         }
-        float roughness = roughness_of(material, surface);
+        float roughness = max(roughness_of(material, surface), least_roughness);
         float metallic;
         Surface lit = surface_of(material, at.world, -direction, at.normal, at.tangent, at.front,
                                  color.rgb, surface, roughness, mapped, metallic);
@@ -446,6 +458,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
                 break;
             }
             throughput *= carried / specular_chance;
+            least_roughness = min(roughness, MOST_ROUGHNESS_FLOOR);
         } else {
             float2 u = float2(next(random), next(random));
             float r = sqrt(u.x);
@@ -456,6 +469,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
             throughput *= (1.0 - schlick(lit.f0, dot(v, halfway))) * lit.diffuse_color
                 / (1.0 - specular_chance);
             shown = false;
+            least_roughness = MOST_ROUGHNESS_FLOOR;
         }
         float3 out_way = t * l.x + b * l.y + lit.normal * l.z;
         if (l.z <= 0.0 || dot(out_way, geometric) <= 0.0) {
