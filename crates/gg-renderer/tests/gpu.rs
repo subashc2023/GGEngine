@@ -87,6 +87,7 @@ fn main() -> ExitCode {
         path_traced_rough_metal_scatters_as_its_microsurface,
         path_traced_sunlight_matches_the_rasters,
         the_rasters_sky_light_matches_paths_traced,
+        the_rasters_sky_light_matches_paths_traced_at_grazing,
         the_rasters_lights_match_paths_traced,
         path_traced_light_leaves_the_rasters_passes_alone,
         path_traced_light_accumulates_until_the_view_moves,
@@ -6386,10 +6387,10 @@ fn sky_pixels(size: [u32; 2], texel: impl Fn(u32, u32) -> [f32; 3]) -> Vec<u8> {
     pixels
 }
 
-/// Squares under a uniform sky of 0.5, no lights. Multiple scattering keeps a white surface's
-/// reflection whole, so every white one shows 0.5; a smooth colored metal, its color of
-/// it; a half occlusion map, half; unlit, its color. A new sky image prefilters again once it
-/// shows.
+/// Squares under a uniform sky of 0.5, no lights. Multiple scattering keeps a white metal's
+/// reflection whole, so it shows 0.5; a white dielectric, what glTF's BRDF does (0.5 smooth, less
+/// rough); a smooth colored metal, its color of it; a half occlusion map, half; unlit, its color. A
+/// new sky image prefilters again once it shows.
 fn a_uniform_sky_lights_white_as_itself() {
     const SIDE: u32 = 16;
     const SQUARES: u32 = 7;
@@ -6466,14 +6467,17 @@ fn a_uniform_sky_lights_white_as_itself() {
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
     let frame = frame_pixels(&mut renderer);
+    // A white dielectric of roughness 1, head-on, by glTF's BRDF: diffuse 1 - F0, 0.96, and
+    // specular 0.0139, the walk's albedo for F0 0.04 run offline. The rest its microsurface masks.
+    const ROUGH_WHITE: f32 = 0.9738;
     let occluded = 0.5 * 128.0 / 255.0;
     let expected = [
-        [0.5; 3],
+        [0.5 * ROUGH_WHITE; 3],
         [0.5; 3],
         [0.5; 3],
         [0.5; 3],
         [0.5 * tint.x, 0.5 * tint.y, 0.5 * tint.z],
-        [occluded; 3],
+        [occluded * ROUGH_WHITE; 3],
         [0.3; 3],
         // The sky, past the squares.
         [0.5; 3],
@@ -6499,8 +6503,8 @@ fn a_uniform_sky_lights_white_as_itself() {
     settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
     let frame = frame_pixels(&mut renderer);
-    let quarter = encoded(0.25);
-    for i in [0, 3, SQUARES] {
+    for (i, quarter) in [(0, 0.25 * ROUGH_WHITE), (3, 0.25), (SQUARES, 0.25)] {
+        let quarter = encoded(quarter);
         let got = pixel_at(&frame, WIDTH, [i * SIDE + SIDE / 2, SIDE / 2]);
         assert!(
             close(got, [quarter, quarter, quarter, 255]),
@@ -6916,29 +6920,8 @@ fn the_rasters_sky_light_matches_paths_traced() {
         return;
     };
     let mut stores = Stores::default();
-    let [width, height] = [128, 64];
-    let sky = sky_texture(&mut stores.textures, [width, height], |x, y| {
-        // How far up, from -1 straight down to 1 straight up, and round, from 0 at -X.
-        let up = 1.0 - 2.0 * (y as f32 + 0.5) / height as f32;
-        let round = (x as f32 + 0.5) / width as f32;
-        if up > 0.0 {
-            let pale = 1.0 - up;
-            // Brighter toward -X, so the lobes' reach round the sky shows.
-            let bright = 1.0 + 0.5 * math::libm::cosf(2.0 * PI * round);
-            [
-                (0.2 + 0.5 * pale) * bright,
-                (0.35 + 0.4 * pale) * bright,
-                0.8 * bright,
-            ]
-        } else {
-            [0.12, 0.09, 0.06]
-        }
-    });
-    stores.sky = Some(Sky {
-        texture: sky,
-        luminance: 1.0,
-    });
     let square = model_square(&mut stores.meshes);
+    stores.sky = Some(graded_sky(&mut stores.textures));
     let mut draws = Draws::default();
     let roughness = |i: u32| i as f32 / (STRIPS - 1) as f32;
     for (row, z) in [(0, 1.5), (1, -1.5)] {
@@ -7004,6 +6987,103 @@ fn the_rasters_sky_light_matches_paths_traced() {
         missed.join("; ")
     );
 }
+
+/// The sky-light tests' sky: a blue zenith to a pale horizon, brighter toward -X, over dark ground.
+fn graded_sky(textures: &mut Textures) -> Sky {
+    let [width, height] = [128, 64];
+    let texture = sky_texture(textures, [width, height], |x, y| {
+        // How far up, from -1 straight down to 1 straight up, and round, from 0 at -X.
+        let up = 1.0 - 2.0 * (y as f32 + 0.5) / height as f32;
+        let round = (x as f32 + 0.5) / width as f32;
+        if up > 0.0 {
+            let pale = 1.0 - up;
+            // Brighter toward -X, so the lobes' reach round the sky shows.
+            let bright = 1.0 + 0.5 * math::libm::cosf(2.0 * PI * round);
+            [
+                (0.2 + 0.5 * pale) * bright,
+                (0.35 + 0.4 * pale) * bright,
+                0.8 * bright,
+            ]
+        } else {
+            [0.12, 0.09, 0.06]
+        }
+    });
+    Sky {
+        texture,
+        luminance: 1.0,
+    }
+}
+
+/// [`the_rasters_sky_light_matches_paths_traced`]'s dielectric strips seen near grazing, at a
+/// cosine of 0.2, where the sky's diffuse gives way most to its specular. Each strip's mean light
+/// is within [`GRAZING_SKY_LIGHT_ERROR`] of the paths' at 256 a pixel. Diffuse weighted by 1 less
+/// the reflectance, as Fdez-Agüera has it, is 18% dark at roughness 0.
+fn the_rasters_sky_light_matches_paths_traced_at_grazing() {
+    const WIDTH: u32 = 200;
+    const HEIGHT: u32 = 80;
+    const STRIPS: u32 = 5;
+    let Some(mut renderer) = tracing_renderer(WIDTH, HEIGHT) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    stores.sky = Some(graded_sky(&mut stores.textures));
+    let mut draws = Draws::default();
+    let roughness = |i: u32| i as f32 / (STRIPS - 1) as f32;
+    for i in 0..STRIPS {
+        let material = Material {
+            color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            workflow: metallic(0.0, roughness(i)),
+            ..Material::default()
+        };
+        let material = stores.materials.add(&material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        // Long, so the view sees nothing past it.
+        let strip = Mat4::from_translation(Vec3::new(2.0 * i as f32 - 4.0, 0.0, 0.0))
+            * Mat4::from_rotation_x(-FRAC_PI_2)
+            * Mat4::from_scale(Vec3::new(2.0, 40.0, 1.0));
+        draws.push_draw(strip, &draw, 0);
+    }
+    // Orthographic, so every point of a strip is seen at one angle.
+    let down = math::libm::asin(0.2);
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 14.0 * 0.2, 14.0 * math::libm::cos(down)),
+        rotation: Quat::from_rotation_x(-down as f32),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: 1.0,
+            far: 30.0,
+        },
+    };
+    let viewport = filling([WIDTH, HEIGHT]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+    let raster = frame_pixels(&mut renderer);
+    let traced = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 256);
+    let mut missed = Vec::new();
+    for i in 0..STRIPS {
+        let center = [WIDTH / STRIPS * i + WIDTH / STRIPS / 2, HEIGHT / 2];
+        let [raster, traced] = [&raster, &traced].map(|frame| linear_mean(frame, WIDTH, center, 5));
+        let off = luminance(raster) / luminance(traced) - 1.0;
+        if off.abs() >= GRAZING_SKY_LIGHT_ERROR[i as usize] {
+            missed.push(format!(
+                "roughness {:.2}: {:+.1}%",
+                roughness(i),
+                100.0 * off
+            ));
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "the raster's sky light at grazing misses by: {}",
+        missed.join("; ")
+    );
+}
+
+/// [`the_rasters_sky_light_matches_paths_traced_at_grazing`]'s bounds, by roughness: 0.25's misses
+/// by 7.3%, 0.5's by 5.6%, as docs/DEFECTS.md keeps.
+const GRAZING_SKY_LIGHT_ERROR: [f32; 5] = [0.05, 0.09, 0.08, 0.06, 0.05];
 
 /// How far the raster's sky light may stray from the paths', as a share of their luminance.
 const SKY_LIGHT_ERROR: f32 = 0.05;

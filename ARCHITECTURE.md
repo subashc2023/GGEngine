@@ -842,6 +842,9 @@ that are images. Paths are under `crates/gg-renderer/src/`.
   path tracer's walk: Kulla and Conty's form in the sky's light, and their lobe in each light's. A
   rough surface looks the sky up toward its normal, as Filament does. What they miss against paths
   traced is in [docs/DEFECTS.md](docs/DEFECTS.md).
+- The sky's diffuse light loses to Fresnel what glTF's BRDF does, as lights and paths take it, not
+  what the surface reflects. glTF's BRDF doesn't conserve energy: a white rough dielectric under a
+  white sky shows 2.6% less than it.
 - One directional light casts shadows, the brightest that casts, in four cascades kept steady in
   the world as the view moves.
 - A sky is an image or an atmosphere, prefiltered on the GPU only as it changes. A sky's sun lights

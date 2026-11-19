@@ -11,6 +11,7 @@
 // - Roughness widened by how far the normal turns across the pixel (`filtered_roughness`), so a
 //   highlight narrower than a pixel spreads over it rather than flickering as it moves.
 // - The sky's prefiltered light by the split sum, looked up toward the normal as roughness grows.
+//   Its diffuse loses to Fresnel what glTF's BRDF does (`diffuse_fresnel`).
 // - GGX's light scattered more than once, which glTF's BRDF loses, fitted to trace.slang's walk:
 //   the sky's in its reflectance (`scattered`), the lights' by Kulla and Conty's lobe
 //   (`reflected`).
@@ -226,6 +227,14 @@ float3 sky_reflectance(float3 f0, float roughness, float n_dot_v, float2 table) 
     return once + scattered(f0, roughness, n_dot_v, 1.0 - (table.x + table.y));
 }
 
+// What Fresnel takes of glTF's diffuse, (1 - F(v.h)) c / pi, past F0, from a uniform sky seen at a
+// cosine of `n_dot`, over 1 - F0: the cosine-weighted mean of (1 - v.h)^5 over the ways in. A
+// quartic fitted to it, within 1e-4; 0.028 at grazing, 0 head-on.
+float diffuse_fresnel(float n_dot) {
+    return 0.0282312 + n_dot * (-0.0800283 + n_dot * (0.0865912 + n_dot * (-0.0436652
+        + n_dot * 0.00895321)));
+}
+
 // Lagarde and de Rousiers' specular occlusion ("Moving Frostbite to Physically Based Rendering",
 // 2014, listing 26), of GGX's alpha, as Filament takes it: a rough lobe takes `occlusion`, as
 // diffuse does; a smooth one less at grazing angles, more head-on.
@@ -237,7 +246,9 @@ float specular_occlusion(float n_dot_v, float occlusion, float roughness) {
 // The sky's light diffused, as luminance before the exposure, and reflected, in `specular_light`:
 // a dielectric (`diffuse_color`, `f0`) mixed by `metallic` with a metal, which diffuses none.
 // Specular takes `specular_occlusion` and 1 less `taken`, the reflection's share. `reflectance`:
-// how much of a reflection's light it reflects.
+// how much of a reflection's light it reflects. Diffuse loses to Fresnel what glTF's BRDF does
+// (`diffuse_fresnel`), as lights and paths take it: 1 less the reflectance, as Fdez-Agüera has it,
+// is a third darker at grazing views.
 float3 sky_light(Frame frame, float3 diffuse_color, float3 f0, float3 metal, float metallic,
                  float roughness, float3 normal, float3 view, float n_dot_v, float occlusion,
                  float taken, out float3 reflectance, out float3 specular_light) {
@@ -258,7 +269,8 @@ float3 sky_light(Frame frame, float3 diffuse_color, float3 f0, float3 metal, flo
     float3 metal_reflectance = sky_reflectance(metal, roughness, n_dot_v, table);
     reflectance = lerp(dielectric_reflectance, metal_reflectance, metallic);
     specular_light = specular * reflectance * frame.sky_luminance;
-    return diffuse * ((1.0 - dielectric_reflectance) * (1.0 - metallic)) * frame.sky_luminance;
+    float3 kept = (1.0 - f0) * ((1.0 - diffuse_fresnel(n_dot_v)) * (1.0 - metallic));
+    return diffuse * kept * frame.sky_luminance;
 }
 
 // How lit `uv` at `depth` is in shadow map `map`, `size` texels across: texels 1 where `depth` is
