@@ -1273,7 +1273,7 @@
         ),
         "f3ea1db8c7351271": (
             Environment: (
-                exposure: 15.0,
+                exposure: 14.0,
                 adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,

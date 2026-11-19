@@ -30,7 +30,7 @@
         ),
         "54fe2fd43352b9c6": (
             Environment: (
-                exposure: 15.0,
+                exposure: 14.0,
                 adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,

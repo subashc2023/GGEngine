@@ -285,7 +285,7 @@
         ),
         "fec2e4927358a085": (
             Environment: (
-                exposure: 15.0,
+                exposure: 14.0,
                 adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,

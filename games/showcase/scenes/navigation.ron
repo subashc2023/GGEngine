@@ -464,7 +464,7 @@
         ),
         "7a4c9e1d3f2b6085": (
             Environment: (
-                exposure: 15.0,
+                exposure: 14.0,
                 adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,

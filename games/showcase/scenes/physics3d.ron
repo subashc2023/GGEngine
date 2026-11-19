@@ -17,7 +17,7 @@
         ),
         "13e9b7c05f2a64d8": (
             Environment: (
-                exposure: 15.0,
+                exposure: 14.0,
                 adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
