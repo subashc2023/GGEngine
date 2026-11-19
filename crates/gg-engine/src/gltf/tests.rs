@@ -334,14 +334,15 @@ fn a_model_reads_into_parts_primitives_and_images() {
         })
     };
     let mut primitives = imported.primitives.clone();
-    // MikkTSpace's: along +X, the bitangent cross(normal, tangent) * W along +Y, as V runs up the
-    // triangle facing -Z. Compared within rounding, then as exactly that.
+    // MikkTSpace's along +X, with U. The bitangent cross(normal, tangent) * W is -Y on the triangle
+    // facing -Z: against V, so up the image, as glTF's normal maps take green. Compared within
+    // rounding, then as exactly that.
     let made = &mut primitives[1].tangents;
     for tangent in made.iter() {
-        let near = Vec4::from(*tangent).abs_diff_eq(Vec4::new(1.0, 0.0, 0.0, -1.0), 1e-6);
+        let near = Vec4::from(*tangent).abs_diff_eq(Vec4::new(1.0, 0.0, 0.0, 1.0), 1e-6);
         assert!(near, "{tangent:?}");
     }
-    *made = vec![[1.0, 0.0, 0.0, -1.0]; 3];
+    *made = vec![[1.0, 0.0, 0.0, 1.0]; 3];
     assert_eq!(
         primitives,
         [
@@ -382,7 +383,7 @@ fn a_model_reads_into_parts_primitives_and_images() {
                     [1.0, 0.0, 0.0, 1.0],
                 ],
                 normals: back,
-                tangents: vec![[1.0, 0.0, 0.0, -1.0]; 3],
+                tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
                 indices: vec![0, 1, 2],
                 mesh: None,
                 material: Material {
@@ -1021,10 +1022,10 @@ fn tangents_that_arent_finite_are_ignored() {
     let ignored = "primitive 0 of mesh 0's TANGENT, which holds numbers that aren't finite: \
                        it's drawn as without one";
     assert_eq!(imported.ignored, [ignored]);
-    // MikkTSpace's, along U, which runs along X.
+    // MikkTSpace's, along U, which runs along X; the bitangent -Y, against V, up the image.
     let made = &imported.primitives[0].tangents;
     assert!(
-        made.iter().all(|tangent| tangent == &[1.0, 0.0, 0.0, 1.0]),
+        made.iter().all(|tangent| tangent == &[1.0, 0.0, 0.0, -1.0]),
         "{made:?}"
     );
     gltf["meshes"][0]["primitives"][0]["attributes"]["NORMAL"] = json!(5);

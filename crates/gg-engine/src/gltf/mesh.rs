@@ -225,7 +225,10 @@ impl Geometry<Libm> for Corners<'_> {
 
     fn set_tangent(&mut self, tangent: Option<TangentSpace>, face: usize, corner: usize) {
         if let Some(tangent) = tangent {
-            self.tangents[face * 3 + corner] = tangent.tangent_encoded();
+            // MikkTSpace's bitangent runs with V, down glTF's images, but normal maps' green runs
+            // up them: W flips, as three.js' `negateSign` and Blender's flipped V do.
+            let [x, y, z, w] = tangent.tangent_encoded();
+            self.tangents[face * 3 + corner] = [x, y, z, -w];
         }
     }
 }
