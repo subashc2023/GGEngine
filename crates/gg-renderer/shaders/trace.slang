@@ -446,7 +446,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
         // toward the view is nearly 1 where a normal map turns the normal from it: the diffuse
         // would be taken once in thousands of paths and weighed thousands of times.
         float specular_share = luminance(schlick(lit.f0, lit.n_dot_v));
-        float diffuse_share = luminance(lit.diffuse_color * (1.0 - lit.f0));
+        float diffuse_share = luminance(lit.diffuse_color * (1.0 - lit.diffuse_f0));
         if (specular_share + diffuse_share <= 0.0) {
             break;
         }
@@ -466,7 +466,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
             l = float3(r * cos(phi), r * sin(phi), sqrt(1.0 - u.x));
             // `brdf`'s diffuse over the cosine's density, l.z over π.
             float3 halfway = normalize(v + l);
-            throughput *= (1.0 - schlick(lit.f0, dot(v, halfway))) * lit.diffuse_color
+            throughput *= (1.0 - schlick(lit.diffuse_f0, dot(v, halfway))) * lit.diffuse_color
                 / (1.0 - specular_chance);
             shown = false;
             least_roughness = MOST_ROUGHNESS_FLOOR;

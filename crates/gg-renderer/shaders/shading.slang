@@ -360,6 +360,9 @@ struct Surface {
     float3 diffuse_color;
     float3 f0;
     float alpha2;
+    // The head-on color whose Fresnel the diffuse loses: the dielectric's 0.04, as glTF mixes a
+    // dielectric with a metal; a specular-glossiness material's `f0`, as its extension has it.
+    float3 diffuse_f0;
     // What specular light is scaled by: 1, or 0 where the view shows diffuse light alone (a
     // diffuse color of 0 shows specular alone).
     float3 specular_weight;
@@ -412,7 +415,8 @@ float3 brdf(Surface surface, float3 to_light, float n_dot_l) {
         / (n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - alpha2) + alpha2)
             + n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha2) + alpha2));
     float3 specular = fresnel * (distribution * visibility * surface.specular_weight);
-    float3 diffuse = (1.0 - fresnel) * surface.diffuse_color / PI;
+    float3 lost = surface.diffuse_f0 + (1.0 - surface.diffuse_f0) * pow5(1.0 - v_dot_h);
+    float3 diffuse = (1.0 - lost) * surface.diffuse_color / PI;
     return diffuse + specular;
 }
 
@@ -790,9 +794,11 @@ Surface surface_of(Material material, float3 world, float3 view, float3 interpol
     if ((material.flags & SPECULAR_GLOSSINESS) != 0) {
         metallic = 0.0;
         out.diffuse_color = base * (1.0 - max(max(out.f0.r, out.f0.g), out.f0.b));
+        out.diffuse_f0 = out.f0;
     } else {
         metallic = saturate(material.metallic * surface.b);
         out.diffuse_color = base * (1.0 - metallic);
+        out.diffuse_f0 = float3(0.04);
     }
     float alpha = roughness * roughness;
     out.alpha2 = alpha * alpha;

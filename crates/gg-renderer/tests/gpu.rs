@@ -85,6 +85,7 @@ fn main() -> ExitCode {
         sky_lit_spheres_match_their_reference,
         path_traced_metal_reflects_all_of_a_furnace,
         path_traced_rough_metal_scatters_as_its_microsurface,
+        path_traced_half_metal_shades_as_gltf_mixes_it,
         path_traced_sunlight_matches_the_rasters,
         the_rasters_sky_light_matches_paths_traced,
         the_rasters_sky_light_matches_paths_traced_at_grazing,
@@ -5868,12 +5869,12 @@ fn shaders_read_the_frames_data() {
 }
 
 /// Model squares lit head-on, each middle against glTF's BRDF by hand: under `E` = π lux and
-/// roughness 1 (GGX lobe 1/π, visibility 1/(4 cos)), a surface shows `(1 - f0) c cos + f0 / 4`,
-/// plus what its microsurface scatters more than once: 0.154 for the metal, by trace.slang's walk
-/// run offline, and under a byte for the dielectric. They cover unlit, emission, normal and surface
-/// maps in each format, and maps never filled. A point of 4π candela 2 above lights the first as
-/// the sun did, also with a range, by KHR_lights_punctual's window; a spot, alike inside its inner
-/// cone, not at all outside its outer.
+/// roughness 1 (GGX lobe 1/π, visibility 1/(4 cos)), a surface of diffuse color `c` shows
+/// `0.96 c cos + f0 / 4`, plus what its microsurface scatters more than once: 0.154 for the metal,
+/// by trace.slang's walk run offline, and under a byte for the dielectric. They cover unlit,
+/// emission, normal and surface maps in each format, and maps never filled. A point of 4π candela 2
+/// above lights the first as the sun did, also with a range, by KHR_lights_punctual's window; a
+/// spot, alike inside its inner cone, not at all outside its outer.
 fn lights_shade_as_gltf_defines() {
     const SIDE: u32 = 16;
     const SQUARES: u32 = 10;
@@ -6025,7 +6026,7 @@ fn lights_shade_as_gltf_defines() {
     // A metallic of 1/255: f0 a 255th of the way from 0.04 to 0.5, and as much less diffuse.
     let barely = 1.0 / 255.0;
     let f0 = 0.04 + (0.5 - 0.04) * barely;
-    let barely_metallic = 0.5 * (1.0 - barely) * (1.0 - f0) + f0 / 4.0;
+    let barely_metallic = 0.5 * (1.0 - barely) * 0.96 + f0 / 4.0;
     let expected = [
         lit(1.0),
         0.5,
@@ -6856,6 +6857,68 @@ fn path_traced_rough_metal_scatters_as_its_microsurface() {
     const SUN: f32 = 2.0;
     let toward_sun = Vec3::new(0.2345, 0.1858, 0.1110);
     let mut check = |stores: &mut Stores, what: &str, expected: Vec3| {
+        settle(&mut renderer, stores, viewport, viewpoint, &draws);
+        let frame = traced(&mut renderer, stores, viewport, viewpoint, &draws, 64);
+        let mean = linear_mean(&frame, SIZE, [SIZE / 2, SIZE / 2], 8);
+        let off = (mean / expected - 1.0).abs().max_element();
+        assert!(
+            off < 0.02,
+            "{what}: {mean} against {expected}, {off:.3} off"
+        );
+    };
+    check(&mut stores, "the sky", albedo * SKY);
+    stores.sky = None;
+    stores.lights = vec![Light {
+        color: Vec3::splat(SUN),
+        ..sun(Vec3::new(0.5, -1.0, 0.0), None)
+    }];
+    check(&mut stores, "the sun", toward_sun * SUN);
+}
+
+/// Open ground of base 0.8, metallic 0.5 and roughness 0.5, seen as
+/// [`path_traced_rough_metal_scatters_as_its_microsurface`] sees it, under its sky and then its
+/// sun, against glTF's BRDF integrated offline: a metal and a dielectric mixed by how metallic it
+/// is, the dielectric's diffuse less Fresnel's share at its own F0 of 0.04, plus the walk past the
+/// first scattering. Within 2% each channel. Diffuse less the share at the mixed F0 of 0.42 is 19%
+/// dark under the sky and 28% under the sun.
+fn path_traced_half_metal_shades_as_gltf_mixes_it() {
+    const SIZE: u32 = 32;
+    let Some(mut renderer) = tracing_renderer(SIZE, SIZE) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let half_metal = Material {
+        color: Vec4::new(0.8, 0.8, 0.8, 1.0),
+        workflow: metallic(0.5, 0.5),
+        ..Material::default()
+    };
+    let half_metal = stores.materials.add(&half_metal);
+    let floor = MeshDraw::with_material(square, half_metal, &stores.materials, &mut stores.shaders);
+    let mut draws = Draws::default();
+    draws.push_draw(facing_up(40.0, Vec3::ZERO), &floor, 0);
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 10.0, 10.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_4),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: 1.0,
+            far: 30.0,
+        },
+    };
+    let viewport = filling([SIZE, SIZE]);
+    const SKY: f32 = 0.5;
+    let sky = sky_texture(&mut stores.textures, [8, 4], |_, _| [SKY; 3]);
+    stores.sky = Some(Sky {
+        texture: sky,
+        luminance: 1.0,
+        rotation: 0.0,
+    });
+    // The directional albedo at 45 degrees, and the BRDF times the cosine toward the sun.
+    let albedo = 0.7824;
+    const SUN: f32 = 2.0;
+    let toward_sun = 0.1552;
+    let mut check = |stores: &mut Stores, what: &str, expected: f32| {
         settle(&mut renderer, stores, viewport, viewpoint, &draws);
         let frame = traced(&mut renderer, stores, viewport, viewpoint, &draws, 64);
         let mean = linear_mean(&frame, SIZE, [SIZE / 2, SIZE / 2], 8);
