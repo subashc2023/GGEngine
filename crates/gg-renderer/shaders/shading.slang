@@ -10,8 +10,10 @@
 // - Light falloff by KHR_lights_punctual's reference.
 // - Roughness widened by how far the normal turns across the pixel (`filtered_roughness`), so a
 //   highlight narrower than a pixel spreads over it rather than flickering as it moves.
-// - The sky's prefiltered light by the split sum, plus the light scattered more than once
-//   (`scattered`).
+// - The sky's prefiltered light by the split sum.
+// - GGX's light scattered more than once, which glTF's BRDF loses, fitted to trace.slang's walk:
+//   the sky's in its reflectance (`scattered`), the lights' by Kulla and Conty's lobe
+//   (`reflected`).
 // - Occlusion, the map's and the view's, darkens only the sky's light (`ambient`).
 // - The view's reflections replace the sky's specular light where found (`reflection`).
 // - The shadow-casting light lights only what its shadow maps see.
@@ -185,6 +187,38 @@ float3 scattered(float3 f0, float roughness, float n_dot, float missed) {
     return missed * (1.0 - q) * f * f / (1.0 - q * f);
 }
 
+// `missed`'s fit, by the powers of s from 0 to 4, each by alpha's from 0 to 3.
+static const float4 MISSED[5] = {
+    float4(0.0474549, -0.241842, 0.396059, -0.180501),
+    float4(-0.483469, 2.70171, 0.827328, -0.0301215),
+    float4(3.33921, -9.51835, -3.18978, 1.48813),
+    float4(-5.56297, 12.0909, 18.9256, -11.6931),
+    float4(2.65828, -4.88738, -19.527, 12.4488),
+};
+
+// 1 less the single scattering's albedo at F0 1, at a cosine of `n_dot` and `alpha`: the split
+// sum's 1 - (A + B), without its table, which only a sky makes. A polynomial in alpha and
+// s = n_dot / (n_dot + alpha), by which Smith's masking goes, fitted to prefilter.slang's sum:
+// within 0.004.
+float missed(float n_dot, float alpha) {
+    float s = n_dot / (n_dot + alpha);
+    float4 by_s = MISSED[0] + s * (MISSED[1] + s * (MISSED[2] + s * (MISSED[3] + s * MISSED[4])));
+    float4 by_alpha = float4(1.0, alpha, alpha * alpha, alpha * alpha * alpha);
+    return max(dot(by_alpha, by_s), 0.0);
+}
+
+// The least roughness the lights' lobe of light scattered more than once takes its shape at.
+// Below it, the true lobe is a spike at grazing ways that `missed` doesn't hold. Taken at it, the
+// lobe adds at most 0.016 of a light, at views within a degree of grazing.
+static const float LEAST_LOBE_ROUGHNESS = 0.25;
+
+// `missed`'s cosine-weighted mean over the hemisphere, from LEAST_LOBE_ROUGHNESS to 1: a quartic in
+// `roughness` fitted to it, within 0.54%.
+float missed_mean(float roughness) {
+    return 0.00804913 + roughness * (-0.0594239 + roughness * (-0.117123
+        + roughness * (1.97411 + roughness * -1.21803)));
+}
+
 // How much of the sky's light GGX reflects at a cosine of `n_dot_v`, by the split sum's `table`
 // there: once, plus `scattered`.
 float3 sky_reflectance(float3 f0, float roughness, float n_dot_v, float2 table) {
@@ -297,6 +331,10 @@ struct Surface {
     // What specular light is scaled by: 1, or 0 where the view shows diffuse light alone (a
     // diffuse color of 0 shows specular alone).
     float3 specular_weight;
+    // The lights' lobe of light scattered more than once (`reflected`) but its shape, `missed` at
+    // the light's cosine and `lobe_alpha`.
+    float3 lobe;
+    float lobe_alpha;
 };
 
 // The light the frame's `i`th light shines on `world`, before its shadows and the exposure, and
@@ -348,7 +386,12 @@ float3 brdf(Surface surface, float3 to_light, float n_dot_l) {
     return diffuse + specular;
 }
 
-// The light the frame's `i`th light reflects from `surface` toward the view, before the exposure.
+// The light the frame's `i`th light reflects from `surface` toward the view, before the exposure:
+// `brdf`'s single scattering, and Kulla and Conty's lobe of what scatters more than once.
+// `scattered` at the view times `missed` at the light, over pi and `missed`'s mean, so the lights
+// of every way sum to `scattered`. Against trace.slang's walk, which paths take in its place:
+// within 12% at roughness 0.75 and 1. Smoother surfaces glow with lights behind them, where they
+// reflect little: 37% over at 0.5.
 float3 reflected(Frame frame, Surface surface, uint i) {
     float3 to_light;
     float3 radiance = arriving(frame, i, surface.world, to_light);
@@ -359,7 +402,8 @@ float3 reflected(Frame frame, Surface surface, uint i) {
     if (i == frame.shadows.light) {
         radiance *= shadowed(frame.shadows, surface.world, surface.surface_normal, to_light);
     }
-    return brdf(surface, to_light, n_dot_l) * radiance * n_dot_l;
+    float3 lobe = surface.lobe * surface.specular_weight * missed(n_dot_l, surface.lobe_alpha);
+    return (brdf(surface, to_light, n_dot_l) + lobe) * radiance * n_dot_l;
 }
 
 // The ambient light's share reaching `pixel`: the less of the view's ambient occlusion and the
@@ -712,6 +756,10 @@ Surface surface_of(Material material, float3 world, float3 view, float3 interpol
     float alpha = roughness * roughness;
     out.alpha2 = alpha * alpha;
     out.specular_weight = float3(1.0);
+    float lobe_roughness = max(roughness, LEAST_LOBE_ROUGHNESS);
+    out.lobe_alpha = lobe_roughness * lobe_roughness;
+    out.lobe = scattered(out.f0, roughness, out.n_dot_v, missed(out.n_dot_v, alpha))
+        / (PI * missed_mean(lobe_roughness));
     return out;
 }
 

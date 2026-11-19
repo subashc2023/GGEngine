@@ -87,6 +87,7 @@ fn main() -> ExitCode {
         path_traced_rough_metal_scatters_as_its_microsurface,
         path_traced_sunlight_matches_the_rasters,
         the_rasters_sky_light_matches_paths_traced,
+        the_rasters_lights_match_paths_traced,
         path_traced_light_leaves_the_rasters_passes_alone,
         path_traced_light_accumulates_until_the_view_moves,
         path_traced_masks_cover_as_the_raster_draws_them,
@@ -5856,10 +5857,12 @@ fn shaders_read_the_frames_data() {
 }
 
 /// Model squares lit head-on, each middle against glTF's BRDF by hand: under `E` = π lux and
-/// roughness 1 (GGX lobe 1/π, visibility 1/(4 cos)), a surface shows `(1 - f0) c cos + f0 / 4`.
-/// They cover unlit, emission, normal and surface maps in each format, and maps never filled. A
-/// point of 4π candela 2 above lights the first as the sun did, also with a range, by
-/// KHR_lights_punctual's window; a spot, alike inside its inner cone, not at all outside its outer.
+/// roughness 1 (GGX lobe 1/π, visibility 1/(4 cos)), a surface shows `(1 - f0) c cos + f0 / 4`,
+/// plus what its microsurface scatters more than once: 0.154 for the metal, by trace.slang's walk
+/// run offline, and under a byte for the dielectric. They cover unlit, emission, normal and surface
+/// maps in each format, and maps never filled. A point of 4π candela 2 above lights the first as
+/// the sun did, also with a range, by KHR_lights_punctual's window; a spot, alike inside its inner
+/// cone, not at all outside its outer.
 fn lights_shade_as_gltf_defines() {
     const SIDE: u32 = 16;
     const SQUARES: u32 = 10;
@@ -6021,7 +6024,7 @@ fn lights_shade_as_gltf_defines() {
         lit(flat),
         lit(1.0),
         barely_metallic,
-        0.125,
+        0.125 + 0.154,
         lit(cos_of(bc7_tilted)),
     ];
     let shown = |renderer: &mut Renderer, i: u32| {
@@ -7007,6 +7010,96 @@ const SKY_LIGHT_ERROR: f32 = 0.05;
 /// The same for the metal strips, by roughness: the roughest misses by 9.3%, as docs/DEFECTS.md
 /// keeps.
 const METAL_SKY_LIGHT_ERROR: [f32; 5] = [0.05, 0.05, 0.05, 0.05, 0.11];
+
+/// The raster's lights checked against the path tracer's on rough colored metal: open ground in
+/// strips of roughness 0.5, 0.75 and 1, seen from above at 45 degrees, lit by one sun at a time, in
+/// the view's mirror way and then across it. Paths walk the microsurface, so they hold the raster's
+/// light scattered more than once (`reflected`'s lobe) to it. Each strip's mean light is within
+/// [`LIGHTS_ERROR`] of the paths' at 64 a pixel. Without the lobe, the roughest strips are 55% and
+/// 58% dark.
+fn the_rasters_lights_match_paths_traced() {
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 64;
+    const ROUGHNESS: [f32; 3] = [0.5, 0.75, 1.0];
+    let Some(mut renderer) = tracing_renderer(WIDTH, HEIGHT) else {
+        return;
+    };
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    for (i, roughness) in ROUGHNESS.into_iter().enumerate() {
+        let material = Material {
+            color: Vec4::new(0.9, 0.8, 0.6, 1.0),
+            workflow: metallic(1.0, roughness),
+            ..Material::default()
+        };
+        let material = stores.materials.add(&material);
+        let draw =
+            MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders);
+        let strip = Mat4::from_translation(Vec3::new(2.0 * i as f32 - 2.0, 0.0, 0.0))
+            * Mat4::from_rotation_x(-FRAC_PI_2)
+            * Mat4::from_scale(Vec3::new(2.0, 8.0, 1.0));
+        draws.push_draw(strip, &draw, 0);
+    }
+    // Down at 45 degrees, orthographic, so every point of a strip is seen at one angle.
+    let viewpoint = Viewpoint {
+        position: DVec3::new(0.0, 10.0, 10.0),
+        rotation: Quat::from_rotation_x(-FRAC_PI_4),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: 1.0,
+            far: 30.0,
+        },
+    };
+    let viewport = filling([WIDTH, HEIGHT]);
+    let mut missed = Vec::new();
+    // Each sun's lux keeps its strips' light in the frame's range: 0.5 for the mirror's highlight.
+    for (sun_name, along, lux, bounds) in [
+        (
+            "the mirror sun",
+            Vec3::new(0.0, -1.0, 1.0),
+            0.5,
+            LIGHTS_ERROR[0],
+        ),
+        (
+            "the side sun",
+            Vec3::new(-0.8, -0.6, 0.0),
+            3.0,
+            LIGHTS_ERROR[1],
+        ),
+    ] {
+        stores.lights = vec![Light {
+            color: Vec3::splat(lux),
+            ..sun(along, None)
+        }];
+        settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+        render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &draws));
+        let raster = frame_pixels(&mut renderer);
+        let traced = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 64);
+        for (i, roughness) in ROUGHNESS.into_iter().enumerate() {
+            let center = [WIDTH / 3 * i as u32 + WIDTH / 6, HEIGHT / 2];
+            let [raster, traced] =
+                [&raster, &traced].map(|frame| linear_mean(frame, WIDTH, center, 5));
+            let off = luminance(raster) / luminance(traced) - 1.0;
+            if off.abs() >= bounds[i] {
+                missed.push(format!(
+                    "{sun_name} at roughness {roughness:.2}: {:+.1}%",
+                    100.0 * off
+                ));
+            }
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "the raster's light misses by: {}",
+        missed.join("; ")
+    );
+}
+
+/// How far the raster's lights may stray from the paths', as a share of their luminance: by sun,
+/// then roughness. The side sun on roughness 0.5 is 13.4% over, as docs/DEFECTS.md keeps; the rest
+/// are within 4%. Paths at 64 a pixel are within 1% of 256.
+const LIGHTS_ERROR: [[f32; 3]; 2] = [[0.05, 0.05, 0.05], [0.16, 0.05, 0.05]];
 
 /// Rec. 709's luminance of linear `color`.
 fn luminance(color: Vec3) -> f32 {
