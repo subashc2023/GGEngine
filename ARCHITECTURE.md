@@ -759,7 +759,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 |---|---|---|---|
 | Writes and uploads | Material table, the scene's changed records, streamed meshes and textures, recorded before any pass; tracing paths, BLASes, instances and the TLAS | `build BLAS`, `build TLAS` | `lib.rs`, `trace.rs`, gg-gpu `frame/upload.rs`, `frame/builds.rs` |
 | Atmosphere | Its tables, every frame it shows | `atmosphere transmittance`, `… multiple scattering`, `… sky view`, `… aerial perspective` | `atmosphere.rs` |
-| Sky light | Prefilters the sky into diffuse and specular cubes, and once the split sum's table, only as the sky changes | `sky cube`, `sky levels`, `sky light`, `split sum` | `sky.rs` |
+| Sky light | Finds an image sky's sun; prefilters the sky into diffuse and specular cubes, and once the split sum's table, only as the sky changes | `sky sun`, `sky cube`, `sky levels`, `sky light`, `split sum` | `sky.rs` |
 | Skin | Moves skinned meshes' vertices by their joints | `skin` (`skinned vertices`) | `skin.rs` |
 | Particle births | Writes the frame's births into the particle pool | `particle pool growth`, `particles moved`, `particles` | `particles.rs` |
 | Cull | Gathers opaque instances, culls them for the view and each cascade, picks levels, culls meshlets; on the compute queue | `cull gather`, `cull choose`, `cull offsets`, `cull write`, `cull meshlets` | `mesh/cull.rs` |
@@ -848,8 +848,9 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 - One directional light casts shadows, the brightest that casts, in four cascades kept steady in
   the world as the view moves.
 - A sky is an image or an atmosphere, prefiltered on the GPU only as it changes. A sky's sun lights
-  once: with a directional light standing for it, the sky's light leaves out the sun's disk. That
-  light should shine from where the sky shows its sun.
+  once: with a directional light standing for it, the sky's light leaves out the sun, an image's
+  found by contrast with the sky round it. That light should shine from where the sky shows its
+  sun.
 - The atmosphere is Hillaire's. Its shaders work in kilometers above the ground, not radii, at
   which f32s are half a meter apart, so every GPU finds what's near the ground alike. The sun's
   light reaching the world is dimmed on the CPU, once a frame. A set sun casts no shadows; the

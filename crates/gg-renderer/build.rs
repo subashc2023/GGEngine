@@ -100,6 +100,7 @@ const COMPUTE: [(&str, &[&str]); 23] = [
     (
         "prefilter",
         &[
+            "sun_main",
             "cube_main",
             "downsample_main",
             "irradiance_main",

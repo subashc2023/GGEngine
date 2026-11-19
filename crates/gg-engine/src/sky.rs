@@ -18,8 +18,8 @@ pub enum Sky {
     /// Khronos's glTF Sample Viewer and three.js.
     ///
     /// Its sun lights once. With a shining directional light standing for the sun, the sky's light
-    /// clamps each texel to 10⁷ candela per square meter, leaving out the sun's disk, so the sun
-    /// lights through that light alone. It should shine from where the sky shows the sun.
+    /// leaves out the sun, found by contrast with the sky round it, so the sun lights through that
+    /// light alone. It should shine from where the sky shows the sun.
     Image(Texture),
     /// Hillaire's atmosphere, made from the world's brightest shining directional light, the sun.
     /// The sun's disk is drawn where it shines from, red and dim as it sets, gone at night when the

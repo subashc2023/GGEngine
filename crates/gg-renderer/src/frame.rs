@@ -416,18 +416,17 @@ impl Renderer {
         };
         // What the sky's light is prefiltered from, and what a texel of 1 stands for: the
         // atmosphere, of a sun of illuminance 1; or the image sky, while its slot shows its own
-        // image, with that image's size, how many times the slot has changed image, and what its
-        // light keeps texels to, leaving out a sun a directional light stands for.
+        // image, with that image's size, how many times the slot has changed image, and whether
+        // its light leaves out its sun, as a directional light stands for it.
         let sky = match &atmosphere {
             Some(seen) => Some((Source::Atmosphere(seen.lit()), seen.illuminance())),
             None => data.sky.filter(|_| renders_view).and_then(|sky| {
                 let (size, shown) = self.meshes.texture_shown(sky.texture)?;
-                let cutoff = sky::cutoff(sky, shining);
                 let source = Source::Image {
                     sky,
                     size,
                     shown,
-                    cutoff,
+                    leaves: sky::stood_for(shining),
                 };
                 Some((source, sky.luminance))
             }),
@@ -498,10 +497,9 @@ impl Renderer {
         // sky's cube is made from.
         let tables = atmosphere.as_ref().map(|_| AtmospherePass::plan(graph));
         // Then the sky's prefiltering, in the first frame to render the view since: its texture
-        // came to show its image; a directional light came to stand for its sun or ceased to; while
-        // one does, its luminance crossed a power of two that changes what its light keeps texels
-        // to; or, for the atmosphere, its sun turned or the viewer rose or fell past what the light
-        // holds. Its images are the targets after those. Other frames reuse the light.
+        // came to show its image; a directional light came to stand for its sun or ceased to; or,
+        // for the atmosphere, its sun turned or the viewer rose or fell past what the light holds.
+        // Its images are the targets after those. Other frames reuse the light.
         let plan = match sky {
             Some((source, _)) if !self.sky_light.holds(&source) => {
                 let first = occlusion_first + occludes;
