@@ -37,7 +37,8 @@ Each phase's milestones, and what each deferred, are in git history.
   game, faster frames and tests, cheaper CI (2026-11-17)
 - **A reference path tracer**: ray queries, BLASes of packed vertices, specular light scattered as
   often as its microsurface does, `path_traced` shown and captured through the tool API, the
-  raster's sky light held to it, its tests on lavapipe (2026-11-18)
+  raster's light held to it and its multiple scattering fitted to the walk, its tests on lavapipe
+  (2026-11-18)
 
 ## Open
 

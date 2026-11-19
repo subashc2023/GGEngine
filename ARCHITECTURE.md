@@ -838,6 +838,10 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 - Models shade by glTF's metallic-roughness BRDF; lights are KHR_lights_punctual's, binned into
   clusters. Each point shades by the lights that light everywhere, then its cluster's, in the
   frame's order, so the sum is what every light would add.
+- GGX's specular light scattered more than once, which glTF's BRDF loses, comes back by fits to the
+  path tracer's walk: Kulla and Conty's form in the sky's light, and their lobe in each light's. A
+  rough surface looks the sky up toward its normal, as Filament does. What they miss against paths
+  traced is in [docs/DEFECTS.md](docs/DEFECTS.md).
 - One directional light casts shadows, the brightest that casts, in four cascades kept steady in
   the world as the view moves.
 - A sky is an image or an atmosphere, prefiltered on the GPU only as it changes. A sky's sun lights
@@ -878,9 +882,8 @@ not a mode games ship with.
   frame that traces: a frame that doesn't costs nothing.
 - Paths by next-event estimation of the lights, which are deltas, and BSDF sampling of the sky,
   which leaves out a sun a light stands for. GGX's specular light scattered more than once is
-  exact, by Heitz et al.'s random walk on the microsurface, for the sky and every light. So the
-  raster's compensation of the sky's light, and its uncompensated highlights, show as measured
-  differences; compensations such as Turquin's are themselves 10% off for rough colored metals.
+  exact, by Heitz et al.'s random walk on the microsurface, for the sky and every light. The
+  raster's fits are held to it, so what they miss shows as measured differences.
 - Light accumulates over frames until the samples asked for, and starts over as anything it reads
   changes.
 - It sees opaque and masked models alone: no fog, haze, blending, skinned meshes or games' own
