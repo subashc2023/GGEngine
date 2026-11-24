@@ -9,15 +9,22 @@
 //! view's heading, and its center moves in whole texels in the light's space. So texels stay put in
 //! the world as the view moves, and edges don't shimmer. Casters between the light and a box's near
 //! plane still cast, their depth clamped there.
+//!
+//! A box holds much the view doesn't see: past the shadows' reach, beside the view, behind it. A
+//! cascade draws only casters whose shadows can fall on what the view sees within the reach: those
+//! inside the outline of that part of the view, seen from the light, grown by [`MARGIN`] texels.
 
 use bytemuck::NoUninit;
 use gg_core::math::camera::rh::view;
-use gg_core::math::{Mat4, Vec3, Vec4, libm};
+use gg_core::math::{Mat4, Vec2, Vec3, Vec4, libm};
 
 use crate::{Light, LightKind, Projection, Viewpoint};
 
 /// Cascades per light, each its own shadow map.
 pub(crate) const CASCADES: usize = 4;
+
+/// The most sides of the view's outline seen from the light: a hexahedron's has at most 6.
+pub(crate) const OUTLINE: usize = 6;
 
 /// Each map's texels across and down: 16 MiB of 32-bit depth.
 pub(crate) const MAP_SIZE: u32 = 2048;
@@ -76,6 +83,10 @@ pub(crate) struct Cascades {
     /// Each cascade's sphere, nearest first: its center in the light's space, X and Y in whole
     /// texels, and its radius.
     spheres: [Vec4; CASCADES],
+    /// The sides of the outline of the view within the reach, in the light's space's XY: a point
+    /// is inside where its dot product with XY, plus Z, is at least 0. XY is a unit normal.
+    /// [`Vec3::Z`] for a side it lacks.
+    outline: [Vec3; OUTLINE],
     /// A point's distance ahead of the view: its dot product with XYZ, plus W.
     view_depth: Vec4,
     /// Distances ahead of the view where the shadows start to fade, and end.
@@ -120,6 +131,17 @@ impl Cascades {
         }
         let splits = splits(near, far, logarithmic);
         let forward = viewpoint.rotation * Vec3::NEG_Z;
+        let (right, up) = (viewpoint.rotation * Vec3::X, viewpoint.rotation * Vec3::Y);
+        let eye = viewpoint.position.as_vec3();
+        // The view's corners at its near side and at the reach, seen from the light.
+        let corners: [Vec2; 8] = std::array::from_fn(|i| {
+            let ahead = if i < 4 { near } else { far };
+            let high = across.off_axis(ahead) / diagonal;
+            let x = if i & 1 == 0 { -aspect } else { aspect };
+            let y = if i & 2 == 0 { -1.0 } else { 1.0 };
+            let corner = eye + forward * ahead + (right * x + up * y) * high;
+            light_from_world.transform_point3(corner).truncate()
+        });
         let spheres = std::array::from_fn(|i| {
             let (from, to) = (splits[i], splits[i + 1]);
             let (center, radius) = across.sphere(from, to);
@@ -135,7 +157,8 @@ impl Cascades {
             light: crate::light::shader_index(lights, light),
             light_from_world,
             spheres,
-            view_depth: forward.extend(-forward.dot(viewpoint.position.as_vec3())),
+            outline: outline(corners),
+            view_depth: forward.extend(-forward.dot(eye)),
             fade_from: far - (far - near) * (1.0 - FADE_FROM),
             reach: far,
         })
@@ -161,6 +184,21 @@ impl Cascades {
             ),
         );
         into_box * self.light_from_world
+    }
+
+    /// The world planes that cascade `i`'s casters reach inside, besides its box's: the sides of
+    /// the view's outline, along the light and grown by [`MARGIN`] of the cascade's texels. A point
+    /// is inside where its dot product with XYZ, plus W, is at least 0. [`Vec4::W`] holds all.
+    pub(crate) fn casters(&self, i: usize) -> [Vec4; OUTLINE] {
+        let grow = MARGIN * 2.0 * self.spheres[i].w / MAP_SIZE as f32;
+        let (x, y) = (self.light_from_world.row(0), self.light_from_world.row(1));
+        self.outline.map(|side| {
+            if side == Vec3::Z {
+                Vec4::W
+            } else {
+                x * side.x + y * side.y + Vec4::W * (side.z + grow)
+            }
+        })
     }
 
     /// The shadows' GPU form, the maps at slots `maps` of the bindless set.
@@ -194,6 +232,43 @@ fn splits(near: f32, far: f32, logarithmic: f32) -> [f32; CASCADES + 1] {
     })
 }
 
+/// The sides of `points`' convex hull, as [`Cascades::outline`] has them, by Andrew's monotone
+/// chain. Sides past [`OUTLINE`] are left out, which holds more.
+fn outline(mut points: [Vec2; 8]) -> [Vec3; OUTLINE] {
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    // Turning left from `o` to `a` to `b`.
+    let left = |o: Vec2, a: Vec2, b: Vec2| (a - o).perp_dot(b - o) > 0.0;
+    let mut hull = [Vec2::ZERO; 16];
+    let mut len = 0;
+    // Adds `p` to the chain past `hull[..start]`, dropping points it doesn't turn left at.
+    let mut add = |p: Vec2, start: usize, len: &mut usize| {
+        while *len >= start + 2 && !left(hull[*len - 2], hull[*len - 1], p) {
+            *len -= 1;
+        }
+        hull[*len] = p;
+        *len += 1;
+    };
+    // The lower chain left to right, then the upper right to left from the lower's end:
+    // anticlockwise.
+    for &p in &points {
+        add(p, 0, &mut len);
+    }
+    let lower = len - 1;
+    for &p in points.iter().rev().skip(1) {
+        add(p, lower, &mut len);
+    }
+    // The upper chain ends where the lower began.
+    let hull = &hull[..len - 1];
+    let mut sides = [Vec3::Z; OUTLINE];
+    let edges = (0..hull.len()).map(|i| (hull[i], hull[(i + 1) % hull.len()]));
+    // Anticlockwise, the inside is to each side's left.
+    let normals = edges.filter_map(|(a, b)| Some(((b - a).perp().try_normalize()?, a)));
+    for (side, (normal, a)) in sides.iter_mut().zip(normals) {
+        *side = normal.extend(-normal.dot(a));
+    }
+    sides
+}
+
 /// How far the view reaches off its axis, to its corners, at a distance ahead.
 #[derive(Clone, Copy)]
 enum Across {
@@ -204,6 +279,14 @@ enum Across {
 }
 
 impl Across {
+    /// How far off its axis the view reaches to a corner, `ahead` of it.
+    fn off_axis(self, ahead: f32) -> f32 {
+        match self {
+            Self::Perspective(tan) => ahead * tan,
+            Self::Orthographic(half) => half,
+        }
+    }
+
     /// The smallest sphere holding the view's slice from `from` to `to` ahead: its center's
     /// distance ahead on the axis, and its radius.
     ///
@@ -213,10 +296,7 @@ impl Across {
     /// sphere is smallest. If that's past the slice's end, the center is the end, where the far
     /// corners alone reach it.
     fn sphere(self, from: f32, to: f32) -> (f32, f32) {
-        let (a, b) = match self {
-            Self::Perspective(tan) => (from * tan, to * tan),
-            Self::Orthographic(half) => (half, half),
-        };
+        let (a, b) = (self.off_axis(from), self.off_axis(to));
         let center = ((from + to) / 2.0 + (b * b - a * a) / (2.0 * (to - from))).clamp(from, to);
         let (ahead, behind) = (center - from, to - center);
         let near = ahead * ahead + a * a;
@@ -374,6 +454,94 @@ mod tests {
                             let reach = at.x.abs().max(at.y.abs()).max((2.0 * at.z - 1.0).abs());
                             assert!(reach <= inside, "cascade {i}'s corner at {at}");
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The outline of a square's corners and points inside it is the square, anticlockwise.
+    #[test]
+    fn an_outline_leaves_out_points_inside() {
+        let points = [
+            Vec2::new(1.0, 1.0),
+            Vec2::new(0.5, 0.2),
+            Vec2::new(-1.0, 1.0),
+            Vec2::new(0.0, 0.0),
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, -1.0),
+            Vec2::new(-0.3, 0.9),
+        ];
+        let sides = outline(points);
+        let inside = |p: Vec2| {
+            sides
+                .iter()
+                .all(|side| side.truncate().dot(p) + side.z >= -1e-6)
+        };
+        assert_eq!(sides[4..], [Vec3::Z; 2], "{sides:?}");
+        for side in &sides[..4] {
+            assert!(
+                (side.truncate().length() - 1.0).abs() < 1e-6 && side.z == 1.0,
+                "{side}"
+            );
+        }
+        assert!(points.iter().all(|&p| inside(p)));
+        assert!(!inside(Vec2::new(1.1, 0.0)) && !inside(Vec2::new(0.0, -1.1)));
+    }
+
+    /// Under a sun straight down, the far cascade's box reaches past the shadows' reach and behind
+    /// the view, but its casters don't. Whatever the light, every point the view sees within the
+    /// reach is inside each cascade's casters by `MARGIN` texels, less a little for rounding.
+    #[test]
+    fn cascades_cast_from_over_what_the_view_sees() {
+        let rotation = Quat::from_rotation_y(0.6) * Quat::from_rotation_x(-0.2);
+        let view = looking(Vec3::new(4.0, 2.0, -3.0), rotation);
+        let forward = rotation * Vec3::NEG_Z;
+        let aspect = 16.0 / 9.0;
+        let reaches = |planes: &[Vec4], p: Vec3, by: f32| {
+            planes
+                .iter()
+                .all(|plane| plane.truncate().dot(p) + plane.w >= by)
+        };
+        let down = [sun(Vec3::NEG_Y, Some(50.0), 1.0)];
+        let cascades = Cascades::fit(&down, &view, aspect).expect("a light casts");
+        let last = CASCADES - 1;
+        let in_box = |p: Vec3| {
+            let at = cascades.clip_from_world(last).project_point3(p);
+            at.x.abs() <= 1.0 && at.y.abs() <= 1.0
+        };
+        let casters = cascades.casters(last);
+        for p in [
+            Vec3::new(4.0, 2.0, -3.0) + forward * 70.0,
+            Vec3::new(4.0, 2.0, -3.0) - forward * 5.0,
+        ] {
+            assert!(in_box(p), "{p} is outside the box");
+            assert!(!reaches(&casters, p, 0.0), "{p} casts");
+        }
+        let tan = libm::tanf(FRAC_PI_3 / 2.0);
+        for direction in [
+            Vec3::NEG_Y,
+            Vec3::new(0.3, -1.0, 0.2),
+            Vec3::new(-1.0, -0.1, 0.4),
+        ] {
+            let lights = [sun(direction.normalize(), Some(50.0), 1.0)];
+            let cascades = Cascades::fit(&lights, &view, aspect).expect("a light casts");
+            for i in 0..CASCADES {
+                let texel = 2.0 * cascades.spheres[i].w / MAP_SIZE as f32;
+                let casters = cascades.casters(i);
+                for ahead in [0.1, 20.0, 50.0] {
+                    for [x, y] in [
+                        [-1.0, -1.0],
+                        [1.0, -1.0],
+                        [-1.0, 1.0],
+                        [1.0, 1.0],
+                        [0.0, 0.0],
+                    ] {
+                        let corner = Vec3::new(x * tan * aspect, y * tan, -1.0) * ahead;
+                        let world = Vec3::new(4.0, 2.0, -3.0) + rotation * corner;
+                        let by = (MARGIN - 0.01) * texel;
+                        assert!(reaches(&casters, world, by), "cascade {i}, {world}");
                     }
                 }
             }

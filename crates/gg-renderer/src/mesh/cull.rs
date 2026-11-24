@@ -18,7 +18,7 @@ use gg_gpu::{
 use super::draw::{LodView, Uploaded};
 use super::scene::SceneRun;
 use super::{GpuMesh, GpuShader, Held, MAX_LEVELS, MeshPass, PlacedMeshlets, Push, Way};
-use crate::shadow::CASCADES;
+use crate::shadow::{CASCADES, OUTLINE};
 use crate::{Draws, MeshDraw, halves};
 
 pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cull.spv"));
@@ -509,6 +509,9 @@ pub(crate) struct CullView {
     /// Whether depth clamps at its near side, as a cascade's does, so nearer things draw there,
     /// unculled.
     pub(crate) clamped: bool,
+    /// More planes, as [`planes`] has them, that what it keeps reaches inside: a cascade's
+    /// [`casters`](crate::shadow::Cascades::casters). [`Vec4::W`] holds all.
+    pub(crate) casters: [Vec4; OUTLINE],
 }
 
 /// The buffer the game's view's drawn counts go in, which frames read back.
@@ -599,7 +602,8 @@ struct GpuLevel {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit)]
 struct GpuView {
-    planes: [Vec4; 6],
+    /// [`planes`], then [`CullView::casters`].
+    planes: [Vec4; PLANES],
     w: Vec4,
     x: Vec4,
     y: Vec4,
@@ -619,6 +623,9 @@ struct GpuView {
     unused: [u32; 3],
 }
 
+/// A view's planes: `PLANES` in `shaders/culling.slang`.
+const PLANES: usize = 6 + OUTLINE;
+
 /// `NO_PREVIOUS` in `shaders/culling.slang`.
 const NO_PREVIOUS: u32 = u32::MAX;
 
@@ -628,7 +635,13 @@ impl GpuView {
         let lod = LodView::new(clip, view.size);
         let [width, height] = view.size;
         Self {
-            planes: planes(clip, view.clamped),
+            planes: {
+                let mut all = [Vec4::W; PLANES];
+                let (sides, casters) = all.split_at_mut(6);
+                sides.copy_from_slice(&planes(clip, view.clamped));
+                casters.copy_from_slice(&view.casters);
+                all
+            },
             w: lod.w,
             x: clip.row(0),
             y: clip.row(1),

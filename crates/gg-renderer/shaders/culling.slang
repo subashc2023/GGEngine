@@ -10,6 +10,8 @@ static const uint BLOCK = 64;
 static const uint MOST_GROUPS = 65535;
 // A mesh's most levels of detail: `MAX_LEVELS` in src/mesh/registry.rs.
 static const uint MAX_LEVELS = 8;
+// A view's planes: `PLANES` in src/mesh/cull.rs.
+static const uint PLANES = 12;
 // An instance a view doesn't draw.
 static const uint CULLED = 0xFFFFFFFF;
 // `Run::meshlets` without meshlets: `NO_MESHLETS` in src/mesh/cull.rs.
@@ -48,8 +50,9 @@ struct Command {
 
 struct View {
     // `p` is inside a plane where `dot(xyz, p) + w` is at least 0; a sphere reaches inside where
-    // that's at least `-radius * length(xyz)`.
-    float4 planes[6];
+    // that's at least `-radius * length(xyz)`. The view's six, then a cascade's casters' (`OUTLINE`
+    // in src/shadow.rs); (0, 0, 0, 1) holds all.
+    float4 planes[PLANES];
     // As `LodView`: `dot(w, p)` is clip W; `w_slope`, its change per world unit; `pixels_per_unit`,
     // pixels per world unit at W 1.
     float4 w;
@@ -109,7 +112,7 @@ float stretch(float3 x, float3 y, float3 z) {
 // Whether the world sphere reaches inside every plane of `view`.
 bool reaches(View view, float3 center, float radius) {
     bool inside = true;
-    for (uint i = 0; i < 6; i++) {
+    for (uint i = 0; i < PLANES; i++) {
         float4 plane = view.planes[i];
         if (dot(plane.xyz, center) + plane.w < -radius * length(plane.xyz)) {
             inside = false;

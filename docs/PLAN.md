@@ -272,8 +272,8 @@ Defects are in [DEFECTS.md](DEFECTS.md).
   deleted: Shards by its flags (`--relay`, the host printing its code), or Shards given a Host and
   Join menu. Recommendation: Shards by flags, as the match measures the network, which a menu
   doesn't change, and `Context::host` and `join` have tests of their own. Decide before the match.
-- What frame time the 16 Bistros are held to on a Mac. On an M3 Pro they take 14 ms at 1280×720,
-  15.8 at the 95th percentile, as [DEFECTS.md](DEFECTS.md)'s Performance says.
+- What frame time the 16 Bistros are held to on a Mac. On an M3 Pro they take 12 ms at 1280×720,
+  13.9 at the 95th percentile, as [DEFECTS.md](DEFECTS.md)'s Performance says.
   Recommendation: 16.7 ms at the 95th percentile, 60 frames a second, which they meet. Decide
   before Phase 10 closes.
 - What render scale a run starts at on a high-density screen. Every run starts at 1, so a full

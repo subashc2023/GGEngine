@@ -832,7 +832,8 @@ that are images. Paths are under `crates/gg-renderer/src/`.
   ahead of the render thread, and the GPU finishes two frames after that.
 - **The scene.** Each entity with a `Transform` and an opaque `MeshDraw` is a record in a GPU
   table, written only as it changes, so 16 Bistros cost the CPU about what one does.
-- **Culling.** Instances are culled by their spheres for the view and each cascade. The view's
+- **Culling.** Instances are culled by their spheres for the view and each cascade. A cascade
+  keeps those whose shadows can fall on what the view sees within the shadows' reach. The view's
   first pass draws what the last frame found unhidden; a depth pyramid built from it culls the
   rest for the second. What comes into view draws in the frame it does.
 - **Meshlets.** Cooked opaque and masked meshes that aren't skinned draw by meshlets: through mesh

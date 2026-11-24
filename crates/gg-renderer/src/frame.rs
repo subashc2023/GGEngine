@@ -23,7 +23,7 @@ use crate::motion_blur::MotionBlurPass;
 use crate::particles::{ParticlePass, ParticlePlan};
 use crate::pick::Picks;
 use crate::reflections::{ReflectionData, ReflectionPass};
-use crate::shadow::{self, CASCADES, Cascades, MAP_SIZE, ShadowData};
+use crate::shadow::{self, CASCADES, Cascades, MAP_SIZE, OUTLINE, ShadowData};
 use crate::show::ShowPass;
 use crate::skin::{SkinPlan, Skinning};
 use crate::sky::{SkyData, SkyPass, Source};
@@ -1296,6 +1296,7 @@ impl Recorder<'_> {
                     clip_from_world: view_projection,
                     size,
                     clamped: false,
+                    casters: [Vec4::W; OUTLINE],
                 };
                 let mut cascades = [seen; CASCADES];
                 let count = match &view.shadows {
@@ -1305,6 +1306,7 @@ impl Recorder<'_> {
                                 clip_from_world: shadows.cascades.clip_from_world(i),
                                 size: [MAP_SIZE; 2],
                                 clamped: true,
+                                casters: shadows.cascades.casters(i),
                             };
                         }
                         CASCADES
