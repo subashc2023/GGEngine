@@ -94,7 +94,8 @@
 //! - The view's list shows, after shading's parts, the images the game's frame makes, as the API's
 //!   `images` answers as the list opens.
 //! - The title bar's settings limit the editor's frame rate, at the display's by default, and the
-//!   game's, as the look's `max_fps`, which the editor takes from another client too.
+//!   game's, as the look's `max_fps`, and its render scale, as the look's `render_scale`: the
+//!   editor takes both from another client too.
 //! - The Performance panel shows the game's frames first, as each frame's memory carries them.
 //!
 //! # Drag and drop
@@ -309,6 +310,9 @@ struct Game {
     /// The cap on the game's frames, as the settings' game frame rate limit last said or another
     /// client set it.
     max_fps: Option<NonZeroU32>,
+    /// The game's render scale, as the settings' game render scale last said or another client set
+    /// it; `None` for the game's own.
+    render_scale: Option<f32>,
 }
 
 /// The cursor's grab for the game, in Play.
@@ -395,6 +399,7 @@ impl Game {
             message: None,
             measures: Measures::default(),
             max_fps: None,
+            render_scale: None,
         }
     }
 }
@@ -433,15 +438,22 @@ impl Layer for Game {
         self.view.camera.update(dt);
         self.frame_asked();
         self.changes(wants(&self.view));
-        // The settings' game frame rate limit caps the game; one another client set shows there.
+        // The settings' game frame rate limit caps the game, and its game render scale scales it;
+        // ones another client set show there.
         let max_fps = cx.game_max_fps();
         if max_fps != self.max_fps {
             self.max_fps = max_fps;
             self.looking.change(Part::MaxFps);
         }
+        let render_scale = cx.game_render_scale();
+        if render_scale != self.render_scale {
+            self.render_scale = render_scale;
+            self.looking.change(Part::RenderScale);
+        }
         self.view.settle();
         self.take_answers();
         cx.set_game_max_fps(self.max_fps);
+        cx.set_game_render_scale(self.render_scale);
         self.debugger.update();
         self.take_picks();
         self.take_probes();

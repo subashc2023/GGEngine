@@ -102,7 +102,8 @@ fresh run. `cargo gg help run` has the details. `cargo gg mcp` serves the same c
 - A run that doesn't end in an error logs `engine.perf`: frame times, where they went, and memory.
   Compare release builds run headless for the same number of frames.
 - Live frame times: the Performance panel; in the editor, the game's first. The title bar's gear
-  limits the frame rate; in the editor, its own and the game's (the look's `max_fps`).
+  limits the frame rate; in the editor, its own and the game's (the look's `max_fps`), and sets
+  the game's render scale (the look's `render_scale`).
   `--max-fps N` or `--vsync` caps frames; at 2 to 10 fps you can watch frame by frame.
 - How a frame is made: `cargo gg capture --show` and `cargo gg probe`. Tracy and RenderDoc:
   [gg-renderer's AGENTS.md](crates/gg-renderer/AGENTS.md).

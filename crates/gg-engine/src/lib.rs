@@ -119,6 +119,8 @@ mod environment;
 mod event;
 mod font;
 mod frame_rate;
+#[cfg(feature = "dev")]
+mod game_scale;
 mod game_ui;
 mod gltf;
 pub mod grant;

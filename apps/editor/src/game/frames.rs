@@ -109,6 +109,9 @@ impl Game {
         if let Some(max_fps) = taken.max_fps {
             self.max_fps = max_fps;
         }
+        if let Some(render_scale) = taken.render_scale {
+            self.render_scale = render_scale;
+        }
     }
 
     /// Shows the game's latest frame, if one came since.
@@ -248,6 +251,7 @@ impl Game {
             show: toolbar.show.clone(),
             skip: (!toolbar.skip.is_empty()).then(|| toolbar.skip.clone()),
             max_fps: self.max_fps,
+            render_scale: self.render_scale,
         }
     }
 }

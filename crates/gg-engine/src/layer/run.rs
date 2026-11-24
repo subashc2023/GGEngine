@@ -597,6 +597,22 @@ impl Context {
         }
     }
 
+    /// The render scale the title bar's settings set on the game an app shows
+    /// ([`App::embeds_game`](crate::App::embeds_game)), which the app sends the game in its look
+    /// ([`gg_api::Look::render_scale`]); `None` for the game's own.
+    #[cfg(feature = "dev")]
+    pub fn game_render_scale(&self) -> Option<f32> {
+        self.dev.game_render_scale
+    }
+
+    /// Sets [`game_render_scale`](Self::game_render_scale), as when another client scales the game.
+    /// A scale outside [`MIN_RENDER_SCALE`](crate::MIN_RENDER_SCALE) to 1 is the game's to refuse,
+    /// as it does the look that carries it.
+    #[cfg(feature = "dev")]
+    pub fn set_game_render_scale(&mut self, scale: Option<f32>) {
+        self.dev.game_render_scale = scale;
+    }
+
     /// Ends the run before its next frame, as closing its window does when no layer handles that;
     /// for a game's Quit. Embedded in a tool, as in the editor's Play, it stops a copy of the world
     /// as edited that plays instead, as the tool API's `stop` does.

@@ -2552,6 +2552,63 @@ fn clients_set_the_look_part_by_part_the_last_setter_winning() {
     assert_eq!(look.revision, 3);
 }
 
+/// A look's render scale, from the least to 1, replaces the game's own while set; `null` gives it
+/// back. One outside that range is refused, the look as it was. Frames get the scale as answered.
+#[test]
+fn a_looks_render_scale_replaces_the_games_own_until_given_back() {
+    for scale in [json!(gg_renderer::MIN_RENDER_SCALE), json!(0.5), json!(1)] {
+        let params = json!({ "render_scale": scale });
+        let request = Request {
+            id: 1,
+            method: "look".to_owned(),
+            params,
+        };
+        let parsed = parse(&request).expect("a scale in range");
+        let Call::Look(look) = parsed else {
+            panic!("a look");
+        };
+        assert!(matches!(look.render_scale, Some(Some(_))), "{scale}");
+    }
+    let (mut api, session) = started("Api Look Render Scale");
+    let mut cx = Context::seeded(8);
+    let mut stepper = Stepper::default();
+    let client = |mut client: Client| {
+        let mut look =
+            |params: Value| (client.call_as::<Looked>("look", params)).expect("the look");
+        let set = look(json!({"render_scale": 0.5}));
+        let again = look(json!({"render_scale": 0.5}));
+        let refused = client.call("look", json!({"render_scale": 2}));
+        let after = client.call_as::<Looked>("look", Value::Null);
+        let given_back = client.call_as::<Looked>("look", json!({"render_scale": null}));
+        let given_back = given_back.expect("given back");
+        (
+            set,
+            again,
+            refused.err(),
+            after.expect("a read"),
+            given_back,
+        )
+    };
+    let (set, again, refused, after, given_back) = serving(
+        &mut api,
+        &mut cx,
+        &mut Stack::default(),
+        &mut stepper,
+        session,
+        client,
+        |_, _, _| {},
+    );
+    let test = Some("test".to_owned());
+    assert_eq!(set.render_scale, Some(0.5));
+    assert_eq!((&set.by.render_scale, set.revision), (&test, 1));
+    assert_eq!(again, set, "nothing changed, nor counted");
+    assert_eq!(refused.expect("refused").code, "api.bad_params");
+    assert_eq!(after, set, "the look as it was");
+    let (scale, by) = (given_back.render_scale, &given_back.by.render_scale);
+    assert_eq!((scale, by, given_back.revision), (None, &None, 2));
+    assert_eq!((cx.dev.look.render_scale, cx.dev.look.revision), (None, 2));
+}
+
 /// A look's left-out passes are a set: any order or repeats answer once each in
 /// [`gg_api::Pass::ALL`]'s order, and the same set again is no revision. An empty list gives the
 /// part back, as `null` does. Frames get the set as answered.
@@ -3501,6 +3558,13 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         ),
         ("look", outline(&[id], [1.0; 4], 0.0), "api.bad_params"),
         ("look", json!({"grid": "xw"}), "api.bad_params"),
+        // A render scale under the least, past 1, or not a number.
+        ("look", json!({"render_scale": 0.0}), "api.bad_params"),
+        ("look", json!({"render_scale": 0.24}), "api.bad_params"),
+        ("look", json!({"render_scale": 1.01}), "api.bad_params"),
+        ("look", json!({"render_scale": -0.5}), "api.bad_params"),
+        ("look", json!({"render_scale": 1e39}), "api.bad_params"),
+        ("look", json!({"render_scale": "half"}), "api.bad_params"),
         ("pick", Value::Null, "api.bad_params"),
         ("pick", json!({"at": [1]}), "api.bad_params"),
         (

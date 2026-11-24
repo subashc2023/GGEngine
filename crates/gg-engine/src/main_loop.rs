@@ -403,8 +403,9 @@ pub(crate) type Passed = std::convert::Infallible;
 /// 4. Updates the layers.
 /// 5. Draws the world after them, as far on from where the last tick found it to where it left it
 ///    as the frame is past the tick, a client's other players by [`Stack::interpolate`].
-/// 6. Given egui, the dock and egui's input in `ui`, adds the engine's settings
-///    ([`frame_rate::settings`]) and has the layers draw their UI in the dock.
+/// 6. Given egui, the dock and egui's input in `ui`, adds the engine's settings (the frame rate
+///    limits and an embedded game's render scale, [`frame_rate::settings`]) and has the layers
+///    draw their UI in the dock.
 ///
 /// Returns that pass's output and whether any layer draws UI. [`tessellate`] starts the second
 /// half.

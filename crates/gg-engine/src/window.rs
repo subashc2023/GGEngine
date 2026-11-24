@@ -289,6 +289,7 @@ impl Handler<'_> {
             self.monitor = window.current_monitor();
             let rate = frame_rate::refresh_rate(self.monitor.as_ref());
             frame_rate::set_refresh_rate(&mut self.cx, rate);
+            crate::game_scale::start(&mut self.cx);
             frame_rate::start(&mut self.cx)
         };
         #[cfg(not(feature = "dev"))]
@@ -856,6 +857,15 @@ impl ApplicationHandler for Handler<'_> {
                 // Frames stop without a window area; Windows doesn't call `about_to_wait` to
                 // restart them while the user drags an edge.
                 self.request_frame(event_loop);
+            }
+            // macOS keeps a minimized window's area and says only that it's hidden. Covered by
+            // other windows, it's hidden too, but frames go on: an agent's capture needs them.
+            #[cfg(target_os = "macos")]
+            WindowEvent::Occluded(_) => {
+                let window = self.window.as_ref();
+                if let Some(minimized) = window.and_then(|window| window.is_minimized()) {
+                    self.set_minimized(minimized);
+                }
             }
             WindowEvent::RedrawRequested => {
                 // A redraw asked for before minimizing still comes, and Windows sends one on

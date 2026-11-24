@@ -138,11 +138,11 @@ impl<'a> Ui<'a> {
     /// Adds `add_contents` to the settings this frame. With
     /// [`App::custom_title_bar`](crate::App::custom_title_bar), a gear left of the panel hide
     /// buttons opens them below it: the engine's own first, the frame rate limits
-    /// ([`Context::set_max_fps`](crate::Context::set_max_fps), and an embedded game's), then the
-    /// layers', bottom layer first, a line between each. `add_contents` runs while they're open;
-    /// the gear, Escape or a click outside closes them, but a click that closes a dropdown's list
-    /// in them closes the list alone. Without the custom title bar there's no gear and it doesn't
-    /// run. A layer keeps its settings' state itself, like
+    /// ([`Context::set_max_fps`](crate::Context::set_max_fps), and an embedded game's) and an
+    /// embedded game's render scale, then the layers', bottom layer first, a line between each.
+    /// `add_contents` runs while they're open; the gear, Escape or a click outside closes them, but
+    /// a click that closes a dropdown's list in them closes the list alone. Without the custom
+    /// title bar there's no gear and it doesn't run. A layer keeps its settings' state itself, like
     /// [`Context::save_state`](crate::Context::save_state).
     pub fn settings(&mut self, add_contents: impl FnOnce(&mut egui::Ui)) {
         self.dock.bar.settings(add_contents);

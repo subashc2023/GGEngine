@@ -927,6 +927,7 @@ fn a_new_or_an_open_turns_the_view_to_the_games_camera() {
         show: None,
         skip: None,
         max_fps: None,
+        render_scale: None,
         by: By {
             viewpoint: Some(CLIENT.to_owned()),
             outline: None,
@@ -935,6 +936,7 @@ fn a_new_or_an_open_turns_the_view_to_the_games_camera() {
             show: None,
             skip: None,
             max_fps: None,
+            render_scale: None,
         },
         revision: 1,
         run: 1,
@@ -1031,6 +1033,7 @@ fn the_first_frame_through_the_games_camera_turns_the_view_to_the_editors() {
             show: None,
             skip: None,
             max_fps: None,
+            render_scale: None,
             revision,
             run: 1,
             seen: None,
@@ -1243,6 +1246,7 @@ fn the_look_goes_to_the_game_as_the_user_changes_it() {
             show: None,
             skip: None,
             max_fps: None,
+            render_scale: None,
             by: By {
                 viewpoint,
                 outline,
@@ -1251,6 +1255,7 @@ fn the_look_goes_to_the_game_as_the_user_changes_it() {
                 show: None,
                 skip: None,
                 max_fps: None,
+                render_scale: None,
             },
             revision,
             run: 1,
@@ -1432,6 +1437,7 @@ fn the_grid_follows_a_turn_another_clients_viewpoint_makes() {
             show: None,
             skip: None,
             max_fps: None,
+            render_scale: None,
             by: By {
                 viewpoint: viewpoint_by,
                 outline: None,
@@ -1440,6 +1446,7 @@ fn the_grid_follows_a_turn_another_clients_viewpoint_makes() {
                 show: None,
                 skip: None,
                 max_fps: None,
+                render_scale: None,
             },
             revision,
             run: 1,
@@ -1490,6 +1497,7 @@ fn the_passes_left_out_go_to_the_game_and_are_taken_from_other_clients() {
             show: None,
             skip,
             max_fps: None,
+            render_scale: None,
             by: By {
                 skip: by.map(str::to_owned),
                 ..By::default()
@@ -1552,6 +1560,7 @@ fn the_settings_frame_rate_limit_caps_the_game() {
             show: None,
             skip: None,
             max_fps,
+            render_scale: None,
             by: By {
                 max_fps: by.map(str::to_owned),
                 ..By::default()
@@ -1589,6 +1598,70 @@ fn the_settings_frame_rate_limit_caps_the_game() {
     game.looking.reset();
     game.update(&mut cx, Duration::ZERO);
     assert_eq!(looks(&ends), [caps(thirty)], "served anew");
+}
+
+/// The settings' game render scale scales the game: the scale goes as the user sets it, null as
+/// they go back to the game's own, and again to a game served anew. One another client sets shows in
+/// the settings.
+#[test]
+fn the_settings_game_render_scale_scales_the_game() {
+    let (mut game, ends) = serving();
+    let mut cx = Context::seeded(1);
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [], "all the game's own");
+    // The game answers a look scaled to `render_scale`, set by `by`, at `revision`; returns the
+    // looks the editor asks for in the update that takes it.
+    let answer = |game: &mut Game, cx: &mut Context, render_scale, by: Option<&str>, revision| {
+        let looked = Looked {
+            viewpoint: None,
+            outline: None,
+            grid: None,
+            colliders: None,
+            show: None,
+            skip: None,
+            max_fps: None,
+            render_scale,
+            by: By {
+                render_scale: by.map(str::to_owned),
+                ..By::default()
+            },
+            revision,
+            run: 1,
+            seen: None,
+        };
+        let answer = ("look".to_owned(), Ok(json!(looked)));
+        ends.answer.send(answer).expect("sent");
+        game.update(cx, Duration::ZERO);
+        looks(&ends)
+    };
+    let scales = |render_scale| Look {
+        render_scale: Some(render_scale),
+        ..Look::default()
+    };
+    let (half, quarter) = (Some(0.5), Some(0.25));
+    // The settings' choice, which a test sets, since it can't run `ui`.
+    cx.set_game_render_scale(half);
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [scales(half)]);
+    assert_eq!(answer(&mut game, &mut cx, half, Some(CLIENT), 1), []);
+    let sent = answer(&mut game, &mut cx, quarter, Some("agent"), 2);
+    assert_eq!(
+        (sent, cx.game_render_scale()),
+        (vec![], quarter),
+        "the agent's"
+    );
+    cx.set_game_render_scale(None);
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [scales(None)], "the user's null");
+    assert_eq!(answer(&mut game, &mut cx, None, None, 3), []);
+    cx.set_game_render_scale(half);
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [scales(half)]);
+    assert_eq!(answer(&mut game, &mut cx, half, Some(CLIENT), 4), []);
+    // As a game serves anew.
+    game.looking.reset();
+    game.update(&mut cx, Duration::ZERO);
+    assert_eq!(looks(&ends), [scales(half)], "served anew");
 }
 
 /// A Probe press asks the game for a probe of its pixel, in the view's pixels, taking the press

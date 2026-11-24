@@ -105,7 +105,7 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 | On Windows, an inner size asked of a UI-titled window (`InnerSize`, `MinInnerSize`, `MaxInnerSize`) leaves it a frame smaller | Add the frame, as `AdjustWindowRectExForDpi` measures it | Code resizes such a window |
 | On Windows, a maximized UI-titled window covers the monitor, which can keep an auto-hiding taskbar from showing | Leave it a pixel or two, as Windows Terminal does | Someone hides their taskbar |
 | A torn-off window opens at its saved position even off every monitor | Move it onto one | Someone's monitors change |
-| Frames pause for a minimized window only at zero area, as Windows gives it: macOS reports occlusion and Wayland nothing, so frames go on unseen and `ping` says nothing waits (unchecked) | Pause at winit's `Occluded(true)`; give paced acquires a deadline | Someone minimizes a game on a Mac or Wayland |
+| On Wayland, frames don't pause for a minimized window, which reports neither zero area, as Windows does, nor being minimized, as macOS does: frames go on unseen and `ping` says nothing waits (unchecked) | Give paced acquires a deadline | Someone minimizes a game on Wayland |
 | A torn-off window opening on a monitor of another scale is placed at the main window's scale, away from the cursor | Place it by its own monitor's scale | Someone docks across such monitors |
 | In a frame egui runs twice, torn-off windows' texture changes apply before the main window's, so glyphs added to a growing atlas can go missing | Apply changes in egui's order, which needs egui to hand them over per pass | It shows |
 

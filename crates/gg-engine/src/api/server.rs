@@ -288,6 +288,7 @@ impl Api {
                 show: None,
                 skip: None,
                 max_fps: None,
+                render_scale: None,
                 by: By::default(),
                 revision: 0,
                 run,

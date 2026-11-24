@@ -260,8 +260,9 @@ server](crates/gg-engine/src/api/server.rs) how a game answers.
   client has taken the last, and no faster than the look's cap. The editor takes one a display
   refresh by default (`App::embeds_game`), and its game limit sets the cap. Clients share one look,
   part by part, the last setter of each winning: viewpoint, outline, grid, colliders, what shows in
-  place of the light, passes left out, the cap. Extraction drops a pass left out, so the world is
-  unchanged and the renderer has nothing to skip. Each frame carries its viewpoint and the look's
+  place of the light, passes left out, the cap, and the render scale, which any run takes. The
+  editor's title bar sets the game's render scale, as games' settings menus set their players'.
+  Extraction drops a pass left out, so the world is unchanged and the renderer has nothing to skip. Each frame carries its viewpoint and the look's
   revision, so what a client draws over it lines up, and the game's last frame times, for the
   client's Performance panel.
 - **Captures** show the view as shown. Asked, they show it as the game shows it alone, or a part of
@@ -749,9 +750,13 @@ A render scale below 1 ([`Context::set_render_scale`](crates/gg-engine/src/layer
 `--render-scale`) renders everything before the canvas at that share of the view's pixels each way.
 A pass then upscales the colors to the view's size, by a Catmull-Rom filter clamped to the nearest
 texels, and its IDs by the nearest. The canvas, tonemap, outline, picks and captures keep the
-view's own pixels. Retina screens make it worth having: an M3 Pro renders Bistro full screen in 33
-ms, and in 18 at 0.5. Antialiasing resolves at the scaled size; TAA that resolves into the view's
+view's own pixels. Retina screens make it worth having: an M3 Pro renders Bistro full screen in 26
+ms, and in 12 at 0.5. Antialiasing resolves at the scaled size; TAA that resolves into the view's
 size, as FSR 2 does, would keep more detail.
+
+Every run starts at a render scale of 1, high-density screens too. A game's settings menu sets its
+players' scale, trading sharpness for speed; the editor's title bar sets its game's. On a Mac, the
+16 Bistros at 1280×720 are held to 16.7 ms at the 95th percentile, 60 frames a second.
 
 - Colors are linear 16-bit floats, which games' pipelines are made for. Passes that read them take
   NaN as 0 and infinity as 65,504, since a shader's float can be infinite.

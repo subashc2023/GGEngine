@@ -485,6 +485,24 @@ fn the_view_cuts_to_and_from_the_tools_look() {
     assert_eq!(seen(&mut cx), (false, false), "the frame after it");
 }
 
+/// The look's render scale replaces the game's own in the frame while set, but not in a bare frame,
+/// and the game's own, which a layer reads back, is never changed.
+#[cfg(feature = "dev")]
+#[test]
+fn the_looks_render_scale_replaces_the_games_own_in_the_frame() {
+    let mut cx = Context::seeded(1);
+    cx.set_render_scale(0.75);
+    assert_eq!(handed_off(&mut cx).render_scale, 0.75, "the game's own");
+    cx.dev.look.render_scale = Some(0.5);
+    assert_eq!(handed_off(&mut cx).render_scale, 0.5, "the look's");
+    cx.dev.look.bare = true;
+    assert_eq!(handed_off(&mut cx).render_scale, 0.75, "a bare frame");
+    cx.dev.look.bare = false;
+    assert_eq!(cx.render_scale(), 0.75, "the game's own still");
+    cx.dev.look.render_scale = None;
+    assert_eq!(handed_off(&mut cx).render_scale, 0.75, "given back");
+}
+
 /// The look leaves out passes: the environment as if the game had none, the lights without shadows.
 /// A bare frame leaves none out. The world stays as it was.
 #[cfg(feature = "dev")]

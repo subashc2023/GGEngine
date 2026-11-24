@@ -572,9 +572,9 @@ impl Context {
     ///   answers to come back.
     ///
     /// The viewpoint, outline and picks are forgotten once taken. In a development build the
-    /// look's viewpoint and outline replace the layers', the passes it leaves out are left out,
-    /// and the frame carries the look's revision and whether it's seen from the look's viewpoint,
-    /// whose exposure adapts apart from the game's own. A bare frame leaves the look out, and
+    /// look's viewpoint, outline and render scale replace the layers', the passes it leaves out
+    /// are left out, and the frame carries the look's revision and whether it's seen from the
+    /// look's viewpoint, whose exposure adapts apart from the game's own. A bare frame leaves the look out, and
     /// leaves all picks, asked this frame or held by the renderer, to the next frame that isn't
     /// bare, so none reads a view a client isn't shown.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
@@ -664,6 +664,10 @@ impl Context {
             frame.look = self.dev.look.revision;
             frame.bare = self.dev.look.bare;
             frame.show = self.dev.look.shown();
+            // The game's own scale stays in `render_scale`, which a layer reads back.
+            if let Some(scale) = self.dev.look.render_scale.filter(|_| !self.dev.look.bare) {
+                frame.render_scale = scale;
+            }
             self.dev.look.leave_out(frame);
             // As the look's viewpoint shows, so that a frame that turns to or from it is cut to.
             frame.looked = matches!(seer, Seer::Look(_));

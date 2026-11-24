@@ -343,7 +343,7 @@ game to see the view alone change.
             Help {
                 name: "look",
                 usage: "look [<LOOK>]",
-                summary: "Read or set its look: viewpoint, outline, grid, colliders, show, skip, max_fps",
+                summary: "Read or set its look: viewpoint, outline, grid, colliders, show, skip, max_fps, render_scale",
                 details: "\
 The look is the view's settings, which any client sets; the last to set a part wins. LOOK is a JSON
 object of parts, as the API's `look` takes them, set before the look is printed; `null` gives a part
@@ -357,7 +357,9 @@ back to the game:
   {\"skip\":[\"reflections\",\"shadows\"]}, of `ambient_occlusion`, `reflections`, `shadows`, `fog`,
   `bloom`, `depth_of_field`, `motion_blur`, `antialiasing`, `grade`, `lens` and `adaptation`;
 - `max_fps`, the most frames a second a game embedded in a tool renders, as the editor's game frame
-  rate limit sets it: {\"max_fps\":10}.
+  rate limit sets it: {\"max_fps\":10};
+- `render_scale`, the share of the view's pixels rendered across and down, 0.25 to 1, in place of
+  the game's own, as the editor's game render scale sets it: {\"render_scale\":0.5}.
 ",
             },
             Help {

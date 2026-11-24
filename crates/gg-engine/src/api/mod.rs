@@ -43,6 +43,8 @@ pub(crate) struct Look {
     pub(crate) skip: Vec<gg_api::Pass>,
     /// The cap on an embedded run's frames ([`max_fps`]).
     pub(crate) max_fps: Option<std::num::NonZeroU32>,
+    /// The view's render scale in place of the game's own, unless the frame is bare.
+    pub(crate) render_scale: Option<f32>,
     pub(crate) revision: u64,
     pub(crate) bare: bool,
     pub(crate) captured: Option<Shown>,

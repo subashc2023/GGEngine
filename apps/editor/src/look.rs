@@ -1,7 +1,7 @@
 //! The editor's side of a game's look: the view settings the game keeps. They are the viewpoint, an
 //! outline, a grid, colliders' outlines, what the view shows in place of its light, the passes it
-//! leaves out, and the cap on its frame rate. Any client sets them part by part, the last to set a part winning, as the tool
-//! API's `look` says.
+//! leaves out, the cap on its frame rate and its render scale. Any client sets them part by part,
+//! the last to set a part winning, as the tool API's `look` says.
 //!
 //! A part goes to the game only as the user changes it, or as it follows one the editor took, as
 //! the grid follows the camera driving the view. Every answer is a read of the look. The editor
@@ -22,6 +22,7 @@ pub enum Part {
     Show,
     Skip,
     MaxFps,
+    RenderScale,
 }
 
 /// The look's parts, each `None` where it's the game's own: what the editor wants, or knows the
@@ -36,6 +37,7 @@ pub struct Parts {
     /// In [`Pass::ALL`]'s order, each once, never empty, as the game answers it.
     pub skip: Option<Vec<Pass>>,
     pub max_fps: Option<NonZeroU32>,
+    pub render_scale: Option<f32>,
 }
 
 /// What the editor knows of a game's look, and asks of it.
@@ -47,7 +49,7 @@ pub struct Looking {
     revision: u64,
     drawn: u64,
     /// Per [`Part`], whether it changed since the last ask, by the user or following one taken.
-    changed: [bool; 7],
+    changed: [bool; 8],
     /// The look asked for, until answered. A read sets no part.
     asked: Option<Look>,
 }
@@ -61,7 +63,7 @@ impl Looking {
             by: By::default(),
             revision: 0,
             drawn: 0,
-            changed: [true; 7],
+            changed: [true; 8],
             asked: None,
         }
     }
@@ -91,6 +93,7 @@ impl Looking {
             Part::Show => &self.by.show,
             Part::Skip => &self.by.skip,
             Part::MaxFps => &self.by.max_fps,
+            Part::RenderScale => &self.by.render_scale,
         };
         if by.as_deref().is_none_or(|by| by == self.client) {
             self.change(part);
@@ -122,8 +125,16 @@ impl Looking {
         if self.asked.is_some() {
             return None;
         }
-        let [viewpoint, outline, grid, colliders, show, skip, max_fps] =
-            mem::take(&mut self.changed);
+        let [
+            viewpoint,
+            outline,
+            grid,
+            colliders,
+            show,
+            skip,
+            max_fps,
+            render_scale,
+        ] = mem::take(&mut self.changed);
         let known = &self.known;
         let look = Look {
             viewpoint: sent(viewpoint, &wanted.viewpoint, &known.viewpoint),
@@ -133,6 +144,7 @@ impl Looking {
             show: sent(show, &wanted.show, &known.show),
             skip: sent(skip, &wanted.skip, &known.skip),
             max_fps: sent(max_fps, &wanted.max_fps, &known.max_fps),
+            render_scale: sent(render_scale, &wanted.render_scale, &known.render_scale),
         };
         if look == Look::default() && self.drawn <= self.revision {
             return None;
@@ -155,6 +167,7 @@ impl Looking {
             show,
             skip,
             max_fps,
+            render_scale,
             by,
             revision,
             ..
@@ -203,6 +216,12 @@ impl Looking {
                 (&mut known.max_fps, &mut setters.max_fps),
                 (max_fps, by.max_fps),
                 kept(Part::MaxFps, asked.max_fps.is_some()),
+                client,
+            ),
+            render_scale: take(
+                (&mut known.render_scale, &mut setters.render_scale),
+                (render_scale, by.render_scale),
+                kept(Part::RenderScale, asked.render_scale.is_some()),
                 client,
             ),
         };
@@ -258,6 +277,7 @@ mod tests {
             show: parts.show.clone(),
             skip: parts.skip.clone(),
             max_fps: parts.max_fps,
+            render_scale: parts.render_scale,
             by,
             revision,
             run: 1,
@@ -266,7 +286,7 @@ mod tests {
     }
 
     /// Who set `viewpoint`, the outline, the grid and the colliders. None set what the view shows,
-    /// the passes it leaves out or the cap.
+    /// the passes it leaves out, the cap or the render scale.
     fn by(setters: [Option<&str>; 4]) -> By {
         let [viewpoint, outline, grid, colliders] = setters.map(|by| by.map(str::to_owned));
         By {
@@ -277,6 +297,7 @@ mod tests {
             show: None,
             skip: None,
             max_fps: None,
+            render_scale: None,
         }
     }
 
@@ -401,6 +422,7 @@ mod tests {
             show: None,
             skip: None,
             max_fps: None,
+            render_scale: None,
         };
         let agent = by([Some("agent"); 4]);
         looking.drew(2);
@@ -414,6 +436,7 @@ mod tests {
             show: None,
             skip: None,
             max_fps: None,
+            render_scale: None,
         };
         assert_eq!(taken, expected);
         // As the editor's wanted parts follow what it took, the agent's colliders are kept: the
@@ -426,6 +449,7 @@ mod tests {
             show: None,
             skip: None,
             max_fps: None,
+            render_scale: None,
         };
         assert_eq!(looking.ask(&wanted), None, "nothing the user changed");
         looking.drew(3);

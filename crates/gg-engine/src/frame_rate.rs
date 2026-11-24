@@ -1,6 +1,6 @@
 //! Frame-rate caps for windowed runs, as [`Context::set_max_fps`] says, and embedded ones, as a
 //! client's look says; in development builds, the frame rate limits among the title bar's
-//! settings, kept across runs.
+//! settings, kept across runs, and above the render scale of a game ([`game_scale`]).
 
 use std::num::NonZeroU32;
 use std::thread;
@@ -18,7 +18,7 @@ use tracing::warn;
 use winit::monitor::MonitorHandle;
 
 #[cfg(feature = "dev")]
-use crate::{Context, Ui};
+use crate::{Context, Ui, game_scale};
 
 /// The file keeping the settings' limit on the app's own frames for later runs, in RON as
 /// [`Limit`] has it: `Rate(60)`, `Uncapped` or `Monitor`. Not `max_fps.ron`, which kept another
@@ -189,8 +189,9 @@ fn set_game(cx: &mut Context, limit: Limit) {
 
 /// Adds the frame rate limits to the title bar's settings ([`Ui::settings`]), a line each: the
 /// app's own, called the editor's in an app that embeds a game, and there the game's
-/// ([`Context::game_max_fps`]). A pick applies from the next frame and is kept for the next runs
-/// ([`start`]). A cap set elsewhere, such as another client's 10, shows as it is.
+/// ([`Context::game_max_fps`]), then the game's render scale ([`game_scale::settings`]). A pick
+/// applies from the next frame and is kept for the next runs ([`start`]). A cap set elsewhere,
+/// such as another client's 10, shows as it is.
 #[cfg(feature = "dev")]
 pub(crate) fn settings(ui: &mut Ui<'_>, cx: &mut Context) {
     let embeds = cx.dev.embeds_game;
@@ -214,6 +215,7 @@ pub(crate) fn settings(ui: &mut Ui<'_>, cx: &mut Context) {
         own_picked = line(ui, label, TIP, own);
         if embeds {
             game_picked = line(ui, "Game frame rate", GAME_TIP, game);
+            game_scale::settings(ui, cx);
         }
     });
     if let Some(limit) = own_picked {
@@ -354,7 +356,8 @@ mod tests {
     /// The gear opens the settings, a line per limit: its label, and right of it a dropdown
     /// showing it. A pick applies and is kept in that limit's own file: a rate caps, Uncapped
     /// uncaps, and Match monitor presents at the display's rate, or caps the game at the monitor's.
-    /// In an app that embeds a game, the editor's line and the game's act apart.
+    /// In an app that embeds a game, the editor's line and the game's act apart, and the game's
+    /// render scale has a line of its own, kept in its own file.
     #[cfg(feature = "dev")]
     #[test]
     fn the_settings_frame_rate_limits_apply_each_pick_and_keep_it() {
@@ -423,7 +426,11 @@ mod tests {
             let mut shown = Some(shown);
             let mut pick = |cx: &mut Context, label: &str, limit: &str| {
                 let before = shown.take().expect("the settings show");
-                let line = |text: &str| [own].into_iter().chain(game).any(|label| label == text);
+                let scale = game.map(|_| game_scale::LABEL);
+                let line = |text: &str| {
+                    let labels = [own].into_iter().chain(game).chain(scale);
+                    labels.into_iter().any(|label| label == text)
+                };
                 let lines: Vec<_> = before.iter().filter(|(text, _)| line(text)).collect();
                 let below = dropdown(&before, label).1;
                 let listed = click(cx, below);
@@ -467,6 +474,20 @@ mod tests {
                     (own_caps(&cx), kept_in(KEPT)),
                     ((false, None), Some(Limit::Uncapped))
                 );
+                // The game's render scale: the game's own until a pick, kept in its own file.
+                let kept_scale = || crate::game_scale::kept(&context());
+                assert_eq!(cx.game_render_scale(), None);
+                assert_eq!(pick(&mut cx, game_scale::LABEL, "50%"), "50%");
+                assert_eq!(cx.game_render_scale(), Some(0.5));
+                assert_eq!(kept_scale(), Some(Some(0.5)));
+                assert_eq!(pick(&mut cx, game_scale::LABEL, "Game's own"), "Game's own");
+                assert_eq!(cx.game_render_scale(), None);
+                assert_eq!(kept_scale(), Some(None));
+                assert_eq!(cx.game_max_fps(), rate(144), "the frame rate is its own");
+            } else {
+                let shown = shown.expect("the settings show");
+                let labels: Vec<_> = shown.iter().map(|(text, _)| text.as_str()).collect();
+                assert!(!labels.contains(&game_scale::LABEL), "no game to scale");
             }
         }
     }

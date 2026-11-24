@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gg_api::{Button, Failure, ImageList, InputEvent, Looked, Picked};
 use gg_core::Result;
 use gg_core::math::{DVec3, Quat, Vec4};
-use gg_renderer::{Projection, Viewpoint};
+use gg_renderer::{MIN_RENDER_SCALE, Projection, Viewpoint};
 use tracing::warn;
 
 use super::connection::Reply;
@@ -105,6 +105,7 @@ impl Api {
             show,
             skip,
             max_fps,
+            render_scale,
             by,
             revision,
             ..
@@ -117,6 +118,12 @@ impl Api {
             set_part(show, &mut by.show, given.show, client),
             set_part(skip, &mut by.skip, given.skip, client),
             set_part(max_fps, &mut by.max_fps, given.max_fps, client),
+            set_part(
+                render_scale,
+                &mut by.render_scale,
+                given.render_scale,
+                client,
+            ),
         ];
         if changed.contains(&true) {
             *revision += 1;
@@ -139,6 +146,7 @@ impl Api {
         look.show = show.as_ref().map(Shown::of);
         look.skip = skip.clone().unwrap_or_default();
         look.max_fps = *max_fps;
+        look.render_scale = *render_scale;
         look.revision = *revision;
     }
 
@@ -506,7 +514,8 @@ fn crop(shot: &Arc<Shot>, rect: Option<[u32; 4]>) -> Option<Arc<Shot>> {
 ///
 /// - a viewpoint like [`checked_viewpoint`] refuses;
 /// - an outline with an invalid entity ID, a non-finite color, or a width not finite and positive;
-/// - a `show` that [`shown`] refuses.
+/// - a `show` that [`shown`] refuses;
+/// - a `render_scale` outside [`MIN_RENDER_SCALE`] to 1, or not a number.
 pub(super) fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> {
     if let Some(Some(viewpoint)) = &mut given.viewpoint {
         checked_viewpoint(method, viewpoint)?;
@@ -531,6 +540,15 @@ pub(super) fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look
     }
     if let Some(Some(show)) = &given.show {
         shown(method, show)?;
+    }
+    if let Some(Some(scale)) = given.render_scale
+        && !(MIN_RENDER_SCALE..=1.0).contains(&scale)
+    {
+        let what = format!(
+            "takes a `render_scale` from {MIN_RENDER_SCALE} to 1, not {scale}; \
+             `null` gives it back to the game"
+        );
+        return Err(bad_params(method, what));
     }
     // A set, so the same passes again aren't a change; none left out is the game's own.
     if let Some(skip) = &mut given.skip {

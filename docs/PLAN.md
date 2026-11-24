@@ -52,13 +52,9 @@ Gatekeeper refuses until the user allows it. A bundle `gg ship` builds on the Ma
 it loads its own KosmicKrisp alone, replays its live recording without writing into the bundle, and
 links nothing else of the Vulkan SDK. With it, by hand:
 
-- the sandbox on Linux and on macOS under KosmicKrisp (SDK 1.4.363.0 or later): gamepads,
-  `Context::pick_file`'s dialogs, the drawn title bars (on macOS the menu button clear of the
-  traffic lights, 72 points), a torn-off window moved by its tab bar (X11 and macOS move windows
-  asynchronously), swapchains rebuilt as windows resize, and on Wayland whether the frame in
-  flight after a maximize presents at its old size;
-- the 16 Bistros on a Mac against a frame time set there, an open question below;
-- [DEFECTS.md](DEFECTS.md)'s macOS row on minimized windows.
+- the sandbox on Linux: gamepads, `Context::pick_file`'s dialogs, the drawn title bars, a torn-off
+  window moved by its tab bar (X11 moves windows asynchronously), swapchains rebuilt as windows
+  resize, and on Wayland whether the frame in flight after a maximize presents at its old size.
 
 What grows and what is frozen meanwhile is in [ARCHITECTURE.md's Goals](../ARCHITECTURE.md#goals).
 
@@ -272,11 +268,3 @@ Defects are in [DEFECTS.md](DEFECTS.md).
   deleted: Shards by its flags (`--relay`, the host printing its code), or Shards given a Host and
   Join menu. Recommendation: Shards by flags, as the match measures the network, which a menu
   doesn't change, and `Context::host` and `join` have tests of their own. Decide before the match.
-- What frame time the 16 Bistros are held to on a Mac. On an M3 Pro they take 9.8 ms at 1280×720,
-  10.3 at the 95th percentile, as [DEFECTS.md](DEFECTS.md)'s Performance says.
-  Recommendation: 16.7 ms at the 95th percentile, 60 frames a second, which they meet. Decide
-  before Phase 10 closes.
-- What render scale a run starts at on a high-density screen. Every run starts at 1, so a full
-  Retina screen renders 3024×1890 pixels: Bistro's frame takes 26 ms on an M3 Pro, and 12 at 0.5.
-  Recommendation: keep 1, as games' settings menus set it for their players, who pick sharpness or
-  speed. Decide before a 3D game ships on Macs.

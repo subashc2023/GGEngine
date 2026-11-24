@@ -580,9 +580,10 @@ pub(crate) struct Dev {
     /// them, and the number of the last.
     pub(crate) game_perf: Option<(Perf, u64)>,
     /// Whether the app shows a game it embeds ([`App::embeds_game`](crate::App::embeds_game)), and
-    /// the cap the settings set on that game.
+    /// the cap and the render scale the settings set on that game.
     pub(crate) embeds_game: bool,
     pub(crate) game_max_fps: Option<std::num::NonZeroU32>,
+    pub(crate) game_render_scale: Option<f32>,
     /// Whether that cap follows the window's monitor's refresh rate, the settings' Match monitor,
     /// until another cap replaces it.
     pub(crate) game_matches_monitor: bool,
@@ -608,6 +609,7 @@ impl Dev {
             game_perf: None,
             embeds_game: false,
             game_max_fps: None,
+            game_render_scale: None,
             game_matches_monitor: false,
             refresh_rate: None,
         }
