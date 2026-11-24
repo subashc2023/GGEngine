@@ -32,7 +32,10 @@ xcrun xctrace export --input target/run.trace \
 - KosmicKrisp runs a stretch of compute passes in one encoder. Split one by dispatching a pass
   twice; skipping a pass leaves later ones reading garbage, which changes their cost.
 - The `graphics-compiler-spill-events` table gives each encoder's register spills, in bytes a
-  thread.
+  thread. A spill needn't cost time: halving view shading's took none off it. Time a pass with
+  its parts taken out instead.
+- `MESA_KK_DEBUG=msl` prints the Metal source KosmicKrisp makes of each pipeline. A `scratch`
+  array in it is a shader array indexed by a variable, kept in memory.
 - An M3 slows by a fifth over a long run: compare builds by turns, over the same frames.
 - Time frames after the scene has loaded. Bistro's image sky arrives about 120 frames in, and
   with it ambient occlusion and the sky's light: 7 ms more at 3024×1890.

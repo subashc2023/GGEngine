@@ -431,20 +431,40 @@ float3 brdf(Surface surface, float3 to_light, float n_dot_l) {
 
 // The light the frame's `i`th light reflects from `surface` toward the view by `brdf`'s single
 // scattering, before the exposure. Adds to `spread` that light times `missed` at its cosine, the
-// shape of Kulla and Conty's lobe of what scatters more than once, which `lobe` scales.
-float3 reflected(Frame* frame, Light* lights, Surface surface, uint i, inout float3 spread) {
+// shape of Kulla and Conty's lobe of what scatters more than once, which `lobe` scales. Light
+// `shadowing` takes `shadow`, as `shadow_of` found it.
+float3 reflected(Light* lights, Surface surface, uint i, uint shadowing, float shadow,
+                 inout float3 spread) {
     float3 to_light;
     float3 radiance = arriving(lights, i, surface.world, to_light);
     float n_dot_l = dot(surface.normal, to_light);
-    if (n_dot_l <= 0.0) {
+    // None from behind, or from past its range or outside its cone: a cluster lists every light
+    // reaching its box, and most of its points can lie beyond a light's range.
+    if (n_dot_l <= 0.0 || all(radiance <= 0.0)) {
         return float3(0.0);
     }
-    if (i == frame.shadows.light) {
-        radiance *= shadowed(frame, surface.world, surface.surface_normal, to_light);
+    if (i == shadowing) {
+        radiance *= shadow;
     }
     float3 received = radiance * n_dot_l;
     spread += received * missed(surface.lobe_fit, n_dot_l);
     return brdf(surface, to_light, n_dot_l) * received;
+}
+
+// How much of the frame's shadow-casting light reaches `surface`, by `shadowed`; 1 without one, or
+// where it lights the surface's back. Found once, before the lights' loops, so its filter's
+// unrolled cascades are inlined once, not in each loop.
+float shadow_of(Frame* frame, Light* lights, Surface surface) {
+    uint shadowing = frame.shadows.light;
+    if (shadowing >= frame.light_count) {
+        return 1.0;
+    }
+    float3 to_light;
+    arriving(lights, shadowing, surface.world, to_light);
+    if (dot(surface.normal, to_light) <= 0.0) {
+        return 1.0;
+    }
+    return shadowed(frame, surface.world, surface.surface_normal, to_light);
 }
 
 // What Kulla and Conty's lobe reflects per unit of `reflected`'s `spread`: `scattered` at the view
@@ -585,6 +605,8 @@ float2 curve(Texture2D surfaces, uint2 pixel, float3 normal) {
     static const float2 WAYS[4] = { float2(-1.0, 0.0), float2(1.0, 0.0), float2(0.0, -1.0),
                                     float2(0.0, 1.0) };
     float3 sides[4];
+    // Unrolled, so `sides` indexes by constants: stored by a counter, it went to memory on an M3.
+    [ForceUnroll]
     for (uint i = 0; i < 4; i++) {
         float2 side = uv + WAYS[i] * span * texel;
         float3 mean = surfaces.SampleLevel(clamp_, side, float(CURVE_LEVEL)).xyz;
@@ -859,18 +881,55 @@ float4 lit(Frame* frame, Light* lights, Material material, float3 world, float3 
     if (frame.show == SHOW_DIFFUSE_LIGHT) {
         lit.specular_weight = float3(0.0);
     }
+    // The light that isn't the lights', exposed and summed before their loop, as what's shown
+    // takes it; the lights' adds by `direct_scale`. Taken after, the color, emission, occlusion
+    // and reflection it reads stayed live across the loop: model.slang's fragments spilled 48 bytes
+    // on an M3.
+    //
+    // The view's reflection is already exposed (the trace takes it to this frame's exposure), so
+    // neither the sky's luminance nor the exposure scales it: in place of its share of the sky's
+    // specular light, times that light's reflectance.
+    float3 mirrored = float3(0.0);
+    float3 sky_diffused = float3(0.0);
+    float3 sky_reflected = float3(0.0);
+    if (frame.specular_levels > 0) {
+        float3 reflectance;
+        sky_diffused = sky_light(frame, sky_diffuse, sky_f0, color.rgb, metallic, roughness, normal,
+                                 view, lit.n_dot_v, occlusion, reflection.a, reflectance,
+                                 sky_reflected);
+        mirrored = reflection.rgb * reflection.a * reflectance;
+    }
+    float exposure = frame.exposure;
+    float3 rest;
+    float direct_scale = exposure;
+    if (frame.show == SHOW_LIGHT) {
+        rest = (sky_diffused + sky_reflected) * exposure + mirrored + emission;
+    } else if (frame.show == SHOW_DIRECT_LIGHT) {
+        rest = float3(0.0);
+    } else if (frame.show == SHOW_SKY_LIGHT) {
+        rest = (sky_diffused + sky_reflected) * exposure;
+        direct_scale = 0.0;
+    } else if (frame.show == SHOW_DIFFUSE_LIGHT) {
+        rest = sky_diffused * exposure;
+    } else if (frame.show == SHOW_SPECULAR_LIGHT) {
+        rest = sky_reflected * exposure + mirrored;
+    } else {
+        rest = mirrored;
+        direct_scale = 0.0;
+    }
     float3 light_sum = float3(0.0);
     float3 spread = float3(0.0);
-    // Found before the lights that light everywhere, so the clusters' planes end before the sun's
-    // shadows begin.
+    // Found before the shadows, so the clusters' planes end before the shadows' reads begin.
     uint found = cluster(frame, world);
+    uint shadowing = frame.shadows.light;
+    float shadow = shadow_of(frame, lights, lit);
     uint everywhere = frame.clusters.everywhere;
     for (uint i = 0; i < everywhere; i++) {
-        light_sum += reflected(frame, lights, lit, i, spread);
+        light_sum += reflected(lights, lit, i, shadowing, shadow, spread);
     }
     if (found == NO_CLUSTER) {
         for (uint i = everywhere; i < frame.light_count; i++) {
-            light_sum += reflected(frame, lights, lit, i, spread);
+            light_sum += reflected(lights, lit, i, shadowing, shadow, spread);
         }
     } else {
         // Through the lights' address, which the bits follow (`Clusters` says why), by a pointer
@@ -886,35 +945,15 @@ float4 lit(Frame* frame, Light* lights, Material material, float3 world, float3 
             while (bits != 0) {
                 uint bit = firstbitlow(bits);
                 bits &= bits - 1;
-                light_sum += reflected(frame, lights, lit, everywhere + word * 32 + bit,
-                                       spread);
+                light_sum += reflected(lights, lit, everywhere + word * 32 + bit, shadowing,
+                                       shadow, spread);
             }
         }
     }
-    float n_dot_v = lit.n_dot_v;
     float3 direct = light_sum + spread * lobe(lit, roughness);
-    // The view's reflection, already exposed (the trace takes it to this frame's exposure), so
-    // neither the sky's luminance nor the exposure scales it: in place of its share of the sky's
-    // specular light, times that light's reflectance.
-    float3 mirrored = float3(0.0);
-    float3 sky_diffused = float3(0.0);
-    float3 sky_reflected = float3(0.0);
-    if (frame.specular_levels > 0) {
-        float3 reflectance;
-        sky_diffused = sky_light(frame, sky_diffuse, sky_f0, color.rgb, metallic, roughness, normal,
-                                 view, n_dot_v, occlusion, reflection.a, reflectance,
-                                 sky_reflected);
-        mirrored = reflection.rgb * reflection.a * reflectance;
-    }
-    float3 sky = sky_diffused + sky_reflected;
+    float3 shown = direct * direct_scale + rest;
     if (frame.show != SHOW_LIGHT) {
-        float3 part = frame.show == SHOW_DIRECT_LIGHT ? direct * frame.exposure
-            : frame.show == SHOW_SKY_LIGHT ? sky * frame.exposure
-            : frame.show == SHOW_DIFFUSE_LIGHT ? (direct + sky_diffused) * frame.exposure
-            : frame.show == SHOW_SPECULAR_LIGHT ? (direct + sky_reflected) * frame.exposure + mirrored
-            : mirrored;
-        return float4(min(part, BRIGHTEST), color.a);
+        return float4(min(shown, BRIGHTEST), color.a);
     }
-    float3 shaded = hazed(frame, world, (direct + sky) * frame.exposure + mirrored + emission);
-    return float4(min(shaded, BRIGHTEST), color.a);
+    return float4(min(hazed(frame, world, shown), BRIGHTEST), color.a);
 }
