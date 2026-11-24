@@ -178,8 +178,8 @@ the licenses of the crates it's built from, which cargo-about 0.9.2 writes from 
   loader and KosmicKrisp of the Vulkan SDK 1.4.363.0 or later, whose `macOS` folder `VULKAN_SDK`
   names (`gg.no_sdk`, `gg.sdk_version`).
 Symbols go in `ship/PACKAGE-symbols`, with build.txt naming the build (`gg.symbols`): the PDB on
-Windows, the unstripped executable (objcopy) on Linux, a dSYM (dsymutil) on macOS. Prints a line
-naming the folders and each file in them, with sizes.
+Windows, the unstripped executable (objcopy) on Linux, a dSYM (rustc's, packed as it links) on
+macOS. Prints a line naming the folders and each file in them, with sizes.
 ",
             },
             Help {

@@ -43,6 +43,8 @@ pub(crate) struct Extracted {
     pub(crate) clear_color: [f32; 4],
     pub(crate) tonemapper: Tonemapper,
     pub(crate) antialiasing: Antialiasing,
+    /// See [`RenderData::render_scale`].
+    pub(crate) render_scale: f32,
     /// See [`RenderData::exposure`].
     pub(crate) exposure: f32,
     pub(crate) adaptation: Option<gg_renderer::Adaptation>,
@@ -159,6 +161,7 @@ impl Default for Extracted {
             clear_color: [0.0; 4],
             tonemapper: Tonemapper::None,
             antialiasing: Antialiasing::None,
+            render_scale: 1.0,
             exposure: 1.0,
             adaptation: None,
             looked: false,
@@ -286,6 +289,7 @@ impl Render for Renderer {
             clear_color: frame.clear_color,
             tonemapper: frame.tonemapper,
             antialiasing: frame.antialiasing,
+            render_scale: frame.render_scale,
             exposure: frame.exposure,
             adaptation: frame.adaptation,
             looked: frame.looked,

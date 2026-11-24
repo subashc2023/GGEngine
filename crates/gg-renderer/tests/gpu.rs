@@ -164,6 +164,7 @@ fn main() -> ExitCode {
         picks_answer_what_their_frame_drew,
         picks_wait_through_frames_that_read_none,
         picks_see_through_the_grid,
+        a_scaled_view_upscales_under_its_canvas,
         removed_assets_draw_nothing_or_their_stand_in,
         antialiasing_smooths_edges_frame_by_frame,
         antialiasing_follows_what_moves,
@@ -358,6 +359,7 @@ impl Stores {
             clear_color: CLEAR,
             tonemapper: Tonemapper::None,
             antialiasing: Antialiasing::None,
+            render_scale: 1.0,
             exposure: 1.0,
             adaptation: None,
             looked: false,
@@ -3547,6 +3549,124 @@ fn picks_answer_what_their_frame_drew() {
     for (frame, (answered, expected)) in (1..).zip(answered.iter().zip(&expected)) {
         assert_eq!(answered, expected, "frame {frame}'s answers");
     }
+    shut_down(renderer);
+}
+
+/// A view rendered at half its size, upscaled, against the same view at its own:
+/// - Within flat squares, it shows the same colors, without antialiasing and with TAA.
+/// - The canvas draws at the view's own pixels: a sprite 5 pixels wide at an odd pixel keeps its
+///   edges.
+/// - Picks answer at the view's own pixels.
+/// - The scale changing between frames remakes what's kept at the scaled size under validation.
+fn a_scaled_view_upscales_under_its_canvas() {
+    const WIDTH: u32 = 128;
+    const HEIGHT: u32 = 96;
+    const LEFT: u64 = 1 << 32;
+    const RIGHT: u64 = 2 << 32;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = filling([WIDTH, HEIGHT]);
+    // A unit a pixel.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: HEIGHT as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    // In view pixels from its top left.
+    let over = |[x0, y0]: [f32; 2], [x1, y1]: [f32; 2]| {
+        let center = Vec3::new(
+            (x0 + x1) / 2.0 - WIDTH as f32 / 2.0,
+            HEIGHT as f32 / 2.0 - (y0 + y1) / 2.0,
+            0.0,
+        );
+        Mat4::from_translation(center) * Mat4::from_scale(Vec3::new(x1 - x0, y1 - y0, 1.0))
+    };
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let red = MeshDraw::new(square, flat, Vec4::new(0.8, 0.2, 0.1, 1.0));
+    let blue = MeshDraw::new(square, flat, Vec4::new(0.1, 0.3, 0.9, 1.0));
+    let mut draws = Draws::default();
+    draws.push_draw(over([8.0, 8.0], [56.0, 88.0]), &red, LEFT);
+    draws.push_draw(over([72.0, 8.0], [120.0, 88.0]), &blue, RIGHT);
+    // Centered in canvas pixels from the view's bottom left: x 61 to 66, y 51 to 56 from the top.
+    let mut canvas = Draws::default();
+    let white = Sprite {
+        color: Vec4::ONE,
+        ..Sprite::default()
+    };
+    let at = Mat4::from_translation(Vec3::new(63.5, 42.5, 0.0));
+    canvas.push_sprite(at * Mat4::from_scale(Vec3::new(5.0, 5.0, 1.0)), white);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let render = |renderer: &mut Renderer, stores: &mut Stores, scale, antialiasing, picks| {
+        let data = RenderData {
+            render_scale: scale,
+            antialiasing,
+            canvas: &canvas,
+            picks,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(renderer, data);
+    };
+    render(&mut renderer, &mut stores, 1.0, Antialiasing::None, &[]);
+    let full = frame_pixels(&mut renderer);
+    let inside = [[32, 48], [12, 12], [96, 48], [116, 84]];
+    let white = [255; 4];
+    for antialiasing in [Antialiasing::None, Antialiasing::Taa] {
+        for scale in [0.75, 0.5, 1.0, 0.5] {
+            for _ in 0..4 {
+                render(&mut renderer, &mut stores, scale, antialiasing, &[]);
+            }
+        }
+        let scaled = frame_pixels(&mut renderer);
+        for pixel in inside {
+            let [shown, expected] = [&scaled, &full].map(|frame| pixel_at(frame, WIDTH, pixel));
+            assert!(
+                close(shown, expected),
+                "{antialiasing:?} at {pixel:?}: {shown:?}"
+            );
+        }
+        for pixel in [[61, 51], [65, 55]] {
+            let shown = pixel_at(&scaled, WIDTH, pixel);
+            assert!(
+                close(shown, white),
+                "{antialiasing:?} at {pixel:?}: {shown:?}"
+            );
+        }
+        for pixel in [[60, 53], [66, 53], [63, 50], [63, 56]] {
+            let shown = pixel_at(&scaled, WIDTH, pixel);
+            assert!(
+                close(shown, CLEARED),
+                "{antialiasing:?} at {pixel:?}: {shown:?}"
+            );
+        }
+    }
+    let picks = [
+        ([12, 12], LEFT),
+        ([119, 87], RIGHT),
+        ([63, 53], 0),
+        ([64, 4], 0),
+    ];
+    let asked: Vec<Pick> = (picks.iter().enumerate())
+        .map(|(tag, &(pixel, _))| Pick {
+            tag: tag as u64,
+            pixel,
+        })
+        .collect();
+    let mut answered = Vec::new();
+    for frame in 0..3 {
+        let asking = if frame == 0 { &asked[..] } else { &[] };
+        render(&mut renderer, &mut stores, 0.5, Antialiasing::None, asking);
+        answered.extend_from_slice(renderer.picked());
+    }
+    let expected: Vec<(u64, u64)> = (picks.iter().enumerate())
+        .map(|(tag, &(_, id))| (tag as u64, id))
+        .collect();
+    assert_eq!(answered, expected);
     shut_down(renderer);
 }
 

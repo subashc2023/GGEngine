@@ -31,6 +31,7 @@ use crate::smaa::SmaaPass;
 use crate::taa::TaaPass;
 use crate::tonemap::TonemapPass;
 use crate::trace::{self, TracePass};
+use crate::upscale::{self, UpscalePass};
 use crate::view::{OutlinePass, OutlinePlan};
 use crate::{
     AmbientOcclusion, Antialiasing, Channel, DrawCounts, Fog, FrameImage, Light, LightKind,
@@ -103,8 +104,11 @@ struct ViewPasses {
     /// Blooms and grades it, if it does either.
     bloom: Option<bloom::Plan>,
     lens: Option<lens::Plan>,
+    /// Upscales it to its own size, if it renders below, and draws the canvas there.
+    upscale: Option<Upscale>,
     /// Draws the canvas in its own pass if antialiasing, keeping for reflections, metering, blurs,
-    /// bloom, the grade or a lens follow the view's last pass. Otherwise that pass draws it.
+    /// bloom, the grade or a lens follow the view's last pass, and it isn't upscaled. Otherwise
+    /// that pass, or the upscale's, draws it.
     canvas: Option<PassId>,
     /// Shows an image the frame makes in the view's place, or black for paths traced without ray
     /// queries.
@@ -119,6 +123,15 @@ struct ViewPasses {
     read_ids: Option<PassId>,
     outline: Option<OutlinePlan>,
     read_view: Option<PassId>,
+}
+
+/// The game's view's upscaling to its own size, in a frame's graph: the pass, the colors and IDs it
+/// samples, and those it draws.
+struct Upscale {
+    pass: PassId,
+    sampled: [ImageId; 2],
+    colors: ImageId,
+    ids: ImageId,
 }
 
 /// The game's view's visibility buffer, in a frame's graph. The culled runs of the opaque and
@@ -187,7 +200,12 @@ enum Shown {
 /// its name in [`Renderer::render_frame`].
 #[derive(Clone, Copy)]
 struct Viewing<'a> {
+    /// What the view renders at before upscaling: `view_size` by the render scale.
     size: [u32; 2],
+    /// The view's own size, which the canvas, outline and picks take.
+    view_size: [u32; 2],
+    /// Whether `size` is below `view_size`, so the view is upscaled before its canvas.
+    upscaled: bool,
     number: u64,
     unjittered: Mat4,
     view_projection: Mat4,
@@ -224,6 +242,7 @@ struct Recorder<'a> {
     fog: &'a FogPass,
     taa: &'a mut TaaPass,
     smaa: &'a Option<SmaaPass>,
+    upscale: &'a Option<UpscalePass>,
     show: &'a Option<ShowPass>,
     trace: &'a mut Option<TracePass>,
     sky: &'a Option<SkyPass>,
@@ -347,6 +366,12 @@ impl Renderer {
             })
         });
         let renders_view = has_view && pixels.is_none();
+        // What the view renders at before it's upscaled to its own size.
+        let rendered = upscale::rendered(data.viewport.size, data.render_scale);
+        let upscaled = renders_view && rendered != data.viewport.size;
+        if upscaled && self.upscale.is_none() {
+            self.upscale = Some(UpscalePass::new(&self.device)?);
+        }
         // Antialiased temporally, the view but its canvas is drawn off by the frame's offset, and
         // culled as drawn. By SMAA, it's drawn as it is.
         let antialiased = renders_view && data.antialiasing == Antialiasing::Taa;
@@ -390,8 +415,8 @@ impl Renderer {
             self.trace = Some(TracePass::new(&self.device)?);
         }
         let (jitter, view_projection) = if antialiased {
-            self.history.prepare(&self.device, data.viewport.size)?;
-            let jitter = taa::normalized(self.taa.offset(), data.viewport.size);
+            self.history.prepare(&self.device, rendered)?;
+            let jitter = taa::normalized(self.taa.offset(), rendered);
             (jitter, taa::jitter(jitter) * unjittered)
         } else {
             (Vec2::ZERO, unjittered)
@@ -453,24 +478,24 @@ impl Renderer {
         // view without it. Against what the frame before accumulated, if it did at this size and
         // the view isn't cut.
         if occluded.is_some() {
-            self.ao_history.prepare(&self.device, data.viewport.size)?;
+            self.ao_history.prepare(&self.device, rendered)?;
         } else if renders_view {
             self.ao_history.forget();
         }
-        let occluded_against = (self.ao_history).against(number, data.viewport.size, data.cut);
+        let occluded_against = (self.ao_history).against(number, rendered, data.cut);
         // Under a perspective, reflections trace through its depth against the colors the frame
         // before kept. Each reflecting frame keeps them for the next, in images of the view's size,
         // let go by a frame rendering the view without reflections.
         let reflected = (data.reflections)
             .filter(|reflections| reflections.reflects() && sky.is_some() && perspective);
         if reflected.is_some() {
-            self.reflected.prepare(&self.device, data.viewport.size)?;
+            self.reflected.prepare(&self.device, rendered)?;
         } else if renders_view {
             self.reflected.forget();
         }
         // Against the colors the frame before kept, if it kept them at this size, and how it drew
         // them.
-        let traced = reflected.zip(self.reflected.traced_against(number, data.viewport.size));
+        let traced = reflected.zip(self.reflected.traced_against(number, rendered));
         if renders_view {
             self.lighting.order(shining, &data.viewpoint);
         } else {
@@ -528,7 +553,9 @@ impl Renderer {
         let visibility_buffer = self.visibility_buffer;
         let fogged = data.fog.is_some_and(|fog| fog.shows());
         let viewing = Viewing {
-            size,
+            size: rendered,
+            view_size: size,
+            upscaled,
             number,
             unjittered,
             view_projection,
@@ -685,6 +712,7 @@ impl Renderer {
                     fog: &self.fog,
                     taa: &mut self.taa,
                     smaa: &self.smaa,
+                    upscale: &self.upscale,
                     show: &self.show,
                     trace: &mut self.trace,
                     sky: &self.sky,
@@ -789,12 +817,13 @@ impl Renderer {
             self.sky_sun.prefiltered(plan, number);
         }
         if keeps {
-            self.reflected.kept(number, size, unjittered, self.exposed);
+            self.reflected
+                .kept(number, rendered, unjittered, self.exposed);
         } else if data.show.is_some() && traced.is_some() {
             self.reflected.carry(number);
         }
         if accumulates {
-            (self.ao_history).accumulated(number, size, view_projection, unjittered);
+            (self.ao_history).accumulated(number, rendered, view_projection, unjittered);
         }
         self.waited = self.frames.waited();
         Ok(true)
@@ -820,6 +849,8 @@ fn plan_view(
 ) -> ViewPasses {
     let Viewing {
         size,
+        view_size,
+        upscaled,
         number,
         antialiased,
         smaa,
@@ -1067,7 +1098,7 @@ fn plan_view(
         // Apart where what follows writes the resolved colors in place: depth of field; or bloom,
         // the grade or the canvas, unless motion blur or the lens wrote colors of their own before
         // them.
-        let over = blooms || grades || (!lensed && !data.canvas.is_empty());
+        let over = blooms || grades || (!lensed && !upscaled && !data.canvas.is_empty());
         let apart = circle.is_some() || (blur.is_none() && over);
         let drawn = [hdr, depth, motion];
         taa.plan(graph, resolved, number, size, drawn, apart)
@@ -1093,6 +1124,30 @@ fn plan_view(
     let bloom = (blooms || grades).then(|| BloomPass::plan(graph, shown, size, blooms, grades));
     let lens = lensed.then(|| LensPass::plan(graph, data.lens, shown, size));
     let shown = lens.as_ref().map_or(shown, lens::Plan::lensed);
+    // Upscaled to the view's size, with IDs, motion and depth of its own for the canvas, which
+    // draws in the same pass.
+    let upscale = upscaled.then(|| {
+        let colors = graph.hdr("view upscaled", view_size);
+        let ids_upscaled = graph.ids("view ids upscaled", view_size);
+        let motion = graph.motion("view motion upscaled", view_size);
+        let depth = graph.depth("view depth upscaled", view_size);
+        let pass = graph.render(label!("upscale")).sample(shown).sample(ids);
+        let pass = if data.canvas.is_empty() {
+            pass
+        } else {
+            binned(clusters.as_ref(), sampling(lit(), pass))
+        };
+        let pass = pass.clear(colors, data.clear_color).ids(ids_upscaled);
+        Upscale {
+            pass: pass.motion(motion).depth(depth).add(),
+            sampled: [shown, ids],
+            colors,
+            ids: ids_upscaled,
+        }
+    });
+    let (shown, ids) = upscale
+        .as_ref()
+        .map_or((shown, ids), |up| (up.colors, up.ids));
     let after = taa.is_some()
         || smaa.is_some()
         || keep.is_some()
@@ -1101,7 +1156,7 @@ fn plan_view(
         || blur.is_some()
         || bloom.is_some()
         || lens.is_some();
-    let canvas = (!data.canvas.is_empty() && after).then(|| {
+    let canvas = (!data.canvas.is_empty() && after && !upscaled).then(|| {
         let canvas = graph.render(label!("canvas"));
         let canvas = binned(clusters.as_ref(), sampling(lit(), canvas));
         (canvas.keep(shown).keep(ids).keep(motion).keep(depth)).add()
@@ -1115,14 +1170,14 @@ fn plan_view(
         (Some(name), _) => {
             let found = graph.image_named(name);
             show_missing(missing, name, found.is_some());
-            Some(ShowPass::plan(graph, found, size))
+            Some(ShowPass::plan(graph, found, view_size))
         }
-        (None, Some(false)) => Some(ShowPass::plan(graph, None, size)),
+        (None, Some(false)) => Some(ShowPass::plan(graph, None, view_size)),
         (None, _) => None,
     };
     let trace = (path_traced == Some(true)).then(|| {
         let sky = plan.iter().flat_map(sky::Plan::sampled);
-        TracePass::plan(graph, size, sky)
+        TracePass::plan(graph, view_size, sky)
     });
     let (shown, tonemapper) = match (&show, &trace) {
         (Some(plan), _) => (plan.shown(), plan.tonemapper(data.tonemapper)),
@@ -1131,7 +1186,7 @@ fn plan_view(
     };
     let read_ids = (data.read_picks).then(|| graph.read_ids(label!("read ids"), ids));
     // Cleared as a graph's own image is first written, though the pass writes every pixel.
-    let color = graph.color("view", size);
+    let color = graph.color("view", view_size);
     let tonemap = (graph.render(label!("tonemap")))
         .clear(color, data.clear_color)
         .sample(shown)
@@ -1139,7 +1194,7 @@ fn plan_view(
     // Into the view's image, from the picks' IDs, so the view shows outlined wherever it shows and
     // as it's read back.
     let outline = (data.outline.as_ref().is_some_and(Outline::shows))
-        .then(|| OutlinePass::plan(graph, color, ids, size));
+        .then(|| OutlinePass::plan(graph, color, ids, view_size));
     let read_view = (data.read_view).then(|| graph.read_image(label!("read view"), color));
     ViewPasses {
         skin: skin_plan,
@@ -1163,6 +1218,7 @@ fn plan_view(
         blur,
         bloom,
         lens,
+        upscale,
         canvas,
         show,
         trace,
@@ -1194,6 +1250,7 @@ impl Recorder<'_> {
     ) -> Result<(DrawCounts, bool)> {
         let Viewing {
             size,
+            view_size,
             unjittered,
             view_projection,
             jitter,
@@ -1634,14 +1691,14 @@ impl Recorder<'_> {
         };
         let draw_canvas = |pass: &mut gg_gpu::Pass<'_, '_>| {
             pass.begin_label(c"canvas");
-            let canvas = canvas_projection(size);
+            let canvas = canvas_projection(view_size);
             let on = data.canvas;
             let all = Runs::All;
             let drawn = meshes.draw(
                 pass,
                 canvas,
                 canvas_data,
-                size,
+                view_size,
                 on,
                 on_canvas,
                 all,
@@ -1651,7 +1708,9 @@ impl Recorder<'_> {
             pass.end_label();
             drawn
         };
-        if view.taa.is_none() && view.smaa.is_none() && view.canvas.is_none() {
+        // Else the canvas draws after the resolve or the upscale.
+        let canvas_later = view.taa.is_some() || view.smaa.is_some() || view.upscale.is_some();
+        if !canvas_later && view.canvas.is_none() {
             counts += draw_canvas(&mut pass)?;
         }
         drop(pass);
@@ -1689,6 +1748,19 @@ impl Recorder<'_> {
         if let Some(plan) = &view.lens {
             self.lens.record(frame, plan);
         }
+        if let Some(plan) = &view.upscale {
+            let mut pass =
+                (frame.render(plan.pass)).expect("the graph's own images are always there");
+            let upscale = self
+                .upscale
+                .as_ref()
+                .expect("made by the frame that planned it");
+            let sampled = plan.sampled.map(|image| pass.sampled(image));
+            upscale.draw(&mut pass, sampled, size, view_size);
+            if !data.canvas.is_empty() {
+                counts += draw_canvas(&mut pass)?;
+            }
+        }
         if let Some(canvas) = view.canvas {
             let mut pass = (frame.render(canvas)).expect("the graph's own images are always there");
             counts += draw_canvas(&mut pass)?;
@@ -1705,7 +1777,7 @@ impl Recorder<'_> {
             trace.record(frame, plan, traced_data)?;
         }
         if let Some(read) = view.read_ids {
-            let picked = self.picks.take(frame.number(), Some(size));
+            let picked = self.picks.take(frame.number(), Some(view_size));
             frame.read_ids(read, picked)?;
         }
         let mut pass =

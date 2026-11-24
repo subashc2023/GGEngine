@@ -91,3 +91,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.unicode-properties]
 opt-level = 3
+
+# Debug builds' windowed frames allocate nothing on macOS without objc2's checks: each message's
+# signature, parsed into vectors and checked against its class's. winit's objc2, 0.5, has no
+# feature to turn them off.
+[profile.dev.package.objc2]
+debug-assertions = false

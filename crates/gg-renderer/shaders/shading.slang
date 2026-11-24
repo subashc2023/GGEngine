@@ -264,7 +264,7 @@ float specular_occlusion(float n_dot_v, float occlusion, float roughness) {
 // how much of a reflection's light it reflects. Diffuse loses to Fresnel what glTF's BRDF does
 // (`diffuse_fresnel`), as lights and paths take it: 1 less the reflectance, as Fdez-Agüera has it,
 // is a third darker at grazing views.
-float3 sky_light(Frame frame, float3 diffuse_color, float3 f0, float3 metal, float metallic,
+float3 sky_light(Frame* frame, float3 diffuse_color, float3 f0, float3 metal, float metallic,
                  float roughness, float3 normal, float3 view, float n_dot_v, float occlusion,
                  float taken, out float3 reflectance, out float3 specular_light) {
     SamplerState clamp_ = samplers[LINEAR_CLAMP];
@@ -308,7 +308,10 @@ float filtered(uint map, float2 uv, float depth, float size) {
     float3 wv = float3(4.0 - 3.0 * s.y, 7.0, 1.0 + 3.0 * s.y);
     float3 v = float3((3.0 - 2.0 * s.y) / wv.x - 2.0, (3.0 + s.y) / 7.0, s.y / wv.z + 2.0);
     float sum = 0.0;
+    // Unrolled, as `shadowed`'s cascades are, so `u`, `v` and their weights index by constants.
+    [ForceUnroll]
     for (uint j = 0; j < 3; j++) {
+        [ForceUnroll]
         for (uint i = 0; i < 3; i++) {
             float2 at = (base + float2(u[i], v[j])) / size;
             sum += wu[i] * wv[j] * texture.SampleCmpLevelZero(compare, at, depth);
@@ -330,6 +333,9 @@ float shadowed(Shadows shadows, float3 world, float3 normal, float3 to_light) {
     float n_dot_l = dot(normal, to_light);
     float sine = sqrt(saturate(1.0 - n_dot_l * n_dot_l));
     float inside = 1.0 - 2.0 * MARGIN / shadows.map_size;
+    // Unrolled, so the cascades index by constants: indexed in a loop, arrays in registers go to
+    // memory, as an M3's model shaders spilled them.
+    [ForceUnroll]
     for (uint i = 0; i < CASCADES; i++) {
         float4 cascade = shadows.cascades[i];
         float3 n = (light - cascade.xyz) * cascade.w;
@@ -370,12 +376,12 @@ struct Surface {
     MissedFit lobe_fit;
 };
 
-// The light the frame's `i`th light shines on `world`, before its shadows and the exposure, and
-// which way it comes from, `to_light`.
-float3 arriving(Frame frame, uint i, float3 world, out float3 to_light) {
+// The light `lights`' `i`th shines on `world`, before its shadows and the exposure, and which way
+// it comes from, `to_light`.
+float3 arriving(Light* lights, uint i, float3 world, out float3 to_light) {
     // Loaded here: passed in as a `Light`, it lost the lights' address in `lit`'s cluster loop on
     // AMD's driver (25.10.30) under slangc 2026.20.
-    Light light = frame.lights[i];
+    Light light = lights[i];
     float3 radiance = light.color;
     if (light.kind == 0) {
         to_light = -light.direction;
@@ -423,9 +429,9 @@ float3 brdf(Surface surface, float3 to_light, float n_dot_l) {
 // The light the frame's `i`th light reflects from `surface` toward the view by `brdf`'s single
 // scattering, before the exposure. Adds to `spread` that light times `missed` at its cosine, the
 // shape of Kulla and Conty's lobe of what scatters more than once, which `lobe` scales.
-float3 reflected(Frame frame, Surface surface, uint i, inout float3 spread) {
+float3 reflected(Frame* frame, Light* lights, Surface surface, uint i, inout float3 spread) {
     float3 to_light;
-    float3 radiance = arriving(frame, i, surface.world, to_light);
+    float3 radiance = arriving(lights, i, surface.world, to_light);
     float n_dot_l = dot(surface.normal, to_light);
     if (n_dot_l <= 0.0) {
         return float3(0.0);
@@ -454,7 +460,7 @@ float3 lobe(Surface surface, float roughness) {
 // The ambient light's share reaching `pixel`: the less of the view's ambient occlusion and the
 // material's `occlusion`, as Filament takes them; their product would darken twice where both see
 // one occluder.
-float ambient(Frame frame, uint2 pixel, float occlusion) {
+float ambient(Frame* frame, uint2 pixel, float occlusion) {
     if (frame.ambient_occlusion == 0) {
         return occlusion;
     }
@@ -594,7 +600,7 @@ float2 curve(Texture2D surfaces, uint2 pixel, float3 normal) {
 // variance. On a curve the lobe spans fewer pixels: a ball's reflection stays on its side facing
 // what it shows, read from levels fine enough not to swim as the view turns. It takes in only
 // surfaces facing as the pixel's does, and its share is their mean trust.
-float4 reflection(Frame frame, uint2 pixel, float roughness) {
+float4 reflection(Frame* frame, uint2 pixel, float roughness) {
     Reflected reflected = frame.reflections;
     if (reflected.colors == 0) {
         return float4(0.0);
@@ -813,7 +819,12 @@ Surface surface_of(Material material, float3 world, float3 view, float3 interpol
 // factor's in), `surface`, `mapped` (X and Y, -1 to 1), `occlusion`, `emission`: its maps there.
 // `roughness`: the surface's, as `filtered_roughness` widens it. Where `show` asks: an input
 // (`surface_shown`), or a part of its light, exposed, unhazed, none for what's unlit.
-float4 lit(Frame frame, Material material, float3 world, float3 interpolated, float4 tangent,
+//
+// `frame` is read through, each field where it's used. Held whole, its 520 bytes spilled from an
+// M3's registers each pixel: 8 of Bistro's 47 ms at 3024×1890. `lights` is its lights' address,
+// from a frame loaded whole: read through `frame`, it would be an address read through an address,
+// which AMD's driver miscompiles (`compile` in src/shader/mod.rs says how).
+float4 lit(Frame* frame, Light* lights, Material material, float3 world, float3 interpolated, float4 tangent,
            bool front, float4 color, float4 surface, float roughness, float2 mapped,
            float occlusion, float3 emission, float4 reflection) {
     if (frame.show != SHOW_LIGHT && frame.show < SHOW_DIRECT_LIGHT) {
@@ -848,18 +859,18 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
     float3 spread = float3(0.0);
     Clusters clusters = frame.clusters;
     for (uint i = 0; i < clusters.everywhere; i++) {
-        light_sum += reflected(frame, lit, i, spread);
+        light_sum += reflected(frame, lights, lit, i, spread);
     }
     uint found = cluster(clusters, world);
     if (found == NO_CLUSTER) {
         for (uint i = clusters.everywhere; i < frame.light_count; i++) {
-            light_sum += reflected(frame, lit, i, spread);
+            light_sum += reflected(frame, lights, lit, i, spread);
         }
     } else {
         // Through the lights' address, which the bits follow (`Clusters` says why), by a pointer
         // made once: AMD's driver drops the address of an index past them made in the loop. A
         // change here needs AMD's ISA checked again, under both slangc releases the build may use.
-        uint* at = (uint*)frame.lights + clusters.bits;
+        uint* at = (uint*)lights + clusters.bits;
         uint first = at[2 * found];
         uint end = at[2 * found + 1];
         uint words = 2 * clusters.across * clusters.down * clusters.slices + found * clusters.words;
@@ -868,7 +879,8 @@ float4 lit(Frame frame, Material material, float3 world, float3 interpolated, fl
             while (bits != 0) {
                 uint bit = firstbitlow(bits);
                 bits &= bits - 1;
-                light_sum += reflected(frame, lit, clusters.everywhere + word * 32 + bit, spread);
+                light_sum += reflected(frame, lights, lit, clusters.everywhere + word * 32 + bit,
+                                       spread);
             }
         }
     }

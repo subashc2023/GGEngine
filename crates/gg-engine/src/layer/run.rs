@@ -237,6 +237,7 @@ impl Context {
             vsync: false,
             clear_color: [0.02, 0.02, 0.02, 1.0],
             antialiasing: None,
+            render_scale: 1.0,
             viewpoint: None,
             origin: DVec3::ZERO,
             seen: None,

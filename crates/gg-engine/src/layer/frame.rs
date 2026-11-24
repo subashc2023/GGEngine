@@ -5,8 +5,8 @@ use std::mem;
 use bytemuck::NoUninit;
 use gg_core::math::{DVec3, Mat4, Vec3, Vec4};
 use gg_renderer::{
-    Antialiasing, Circle, Grade, Line, MAX_PICKS, Mesh, Shader, Sprite, Tonemapper, Viewpoint,
-    Viewport,
+    Antialiasing, Circle, Grade, Line, MAX_PICKS, MIN_RENDER_SCALE, Mesh, Shader, Sprite,
+    Tonemapper, Viewpoint, Viewport,
 };
 use tracing::warn;
 
@@ -66,6 +66,30 @@ impl Context {
     /// differently, and their replays, are unaffected.
     pub fn set_antialiasing(&mut self, antialiasing: Option<Antialiasing>) {
         self.antialiasing = antialiasing;
+    }
+
+    /// The share of the game's view's pixels rendered across and down: see
+    /// [`set_render_scale`](Self::set_render_scale).
+    pub fn render_scale(&self) -> f32 {
+        self.render_scale
+    }
+
+    /// Renders the game's view at `scale` of its pixels across and down from this frame on, from
+    /// [`MIN_RENDER_SCALE`] to 1, upscaled to its size, as a game's graphics settings do. 1, the
+    /// default, renders every pixel; `--render-scale` sets it at the start. The GPU's work on most
+    /// of a frame shrinks with the scale's square. The game's UI, picks and captures keep the
+    /// view's own pixels, as [`RenderData::render_scale`](gg_renderer::RenderData::render_scale)
+    /// says. Like [`set_antialiasing`](Self::set_antialiasing), it's the run's own.
+    ///
+    /// # Panics
+    ///
+    /// - If `scale` is outside [`MIN_RENDER_SCALE`] to 1, or not a number.
+    pub fn set_render_scale(&mut self, scale: f32) {
+        assert!(
+            (MIN_RENDER_SCALE..=1.0).contains(&scale),
+            "a render scale is from {MIN_RENDER_SCALE} to 1, not {scale}"
+        );
+        self.render_scale = scale;
     }
 
     /// The viewpoint a layer set for this frame, if any.
@@ -561,6 +585,7 @@ impl Context {
         frame.antialiasing = self.antialiasing.unwrap_or_else(|| {
             (self.environment).map_or(Antialiasing::None, |seen| seen.antialiasing)
         });
+        frame.render_scale = self.render_scale;
         frame.exposure = self.environment.unwrap_or_default().light_scale();
         frame.adaptation = (self.environment)
             .and_then(|seen| seen.adaptation)

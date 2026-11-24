@@ -253,11 +253,13 @@ pub use gg_renderer::MeshDraw;
 /// What layers add and draw through their [`Context`]: sprites, sprite sheets, circles, meshes,
 /// shaders for their vertex types (each added with its blend), textures and samplers. Also the
 /// view's viewpoint and projection (a [`Camera`] has one too) and its place in the window; an
-/// [`Environment`]'s tonemapper, antialiasing, grade, ambient occlusion, fog and reflections; and
-/// what's still streaming to the GPU ([`Context::streaming`]).
+/// [`Environment`]'s tonemapper, antialiasing, grade, ambient occlusion, fog and reflections; the
+/// least render scale ([`Context::set_render_scale`]); and what's still streaming to the GPU
+/// ([`Context::streaming`]).
 pub use gg_renderer::{
-    AmbientOcclusion, Antialiasing, Blend, Circle, Fog, Grade, Mesh, Projection, Reflections,
-    Sampler, Shader, Sprite, SpriteSheet, Streaming, Texture, Tonemapper, Viewpoint, Viewport,
+    AmbientOcclusion, Antialiasing, Blend, Circle, Fog, Grade, MIN_RENDER_SCALE, Mesh, Projection,
+    Reflections, Sampler, Shader, Sprite, SpriteSheet, Streaming, Texture, Tonemapper, Viewpoint,
+    Viewport,
 };
 #[doc(inline)]
 pub use grant::Grant;

@@ -23,7 +23,16 @@ pub(crate) struct Ship {
 }
 
 /// Cargo's flags for a build as it ships; the `shipping` profile is in `.cargo/config.toml`.
-const SHIPPING: [&str; 3] = ["--no-default-features", "--profile", "shipping"];
+///
+/// On macOS rustc packs the debug info as it links, while the C and C++ objects the debug map names
+/// still exist: dsymutil run afterwards can't open them. Elsewhere the profile's setting stands.
+fn shipping() -> Vec<&'static str> {
+    let mut args = vec!["--no-default-features", "--profile", "shipping"];
+    if cfg!(target_os = "macos") {
+        args.extend(["--config", "profile.shipping.split-debuginfo=\"packed\""]);
+    }
+    args
+}
 
 /// The loader's name, in a bundle's `Contents/Frameworks` (gg-gpu loads it by it) and as the SDK's
 /// link.
@@ -122,7 +131,7 @@ pub(crate) fn ship(ship: &Ship) -> Result<(), Failure> {
     } else {
         Vec::new()
     };
-    let built = build::build(&ship.package, &SHIPPING, dir)?;
+    let built = build::build(&ship.package, &shipping(), dir)?;
     let ggpk = built.exe.with_extension("ggpk");
     let cooker = cooker(engine, &package.root, &package.target);
     cook(project_dir, &ggpk, &cooker, dir)?;
@@ -708,15 +717,44 @@ fn strip(exe: &Path) -> Result<PathBuf, Failure> {
     Ok(stripped)
 }
 
-/// A dSYM of `exe` at `out`, by dsymutil from the objects its debug map names.
+/// A copy at `out` of the dSYM rustc made beside `exe` as it linked ([`shipping`]).
+///
+/// Its dsymutil ran while the objects of Luau, VMA and zstd still existed; a run afterwards finds
+/// them removed and leaves their lines out.
 ///
 /// # Errors
 ///
-/// - `gg.symbols`: dsymutil can't run or fails.
+/// - `gg.symbols`: the build left no dSYM, or it can't be copied.
 fn dsym(exe: &Path, out: &Path) -> Result<(), Failure> {
-    let mut dsymutil = Command::new("dsymutil");
-    dsymutil.arg(exe).arg("-o").arg(out);
-    tool(dsymutil, "dsymutil")
+    let name = exe.file_name().unwrap_or_default().to_string_lossy();
+    let made = exe.with_file_name(format!("{name}.dSYM"));
+    if !made.is_dir() {
+        let message = format!("the build left no dSYM, {}", made.display());
+        return Err(Failure::new("gg.symbols", message));
+    }
+    copy_dir(&made, out).map_err(|error| {
+        let message = format!(
+            "can't copy {} to {}: {error}",
+            made.display(),
+            out.display()
+        );
+        Failure::new("gg.symbols", message)
+    })
+}
+
+/// Copies directory `from`, through links, to `to`, which it makes.
+fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let (from, to) = (entry.path(), to.join(entry.file_name()));
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Runs `command`, tool `name`, with its stdout on stderr, keeping stdout for gg's line.
@@ -1143,6 +1181,24 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(missing.as_deref(), Some("gg.symbols"));
         assert_eq!(found, Ok(dir.join("gg_shards.pdb")));
+    }
+
+    #[test]
+    fn a_dsym_is_copied_whole_and_its_absence_is_refused() {
+        let dir = scratch("dsym");
+        let exe = dir.join("gg-shards");
+        let missing = dsym(&exe, &dir.join("out"))
+            .err()
+            .map(|failure| failure.code);
+        let dwarf = dir.join("gg-shards.dSYM/Contents/Resources/DWARF");
+        fs::create_dir_all(&dwarf).expect("made");
+        fs::write(dwarf.join("gg_shards-1"), b"dwarf").expect("written");
+        let copied = dsym(&exe, &dir.join("out/Shards.dSYM"));
+        let held = fs::read(dir.join("out/Shards.dSYM/Contents/Resources/DWARF/gg_shards-1"));
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(missing.as_deref(), Some("gg.symbols"));
+        assert!(copied.is_ok());
+        assert_eq!(held.expect("copied"), b"dwarf");
     }
 
     /// The cooker is built with the workspace's in the engine's workspace, apart outside it.

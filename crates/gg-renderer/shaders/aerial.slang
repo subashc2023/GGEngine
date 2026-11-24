@@ -10,7 +10,7 @@ static const float AERIAL_SLICE = 4000.0;
 // `color`, lit at `world`, seen through the haze: dimmed by the transmittance, plus the light
 // scattered toward the viewer times the sun's illuminance and the exposure. Blends the two slices
 // round its distance, fading to none within the first half slice. Unchanged without an atmosphere.
-float3 hazed(Frame frame, float3 world, float3 color) {
+float3 hazed(Frame* frame, float3 world, float3 color) {
     Aerial aerial = frame.aerial;
     if (aerial.luminance <= 0.0) {
         return color;

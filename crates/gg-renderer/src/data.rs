@@ -10,7 +10,7 @@ use crate::{
     Textures, Tonemapper, UploadPath, Viewpoint, mesh, model, shader, texture,
 };
 #[cfg(doc)]
-use crate::{MAX_PICKS, Renderer, ViewCallback};
+use crate::{MAX_PICKS, MIN_RENDER_SCALE, Renderer, ViewCallback};
 
 /// The `size` pixels of a frame whose top left is at `origin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,8 +132,9 @@ impl Streaming {
 /// 4. Depth of field, then motion blur.
 /// 5. Bloom and the grade.
 /// 6. The lens.
-/// 7. `canvas`.
-/// 8. The tonemapper, then the outline.
+/// 7. Upscaling, if `render_scale` is below 1.
+/// 8. `canvas`.
+/// 9. The tonemapper, then the outline.
 pub struct RenderData<'a> {
     /// What the view clears to, tonemapped with what it draws, and the frame around it, as it is.
     /// Linear RGBA.
@@ -145,6 +146,14 @@ pub struct RenderData<'a> {
     /// view at its size, and from this frame alone otherwise. [`Antialiasing::Smaa`] works on each
     /// frame alone. [`Antialiasing::None`] draws each pixel's center.
     pub antialiasing: Antialiasing,
+    /// The view's pixels rendered per pixel it shows, across and down: 1 renders each; below,
+    /// fewer, down to [`MIN_RENDER_SCALE`]. Out of range clamps, and a non-finite scale is 1.
+    ///
+    /// - Everything before the canvas renders at the scaled size, then is upscaled to the view's.
+    /// - The canvas, the outline, picks and the view read back keep the view's own pixels.
+    /// - Antialiasing resolves at the scaled size, so its history starts afresh as the scale
+    ///   changes.
+    pub render_scale: f32,
     /// What lit shading multiplies light by, unless `adaptation` adapts it. Light in physical
     /// units, as lux and candela, times this is what the tonemapper maps. Unlit draws (sprites,
     /// text, unlit materials) keep their colors. Shaders read it from the frame's data

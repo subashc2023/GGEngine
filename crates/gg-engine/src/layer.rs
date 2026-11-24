@@ -357,6 +357,8 @@ pub struct Context {
     /// Set in place of the world's environment's, as
     /// [`set_antialiasing`](Self::set_antialiasing) says.
     antialiasing: Option<Antialiasing>,
+    /// As [`set_render_scale`](Self::set_render_scale) says.
+    render_scale: f32,
     /// Set by a layer for this frame, in place of the world's camera.
     viewpoint: Option<Viewpoint>,
     origin: DVec3,

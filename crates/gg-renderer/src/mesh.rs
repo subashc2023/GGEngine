@@ -3,14 +3,15 @@
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::sync::Arc;
+use std::thread;
 
-use gg_core::Result;
 use gg_core::math::{Mat4, Vec3};
+use gg_core::{Error, Result};
 #[cfg(doc)]
 use gg_gpu::Format;
 use gg_gpu::{ComputePipeline, Device, Faces, GpuBuffer, Pipeline};
 
-use crate::{Draws, shader};
+use crate::{Draws, parallel, shader};
 
 mod cull;
 mod draw;
@@ -143,6 +144,13 @@ impl MeshPass {
     pub(crate) fn new(device: &Arc<Device>, budget: u64) -> Result<Self> {
         let from_visibility = shader::non_uniform(visibility::SPIRV);
         let pipeline = |name, entry| ComputePipeline::new(device, name, &from_visibility, entry);
+        // Each on a thread of its own, as `Renderer`'s passes are made.
+        let (culling, shading, normals) = thread::scope(|scope| {
+            let culling = parallel::make(scope, || cull::Culling::new(device));
+            let shading = parallel::make(scope, || pipeline("view shading", c"shade_main"));
+            let normals = parallel::make(scope, || pipeline("view normals", c"normal_main"));
+            Ok::<_, Error>((culling.made()?, shading.made()?, normals.made()?))
+        })?;
         Ok(Self {
             device: device.clone(),
             shaders: Vec::new(),
@@ -155,9 +163,9 @@ impl MeshPass {
                 entries: Vec::new(),
             },
             budget,
-            culling: cull::Culling::new(device)?,
-            shading: pipeline("view shading", c"shade_main")?,
-            normals: pipeline("view normals", c"normal_main")?,
+            culling,
+            shading,
+            normals,
             scene: scene::Kept::default(),
             meshlet_table: MeshletTable {
                 table: None,

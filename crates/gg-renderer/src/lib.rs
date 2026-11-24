@@ -48,6 +48,7 @@ mod mesh;
 mod model;
 mod motion_blur;
 mod packed;
+mod parallel;
 mod particles;
 mod pick;
 mod reflections;
@@ -64,11 +65,13 @@ mod texture;
 mod tonemap;
 mod trace;
 mod ui;
+mod upscale;
 mod view;
 mod viewpoint;
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use gg_core::math::DVec3;
@@ -121,6 +124,7 @@ pub use texture::{Map, Mipmaps, Texels, Texture, Textures};
 pub use texture::{add_levels, add_map_mipmaps, add_mipmaps, widen_by_normals};
 pub use tonemap::Tonemapper;
 pub use ui::Ui;
+pub use upscale::MIN_RENDER_SCALE;
 pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
@@ -145,6 +149,7 @@ use taa::TaaPass;
 use tonemap::TonemapPass;
 use trace::TracePass;
 use ui::UiPass;
+use upscale::UpscalePass;
 use view::{OutlinePass, ViewPass};
 
 /// A headless renderer's image's debug name.
@@ -175,6 +180,8 @@ pub struct Renderer {
     history: taa::History,
     /// Made by the first frame that uses SMAA.
     smaa: Option<SmaaPass>,
+    /// Made by the first frame that renders the view below its size.
+    upscale: Option<UpscalePass>,
     /// Made by the first frame that shows an image. `missing` is the last name it couldn't find,
     /// which it warned of.
     show: Option<ShowPass>,
@@ -356,60 +363,83 @@ impl Renderer {
             Output::Window(swapchain) => swapchain.format(),
             Output::Offscreen(..) => ColorImage::FORMAT,
         };
-        Ok(Self {
-            frames: Frames::new(device)?,
-            output,
-            origin: DVec3::ZERO,
-            window_keys: Vec::new(),
-            windows: Vec::new(),
-            meshes: MeshPass::new(device, settings.upload_budget)?,
-            view: ViewPass::new(device, format)?,
-            bloom: BloomPass::new(device)?,
-            tonemap: TonemapPass::new(device)?,
-            outline: OutlinePass::new(device)?,
-            fog: FogPass::new(device)?,
-            taa: TaaPass::new(device)?,
-            history: taa::History::default(),
-            smaa: None,
-            show: None,
-            missing: None,
-            trace: None,
-            traced: None,
-            no_ray_query: false,
-            images: Vec::new(),
-            sky: None,
-            sky_light: SkyLight::default(),
-            sky_sun: SkySun::default(),
-            atmosphere: None,
-            sunlit: Vec::new(),
-            graph: Graph::default(),
-            window_passes: Vec::new(),
-            pixels: None,
-            view_read: 0,
-            picks: Picks::default(),
-            ui: UiPass::new(device, format)?,
-            instance: instance.clone(),
-            device: device.clone(),
-            vsync: settings.vsync,
-            visibility_buffer: settings.visibility_buffer,
-            capture: settings.capture,
-            failed: false,
-            waited: Duration::ZERO,
-            drawn: DrawCounts::default(),
-            counted: [(0, DrawCounts::default(), false); 2],
-            lighting: Lighting::new(device)?,
-            skinning: Skinning::new(device)?,
-            particles: ParticlePass::new(device)?,
-            ao: AoPass::new(device)?,
-            ao_history: ao::History::default(),
-            reflections: ReflectionPass::new(device)?,
-            reflected: reflections::Images::default(),
-            exposure: ExposurePass::new(device)?,
-            adapting: [Adapting::default(), Adapting::default()],
-            exposed: 0.0,
-            depth_of_field: DepthOfFieldPass::new(device)?,
-            motion_blur: MotionBlurPass::new(device)?,
-            lens: LensPass::new(device)?,
+        let upload_budget = settings.upload_budget;
+        // Each pass makes its pipelines on a thread of its own, as drivers compile shaders as
+        // pipelines are made: on macOS, seconds of a first start.
+        thread::scope(|scope| {
+            let meshes = parallel::make(scope, || MeshPass::new(device, upload_budget));
+            let view = parallel::make(scope, || ViewPass::new(device, format));
+            let bloom = parallel::make(scope, || BloomPass::new(device));
+            let tonemap = parallel::make(scope, || TonemapPass::new(device));
+            let outline = parallel::make(scope, || OutlinePass::new(device));
+            let fog = parallel::make(scope, || FogPass::new(device));
+            let taa = parallel::make(scope, || TaaPass::new(device));
+            let ui = parallel::make(scope, || UiPass::new(device, format));
+            let lighting = parallel::make(scope, || Lighting::new(device));
+            let skinning = parallel::make(scope, || Skinning::new(device));
+            let particles = parallel::make(scope, || ParticlePass::new(device));
+            let ao = parallel::make(scope, || AoPass::new(device));
+            let reflections = parallel::make(scope, || ReflectionPass::new(device));
+            let exposure = parallel::make(scope, || ExposurePass::new(device));
+            let depth_of_field = parallel::make(scope, || DepthOfFieldPass::new(device));
+            let motion_blur = parallel::make(scope, || MotionBlurPass::new(device));
+            let lens = parallel::make(scope, || LensPass::new(device));
+            Ok(Self {
+                frames: Frames::new(device)?,
+                output,
+                origin: DVec3::ZERO,
+                window_keys: Vec::new(),
+                windows: Vec::new(),
+                meshes: meshes.made()?,
+                view: view.made()?,
+                bloom: bloom.made()?,
+                tonemap: tonemap.made()?,
+                outline: outline.made()?,
+                fog: fog.made()?,
+                taa: taa.made()?,
+                history: taa::History::default(),
+                smaa: None,
+                upscale: None,
+                show: None,
+                missing: None,
+                trace: None,
+                traced: None,
+                no_ray_query: false,
+                images: Vec::new(),
+                sky: None,
+                sky_light: SkyLight::default(),
+                sky_sun: SkySun::default(),
+                atmosphere: None,
+                sunlit: Vec::new(),
+                graph: Graph::default(),
+                window_passes: Vec::new(),
+                pixels: None,
+                view_read: 0,
+                picks: Picks::default(),
+                ui: ui.made()?,
+                instance: instance.clone(),
+                device: device.clone(),
+                vsync: settings.vsync,
+                visibility_buffer: settings.visibility_buffer,
+                capture: settings.capture,
+                failed: false,
+                waited: Duration::ZERO,
+                drawn: DrawCounts::default(),
+                counted: [(0, DrawCounts::default(), false); 2],
+                lighting: lighting.made()?,
+                skinning: skinning.made()?,
+                particles: particles.made()?,
+                ao: ao.made()?,
+                ao_history: ao::History::default(),
+                reflections: reflections.made()?,
+                reflected: reflections::Images::default(),
+                exposure: exposure.made()?,
+                adapting: [Adapting::default(), Adapting::default()],
+                exposed: 0.0,
+                depth_of_field: depth_of_field.made()?,
+                motion_blur: motion_blur.made()?,
+                lens: lens.made()?,
+            })
         })
     }
 

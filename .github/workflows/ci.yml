@@ -156,14 +156,17 @@ jobs:
       # The demo's two peers in lockstep on the loopback, each exiting 0: the joiner starts from the
       # host's world, and their worlds hash alike at every tick, as no `net.desync` in either log
       # says; the host plays on alone once the joiner has gone. Each session's runs here are given
-      # a code of their own, which a host or a server not given one makes and prints.
+      # a code of their own, which a host or a server not given one makes and prints. Pairs run in
+      # real time: at a tick a frame, a host on a fast GPU can spend its frames before the joiner
+      # has loaded.
       - name: Run the demo as two lockstep peers
         if: matrix.part == 'runs'
         run: |
           cargo build -p shards --locked
-          target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7700 --code 0000-0000-0000-7700 &
+          pair="--headless --size 320x180 --real-time"
+          target/debug/gg-shards $pair --frames 600 --host 127.0.0.1:7700 --code 0000-0000-0000-7700 &
           host=$!
-          target/debug/gg-shards --headless --frames 300 --join 127.0.0.1:7700 --code 0000-0000-0000-7700
+          target/debug/gg-shards $pair --frames 300 --join 127.0.0.1:7700 --code 0000-0000-0000-7700
           wait $host
           grep -q '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl
           ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
@@ -173,9 +176,10 @@ jobs:
       - name: Run the demo as two rollback peers over a slow link
         if: matrix.part == 'runs'
         run: |
-          target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7701 --code 0000-0000-0000-7701 --rollback --link 100,20,5 &
+          pair="--headless --size 320x180 --real-time --rollback --link 100,20,5"
+          target/debug/gg-shards $pair --frames 600 --host 127.0.0.1:7701 --code 0000-0000-0000-7701 &
           host=$!
-          target/debug/gg-shards --headless --frames 300 --join 127.0.0.1:7701 --code 0000-0000-0000-7701 --rollback --link 100,20,5
+          target/debug/gg-shards $pair --frames 300 --join 127.0.0.1:7701 --code 0000-0000-0000-7701
           wait $host
           test "$(grep -h '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl | wc -l)" = 2
           grep -q '"code":"net.rollback","rollbacks":[1-9]' target/debug/logs/shards-*.jsonl

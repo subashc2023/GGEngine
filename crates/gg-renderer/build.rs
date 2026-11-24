@@ -7,7 +7,7 @@ use std::path::{self, Path, PathBuf};
 use std::process::Command;
 
 /// Shaders that draw, each a vertex and a fragment shader.
-const SHADERS: [&str; 14] = [
+const SHADERS: [&str; 15] = [
     "circle",
     "egui",
     "grid",
@@ -21,6 +21,7 @@ const SHADERS: [&str; 14] = [
     "sprite",
     "text",
     "tonemap",
+    "upscale",
     "view",
 ];
 

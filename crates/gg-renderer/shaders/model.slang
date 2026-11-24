@@ -158,8 +158,11 @@ struct Shaded {
 
 [shader("fragment")]
 Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
-    Frame frame = *push.frame;
-    Material material = frame.materials[push.params[input.instance].material];
+    // Loaded whole for its addresses, as `shadow_main` says why; the rest read through `frame`
+    // where used, as shading.slang's `lit` says why.
+    Frame whole = loadAligned<8>(push.frame);
+    Frame* frame = push.frame;
+    Material material = whole.materials[push.params[input.instance].material];
     // Every texture sampled before any branch or discard, which would leave the derivatives that
     // pick their levels undefined, and the normal's too. Base, emission and specular-glossiness
     // specular colors decode from sRGB as sampled; other maps, and glossiness in alpha, read as
@@ -197,11 +200,11 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     occlusion = ambient(frame, pixel, occlusion);
     reflected = reflection(frame, pixel, roughness);
 #endif
-    out.color = lit(frame, material, input.world, input.normal, input.tangent, shows_front, color,
-                    surface, roughness, mapped, occlusion, emission, reflected);
+    out.color = lit(frame, whole.lights, material, input.world, input.normal, input.tangent,
+                    shows_front, color, surface, roughness, mapped, occlusion, emission, reflected);
     out.motion = float4(input.moved, 0.0);
 #if !defined(OPAQUE) && !defined(MASKED)
-    out.color = fogged(fog_at(frame, input.world), out.color);
+    out.color = fogged(fog_at(*frame, input.world), out.color);
 #endif
     return out;
 }

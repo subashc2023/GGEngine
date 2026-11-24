@@ -731,6 +731,14 @@ The frame shows them pixel for pixel, under the UI or where a dock panel's
 [`ViewCallback`](crates/gg-renderer/src/view.rs) paints it. So post-processing and captures read
 the whole view, and nothing stretches.
 
+A render scale below 1 ([`Context::set_render_scale`](crates/gg-engine/src/layer/frame.rs),
+`--render-scale`) renders everything before the canvas at that share of the view's pixels each way.
+A pass then upscales the colors to the view's size, by a Catmull-Rom filter clamped to the nearest
+texels, and its IDs by the nearest. The canvas, tonemap, outline, picks and captures keep the
+view's own pixels. Retina screens make it worth having: an M3 Pro renders Bistro full screen in 39
+ms, and in 18 at 0.5. Antialiasing resolves at the scaled size; TAA that resolves into the view's
+size, as FSR 2 does, would keep more detail.
+
 - Colors are linear 16-bit floats, which games' pipelines are made for. Passes that read them take
   NaN as 0 and infinity as 65,504, since a shader's float can be infinite.
 - Every draw writes its 64-bit ID beside its color; what writes depth also writes its motion.
@@ -781,6 +789,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 | Motion blur | McGuire et al.'s reconstruction filter | `motion blur velocity`, `… tiles`, `… neighbors`, `motion blur` (`view blurred`) | `motion_blur.rs` |
 | Bloom and grade | Downsample chain, upsample, blend; grade in the same last pass | `bloom down 1`–`8`, `bloom up 1`–`7`, `bloom`, `bloom and grade` or `grade` (`bloom 1`–`8`) | `bloom.rs`, `grade.rs` |
 | Lens | Chromatic aberration, vignette, grain | `lens` (`view lensed`) | `lens.rs` |
+| Upscale | Below a render scale of 1, the colors and IDs to the view's size; the canvas draws in the same pass | `upscale` (`view upscaled`, `view ids upscaled`, `view motion upscaled`, `view depth upscaled`) | `upscale.rs` |
 | Canvas | The game's UI, in the view's pixels, where a pass above follows the view's last | `canvas` | `lib.rs` |
 | Show | An image, by its debug name, in place of the view's light | `show` (`view shown`) | `show.rs` |
 | Path trace | Paths through the opaque and masked models, in place of the view's light | `path trace` (`path traced`) | `trace.rs` |
@@ -907,7 +916,7 @@ not a mode games ship with.
 ### Antialiasing and post-processing
 
 - Order: antialiasing, the copy for reflections, the meter, depth of field, motion blur (both before
-  bloom, as Unreal orders them), bloom and grade, lens, canvas, tonemap. All come before the canvas,
+  bloom, as Unreal orders them), bloom and grade, lens, upscaling, canvas, tonemap. All come before the canvas,
   so a game's UI is neither antialiased, blurred, bloomed, graded nor seen through the lens.
 - TAA resolves before tonemapping, and the canvas draws after the resolve, so UI stays sharp and
   out of the history. Particles draw before it, so they sort by z among what blends; they write no
@@ -1003,6 +1012,11 @@ makes and drops the surfaces, and the render thread never holds a window's last 
 frame-rate cap (`Context::set_max_fps`) sleeps before each frame, since Windows doesn't run the
 event loop while a window is moved or resized. Images decode on threads of their own, `gg-load`, so
 neither a layer's add nor a tick that names an asset waits for a decode.
+
+Pipelines are made on threads of their own, `gg-pipelines`, which start and end with each batch:
+the renderer's passes', and each added shader's. Drivers compile shaders as pipelines are made, and
+Metal compiles each anew the first time an app starts, so made in turn they'd hold that start back
+for seconds. Not the job system's threads, which gg-renderer doesn't own, and which a tick may hold.
 
 ## Platforms
 

@@ -299,6 +299,7 @@ impl Handler<'_> {
         };
         self.cx.set_vsync(vsync);
         self.cx.set_max_fps(max);
+        self.cx.set_render_scale(self.args.render_scale);
         api::debug(&self.api, &mut self.cx);
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
@@ -685,10 +686,28 @@ impl Handler<'_> {
         event_loop.exit();
     }
 
-    /// Asks for a frame, unless the window has no area to render into or the run is ending.
+    /// Whether a frame can run: the window is open with an area to render into, and the run isn't
+    /// ending.
+    fn can_frame(&self, event_loop: &ActiveEventLoop) -> bool {
+        !self.minimized && !event_loop.exiting() && self.window.is_some()
+    }
+
+    /// Runs a frame, unless the window has no area to render into.
+    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        // No frame runs without a window area, or it would count the pause.
+        if !self.minimized {
+            self.frame(event_loop);
+            #[cfg(feature = "dev")]
+            self.show_window_menu();
+        }
+    }
+
+    /// Asks for a frame, unless it can't run. On macOS it asks for none: `about_to_wait` runs them.
     fn request_frame(&self, event_loop: &ActiveEventLoop) {
-        if !self.minimized
-            && !event_loop.exiting()
+        #[cfg(target_os = "macos")]
+        let _ = event_loop;
+        #[cfg(not(target_os = "macos"))]
+        if self.can_frame(event_loop)
             && let Some(window) = &self.window
         {
             window.request_redraw();
@@ -839,14 +858,9 @@ impl ApplicationHandler for Handler<'_> {
                 self.request_frame(event_loop);
             }
             WindowEvent::RedrawRequested => {
-                // No frame runs without a window area, or it would count the pause. A redraw
-                // asked for before minimizing still comes, and Windows sends one on restoring,
-                // before the resize that ends the pause.
-                if !self.minimized {
-                    self.frame(event_loop);
-                    #[cfg(feature = "dev")]
-                    self.show_window_menu();
-                }
+                // A redraw asked for before minimizing still comes, and Windows sends one on
+                // restoring, before the resize that ends the pause. On macOS only AppKit's come.
+                self.redraw(event_loop);
                 // Windows doesn't call `about_to_wait` while it moves or resizes a window in its
                 // own loop, so each frame asks for the next. Otherwise winit calls it between
                 // frames, and the two requests make one.
@@ -915,7 +929,20 @@ impl ApplicationHandler for Handler<'_> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Frames run back to back, paced by the render thread, itself paced by presentation
         // (mailbox: the GPU; FIFO under `--vsync`: the display).
+        #[cfg(not(target_os = "macos"))]
         self.request_frame(event_loop);
+        // winit's macOS loop takes its list of windows to redraw whole each turn, dropping its
+        // memory, so each `request_redraw` would allocate. Frames run here instead, the loop
+        // polling while they can and waiting while they can't.
+        #[cfg(target_os = "macos")]
+        {
+            use winit::event_loop::ControlFlow as Flow;
+            let can = self.can_frame(event_loop);
+            event_loop.set_control_flow(if can { Flow::Poll } else { Flow::Wait });
+            if can {
+                self.redraw(event_loop);
+            }
+        }
     }
 
     /// A tool API request came, or stdin ended under `--supervised`. Frames handle both as they

@@ -203,9 +203,11 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
         storage[push.motion][at] = float4(0.0);
         return;
     }
-    // Loaded whole, as model.slang's `shadow_main` says why.
-    Frame frame = loadAligned<8>(push.frame);
-    Shown shown = shown_at(shading, frame.materials, pixel.xy, seen);
+    // Loaded whole for its addresses, as model.slang's `shadow_main` says why; the rest read
+    // through `frame` where used, as `lit` says why.
+    Frame whole = loadAligned<8>(push.frame);
+    Frame* frame = push.frame;
+    Shown shown = shown_at(shading, whole.materials, pixel.xy, seen);
     storage[push.motion][at] = float4(shown.world - shown.was, 0.0);
     Material material = shown.material;
     float2 uv = shown.uv;
@@ -225,8 +227,8 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
                                          shown.normal_down);
     float4 reflected = reflection(frame, pixel.xy, roughness);
     storage[push.target][at] =
-        lit(frame, material, shown.world, shown.normal, shown.tangent, shown.front, color, surface,
-            roughness, mapped, occlusion, emission, reflected);
+        lit(frame, whole.lights, material, shown.world, shown.normal, shown.tangent, shown.front,
+            color, surface, roughness, mapped, occlusion, emission, reflected);
 }
 
 // Each pixel's unit normal in the world, as shading turns it, with its normal map's bumps, in RGB,

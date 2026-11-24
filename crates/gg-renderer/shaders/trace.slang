@@ -428,7 +428,7 @@ float3 path(Frame frame, RaytracingAccelerationStructure tlas, float3 origin, fl
         float3 v = normalize(float3(dot(view, t), dot(view, b), lit.n_dot_v));
         for (uint i = 0; i < frame.light_count; i++) {
             float3 to_light;
-            float3 arrived = arriving(frame, i, at.world, to_light);
+            float3 arrived = arriving(frame.lights, i, at.world, to_light);
             float n_dot_l = dot(lit.normal, to_light);
             // Lights out of range or cone skipped: under Bistro's 96 point lights, their shadow
             // rays and walks would be most of a path's cost.

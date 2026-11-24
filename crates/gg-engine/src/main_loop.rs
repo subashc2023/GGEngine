@@ -73,6 +73,7 @@ pub(crate) fn run_headless(
     let mut render = RenderThread::start(renderer)?;
     // An embedded run is the game a tool shows, as the editor plays it, sounds included.
     let mut cx = Context::of_run(None, app, embedded);
+    cx.set_render_scale(args.render_scale);
     api::debug(&api, &mut cx);
     let mut clock = Clock::default();
     let mut stepper = match app.headless_step {

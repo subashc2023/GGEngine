@@ -60,7 +60,8 @@ links nothing else of the Vulkan SDK. With it, by hand:
 - the 16 Bistros on a Mac against a frame time set there, an open question below;
 - [DEFECTS.md](DEFECTS.md)'s macOS row on minimized windows.
 
-Later: upscalers (DLSS, FSR, XeSS), and ray-traced effects (GI, reflections) over the path
+Later: upscalers (DLSS, FSR, XeSS, or TAA resolving into the view's size) behind the render
+scale, and ray-traced effects (GI, reflections) over the path
 tracer's scene where the GPU has ray queries (no macOS driver does).
 
 ## Deferred
@@ -114,6 +115,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | `*IndirectCount` draws, one a pipeline, none recorded a run; visibility kept per slot and meshlet across frames | The render thread outlasts the GPU |
 | Culling shadow casters by what's hidden, spots by their cones, blended draws, the canvas, layers' own meshes | A profile shows them |
 | Less work a frame: lights that changed, rows that left tables, culling in place, IDs only when picked, a one-pass depth pyramid | A profile shows it |
+| The render scale in the title bar's settings, the tool API's look and Luau; sharpening after its upscale | A player or tool sets it |
 | Visibility buffer for dev runs' models, skinned meshes, games' opaque shaders (and in the pyramid); shading by material | A profile shows the cost |
 | Several views (split screen, the editor's beside the game's), a camera's own aspect, glTF's `zfar` | A game or the editor draws several |
 | Picks: the world point under the cursor, more than 64 a frame, answers a frame sooner | Placing at the cursor, many touches, or hover latency |
@@ -270,7 +272,11 @@ Defects are in [DEFECTS.md](DEFECTS.md).
   deleted: Shards by its flags (`--relay`, the host printing its code), or Shards given a Host and
   Join menu. Recommendation: Shards by flags, as the match measures the network, which a menu
   doesn't change, and `Context::host` and `join` have tests of their own. Decide before the match.
-- What frame time the 16 Bistros are held to on a Mac. On an M3 Pro they take 19.2 ms at 1280×720,
-  20 to 21 at the 95th percentile, as [DEFECTS.md](DEFECTS.md)'s Performance says.
-  Recommendation: 16.7 ms at the 95th percentile, 60 frames a second, which the 10 ms that doesn't
+- What frame time the 16 Bistros are held to on a Mac. On an M3 Pro they take 17.7 ms at 1280×720,
+  19.8 at the 95th percentile, as [DEFECTS.md](DEFECTS.md)'s Performance says.
+  Recommendation: 16.7 ms at the 95th percentile, 60 frames a second, which the 11 ms that doesn't
   follow the view's size has room to give. Decide before Phase 10 closes.
+- What render scale a run starts at on a high-density screen. Every run starts at 1, so a full
+  Retina screen renders 3024×1890 pixels: Bistro's frame takes 39 ms on an M3 Pro, and 18 at 0.5.
+  Recommendation: keep 1, as games' settings menus set it for their players, who pick sharpness or
+  speed. Decide before a 3D game ships on Macs.

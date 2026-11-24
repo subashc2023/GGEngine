@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gg_core::{Error, Result};
-use gg_renderer::MAX_TEXTURE_SIZE;
+use gg_renderer::{MAX_TEXTURE_SIZE, MIN_RENDER_SCALE};
 
 use crate::net::Code;
 
@@ -30,6 +30,8 @@ pub(crate) struct Args {
     pub(crate) vsync: bool,
     /// A windowed run's cap ([`Context::set_max_fps`](crate::Context::set_max_fps)).
     pub(crate) max_fps: Option<NonZeroU32>,
+    /// The view's render scale ([`Context::set_render_scale`](crate::Context::set_render_scale)).
+    pub(crate) render_scale: f32,
     /// Threads for the simulation's jobs, the main thread among them.
     pub(crate) threads: NonZeroUsize,
     /// Where the run is recorded: its seed, layers' commands and the world's hash each tick.
@@ -137,7 +139,7 @@ pub(crate) enum Dump {
 }
 
 /// The run flags a replay refuses: it renders, records and serves nothing.
-const NOT_REPLAYED: [&str; 24] = [
+const NOT_REPLAYED: [&str; 25] = [
     "--record",
     "--restore",
     "--headless",
@@ -151,6 +153,7 @@ const NOT_REPLAYED: [&str; 24] = [
     "--no-validation",
     "--vsync",
     "--max-fps",
+    "--render-scale",
     "--no-api",
     "--stopped",
     "--host",
@@ -188,6 +191,8 @@ Options:
                       development build's title bar keeps
   --max-fps <N>       In a window, render at most N frames a second, in place of that limit; an
                       embedded run goes at its tool's pace
+  --render-scale <S>  Render the view at S of its pixels across and down, 0.25 to 1, upscaled to its
+                      size (1)
   --threads <N>       Run the simulation's jobs on N threads, the main one among them (CPUs less 1)
   --mods <DIR>        Run DIR's mods, not those a windowed run runs from the game's per-user folder
   --package <PATH>    Read the asset root's files from the package at PATH, which `tools/cook`
@@ -266,6 +271,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         validation: cfg!(debug_assertions),
         vsync: false,
         max_fps: None,
+        render_scale: 1.0,
         threads: std::thread::available_parallelism()
             .ok()
             .and_then(|cpus| NonZeroUsize::new(cpus.get() - 1))
@@ -441,6 +447,16 @@ fn option(
                 ))
             })?);
         }
+        "--render-scale" => {
+            let scale = value_of(flag)?;
+            parsed.render_scale = (scale.parse::<f32>().ok())
+                .filter(|scale| (MIN_RENDER_SCALE..=1.0).contains(scale))
+                .ok_or_else(|| {
+                    bad(format!(
+                        "`--render-scale` takes the share of the view's pixels rendered across                          and down, from {MIN_RENDER_SCALE} to 1, not `{scale}`"
+                    ))
+                })?;
+        }
         "--threads" => {
             let threads = value_of(flag)?;
             parsed.threads = threads.parse().map_err(|_| {
@@ -568,6 +584,7 @@ fn check(parsed: &Args) -> Result<()> {
             (parsed.gpu.is_some(), "--gpu"),
             (parsed.vsync, "--vsync"),
             (parsed.max_fps.is_some(), "--max-fps"),
+            (parsed.render_scale != 1.0, "--render-scale"),
         ];
         if let Some((_, flag)) = renders.iter().find(|(given, _)| *given) {
             let why = if *flag == "--record" {
@@ -759,6 +776,15 @@ mod tests {
             let max_fps = parse_strs(args).unwrap().unwrap().max_fps;
             assert_eq!(max_fps, NonZeroU32::new(60), "{args:?}");
         }
+        assert_eq!(args.render_scale, 1.0);
+        for (args, scale) in [
+            (&["--render-scale", "0.5"][..], 0.5),
+            (&["--render-scale=0.25"], 0.25),
+            (&["--headless", "--render-scale", "1"], 1.0),
+        ] {
+            let parsed = parse_strs(args).unwrap().unwrap().render_scale;
+            assert_eq!(parsed, scale, "{args:?}");
+        }
         for (size, expected) in [("320x180", [320, 180]), ("1x8192", [1, 8192])] {
             let args = parse_strs(&["--headless", "--size", size]);
             assert_eq!(args.unwrap().unwrap().size, Some(expected), "{size}");
@@ -903,6 +929,7 @@ mod tests {
                 "--capture",
                 "--gpu",
                 "--max-fps",
+                "--render-scale",
                 "--record",
                 "--restore",
                 "--host",
@@ -1007,6 +1034,11 @@ mod tests {
             &["--max-fps", "59.94"],
             &["--headless", "--max-fps", "60"],
             &["--embedded", "--max-fps", "60"],
+            &["--render-scale"],
+            &["--render-scale", "0.2"],
+            &["--render-scale", "1.5"],
+            &["--render-scale", "NaN"],
+            &["--render-scale", "half"],
             &["--size", "320x180"],
             &["--embedded", "--size", "320x180"],
             &["--headless", "--size"],
@@ -1061,6 +1093,7 @@ mod tests {
             &["--serve", "0.0.0.0:7700", "--gpu", "amd"],
             &["--serve", "0.0.0.0:7700", "--vsync"],
             &["--serve", "0.0.0.0:7700", "--max-fps", "60"],
+            &["--serve", "0.0.0.0:7700", "--render-scale", "0.5"],
             &["--serve", "0.0.0.0:7700", "--headless", "--size", "320x180"],
             &["--stopped", "--serve", "0.0.0.0:7700"],
             &["--stopped", "--connect", "127.0.0.1:7700"],
