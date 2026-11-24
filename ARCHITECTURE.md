@@ -809,8 +809,10 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 - Readbacks (picks, the culling's counts, the exposure's meter) come back as the frame two later
   begins, so no frame waits for the GPU.
 - Every Vulkan object has a debug name and every pass a label; runs of draws are labeled with their
-  shader's name. Per-pass timestamps feed Tracy's GPU timelines and `engine.perf`'s `gpu_ms_mean`,
-  `gpu_ms_p95` and `transient_bytes`.
+  shader's name. Each queue writes a timestamp as a frame's first pass begins and as its last
+  ends, for `engine.perf`'s `gpu_ms_mean` and `gpu_ms_p95`. With the `tracy` feature, every pass
+  writes two, for Tracy's GPU timelines. On an M3 under KosmicKrisp, those idle the GPU 3.8 ms a
+  frame.
 
 ### Drawing
 

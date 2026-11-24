@@ -1,11 +1,14 @@
-//! Each pass's time on the GPU, from timestamps written as it begins and ends, read back once its
-//! frame has finished. With gg-core's `tracy` feature, Tracy shows one GPU timeline per queue. The
-//! frame's time, from its first pass's start on either queue to its last's end, goes to
-//! [`Frames::gpu_time`](crate::Frames::gpu_time).
+//! A frame's time on the GPU, from timestamps read back once it has finished. The frame's time,
+//! from its first pass's start on either queue to its last's end, goes to
+//! [`Frames::gpu_time`](crate::Frames::gpu_time). With gg-core's `tracy` feature, each pass's
+//! begin and end are timed too, and Tracy shows one GPU timeline per queue.
 //!
-//! Both timestamps are written once everything before them on the queue has run through every
-//! stage. A pass's time so takes in its barriers' waits, and a queue's passes follow one another
-//! on its timeline, none beginning before the one before it ended.
+//! Without the feature, a queue writes two timestamps a frame, not two a pass. On an M3 under
+//! KosmicKrisp, a pass's timestamps left the GPU idle 3.8 of the 16 Bistros' 18 ms at 1280×720.
+//!
+//! Each timestamp is written once everything before it on the queue has run through every stage.
+//! A pass's time so takes in its barriers' waits, and a queue's passes follow one another on its
+//! timeline, none beginning before the one before it ended.
 //!
 //! Tracy places a timeline against its CPU's clock by pairing a reading of the GPU's clock with its
 //! own, as the timeline starts and again each second, so that it doesn't drift. The reading is
@@ -39,6 +42,9 @@ pub(crate) struct Timer {
     pools: Vec<(vk::QueryPool, u32)>,
     /// How many timestamps each slot's last frame wrote, until they're read.
     written: Vec<u32>,
+    /// How many of each slot's frame's passes on the queue are yet to end. Without Tracy's
+    /// timeline, the last to end writes the frame's last timestamp.
+    left: Vec<usize>,
     /// What a slot's timestamps are read into.
     results: Vec<u64>,
     /// The bits of the queue's timestamps that count, those both queues' count; `None` for a
@@ -82,6 +88,7 @@ impl Timer {
             name,
             pools: vec![(vk::QueryPool::null(), 0); FRAMES_IN_FLIGHT as usize],
             written: vec![0; FRAMES_IN_FLIGHT as usize],
+            left: vec![0; FRAMES_IN_FLIGHT as usize],
             results: Vec::new(),
             mask,
             timeline,
@@ -167,6 +174,7 @@ impl Timer {
         passes: usize,
     ) -> Result<()> {
         self.written[slot] = 0;
+        self.left[slot] = passes;
         if self.mask.is_none() {
             return Ok(());
         }
@@ -179,6 +187,11 @@ impl Timer {
                     MOST_TIMESTAMPS / 2
                 )
             });
+        let needed = if self.each_pass() {
+            needed
+        } else {
+            needed.min(2)
+        };
         let (pool, capacity) = &mut self.pools[slot];
         if needed > *capacity {
             let grown = needed.next_power_of_two().max(32);
@@ -213,7 +226,8 @@ impl Timer {
 
     /// Writes the timestamp a pass named `label` begins at, into slot `slot`'s pool
     /// ([`Timer::begin_frame`] readied it), in `commands`, which run on the timer's queue after
-    /// those it was readied in.
+    /// those it was readied in. Without Tracy's timeline, only the frame's first pass on the queue
+    /// writes it.
     pub(crate) fn begin(
         &mut self,
         device: &Device,
@@ -221,6 +235,9 @@ impl Timer {
         slot: usize,
         label: Label,
     ) {
+        if !self.each_pass() && self.written[slot] > 0 {
+            return;
+        }
         if let Some(query) = self.write(device, commands, slot)
             && let Some((timeline, _)) = &self.timeline
         {
@@ -228,13 +245,23 @@ impl Timer {
         }
     }
 
-    /// Writes the timestamp the pass begun last ends at.
+    /// Writes the timestamp the pass begun last ends at: without Tracy's timeline, only if it's
+    /// the frame's last on the queue.
     pub(crate) fn end(&mut self, device: &Device, commands: vk::CommandBuffer, slot: usize) {
+        self.left[slot] = self.left[slot].saturating_sub(1);
+        if !self.each_pass() && self.left[slot] > 0 {
+            return;
+        }
         if let Some(query) = self.write(device, commands, slot)
             && let Some((timeline, _)) = &self.timeline
         {
             timeline.end(id(slot, query));
         }
+    }
+
+    /// Whether each pass is timed, for Tracy's timeline, rather than the frame alone.
+    fn each_pass(&self) -> bool {
+        self.timeline.is_some()
     }
 
     /// Writes the slot's next timestamp and returns its index; `None` where nothing's timed.

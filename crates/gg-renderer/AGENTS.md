@@ -17,8 +17,9 @@ To capture a headless run instead:
 ## Profiling on a Mac
 
 KosmicKrisp's timestamps are good at render passes' edges alone, and a pass's fragment work lands
-after its end, so the engine's own pass times blame the wrong passes. Metal System Trace times
-each Metal encoder instead:
+after its end, so Tracy's pass times blame the wrong passes. Writing them also idles the GPU about
+4 ms a frame: time builds without the `tracy` feature. Metal System Trace times each Metal encoder
+instead:
 
 ```sh
 xcrun xctrace record --template 'Metal System Trace' --output target/run.trace \
