@@ -25,6 +25,20 @@ file in the same commit.
 - Windows and Linux on x86-64 and ARM64, and macOS on Apple Silicon. Consoles, mobile and the web
   wait until the desktop engine is solid.
 
+Until a flagship sets the priorities, the engine grows only what changing a running game by asking
+runs through. That is the main loop, the ECS, scenes, snapshots, hot reload, the tool API and `gg`,
+assets, cooking and the player, scripts, input, the editor's panels, and the renderer's speed and
+correctness. The rest is frozen:
+
+- networking past lockstep, and the relay;
+- world streaming, navigation, skeletal animation and joints;
+- mods and torn-off windows;
+- the renderer's effects, as they are, with no new ones.
+
+Frozen code keeps its tests and its showcase scene, and gets fixes for crashes, validation errors
+and security alone. Its features, its speed and its [DEFECTS.md](docs/DEFECTS.md) rows wait until a
+game needs them. The open milestones' checks still run.
+
 ## Crates
 
 ```text

@@ -60,9 +60,7 @@ links nothing else of the Vulkan SDK. With it, by hand:
 - the 16 Bistros on a Mac against a frame time set there, an open question below;
 - [DEFECTS.md](DEFECTS.md)'s macOS row on minimized windows.
 
-Later: upscalers (DLSS, FSR, XeSS, or TAA resolving into the view's size) behind the render
-scale, and ray-traced effects (GI, reflections) over the path
-tracer's scene where the GPU has ray queries (no macOS driver does).
+What grows and what is frozen meanwhile is in [ARCHITECTURE.md's Goals](../ARCHITECTURE.md#goals).
 
 ## Deferred
 
@@ -143,6 +141,8 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | What blends sorted back to front by view depth (particles too, now by age), and taken by depth of field, AO, reflections, shadows | A game blends in 3D |
 | Particles: soft, lit, colliding, forced, ribbons, curves over life, drawn by layers or on the canvas, playing while stopped | A game's effect needs it |
 | Particle pools that shrink, and bursts faster than a lifetime | A game's peak or burst rate needs it |
+| Upscalers behind the render scale: DLSS, FSR, XeSS, or TAA resolving into the view's size | A game's frame needs one |
+| Ray-traced GI and reflections over the path tracer's scene, where the GPU has ray queries (no macOS driver does) | A game's look needs them |
 
 ### Text, a game's UI and audio
 
