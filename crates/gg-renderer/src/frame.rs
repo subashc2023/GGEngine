@@ -225,6 +225,7 @@ struct Viewing<'a> {
     visibility_buffer: bool,
     occluded: Option<AmbientOcclusion>,
     occluded_against: Option<Mat4>,
+    occlusion_size: [u32; 2],
     reflected: Option<Reflections>,
     traced: Option<(Reflections, (Mat4, f32))>,
     resolved: usize,
@@ -474,11 +475,12 @@ impl Renderer {
         let perspective = matches!(data.viewpoint.projection, Projection::Perspective { .. });
         let occluded = (data.ambient_occlusion)
             .filter(|occlusion| occlusion.darkens() && sky.is_some() && perspective);
-        // Averaged over frames in a history of the view's size, let go by a frame rendering the
-        // view without it. Against what the frame before accumulated, if it did at this size and
-        // the view isn't cut.
+        // Averaged over frames in a history of the occlusion's size, let go by a frame rendering
+        // the view without it. Against what the frame before accumulated, if it did at this size
+        // and the view isn't cut.
+        let occlusion_size = ao::occlusion_size(rendered, self.half_size_occlusion);
         if occluded.is_some() {
-            self.ao_history.prepare(&self.device, rendered)?;
+            self.ao_history.prepare(&self.device, occlusion_size)?;
         } else if renders_view {
             self.ao_history.forget();
         }
@@ -574,6 +576,7 @@ impl Renderer {
             visibility_buffer,
             occluded,
             occluded_against,
+            occlusion_size,
             reflected,
             traced,
             resolved,
@@ -864,6 +867,7 @@ fn plan_view(
         visibility_buffer,
         occluded,
         occluded_against,
+        occlusion_size,
         reflected,
         traced,
         resolved,
@@ -1021,7 +1025,15 @@ fn plan_view(
         let depths = [if visibility.is_some() { depth } else { alone }, alone];
         let ao = occluded.map(|_| {
             let against = occluded_against;
-            AoPass::plan(graph, depths, size, occlusion_first, number, against)
+            AoPass::plan(
+                graph,
+                depths,
+                size,
+                occlusion_size,
+                occlusion_first,
+                number,
+                against,
+            )
         });
         // Each depth's, as they pair.
         let found = [normals, drawn_normals].map(|pair| pair.map(|(_, normals)| normals));

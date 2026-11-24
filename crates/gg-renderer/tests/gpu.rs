@@ -112,6 +112,8 @@ fn main() -> ExitCode {
         ambient_occlusion_averages_its_noise_away,
         ambient_occlusion_holds_to_the_world_as_the_view_pans,
         ambient_occlusion_leaves_no_trail_behind_what_moves,
+        ambient_occlusion_at_half_size_darkens_the_skys_light_near_what_hides_it,
+        ambient_occlusion_at_half_size_holds_to_the_world_as_the_view_pans,
         specular_occlusion_dims_the_skys_reflection_by_the_way_to_the_eye,
         reflections_mirror_what_the_view_shows,
         reflections_follow_an_exposures_jump,
@@ -274,6 +276,7 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
         mesh_shaders: None,
         ray_query: None,
         visibility_buffer: true,
+        half_size_occlusion: None,
         upload_budget: DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,
         capture: None,
@@ -282,6 +285,15 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
 
 fn renderer(width: u32, height: u32) -> Renderer {
     renderer_uploading(width, height, None)
+}
+
+/// [`renderer`], computing ambient occlusion at half the view's size if `half`, else at its own.
+fn renderer_occluding(width: u32, height: u32, half: bool) -> Renderer {
+    let settings = Settings {
+        half_size_occlusion: Some(half),
+        ..settings(None)
+    };
+    Renderer::headless_on(&harness::instance(), &settings, width, height).expect("a renderer")
 }
 
 /// [`renderer`], uploading by `uploads` if given.
@@ -7999,9 +8011,19 @@ fn pixel_of(viewpoint: Viewpoint, size: [u32; 2], at: Vec3) -> [u32; 2] {
 /// Settled in a still view, each frame matches the one 8 before, as TAA's resolve asks of a still
 /// pixel it keeps unclipped.
 fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
+    darkens_the_skys_light_near_what_hides_it(false, "ambient_occlusion");
+}
+
+/// [`ambient_occlusion_darkens_the_skys_light_near_what_hides_it`] at half the view's size,
+/// upsampled by depth, against a reference of its own.
+fn ambient_occlusion_at_half_size_darkens_the_skys_light_near_what_hides_it() {
+    darkens_the_skys_light_near_what_hides_it(true, "ambient_occlusion_half");
+}
+
+fn darkens_the_skys_light_near_what_hides_it(half: bool, reference: &str) {
     const WIDTH: u32 = 192;
     const HEIGHT: u32 = 128;
-    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut renderer = renderer_occluding(WIDTH, HEIGHT, half);
     let mut stores = Stores::default();
     let sky = sky_texture(&mut stores.textures, [64, 32], |_, _| [0.5; 3]);
     stores.sky = Some(Sky {
@@ -8063,7 +8085,7 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
         wall(&without),
         "the back wall reads no occlusion"
     );
-    compare("ambient_occlusion", WIDTH, HEIGHT, &with);
+    compare(reference, WIDTH, HEIGHT, &with);
     let frame = |renderer: &mut Renderer, stores: &mut Stores, antialiasing| {
         let data = RenderData {
             ambient_occlusion: on,
@@ -8090,7 +8112,7 @@ fn ambient_occlusion_darkens_the_skys_light_near_what_hides_it() {
     for _ in 0..16 {
         frame(&mut renderer, &mut stores, Antialiasing::Taa);
     }
-    check(renderer, "ambient_occlusion", WIDTH, HEIGHT);
+    check(renderer, reference, WIDTH, HEIGHT);
 }
 
 /// [`occlusion_scene`] seen first looking up, so culling finds most of it outside the view, then as
@@ -8475,6 +8497,16 @@ fn floor_balls_shown(
 /// On an RTX 4090, noise fixed on the screen gave 1.11 and 1.07 without TAA, 0.50 and 0.55 with;
 /// the history, 0.24 and 0.27, and 0.21 and 0.24.
 fn ambient_occlusion_holds_to_the_world_as_the_view_pans() {
+    holds_to_the_world_as_the_view_pans(false);
+}
+
+/// [`ambient_occlusion_holds_to_the_world_as_the_view_pans`] at half the view's size, whose
+/// history moves by half its pixels a frame.
+fn ambient_occlusion_at_half_size_holds_to_the_world_as_the_view_pans() {
+    holds_to_the_world_as_the_view_pans(true);
+}
+
+fn holds_to_the_world_as_the_view_pans(half: bool) {
     const WIDTH: u32 = 384;
     const HEIGHT: u32 = 256;
     const SIZE: [u32; 2] = [WIDTH, HEIGHT];
@@ -8499,7 +8531,7 @@ fn ambient_occlusion_holds_to_the_world_as_the_view_pans() {
             let compared: Vec<usize> = (firsts.iter())
                 .flat_map(|&first| [first, first + apart])
                 .collect();
-            let mut renderer = renderer(WIDTH, HEIGHT);
+            let mut renderer = renderer_occluding(WIDTH, HEIGHT, half);
             let mut stores = Stores::default();
             let draws = occlusion_floor(&mut stores);
             let viewport = filling(SIZE);
@@ -8552,7 +8584,8 @@ fn ambient_occlusion_holds_to_the_world_as_the_view_pans() {
                     }
                 }
             }
-            let case = format!("{antialiasing:?}, panning a pixel every {over} frames");
+            let case =
+                format!("{antialiasing:?}, panning a pixel every {over} frames, half {half}");
             assert!(
                 points >= 10_000,
                 "{case}, {points} points darkened, too few"

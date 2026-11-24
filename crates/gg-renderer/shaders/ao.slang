@@ -9,6 +9,10 @@
 // the last `denoise_last_main`. View space is XeGTAO's: X right, Y up and Z ahead, so depth is
 // positive.
 //
+// At half the view's size, each of the occlusion's pixels takes the depth at the center of the
+// first of the 2 by 2 view pixels it stands for. `upsample_main` then takes the view's pixels
+// from the four nearest, by how near their depths are.
+//
 // The blur leaves blotches of the screen's noise a few pixels across, which TAA, clipping to this
 // frame, doesn't take away. So the last denoise also averages each pixel over frames by a history
 // of its own (reverse reprojection caching: Nehab, Sander, Lawrence, Tatarchuk and Isidoro,
@@ -52,12 +56,14 @@ struct Push {
     // From the view's depth, `z`, to view-space depth: `depth_mul / (depth_add + z)`.
     float depth_mul;
     float depth_add;
-    // In pixels.
+    // The occlusion's size and the view's, in pixels.
     uint2 size;
+    uint2 view;
     // Bindless textures, two depths whose nearer is what's opaque: the visibility buffer's and
     // what's drawn otherwise, or one twice.
     uint2 depths;
-    // The view's ambient occlusion, a bindless storage image.
+    // The view's ambient occlusion, a bindless storage image. At half size, only the upsample
+    // writes it.
     uint target;
     // How far occluders reach, in world units, and the power the visibility is raised to.
     float radius;
@@ -71,6 +77,10 @@ struct Push {
     uint start2;
     uint start3;
     uint start4;
+    // View pixels across and down per pixel of the occlusion: 1, or 2 at half size.
+    uint step;
+    // What the last denoise accumulated, a bindless texture, which the upsample reads.
+    uint occluded;
     uint unused;
     Accumulation* accumulation;
 };
@@ -111,6 +121,9 @@ static const float DEPTH_SLACK = 0.02;
 static const float HISTORY_MARGIN = 0.02;
 // The largest half float short of infinity: the depth a history keeps of what's farther.
 static const float HALF_MOST = 65504.0;
+// How far, relative, a neighbor's depth may be from a view pixel's before the upsample weighs it
+// less: each neighbor's weight is its bilinear one over the square of this plus that difference.
+static const float UPSAMPLE_SLACK = 0.02;
 
 uint2 level_size(uint level) {
     return max(push.size >> level, uint2(1));
@@ -122,14 +135,25 @@ uint level_start(uint level) {
     return level == 0 ? 0 : starts[max(level, 1) - 1];
 }
 
-// The view-space depth at `pixel`, clamped to the view: the nearer of the two depths.
-float view_depth(int2 pixel) {
-    int2 at = clamp(pixel, int2(0), int2(push.size) - 1);
+// The view-space depth at the view's pixel `pixel`, clamped to the view: the nearer of the two
+// depths.
+float depth_in_view(int2 pixel) {
+    int2 at = clamp(pixel, int2(0), int2(push.view) - 1);
     float a = depths[push.depths.x].Load(int3(at, 0));
     float b = depths[push.depths.y].Load(int3(at, 0));
     // Reversed: the nearer is the greater. Where neither drew, it's 0, infinitely far.
     float z = max(a, b);
     return min(push.depth_mul / (push.depth_add + z), FARTHEST);
+}
+
+// The view-space depth the occlusion's `pixel` takes: the view's at the first pixel it stands for.
+float view_depth(int2 pixel) {
+    return depth_in_view(pixel * int(push.step));
+}
+
+// Where the occlusion's `pixel` takes its depth, in texture coordinates from the view's top left.
+float2 uv_of(uint2 pixel) {
+    return (float2(pixel * push.step) + 0.5) / float2(push.view);
 }
 
 void write_level(uint level, uint2 at, float depth) {
@@ -302,8 +326,9 @@ void occlusion_main(uint3 thread: SV_DispatchThreadID) {
     }
     uint index = pixel.y * push.size.x + pixel.x;
     int2 at = int2(pixel);
-    float2 pixel_size = 1.0 / float2(push.size);
-    float2 uv = (float2(pixel) + 0.5) * pixel_size;
+    // The occlusion's pixel in texture coordinates.
+    float2 pixel_size = float(push.step) / float2(push.view);
+    float2 uv = uv_of(pixel);
     float z = depth_at(at);
     float left = depth_at(at + int2(-1, 0));
     float right = depth_at(at + int2(1, 0));
@@ -495,9 +520,8 @@ void denoise_last_main(uint3 thread: SV_DispatchThreadID) {
     // Frames the history held where the point showed; none where it's taken from nowhere.
     float held = 0.0;
     if (accumulation.taken != 0 && z < FARTHEST) {
-        float2 size = float2(push.size);
-        float2 uv = (float2(pixel) + 0.5) / size;
-        float4 clip = mul(accumulation.previous_clip_from_view, float4(position(uv, z), 1.0));
+        float3 seen = position(uv_of(pixel), z);
+        float4 clip = mul(accumulation.previous_clip_from_view, float4(seen, 1.0));
         if (clip.w > 0.0) {
             // The frame before's depth of the point, and the slack for each of the 4 pixels round
             // where it showed: `DEPTH_SLACK`, plus the depth's change to the next pixel each way
@@ -505,7 +529,9 @@ void denoise_last_main(uint3 thread: SV_DispatchThreadID) {
             float across = min(abs(depth_at(at + int2(1, 0)) - z), abs(z - depth_at(at + int2(-1, 0))));
             float down = min(abs(depth_at(at + int2(0, 1)) - z), abs(z - depth_at(at + int2(0, -1))));
             float slack = DEPTH_SLACK * clip.w + across + down;
-            float2 texel = (clip.xy / clip.w * 0.5 + 0.5) * size - 0.5;
+            // Each history texel holds the occlusion's pixel that takes its depth there, as `uv_of`.
+            float2 texel = ((clip.xy / clip.w * 0.5 + 0.5) * float2(push.view) - 0.5)
+                / float(push.step);
             float2 floored = floor(texel);
             float2 f = texel - floored;
             float2 g = 1.0 - f;
@@ -535,7 +561,42 @@ void denoise_last_main(uint3 thread: SV_DispatchThreadID) {
             }
         }
     }
-    scalars[push.target][uint3(pixel, 0)] = occlusion;
+    if (push.step == 1) {
+        scalars[push.target][uint3(pixel, 0)] = occlusion;
+    }
     storage[accumulation.accumulated][uint3(pixel, 0)] =
         float4(occlusion, min(z, HALF_MOST), min(held + 1.0, HELD_MOST), 0.0);
+}
+
+// At half size, the view's ambient occlusion from what the last denoise accumulated: the four
+// pixels of it round each of the view's, weighted bilinearly and by how near their depths are to
+// its own, so what's behind an edge doesn't darken what's before it, or the reverse.
+[shader("compute")]
+[numthreads(GROUP, GROUP, 1)]
+void upsample_main(uint3 thread: SV_DispatchThreadID) {
+    uint2 pixel = thread.xy;
+    if (pixel.x >= push.view.x || pixel.y >= push.view.y) {
+        return;
+    }
+    // As the history keeps it.
+    float z = min(depth_in_view(int2(pixel)), HALF_MOST);
+    // The occlusion's pixel `p` took its depth at the view's `p * step`.
+    float2 at = float2(pixel) / float(push.step);
+    float2 floored = floor(at);
+    float2 f = at - floored;
+    int2 corner = int2(floored);
+    float sum = 0.0;
+    float weights = 0.0;
+    for (uint i = 0; i < 4; i++) {
+        int2 offset = int2(i & 1, i >> 1);
+        float2 along = lerp(1.0 - f, f, float2(offset));
+        int2 texel = min(corner + offset, int2(push.size) - 1);
+        float2 kept = textures[push.occluded].Load(int3(texel, 0)).xy;
+        float apart = UPSAMPLE_SLACK + abs(kept.y - z) / z;
+        float weight = along.x * along.y / (apart * apart);
+        sum += kept.x * weight;
+        weights += weight;
+    }
+    // The nearest neighbor's bilinear weight is a quarter at least.
+    scalars[push.target][uint3(pixel, 0)] = sum / weights;
 }

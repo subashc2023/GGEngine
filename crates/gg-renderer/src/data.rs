@@ -318,6 +318,9 @@ pub struct Settings<'a> {
     /// Shade models' opaque and masked materials drawn by meshlets from a visibility buffer, as
     /// `shaders/visibility.slang` says, or, to test or measure each, as everything else draws.
     pub visibility_buffer: bool,
+    /// Compute ambient occlusion at half the view's size or at its own, to test or measure each,
+    /// rather than by the view's size: half past 1920 by 1080 pixels, upsampled by depth.
+    pub half_size_occlusion: Option<bool>,
     /// The most bytes a frame copies to the GPU while streaming: [`DEFAULT_UPLOAD_BUDGET`] unless a
     /// test or measurement wants another.
     ///

@@ -3,6 +3,10 @@
 //! occlusion in compute passes, after the opaque depth and before shading, into an image of the
 //! view's size. A [`History`] averages it over frames, so its screen-space noise doesn't stay put
 //! as the view moves.
+//!
+//! A view of more than [`HALF_ABOVE`] pixels computes it at half its size across and down, as
+//! [`occlusion_size`] says. A last pass then upsamples it to the view's size, weighting each
+//! neighbor by how near its depth is.
 
 use std::sync::Arc;
 
@@ -43,6 +47,23 @@ const DENOISES: usize = 3;
 /// noise, which a moving view goes on through.
 const PHASES: u64 = 8;
 const CYCLES: u64 = 8;
+
+/// The most pixels a view has for its occlusion to be computed at its own size: 1920 by 1080.
+/// Past it, as on a Retina screen, its cost grows with the pixels while a pixel's detail shows
+/// less. At 3024 by 1890 on an M3 Pro, the full size took 6.2 ms and half 2. Half loses the
+/// darkening of creases a few pixels across, which the shaded view there hardly shows.
+const HALF_ABOVE: u64 = 1920 * 1080;
+
+/// The size a view of `size` computes its ambient occlusion at: half, rounded up, if `half` says
+/// so or, unasked, if the view has more than [`HALF_ABOVE`] pixels; else its own.
+pub(crate) fn occlusion_size(size: [u32; 2], half: Option<bool>) -> [u32; 2] {
+    let pixels = u64::from(size[0]) * u64::from(size[1]);
+    if half.unwrap_or(pixels > HALF_ABOVE) {
+        size.map(|side| side.div_ceil(2))
+    } else {
+        size
+    }
+}
 
 /// How the view's ambient occlusion darkens the light from all around, as
 /// [`RenderData::ambient_occlusion`](crate::RenderData::ambient_occlusion) has it.
@@ -118,6 +139,7 @@ struct Push {
     depth_mul: f32,
     depth_add: f32,
     size: [u32; 2],
+    view: [u32; 2],
     depths: [u32; 2],
     target: u32,
     radius: f32,
@@ -125,6 +147,8 @@ struct Push {
     noise: u32,
     blur: f32,
     starts: [u32; LEVELS as usize - 1],
+    step: u32,
+    occluded: u32,
     unused: u32,
     accumulation: u64,
 }
@@ -146,8 +170,8 @@ fn reprojection(previous_clip_from_world: Mat4, world_from_view: Mat4) -> Mat4 {
     previous_clip_from_world * world_from_view * Mat4::from_scale(Vec3::new(1.0, 1.0, -1.0))
 }
 
-/// The ambient occlusion's history, kept from frame to frame. Two images of the view's size, remade
-/// when it changes and dropped by a frame without ambient occlusion; each frame accumulates into
+/// The ambient occlusion's history, kept from frame to frame. Two images of the occlusion's size
+/// ([`occlusion_size`]), remade when it changes and dropped by a frame without ambient occlusion; each frame accumulates into
 /// the one the last didn't, against the other. It also keeps how the last accumulating frame drew
 /// the view (forgotten with the images), and which frames' noise frames take. It's apart from
 /// [`AoPass`] because a frame takes its images as targets while recording.
@@ -165,7 +189,8 @@ pub(crate) struct History {
     moving: u64,
 }
 
-/// The last frame that accumulated: its number, the view's size, and its world-to-clip matrices
+/// The last frame that accumulated: its number, the view's size (not the occlusion's), and its
+/// world-to-clip matrices
 /// with antialiasing's offset (the history's) and without.
 #[derive(Clone, Copy)]
 struct Accumulated {
@@ -275,18 +300,21 @@ fn levels(size: [u32; 2]) -> ([u32; LEVELS as usize - 1], u64) {
 }
 
 /// Computes the view's ambient occlusion: depth prefilter, occlusion, the denoises before the last,
-/// and the last.
+/// the last, and at half size the upsample.
 pub(crate) struct AoPass {
     prefilter: ComputePipeline,
     occlusion: ComputePipeline,
     denoise: ComputePipeline,
     denoise_last: ComputePipeline,
+    upsample: ComputePipeline,
 }
 
 /// A frame's ambient occlusion in its graph. It takes the nearer of `depths`, and `history` is the
 /// image it accumulates against, with the matrix that drew it.
 pub(crate) struct Plan {
+    /// The occlusion's size, and the view's.
     size: [u32; 2],
+    view: [u32; 2],
     depths: [ImageId; 2],
     levels: BufferId,
     /// The occlusion writes them, and the denoises read and write them by turns.
@@ -297,9 +325,16 @@ pub(crate) struct Plan {
     prefilter: PassId,
     occlusion: PassId,
     denoises: [PassId; DENOISES],
+    /// At half size alone: from the last denoise's accumulated image into `image`.
+    upsample: Option<PassId>,
 }
 
 impl Plan {
+    /// View pixels across and down per pixel of the occlusion: 1 or 2.
+    fn step(&self) -> u32 {
+        if self.size == self.view { 1 } else { 2 }
+    }
+
     /// The view's ambient occlusion: per pixel, the fraction of the light from all around that
     /// reaches it.
     pub(crate) fn image(&self) -> ImageId {
@@ -324,17 +359,20 @@ impl AoPass {
             occlusion: pipeline("ambient occlusion", c"occlusion_main")?,
             denoise: pipeline("ambient occlusion denoise", c"denoise_main")?,
             denoise_last: pipeline("ambient occlusion denoise last", c"denoise_last_main")?,
+            upsample: pipeline("ambient occlusion upsample", c"upsample_main")?,
         })
     }
 
-    /// Declares in `graph` frame `frame`'s ambient occlusion at `size`, from `depths` (the nearest
-    /// is what's opaque), into an image shading then samples. It's denoised [`DENOISES`] times. The
-    /// last denoise accumulates into whichever of a [`History`]'s two images (targets `first` and
-    /// `first + 1`) the frame before didn't, against the other, if `against` gives that frame's
-    /// matrix ([`History::against`]).
+    /// Declares in `graph` frame `frame`'s ambient occlusion at `size` ([`occlusion_size`] of
+    /// `view`, the view's size), from `depths` (the nearest is what's opaque), into an image of the
+    /// view's size shading then samples. It's denoised [`DENOISES`] times. The last denoise
+    /// accumulates into whichever of a [`History`]'s two images (targets `first` and `first + 1`)
+    /// the frame before didn't, against the other, if `against` gives that frame's matrix
+    /// ([`History::against`]). At half size, a last pass upsamples what it accumulated.
     pub(crate) fn plan(
         graph: &mut Graph,
         depths: [ImageId; 2],
+        view: [u32; 2],
         size: [u32; 2],
         first: usize,
         frame: u64,
@@ -347,7 +385,8 @@ impl AoPass {
             graph.buffer("ambient occlusion terms", pixels),
             graph.buffer("ambient occlusion terms denoised", pixels),
         ];
-        let image = graph.scalar("ambient occlusion", size);
+        let image = graph.scalar("ambient occlusion", view);
+        let half = size != view;
         let images = [graph.target(first), graph.target(first + 1)];
         let (into, from) = ((frame % 2) as usize, ((frame + 1) % 2) as usize);
         let accumulated = images[into];
@@ -373,14 +412,25 @@ impl AoPass {
                     Some((history, _)) => pass.sample(history),
                     None => pass,
                 };
-                pass.overwrite(image).overwrite(accumulated)
+                let pass = if half { pass } else { pass.overwrite(image) };
+                pass.overwrite(accumulated)
             } else {
                 pass.write_buffer(terms[(i + 1) % 2])
             };
             pass.add()
         });
+        let upsample = half.then(|| {
+            let pass = graph.compute(label!("ambient occlusion upsample"));
+            let pass = if depths[0] == depths[1] {
+                pass.sample(depths[0])
+            } else {
+                pass.sample(depths[0]).sample(depths[1])
+            };
+            pass.sample(accumulated).overwrite(image).add()
+        });
         Plan {
             size,
+            view,
             depths,
             levels,
             terms,
@@ -390,6 +440,7 @@ impl AoPass {
             prefilter,
             occlusion,
             denoises,
+            upsample,
         }
     }
 
@@ -410,6 +461,7 @@ impl AoPass {
             depth_mul,
             depth_add,
             size: plan.size,
+            view: plan.view,
             depths: [0; 2],
             target: 0,
             radius: seen.settings.radius,
@@ -417,6 +469,8 @@ impl AoPass {
             noise: seen.noise,
             blur: BLUR,
             starts: levels(plan.size).0,
+            step: plan.step(),
+            occluded: 0,
             unused: 0,
             accumulation: 0,
         };
@@ -464,7 +518,10 @@ impl AoPass {
                 Push {
                     levels: pass.address(plan.levels),
                     terms: pass.address(term(i)),
-                    target: pass.storage(plan.image, 0),
+                    target: match plan.upsample {
+                        Some(_) => 0,
+                        None => pass.storage(plan.image, 0),
+                    },
                     accumulation: pass.upload(bytemuck::bytes_of(&accumulation))?.address(),
                     ..base
                 }
@@ -482,6 +539,19 @@ impl AoPass {
                 &self.denoise
             });
             pass.push_constants(bytemuck::bytes_of(&push));
+            pass.dispatch([across, down, 1]);
+        }
+        if let Some(upsample) = plan.upsample {
+            let mut pass = frame.compute(upsample);
+            let push = Push {
+                depths: plan.depths.map(|depth| pass.sampled(depth)),
+                target: pass.storage(plan.image, 0),
+                occluded: pass.sampled(plan.accumulated),
+                ..base
+            };
+            pass.set_pipeline(&self.upsample);
+            pass.push_constants(bytemuck::bytes_of(&push));
+            let [across, down] = plan.view.map(|side| side.div_ceil(GROUP));
             pass.dispatch([across, down, 1]);
         }
         Ok(())
@@ -579,6 +649,15 @@ mod tests {
         let texels: u32 = sizes.iter().sum();
         assert_eq!(levels([1920, 1080]), (starts, u64::from(texels) * 4));
         assert_eq!(levels([3, 1]), ([3, 4, 5, 6], (3 + 1 + 1 + 1 + 1) * 4));
+    }
+
+    #[test]
+    fn views_past_1080p_occlude_at_half_size_rounded_up() {
+        assert_eq!(occlusion_size([1920, 1080], None), [1920, 1080]);
+        assert_eq!(occlusion_size([1920, 1081], None), [960, 541]);
+        assert_eq!(occlusion_size([3024, 1890], None), [1512, 945]);
+        assert_eq!(occlusion_size([3024, 1890], Some(false)), [3024, 1890]);
+        assert_eq!(occlusion_size([193, 1], Some(true)), [97, 1]);
     }
 
     #[test]

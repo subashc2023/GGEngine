@@ -735,7 +735,7 @@ A render scale below 1 ([`Context::set_render_scale`](crates/gg-engine/src/layer
 `--render-scale`) renders everything before the canvas at that share of the view's pixels each way.
 A pass then upscales the colors to the view's size, by a Catmull-Rom filter clamped to the nearest
 texels, and its IDs by the nearest. The canvas, tonemap, outline, picks and captures keep the
-view's own pixels. Retina screens make it worth having: an M3 Pro renders Bistro full screen in 37
+view's own pixels. Retina screens make it worth having: an M3 Pro renders Bistro full screen in 33
 ms, and in 18 at 0.5. Antialiasing resolves at the scaled size; TAA that resolves into the view's
 size, as FSR 2 does, would keep more detail.
 
@@ -778,7 +778,7 @@ that are images. Paths are under `crates/gg-renderer/src/`.
 | View, second pass | What came into view | `view visibility second`, `opaque depth second` or `view second` | `lib.rs` |
 | Early depth, normals | Beside a visibility buffer, depth of what draws forward; normals for reflections | `opaque depth`, `view normals`, `opaque normals` | `lib.rs`, `mesh/visibility.rs` |
 | Back faces | For reflections, depth of the far sides of what the view's passes kept | `opaque back faces` (`opaque back depth`) | `frame.rs`, `mesh/draw.rs` |
-| Ambient occlusion | XeGTAO from the depth, denoised, accumulated over frames | `ambient occlusion prefilter`, `ambient occlusion`, `ambient occlusion denoise` | `ao.rs` |
+| Ambient occlusion | XeGTAO from the depth, denoised, accumulated over frames; at half size past 1920×1080 pixels, upsampled by depth | `ambient occlusion prefilter`, `ambient occlusion`, `ambient occlusion denoise`, `ambient occlusion upsample` | `ao.rs` |
 | Reflections | Mirror rays traced through a pyramid of the nearest front and farthest back depths; levels of them and their surfaces, which shading blurs them by | `reflections depth`, `reflections`, `reflections blur` | `reflections.rs` |
 | Shading | Shades the visibility buffer, then draws the rest: sky, other opaque runs, what blends, canvas. Without a buffer, the forward `view` pass | `view shading`, `view rest`, `view` | `mesh/visibility.rs`, `mesh.rs` |
 | Fog | Fogs what's opaque from depth; what blends then draws, fogging itself | `fog`, `view blended` | `fog.rs` |

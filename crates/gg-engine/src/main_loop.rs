@@ -852,6 +852,7 @@ pub(crate) fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         mesh_shaders: None,
         ray_query: None,
         visibility_buffer: true,
+        half_size_occlusion: None,
         upload_budget: gg_renderer::DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,
         capture: args.capture,

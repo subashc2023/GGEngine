@@ -222,6 +222,8 @@ pub struct Renderer {
     vsync: bool,
     /// From [`Settings::visibility_buffer`].
     visibility_buffer: bool,
+    /// From [`Settings::half_size_occlusion`].
+    half_size_occlusion: Option<bool>,
     /// From [`Settings::capture`].
     capture: Option<NonZeroU64>,
     /// Set once rendering fails, which can leave the GPU's copies of meshes and textures
@@ -421,6 +423,7 @@ impl Renderer {
                 device: device.clone(),
                 vsync: settings.vsync,
                 visibility_buffer: settings.visibility_buffer,
+                half_size_occlusion: settings.half_size_occlusion,
                 capture: settings.capture,
                 failed: false,
                 waited: Duration::ZERO,

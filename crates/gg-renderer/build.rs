@@ -34,6 +34,7 @@ const COMPUTE: [(&str, &[&str]); 23] = [
             "occlusion_main",
             "denoise_main",
             "denoise_last_main",
+            "upsample_main",
         ],
     ),
     (
