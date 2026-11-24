@@ -3,6 +3,8 @@
 //! pool (tests' threads, a one-thread run) jobs run in turn on the calling thread.
 
 use std::num::NonZeroUsize;
+use std::thread;
+use std::time::Duration;
 
 use gg_core::{Error, Result};
 
@@ -11,11 +13,10 @@ use gg_core::{Error, Result};
 /// With one thread, it starts none. Fails with `engine.threads` if the threads can't start, or a
 /// pool was started before in the process.
 ///
-/// Each thread allocates the first time it looks for a job to steal (crossbeam-epoch records it),
-/// and on macOS the first time it sleeps for want of one (std makes the mutex and condition
-/// variable then): the other threads in the first ticks, the calling thread at the first tick
-/// that keeps it waiting long, at any time. rayon-core doesn't say when a thread has slept, so
-/// nothing here can do it sooner.
+/// Returns with every thread warm, so steady frames allocate nothing. Each thread allocates the
+/// first time it looks for a job to steal (crossbeam-epoch records it), and on macOS the first
+/// time it sleeps for want of one (std makes the mutex and condition variable then).
+/// Both happen here, before it returns.
 pub fn start(threads: NonZeroUsize) -> Result<()> {
     if threads.get() == 1 {
         return Ok(());
@@ -33,7 +34,26 @@ pub fn start(threads: NonZeroUsize) -> Result<()> {
                 format!("can't start {threads} threads for the jobs: {error}"),
             )
         })?;
+    warm_up();
     Ok(())
+}
+
+/// Makes each of the pool's threads steal and then sleep once.
+///
+/// The calling thread, the pool's first, runs its share of a broadcast and waits for the others,
+/// which sleep in theirs. A waiting thread sleeps after 33 rounds of looking
+/// (`ROUNDS_UNTIL_SLEEPING` in rayon-core), well within the others' wait. Once they finish they idle the same
+/// way, so a second wait lets them sleep.
+fn warm_up() {
+    let _zone = gg_core::zone!();
+    const BUSY: Duration = Duration::from_millis(10);
+    rayon_core::broadcast(|context| {
+        // Index 0 is the calling thread, taken over by `use_current_thread`.
+        if context.index() != 0 {
+            thread::sleep(BUSY);
+        }
+    });
+    thread::sleep(BUSY);
 }
 
 /// Runs `a` and `b`. On a pool thread, `b` is offered to the others while this one runs `a`, and

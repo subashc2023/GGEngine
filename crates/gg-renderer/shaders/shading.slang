@@ -320,35 +320,38 @@ float filtered(uint map, float2 uv, float depth, float size) {
     return sum / 144.0;
 }
 
-// How much of the light casting `shadows` reaches `world`, 0 to 1; `normal` is before the normal
-// map. The nearest cascade holding the offset point and the filter's texels shadows it. Past them
-// all, or the shadows' reach, it's lit, and more and more so toward the reach.
-float shadowed(Shadows shadows, float3 world, float3 normal, float3 to_light) {
-    float depth = dot(shadows.view_depth.xyz, world) + shadows.view_depth.w;
-    if (depth >= shadows.reach) {
+// How much of the light casting the frame's shadows reaches `world`, 0 to 1; `normal` is before the
+// normal map. The nearest cascade holding the offset point and the filter's texels shadows it. Past
+// them all, or the shadows' reach, it's lit, and more and more so toward the reach. The shadows are
+// read through `frame`, each field where it's used, as `lit` says why: passed whole, their 176
+// bytes spilled from an M3's registers in the light loop.
+float shadowed(Frame* frame, float3 world, float3 normal, float3 to_light) {
+    float depth = dot(frame.shadows.view_depth.xyz, world) + frame.shadows.view_depth.w;
+    if (depth >= frame.shadows.reach) {
         return 1.0;
     }
-    float3 light = mul(shadows.light_from_world, float4(world, 1.0)).xyz;
-    float3 off = mul((float3x3)shadows.light_from_world, normal);
+    float3 light = mul(frame.shadows.light_from_world, float4(world, 1.0)).xyz;
+    float3 off = mul((float3x3)frame.shadows.light_from_world, normal);
     float n_dot_l = dot(normal, to_light);
     float sine = sqrt(saturate(1.0 - n_dot_l * n_dot_l));
-    float inside = 1.0 - 2.0 * MARGIN / shadows.map_size;
+    float inside = 1.0 - 2.0 * MARGIN / frame.shadows.map_size;
     // Unrolled, so the cascades index by constants: indexed in a loop, arrays in registers go to
     // memory, as an M3's model shaders spilled them.
     [ForceUnroll]
     for (uint i = 0; i < CASCADES; i++) {
-        float4 cascade = shadows.cascades[i];
+        float4 cascade = frame.shadows.cascades[i];
         float3 n = (light - cascade.xyz) * cascade.w;
         if (max(max(abs(n.x), abs(n.y)), abs(n.z)) >= inside) {
             continue;
         }
-        float texel = 2.0 / (cascade.w * shadows.map_size);
+        float texel = 2.0 / (cascade.w * frame.shadows.map_size);
         // The light's space's +Z is toward the light.
         float3 moved = off * (NORMAL_OFFSET * sine) + float3(0.0, 0.0, LIGHT_OFFSET);
         n = (light + moved * texel - cascade.xyz) * cascade.w;
-        float lit = filtered(shadows.maps[i], n.xy * float2(0.5, -0.5) + 0.5, n.z * 0.5 + 0.5,
-                             shadows.map_size);
-        float fade = saturate((depth - shadows.fade_from) / (shadows.reach - shadows.fade_from));
+        float lit = filtered(frame.shadows.maps[i], n.xy * float2(0.5, -0.5) + 0.5,
+                             n.z * 0.5 + 0.5, frame.shadows.map_size);
+        float fade_from = frame.shadows.fade_from;
+        float fade = saturate((depth - fade_from) / (frame.shadows.reach - fade_from));
         return lerp(lit, 1.0, fade);
     }
     return 1.0;
@@ -437,7 +440,7 @@ float3 reflected(Frame* frame, Light* lights, Surface surface, uint i, inout flo
         return float3(0.0);
     }
     if (i == frame.shadows.light) {
-        radiance *= shadowed(frame.shadows, surface.world, surface.surface_normal, to_light);
+        radiance *= shadowed(frame, surface.world, surface.surface_normal, to_light);
     }
     float3 received = radiance * n_dot_l;
     spread += received * missed(surface.lobe_fit, n_dot_l);
@@ -678,25 +681,26 @@ float4 reflection(Frame* frame, uint2 pixel, float roughness) {
 static const uint NO_CLUSTER = 0xFFFFFFFF;
 
 // The index of `world`'s cluster, as `Clusters` numbers them; `NO_CLUSTER` without clusters, or
-// where the view doesn't see it.
-uint cluster(Clusters clusters, float3 world) {
-    if (clusters.words == 0) {
+// where the view doesn't see it. Read through `frame`, as `shadowed` is.
+uint cluster(Frame* frame, float3 world) {
+    if (frame.clusters.words == 0) {
         return NO_CLUSTER;
     }
     float4 p = float4(world, 1.0);
-    float w = dot(clusters.w, p);
-    float2 tile = float2(dot(clusters.x, p), dot(clusters.y, p)) / w;
-    float depth = dot(clusters.depth, p);
-    float slice = (clusters.perspective != 0 ? log2(depth) : depth) * clusters.slice_scale
-        + clusters.slice_bias;
+    float w = dot(frame.clusters.w, p);
+    float2 tile = float2(dot(frame.clusters.x, p), dot(frame.clusters.y, p)) / w;
+    float depth = dot(frame.clusters.depth, p);
+    float slice = (frame.clusters.perspective != 0 ? log2(depth) : depth)
+        * frame.clusters.slice_scale + frame.clusters.slice_bias;
     // So that NaN, from a point behind a perspective's eye, is outside too.
-    bool inside = w > 0.0 && tile.x >= 0.0 && tile.y >= 0.0 && tile.x < float(clusters.across)
-        && tile.y < float(clusters.down) && slice >= 0.0;
+    bool inside = w > 0.0 && tile.x >= 0.0 && tile.y >= 0.0
+        && tile.x < float(frame.clusters.across) && tile.y < float(frame.clusters.down)
+        && slice >= 0.0;
     if (!inside) {
         return NO_CLUSTER;
     }
-    uint3 at = uint3(uint2(tile), min(uint(slice), clusters.slices - 1));
-    return (at.z * clusters.down + at.y) * clusters.across + at.x;
+    uint3 at = uint3(uint2(tile), min(uint(slice), frame.clusters.slices - 1));
+    return (at.z * frame.clusters.down + at.y) * frame.clusters.across + at.x;
 }
 
 // Which way a point of `material` faces, as `lit` shades it: its `interpolated` normal, flipped
@@ -857,29 +861,32 @@ float4 lit(Frame* frame, Light* lights, Material material, float3 world, float3 
     }
     float3 light_sum = float3(0.0);
     float3 spread = float3(0.0);
-    Clusters clusters = frame.clusters;
-    for (uint i = 0; i < clusters.everywhere; i++) {
+    // Found before the lights that light everywhere, so the clusters' planes end before the sun's
+    // shadows begin.
+    uint found = cluster(frame, world);
+    uint everywhere = frame.clusters.everywhere;
+    for (uint i = 0; i < everywhere; i++) {
         light_sum += reflected(frame, lights, lit, i, spread);
     }
-    uint found = cluster(clusters, world);
     if (found == NO_CLUSTER) {
-        for (uint i = clusters.everywhere; i < frame.light_count; i++) {
+        for (uint i = everywhere; i < frame.light_count; i++) {
             light_sum += reflected(frame, lights, lit, i, spread);
         }
     } else {
         // Through the lights' address, which the bits follow (`Clusters` says why), by a pointer
         // made once: AMD's driver drops the address of an index past them made in the loop. A
         // change here needs AMD's ISA checked again, under both slangc releases the build may use.
-        uint* at = (uint*)lights + clusters.bits;
+        uint* at = (uint*)lights + frame.clusters.bits;
         uint first = at[2 * found];
         uint end = at[2 * found + 1];
-        uint words = 2 * clusters.across * clusters.down * clusters.slices + found * clusters.words;
+        uint words = 2 * frame.clusters.across * frame.clusters.down * frame.clusters.slices
+            + found * frame.clusters.words;
         for (uint word = first; word < end; word++) {
             uint bits = at[words + word];
             while (bits != 0) {
                 uint bit = firstbitlow(bits);
                 bits &= bits - 1;
-                light_sum += reflected(frame, lights, lit, clusters.everywhere + word * 32 + bit,
+                light_sum += reflected(frame, lights, lit, everywhere + word * 32 + bit,
                                        spread);
             }
         }

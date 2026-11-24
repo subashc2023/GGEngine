@@ -34,6 +34,8 @@ xcrun xctrace export --input target/run.trace \
 - The `graphics-compiler-spill-events` table gives each encoder's register spills, in bytes a
   thread.
 - An M3 slows by a fifth over a long run: compare builds by turns, over the same frames.
+- Time frames after the scene has loaded. Bistro's image sky arrives about 120 frames in, and
+  with it ambient occlusion and the sky's light: 7 ms more at 3024×1890.
 
 ## Capturing a frame with RenderDoc
 

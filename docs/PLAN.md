@@ -277,6 +277,6 @@ Defects are in [DEFECTS.md](DEFECTS.md).
   Recommendation: 16.7 ms at the 95th percentile, 60 frames a second, which the 11 ms that doesn't
   follow the view's size has room to give. Decide before Phase 10 closes.
 - What render scale a run starts at on a high-density screen. Every run starts at 1, so a full
-  Retina screen renders 3024×1890 pixels: Bistro's frame takes 39 ms on an M3 Pro, and 18 at 0.5.
+  Retina screen renders 3024×1890 pixels: Bistro's frame takes 37 ms on an M3 Pro, and 18 at 0.5.
   Recommendation: keep 1, as games' settings menus set it for their players, who pick sharpness or
   speed. Decide before a 3D game ships on Macs.

@@ -735,7 +735,7 @@ A render scale below 1 ([`Context::set_render_scale`](crates/gg-engine/src/layer
 `--render-scale`) renders everything before the canvas at that share of the view's pixels each way.
 A pass then upscales the colors to the view's size, by a Catmull-Rom filter clamped to the nearest
 texels, and its IDs by the nearest. The canvas, tonemap, outline, picks and captures keep the
-view's own pixels. Retina screens make it worth having: an M3 Pro renders Bistro full screen in 39
+view's own pixels. Retina screens make it worth having: an M3 Pro renders Bistro full screen in 37
 ms, and in 18 at 0.5. Antialiasing resolves at the scaled size; TAA that resolves into the view's
 size, as FSR 2 does, would keep more detail.
 
