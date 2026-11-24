@@ -46,15 +46,10 @@ Phase 21 closes once two people on other networks, one on a phone's hotspot, pla
 game's shipped builds through the rented relay, its numbers read from both ends' logs and the
 relay's, and what they call for fixed. Which game is an open question.
 
-Phase 10 closes once the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is
-opened from Finder on an Apple Silicon Mac: downloaded, so quarantined, and signed ad hoc, which
-Gatekeeper refuses until the user allows it. A bundle `gg ship` builds on the Mac passes the rest:
-it loads its own KosmicKrisp alone, replays its live recording without writing into the bundle, and
-links nothing else of the Vulkan SDK. With it, by hand:
-
-- the sandbox on Linux: gamepads, `Context::pick_file`'s dialogs, the drawn title bars, a torn-off
-  window moved by its tab bar (X11 moves windows asynchronously), swapchains rebuilt as windows
-  resize, and on Wayland whether the frame in flight after a maximize presents at its old size.
+Phase 10 closes once the sandbox is checked by hand on Linux: gamepads, `Context::pick_file`'s
+dialogs, the drawn title bars, a torn-off window moved by its tab bar (X11 moves windows
+asynchronously), swapchains rebuilt as windows resize, and on Wayland whether the frame in flight
+after a maximize presents at its old size.
 
 What grows and what is frozen meanwhile is in [ARCHITECTURE.md's Goals](../ARCHITECTURE.md#goals).
 
