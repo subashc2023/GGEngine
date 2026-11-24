@@ -200,8 +200,9 @@ void offsets_main(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID) {
     uint start = 0;
     uint draws = 0;
     uint instances = 0;
-    // `meshlets_main` counts the triangles of runs drawn by meshlets.
-    bool by_meshlets = run.meshlets != NO_MESHLETS;
+    // `meshlets_main` counts the triangles of runs drawn by meshlets. A view culling no meshlets
+    // draws every run by indices.
+    bool by_meshlets = run.meshlets != NO_MESHLETS && view.meshlets != NO_MESHLETS;
     for (uint l = 0; l < run.level_count; l++) {
         starts[l] = start;
         start += totals[l];

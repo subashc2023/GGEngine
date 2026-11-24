@@ -152,7 +152,8 @@ impl MeshPass {
                 continue;
             }
             // A run culled by meshlets draws by its shader's meshlet geometry.
-            let by_meshlets = culled_run.is_some_and(|run| self.by_meshlets(run, way));
+            let by_meshlets = (culled.zip(culled_run))
+                .is_some_and(|(culled, run)| self.by_meshlets(culled, run, way));
             let (geometry, depth_only) = match &shader.meshlets {
                 Some((geometry, depth_only)) if by_meshlets => (geometry, depth_only),
                 _ => (&shader.pipeline, &shader.depth_only),
@@ -261,10 +262,16 @@ impl MeshPass {
         Ok(drawn)
     }
 
-    /// Whether culled run `run` draws by its kept meshlets as `way` draws: if the culling kept
-    /// them, but its far sides by its levels' indices, as the culling drops meshlets facing away.
-    pub(super) fn by_meshlets(&self, run: usize, way: Way) -> bool {
-        way != Way::BackFaces && self.culling.by_meshlets(run)
+    /// Whether culled run `run` draws by its kept meshlets as `way` draws into `culled`'s view
+    /// (its plan and slot): if the view has meshlet room and the culling kept them, but its far
+    /// sides by its levels' indices, as the culling drops meshlets facing away.
+    pub(super) fn by_meshlets(
+        &self,
+        (plan, slot): (&CullPlan, usize),
+        run: usize,
+        way: Way,
+    ) -> bool {
+        way != Way::BackFaces && plan.draws_meshlets(slot, &self.culling, run)
     }
 }
 

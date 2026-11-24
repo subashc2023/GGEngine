@@ -14,7 +14,8 @@ static const uint MAX_LEVELS = 8;
 static const uint PLANES = 12;
 // An instance a view doesn't draw.
 static const uint CULLED = 0xFFFFFFFF;
-// `Run::meshlets` without meshlets: `NO_MESHLETS` in src/mesh/cull.rs.
+// `Run::meshlets` without meshlets, and `View::meshlets` of a view culling none: `NO_MESHLETS` in
+// src/mesh/cull.rs.
 static const uint NO_MESHLETS = 0xFFFFFFFF;
 // The pixels a level's error may span on screen: `LOD_ERROR_PIXELS` in src/mesh/draw.rs.
 static const float LOD_ERROR_PIXELS = 1.0;
@@ -69,7 +70,8 @@ struct View {
     uint width;
     uint height;
     uint pyramid_levels;
-    // Its meshlets' draws among the culling's commands, in words.
+    // Its meshlets' draws among the culling's commands, in words. `NO_MESHLETS` for a cascade
+    // drawn by indices alone, which culls no meshlets.
     uint meshlets;
     // Where it sees from, and 1, under perspective; or the way it looks, and 0, without.
     float4 eye;

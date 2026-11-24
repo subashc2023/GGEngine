@@ -272,11 +272,11 @@ Defects are in [DEFECTS.md](DEFECTS.md).
   deleted: Shards by its flags (`--relay`, the host printing its code), or Shards given a Host and
   Join menu. Recommendation: Shards by flags, as the match measures the network, which a menu
   doesn't change, and `Context::host` and `join` have tests of their own. Decide before the match.
-- What frame time the 16 Bistros are held to on a Mac. On an M3 Pro they take 12 ms at 1280×720,
-  13.9 at the 95th percentile, as [DEFECTS.md](DEFECTS.md)'s Performance says.
+- What frame time the 16 Bistros are held to on a Mac. On an M3 Pro they take 9.8 ms at 1280×720,
+  10.3 at the 95th percentile, as [DEFECTS.md](DEFECTS.md)'s Performance says.
   Recommendation: 16.7 ms at the 95th percentile, 60 frames a second, which they meet. Decide
   before Phase 10 closes.
 - What render scale a run starts at on a high-density screen. Every run starts at 1, so a full
-  Retina screen renders 3024×1890 pixels: Bistro's frame takes 27 ms on an M3 Pro, and 14 at 0.5.
+  Retina screen renders 3024×1890 pixels: Bistro's frame takes 26 ms on an M3 Pro, and 12 at 0.5.
   Recommendation: keep 1, as games' settings menus set it for their players, who pick sharpness or
   speed. Decide before a 3D game ships on Macs.

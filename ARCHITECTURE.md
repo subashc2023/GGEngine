@@ -852,7 +852,9 @@ that are images. Paths are under `crates/gg-renderer/src/`.
   rest for the second. What comes into view draws in the frame it does.
 - **Meshlets.** Cooked opaque and masked meshes that aren't skinned draw by meshlets: through mesh
   shaders where the device has them, else as instances of a 124-triangle vertex draw, as on AMD's
-  iGPU. A view's room for meshlets is capped, so runs of many instances, as of foliage, can't ask
+  iGPU. The shadow cascades cull and draw by meshlets only through mesh shaders. Through vertex
+  shaders, they draw by their levels' indices, which reuse shaded vertices: depth alone needs no
+  meshlet IDs. A view's room for meshlets is capped, so runs of many instances, as of foliage, can't ask
   more memory than the GPU gives and end the renderer; a run without room draws by its indices
   that frame. What blends keeps its triangles' order, so it draws by indices too.
 - **Visibility buffer.** The model shaders' meshlet draws write only which run, meshlet and

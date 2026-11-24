@@ -58,12 +58,12 @@ fn meshlet_words(placed: &PlacedMeshlets, count: u64) -> u64 {
 
 /// The most meshlet words a frame plans per view; runs past it draw by their levels' indices,
 /// without meshlet culling or a visibility buffer. It fits one run's largest draw: 32 MiB a view,
-/// 192 MiB for the six views of a frame with shadows.
+/// 64 MiB for the game's view's two passes, 192 MiB with cascades drawn through mesh shaders.
 ///
 /// Room is planned per meshlet of every instance, so without a ceiling a few runs of many instances
 /// (foliage) outgrow GPU memory, and a frame that can't make its buffers ends the renderer. Room
 /// for a second such run would cost 8 bytes per meshlet per view, and the graph's power-of-two
-/// rounding takes the six views from 256 MiB to 512 MiB.
+/// rounding takes six views from 256 MiB to 512 MiB.
 const MOST_MESHLET_WORDS: u64 = MESHLET_DRAW + 2 * MOST_MESHLETS;
 
 /// `source_params` of a copy from the scene: `SCENE` in `shaders/gather.slang`.
@@ -216,6 +216,11 @@ pub(crate) struct Bounds {
     meshlet_words: u64,
     /// Runs drawn by indices: those without meshlets or past [`MOST_MESHLET_WORDS`].
     by_indices: u64,
+    /// Whether the cascades cull and draw by meshlets too, as they do through mesh shaders. Through
+    /// vertex shaders, they draw by their levels' indices: a meshlet drawn so shades three corners
+    /// for each of [`MAX_MESHLET_TRIANGLES`](crate::packed::MAX_MESHLET_TRIANGLES), its own or
+    /// not, where an indexed draw reuses shaded vertices. Depth alone needs no meshlet IDs.
+    cascade_meshlets: bool,
 }
 
 impl Bounds {
@@ -246,10 +251,10 @@ impl Bounds {
         self.runs * MAX_LEVELS as u64 * COMMAND
     }
 
-    /// Where view `slot`'s meshlets start, in words: after all `views` views' commands, view after
-    /// view.
-    fn meshlets_at(&self, views: u64, slot: u64) -> u64 {
-        views * self.commands_bytes() / 4 + slot * self.meshlet_words
+    /// Where the `index`th view with meshlet room has its meshlets, in words: after all `views`
+    /// views' commands, view after view.
+    fn meshlets_at(&self, views: u64, index: u64) -> u64 {
+        views * self.commands_bytes() / 4 + index * self.meshlet_words
     }
 
     /// Per view: instances' places, then blocks' counts per level.
@@ -278,12 +283,15 @@ fn pyramid(size: [u32; 2]) -> (usize, u64) {
 /// pass follow the view's first pass, before its second.
 pub(crate) struct CullPlan {
     views: usize,
+    /// Views with meshlet room: all, or the game's view's two passes if the cascades draw by
+    /// indices ([`Bounds::cascade_meshlets`]).
+    meshlet_views: usize,
     bounds: Bounds,
     /// Culled instances, gathered as one view's are kept.
     gathered: BufferId,
     /// Each view's kept instances, laid out by [`Culling::kept`].
     instances: BufferId,
-    /// Each view's commands, then its meshlets: each run's draw and those kept.
+    /// Each view's commands, then each meshlet view's meshlets: each run's draw and those kept.
     commands: BufferId,
     /// Whether each instance was unhidden, kept across frames; then each view's places and block
     /// counts.
@@ -321,14 +329,18 @@ impl CullPlan {
     /// graphics queue, as it samples depth.
     pub(crate) fn new(graph: &mut Graph, bounds: Bounds, cascades: bool) -> Self {
         let views = if cascades { MAX_VIEWS } else { 2 };
+        let meshlet_views = if bounds.cascade_meshlets { views } else { 2 };
         let count = views as u64;
         // Last frame's transforms, of the gathered instances and the view's passes' kept ones.
         let previous = bounds.instances * TRANSFORM;
         let gathered = graph.buffer("gathered instances", bounds.kept_bytes() + previous);
         let kept = count * bounds.kept_bytes() + PREVIOUS * previous;
         let instances = graph.buffer("culled instances", kept);
-        let commands_bytes = bounds.commands_bytes() + bounds.meshlet_words * 4;
-        let commands = graph.buffer("culled draws", count * commands_bytes);
+        let meshlet_bytes = meshlet_views as u64 * bounds.meshlet_words * 4;
+        let commands = graph.buffer(
+            "culled draws",
+            count * bounds.commands_bytes() + meshlet_bytes,
+        );
         let scratch = graph.buffer(
             "culling",
             bounds.instances * 4 + count * bounds.scratch_bytes(),
@@ -360,6 +372,7 @@ impl CullPlan {
             .add();
         Self {
             views,
+            meshlet_views,
             bounds,
             gathered,
             instances,
@@ -439,9 +452,25 @@ impl CullPlan {
         pass.read_buffer(self.instances).indirect(self.commands)
     }
 
-    /// Where view `slot`'s meshlets start among the commands, in words.
-    fn meshlets_at(&self, slot: usize) -> u64 {
-        self.bounds.meshlets_at(self.views as u64, slot as u64)
+    /// Where view `slot`'s meshlets start among the commands, in words. `None` for a cascade
+    /// without meshlet room, which draws by indices alone.
+    fn meshlets_at(&self, slot: usize) -> Option<u64> {
+        let index = if self.meshlet_views == self.views {
+            slot
+        } else if slot == FIRST {
+            0
+        } else if slot == self.second() {
+            1
+        } else {
+            return None;
+        };
+        Some(self.bounds.meshlets_at(self.views as u64, index as u64))
+    }
+
+    /// Whether view `slot` draws culled run `run` of `culling` by its kept meshlets: if it has
+    /// meshlet room and the culling kept the run's meshlets.
+    pub(super) fn draws_meshlets(&self, slot: usize, culling: &Culling, run: usize) -> bool {
+        self.meshlets_at(slot).is_some() && culling.by_meshlets(run)
     }
 
     /// Whether it culls runs by their meshlets, into a visibility buffer.
@@ -494,7 +523,10 @@ impl MeshPass {
             instances: culling.instances,
             params_words: culling.params_words,
             slots: slots.map(|slot| slot as u32),
-            meshlets: slots.map(|slot| plan.meshlets_at(slot) as u32),
+            meshlets: slots.map(|slot| {
+                let at = plan.meshlets_at(slot);
+                at.expect("the game's view's passes have meshlet room") as u32
+            }),
             previous: slots.map(|slot| previous_of(slot, plan.views)),
         }
     }
@@ -653,7 +685,7 @@ impl GpuView {
             width,
             height,
             pyramid_levels: pyramid(view.size).0 as u32,
-            meshlets: plan.meshlets_at(slot) as u32,
+            meshlets: plan.meshlets_at(slot).map_or(NO_MESHLETS, |at| at as u32),
             eye: eye(clip),
             previous: match keep {
                 Keep::All => NO_PREVIOUS,
@@ -758,7 +790,10 @@ impl MeshPass {
     /// shaders, and the meshlets of those drawn by them, of meshes drawable now. `None` if no
     /// shader is opaque.
     pub(crate) fn cull_bounds(&self, draws: &Draws) -> Option<Bounds> {
-        let mut bounds = Bounds::default();
+        let mut bounds = Bounds {
+            cascade_meshlets: self.device.mesh_shaders(),
+            ..Bounds::default()
+        };
         let frame = (draws.runs.iter()).map(|run| (run.mesh, run.shader, run.instances.len()));
         let scene = self.scene.runs().iter();
         let scene = scene.map(|run| (run.mesh, run.shader, run.count as usize));
@@ -930,6 +965,8 @@ impl MeshPass {
         );
         culling.pushed = Some(push);
         let mut pass = frame.compute(plan.meshlets);
+        // The view's first pass, then the cascades with meshlet room.
+        let meshlet_views = plan.meshlet_views - 1;
         if meshlet_words > 0 {
             let meshlets = MeshletPush {
                 runs: push.runs,
@@ -947,7 +984,7 @@ impl MeshPass {
                 instances,
                 unused: 0,
             };
-            culling.meshlets_dispatch(&mut pass, &meshlets, plan.views - 1);
+            culling.meshlets_dispatch(&mut pass, &meshlets, meshlet_views);
             culling.meshlets_pushed = Some(meshlets);
         }
         Ok(true)
@@ -1043,7 +1080,7 @@ impl MeshPass {
         way: Way,
     ) {
         let culling = &self.culling;
-        let (index, by_meshlets) = (run as u32, self.by_meshlets(run, way));
+        let (index, by_meshlets) = (run as u32, self.by_meshlets((plan, slot), run, way));
         let run = &culling.runs[run];
         let [transforms, ids, params] =
             culling.kept(pass.address(plan.instances), plan.views as u64, PREVIOUS);
@@ -1070,7 +1107,10 @@ impl MeshPass {
         };
         if by_meshlets {
             // Its draw's eight words, then the meshlets it keeps, which the shader reads.
-            let draw = (plan.meshlets_at(slot as usize) + u64::from(run.meshlet_draw)) * 4;
+            let at = plan
+                .meshlets_at(slot as usize)
+                .expect("a view drawing meshlets has room");
+            let draw = (at + u64::from(run.meshlet_draw)) * 4;
             // Which run, and which of the game's view's passes, as `Push::draw` says.
             let second = slot as usize == plan.second();
             let push = Push {
