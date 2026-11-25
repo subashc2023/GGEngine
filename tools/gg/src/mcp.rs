@@ -195,8 +195,10 @@ const TOOLS: &[Tool] = &[
         description: "The game's ticks, pause and stop state, frames, entities, view size and open \
                       scene's file (`scene`); `unsaved`, whether the scene differs from its file, \
                       as a playing game's ticks make it; `edited`, whether authors edited it since \
-                      it was saved or opened, which ticks don't; and in a world of cells, `cells`: \
-                      how many are in, and how many out keep what they held.",
+                      it was saved or opened, which ticks don't; in a world of cells, `cells`: how \
+                      many are in, and how many out keep what they held; and `cursor_grabbed`, \
+                      whether the game wants the cursor grabbed, so it looks about by `motion` \
+                      events, not `cursor` moves.",
         properties: || json!({}),
         required: &[],
     },
@@ -498,8 +500,21 @@ const TOOLS: &[Tool] = &[
         name: "input",
         description: "Hands the game's layers input events, in order, as its window would, as a \
                       frame starts. Release each key and button you press: the game holds it down \
-                      until then.",
-        properties: || json!({"events": input()}),
+                      until then, or give `hold`.",
+        properties: || {
+            json!({
+                "events": input(),
+                "hold": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "Ticks (64 a second) to hold the keys and buttons the events \
+                                    press and leave down. They're released after exactly that \
+                                    many, and the answer is the status then, as `step`'s. Paused, \
+                                    the hold steps its ticks; refused while stopped.",
+                },
+            })
+        },
         required: &["events"],
     },
     Tool {
@@ -1410,6 +1425,7 @@ mod tests {
         assert_eq!(schema("cells"), nothing);
         let input = schema("input");
         assert_eq!(input["required"], json!(["events"]));
+        assert_eq!(input["properties"]["hold"]["minimum"], 1);
         let events = &input["properties"]["events"];
         assert_eq!(events["type"], "array");
         // A choice's kind: an object's one key, or a string's values.

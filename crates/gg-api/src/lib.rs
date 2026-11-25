@@ -560,8 +560,8 @@ pub struct Pulse {
     pub waiting: Option<String>,
 }
 
-/// What `status`, `pause`, `resume`, `play`, `stop` and `step` answer: the game as the answering
-/// frame starts.
+/// What `status`, `pause`, `resume`, `play`, `stop`, `step` and a held `input` answer: the game as
+/// the answering frame starts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// The ticks run, which number the next. After a `stop` that brings back the world as edited,
@@ -602,6 +602,11 @@ pub struct Status {
     /// cells never came in, and from an engine older than cells.
     #[serde(default)]
     pub cells: Option<CellCounts>,
+    /// Whether the game's layers want the cursor grabbed, as for looking about with the mouse.
+    /// A grabbed cursor sends raw `motion`, not `cursor` moves. Headless runs, which have no
+    /// cursor, report what layers want. False from an engine older than it.
+    #[serde(default)]
+    pub cursor_grabbed: bool,
 }
 
 /// How many of a world's cells are in, and how many out keep what they held.
@@ -815,11 +820,20 @@ pub struct View {
     pub memory: Option<String>,
 }
 
-/// What `input` takes: the events to hand the game's layers, in order.
+/// What `input` takes: the events to hand the game's layers, in order, and how long to hold what
+/// they press.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
     pub events: Vec<InputEvent>,
+    /// The ticks to hold the keys and buttons the events press and leave down, 1 to 10,000.
+    ///
+    /// The engine releases them as the frame after the last of those ticks starts, then answers
+    /// with the [`Status`], as `step` does; until then, frames run no tick past it. Paused, the
+    /// hold steps its ticks. Without it, `input` answers `{}` at once and keys stay down until an
+    /// event releases them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<u64>,
 }
 
 /// An event `input` hands the game's layers, as its window would: `{"key":{"key":"KeyW",

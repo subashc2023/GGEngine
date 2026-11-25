@@ -239,6 +239,7 @@ package in the engine's lock, as `--package NAME` would name both.
 - `unsaved`: whether the scene differs from its file, as a playing game's ticks make it.
 - `edited`: whether authors edited it since it was saved or opened.
 - `cells`: in a world of cells, how many are in, and how many out keep what they held.
+- `cursor_grabbed`: whether the game wants the cursor grabbed, so it looks about by `motion`.
 ",
             },
             Help {
@@ -409,7 +410,7 @@ Every value is `null` for a pixel outside the view. On an unlit material, each p
             },
             Help {
                 name: "input",
-                usage: "input <EVENTS>",
+                usage: "input [--hold <TICKS>] <EVENTS>",
                 summary: "Hand its layers input events, as its window would",
                 details: "\
 EVENTS is a JSON array of the API's input events, handed over in order as a frame starts:
@@ -422,8 +423,10 @@ EVENTS is a JSON array of the API's input events, handed over in order as a fram
 - a scroll: {\"scroll\":{\"lines\":[0,1]}};
 - the keys' focus: {\"focused\":true}.
 
-A key or button stays down until an event releases it. To hold one for an exact number of ticks:
-`pause`, `input` to press, `step N`, `input` to release, then `resume`.
+A key or button stays down until an event releases it. `--hold N` releases those the events press
+and leave down after exactly N ticks (64 a second), then prints the status, as `step` does. Frames
+run no tick past the release meanwhile. Paused, it steps the N ticks. Past 30 s (1,920 ticks), give
+`--timeout`. Refused while the game is stopped.
 ",
             },
             Help {
@@ -797,7 +800,7 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 21] = [
+const VALUED: [&str; 22] = [
     "--engine",
     "--viewpoints",
     "--rect",
@@ -819,6 +822,7 @@ const VALUED: [&str; 21] = [
     "--wait",
     "--show",
     "--within",
+    "--hold",
 ];
 
 /// The arguments after a command's name; what follows `--` is for the game.
@@ -1217,13 +1221,20 @@ fn control_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
 fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     let command = match name {
         "input" => {
-            let given = parsed.positional(1, 1, "input <EVENTS>")?;
+            let given = parsed.positional(1, 1, "input [--hold <TICKS>] <EVENTS>")?;
             let events: Value = serde_json::from_str(&given[0])
                 .map_err(|error| bad(format!("EVENTS isn't JSON: {error}")))?;
             if !events.is_array() {
                 return Err(bad("EVENTS is a JSON array of input events".to_owned()));
             }
-            call(parsed, "input", json!({"events": events}))?
+            let mut params = json!({"events": events});
+            if let Some(hold) = parsed.value("--hold") {
+                let ticks = hold
+                    .parse::<u64>()
+                    .map_err(|_| bad(format!("`--hold` takes a number of ticks, not `{hold}`")))?;
+                params["hold"] = json!(ticks);
+            }
+            call(parsed, "input", params)?
         }
         "capture" => {
             let usage = "capture [--own] [--show <NAME>[,<NAME>...]]... [PATH]";
@@ -1641,6 +1652,12 @@ mod tests {
             (Some(7), Some("Sandbox"), Duration::from_secs(5))
         );
         assert_eq!((method.as_str(), params), ("step", json!({"ticks": 2})));
+        let w = r#"[{"key":{"key":"KeyW","pressed":true}}]"#;
+        let Ok(Command::Call { params, .. }) = parsed(&["input", "--hold", "64", w]) else {
+            panic!("a call");
+        };
+        let events = json!([{"key": {"key": "KeyW", "pressed": true}}]);
+        assert_eq!(params, json!({"events": events, "hold": 64}));
         let Ok(Command::Run(run)) = parsed(&["--no-patch", "run", "sandbox", "--", "--vsync"])
         else {
             panic!("a run");
@@ -2030,6 +2047,7 @@ mod tests {
             &["input", "{not json"],
             &["input", r#"{"key":{"key":"KeyW","pressed":true}}"#],
             &["input", "[]", "[]"],
+            &["input", "--hold", "long", "[]"],
             &["status", "--frames", "2"],
             &["status", "extra"],
             &["step", "many"],

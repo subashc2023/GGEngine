@@ -670,6 +670,9 @@ pub(crate) struct Stepper {
     stopped: bool,
     /// The ticks still to run while paused, at most [`MOST_TICKS`] a frame.
     steps: u64,
+    /// The tick no frame runs, so the tool API lets go of a held `input` exactly as the tick
+    /// before it ends. Ticks it holds back stay owed.
+    barrier: Option<u64>,
 }
 
 impl Stepper {
@@ -719,6 +722,8 @@ impl Stepper {
     /// - If `tick` returns `false` (waiting for a lockstep peer's inputs), the frame's ticks stop
     ///   and those owed stay owed, up to [`MOST_TICKS`].
     /// - Stopped, none, owing and dropping none.
+    /// - None numbered from the barrier [`stop_before`](Self::stop_before) sets on; those it holds
+    ///   back stay owed.
     pub(crate) fn step(
         &mut self,
         dt: Duration,
@@ -739,9 +744,10 @@ impl Stepper {
             self.owed = Duration::from_nanos((owed % step) as u64);
             (owed / step) as u64
         };
+        let room = (self.barrier).map_or(u64::MAX, |until| until.saturating_sub(self.ticks));
         let mut ran = 0;
         let mut waiting = false;
-        while ran < due.min(MOST_TICKS) {
+        while ran < due.min(MOST_TICKS).min(room) {
             if !tick(Tick { number: self.ticks }) {
                 waiting = true;
                 break;
@@ -754,12 +760,13 @@ impl Stepper {
                 break;
             }
         }
+        let held = ran == room && ran < due;
         if self.paused {
             self.steps -= ran;
-        } else if waiting && !self.lockstep {
+        } else if (waiting || held) && !self.lockstep {
             let owed = self.owed + Tick::DT * (due - ran) as u32;
             self.owed = owed.min(Tick::DT * MOST_TICKS as u32);
-        } else if !waiting {
+        } else if !waiting && !held {
             self.dropped += due - ran;
         }
         ran
@@ -816,6 +823,12 @@ impl Stepper {
     #[cfg(feature = "dev")]
     pub(crate) fn steps(&self) -> u64 {
         self.steps
+    }
+
+    /// Has frames run no tick numbered `until` or later, until it's changed; `None` lifts it.
+    #[cfg(feature = "dev")]
+    pub(crate) fn stop_before(&mut self, until: Option<u64>) {
+        self.barrier = until;
     }
 
     /// Stops the simulation (the tool API's `stop`): frames run no ticks, whatever their time, and
@@ -1274,6 +1287,28 @@ pub(crate) mod tests {
         let mut tick = |tick: Tick| tick.number < until;
         assert_eq!(stepper.step(Duration::ZERO, &mut tick, fast), MOST_TICKS);
         assert_eq!((stepper.ticks, stepper.dropped), (2 + MOST_TICKS, 0));
+    }
+
+    /// A barrier, as a held `input` sets, stops a frame's ticks before it; those held back stay
+    /// owed, none dropped, and run once it lifts.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn ticks_held_back_by_a_barrier_stay_owed() {
+        let mut stepper = Stepper::default();
+        let fast = || Duration::ZERO;
+        stepper.stop_before(Some(2));
+        assert_eq!(stepper.step(Tick::DT * 5, |_| true, fast), 2);
+        assert_eq!(stepper.step(Tick::DT, |_| true, fast), 0);
+        assert_eq!((stepper.ticks, stepper.dropped), (2, 0));
+        stepper.stop_before(None);
+        assert_eq!(stepper.step(Duration::ZERO, |_| true, fast), 4);
+        // Paused, steps wait for the barrier too.
+        stepper.step_by(3);
+        stepper.stop_before(Some(7));
+        assert_eq!(stepper.step(Duration::ZERO, |_| true, fast), 1);
+        stepper.stop_before(None);
+        assert_eq!(stepper.step(Duration::ZERO, |_| true, fast), 2);
+        assert_eq!((stepper.ticks, stepper.dropped), (9, 0));
     }
 
     /// A frame draws the world at the simulation's time: part way through the latest tick, 0

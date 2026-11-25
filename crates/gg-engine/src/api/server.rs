@@ -41,8 +41,8 @@ use std::time::{Duration, Instant};
 
 use gg_api::view::{Pacer, Writer};
 use gg_api::{
-    Authored, By, CellCounts, Failure, Hash, History, Looked, Scene, SceneAction, Session, Status,
-    Welcome,
+    Authored, By, CellCounts, Failure, Hash, History, InputEvent, Looked, Scene, SceneAction,
+    Session, Status, Welcome,
 };
 use gg_core::log::Events;
 use gg_core::{Error, Result};
@@ -62,9 +62,26 @@ use crate::{Context, patch};
 use connection::{Reply, accept};
 use edits::{Offer, answer_done, assets_named, operations, save_prefab, words};
 use files::{Taken, Writing, write_pngs, write_snapshots};
-use parse::{Call, bad_params};
+use parse::{Call, Hold, bad_params};
 use view::{Capturing, Filming, Picking, input_event};
 use world::{Listing, assets, entity, field, list};
+
+/// A held `input` waiting for the simulation to reach `until`, its last tick's number plus one,
+/// to hand its `releases`, then answer.
+struct Holding {
+    until: u64,
+    releases: Vec<InputEvent>,
+    reply: Reply,
+}
+
+/// Hands `events` to the layers, as their window would.
+fn hand(cx: &mut Context, stack: &mut Stack, events: &[InputEvent]) {
+    let origin = cx.view().map_or([0, 0], |view| view.origin);
+    for given in events {
+        let event = input_event(given, origin);
+        let _ = stack.event(cx, &event.expect("checked as it was read"));
+    }
+}
 
 /// The most of the clients' picks a frame asks: half what a frame reads back, leaving the game's
 /// layers the rest.
@@ -88,6 +105,9 @@ pub(crate) struct Api {
     shared: Arc<Shared>,
     /// `step`s waiting for the simulation to have run their ticks.
     steps: Vec<(Reply, u64)>,
+    /// Held `input`s waiting to let go as the simulation reaches their ticks; frames run no tick
+    /// past the soonest.
+    holds: Vec<Holding>,
     /// `assets` waiting for the asset root's watcher thread to have looked since each came.
     listing: Vec<Listing>,
     /// `capture`s waiting for a frame handed off of their kind, bare or not, in order of arrival.
@@ -271,6 +291,7 @@ impl Api {
             held: None,
             shared,
             steps: Vec::new(),
+            holds: Vec::new(),
             listing: Vec::new(),
             asked: Vec::new(),
             riding: Vec::new(),
@@ -400,8 +421,8 @@ impl Api {
     }
 
     /// Like [`serve`](Self::serve), between frames while a minimized window pauses them, counting
-    /// no frame. `capture`, `frames`, `pick`, `images` and `step` need frames and fail with
-    /// `api.paused`.
+    /// no frame. `capture`, `frames`, `pick`, `images`, `step` and a held `input` need frames and
+    /// fail with `api.paused`.
     pub(crate) fn serve_paused(
         &mut self,
         cx: &mut Context,
@@ -436,6 +457,16 @@ impl Api {
             .steps
             .extract_if(.., |&mut (_, until)| until <= stepper.ticks);
         for (reply, _) in ran.collect::<Vec<_>>() {
+            reply.result(&self.status(cx, stepper));
+        }
+        let held = self
+            .holds
+            .extract_if(.., |holding| holding.until <= stepper.ticks);
+        for Holding {
+            releases, reply, ..
+        } in held.collect::<Vec<_>>()
+        {
+            hand(cx, stack, &releases);
             reply.result(&self.status(cx, stepper));
         }
         let answered = cx.assets_answered();
@@ -479,6 +510,7 @@ impl Api {
                     reply.send(Err(Failure::new("api.quitting", message)));
                 }
                 Call::Step(_)
+                | Call::Input(_, Some(_))
                 | Call::Capture { .. }
                 | Call::Frames { .. }
                 | Call::Pick(..)
@@ -486,8 +518,8 @@ impl Api {
                     if paused =>
                 {
                     let message = "frames have paused while the window is minimized, and steps, \
-                                   captures, picks and images run in frames; restore the window \
-                                   first";
+                                   holds, captures, picks and images run in frames; restore the \
+                                   window first";
                     reply.send(Err(Failure::new("api.paused", message)));
                 }
                 Call::Status
@@ -497,11 +529,12 @@ impl Api {
                 | Call::Stop
                 | Call::Scene(_)
                 | Call::Step(_)
+                | Call::Input(_, Some(_))
                 | Call::Quit => quit = self.answer_control(cx, stack, stepper, call, reply),
                 Call::Capture { .. }
                 | Call::Frames { .. }
                 | Call::View(_)
-                | Call::Input(_)
+                | Call::Input(_, None)
                 | Call::Look(_)
                 | Call::Pick(..)
                 | Call::Images => self.answer_view(cx, stack, call, &client, names, reply),
@@ -520,6 +553,7 @@ impl Api {
                 }
             }
         }
+        stepper.stop_before(self.holds.iter().map(|holding| holding.until).min());
         quit
     }
 
@@ -534,7 +568,7 @@ impl Api {
     ) -> bool {
         let mut quit = false;
         match call {
-            Call::Step(_) if stepper.stopped() => {
+            Call::Step(_) | Call::Input(_, Some(_)) if stepper.stopped() => {
                 let message = "the game is stopped, and runs no ticks until `play`";
                 reply.send(Err(Failure::new("api.stopped", message)));
             }
@@ -578,6 +612,18 @@ impl Api {
                 stepper.step_by(ticks);
                 let until = stepper.ticks + stepper.steps();
                 self.steps.push((reply, until));
+            }
+            Call::Input(events, Some(Hold { ticks, releases })) => {
+                hand(cx, stack, &events);
+                if stepper.paused() {
+                    stepper.step_by(ticks);
+                }
+                let until = stepper.ticks + ticks;
+                self.holds.push(Holding {
+                    until,
+                    releases,
+                    reply,
+                });
             }
             Call::Quit => {
                 reply.send(Ok("{}".to_owned()));
@@ -671,12 +717,8 @@ impl Api {
                     reply.send(Err(Failure::new("api.view", message)));
                 }
             },
-            Call::Input(events) => {
-                let origin = cx.view().map_or([0, 0], |view| view.origin);
-                for given in &events {
-                    let event = input_event(given, origin);
-                    let _ = stack.event(cx, &event.expect("checked as it was read"));
-                }
+            Call::Input(events, None) => {
+                hand(cx, stack, &events);
                 reply.send(Ok("{}".to_owned()));
             }
             Call::Look(given) => {
@@ -950,6 +992,14 @@ impl Api {
         for (waiting, _) in self.steps.drain(..) {
             waiting.send(Err(Failure::new("api.stopped", message)));
         }
+        for Holding {
+            releases, reply, ..
+        } in self.holds.drain(..)
+        {
+            hand(cx, stack, &releases);
+            reply.send(Err(Failure::new("api.stopped", message)));
+        }
+        stepper.stop_before(None);
     }
 
     /// Does to the open scene what `scene` asks, as gg-api's docs say, in a project's game, with
@@ -1041,6 +1091,7 @@ impl Api {
                 .as_ref()
                 .map_or(cx.scenes.open.edited, |edited| edited.open.edited),
             cells: (cx.world().cell_counts()).map(|(cells_in, kept)| CellCounts { cells_in, kept }),
+            cursor_grabbed: cx.cursor_grabbed(),
         }
     }
 

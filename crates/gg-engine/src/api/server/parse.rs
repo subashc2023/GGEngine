@@ -91,8 +91,8 @@ pub(super) enum Call {
     },
     /// The shared memory to publish the view to; `None` stops.
     View(Option<String>),
-    /// Events to hand the layers; each key event names a real key.
-    Input(Vec<InputEvent>),
+    /// Events to hand the layers, each key event naming a real key, and what to release after.
+    Input(Vec<InputEvent>, Option<Hold>),
     /// The look's parts to set, checked, the viewpoint's rotation normalized.
     Look(gg_api::Look),
     /// The view pixel to pick at, and optionally the entity whose model to pick within.
@@ -140,12 +140,51 @@ pub(super) enum Call {
     Quit,
 }
 
+/// What a held `input` lets go of, and when.
+#[derive(Debug, PartialEq)]
+pub(super) struct Hold {
+    /// The ticks to hold for, from 1 to [`MOST_STEPS`].
+    pub(super) ticks: u64,
+    /// A release of each key and button the events press and leave down, in the order pressed.
+    pub(super) releases: Vec<InputEvent>,
+}
+
+/// A release of each key and button `events` press and leave down, in the order pressed.
+fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
+    let mut down: Vec<InputEvent> = Vec::new();
+    for given in events {
+        let release = match given {
+            InputEvent::Key { key, .. } => InputEvent::Key {
+                key: key.clone(),
+                pressed: false,
+                repeat: false,
+            },
+            &InputEvent::Button { button, .. } => InputEvent::Button {
+                button,
+                pressed: false,
+            },
+            _ => continue,
+        };
+        let pressed = matches!(
+            given,
+            InputEvent::Key { pressed: true, .. } | InputEvent::Button { pressed: true, .. }
+        );
+        down.retain(|held| *held != release);
+        if pressed {
+            down.push(release);
+        }
+    }
+    down
+}
+
 /// The main loop's call for `request`.
 ///
 /// Fails with:
 ///
 /// - `api.unknown_method`.
-/// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); a `scene`
+/// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); an
+///   `input` with an unknown key, a `hold` of 0 or past [`MOST_STEPS`] ticks, or a `hold` whose
+///   events leave nothing down; a `scene`
 ///   path missing, unwanted or not `.ron`, or `discard` given to `save`; a `save_prefab` path not
 ///   `.prefab`; a `frames` `dir` not an absolute directory path, a `count` of 0 or past
 ///   [`gg_api::MOST_FRAMES`], or invalid viewpoints or `rect` (no area).
@@ -350,7 +389,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
             Call::View(memory)
         }
         "input" => {
-            let Input { events } = take(method, params)?;
+            let Input { events, hold } = take(method, params)?;
             let unknown = events.iter().find_map(|given| match given {
                 InputEvent::Key { key, .. } if Key::from_name(key).is_none() => Some(key),
                 _ => None,
@@ -360,7 +399,23 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
                     format!("names keys by their W3C `code`, as `KeyW`, and `{key}` is none");
                 return Err(bad_params(method, what));
             }
-            Call::Input(events)
+            let hold = match hold {
+                Some(ticks) if !(1..=MOST_STEPS).contains(&ticks) => {
+                    let what = format!("holds from 1 to {MOST_STEPS} ticks, not {ticks}");
+                    return Err(bad_params(method, what));
+                }
+                Some(ticks) => {
+                    let releases = releases(&events);
+                    if releases.is_empty() {
+                        let what = "holds the keys and buttons its events press and leave down, \
+                                    and they leave none down";
+                        return Err(bad_params(method, what));
+                    }
+                    Some(Hold { ticks, releases })
+                }
+                None => None,
+            };
+            Call::Input(events, hold)
         }
         "entities" => {
             let gg_api::Entities { with, skip, take } = self::take(method, params)?;

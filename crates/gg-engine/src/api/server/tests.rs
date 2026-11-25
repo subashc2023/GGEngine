@@ -2470,6 +2470,71 @@ fn input_reaches_the_layers_as_the_windows_would() {
     assert_eq!(input.cursor(), Some([13.0, 24.5]));
 }
 
+/// A held `input` lets go of what it pressed and left down after exactly its ticks, though each
+/// frame owes three: the frame before the release runs fewer. Paused, the hold steps its ticks.
+/// Each answers the status as it lets go, with whether layers want the cursor grabbed.
+#[test]
+fn a_held_input_lets_go_after_exactly_its_ticks() {
+    let (mut api, session) = started("Api Held Input");
+    let mut cx = Context::seeded(5);
+    cx.set_cursor_grabbed(true);
+    let mut stack = Stack::default();
+    let mut stepper = Stepper::default();
+    let client = thread::spawn(move || {
+        let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
+        let events = json!([
+            {"key": {"key": "KeyW", "pressed": true}},
+            {"key": {"key": "KeyA", "pressed": true}},
+            {"key": {"key": "KeyA", "pressed": false}},
+            {"button": {"button": "left", "pressed": true}},
+        ]);
+        let refused = [
+            json!({"events": events, "hold": 0}),
+            json!({"events": [{"key": {"key": "KeyW", "pressed": false}}], "hold": 4}),
+        ]
+        .map(|params| client.call("input", params).expect_err("refused").code);
+        let held = json!({"events": events, "hold": 4});
+        let running: Status = client.call_as("input", held).expect("held");
+        let _: Status = client.call_as("pause", ()).expect("paused");
+        let held = json!({"events": events, "hold": 2});
+        let paused: Status = client.call_as("input", held).expect("held while paused");
+        (refused, running, paused)
+    });
+    // Each tick's number, and whether W was down through it.
+    let mut ticks = Vec::new();
+    let start = Instant::now();
+    while !client.is_finished() {
+        assert!(start.elapsed() < DEADLINE, "the client never finished");
+        api.serve(&mut cx, &mut stack, &mut stepper);
+        let tick = |tick: Tick| {
+            ticks.push((tick.number, cx.input().key_down(Key::KeyW)));
+            true
+        };
+        stepper.step(Tick::DT * 3, tick, || Duration::ZERO);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let (refused, running, paused) = client.join().expect("the client didn't panic");
+    assert_eq!(refused, ["api.bad_params"; 2]);
+    // The first tick and count of each run of ticks with W down.
+    let mut held: Vec<(u64, u64)> = Vec::new();
+    for &(number, down) in &ticks {
+        match held.last_mut() {
+            Some((first, count)) if down && *first + *count == number => *count += 1,
+            _ if down => held.push((number, 1)),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        held.iter().map(|&(_, count)| count).collect::<Vec<_>>(),
+        [4, 2]
+    );
+    assert_eq!((running.ticks, running.paused), (held[0].0 + 4, false));
+    assert_eq!((paused.ticks, paused.paused), (held[1].0 + 2, true));
+    assert!(running.cursor_grabbed && paused.cursor_grabbed);
+    assert!(!cx.input().key_down(Key::KeyW));
+    assert!(!cx.input().button_down(MouseButton::Left));
+}
+
 /// Publishing the view to memory the client made: the next frame back takes it to the render thread
 /// with what paces frames by it. A name that opens no memory is refused, leaving publishing as it
 /// was; `null` stops it.
