@@ -362,6 +362,13 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
                 JsonValue::Object(given) => {
                     Value::Struct(object_fields(given, fields, names, depth)?)
                 }
+                // A newtype's one field, bare, as `"Name": "Hero"`.
+                json if matches!(&fields[..], [field] if field.name.as_ref() == "0") => {
+                    let (name, ty) = (&fields[0].name, &fields[0].ty);
+                    let value = read_at(json, ty, names, depth + 1)
+                        .map_err(|error| reflect::within(error, name))?;
+                    Value::Struct(vec![(name.clone(), value)])
+                }
                 _ => return Err(wrong("an object of the struct's fields")),
             },
             Shape::Enum(variants) => {
@@ -975,6 +982,19 @@ mod tests {
         let root = Type::Named(world.types().find("PrefabRoot").expect("registered"));
         let error = read_json(&world, &root, r#"{"0": "prefabs/none.prefab"}"#).expect_err("none");
         assert_eq!(error.code(), "api.no_prefab", "{error}");
+        // A newtype's one field, bare or as an object; another struct takes an object alone.
+        world.register::<crate::Name>().expect("registered");
+        let name = Type::Named(world.types().find("Name").expect("registered"));
+        let hero = Value::Struct(vec![(Ident::from("0"), Value::String("Hero".into()))]);
+        assert_eq!(read_json(&world, &name, r#""Hero""#).expect("bare"), hero);
+        assert_eq!(
+            read_json(&world, &name, r#"{"0": "Hero"}"#).expect("whole"),
+            hero
+        );
+        let error = read_json(&world, &name, "7").expect_err("not a string");
+        assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
+        let error = read_json(&world, &sprite, "7").expect_err("not a newtype");
+        assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
     }
 
     /// A whole number reads as an `Int` for a signed field, a `UInt` for an unsigned one, except

@@ -306,8 +306,9 @@
 //! model, a font or a prefab by name or by a path to its file, which the game loads from under its
 //! asset root if it hasn't, a model's image with its model; an entity by a living one's ID, or
 //! `null` for none; and a struct or a variant's fields missing a field, which takes its default, as
-//! in a scene. What's opaque is kept as it is, or made as the type's own is, as an `(opaque)` that
-//! a create or an add gives says.
+//! in a scene. A tuple struct of one field also takes that field's value bare, as `"Name": "Hero"`
+//! for `{"0": "Hero"}`, but for an object. What's opaque is kept as it is, or made as the type's own
+//! is, as an `(opaque)` that a create or an add gives says.
 
 pub mod asset;
 pub mod build;
@@ -1412,6 +1413,10 @@ pub struct SavedPrefab {
 
 /// What `get` takes: an entity's ID or name, a component type, and a field's path, such as
 /// `translation.x` or `rect[1]`, empty for the whole component.
+///
+/// A path may instead follow the type and `.`, as `Transform.translation`, as `entities` takes
+/// fields; one in `path` too goes after it. `Operation::Set` and `Operation::Revert` take paths so
+/// too.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {

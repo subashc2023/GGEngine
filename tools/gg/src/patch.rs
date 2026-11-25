@@ -20,7 +20,7 @@ use crate::build::{self, Package, fit};
 use crate::classify::{self, Edit};
 use crate::dx::{self, Dx, Fat};
 use crate::run::{self, Run, Stamp, event, millis};
-use crate::runs::State;
+use crate::runs::{self, State};
 
 /// How long the sources must stay the same before a change is acted on: saves come in bursts.
 const QUIET: Duration = Duration::from_millis(200);
@@ -66,6 +66,8 @@ pub(crate) struct Patches {
     /// The failure of the last rebuild or patch, until one succeeds or a look at the sources finds
     /// the processes run what they hold.
     failed: Option<Failure>,
+    /// The last patch or rebuild that succeeded, as [`State::reload`] tells it.
+    reload: Option<Value>,
 }
 
 /// With dx, which patches build against, or with cargo, for a game patches can't reach.
@@ -187,6 +189,7 @@ impl Patches {
             job: None,
             libs: Vec::new(),
             failed: None,
+            reload: None,
             baseline,
         }))
     }
@@ -197,6 +200,7 @@ impl Patches {
         let mut state = State::new("running");
         state.pids = games.iter().map(|game| game.pid).collect();
         state.error.clone_from(&self.failed);
+        state.reload.clone_from(&self.reload);
         state.phase = match &self.job {
             Some(Job::Rebuild { why, .. }) => {
                 state.why = Some(why.clone());
@@ -437,11 +441,19 @@ impl Patches {
         };
         match self.job.take() {
             Some(Job::Rebuild {
-                started, thread, ..
+                started,
+                thread,
+                why,
             }) => match thread.join().unwrap_or_else(|_| Err(panicked())) {
                 Ok((fat, baseline)) => {
                     let ms = millis(started.elapsed());
                     event(&json!({"event": "rebuilt", "exe": fat.exe, "build_ms": ms}));
+                    self.reload = Some(json!({
+                        "event": "rebuilt",
+                        "why": why,
+                        "build_ms": ms,
+                        "at": runs::now_ms(),
+                    }));
                     self.rebuilt = Some((fat, baseline));
                     self.failed = None;
                     true
@@ -492,14 +504,22 @@ impl Patches {
                     };
                     match outcome {
                         Outcome::Applied(patched, applied) => {
+                            let (build_ms, apply_ms) = (millis(patching.built), millis(applied));
                             event(&json!({
                                 "event": "patched",
                                 "pid": pid,
                                 "files": files,
                                 "attach": attach,
-                                "build_ms": millis(patching.built),
-                                "apply_ms": millis(applied),
+                                "build_ms": build_ms,
+                                "apply_ms": apply_ms,
                                 "ticks": patched.ticks,
+                            }));
+                            self.reload = Some(json!({
+                                "event": "patched",
+                                "files": files,
+                                "build_ms": build_ms,
+                                "apply_ms": apply_ms,
+                                "at": runs::now_ms(),
                             }));
                             if !attach.is_empty() {
                                 let message = format!(
@@ -1216,6 +1236,7 @@ mod tests {
             job: None,
             libs: Vec::new(),
             failed: None,
+            reload: None,
             baseline,
         };
         let session = Session {

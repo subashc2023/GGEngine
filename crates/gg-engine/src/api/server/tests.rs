@@ -368,10 +368,13 @@ fn an_entity_is_named_by_its_id_or_by_the_one_entity_with_its_name() {
             .expect("a field by name");
         let none = entity(&mut client, "Nobody").expect_err("no such name");
         let two = entity(&mut client, "Twin").expect_err("two with the name");
-        let set = json!({"operations": [{"set": {"id": "Hero", "component": "Transform",
-            "path": "translation.y", "value": 5.0}}]});
-        let applied = client.call("apply", set);
-        (by_name, by_id, got, none, two, applied.is_ok())
+        // A path may follow the type and `.`, as `entities` takes fields.
+        let set = json!({"operations": [{"set": {"id": "Hero",
+            "component": "Transform.translation", "path": "y", "value": 5.0}}]});
+        let applied = client.call("apply", set).is_ok();
+        let dotted = json!({"id": "Hero", "component": "Transform.translation.y"});
+        let dotted: f64 = client.call_as("get", dotted).expect("a dotted field");
+        (by_name, by_id, got, none, two, applied && dotted == 5.0)
     };
     let (by_name, by_id, got, none, two, applied) = serving(
         &mut api,
@@ -392,7 +395,10 @@ fn an_entity_is_named_by_its_id_or_by_the_one_entity_with_its_name() {
     for id in &twins {
         assert!(two.message.contains(id.as_str()), "{}", two.message);
     }
-    assert!(applied, "an operation names an entity as well");
+    assert!(
+        applied,
+        "an operation names an entity as well, and its path its field"
+    );
 }
 
 /// The first request is `hello` with the token; the connection's thread answers `ping` while no

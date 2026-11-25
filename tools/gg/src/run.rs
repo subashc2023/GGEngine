@@ -633,9 +633,12 @@ impl Supervisor<'_> {
         if let Some(status) = ended.map_err(|error| failed(&self.peers[peer].copy, error))? {
             return Ok(Some(self.ended(peer, game, status)));
         }
+        // A game started afresh refuses one until its first tick, as one started paused may wait
+        // long for it: the next asks again, quietly. A restart's refused snapshot is still told.
         if let Some(taking) = &game.snapshotting
             && taking.is_finished()
             && let Some(taken) = game.landed()
+            && !matches!(&taken, Err(failure) if failure.code == "api.not_ticked")
         {
             self.note(peer, game, taken);
         }

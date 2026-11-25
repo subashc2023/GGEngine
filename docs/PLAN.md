@@ -67,7 +67,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Tokens for clients without the session file, grants narrower or kept to one scene, the project in `hello` | A client on another machine, or kept to less |
 | RenderDoc captures through the tool API, several a run, after streaming, with synchronization validation | An agent needs a frame's GPU work |
 | Captures on macOS, and of the editor's view (`api.no_view`) | Someone captures there |
-| More through the API: each pass's GPU time, shadow draw counts, exposure, streaming, sounds playing, mods loaded, a run's last event | An agent needs it |
+| More through the API: each pass's GPU time, shadow draw counts, exposure, streaming, sounds playing, mods loaded, a run's last event, each log line's tick | An agent needs it |
 | Debug views of lights per cluster, shadow cascades, TAA's history and the navmesh; `gg probe` at its sources' precision | They need debugging by sight |
 | Through the API: game actions pressed and listed by name, `gg mv` with the ID file | An agent plays through it, or loses IDs |
 | Steps while minimized (`api.paused`); requests, and the compositor, answered while a dialog or a script's stop holds the main thread | A tool needs them |

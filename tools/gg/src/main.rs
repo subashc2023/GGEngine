@@ -107,14 +107,16 @@ ends when gg does, however gg ends. A second `run` of PACKAGE is refused (`gg.ru
 Events, a JSON line each (the game's and cargo's output go to stderr): `started`, `serving` (the
 tool API), and as it ends `exited`, `crashed` or `hung`, with the errors its log holds.
 
-Restarts, from the last snapshot (`snapshot_failed` says why one fails): after a crash or a hang;
-after a rebuild (`rebuilt`), from a snapshot taken in the same request as the quit, so no edit is
-lost between them; and at once (`killed`, with what it waits for) for a game waiting where it can't
-answer: at a script's breakpoint, in a file dialog or in the window menu. A game that ends before
-its first snapshot waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh
-(`refused`). Pauses and stops last across restarts. Only the world, its entities' components,
-survives; a layer's own fields and statics start over. A layer's `load` makes its assets; its
-`attach`, which a restart skips, builds the world.
+Restarts, from the last snapshot: after a crash or a hang; after a rebuild (`rebuilt`), from a
+snapshot taken in the same request as the quit, so no edit is lost between them; and at once
+(`killed`, with what it waits for) for a game waiting where it can't answer: at a script's
+breakpoint, in a file dialog or in the window menu. A game that ends before its first snapshot
+waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`).
+`snapshot_failed` says why one fails; a game that hasn't ticked since it started refuses one, and
+the next is asked for quietly. Pauses and stops last across restarts. Only the world, its entities'
+components, survives; a layer's own fields and statics start over. A field a rebuild adds takes its
+default, the game warning `snapshot.changed`. A layer's `load` makes its assets; its `attach`, which
+a restart skips, builds the world.
 
 `run` ends as the game comes to its own end (its window closes, `quit` asks or its frames run out),
 whatever its status; as a game that never served the API ends; and, with restarts off
@@ -129,8 +131,10 @@ file (`watching`). Then:
 - an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
   between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
 - any other change rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
-  `rebuild_failed`): a change to a type, even one declared in a body, or to code run as the game
-  started (`main`, a layer's `load` and `restored`), and any change after a failed rebuild;
+  `rebuild_failed`): any outside function bodies, as a new item (a type, `const`, `fn` or `use`), a
+  changed signature or a changed `const`; a change to a type, even one declared in a body; one to
+  code run as the game started (`main`, a layer's `load` and `restored`); and any change after a
+  failed rebuild;
 - an edit inside a layer's `attach` patches (`patched` names its module in `attach`), the game
   warning `gg.attach_changed`. It shows only in a run started afresh, as restarts keep the world.
   `gg scene open <SCENE> --discard` reloads the open scene's entities from its file, a fresh world
@@ -146,9 +150,12 @@ Without dx, or where patches can't reach (as with `--release`), with restarts on
 change rebuilds and restarts from a snapshot, rustc's errors in `rebuild_failed`. A failed first
 build waits for a change (`build_failed`).
 
+Scene files aren't code: `run` doesn't watch them. The game itself applies each save of a scene file
+it loaded, within a second, logging `scene.applied` (`gg logs --level info`), and keeps its state.
+
 While no game answers, the commands that talk to it fail with what `run` is doing: `gg.rebuilding`,
 `gg.starting`, `gg.waiting`, or `gg.build_failed` with the last build's errors. `gg wait` waits
-until the game runs an edit's code.
+until the game runs an edit's code, and says which patch or rebuild ran it.
 ",
             },
             Help {
@@ -248,7 +255,11 @@ package in the engine's lock, as `--package NAME` would name both.
                 summary: "Wait until the game under `gg run` runs the code of every edit saved before",
                 details: "\
 Waits at most `--timeout` (300 s) for the edits to be patched in or rebuilt, then prints what `run`
-is doing. Fails with:
+is doing. Its `reload` is the last patch or rebuild, with `at` (ms since the epoch, as `updated`):
+- {\"event\":\"patched\",\"files\":[...],\"build_ms\":..,\"apply_ms\":..,\"at\":..}, the game's state
+  untouched;
+- {\"event\":\"rebuilt\",\"why\":..,\"build_ms\":..,\"at\":..}, the game started again from a snapshot.
+Scene files aren't code: the game applies each as it's saved, without `wait`. Fails with:
 - `gg.build_failed` and rustc's errors, if the edits don't build;
 - `gg.waiting`, if the game ended and waits for a change;
 - `gg.no_run`, without a `gg run`; `gg.which_run`, with several, which `--pid` tells apart;
@@ -490,9 +501,14 @@ prefab, each component's fields, and the components it adds.
             },
             Help {
                 name: "get",
-                usage: "get <ENTITY> <COMPONENT> [PATH]",
+                usage: "get <ENTITY> <COMPONENT>[.<PATH>]",
                 summary: "A component's value, or its field at PATH, such as `translation.x`",
-                details: "ENTITY is an ID or a name, as `entity` takes it.\n",
+                details: "\
+ENTITY is an ID or a name, as `entity` takes it. PATH follows its component's type and `.`, as
+`entities --fields` takes it, or comes as an argument of its own:
+  gg get Player Transform.translation.x
+  gg get Player Transform translation.x
+",
             },
             Help {
                 name: "types",
@@ -553,11 +569,26 @@ button or widget by name with `press`; type into a text field pressed so with `i
                 usage: "apply <OPERATIONS>",
                 summary: "Apply operations as one edit, all or none, which `undo` takes back",
                 details: "\
-OPERATIONS is a JSON array of the API's operations, applied between ticks; each `id` and `parent` is
-an entity's ID or the name of the one entity with it. Among them:
+OPERATIONS is a JSON array of the API's operations, applied between ticks, in order. Each `id` and
+`parent` is an entity's ID or the name of the one entity with it. A value V is shaped as `entity`
+shows it, a field left out taking its default; `types` describes each type's fields.
+- {\"create\":{\"components\":{C:V,...},\"parent\":ENTITY,\"id\":ID}} spawns an entity, the last of
+  `parent`'s children; without `parent`, a root; without `id` (16 hex digits), one drawn;
+- {\"duplicate\":{\"id\":ENTITY,\"copies\":[ID,...]}} copies it and its descendants;
+- {\"delete\":{\"id\":ENTITY}} despawns it and its descendants;
+- {\"add\":{\"id\":ENTITY,\"component\":C,\"value\":V}} gives it C, as V or C's default;
+- {\"remove\":{\"id\":ENTITY,\"component\":C}} takes C away;
+- {\"set\":{\"id\":ENTITY,\"component\":C,\"path\":P,\"value\":V}} sets a field, as `set` does;
+- {\"reparent\":{\"id\":ENTITY,\"parent\":ENTITY}} makes it the last of `parent`'s children, or a
+  root for null, moving with it; `\"in_place\":true` keeps its place in the world;
 - {\"unlink\":{\"id\":ENTITY}} unlinks a prefab's instance into entities of its own;
 - {\"revert\":{\"id\":ENTITY,\"component\":C,\"path\":P}} sets a field of an instance's entity back
   to its prefab's.
+Prints the ticks and the IDs its creates and duplicates spawned. A kinematic platform:
+  gg apply '[{\"create\":{\"components\":{\"Name\":\"Lift\",
+    \"Transform\":{\"translation\":[5,1,0],\"scale\":[3,0.5,1]},
+    \"RigidBody2D\":{\"body_type\":\"Kinematic\"},\"BoxCollider2D\":{}}}}]'
+`gg scene save` then writes the world to its scene file.
 ",
             },
             Help {
@@ -573,11 +604,14 @@ Prints the prefab's path and name. ENTITY is an ID or a name, as `entity` takes 
             },
             Help {
                 name: "set",
-                usage: "set <ENTITY> <COMPONENT> <PATH> <VALUE>",
+                usage: "set <ENTITY> <COMPONENT>[.<PATH>] <VALUE>",
                 summary: "Set a component's field, or the whole component, as one edit",
                 details: "\
-PATH is a field, such as `translation.x`, or empty for the whole component. VALUE is JSON, or else a
-string. ENTITY is an ID or a name, as `entity` takes it.
+PATH is a field, such as `translation.x`; without one, VALUE is the whole component. It follows its
+component's type and `.`, as `get` takes it, or comes as an argument of its own, empty for the
+whole. VALUE is JSON, or else a string, shaped as `entity` shows values. ENTITY is an ID or a name.
+  gg set Player Player.speed 9
+  gg set Player Transform translation '[0, 2, 0]'
 ",
             },
             Help {
@@ -1492,7 +1526,7 @@ fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             call(parsed, "entity", json!({"id": id}))?
         }
         "get" => {
-            let mut given = parsed.positional(2, 3, "get <ENTITY> <COMPONENT> [PATH]")?;
+            let mut given = parsed.positional(2, 3, "get <ENTITY> <COMPONENT>[.<PATH>]")?;
             let path = if given.len() == 3 {
                 given.remove(2)
             } else {
@@ -1530,11 +1564,16 @@ fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             call(parsed, "save_prefab", params)?
         }
         "set" => {
-            let given = parsed.positional(4, 4, "set <ENTITY> <COMPONENT> <PATH> <VALUE>")?;
-            let value =
-                serde_json::from_str(&given[3]).unwrap_or_else(|_| Value::String(given[3].clone()));
-            let set =
-                json!({"id": given[0], "component": given[1], "path": given[2], "value": value});
+            let mut given = parsed.positional(3, 4, "set <ENTITY> <COMPONENT>[.<PATH>] <VALUE>")?;
+            // The game moves a path given after the type's `.` into `path`.
+            let raw = given.pop().expect("three or four");
+            let path = if given.len() == 3 {
+                given.pop().expect("four")
+            } else {
+                String::new()
+            };
+            let value = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
+            let set = json!({"id": given[0], "component": given[1], "path": path, "value": value});
             call(parsed, "apply", json!({"operations": [{"set": set}]}))?
         }
         method @ ("undo" | "redo" | "edits") => {
@@ -1727,6 +1766,27 @@ mod tests {
         };
         let fields = json!(["Transform.translation", "Unit", "Name"]);
         assert_eq!(params["fields"], fields);
+        // The game splits a path after the type's `.`; VALUE is JSON, or else a string.
+        for (given, path, value) in [
+            (&["set", "Hero", "Player.speed", "9"][..], "", json!(9)),
+            (
+                &["set", "Hero", "Name", "", "Hero 2"][..],
+                "",
+                json!("Hero 2"),
+            ),
+            (
+                &["set", "Hero", "Player", "speed", "9"][..],
+                "speed",
+                json!(9),
+            ),
+        ] {
+            let Ok(Command::Call { method, params, .. }) = parsed(given) else {
+                panic!("a call");
+            };
+            let set = &params["operations"][0]["set"];
+            assert_eq!((method.as_str(), &set["path"]), ("apply", &json!(path)));
+            assert_eq!(set["value"], value, "{given:?}");
+        }
         let Ok(Command::Call { method, params, .. }) =
             parsed(&["press", "end_turn", "--ui", "fight", "--ticks", "2"])
         else {

@@ -207,9 +207,13 @@ const TOOLS: &[Tool] = &[
         description: "Call after editing the game's code, before checking what the edit does: \
                       waits until the game under `gg run` runs the code of every edit saved before \
                       the call, patched, or rebuilt and restarted, and answers what the run is \
-                      doing. Fails with `gg.build_failed` and rustc's errors if the edits don't \
-                      build (the game runs its old code), `gg.waiting` if the game ended and waits \
-                      for a change, or `gg.timeout`.",
+                      doing. Its `reload` is the last patch (`patched`, with its `files`, \
+                      `build_ms` and `apply_ms`) or rebuild (`rebuilt`, with its `why` and \
+                      `build_ms`), with `at`, ms since the epoch, as `updated`. Scene files aren't \
+                      code: the game applies each as it's saved, without a wait. Fails with \
+                      `gg.build_failed` and rustc's errors if the edits don't build (the game runs \
+                      its old code), `gg.waiting` if the game ended and waits for a change, or \
+                      `gg.timeout`.",
         properties: || {
             json!({"timeout_s": {"type": "integer", "minimum": 1, "default": 300,
                                  "description": "How long to wait, in seconds"}})
@@ -589,7 +593,8 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "get",
         description: "A component's value, or its field at a path, such as `translation.x` or \
-                      `rect[1]`.",
+                      `rect[1]`. The path may instead follow the component's type and `.`, as \
+                      `Transform.translation.x`.",
         properties: || {
             json!({
                 "id": entity(),
@@ -721,7 +726,8 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "set",
         description: "Sets a component's field at a path, such as `translation.x`, or the whole \
-                      component for an empty path, as an edit `undo` takes back.",
+                      component for an empty path, as an edit `undo` takes back. The path may \
+                      instead follow the component's type and `.`, as `Transform.translation.x`.",
         properties: || {
             json!({
                 "id": entity(),

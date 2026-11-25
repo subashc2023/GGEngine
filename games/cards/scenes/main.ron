@@ -17,8 +17,25 @@
             ),
         ),
         "7b1e94c2a05d63f8": (
-            Effects: (),
-            Fight: (rng: (state: 20260101)),
+            Effects: (
+                logged: 0.0,
+            ),
+            Fight: (
+                player_hp: 0,
+                player_block: 0,
+                energy: 0,
+                enemy_hp: 0,
+                turn: 0,
+                rng: (
+                    state: 20260101,
+                ),
+                result: 0,
+                wins: 0,
+                losses: 0,
+                deck: [],
+                hand: [],
+                discard: [],
+            ),
             Name: ("Fight"),
         ),
     },

@@ -237,9 +237,20 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
         }
         "apply" => {
             let Apply {
-                operations,
+                mut operations,
                 gesture,
             } = take(method, params)?;
+            for operation in &mut operations {
+                if let gg_api::Operation::Set {
+                    component, path, ..
+                }
+                | gg_api::Operation::Revert {
+                    component, path, ..
+                } = operation
+                {
+                    split_field(component, path);
+                }
+            }
             let mut seen = Vec::new();
             let mut field = None;
             let one_field = operations.iter().all(|operation| match operation {
@@ -476,9 +487,10 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
         "get" => {
             let Field {
                 id,
-                component,
-                path,
+                mut component,
+                mut path,
             } = take(method, params)?;
+            split_field(&mut component, &mut path);
             Call::Get {
                 id: Subject::of(&id),
                 component,
@@ -498,6 +510,20 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
         }
     };
     Ok(call)
+}
+
+/// Moves a path given in `component`, as `Transform.translation`, to the front of `path`.
+///
+/// `entities` takes its fields so: a type's name has no `.`.
+fn split_field(component: &mut String, path: &mut String) {
+    if let Some((of, rest)) = component.split_once('.') {
+        *path = if path.is_empty() {
+            rest.to_owned()
+        } else {
+            format!("{rest}.{path}")
+        };
+        component.truncate(of.len());
+    }
 }
 
 /// `params` as a `T`; defaults fill what isn't given.

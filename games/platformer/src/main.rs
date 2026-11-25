@@ -250,3 +250,21 @@ fn follow(world: &mut World) {
         at.translation.x = x;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The start scene saves to its own bytes, so a `gg scene save` changes only what was edited.
+    #[test]
+    fn the_scene_saves_as_it_is() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut cx = Context::seeded(1).root(dir);
+        Game::new().load(&mut cx).expect("loaded");
+        let path = dir.join("scenes/main.ron");
+        let text = std::fs::read_to_string(&path).expect("the scene");
+        let roots = cx.load_scene_file(path).expect("the scene loads");
+        let saved = cx.world().save_scene(&roots).expect("saved");
+        assert_eq!(saved, text);
+    }
+}

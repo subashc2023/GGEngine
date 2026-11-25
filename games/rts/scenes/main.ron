@@ -11,6 +11,17 @@
                 scale: (2.0, 1.9, 2.0),
             ),
         ),
+        "08d3c230d60da975": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Rock Shape"),
+            Parent: ("012530bc284b852a"),
+            Tint: ((0.45, 0.45, 0.48, 1.0)),
+            Transform: (
+                translation: (0.0, 0.75, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.5, 1.0),
+            ),
+        ),
         "0c8d2dca1087d971": (
             Name: ("Unit 5"),
             Transform: (
@@ -25,6 +36,28 @@
                 moving: false,
                 target: (-4.5, 5.5),
                 stalled: 0,
+            ),
+        ),
+        "0d02f1dad349cb28": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("c83c28a752d102cc"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "110e57c5d42496e2": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("94928b7da1cb53d3"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
             ),
         ),
         "118294e54c8a2c3c": (
@@ -51,6 +84,61 @@
                 translation: (0.0, -0.5, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (60.0, 1.0, 60.0),
+            ),
+        ),
+        "282445cae0b0aee7": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Rock Shape"),
+            Parent: ("9d35034b60a2b16d"),
+            Tint: ((0.45, 0.45, 0.48, 1.0)),
+            Transform: (
+                translation: (0.0, 0.75, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.5, 1.0),
+            ),
+        ),
+        "2fa35f5ff7fa0661": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("dcbd11ac41ddba32"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "30d99ad4fbbfad54": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("566bb317039d588b"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "364a54b72f072c6f": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Rock Shape"),
+            Parent: ("a26afe9c8dca3011"),
+            Tint: ((0.45, 0.45, 0.48, 1.0)),
+            Transform: (
+                translation: (0.0, 0.75, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.5, 1.0),
+            ),
+        ),
+        "393eeefc48205b6f": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Rock Shape"),
+            Parent: ("a250a77e0b2f47b1"),
+            Tint: ((0.45, 0.45, 0.48, 1.0)),
+            Transform: (
+                translation: (0.0, 0.75, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.5, 1.0),
             ),
         ),
         "48c98cab7866e606": (
@@ -108,6 +196,17 @@
                 stalled: 0,
             ),
         ),
+        "5732ed3e6238de4c": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("97e6ed38095c507e"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
         "94928b7da1cb53d3": (
             Name: ("Unit 6"),
             Transform: (
@@ -138,6 +237,17 @@
                 moving: false,
                 target: (1.5, 3.0),
                 stalled: 0,
+            ),
+        ),
+        "9a8cad97df547732": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("118294e54c8a2c3c"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
             ),
         ),
         "9d35034b60a2b16d": (
@@ -187,6 +297,17 @@
                 moving: false,
                 target: (4.5, 5.5),
                 stalled: 0,
+            ),
+        ),
+        "a5729c2437e01b42": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("0c8d2dca1087d971"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
             ),
         ),
         "c83c28a752d102cc": (
@@ -265,131 +386,10 @@
                 stalled: 0,
             ),
         ),
-        "08d3c230d60da975": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Rock Shape"),
-            Parent: ("012530bc284b852a"),
-            Tint: ((0.45, 0.45, 0.48, 1.0)),
-            Transform: (
-                translation: (0.0, 0.75, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.0, 1.5, 1.0),
-            ),
-        ),
-        "a5729c2437e01b42": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Unit Shape"),
-            Parent: ("0c8d2dca1087d971"),
-            Tint: ((0.15, 0.4, 0.9, 1.0)),
-            Transform: (
-                translation: (0.0, 0.5, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (0.8, 1.0, 0.8),
-            ),
-        ),
-        "9a8cad97df547732": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Unit Shape"),
-            Parent: ("118294e54c8a2c3c"),
-            Tint: ((0.15, 0.4, 0.9, 1.0)),
-            Transform: (
-                translation: (0.0, 0.5, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (0.8, 1.0, 0.8),
-            ),
-        ),
-        "30d99ad4fbbfad54": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Unit Shape"),
-            Parent: ("566bb317039d588b"),
-            Tint: ((0.15, 0.4, 0.9, 1.0)),
-            Transform: (
-                translation: (0.0, 0.5, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (0.8, 1.0, 0.8),
-            ),
-        ),
-        "110e57c5d42496e2": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Unit Shape"),
-            Parent: ("94928b7da1cb53d3"),
-            Tint: ((0.15, 0.4, 0.9, 1.0)),
-            Transform: (
-                translation: (0.0, 0.5, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (0.8, 1.0, 0.8),
-            ),
-        ),
-        "5732ed3e6238de4c": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Unit Shape"),
-            Parent: ("97e6ed38095c507e"),
-            Tint: ((0.15, 0.4, 0.9, 1.0)),
-            Transform: (
-                translation: (0.0, 0.5, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (0.8, 1.0, 0.8),
-            ),
-        ),
-        "282445cae0b0aee7": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Rock Shape"),
-            Parent: ("9d35034b60a2b16d"),
-            Tint: ((0.45, 0.45, 0.48, 1.0)),
-            Transform: (
-                translation: (0.0, 0.75, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.0, 1.5, 1.0),
-            ),
-        ),
-        "393eeefc48205b6f": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Rock Shape"),
-            Parent: ("a250a77e0b2f47b1"),
-            Tint: ((0.45, 0.45, 0.48, 1.0)),
-            Transform: (
-                translation: (0.0, 0.75, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.0, 1.5, 1.0),
-            ),
-        ),
-        "364a54b72f072c6f": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Rock Shape"),
-            Parent: ("a26afe9c8dca3011"),
-            Tint: ((0.45, 0.45, 0.48, 1.0)),
-            Transform: (
-                translation: (0.0, 0.75, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.0, 1.5, 1.0),
-            ),
-        ),
         "e951556a08dc01a8": (
             ModelRoot: ("gg:cube"),
             Name: ("Unit Shape"),
             Parent: ("a2c62f0f7429e706"),
-            Tint: ((0.15, 0.4, 0.9, 1.0)),
-            Transform: (
-                translation: (0.0, 0.5, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (0.8, 1.0, 0.8),
-            ),
-        ),
-        "0d02f1dad349cb28": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Unit Shape"),
-            Parent: ("c83c28a752d102cc"),
-            Tint: ((0.15, 0.4, 0.9, 1.0)),
-            Transform: (
-                translation: (0.0, 0.5, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (0.8, 1.0, 0.8),
-            ),
-        ),
-        "2fa35f5ff7fa0661": (
-            ModelRoot: ("gg:cube"),
-            Name: ("Unit Shape"),
-            Parent: ("dcbd11ac41ddba32"),
             Tint: ((0.15, 0.4, 0.9, 1.0)),
             Transform: (
                 translation: (0.0, 0.5, 0.0),

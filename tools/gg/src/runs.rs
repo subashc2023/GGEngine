@@ -40,6 +40,10 @@ pub(crate) struct State {
     pub(crate) current: Option<bool>,
     /// The last build's or patch's failure, until one succeeds or an edit undoes it.
     pub(crate) error: Option<Failure>,
+    /// The last patch or rebuild that succeeded, as its event told it, with `at`, when it landed
+    /// (ms since the epoch): `patched` with its `files`, `build_ms` and `apply_ms`, or `rebuilt`
+    /// with its `why` and `build_ms`. A rebuild's game then starts again from a snapshot.
+    pub(crate) reload: Option<Value>,
 }
 
 impl State {
@@ -50,6 +54,7 @@ impl State {
             pids: Vec::new(),
             current: None,
             error: None,
+            reload: None,
         }
     }
 }
@@ -135,6 +140,7 @@ fn fill(told: &mut Value, state: &State, looked: u64) {
     told["current"] = json!(state.current);
     told["error"] = error.unwrap_or(Value::Null);
     told["looked"] = json!(looked);
+    told["reload"] = state.reload.clone().unwrap_or(Value::Null);
 }
 
 /// Writes `told` through a file beside `path` renamed over it, so that a reader never reads half.
@@ -350,6 +356,8 @@ mod tests {
         let mut state = State::new("running");
         state.pids = vec![42];
         state.current = Some(true);
+        let patched = json!({"event": "patched", "files": ["src/main.rs"], "at": 1200});
+        state.reload = Some(patched.clone());
         told.tell(&state, 1234);
         thread::sleep(WRITE * 3);
         let read = runs_in(&dir, Some(&manifest));
@@ -366,6 +374,7 @@ mod tests {
             (&read["gg"], &read["state"], &read["pids"], &read["looked"]),
             (&json!(7), &json!("running"), &json!([42]), &json!(1234))
         );
+        assert_eq!(read["reload"], patched);
         assert!(other.is_empty() && !gone && left.is_empty());
     }
 

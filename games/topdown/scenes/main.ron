@@ -1,7 +1,6 @@
 (
     entities: {
         "0000000000000001": (
-            Name: ("Camera"),
             Camera: (
                 projection: Orthographic(
                     height: 12.0,
@@ -10,13 +9,24 @@
                 ),
                 primary: true,
             ),
+            Name: ("Camera"),
             Transform: (
-                translation: (0, 0, 10),
+                translation: (0.0, 0.0, 10.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1, 1, 1.0),
+                scale: (1.0, 1.0, 1.0),
             ),
         ),
         "0000000000000002": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.0,
+                restitution: 0.0,
+                sensor: false,
+                membership: 1,
+                filter: 6,
+            ),
             Name: ("Player"),
             Player: (
                 speed: 5.0,
@@ -24,6 +34,13 @@
                 aim: (1.0, 0.0),
                 firing: false,
                 cooldown: 0,
+            ),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: true,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
             ),
             Sprite: (
                 color: (0.2, 0.6, 1.0, 1.0),
@@ -35,17 +52,12 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (0, 0, 0.3),
+                translation: (0.0, 0.0, 0.3),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.8, 0.8, 1.0),
             ),
-            RigidBody2D: (
-                body_type: Dynamic,
-                fixed_rotation: true,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
+        ),
+        "0000000000000003": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
                 size: (1.0, 1.0),
@@ -53,12 +65,17 @@
                 friction: 0.0,
                 restitution: 0.0,
                 sensor: false,
-                membership: 1,
-                filter: 6,
+                membership: 4,
+                filter: 4294967295,
             ),
-        ),
-        "0000000000000003": (
             Name: ("North wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.22, 0.25, 0.32, 1.0),
                 texture: None,
@@ -69,30 +86,30 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (0, 6.25, 0.1),
+                translation: (0.0, 6.25, 0.1),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (16.5, 0.5, 1.0),
-            ),
-            RigidBody2D: (
-                body_type: Static,
-                fixed_rotation: false,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
-            BoxCollider2D: (
-                offset: (0.0, 0.0),
-                size: (1.0, 1.0),
-                density: 1.0,
-                friction: 0.0,
-                restitution: 0.0,
-                sensor: false,
-                membership: 4,
-                filter: 4294967295,
             ),
         ),
         "0000000000000004": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.0,
+                restitution: 0.0,
+                sensor: false,
+                membership: 4,
+                filter: 4294967295,
+            ),
             Name: ("South wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.22, 0.25, 0.32, 1.0),
                 texture: None,
@@ -103,17 +120,12 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (0, -6.25, 0.1),
+                translation: (0.0, -6.25, 0.1),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (16.5, 0.5, 1.0),
             ),
-            RigidBody2D: (
-                body_type: Static,
-                fixed_rotation: false,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
+        ),
+        "0000000000000005": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
                 size: (1.0, 1.0),
@@ -124,9 +136,14 @@
                 membership: 4,
                 filter: 4294967295,
             ),
-        ),
-        "0000000000000005": (
             Name: ("West wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.22, 0.25, 0.32, 1.0),
                 texture: None,
@@ -137,30 +154,30 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (-8.25, 0, 0.1),
+                translation: (-8.25, 0.0, 0.1),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.5, 12.0, 1.0),
-            ),
-            RigidBody2D: (
-                body_type: Static,
-                fixed_rotation: false,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
-            BoxCollider2D: (
-                offset: (0.0, 0.0),
-                size: (1.0, 1.0),
-                density: 1.0,
-                friction: 0.0,
-                restitution: 0.0,
-                sensor: false,
-                membership: 4,
-                filter: 4294967295,
             ),
         ),
         "0000000000000006": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.0,
+                restitution: 0.0,
+                sensor: false,
+                membership: 4,
+                filter: 4294967295,
+            ),
             Name: ("East wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.22, 0.25, 0.32, 1.0),
                 texture: None,
@@ -171,17 +188,12 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (8.25, 0, 0.1),
+                translation: (8.25, 0.0, 0.1),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.5, 12.0, 1.0),
             ),
-            RigidBody2D: (
-                body_type: Static,
-                fixed_rotation: false,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
+        ),
+        "0000000000000007": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
                 size: (1.0, 1.0),
@@ -192,9 +204,14 @@
                 membership: 4,
                 filter: 4294967295,
             ),
-        ),
-        "0000000000000007": (
             Name: ("Pillar"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.22, 0.25, 0.32, 1.0),
                 texture: None,
@@ -205,51 +222,12 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (0, 3, 0.1),
+                translation: (0.0, 3.0, 0.1),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.5, 1.5, 1.0),
-            ),
-            RigidBody2D: (
-                body_type: Static,
-                fixed_rotation: false,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
-            BoxCollider2D: (
-                offset: (0.0, 0.0),
-                size: (1.0, 1.0),
-                density: 1.0,
-                friction: 0.0,
-                restitution: 0.0,
-                sensor: false,
-                membership: 4,
-                filter: 4294967295,
             ),
         ),
         "0000000000000008": (
-            Name: ("Pillar 2"),
-            Sprite: (
-                color: (0.22, 0.25, 0.32, 1.0),
-                texture: None,
-                rect: [
-                    (0.0, 0.0),
-                    (1.0, 1.0),
-                ],
-                sampler: LinearClamp,
-            ),
-            Transform: (
-                translation: (-4, -2, 0.1),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.5, 1.5, 1.0),
-            ),
-            RigidBody2D: (
-                body_type: Static,
-                fixed_rotation: false,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
             BoxCollider2D: (
                 offset: (0.0, 0.0),
                 size: (1.0, 1.0),
@@ -260,13 +238,52 @@
                 membership: 4,
                 filter: 4294967295,
             ),
+            Name: ("Pillar 2"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-4.0, -2.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.5, 1.5, 1.0),
+            ),
         ),
         "0000000000000009": (
-            Name: ("Enemy 1"),
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.0,
+                restitution: 0.0,
+                sensor: false,
+                membership: 2,
+                filter: 15,
+            ),
             Enemy: (
                 speed: 2.0,
                 home: (6.0, 4.0),
             ),
+            Name: ("Enemy 1"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: true,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.95, 0.3, 0.25, 1.0),
                 texture: None,
@@ -277,17 +294,12 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (6, 4, 0.3),
+                translation: (6.0, 4.0, 0.3),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.8, 0.8, 1.0),
             ),
-            RigidBody2D: (
-                body_type: Dynamic,
-                fixed_rotation: true,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
+        ),
+        "000000000000000a": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
                 size: (1.0, 1.0),
@@ -298,13 +310,18 @@
                 membership: 2,
                 filter: 15,
             ),
-        ),
-        "000000000000000a": (
-            Name: ("Enemy 2"),
             Enemy: (
                 speed: 2.0,
                 home: (-6.0, 4.0),
             ),
+            Name: ("Enemy 2"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: true,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.95, 0.3, 0.25, 1.0),
                 texture: None,
@@ -315,17 +332,12 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (-6, 4, 0.3),
+                translation: (-6.0, 4.0, 0.3),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.8, 0.8, 1.0),
             ),
-            RigidBody2D: (
-                body_type: Dynamic,
-                fixed_rotation: true,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
+        ),
+        "000000000000000b": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
                 size: (1.0, 1.0),
@@ -336,13 +348,18 @@
                 membership: 2,
                 filter: 15,
             ),
-        ),
-        "000000000000000b": (
-            Name: ("Enemy 3"),
             Enemy: (
                 speed: 2.0,
                 home: (6.0, -4.0),
             ),
+            Name: ("Enemy 3"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: true,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.95, 0.3, 0.25, 1.0),
                 texture: None,
@@ -353,17 +370,12 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (6, -4, 0.3),
+                translation: (6.0, -4.0, 0.3),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.8, 0.8, 1.0),
             ),
-            RigidBody2D: (
-                body_type: Dynamic,
-                fixed_rotation: true,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
+        ),
+        "000000000000000c": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
                 size: (1.0, 1.0),
@@ -374,13 +386,18 @@
                 membership: 2,
                 filter: 15,
             ),
-        ),
-        "000000000000000c": (
-            Name: ("Enemy 4"),
             Enemy: (
                 speed: 2.0,
                 home: (-6.0, -4.0),
             ),
+            Name: ("Enemy 4"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: true,
+                continuous_collision: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
             Sprite: (
                 color: (0.95, 0.3, 0.25, 1.0),
                 texture: None,
@@ -391,26 +408,9 @@
                 sampler: LinearClamp,
             ),
             Transform: (
-                translation: (-6, -4, 0.3),
+                translation: (-6.0, -4.0, 0.3),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.8, 0.8, 1.0),
-            ),
-            RigidBody2D: (
-                body_type: Dynamic,
-                fixed_rotation: true,
-                continuous_collision: false,
-                velocity: (0.0, 0.0),
-                angular_velocity: 0.0,
-            ),
-            BoxCollider2D: (
-                offset: (0.0, 0.0),
-                size: (1.0, 1.0),
-                density: 1.0,
-                friction: 0.0,
-                restitution: 0.0,
-                sensor: false,
-                membership: 2,
-                filter: 15,
             ),
         ),
     },
