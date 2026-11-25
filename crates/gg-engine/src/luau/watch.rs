@@ -17,6 +17,8 @@ const LOOK: Duration = Duration::from_millis(200);
 pub(crate) struct Files {
     files: Vec<File>,
     looked: Option<Instant>,
+    /// When the last look that read every file saved before it started, by the wall clock.
+    looked_at: Option<SystemTime>,
 }
 
 struct File {
@@ -38,6 +40,12 @@ impl Files {
             stamp: stamp(path),
             text,
         });
+    }
+
+    /// When the last look that read every script saved before it started, by the wall clock:
+    /// each of those has reloaded, or warned why not, since. `None` before one.
+    pub(crate) fn looked_at(&self) -> Option<SystemTime> {
+        self.looked_at
     }
 }
 
@@ -62,6 +70,8 @@ pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
         return;
     }
     files.looked = Some(now);
+    let started = SystemTime::now();
+    let mut read_all = true;
     let mut saves = Vec::new();
     for file in &mut files.files {
         let stamp = stamp(&file.path);
@@ -70,6 +80,7 @@ pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
         }
         // Being written, or held by its writer: a later look reads it, its stamp unchanged.
         let Ok(text) = fs::read_to_string(&file.path) else {
+            read_all = false;
             continue;
         };
         file.stamp = stamp;
@@ -86,6 +97,9 @@ pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
             continue;
         }
         saves.push((file.name.clone(), text));
+    }
+    if read_all {
+        files.looked_at = Some(started);
     }
     for (path, text) in saves {
         stack.offer_script(cx, path, text);

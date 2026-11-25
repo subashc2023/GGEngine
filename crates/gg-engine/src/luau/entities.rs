@@ -25,7 +25,7 @@ use super::fields::{bits, handle, named, value_of};
 use super::{Field, Shared, shared, ungranted};
 use crate::ecs::ComponentId;
 use crate::grant::Capability;
-use crate::reflect::{Ident, Reflect, Value, list};
+use crate::reflect::{Ident, Reflect, Type, Value, list};
 use crate::{Entity, PrefabRoot, Transform, World};
 
 /// Adds this module's functions to `gg`.
@@ -61,7 +61,7 @@ fn spawn(_: &Lua, (components, options): (Lua_, Lua_)) -> mlua::Result<Lua_> {
         ticking(shared, "spawns")?;
         let components = table_arg("`gg.spawn`'s components", components)?;
         let options = table_arg("`gg.spawn`'s options", options)?;
-        let given = components_in(components)?;
+        let given = components_in(&shared.world.borrow(), components)?;
         let (mut parent, mut prefab) = (None, None);
         for pair in options.iter().flat_map(Table::pairs::<Lua_, Lua_>) {
             let (key, value) = pair?;
@@ -174,8 +174,13 @@ fn add(_: &Lua, (entity, component, fields): (Lua_, Lua_, Lua_)) -> mlua::Result
         ticking(shared, "gives components")?;
         let entity = entity_arg("`gg.add`'s entity", entity)?;
         let component = name_arg("`gg.add`'s component", &component)?;
-        let fields = table_arg("`gg.add`'s fields", fields)?;
-        let fields = fields_in(&component, fields)?;
+        let fields = match fields {
+            Lua_::Nil | Lua_::Table(_) => {
+                fields_in(&component, table_arg("`gg.add`'s fields", fields)?)?
+            }
+            value if newtype(&shared.world.borrow(), &component) => bare(value),
+            other => return Err(argument("`gg.add`'s fields", "a table or nil", &other)),
+        };
         writes(shared, &component, "giving an entity")?;
         let mut world = shared.world.borrow_mut();
         let about = |world: &World, error: Error| {
@@ -306,9 +311,9 @@ fn target(data: LightUserData) -> mlua::Result<Entity> {
     })
 }
 
-/// A spawn's `components`: each type's name and its fields ([`fields_in`]), sorted by name so what
-/// a spawn refuses first doesn't depend on Luau's table order.
-fn components_in(components: Option<Table>) -> mlua::Result<Vec<(String, Fields)>> {
+/// A spawn's `components`: each type's name and its fields ([`fields_in`], or [`bare`]), sorted by
+/// name so what a spawn refuses first doesn't depend on Luau's table order.
+fn components_in(world: &World, components: Option<Table>) -> mlua::Result<Vec<(String, Fields)>> {
     let mut given = Vec::new();
     for pair in components.iter().flat_map(Table::pairs::<Lua_, Lua_>) {
         let (name, fields) = pair?;
@@ -322,6 +327,7 @@ fn components_in(components: Option<Table>) -> mlua::Result<Vec<(String, Fields)
         let name = name.to_str()?.to_owned();
         let fields = match fields {
             Lua_::Table(fields) => fields_in(&name, Some(fields))?,
+            value if newtype(world, &name) => bare(value),
             other => {
                 let message = format!(
                     "a spawn's `{name}` is a table of its fields' values, not a {}",
@@ -338,6 +344,18 @@ fn components_in(components: Option<Table>) -> mlua::Result<Vec<(String, Fields)
 
 /// A script's values for a component's fields, by name.
 type Fields = Vec<(String, Lua_)>;
+
+/// Whether component type `component` is a tuple struct of one field, which a script may give
+/// bare, as the tool API does.
+fn newtype(world: &World, component: &str) -> bool {
+    let id = world.component_named(component);
+    id.is_some_and(|id| matches!(world.fields_of(id), [field] if field.name == "0"))
+}
+
+/// A newtype's one field, `0`, given `value` bare.
+fn bare(value: Lua_) -> Fields {
+    vec![("0".to_owned(), value)]
+}
 
 /// `fields`' values for `component`'s fields, sorted by name (as [`components_in`]).
 fn fields_in(component: &str, fields: Option<Table>) -> mlua::Result<Fields> {
@@ -365,8 +383,8 @@ fn fields_in(component: &str, fields: Option<Table>) -> mlua::Result<Fields> {
 /// - `reflect.unknown_type` for no such type, `reflect.read_only` for one the world keeps
 ///   ([`World::unlinked_type`]);
 /// - `reflect.no_field` for a field the type hasn't;
-/// - `reflect.wrong_kind` for a field scripts don't reach, or a value of another kind
-///   ([`value_of`]);
+/// - `reflect.wrong_kind` for a field scripts don't reach (a string, which a script gives but
+///   can't read, is reached), or a value of another kind ([`value_of`]);
 /// - `reflect.no_default` for a field not given that has no default;
 /// - what `default_of` fails with, otherwise.
 fn made(world: &World, component: &str, fields: &[(String, Lua_)]) -> Result<Value> {
@@ -384,18 +402,26 @@ fn made(world: &World, component: &str, fields: &[(String, Lua_)]) -> Result<Val
                 ),
             ));
         };
-        let Some(ty) = Field::of(&field.ty) else {
-            return Err(Error::new(
-                "reflect.wrong_kind",
-                format!(
-                    "`{component}.{name}` holds what scripts don't reach, which takes its default"
-                ),
-            ));
+        let converted = if field.ty == Type::String {
+            text_in(value).map_err(|error| {
+                let message = format!("`{component}.{name}`: {error:#}");
+                error.with_message(message)
+            })?
+        } else {
+            let Some(ty) = Field::of(&field.ty) else {
+                return Err(Error::new(
+                    "reflect.wrong_kind",
+                    format!(
+                        "`{component}.{name}` holds what scripts don't reach, which takes its \
+                         default"
+                    ),
+                ));
+            };
+            value_of(ty, value).map_err(|error| {
+                let message = format!("`{component}.{name}`: {error:#}");
+                error.with_message(message)
+            })?
         };
-        let converted = value_of(ty, value).map_err(|error| {
-            let message = format!("`{component}.{name}`: {error:#}");
-            error.with_message(message)
-        })?;
         given.push((&field.name, converted));
     }
     let mut value = match world.default_of(component) {
@@ -435,11 +461,31 @@ fn made(world: &World, component: &str, fields: &[(String, Lua_)]) -> Result<Val
     Ok(value)
 }
 
+/// A script's string `value`, as a field of a string.
+///
+/// Fails with `reflect.wrong_kind` for another kind of value, or text that isn't UTF-8.
+fn text_in(value: &Lua_) -> Result<Value> {
+    let text = match value {
+        Lua_::String(text) => text.to_str().ok().map(|text| text.to_owned()),
+        other => {
+            let got = other.type_name();
+            let message = format!("expected a string, got a {got}");
+            return Err(Error::new("reflect.wrong_kind", message));
+        }
+    };
+    text.map(Value::String).ok_or_else(|| {
+        Error::new(
+            "reflect.wrong_kind",
+            "the string isn't UTF-8, which a field holds",
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use gg_core::math::{DVec3, Quat, Vec3};
+    use gg_core::math::{DVec3, Quat, Vec3, Vec4};
     use mlua::{FromLuaMulti, IntoLuaMulti};
 
     use super::super::host::lent;
@@ -746,7 +792,7 @@ return Kid
             ("gg.add(bare, \"Body\", { nope = 1 })", "reflect.no_field"),
             ("gg.add(bare, \"Body\", { [1] = 1 })", "reflect.no_field"),
             (
-                "gg.add(bare, \"Body\", { label = \"a\" })",
+                "gg.add(bare, \"Body\", { label = 1 })",
                 "reflect.wrong_kind",
             ),
             (
@@ -817,6 +863,111 @@ return Kid
         let text = "local gone = ...\ngg.despawn(gone)";
         let error = call::<()>(host, cx.world_mut(), text, held(gone)).expect_err("refused");
         assert!(error.to_string().contains(&gone.to_string()), "{error}");
+    }
+
+    /// A tuple struct's fields go by `0`, `1`, and so on, wherever a named struct's do, and a
+    /// struct of one takes its value bare: made by a spawn or an add, read, set and tweened.
+    #[test]
+    fn a_script_makes_and_reaches_a_tuple_struct_s_field_by_its_index_or_bare() {
+        use crate::{Name, Tint, step_animation};
+
+        let dir = Scratch::new("luau-entities-tuple");
+        let (mut cx, scripts) = loaded(&dir, &[("scripts/kid.luau", KID)]);
+        cx.world_mut().register::<Name>().expect("described");
+        cx.world_mut().register::<Tint>().expect("described");
+        let host = &mut *scripts.host.borrow_mut();
+        let text = r#"
+            local Tint = gg.component("Tint")
+            local a = gg.spawn({ Name = "Lift", Tint = vector.create(1, 0, 0, 1) })
+            local b = gg.spawn({
+                Name = { ["0"] = "Door" },
+                Tint = { ["0"] = vector.create(0, 1, 0, 1) },
+            })
+            local c = gg.spawn()
+            gg.add(c, "Tint", vector.create(0, 0, 1, 1))
+            gg.add(c, "Name", "Hatch")
+            local d = gg.spawn({ Name = {}, Tint = {} })
+            local read = b[Tint["0"]]
+            b[Tint["0"]] = vector.create(0.5, 0.5, 0.5, 1)
+            gg.tween(a, Tint["0"], vector.create(0, 0, 0, 1), 1)
+            return a, b, c, d, read.y"#;
+        let made: (
+            LightUserData,
+            LightUserData,
+            LightUserData,
+            LightUserData,
+            f32,
+        ) = call(host, cx.world_mut(), text, ()).expect("made");
+        let [a, b, c, d] = [made.0, made.1, made.2, made.3].map(entity);
+        let world = cx.world();
+        let named = |entity| world.get::<Name>(entity).map(|name| name.0.clone());
+        assert_eq!(named(a).as_deref(), Some("Lift"));
+        assert_eq!(named(b).as_deref(), Some("Door"));
+        assert_eq!(named(c).as_deref(), Some("Hatch"));
+        assert_eq!(named(d).as_deref(), Some(""), "its default");
+        let tint = |entity| world.get::<Tint>(entity).expect("tinted").0;
+        assert_eq!(tint(a), Vec4::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(tint(b), Vec4::new(0.5, 0.5, 0.5, 1.0), "set by the script");
+        assert_eq!(tint(c), Vec4::new(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(tint(d), Vec4::ONE, "its default");
+        assert_eq!(made.4, 1.0, "read as the vector it holds");
+        // A string, which a script gives but doesn't read, has no handle.
+        let text = r#"return gg.component("Name")["0"]"#;
+        let unreached: Lua_ = call(host, cx.world_mut(), text, ()).expect("ran");
+        assert!(unreached.is_nil());
+        for _ in 0..64 {
+            step_animation(cx.world_mut());
+        }
+        let tweened = cx.world().get::<Tint>(a).expect("tinted").0;
+        assert_eq!(
+            tweened,
+            Vec4::new(0.0, 0.0, 0.0, 1.0),
+            "tweened by its handle"
+        );
+    }
+
+    /// A field a type lacks, or a value of another kind for a tuple struct's, is refused with the
+    /// fields the type has.
+    #[test]
+    fn what_a_script_gives_a_tuple_struct_wrongly_is_refused_naming_its_fields() {
+        use crate::{Name, Tint};
+
+        let dir = Scratch::new("luau-entities-tuple-refused");
+        let (mut cx, scripts) = loaded(&dir, &[("scripts/kid.luau", KID)]);
+        cx.world_mut().register::<Name>().expect("described");
+        cx.world_mut().register::<Tint>().expect("described");
+        let host = &mut *scripts.host.borrow_mut();
+        let refusals = [
+            ("gg.spawn({ Tint = { nope = 1 } })", "reflect.no_field"),
+            (
+                r#"gg.spawn({ Tint = { ["1"] = vector.create(1, 1, 1, 1) } })"#,
+                "reflect.no_field",
+            ),
+            ("gg.spawn({ Tint = 5 })", "reflect.wrong_kind"),
+            (
+                r#"gg.spawn({ Tint = { ["0"] = 5 } })"#,
+                "reflect.wrong_kind",
+            ),
+            ("gg.spawn({ Name = 5 })", "reflect.wrong_kind"),
+            (
+                r#"gg.spawn({ Name = { ["0"] = true } })"#,
+                "reflect.wrong_kind",
+            ),
+            (r#"gg.spawn({ Body = "mass" })"#, "reflect.wrong_kind"),
+            (r#"gg.add(gg.spawn(), "Tint", 5)"#, "reflect.wrong_kind"),
+            (r#"gg.add(gg.spawn(), "Body", 5)"#, "script.bad_argument"),
+        ];
+        for (text, expected) in refusals {
+            let ran = call::<()>(host, cx.world_mut(), text, ());
+            assert_eq!(code(ran), expected, "{text}");
+        }
+        let text = "gg.spawn({ Tint = { nope = 1 } })";
+        let error = call::<()>(host, cx.world_mut(), text, ()).expect_err("refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("`Tint` has no field `nope`; its fields are `0`"),
+            "{message}"
+        );
     }
 
     /// A type without a default (a non-option entity field) is made of the fields given and the

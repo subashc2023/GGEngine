@@ -150,12 +150,13 @@ Without dx, or where patches can't reach (as with `--release`), with restarts on
 change rebuilds and restarts from a snapshot, rustc's errors in `rebuild_failed`. A failed first
 build waits for a change (`build_failed`).
 
-Scene files aren't code: `run` doesn't watch them. The game itself applies each save of a scene file
-it loaded, within a second, logging `scene.applied` (`gg logs --level info`), and keeps its state.
+Scene and script files aren't Rust: `run` doesn't watch them. The game itself applies each save of a
+scene or script file it loaded, within a second, logging `scene.applied` or `Script reloaded`, and
+keeps its state; `gg wait` waits for it too.
 
 While no game answers, the commands that talk to it fail with what `run` is doing: `gg.rebuilding`,
 `gg.starting`, `gg.waiting`, or `gg.build_failed` with the last build's errors. `gg wait` waits
-until the game runs an edit's code, and says which patch or rebuild ran it.
+until the game runs an edit, and says which patch, rebuild, scene or script reload ran it.
 ",
             },
             Help {
@@ -252,14 +253,18 @@ package in the engine's lock, as `--package NAME` would name both.
             Help {
                 name: "wait",
                 usage: "wait [--timeout <SECONDS>]",
-                summary: "Wait until the game under `gg run` runs the code of every edit saved before",
+                summary: "Wait until the game under `gg run` runs every edit saved before: code, scenes and scripts",
                 details: "\
-Waits at most `--timeout` (300 s) for the edits to be patched in or rebuilt, then prints what `run`
-is doing. Its `reload` is the last patch or rebuild, with `at` (ms since the epoch, as `updated`):
+Waits at most `--timeout` (300 s) for code edits to be patched in or rebuilt, and for the game to
+look at its scene and script files since, then prints what `run` is doing. Its `reload` is the last
+patch or rebuild, with `at` (ms since the epoch, as `updated`):
 - {\"event\":\"patched\",\"files\":[...],\"build_ms\":..,\"apply_ms\":..,\"at\":..}, the game's state
   untouched;
 - {\"event\":\"rebuilt\",\"why\":..,\"build_ms\":..,\"at\":..}, the game started again from a snapshot.
-Scene files aren't code: the game applies each as it's saved, without `wait`. Fails with:
+The game applies scene and script files itself, as they're saved; `files_looked` is when it last
+looked at them. `files` has the last event it logged of each, the latest 20 files', with its
+`timestamp`: a scene's `scene.applied`, a script's `Script reloaded`, a warning why one didn't
+apply, a script's error. Fails with:
 - `gg.build_failed` and rustc's errors, if the edits don't build;
 - `gg.waiting`, if the game ended and waits for a change;
 - `gg.no_run`, without a `gg run`; `gg.which_run`, with several, which `--pid` tells apart;
@@ -384,6 +389,35 @@ back to the game:
 Prints its ID and name, `null` for none. X, Y are from the view's top left, as a capture has it, the
 look included. A model's node gives the model's root, but `--within` the root or one of its nodes
 gives the node itself, as the editor picks parts. ENTITY is an ID or a name, as `entity` takes it.
+What the game draws over the world shows on top: a crosshair or HUD gives `null`. `cast` says what a
+shot through the pixel would hit.
+",
+            },
+            Help {
+                name: "cast",
+                usage: "cast [<X> <Y>] [--exclude <ENTITY>]",
+                summary: "What a ray from its camera through pixel X, Y, or the view's middle, hits",
+                details: "\
+Prints the entity whose 3D collider it hits first, by ID and name, with the `point` hit, the surface's
+`normal` there and the `distance` from the camera; `null`s for none. It reads the camera the last
+frame drew and the colliders as the last tick left them, as a game's own ray does, sensors skipped.
+X, Y are from the view's top left, as `pick` takes them; without them, the view's middle, where a
+crosshair is. `--exclude` passes through ENTITY's colliders: the player's, for a camera inside or
+behind it. `pick` serves 2D games, and says what shows rather than what's solid.
+",
+            },
+            Help {
+                name: "project",
+                usage: "project <ENTITY | X Y Z>",
+                summary: "Where its view shows an entity or a world point, and how far to turn to face it",
+                details: "\
+Prints `at`, the view's pixel [x, y] as `pick` takes it, or `null` outside the view or behind the
+camera; `turn`, the radians [right, up] the camera turns to face it, about its own axes, `null`
+without perspective; and `distance` from the camera. Hidden or not: `pick` at `at` says what shows.
+An entity's point is the middle of what it draws, as `entity`'s `bounds`, else its origin; ENTITY is
+an ID or a name. To aim a game that turns its camera by mouse motion, move the mouse by `turn`
+divided by the game's sensitivity in radians per pixel, sign as the game reads it; a camera that
+orbits its player moves as it turns, so `project` again.
 ",
             },
             Help {
@@ -855,6 +889,19 @@ fn warn(code: &str, message: &str, path: &Path) {
     let _ = writeln!(std::io::stderr().lock(), "{warning}");
 }
 
+/// `given` as a finite number, for `gg COMMAND`, which takes `what` there.
+fn number(command: &str, what: &str, given: &str) -> Result<f64, Failure> {
+    let number = given
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite());
+    number.ok_or_else(|| {
+        bad(format!(
+            "`gg {command}` takes {what}, numbers, not `{given}`"
+        ))
+    })
+}
+
 fn bad(message: String) -> Failure {
     Failure::new(
         "gg.args",
@@ -871,7 +918,7 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 25] = [
+const VALUED: [&str; 26] = [
     "--engine",
     "--viewpoints",
     "--rect",
@@ -893,6 +940,7 @@ const VALUED: [&str; 25] = [
     "--wait",
     "--show",
     "--within",
+    "--exclude",
     "--hold",
     "--fields",
     "--ui",
@@ -1113,9 +1161,8 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         "run" | "check" | "ship" => build_args(name, &mut parsed)?,
         "fetch" | "new" => project_args(name, &mut parsed)?,
         "wait" | "step" | "scene" | "snapshot" => control_args(name, &mut parsed)?,
-        "input" | "press" | "capture" | "frames" | "look" | "pick" | "probe" => {
-            view_args(name, &mut parsed)?
-        }
+        "input" | "press" | "capture" | "frames" | "look" | "pick" | "cast" | "project"
+        | "probe" => view_args(name, &mut parsed)?,
         "sessions" | "logs" | "entities" | "assets" | "entity" | "get" => {
             read_args(name, &mut parsed)?
         }
@@ -1423,22 +1470,53 @@ fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
         }
         "pick" => {
             let given = parsed.positional(2, 2, "pick <X> <Y> [--within <ENTITY>]")?;
-            let at = given.iter().map(|given| {
-                let at = given.parse::<f64>().ok().filter(|at| at.is_finite());
-                at.ok_or_else(|| {
-                    bad(format!(
-                        "`gg pick` takes a pixel's X and Y, numbers, not `{given}`"
-                    ))
-                })
-            });
-            let at: [f64; 2] = at
-                .collect::<Result<Vec<f64>, Failure>>()?
-                .try_into()
-                .expect("two numbers, as many as `positional` took");
+            let coordinate = |given: &str| number("pick", "a pixel's X and Y", given);
+            let at = [coordinate(&given[0])?, coordinate(&given[1])?];
             // `within` stays out unless given: a game of an older engine refuses unknown fields.
             let within = parsed.value("--within");
             let pick = serde_json::to_value(gg_api::Pick { at, within }).expect("JSON");
             call(parsed, "pick", pick)?
+        }
+        "cast" => {
+            let given = parsed.positional(0, 2, "cast [<X> <Y>] [--exclude <ENTITY>]")?;
+            let coordinate = |given: &str| number("cast", "a pixel's X and Y", given);
+            let at = match &given[..] {
+                [] => None,
+                [x, y] => Some([coordinate(x)?, coordinate(y)?]),
+                _ => {
+                    let what = "`gg cast` takes a pixel's X and Y, both or neither";
+                    return Err(bad(what.to_owned()));
+                }
+            };
+            let exclude = parsed.value("--exclude");
+            let cast = serde_json::to_value(gg_api::Cast { at, exclude }).expect("JSON");
+            call(parsed, "cast", cast)?
+        }
+        "project" => {
+            let given = parsed.positional(1, 3, "project <ENTITY | X Y Z>")?;
+            let project = match &given[..] {
+                [entity] => gg_api::ProjectPoint {
+                    entity: Some(entity.clone()),
+                    point: None,
+                },
+                [x, y, z] => {
+                    let coordinate = |given: &str| number("project", "a point's X, Y and Z", given);
+                    gg_api::ProjectPoint {
+                        entity: None,
+                        point: Some([coordinate(x)?, coordinate(y)?, coordinate(z)?]),
+                    }
+                }
+                _ => {
+                    return Err(bad(
+                        "`gg project` takes an entity, or a point's X, Y and Z".to_owned()
+                    ));
+                }
+            };
+            call(
+                parsed,
+                "project",
+                serde_json::to_value(project).expect("JSON"),
+            )?
         }
         "probe" => {
             let given = parsed.positional(2, 2, "probe <X> <Y> [--own]")?;
@@ -2000,6 +2078,16 @@ mod tests {
             ),
             // A pixel outside the view too; the game answers none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
+            (&["cast"], json!({})),
+            (
+                &["cast", "480", "254.5", "--exclude", "Player"],
+                json!({"at": [480.0, 254.5], "exclude": "Player"}),
+            ),
+            (&["project", "Target"], json!({"entity": "Target"})),
+            (
+                &["project", "1", "-2.5", "3"],
+                json!({"point": [1.0, -2.5, 3.0]}),
+            ),
             (
                 &["pick", "3", "4", "--within", "00000000000000ff"],
                 json!({"at": [3.0, 4.0], "within": "00000000000000ff"}),
@@ -2192,6 +2280,13 @@ mod tests {
             &["pick", "1", "2", "3"],
             &["pick", "left", "2"],
             &["pick", "1", "NaN"],
+            &["cast", "1"],
+            &["cast", "1", "2", "3"],
+            &["cast", "left", "2"],
+            &["project"],
+            &["project", "1", "2"],
+            &["project", "1", "2", "z"],
+            &["project", "1", "2", "3", "4"],
             &["probe"],
             &["probe", "1"],
             &["probe", "1", "2", "3"],

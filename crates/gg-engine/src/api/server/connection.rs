@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::{Level, debug, info, warn};
 
-use super::parse::{Call, bad_params, parse, take};
+use super::parse::{Call, Projecting, bad_params, parse, take};
 use super::{Incoming, Shared, failure};
 use crate::api::Waiting;
 use crate::grant::{Capability, Grant};
@@ -303,7 +303,11 @@ pub(super) fn needs(call: &Call) -> Vec<Capability> {
             .flatten()
             .collect(),
         Call::Frames { .. } => vec![View, Files],
-        Call::View(_) | Call::Look(_) | Call::Pick(..) | Call::Images => vec![View],
+        Call::View(_) | Call::Look(_) | Call::Pick(..) | Call::Cast(..) | Call::Images => {
+            vec![View]
+        }
+        Call::Project(Projecting::Point(_)) => vec![View],
+        Call::Project(Projecting::Entity(_)) => vec![View, Read(None)],
         Call::Input(..) | Call::Press { .. } => vec![Input],
         Call::Get { component, .. } => vec![Read(Some(component.clone()))],
         Call::Entities { .. }

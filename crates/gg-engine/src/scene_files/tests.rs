@@ -183,8 +183,11 @@ fn a_scene_file_saved_applies_as_an_edit_of_its_own() {
         cx.scenes.looked = None;
         look(cx, stack);
     };
-    // A first look sees it as loaded.
+    // A first look sees it as loaded, and says when it looked, which `status` gives.
+    assert_eq!(cx.scenes.looked_at, None);
+    let before = SystemTime::now();
     look(&mut cx, &mut stack);
+    assert!(cx.scenes.looked_at.is_some_and(|at| at >= before));
     assert_eq!(cx.authors.logs(cx.world()).count(), 0);
     let moved = Transform {
         translation: DVec3::new(1.0, 2.0, 3.0),

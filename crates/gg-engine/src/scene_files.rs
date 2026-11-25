@@ -65,6 +65,9 @@ pub(crate) struct SceneFiles {
     pub(crate) open: Open,
     #[cfg(feature = "dev")]
     looked: Option<Instant>,
+    /// When the last look that read every file saved before it started, by the wall clock.
+    #[cfg(feature = "dev")]
+    pub(crate) looked_at: Option<SystemTime>,
     /// Whether the edited world's open scene differs from its file, as last found, and that
     /// world's ticks then; `None` once either may have changed.
     #[cfg(feature = "dev")]
@@ -232,7 +235,7 @@ mod watch {
     use std::collections::HashSet;
     use std::fs;
     use std::mem;
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime};
 
     use tracing::{info, warn};
 
@@ -264,6 +267,8 @@ mod watch {
             return;
         }
         cx.scenes.looked = Some(now);
+        let started = SystemTime::now();
+        let mut read_all = true;
         let mut saves: Vec<(String, String)> = Vec::new();
         // Files in the world first: a save of one takes its kept text too.
         let scenes = &mut cx.scenes;
@@ -276,6 +281,7 @@ mod watch {
             }
             // Being written, or held by its writer: a later look reads it, its stamp unchanged.
             let Ok(text) = crate::ecs::read_scene(&file.path) else {
+                read_all = false;
                 continue;
             };
             file.stamp = stamp;
@@ -289,6 +295,9 @@ mod watch {
         // After the loop, so a save finds its own file in place, applying now or later.
         for (author, text) in saves {
             stack.offer_save(cx, author, text);
+        }
+        if read_all {
+            cx.scenes.looked_at = Some(started);
         }
         // A cell's file made or taken away since: its cell comes in from it, or no longer does.
         // Not in a run that can't stop, whose recording or session lists it once.

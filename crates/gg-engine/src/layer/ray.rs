@@ -1,4 +1,4 @@
-//! A camera's ray through a window pixel.
+//! A camera's ray through a window pixel, and the pixel where it shows a point.
 
 use gg_core::math::{DVec3, Quat, Vec3, libm};
 use gg_renderer::{Projection, Viewpoint, Viewport};
@@ -26,6 +26,94 @@ impl Context {
     pub fn ray(&self, pixel: [f64; 2]) -> Option<Cast> {
         through(&self.drawn?, self.view?, pixel)
     }
+
+    /// The window pixel where the view shows `point`, as [`ray`](Self::ray) reads one: where a
+    /// marker over an entity goes. Hidden or not, and maybe past the view's edges.
+    ///
+    /// `None` for a point nearer than the near plane, behind the camera, or outside an
+    /// orthographic view's depth, and as `ray` has none.
+    pub fn pixel(&self, point: DVec3) -> Option<[f64; 2]> {
+        onto(&self.drawn?, self.view?, point)
+    }
+
+    /// Where the view shows `point`, as the tool API's `project` answers it: `None` as
+    /// [`ray`](Self::ray) has none.
+    #[cfg(feature = "dev")]
+    pub(crate) fn sighting(&self, point: DVec3) -> Option<Sighting> {
+        let (viewpoint, view) = (self.drawn?, self.view?);
+        let [left, top] = view.origin.map(f64::from);
+        let [width, height] = view.size.map(f64::from);
+        let at = onto(&viewpoint, view, point).map(|[x, y]| [x - left, y - top]);
+        let inside = |[x, y]: &[f64; 2]| (0.0..width).contains(x) && (0.0..height).contains(y);
+        Some(Sighting {
+            at: at.filter(inside),
+            turn: turn(&viewpoint, point),
+            distance: point.distance(viewpoint.position),
+        })
+    }
+}
+
+/// Where the view shows a point.
+#[cfg(feature = "dev")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Sighting {
+    /// Its pixel from the view's top left, inside the view.
+    pub(crate) at: Option<[f64; 2]>,
+    /// How far the camera turns right and up to face it, in radians: none without perspective.
+    pub(crate) turn: Option<[f64; 2]>,
+    /// From the camera, in units.
+    pub(crate) distance: f64,
+}
+
+/// Where `point` is, seen from `viewpoint`: right, up and back, in `f64`.
+fn seen(viewpoint: &Viewpoint, point: DVec3) -> DVec3 {
+    viewpoint.rotation.as_dquat().inverse() * (point - viewpoint.position)
+}
+
+/// The window pixel where a view at `view`, from `viewpoint`, shows `point`: [`through`]'s
+/// inverse.
+fn onto(viewpoint: &Viewpoint, view: Viewport, point: DVec3) -> Option<[f64; 2]> {
+    if !viewpoint.projection.projects() || view.size.contains(&0) {
+        return None;
+    }
+    let local = seen(viewpoint, point);
+    let depth = -local.z;
+    let aspect = f64::from(view.aspect());
+    // Half the view's height in world units, at the point's depth.
+    let half = match viewpoint.projection {
+        Projection::Perspective { fov, near } => {
+            (depth >= f64::from(near)).then(|| depth * f64::from(libm::tanf(fov * 0.5)))?
+        }
+        Projection::Orthographic { height, near, far } => {
+            let (near, far) = (f64::from(near.min(far)), f64::from(near.max(far)));
+            (near..=far)
+                .contains(&depth)
+                .then_some(f64::from(height) * 0.5)?
+        }
+    };
+    // From -1 at the view's left and bottom to 1 at its right and top, as `through` reads them.
+    let across = local.x / (half * aspect);
+    let up = local.y / half;
+    let [left, top] = view.origin.map(f64::from);
+    let [width, height] = view.size.map(f64::from);
+    let pixel = [
+        left + (across + 1.0) * 0.5 * width,
+        top + (1.0 - up) * 0.5 * height,
+    ];
+    pixel.iter().all(|x| x.is_finite()).then_some(pixel)
+}
+
+/// How far a camera at `viewpoint` turns right and up to face `point`, in radians.
+#[cfg(feature = "dev")]
+fn turn(viewpoint: &Viewpoint, point: DVec3) -> Option<[f64; 2]> {
+    let Projection::Perspective { .. } = viewpoint.projection else {
+        return None;
+    };
+    let local = seen(viewpoint, point);
+    let right = libm::atan2(local.x, -local.z);
+    let up = libm::atan2(local.y, libm::hypot(local.x, local.z));
+    let turn = [right, up];
+    turn.iter().all(|x| x.is_finite()).then_some(turn)
 }
 
 /// The ray from `viewpoint` through `pixel` of a view at `view` in the window.
@@ -181,6 +269,70 @@ mod tests {
         assert_eq!(through(&seen, view([0, 0], [10, 10]), [5.0, 5.0]), None);
     }
 
+    /// A point projects onto the pixel whose ray goes through it, in either projection, in a view
+    /// offset in the window; one behind the camera or out of an orthographic view's depth onto
+    /// none.
+    #[test]
+    fn points_project_onto_the_pixels_whose_rays_meet_them() {
+        let turned = Quat::from_rotation_y(0.4) * Quat::from_rotation_x(-0.3);
+        let panel = view([300, 40], [200, 100]);
+        let ortho = Viewpoint {
+            position: DVec3::new(10.0, 20.0, 30.0),
+            rotation: turned,
+            projection: Projection::Orthographic {
+                height: 4.0,
+                near: -1.0,
+                far: 5.0,
+            },
+        };
+        for seen in [perspective(DVec3::new(1.0, 2.0, 3.0), turned), ortho] {
+            for pixel in [[400.0, 90.0], [310.5, 41.0], [480.0, 130.25]] {
+                let ray = through(&seen, panel, pixel).expect("inside the view");
+                let point = ray.from + ray.toward.normalize().as_dvec3() * 3.0;
+                let back = onto(&seen, panel, point).expect("in front");
+                let near = (back[0] - pixel[0]).abs() < 1e-3 && (back[1] - pixel[1]).abs() < 1e-3;
+                assert!(near, "{pixel:?} came back as {back:?}");
+            }
+            let behind = seen.position + (seen.rotation * Vec3::Z).as_dvec3() * 10.0;
+            assert_eq!(onto(&seen, panel, behind), None);
+        }
+        // A point off to the side still has its pixel, past the view's edge.
+        let ahead = perspective(DVec3::ZERO, Quat::IDENTITY);
+        let aside = onto(
+            &ahead,
+            view([0, 0], [200, 100]),
+            DVec3::new(-5.0, 0.0, -1.0),
+        );
+        assert!(aside.is_some_and(|[x, _]| x < 0.0), "{aside:?}");
+    }
+
+    /// A camera turns right and up by the angles to a point, about its own axes; behind it, by
+    /// about a half turn. Without perspective it has no turn.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_camera_turns_by_the_angles_to_a_point() {
+        use std::f64::consts::{FRAC_PI_4, PI};
+        let eye = DVec3::new(1.0, 2.0, 3.0);
+        let seen = perspective(eye, Quat::IDENTITY);
+        let [right, up] = turn(&seen, eye + DVec3::new(1.0, 0.0, -1.0)).expect("a turn");
+        assert!(
+            (right - FRAC_PI_4).abs() < 1e-9 && up.abs() < 1e-9,
+            "{right} {up}"
+        );
+        let [right, up] = turn(&seen, eye + DVec3::new(0.0, 1.0, -1.0)).expect("a turn");
+        assert!(
+            right.abs() < 1e-9 && (up - FRAC_PI_4).abs() < 1e-9,
+            "{right} {up}"
+        );
+        let [right, _] = turn(&seen, eye + DVec3::new(0.0, 0.0, 1.0)).expect("a turn");
+        assert!((right.abs() - PI).abs() < 1e-9, "{right}");
+        // Turned a quarter left, a point down -X is straight ahead.
+        let left = perspective(eye, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let [right, up] = turn(&left, eye - DVec3::X).expect("a turn");
+        assert!(right.abs() < 1e-6 && up.abs() < 1e-6, "{right} {up}");
+        assert_eq!(turn(&Viewpoint::default(), DVec3::NEG_Z), None);
+    }
+
     /// A context's ray reads the view and viewpoint the last frame handed off, and has none before.
     #[test]
     fn a_context_rays_through_the_last_frame_drawn() {
@@ -191,7 +343,36 @@ mod tests {
         cx.drawn = Some(perspective(DVec3::new(0.0, 5.0, 0.0), Quat::IDENTITY));
         let ray = cx.ray([5.0, 5.0]).expect("the middle");
         assert_eq!(ray.from, DVec3::new(0.0, 5.0, 0.0));
+        let ahead = DVec3::new(0.0, 5.0, -2.0);
+        assert_eq!(cx.pixel(ahead), Some([5.0, 5.0]));
+        cx.view = Some(view([100, 20], [10, 10]));
+        assert_eq!(cx.pixel(ahead), Some([105.0, 25.0]));
         cx.view = None;
         assert_eq!(cx.ray([5.0, 5.0]), None);
+        assert_eq!(cx.pixel(ahead), None);
+    }
+
+    /// A context's sighting reads as its ray does: the pixel from the view's corner, inside the
+    /// view alone, with the turn and distance from the camera.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_context_sights_a_point_from_the_last_frame_drawn() {
+        let mut cx = Context::seeded(1);
+        let ahead = DVec3::new(0.0, 5.0, -2.0);
+        assert_eq!(cx.sighting(ahead), None);
+        cx.drawn = Some(perspective(DVec3::new(0.0, 5.0, 0.0), Quat::IDENTITY));
+        cx.view = Some(view([100, 20], [10, 10]));
+        let sighting = Sighting {
+            at: Some([5.0, 5.0]),
+            turn: Some([0.0, 0.0]),
+            distance: 2.0,
+        };
+        assert_eq!(cx.sighting(ahead), Some(sighting));
+        let aside = (cx.sighting(DVec3::new(-5.0, 5.0, -2.0))).expect("a sighting");
+        assert_eq!(aside.at, None);
+        let left = aside.turn.is_some_and(|[right, _]| right < 0.0);
+        assert!(left, "{aside:?}");
+        cx.view = None;
+        assert_eq!(cx.sighting(ahead), None);
     }
 }

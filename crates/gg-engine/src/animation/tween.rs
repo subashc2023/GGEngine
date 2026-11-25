@@ -569,6 +569,30 @@ mod tests {
         assert_eq!(moved, DVec3::new(4.0, 0.5, 0.0), "the rest left as it was");
     }
 
+    /// A tuple struct's field is named by its index, `0`, and one of a vector's components after
+    /// it, as `0.x`.
+    #[test]
+    fn a_tuple_struct_s_field_tweens_by_its_index() {
+        use crate::Tint;
+        use gg_core::math::Vec4;
+
+        let mut world = World::default();
+        let entity = world.spawn(Tint(Vec4::ONE));
+        let tint = |world: &World| world.get::<Tint>(entity).expect("tinted").0;
+        let part = Tween::new("Tint", "0.x", 1.0, 0.0, 1.0);
+        world.tween(entity, part).expect("a vector's component");
+        run(&mut world, 32);
+        assert_eq!(tint(&world), Vec4::new(0.5, 1.0, 1.0, 1.0));
+        let whole = Tween::new("Tint", "0", Vec4::ONE, Vec4::new(0.0, 0.0, 0.0, 1.0), 1.0);
+        world.tween(entity, whole).expect("a vector");
+        run(&mut world, 64);
+        assert_eq!(tint(&world), Vec4::new(0.0, 0.0, 0.0, 1.0));
+        let lacking = Tween::new("Tint", "1", 0.0, 1.0, 1.0);
+        let error = world.tween(entity, lacking).expect_err("a field it lacks");
+        assert_eq!(error.code(), "reflect.no_field");
+        assert!(error.to_string().contains("its fields are `0`"), "{error}");
+    }
+
     /// A translation 1,000 km out tweens in `f64`: halfway between two points 20 cm apart, to the
     /// micrometer, where `f32` would be 6 mm off.
     #[test]

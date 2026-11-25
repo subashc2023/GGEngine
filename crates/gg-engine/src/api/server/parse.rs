@@ -17,7 +17,7 @@ use super::world::Subject;
 use crate::Key;
 
 /// Listed by `api.unknown_method`.
-pub(super) const METHODS: [&str; 36] = [
+pub(super) const METHODS: [&str; 38] = [
     "hello",
     "ping",
     "status",
@@ -34,6 +34,8 @@ pub(super) const METHODS: [&str; 36] = [
     "press",
     "look",
     "pick",
+    "cast",
+    "project",
     "images",
     "entities",
     "entity",
@@ -105,6 +107,10 @@ pub(super) enum Call {
     Look(gg_api::Look),
     /// The view pixel to pick at, and optionally the entity whose model to pick within.
     Pick([f64; 2], Option<Subject>),
+    /// The view pixel to cast through, else its middle, and the entity whose colliders it skips.
+    Cast(Option<[f64; 2]>, Option<Subject>),
+    /// An entity, or a finite world point, to find in the view.
+    Project(Projecting),
     Images,
     Entities {
         with: Option<String>,
@@ -148,6 +154,13 @@ pub(super) enum Call {
     },
     Edits(Option<String>),
     Quit,
+}
+
+/// What `project` finds in the view.
+#[derive(Debug, PartialEq)]
+pub(super) enum Projecting {
+    Entity(Subject),
+    Point([f64; 3]),
 }
 
 /// What a held `input` lets go of, and when.
@@ -195,7 +208,8 @@ fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
 /// - `api.unknown_method`.
 /// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); an
 ///   `input` with an unknown key, or a `hold` of 0 or past [`MOST_STEPS`] ticks; a `press` of 0
-///   or past [`MOST_STEPS`] ticks; an `entities` field without a type; a `scene` path
+///   or past [`MOST_STEPS`] ticks; a `project` of neither or both of an entity and a finite
+///   point; an `entities` field without a type; a `scene` path
 ///   missing, unwanted or not `.ron`, or `discard` given to `save`; a `save_prefab` path not
 ///   `.prefab`; a `frames` `dir` not an absolute directory path, a `count` of 0 or past
 ///   [`gg_api::MOST_FRAMES`], or invalid viewpoints or `rect` (no area).
@@ -405,6 +419,24 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
             let gg_api::Pick { at, within } = take(method, params)?;
             Call::Pick(at, within.as_deref().map(Subject::of))
         }
+        "cast" => {
+            let gg_api::Cast { at, exclude } = take(method, params)?;
+            Call::Cast(at, exclude.as_deref().map(Subject::of))
+        }
+        "project" => match take(method, params)? {
+            gg_api::ProjectPoint {
+                entity: Some(entity),
+                point: None,
+            } => Call::Project(Projecting::Entity(Subject::of(&entity))),
+            gg_api::ProjectPoint {
+                entity: None,
+                point: Some(point),
+            } if point.iter().all(|x| x.is_finite()) => Call::Project(Projecting::Point(point)),
+            _ => {
+                let what = "takes an `entity`, or a finite `point`, `[x, y, z]`, one of them";
+                return Err(bad_params(method, what));
+            }
+        },
         "images" => none(method, params).map(|()| Call::Images)?,
         "view" => {
             let View { memory } = take(method, params)?;

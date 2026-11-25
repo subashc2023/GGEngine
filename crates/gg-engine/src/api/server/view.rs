@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use gg_api::{Button, Failure, ImageList, InputEvent, Looked, Picked};
+use gg_api::{Button, Failure, Hit, ImageList, InputEvent, Looked, Picked, Projected};
 use gg_core::Result;
 use gg_core::math::{DVec3, Quat, Vec4};
 use gg_renderer::{MIN_RENDER_SCALE, Projection, Viewpoint};
@@ -15,13 +15,14 @@ use tracing::warn;
 
 use super::connection::Reply;
 use super::files::{Png, Writing};
-use super::parse::bad_params;
+use super::parse::{Projecting, bad_params};
+use super::world::Subject;
 use super::{Api, failure};
 use crate::api::Shown;
 use crate::grid::Plane;
 use crate::layer::Outlining;
 use crate::render_thread::{Extracted, Publish, Shot};
-use crate::{Context, EntityId, Event, Key, MouseButton, Scroll};
+use crate::{Context, EntityId, Event, Key, MouseButton, Scroll, bounds};
 
 /// The longest a `capture` waits for a frame showing every texture and mesh added before it, none
 /// still decoding or streaming. Then it takes the next frame anyway, saying so.
@@ -485,6 +486,89 @@ fn engine_projection(given: gg_api::Projection) -> Projection {
 
 /// `shot` cropped to `rect` (`[x, y, width, height]` from its top left), whole without one;
 /// `None` if they don't overlap.
+/// What a ray from the view's camera through the view's pixel `at`, else its middle, hits first
+/// of the 3D colliders, past `exclude`'s, as `cast` answers it; with its entity's name if `named`.
+///
+/// Fails with `api.no_view` before a frame has drawn the view, and in replays; and as `exclude`
+/// resolves. An `exclude` of no living entity excludes none.
+pub(super) fn cast(
+    cx: &Context,
+    at: Option<[f64; 2]>,
+    exclude: Option<Subject>,
+    named: bool,
+) -> Result<Hit, Failure> {
+    let world = cx.world();
+    let exclude = exclude.map(|exclude| exclude.resolve(world));
+    let exclude = exclude.transpose().map_err(|error| failure(&error))?;
+    let view = cx.view().ok_or_else(undrawn)?;
+    let middle = view.size.map(|size| f64::from(size) * 0.5);
+    let in_window =
+        |[x, y]: [f64; 2]| [x + f64::from(view.origin[0]), y + f64::from(view.origin[1])];
+    cx.ray(in_window(middle)).ok_or_else(undrawn)?;
+    let mut hit = Hit {
+        id: None,
+        name: None,
+        point: None,
+        normal: None,
+        distance: None,
+    };
+    // Outside the view, it hits nothing, as a pick there picks nothing.
+    let Some(mut ray) = cx.ray(in_window(at.unwrap_or(middle))) else {
+        return Ok(hit);
+    };
+    ray.exclude = exclude.and_then(|id| world.entity(id));
+    if let Some(found) = world.cast_ray(ray) {
+        hit.id = world.id(found.entity).map(|id| id.to_string());
+        hit.name = (world.name(found.entity).filter(|_| named)).map(str::to_owned);
+        hit.point = Some(found.point.to_array());
+        hit.normal = Some(found.normal.to_array());
+        hit.distance = Some(found.distance);
+    }
+    Ok(hit)
+}
+
+/// Where the view shows what `projecting` names, as `project` answers it: an entity's middle of
+/// its bounds, else its origin.
+///
+/// Fails with `api.no_view` before a frame has drawn the view, and in replays; and as the entity
+/// resolves, or with `ecs.no_entity` for an ID no living entity has.
+pub(super) fn project(cx: &Context, projecting: Projecting) -> Result<Projected, Failure> {
+    let world = cx.world();
+    let point = match projecting {
+        Projecting::Point(point) => DVec3::from_array(point),
+        Projecting::Entity(subject) => {
+            let id = subject.resolve(world).map_err(|error| failure(&error))?;
+            let entity = world.entity(id).ok_or_else(|| {
+                Failure::new("ecs.no_entity", format!("no living entity has ID {id}"))
+            })?;
+            match bounds::of(world, cx.meshes(), entity) {
+                Some((center, _)) => center,
+                None => {
+                    world
+                        .pose(entity)
+                        .map_err(|error| failure(&error))?
+                        .matrix
+                        .translation
+                }
+            }
+        }
+    };
+    let sighting = cx.sighting(point).ok_or_else(undrawn)?;
+    Ok(Projected {
+        point: point.to_array(),
+        at: sighting.at,
+        turn: sighting.turn,
+        distance: sighting.distance,
+    })
+}
+
+/// `api.no_view`, for a `cast` or `project` before a frame has drawn the view.
+fn undrawn() -> Failure {
+    let message = "no frame has drawn the view yet, or the run replays one: run a frame, as \
+                   `step` does, first";
+    Failure::new("api.no_view", message)
+}
+
 fn crop(shot: &Arc<Shot>, rect: Option<[u32; 4]>) -> Option<Arc<Shot>> {
     let Some([x, y, width, height]) = rect else {
         return Some(shot.clone());

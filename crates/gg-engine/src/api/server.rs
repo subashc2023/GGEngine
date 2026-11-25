@@ -550,6 +550,8 @@ impl Api {
                 | Call::Input(_, None)
                 | Call::Look(_)
                 | Call::Pick(..)
+                | Call::Cast(..)
+                | Call::Project(_)
                 | Call::Images => self.answer_view(cx, stack, call, &client, names, reply),
                 Call::Entities { .. }
                 | Call::Entity(_)
@@ -795,6 +797,14 @@ impl Api {
                     Err(error) => reply.send(Err(failure(&error))),
                 }
             }
+            Call::Cast(at, exclude) => match view::cast(cx, at, exclude, names) {
+                Ok(hit) => reply.result(&hit),
+                Err(error) => reply.send(Err(error)),
+            },
+            Call::Project(projecting) => match view::project(cx, projecting) {
+                Ok(projected) => reply.result(&projected),
+                Err(error) => reply.send(Err(error)),
+            },
             Call::Images => self.images_asked.push(reply),
             _ => unreachable!("`answer` passes the view's calls alone"),
         }
@@ -1149,6 +1159,7 @@ impl Api {
                 .map_or(cx.scenes.open.edited, |edited| edited.open.edited),
             cells: (cx.world().cell_counts()).map(|(cells_in, kept)| CellCounts { cells_in, kept }),
             cursor_grabbed: cx.cursor_grabbed(),
+            files_looked: files_looked(cx),
         }
     }
 
@@ -1199,6 +1210,19 @@ impl Drop for Api {
 }
 
 /// `error` as the API answers it.
+/// When the game last looked at every scene and script file it watches, as [`Status`] gives it:
+/// the older look of the two kinds, of those that have looked.
+fn files_looked(cx: &Context) -> Option<u64> {
+    let looks = cx
+        .scenes
+        .looked_at
+        .into_iter()
+        .chain(cx.dev.scripts.looked_at());
+    let since = |at: std::time::SystemTime| at.duration_since(std::time::UNIX_EPOCH).ok();
+    let ms = |since: Duration| u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
+    looks.min().and_then(since).map(ms)
+}
+
 fn failure(error: &Error) -> Failure {
     Failure::new(error.code(), format!("{error:#}"))
 }

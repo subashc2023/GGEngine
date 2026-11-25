@@ -3533,6 +3533,152 @@ fn a_pick_is_answered_with_the_entity_drawn_there() {
     assert!(api.picks.is_empty());
 }
 
+/// A cast from the view's middle hits the nearest 3D collider, or the next past one excluded,
+/// named for a client that reads names; through a pixel beside them, or outside the view, it hits
+/// nothing. A projection gives an entity's pixel, the camera's turn to it and its distance; a point
+/// behind the camera has no pixel. Both fail before a frame has drawn the view.
+#[test]
+fn a_cast_hits_the_collider_through_a_pixel_and_a_projection_finds_a_point() {
+    use std::f32::consts::FRAC_PI_2;
+
+    use gg_api::{Hit, Projected};
+    use gg_core::math::Quat;
+    use gg_renderer::Projection;
+
+    use crate::{BodyType, RigidBody3D, SphereCollider3D};
+
+    let undrawn = Context::seeded(1);
+    let failed = view::cast(&undrawn, None, None, true)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(failed.code, "api.no_view");
+    let point = super::parse::Projecting::Point([0.0; 3]);
+    let failed = view::project(&undrawn, point).map(|_| ()).unwrap_err();
+    assert_eq!(failed.code, "api.no_view");
+
+    let (mut api, session) = started("Api Casts");
+    let mut cx = Context::seeded(12);
+    let world = cx.world_mut();
+    let at = |x, z| Transform {
+        translation: DVec3::new(x, 0.0, z),
+        ..Transform::IDENTITY
+    };
+    let fixed = RigidBody3D {
+        body_type: BodyType::Static,
+        ..RigidBody3D::default()
+    };
+    let ball = SphereCollider3D::default();
+    let named = |name: &str| Name(name.to_owned());
+    let near = world.spawn((at(0.0, -5.0), fixed, ball, named("Near")));
+    let far = world.spawn((at(0.0, -10.0), fixed, ball, named("Far")));
+    world.spawn((at(3.0, -10.0), named("Beside")));
+    let [near, far] = [near, far].map(|entity| world.id(entity).expect("alive").to_string());
+    crate::physics::step_physics(world);
+    // A right angle from bottom to top, twice as wide: at 10 deep, 10 up and 20 across.
+    cx.set_viewpoint(Viewpoint {
+        position: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        projection: Projection::Perspective {
+            fov: FRAC_PI_2,
+            near: 0.1,
+        },
+    });
+    let view = Viewport {
+        origin: [10, 20],
+        size: [100, 50],
+    };
+    cx.extract(&mut Extracted::default(), view);
+    let granted = session.clone();
+    let client = move |mut client: Client| {
+        let mut cast = |params| client.call_as::<Hit>("cast", params).expect("an answer");
+        let hits = [
+            cast(json!({})),
+            cast(json!({"exclude": "Near"})),
+            cast(json!({"at": [90, 25]})),
+            cast(json!({"at": [-1, 25]})),
+        ];
+        let grant = Some(vec!["view".to_owned()]);
+        let connected = Client::connect_granted(&granted, "test", grant, DEADLINE);
+        let mut viewer = connected.expect("it connects");
+        let unnamed = viewer.call_as::<Hit>("cast", json!({})).expect("an answer");
+        let ungranted = viewer.call_as::<Projected>("project", json!({"entity": "Beside"}));
+        let mut project =
+            |params| (client.call_as::<Projected>("project", params)).expect("an answer");
+        let beside = project(json!({"entity": "Beside"}));
+        let behind = project(json!({"point": [0, 0, 5]}));
+        (hits, unnamed, ungranted.map(|_| ()), beside, behind)
+    };
+    let (hits, unnamed, ungranted, beside, behind) = serving(
+        &mut api,
+        &mut cx,
+        &mut Stack::default(),
+        &mut Stepper::default(),
+        session,
+        client,
+        |_, _, _| {},
+    );
+    let [first, past, aside, outside] = hits;
+    let hit = |id: &str, name: &str, z: f64, distance: f32| Hit {
+        id: Some(id.to_owned()),
+        name: Some(name.to_owned()),
+        point: Some([0.0, 0.0, z]),
+        normal: Some([0.0, 0.0, 1.0]),
+        distance: Some(distance),
+    };
+    let close = |a: &Hit, b: &Hit| {
+        let points = a
+            .point
+            .zip(b.point)
+            .is_some_and(|(a, b)| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-4));
+        let distances = a
+            .distance
+            .zip(b.distance)
+            .is_some_and(|(a, b)| (a - b).abs() < 1e-4);
+        a.id == b.id && a.name == b.name && points && distances
+    };
+    assert!(close(&first, &hit(&near, "Near", -4.5, 4.5)), "{first:?}");
+    assert!(close(&past, &hit(&far, "Far", -9.5, 9.5)), "{past:?}");
+    let nothing = Hit {
+        id: None,
+        name: None,
+        point: None,
+        normal: None,
+        distance: None,
+    };
+    assert_eq!((aside, outside), (nothing.clone(), nothing));
+    assert_eq!(
+        (unnamed.id, unnamed.name),
+        (Some(near), None),
+        "`view` alone"
+    );
+    assert_eq!(
+        ungranted.map_err(|error| error.code),
+        Err("api.ungranted".to_owned())
+    );
+    // Three across at 10 deep is 3/20 of half the view right of its middle.
+    assert_eq!(beside.point, [3.0, 0.0, -10.0]);
+    let [x, y] = beside.at.expect("in the view");
+    assert!(
+        (x - 57.5).abs() < 1e-9 && (y - 25.0).abs() < 1e-9,
+        "{beside:?}"
+    );
+    let [right, up] = beside.turn.expect("a perspective");
+    assert!(
+        (right - gg_core::math::libm::atan(0.3)).abs() < 1e-9 && up.abs() < 1e-9,
+        "{beside:?}"
+    );
+    assert!(
+        (beside.distance - 109.0_f64.sqrt()).abs() < 1e-9,
+        "{beside:?}"
+    );
+    assert_eq!((behind.at, behind.distance), (None, 5.0));
+    let [right, _] = behind.turn.expect("a perspective");
+    assert!(
+        (right.abs() - std::f64::consts::PI).abs() < 1e-9,
+        "{behind:?}"
+    );
+}
+
 /// A pick of a model's node is answered with the model's root, but within the model: the node drawn
 /// there, however deep, named as `entities` and `entity` name it. Within another entity or one
 /// gone, it gives the root still; an entity in no model gives itself.
@@ -3742,6 +3888,24 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
     );
     let pick = parse(&request("pick", json!({"at": [3, 4.5]})));
     assert_eq!(pick, Ok(Call::Pick([3.0, 4.5], None)));
+    assert_eq!(
+        parse(&request("cast", Value::Null)),
+        Ok(Call::Cast(None, None))
+    );
+    let cast = json!({"at": [3, 4.5], "exclude": "Hero"});
+    let hero = Some(Subject::Name("Hero".to_owned()));
+    assert_eq!(
+        parse(&request("cast", cast)),
+        Ok(Call::Cast(Some([3.0, 4.5]), hero))
+    );
+    let projecting = |given| match parse(&request("project", given)) {
+        Ok(Call::Project(projecting)) => Some(projecting),
+        _ => None,
+    };
+    let entity = super::parse::Projecting::Entity(Subject::Name("Hero".to_owned()));
+    assert_eq!(projecting(json!({"entity": "Hero"})), Some(entity));
+    let point = super::parse::Projecting::Point([1.0, 2.0, 3.0]);
+    assert_eq!(projecting(json!({"point": [1, 2, 3]})), Some(point));
     let within = json!({"at": [3, 4.5], "within": "00000000000000ff"});
     let id = Subject::Id("00000000000000ff".parse().expect("an ID"));
     assert_eq!(
@@ -3919,6 +4083,15 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         ("look", json!({"render_scale": "half"}), "api.bad_params"),
         ("pick", Value::Null, "api.bad_params"),
         ("pick", json!({"at": [1]}), "api.bad_params"),
+        ("cast", json!({"at": [1]}), "api.bad_params"),
+        ("cast", json!({"within": "Hero"}), "api.bad_params"),
+        ("project", Value::Null, "api.bad_params"),
+        ("project", json!({"point": [1, 2]}), "api.bad_params"),
+        (
+            "project",
+            json!({"entity": "Hero", "point": [1, 2, 3]}),
+            "api.bad_params",
+        ),
         ("images", json!({"all": true}), "api.bad_params"),
         ("input", Value::Null, "api.bad_params"),
         (

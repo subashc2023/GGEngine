@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use gg_api::Failure;
+use gg_api::{Failure, LogEvents, Status};
 use serde_json::{Value, json};
 
 use crate::build;
-use crate::game::Pick;
+use crate::game::{self, Pick};
 
 /// How often the file is written, and `wait` reads it.
 const WRITE: Duration = Duration::from_millis(200);
@@ -24,6 +24,23 @@ const STALE: Duration = Duration::from_secs(5);
 /// How long `wait` waits for a just-started `gg run`'s file, within its timeout: written once
 /// cargo names the target directory.
 const GRACE: Duration = Duration::from_secs(5);
+
+/// The most files `wait` lists the game's last event of, the latest.
+const MOST_FILE_EVENTS: usize = 20;
+
+/// How many of the game's latest events at `info` or above `wait` reads for those about files.
+const FILE_EVENTS_READ: usize = 1_000;
+
+/// The fields of an event about a file that `wait` lists, of those it has.
+const FILE_FIELDS: [&str; 7] = [
+    "timestamp",
+    "level",
+    "code",
+    "message",
+    "path",
+    "script",
+    "operations",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct State {
@@ -243,8 +260,10 @@ fn down_as(told: &Value) -> Failure {
 }
 
 /// Waits, for at most `timeout`, until `pick`'s game runs every edit to the watched sources saved
-/// before this call; returns the run's file. That holds once the run has looked at the sources
-/// since and the processes serve, patched or rebuilt; with none watched, once the game serves.
+/// before this call, and has looked at the scene and script files it watches since; returns the
+/// run's file, with `files_looked` and `files` ([`looked`]). The code holds once the run has
+/// looked at the sources since and the processes serve, patched or rebuilt; with none watched,
+/// once the game serves.
 ///
 /// # Errors
 ///
@@ -253,7 +272,8 @@ fn down_as(told: &Value) -> Failure {
 /// - `gg.waiting`: the game ended and waits for a change to rebuild it.
 /// - `gg.no_run`: no run: no file within [`GRACE`] of the call, or gone since.
 /// - `gg.which_run`: several do; `--pid` tells them apart.
-/// - `gg.timeout`: the code isn't running within `timeout`.
+/// - `gg.timeout`: the code isn't running within `timeout`, or the game hasn't looked at its
+///   files since.
 /// - `gg.cargo`: cargo can't name the target directory.
 pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
     let target = build::target_dir(pick.project.as_deref().and_then(Path::parent))?;
@@ -285,7 +305,7 @@ pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
             }
         };
         if let Some(waited) = waited(&told, asked) {
-            return waited;
+            return looked(pick, waited?, asked, start, timeout);
         }
         if start.elapsed() >= timeout {
             let phase = told["state"].as_str().unwrap_or_default();
@@ -298,6 +318,84 @@ pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
         }
         thread::sleep(WRITE);
     }
+}
+
+/// Waits, within `timeout` of `start`, until `pick`'s game has looked at its scene and script
+/// files since `asked` (ms since the epoch), each saved before then applied or refused. Returns
+/// `told` with `files_looked`, when it last looked, and `files`, the last event it logged of each
+/// file ([`about_files`]) among its latest [`FILE_EVENTS_READ`]: not the events since the wait
+/// began, since a look every 200 ms often applies a save before `gg` starts. A game that watches
+/// none, or hasn't looked yet, as one just started, has nothing to wait for.
+///
+/// Fails with `gg.timeout` if it hasn't looked within `timeout`, as while its frames pause.
+fn looked(
+    pick: &Pick,
+    mut told: Value,
+    asked: u64,
+    start: Instant,
+    timeout: Duration,
+) -> Result<Value, Failure> {
+    let (mut client, looked) = loop {
+        // A game restarting answers once it serves again.
+        if let Ok(mut client) = game::connect(pick)
+            && let Ok(status) = client.call_as::<Status>("status", Value::Null)
+            && status.files_looked.is_none_or(|looked| looked >= asked)
+        {
+            break (client, status.files_looked);
+        }
+        if start.elapsed() >= timeout {
+            let message = format!(
+                "the game runs the code of the edits saved before `wait`, but didn't look at its \
+                 scene and script files within {} s, as while its frames pause",
+                timeout.as_secs()
+            );
+            return Err(Failure::new("gg.timeout", message));
+        }
+        thread::sleep(WRITE);
+    };
+    told["files_looked"] = json!(looked);
+    // A read stops at half a line's bytes: read on to the end, a few times at most.
+    let mut params = json!({"level": "info", "last": FILE_EVENTS_READ});
+    let mut events = Vec::new();
+    for _ in 0..8 {
+        let Ok(read) = client.call_as::<LogEvents>("logs", params) else {
+            break;
+        };
+        events.extend(read.events);
+        if read.next >= read.end {
+            break;
+        }
+        params = json!({"level": "info", "from": read.next, "run": read.run});
+    }
+    told["files"] = Value::Array(about_files(&events));
+    Ok(told)
+}
+
+/// The last of `events` about each scene and script file, by its `script` or a scene event's
+/// `path`, in the order of those last events: at most [`MOST_FILE_EVENTS`] files', the latest,
+/// each with [`FILE_FIELDS`].
+fn about_files(events: &[Box<serde_json::value::RawValue>]) -> Vec<Value> {
+    let events = events.iter();
+    let events = events.filter_map(|event| serde_json::from_str::<Value>(event.get()).ok());
+    let mut listed: Vec<(String, Value)> = Vec::new();
+    for event in events {
+        let scene = (event["code"].as_str()).is_some_and(|code| code.starts_with("scene."));
+        let file = match (event["script"].as_str(), event["path"].as_str()) {
+            (Some(script), _) => script,
+            (None, Some(path)) if scene => path,
+            _ => continue,
+        };
+        let file = file.to_owned();
+        let fields = FILE_FIELDS.iter().filter_map(|&name| {
+            let value = event.get(name).filter(|value| !value.is_null())?;
+            Some((name.to_owned(), value.clone()))
+        });
+        listed.retain(|(listed, _)| *listed != file);
+        listed.push((file, Value::Object(fields.collect())));
+    }
+    let over = listed.len().saturating_sub(MOST_FILE_EVENTS);
+    listed.drain(..over);
+    listed.into_iter().map(|(_, event)| event).collect()
 }
 
 /// The wait's end, from `told`, for a wait started at `asked` (ms since the epoch); else `None`.
@@ -376,6 +474,58 @@ mod tests {
         );
         assert_eq!(read["reload"], patched);
         assert!(other.is_empty() && !gone && left.is_empty());
+    }
+
+    /// A wait lists the last event the game logged of each scene and script file, with their own
+    /// fields alone, the latest files'.
+    #[test]
+    fn a_wait_lists_the_last_event_the_game_logged_of_each_file() {
+        let line = |event: Value| serde_json::value::to_raw_value(&event).expect("JSON");
+        let mut events = vec![
+            line(json!({"level": "INFO", "message": "Starting GGEngine", "pid": 7})),
+            line(
+                json!({"level": "WARN", "code": "scene.file", "path": "scenes/main.ron",
+                        "message": "doesn't load"}),
+            ),
+            line(
+                json!({"timestamp": "t", "level": "INFO", "code": "scene.applied",
+                        "path": "scenes/main.ron", "operations": 2, "message": "Applied",
+                        "target": "gg_engine", "line_number": 449}),
+            ),
+            line(
+                json!({"level": "INFO", "script": "scripts/report.luau", "component": "Report",
+                        "message": "Each `Report` holds its fields"}),
+            ),
+            line(json!({"level": "INFO", "script": "scripts/report.luau",
+                        "message": "Script reloaded", "threadName": "main"})),
+            line(
+                json!({"level": "WARN", "code": "script.syntax", "script": "scripts/a.luau",
+                        "message": "a.luau:3: expected"}),
+            ),
+            line(
+                json!({"level": "WARN", "code": "asset.no_id", "path": "textures/a.png",
+                        "message": "no ID"}),
+            ),
+        ];
+        assert_eq!(
+            about_files(&events),
+            [
+                json!({"timestamp": "t", "level": "INFO", "code": "scene.applied",
+                       "message": "Applied", "path": "scenes/main.ron", "operations": 2}),
+                json!({"level": "INFO", "message": "Script reloaded",
+                       "script": "scripts/report.luau"}),
+                json!({"level": "WARN", "code": "script.syntax", "message": "a.luau:3: expected",
+                       "script": "scripts/a.luau"}),
+            ]
+        );
+        let reload = |i| {
+            json!({"level": "INFO", "script": format!("{i}.luau"),
+                                "message": "Script reloaded"})
+        };
+        events.extend((0..MOST_FILE_EVENTS).map(|i| line(reload(i))));
+        let listed = about_files(&events);
+        let latest: Vec<Value> = (0..MOST_FILE_EVENTS).map(reload).collect();
+        assert_eq!(listed, latest, "the latest files'");
     }
 
     /// A game down says what its run does, with the build's errors.

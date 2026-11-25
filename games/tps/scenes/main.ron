@@ -316,7 +316,7 @@
             ),
         ),
         "9a3b6868b77a7d77": (
-            ModelRoot: ("gg:cube"),
+            ModelRoot: ("gg:sphere"),
             Name: ("Target"),
             RigidBody3D: (
                 body_type: Static,
@@ -429,7 +429,7 @@
             ),
         ),
         "b8d8b9af4bf18885": (
-            ModelRoot: ("gg:cube"),
+            ModelRoot: ("gg:sphere"),
             Name: ("Target"),
             RigidBody3D: (
                 body_type: Static,
@@ -459,7 +459,7 @@
             ),
         ),
         "bc6d9a61e0a81fec": (
-            ModelRoot: ("gg:cube"),
+            ModelRoot: ("gg:sphere"),
             Name: ("Target"),
             RigidBody3D: (
                 body_type: Static,
@@ -489,7 +489,7 @@
             ),
         ),
         "c37f89cc8e1c680d": (
-            ModelRoot: ("gg:cube"),
+            ModelRoot: ("gg:sphere"),
             Name: ("Target"),
             RigidBody3D: (
                 body_type: Static,
@@ -654,7 +654,7 @@
             ),
         ),
         "f8b74c77d7be13ec": (
-            ModelRoot: ("gg:cube"),
+            ModelRoot: ("gg:sphere"),
             Name: ("Target"),
             RigidBody3D: (
                 body_type: Static,

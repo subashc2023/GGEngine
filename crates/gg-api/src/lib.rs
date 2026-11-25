@@ -16,11 +16,11 @@
 //!
 //! # Entities
 //!
-//! Where a request takes an entity (`entity`, `get`, `save_prefab`, `pick`'s `within`, and the `id`
-//! and `parent` of [`Operation`]s), its value is an ID or a name. Text of 16 hex digits is an ID.
-//! Any other is the `Name` of the one entity that has it, else the request fails with
-//! `ecs.no_entity`, naming the text, for none, or `ecs.ambiguous_name`, listing their IDs, for
-//! several. The IDs a request makes (`create`'s `id`, `duplicate`'s `copies`) are IDs alone.
+//! Where a request takes an entity (`entity`, `get`, `save_prefab`, `pick`'s `within`, `cast`'s
+//! `exclude`, `project`'s `entity`, and the `id` and `parent` of [`Operation`]s), its value is an
+//! ID or a name. Text of 16 hex digits is an ID. Any other is the `Name` of the one entity that
+//! has it, else the request fails with `ecs.no_entity`, naming the text, for none, or
+//! `ecs.ambiguous_name`, listing their IDs, for several. The IDs a request makes (`create`'s `id`, `duplicate`'s `copies`) are IDs alone.
 //!
 //! # Methods
 //!
@@ -41,6 +41,8 @@
 //! | `press` | [`Press`] | [`Pressed`] | `input` |
 //! | `look` | [`Look`] | [`Looked`] | `view` |
 //! | `pick` | [`Pick`] | [`Picked`] | `view` |
+//! | `cast` | [`Cast`] | [`Hit`] | `view` |
+//! | `project` | [`ProjectPoint`] | [`Projected`] | `view` |
 //! | `images` | - | [`ImageList`] | `view` |
 //! | `entities` | [`Entities`] | [`EntityList`] | `read` |
 //! | `entity` | [`Entity`] | see notes | `read` |
@@ -152,6 +154,12 @@
 //!   Not refused: an outline that outlines nothing, an image name the frame doesn't make.
 //! - `pick`: the entity the view shows at a pixel as shown (the look among it), in the frame that
 //!   reads it, about four frames on. `api.bad_params` for a `within` that isn't 16 hex digits.
+//!   What the game draws over the world, as a crosshair on its canvas, shows on top: `null` there.
+//! - `cast`, `project`: answer at once, from the viewpoint and view the last frame drew, as the
+//!   game's `Context::ray` reads them; `cast` sees the colliders as the last tick left them. Both
+//!   fail with `api.no_view` before a frame has drawn the view, and in replays. `cast` sees 3D
+//!   colliders alone; `pick` serves 2D games. `project` fails with `api.bad_params` for neither or
+//!   both of `entity` and `point`, or a point that isn't finite.
 //! - `images`: the images [`Shown::Image`] names that the next frame that renders makes, by debug
 //!   name, with what each holds and its size, in the frame's order. They follow the look: with the
 //!   light drawn or an image shown, every pass's but antialiasing's, which a frame showing an image
@@ -280,7 +288,8 @@
 //!
 //! - `get` needs `read` of its component's type; `apply`, `write` of the type each `set`, `add`,
 //!   `remove` and `revert` names, and of the whole world for any other operation;
-//! - `pick` names its entity only with `read` of `Name` too;
+//! - `pick` and `cast` name their entity only with `read` of `Name` too; `project` of an entity
+//!   needs `read` too;
 //! - a `capture` or a `snapshot` given a path needs `files` too, and a `snapshot` with `quit`,
 //!   `quit` too.
 //!
@@ -624,6 +633,12 @@ pub struct Status {
     /// cursor, report what layers want. False from an engine older than it.
     #[serde(default)]
     pub cursor_grabbed: bool,
+    /// When the game last looked at the scene and script files it watches, in ms since the Unix
+    /// epoch, as `gg run`'s file gives times. Each saved before then has applied, or warned why
+    /// not; a lockstep host's applies at a tick it offers. `None` before a look, in a game that
+    /// watches none, and from an engine older than it.
+    #[serde(default)]
+    pub files_looked: Option<u64>,
 }
 
 /// How many of a world's cells are in, and how many out keep what they held.
@@ -1266,6 +1281,66 @@ pub struct Picked {
     pub name: Option<String>,
 }
 
+/// What `cast` takes: the view's pixel `at` to cast through, as [`Pick::at`], else the view's
+/// middle, where a crosshair is.
+///
+/// `exclude`, an entity's ID or name, whose colliders the ray passes through: the player's, for a
+/// camera inside or behind it. A shot in a game skips its shooter the same way.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cast {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<String>,
+}
+
+/// What `cast` answers: the entity whose 3D collider the ray hits first, as [`Picked`] names it.
+///
+/// Both are `None` where it hits nothing, and the rest are absent. `point` is where it hits in the
+/// world, `normal` the unit vector out of the surface there, and `distance` how far from the view's
+/// camera, in units. A ray starting inside a collider hits it at 0, with a zero normal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hit {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f32>,
+}
+
+/// What `project` takes: an `entity`, by ID or name, or a world `point`, `[x, y, z]`; one of them.
+///
+/// An entity's point is the middle of its `bounds`, as `entity` answers them, else its origin.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectPoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<[f64; 3]>,
+}
+
+/// What `project` answers: where the view shows a point, from the viewpoint the last frame drew.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Projected {
+    /// The world point projected.
+    pub point: [f64; 3],
+    /// The view's pixel there, `[x, y]` from its top left, as [`Pick::at`]: `None` outside the
+    /// view, behind the camera, or nearer than its near plane. Hidden or not: a `pick` there says
+    /// what shows.
+    pub at: Option<[f64; 2]>,
+    /// How far the view's camera turns to face the point, in radians right and up of the view's
+    /// middle, about its own axes: `None` without perspective. A game turning its camera by mouse
+    /// motion turns it by the motion times its sensitivity.
+    pub turn: Option<[f64; 2]>,
+    /// How far it is from the view's camera, in units.
+    pub distance: f64,
+}
+
 /// What `images` answers: the images [`Shown::Image`] names that the reading frame made, in its
 /// order, each name once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1766,9 +1841,9 @@ pub enum UiEventKind {
 
 /// The methods that change nothing, which a client may send again whether or not the first was
 /// taken.
-const READS: [&str; 14] = [
+const READS: [&str; 16] = [
     "hello", "ping", "status", "entities", "entity", "get", "types", "hash", "assets", "ui",
-    "edits", "logs", "pick", "cells",
+    "edits", "logs", "pick", "cast", "project", "cells",
 ];
 
 /// Whether `method` may change the game, its world, run or files.

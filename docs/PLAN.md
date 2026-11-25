@@ -76,7 +76,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | `gg run` patching edits to constants, and restarting on crashes from data and on manifest edits | Agents tune constants live, or data crashes a game |
 | `gg run --peers 2` windows apart, through a relay or embedded; an app's name and run defaults in a manifest, the sandbox's too | Someone needs them |
 | `gg input`: the cursor in canvas units, clicks that leave the OS cursor ungrabbed | An agent plays a game through it |
-| Through the API: `pick` naming the entity's parent, a world point's pixel | An agent aims in 3D |
+| Through the API: `pick` naming the entity's parent, `cast` through 2D colliders or of a shape | An agent needs one |
 
 ### Shipping and CI
 
@@ -194,7 +194,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Determinism checks: job threads' FP environment, zero signs of f32 `min` and `max`, physics in the hash, layout divergences located | A replay parts unseen |
 | Recordings of restored runs, rollback peers, servers and joiners, and of every run as a flight recorder | Such a run is worth replaying |
 | Recordings that travel: holding what attach read, scripts, the commit, and stand-ins that keep the hash | A bug report replays elsewhere |
-| Layers' own state (cameras, the look) kept across a restart from a snapshot | Someone misses where they looked |
+| Layers' own state (cameras, the look, the cursor's grab) kept across a restart from a snapshot | Someone misses where they looked, or grabbing again after a restart costs more than a click |
 | Frames allocating nothing with egui, sounds, a pad, keys on Windows, asset watchers, physics, or job threads' first ticks | Frames must allocate nothing |
 | Counting what the Vulkan loader, drivers, validation and VMA allocate (`VkAllocationCallbacks`) | A profile shows them allocating each frame |
 | The job system in gg-core, where the renderer can reach it | gg-renderer needs jobs |
@@ -203,7 +203,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 
 | Deferred | Add when |
 |---|---|
-| Scripts: `has` a component, find by `Name`, strings, input, random numbers from the world, a machine's state; create and destroy hooks | A script needs it |
+| Scripts: `has` a component, find by `Name`, reading strings, input, random numbers from the world, a machine's state; create and destroy hooks | A script needs it |
 | Calls into a script with arguments, or events scripts hook | A game hands a script what happened, as the card demo encodes plays in a field |
 | A tick's budget for all of a game's script calls, or one by time in development builds | A runaway script's crawl gets in the way |
 | luau-lsp type definitions, and debugging over DAP (`gg dap`) | Someone works on scripts in a code editor |

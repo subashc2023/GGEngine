@@ -688,18 +688,13 @@ fn no_script_code_runs_outside_a_call_into_a_script() {
 fn a_script_s_write_is_refused_as_a_field_set_by_name_is() {
     let dir = Scratch::new("luau-checked");
     let script = "local Box = gg.component(\"BoxCollider2D\")\n\
-            local Dense = gg.declare(\"Dense\", {\n\
-                to = 1,\n\
-                parentless = next(gg.component(\"Parent\")) == nil,\n\
-            })\n\
+            local Dense = gg.declare(\"Dense\", { to = 1 })\n\
             function Dense.tick(entity, dt)\n\
                 entity[Box.density] = entity[Dense.to]\n\
             end\n\
             return Dense\n";
     let (mut cx, mut host) = loaded(&dir, &[("scripts/dense.luau", script)]);
     let world = cx.world_mut();
-    let parentless = default(world, "Dense", "parentless");
-    assert_eq!(parentless, Some(Value::Bool(true)));
     let dense = world.spawn(crate::BoxCollider2D::default());
     world.add_default(dense, "Dense").expect("added");
     let collider = world.component_named("BoxCollider2D").expect("registered");

@@ -204,13 +204,17 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "wait",
-        description: "Call after editing the game's code, before checking what the edit does: \
-                      waits until the game under `gg run` runs the code of every edit saved before \
-                      the call, patched, or rebuilt and restarted, and answers what the run is \
+        description: "Call after editing the game's code, scenes or scripts, before checking \
+                      what the edit does: waits until the game under `gg run` runs the code of \
+                      every edit saved before the call, patched, or rebuilt and restarted, and has \
+                      looked at its scene and script files since, and answers what the run is \
                       doing. Its `reload` is the last patch (`patched`, with its `files`, \
                       `build_ms` and `apply_ms`) or rebuild (`rebuilt`, with its `why` and \
-                      `build_ms`), with `at`, ms since the epoch, as `updated`. Scene files aren't \
-                      code: the game applies each as it's saved, without a wait. Fails with \
+                      `build_ms`), with `at`, ms since the epoch, as `updated`. `files_looked` is \
+                      when the game last looked at its scene and script files, and `files` the \
+                      last event it logged of each, the latest 20 files', with its `timestamp`: \
+                      `scene.applied`, `Script reloaded`, a warning why one didn't apply, a \
+                      script's error. Fails with \
                       `gg.build_failed` and rustc's errors if the edits don't build (the game runs \
                       its old code), `gg.waiting` if the game ended and waits for a change, or \
                       `gg.timeout`.",
@@ -454,6 +458,44 @@ const TOOLS: &[Tool] = &[
             })
         },
         required: &["at"],
+    },
+    Tool {
+        name: "cast",
+        description: "What a ray from the view's camera through a pixel, or the view's middle where \
+                      a crosshair is, hits first of the 3D colliders, sensors skipped: the \
+                      entity's ID and name, the `point` hit, the surface's `normal` there and the \
+                      `distance` from the camera; ID and name null for none. Reads the camera the \
+                      last frame drew and the colliders as the last tick left them, as a game's \
+                      shot does: what a shot would hit, where `pick` says what shows, a HUD \
+                      included. Fails with api.no_view before a frame has drawn the view.",
+        properties: || {
+            json!({
+                "at": numbers(2, "The pixel, [x, y] from the view's top left, as `pick` takes \
+                                  it; the view's middle without it"),
+                "exclude": {"type": "string",
+                            "description": "The ID or name of an entity whose colliders the ray \
+                                            passes through: the player's, for a camera inside or \
+                                            behind it"},
+            })
+        },
+        required: &[],
+    },
+    Tool {
+        name: "project",
+        description: "Where the view shows an entity, by the middle of what it draws, else its \
+                      origin, or a world point, from the camera the last frame drew: `at`, the \
+                      pixel as `pick` takes it, null outside the view or behind the camera; `turn`, \
+                      the radians [right, up] the camera turns to face it, about its own axes, \
+                      null without perspective; `distance` from the camera. Hidden or not. To aim \
+                      a camera turned by mouse motion, move by `turn` over the game's sensitivity; \
+                      a camera orbiting its player moves as it turns, so project again.",
+        properties: || {
+            json!({
+                "entity": {"type": "string", "description": "An entity's ID or name"},
+                "point": numbers(3, "A world point, [x, y, z]"),
+            })
+        },
+        required: &[],
     },
     Tool {
         name: "images",
@@ -1029,10 +1071,9 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         }
         _ if crate::NO_PARAMETERS.contains(&name) || name == "snapshot" => call(name, Value::Null),
         // `scene`'s and `save_prefab`'s paths stay as given: from the asset root.
-        "step" | "scene" | "pick" | "input" | "press" | "entities" | "entity" | "get" | "apply"
-        | "save_prefab" | "undo" | "redo" | "edits" | "assets" | "debug" => {
-            call(name, Value::Object(arguments))
-        }
+        "step" | "scene" | "pick" | "cast" | "project" | "input" | "press" | "entities"
+        | "entity" | "get" | "apply" | "save_prefab" | "undo" | "redo" | "edits" | "assets"
+        | "debug" => call(name, Value::Object(arguments)),
         "look" | "frames" => {
             // A name that isn't a variant's is an image's, as in `capture`.
             if let Some(show) = arguments.get_mut("show")

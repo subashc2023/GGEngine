@@ -93,6 +93,7 @@ fn status(stopped: bool, paused: bool) -> Result<Value, Failure> {
         edited: false,
         cells: None,
         cursor_grabbed: false,
+        files_looked: None,
     };
     Ok(json!(status))
 }
@@ -112,6 +113,7 @@ fn scene_status(scene: Option<&str>, unsaved: bool) -> Result<Value, Failure> {
         edited: unsaved,
         cells: None,
         cursor_grabbed: false,
+        files_looked: None,
     };
     Ok(json!(status))
 }

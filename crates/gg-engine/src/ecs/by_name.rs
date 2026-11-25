@@ -342,16 +342,14 @@ impl World {
         self.components.declared(id).map(|declared| &**declared)
     }
 
-    /// The fields of component type `id`; none if it isn't a struct with named fields.
+    /// The fields of component type `id`, a tuple struct's named `0`, `1`, and so on; none if it
+    /// isn't a struct.
     pub(crate) fn fields_of(&self, id: ComponentId) -> &[reflect::Field] {
         let Type::Named(index) = self.components.ty(id) else {
             return &[];
         };
         match &self.types().info(index).shape {
-            Shape::Struct {
-                fields,
-                tuple: false,
-            } => fields,
+            Shape::Struct { fields, .. } => fields,
             _ => &[],
         }
     }
@@ -364,7 +362,7 @@ impl World {
         }
     }
 
-    /// Field `index` of `entity`'s component `id`, a struct with named fields. Doesn't allocate:
+    /// Field `index` of `entity`'s component `id`, a struct. Doesn't allocate:
     /// scripts read fields every tick.
     ///
     /// Fails with `ecs.no_entity` if `entity` isn't alive, `reflect.missing_component` if it lacks
@@ -381,7 +379,7 @@ impl World {
         Ok(column.part(row, index).expect(FIELD))
     }
 
-    /// Field `index` of `entity`'s component `id`, a struct with named fields, to be set to
+    /// Field `index` of `entity`'s component `id`, a struct, to be set to
     /// `value`, checked like [`set_field`](Self::set_field). Doesn't allocate unless it's refused:
     /// scripts set fields every tick. To avoid allocating a `Value`, `value` is `None` for an
     /// entity or none (no bounds apply), set as an `Option<Entity>`; for an option's field, a

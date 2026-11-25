@@ -60,13 +60,13 @@ Lifecycle, in order:
 | vector | Luau's native four-wide `vector`, `vector.create(x, y, z, w)`, w optional. A `Vec2` reads as `(x, y, 0, 0)` and writes from `x`, `y`; a `Vec3` as `(x, y, z, 0)`; a `Vec4` whole. A `DVec3` position, such as a `Transform`'s `translation`, reads as a `Vec3`, each part rounded to the nearest `f32`, and writes from `x`, `y`, `z` as they are. So positions, the casts' included, step 2 mm at 16 km from the origin and 6 cm at 1,000 km. `vector.angle` is gone. |
 | quaternion | A vector `(x, y, z, w)`, as `gg.quat` makes. Identity is `(0, 0, 0, 1)`. |
 
-Strings, enums, structs and lists are fields scripts can't reach: they have no handle.
+Strings, enums, structs and lists are fields scripts can't reach: they have no handle. A script can still give a string field as it makes a component (`gg.spawn`, `gg.add`).
 
 ## Components and fields
 
 | Call | Returns | Does |
 | :- | :- | :- |
-| `gg.component(name)` | table | A read-only table of type `name`'s field handles, by field name (`Shard.angle`); fields of kinds scripts can't reach are nil. Call it once, in the chunk. An unknown name fails without a code, naming the types; in a mod, a type it may neither read nor write fails with `mod.ungranted`. |
+| `gg.component(name)` | table | A read-only table of type `name`'s field handles, by field name (`Shard.angle`); a tuple struct's fields are named `0`, `1` and so on (`Tint["0"]`); fields of kinds scripts can't reach are nil. Call it once, in the chunk. An unknown name fails without a code, naming the types; in a mod, a type it may neither read nor write fails with `mod.ungranted`. |
 | `gg.declare(name, fields, options?)` | table | Declares this script's component; only in the chunk. `fields` maps name to default, which sets the field's kind: a number (`1.5`), a bool (`true`), a vector as a `Vec3` (`vector.create(1, 2, 3)`), or an entity or none (`gg.entity`). `options` is `{ on = "OtherType" }`, which makes it ride on that type: each entity with one gets this component, at its defaults, before the tick. Returns the table of its handles (`Spin`), which `tick` is assigned to. `script.bad` for a default of another kind, a field named `tick`, a non-string name, or a second call; `reflect.name_taken` for a name a Rust type or another script has. A reload keeps the name (`script.renamed`). |
 | `gg.entity` | | Not a function: the entity-valued "none", as a field's default, or as a cast's `exclude` for none. `gg.alive` says it's dead; `gg.despawn` refuses it (`ecs.no_entity`). |
 
@@ -92,14 +92,14 @@ component:
 - `script.bad_argument`: an argument of another kind; `script.loading`: called in a chunk.
 - `reflect.unknown_type`: no such type; `reflect.no_field`: no such field.
 - `reflect.read_only`: a type the world keeps (`Parent`, `ModelNode`, `PrefabRoot`, `ModelRoot`).
-- `reflect.wrong_kind`: a value of another kind, or a field of a kind scripts don't reach.
+- `reflect.wrong_kind`: a value of another kind, or a field of a kind scripts don't reach (a string takes a string).
 - `reflect.no_default`: a field with no default that wasn't given.
 
 | Call | Returns | Does |
 | :- | :- | :- |
-| `gg.spawn(components?, options?)` | entity | Spawns an entity. `components` maps type name to a table of fields. `options`: `parent = entity` makes it that entity's last child; `prefab = "id or path"` spawns that prefab's instance with it as the root, the components given replacing the prefab's, and `Transform` the identity if not given (`asset.no_prefab`). Any other option is `script.bad_option`. |
+| `gg.spawn(components?, options?)` | entity | Spawns an entity. `components` maps type name to a table of fields; a tuple struct's are `0`, `1`, and so on, and a tuple struct of one field also takes that field's value bare: `{ Name = "Lift", Tint = vector.create(1, 0, 0, 1) }`. `options`: `parent = entity` makes it that entity's last child; `prefab = "id or path"` spawns that prefab's instance with it as the root, the components given replacing the prefab's, and `Transform` the identity if not given (`asset.no_prefab`). Any other option is `script.bad_option`. |
 | `gg.despawn(entity)` | | Despawns it and its descendants. |
-| `gg.add(entity, component, fields?)` | | Gives it a component it hasn't (`reflect.has_component`). |
+| `gg.add(entity, component, fields?)` | | Gives it a component it hasn't (`reflect.has_component`). `fields` is a table, or for a tuple struct of one field that field's value. |
 | `gg.remove(entity, component)` | | Takes the component away (`reflect.missing_component`). |
 | `gg.alive(entity)` | boolean | Whether the handle's entity is still in the world; false for `gg.entity` and nil. A handle to a despawned entity stays dead: no later entity in its slot is it. |
 
