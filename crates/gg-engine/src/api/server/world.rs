@@ -68,20 +68,49 @@ impl Subject {
     }
 }
 
-/// The page of `world`'s entities `entities` asks for.
+/// The page of `world`'s entities `entities` asks for, with each one's values of `fields`, each a
+/// component type and a path.
+///
+/// Fails with `reflect.unknown_type` for a type, `with`'s or a field's, that no component has;
+/// and as [`World::get_field`] does for a field's path, but for a component an entity lacks,
+/// which leaves the field out.
 pub(super) fn list(
     world: &World,
     with: Option<&str>,
     skip: usize,
     take: usize,
+    fields: &[(String, String)],
 ) -> Result<String, Failure> {
-    let mut listing = world.entities(with).map_err(|error| failure(&error))?;
+    let about = |error: Error| failure(&error);
+    let mut listing = world.entities(with).map_err(about)?;
+    // Checked before the page, which may hold no entity with the type.
+    for (component, _) in fields {
+        world.entities(Some(component)).map_err(about)?;
+    }
     let total = listing.len();
     let page = listing.by_ref().skip(skip).take(take);
-    let entities = page.map(|entity| listed(world, entity)).collect();
+    let entities = page.map(|entity| {
+        let mut listed = listed(world, entity);
+        for (component, path) in fields {
+            let value = match world.get_field(entity, component, path) {
+                Ok(value) => value,
+                Err(error) if error.code() == "reflect.missing_component" => continue,
+                Err(error) => return Err(about(error)),
+            };
+            let mut out = String::new();
+            json::write(&mut out, &value, world);
+            let value = serde_json::from_str(&out).expect("a value writes as JSON");
+            let field = match path.as_str() {
+                "" => component.clone(),
+                path => format!("{component}.{path}"),
+            };
+            listed.fields.insert(field, value);
+        }
+        Ok(listed)
+    });
     let list = EntityList {
         total,
-        entities,
+        entities: entities.collect::<Result<_, _>>()?,
         types: world.types_revision(),
     };
     Ok(serde_json::to_string(&list).expect("a list serializes"))
@@ -156,6 +185,7 @@ pub(super) fn listed(world: &World, entity: Entity) -> Listed {
             .map(|child| id(child).expect("a child is alive"))
             .collect(),
         components: components.map(str::to_owned).collect(),
+        fields: serde_json::Map::new(),
     }
 }
 

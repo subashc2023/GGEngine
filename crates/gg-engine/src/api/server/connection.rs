@@ -304,7 +304,7 @@ pub(super) fn needs(call: &Call) -> Vec<Capability> {
             .collect(),
         Call::Frames { .. } => vec![View, Files],
         Call::View(_) | Call::Look(_) | Call::Pick(..) | Call::Images => vec![View],
-        Call::Input(..) => vec![Input],
+        Call::Input(..) | Call::Press { .. } => vec![Input],
         Call::Get { component, .. } => vec![Read(Some(component.clone()))],
         Call::Entities { .. }
         | Call::Entity(_)

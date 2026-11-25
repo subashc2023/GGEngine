@@ -14,12 +14,14 @@ use super::disc;
 use super::layout::Rect;
 use super::{Document, GameUi, State, cursor_on, units};
 #[cfg(feature = "dev")]
-use super::{Kind, Node, PRESSED, Widget};
+use super::{Kind, Node, PRESSED, UiEvent, UiValue, Widget};
 #[cfg(feature = "dev")]
 use crate::Font;
 #[cfg(feature = "dev")]
 use crate::canvas::CANVAS_HEIGHT;
 use crate::font::Fonts;
+#[cfg(feature = "dev")]
+use gg_core::{Error, Result};
 
 /// The UIs a context's layers added: each file read once, and each UI with its state.
 #[derive(Default)]
@@ -37,6 +39,10 @@ pub(crate) struct Uis {
     pub(super) consumed: bool,
     /// What [`GameUi::set_text_fmt`] writes, kept for its room.
     pub(super) written: String,
+    /// What [`GameUi::event`] gave the layers since [`heed`](Self::heed), by UI; `None` while
+    /// unheeded, so frames keep nothing.
+    #[cfg(feature = "dev")]
+    pub(super) heard: Option<Vec<(GameUi, UiEvent)>>,
 }
 
 /// A UI's file, shared by the UIs added from it: its name (asset ID, else path, as for a texture),
@@ -224,6 +230,133 @@ impl Uis {
             Some(state) => state,
             None => panic!("{ui:?} is a UI of another context"),
         }
+    }
+
+    /// Where the tool API's `press` clicks button or widget `node`, of the UI named `ui` if given:
+    /// the UI's name, and the middle of what shows of the node in `view`, in view pixels from its
+    /// top left. Laid out for `view` as the last frame handed it off, like [`GameUi::draw`].
+    ///
+    /// Fails, as gg-api's `press` says, with:
+    /// - `ui.no_ui`: no UI named `ui`;
+    /// - `ui.no_node`: no node named `node`; `ui.ambiguous_node`: several UIs have one;
+    /// - `ui.wrong_kind`: a node that takes no focus;
+    /// - `ui.no_input`: a UI that takes no input or didn't draw in the last frame;
+    /// - `ui.hidden`: a node that doesn't show, or shows nothing within what clips it and the view;
+    /// - `ui.disabled`: a disabled node.
+    #[cfg(feature = "dev")]
+    pub(crate) fn aim(
+        &mut self,
+        fonts: &mut Fonts,
+        view: Option<Viewport>,
+        ui: Option<&str>,
+        node: &str,
+    ) -> Result<(String, [f64; 2])> {
+        if let Some(ui) = ui
+            && !self.states.iter().any(|state| state.name == ui)
+        {
+            let message = format!("no UI is named `{ui}`; `ui` lists them");
+            return Err(Error::new("ui.no_ui", message));
+        }
+        let mut having = (self.states.iter().enumerate())
+            .filter(|(_, state)| ui.is_none_or(|ui| state.name == ui))
+            .filter_map(|(at, state)| state.named(node).map(|i| (at, i)));
+        let Some((at, i)) = having.next() else {
+            let message = match ui {
+                Some(ui) => format!("UI `{ui}` has no node named `{node}`"),
+                None => format!("no UI has a node named `{node}`"),
+            };
+            return Err(Error::new("ui.no_node", message));
+        };
+        if let Some((also, _)) = having.next() {
+            let (first, also) = (&self.states[at].name, &self.states[also].name);
+            let message = format!(
+                "UIs `{first}` and `{also}`, at least, have a node named `{node}`: give its UI"
+            );
+            return Err(Error::new("ui.ambiguous_node", message));
+        }
+        let frames = self.frames;
+        let state = &mut self.states[at];
+        let name = state.name.clone();
+        let kind = state.nodes[i].kind;
+        if !kind.focuses() {
+            let message = format!(
+                "node `{node}` of UI `{name}` is {}, which takes no click: press a button or a \
+                 widget",
+                kind.called()
+            );
+            return Err(Error::new("ui.wrong_kind", message));
+        }
+        let (Some(view), true) = (view, state.takes_input(frames)) else {
+            let why = if state.input {
+                "the last frame didn't draw it"
+            } else {
+                "its layer has it take none"
+            };
+            let message = format!("UI `{name}` takes no input: {why}");
+            return Err(Error::new("ui.no_input", message));
+        };
+        let units = units(Some(view));
+        state.lay_out(fonts, units);
+        let rect = state.laid.rects[i];
+        let clipped = state.laid.clips[i].map_or(rect, |clip| rect.within(clip));
+        let shows = clipped.within(Rect {
+            at: Vec2::ZERO,
+            size: units,
+        });
+        if !state.laid.shown[i] || shows.size.cmple(Vec2::ZERO).any() {
+            let message = format!(
+                "node `{node}` of UI `{name}` doesn't show: it or a node above is hidden, or a \
+                 list, a clipping container or the view's edge hides it"
+            );
+            return Err(Error::new("ui.hidden", message));
+        }
+        if state.nodes[i].disabled {
+            let message = format!("node `{node}` of UI `{name}` is disabled");
+            return Err(Error::new("ui.disabled", message));
+        }
+        let scale = f64::from(view.size[1]) / f64::from(CANVAS_HEIGHT);
+        let middle = shows.middle();
+        let at = [f64::from(middle.x) * scale, f64::from(middle.y) * scale];
+        Ok((name, at))
+    }
+
+    /// Keeps what [`GameUi::event`] gives the layers from now until [`heard`](Self::heard), for
+    /// the tool API's `press`.
+    #[cfg(feature = "dev")]
+    pub(crate) fn heed(&mut self) {
+        self.heard = Some(Vec::new());
+    }
+
+    /// What [`GameUi::event`] gave the layers since [`heed`](Self::heed), as gg-api's
+    /// `UiEvent`s; it keeps no more.
+    #[cfg(feature = "dev")]
+    pub(crate) fn heard(&mut self) -> Vec<gg_api::UiEvent> {
+        use gg_api::UiEventKind::{Back, Changed, Focused, Pressed};
+
+        let heard = self.heard.take().unwrap_or_default();
+        let events = heard.into_iter().map(|(ui, event)| {
+            let (kind, node, value) = match event {
+                UiEvent::Pressed(node) => (Pressed, Some(node), None),
+                UiEvent::Focused(node) => (Focused, Some(node), None),
+                UiEvent::Changed(node, value) => {
+                    let value = match value {
+                        UiValue::Number(number) => Some(gg_api::UiValue::Number(number)),
+                        UiValue::On(on) => Some(gg_api::UiValue::On(on)),
+                        UiValue::Choice(choice) => Some(gg_api::UiValue::Choice(choice)),
+                        UiValue::Text(_) => None,
+                    };
+                    (Changed, Some(node), value)
+                }
+                UiEvent::Back => (Back, None, None),
+            };
+            gg_api::UiEvent {
+                ui: self.states[ui.0 as usize].name.clone(),
+                kind,
+                node: node.as_deref().map(str::to_owned),
+                value,
+            }
+        });
+        events.collect()
     }
 
     /// Each UI as the tool API's `ui` lists it, laid out for `view` (as the last frame handed it

@@ -66,11 +66,13 @@ use parse::{Call, Hold, bad_params};
 use view::{Capturing, Filming, Picking, input_event};
 use world::{Listing, assets, entity, field, list};
 
-/// A held `input` waiting for the simulation to reach `until`, its last tick's number plus one,
-/// to hand its `releases`, then answer.
+/// A held `input`, or a `press` given ticks, waiting for the simulation to reach `until`, its last
+/// tick's number plus one, to hand its `releases`, then answer: the status, or the press's answer
+/// with the ticks run.
 struct Holding {
     until: u64,
     releases: Vec<InputEvent>,
+    pressed: Option<gg_api::Pressed>,
     reply: Reply,
 }
 
@@ -463,11 +465,20 @@ impl Api {
             .holds
             .extract_if(.., |holding| holding.until <= stepper.ticks);
         for Holding {
-            releases, reply, ..
+            releases,
+            pressed,
+            reply,
+            ..
         } in held.collect::<Vec<_>>()
         {
             hand(cx, stack, &releases);
-            reply.result(&self.status(cx, stepper));
+            match pressed {
+                Some(pressed) => reply.result(&gg_api::Pressed {
+                    ticks: stepper.ticks,
+                    ..pressed
+                }),
+                None => reply.result(&self.status(cx, stepper)),
+            }
         }
         let answered = cx.assets_answered();
         let looked = self
@@ -511,6 +522,7 @@ impl Api {
                 }
                 Call::Step(_)
                 | Call::Input(_, Some(_))
+                | Call::Press { ticks: Some(_), .. }
                 | Call::Capture { .. }
                 | Call::Frames { .. }
                 | Call::Pick(..)
@@ -530,6 +542,7 @@ impl Api {
                 | Call::Scene(_)
                 | Call::Step(_)
                 | Call::Input(_, Some(_))
+                | Call::Press { .. }
                 | Call::Quit => quit = self.answer_control(cx, stack, stepper, call, reply),
                 Call::Capture { .. }
                 | Call::Frames { .. }
@@ -568,7 +581,9 @@ impl Api {
     ) -> bool {
         let mut quit = false;
         match call {
-            Call::Step(_) | Call::Input(_, Some(_)) if stepper.stopped() => {
+            Call::Step(_) | Call::Input(_, Some(_)) | Call::Press { ticks: Some(_), .. }
+                if stepper.stopped() =>
+            {
                 let message = "the game is stopped, and runs no ticks until `play`";
                 reply.send(Err(Failure::new("api.stopped", message)));
             }
@@ -622,9 +637,48 @@ impl Api {
                 self.holds.push(Holding {
                     until,
                     releases,
+                    pressed: None,
                     reply,
                 });
             }
+            Call::Press { node, ui, ticks } => match cx.ui_aim(ui.as_deref(), &node) {
+                Ok((ui, at)) => {
+                    let click = [
+                        InputEvent::Cursor(at),
+                        InputEvent::Button {
+                            button: gg_api::Button::Left,
+                            pressed: true,
+                        },
+                        InputEvent::Button {
+                            button: gg_api::Button::Left,
+                            pressed: false,
+                        },
+                    ];
+                    let events = cx.ui_heard(|cx| hand(cx, stack, &click));
+                    let pressed = gg_api::Pressed {
+                        ui,
+                        node,
+                        at,
+                        events,
+                        ticks: stepper.ticks,
+                    };
+                    match ticks {
+                        Some(ticks) => {
+                            if stepper.paused() {
+                                stepper.step_by(ticks);
+                            }
+                            self.holds.push(Holding {
+                                until: stepper.ticks + ticks,
+                                releases: Vec::new(),
+                                pressed: Some(pressed),
+                                reply,
+                            });
+                        }
+                        None => reply.result(&pressed),
+                    }
+                }
+                Err(error) => reply.send(Err(failure(&error))),
+            },
             Call::Quit => {
                 reply.send(Ok("{}".to_owned()));
                 quit = true;
@@ -757,9 +811,12 @@ impl Api {
     ) {
         let world = cx.world();
         match call {
-            Call::Entities { with, skip, take } => {
-                reply.send(list(world, with.as_deref(), skip, take));
-            }
+            Call::Entities {
+                with,
+                skip,
+                take,
+                fields,
+            } => reply.send(list(world, with.as_deref(), skip, take, &fields)),
             Call::Entity(id) => reply.send(match id.resolve(world) {
                 Ok(id) => entity(world, cx.meshes(), id),
                 Err(error) => Err(failure(&error)),

@@ -17,7 +17,7 @@ use super::world::Subject;
 use crate::Key;
 
 /// Listed by `api.unknown_method`.
-pub(super) const METHODS: [&str; 35] = [
+pub(super) const METHODS: [&str; 36] = [
     "hello",
     "ping",
     "status",
@@ -31,6 +31,7 @@ pub(super) const METHODS: [&str; 35] = [
     "frames",
     "view",
     "input",
+    "press",
     "look",
     "pick",
     "images",
@@ -93,6 +94,13 @@ pub(super) enum Call {
     View(Option<String>),
     /// Events to hand the layers, each key event naming a real key, and what to release after.
     Input(Vec<InputEvent>, Option<Hold>),
+    /// A UI's node to click, by name, the UI's name if given, and the ticks to run after, from 1
+    /// to [`MOST_STEPS`].
+    Press {
+        node: String,
+        ui: Option<String>,
+        ticks: Option<u64>,
+    },
     /// The look's parts to set, checked, the viewpoint's rotation normalized.
     Look(gg_api::Look),
     /// The view pixel to pick at, and optionally the entity whose model to pick within.
@@ -102,6 +110,8 @@ pub(super) enum Call {
         with: Option<String>,
         skip: usize,
         take: usize,
+        /// Each field's component type and path, split at the first `.`.
+        fields: Vec<(String, String)>,
     },
     Entity(Subject),
     Get {
@@ -184,7 +194,8 @@ fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
 ///
 /// - `api.unknown_method`.
 /// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); an
-///   `input` with an unknown key, or a `hold` of 0 or past [`MOST_STEPS`] ticks; a `scene` path
+///   `input` with an unknown key, or a `hold` of 0 or past [`MOST_STEPS`] ticks; a `press` of 0
+///   or past [`MOST_STEPS`] ticks; an `entities` field without a type; a `scene` path
 ///   missing, unwanted or not `.ron`, or `discard` given to `save`; a `save_prefab` path not
 ///   `.prefab`; a `frames` `dir` not an absolute directory path, a `count` of 0 or past
 ///   [`gg_api::MOST_FRAMES`], or invalid viewpoints or `rect` (no area).
@@ -412,13 +423,43 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
             };
             Call::Input(events, hold)
         }
+        "press" => {
+            let gg_api::Press { node, ui, ticks } = take(method, params)?;
+            if let Some(ticks) = ticks.filter(|ticks| !(1..=MOST_STEPS).contains(ticks)) {
+                let what = format!("runs from 1 to {MOST_STEPS} ticks, not {ticks}");
+                return Err(bad_params(method, what));
+            }
+            Call::Press { node, ui, ticks }
+        }
         "entities" => {
-            let gg_api::Entities { with, skip, take } = self::take(method, params)?;
+            let gg_api::Entities {
+                with,
+                skip,
+                take,
+                fields,
+            } = self::take(method, params)?;
             if take > MOST_LISTED {
                 let what = format!("lists at most {MOST_LISTED} entities a page, not {take}");
                 return Err(bad_params(method, what));
             }
-            Call::Entities { with, skip, take }
+            let fields = fields.iter().map(|field| {
+                let (component, path) = field.split_once('.').unwrap_or((field, ""));
+                if component.is_empty() || (path.is_empty() && field.ends_with('.')) {
+                    let what = format!(
+                        "takes fields of a component's type, then `.` and a path if any, as \
+                         `Transform.translation`, not `{field}`"
+                    );
+                    return Err(bad_params(method, what));
+                }
+                Ok((component.to_owned(), path.to_owned()))
+            });
+            let fields = fields.collect::<Result<_, _>>()?;
+            Call::Entities {
+                with,
+                skip,
+                take,
+                fields,
+            }
         }
         "entity" => {
             let gg_api::Entity { id } = take(method, params)?;

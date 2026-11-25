@@ -350,6 +350,25 @@ impl Context {
         self.uis.listed(&mut self.fonts, self.view)
     }
 
+    /// Where the tool API's `press` clicks the button or widget named `node`, of the UI named `ui`
+    /// if given: the UI's name and a view pixel. Fails as [`Uis::aim`](game_ui::Uis::aim) does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn ui_aim(
+        &mut self,
+        ui: Option<&str>,
+        node: &str,
+    ) -> gg_core::Result<(String, [f64; 2])> {
+        self.uis.aim(&mut self.fonts, self.view, ui, node)
+    }
+
+    /// The UIs' events, as gg-api's, that `events` has the layers' UIs give them.
+    #[cfg(feature = "dev")]
+    pub(crate) fn ui_heard(&mut self, events: impl FnOnce(&mut Self)) -> Vec<gg_api::UiEvent> {
+        self.uis.heed();
+        events(self);
+        self.uis.heard()
+    }
+
     /// Draws a grid this frame as `viewpoint` sees it (the frame's, from
     /// [`set_viewpoint`](Self::set_viewpoint)), fitted to the last handed-off view
     /// ([`view`](Self::view)).

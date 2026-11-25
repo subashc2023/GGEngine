@@ -521,14 +521,56 @@ const TOOLS: &[Tool] = &[
         required: &["events"],
     },
     Tool {
+        name: "press",
+        description: "Clicks a `.ui` button or widget by name, at the middle of what shows of it, \
+                      as a player would: a button presses, a toggle flips, a drop-down opens or \
+                      closes, a text field takes the focus, a slider takes its middle value. \
+                      Answers the `ui` and `node`, the pixel clicked `at`, the `ticks`, and \
+                      `events`: what the UIs gave the game's layers, each `{\"ui\", \"kind\", \
+                      \"node\", \"value\"}` with `kind` `pressed`, `focused`, `changed` or `back`. \
+                      Empty `events` means no UI took the click, as when another covers it. \
+                      Refused, clicking nothing, for a node that's disabled (`ui.disabled`), \
+                      doesn't show (`ui.hidden`), isn't a button or widget (`ui.wrong_kind`), or \
+                      whose UI takes no input or didn't draw (`ui.no_input`).",
+        properties: || {
+            json!({
+                "node": {"type": "string", "description": "The node's name, as `ui` lists it"},
+                "ui": {
+                    "type": "string",
+                    "description": "The UI's name, as `ui` lists it: needed only where several \
+                                    UIs have a node of the name",
+                },
+                "ticks": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "Ticks (64 a second) to run after the click before answering, \
+                                    as `step` does, so the game has acted on it; refused while \
+                                    stopped",
+                },
+            })
+        },
+        required: &["node"],
+    },
+    Tool {
         name: "entities",
-        description: "A page of the world's entities: each one's ID, name, parent and components' \
-                      types.",
+        description: "A page of the world's entities: each one's ID, name, parent, children and \
+                      components' types, and with `fields`, each one's values of them, as `get` \
+                      reads them: many entities' positions or health in one call.",
         properties: || {
             json!({
                 "with": {"type": "string", "description": "Only those with this component"},
                 "skip": {"type": "integer", "minimum": 0, "default": 0},
                 "take": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 100},
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Fields to read of each entity, answered in its `fields` by \
+                                    field: a component's type for the whole component, or its \
+                                    type, `.` and a path, as `Transform.translation` or \
+                                    `Sprite.rect[1]`. An entity without the component goes \
+                                    without the field.",
+                },
             })
         },
         required: &[],
@@ -617,9 +659,9 @@ const TOOLS: &[Tool] = &[
                       the view's pixels, as a capture has them), `visible`, `text`, a widget's \
                       `value` ({\"number\": 0.5}, {\"on\": true} or {\"choice\": 1}), `disabled`, \
                       `focused` and `pressed`. An edited file reloads, each node keeping what the \
-                      game's code set. Press a button with `input`: the cursor at its pixels, then \
-                      the left button down and up; type into a text field clicked so with `text`; \
-                      scroll a list under the cursor with `scroll`.",
+                      game's code set. Press a button or widget by name with `press`; type into a \
+                      text field pressed so with `input`'s `text`; scroll a list under the cursor \
+                      with `input`'s `scroll`.",
         properties: || json!({}),
         required: &[],
     },
@@ -981,7 +1023,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         }
         _ if crate::NO_PARAMETERS.contains(&name) || name == "snapshot" => call(name, Value::Null),
         // `scene`'s and `save_prefab`'s paths stay as given: from the asset root.
-        "step" | "scene" | "pick" | "input" | "entities" | "entity" | "get" | "apply"
+        "step" | "scene" | "pick" | "input" | "press" | "entities" | "entity" | "get" | "apply"
         | "save_prefab" | "undo" | "redo" | "edits" | "assets" | "debug" => {
             call(name, Value::Object(arguments))
         }
@@ -1429,6 +1471,11 @@ mod tests {
         let input = schema("input");
         assert_eq!(input["required"], json!(["events"]));
         assert_eq!(input["properties"]["hold"]["minimum"], 1);
+        let press = schema("press");
+        assert_eq!(press["required"], json!(["node"]));
+        assert_eq!(press["properties"]["ticks"]["maximum"], 10000);
+        let fields = &schema("entities")["properties"]["fields"];
+        assert_eq!(fields["items"]["type"], "string");
         let events = &input["properties"]["events"];
         assert_eq!(events["type"], "array");
         // A choice's kind: an object's one key, or a string's values.

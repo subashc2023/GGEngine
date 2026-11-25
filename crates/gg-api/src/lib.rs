@@ -38,6 +38,7 @@
 //! | `frames` | [`Frames`] | [`Framed`] | `view`, `files` |
 //! | `view` | [`View`] | `{}` | `view` |
 //! | `input` | [`Input`] | `{}` | `input` |
+//! | `press` | [`Press`] | [`Pressed`] | `input` |
 //! | `look` | [`Look`] | [`Looked`] | `view` |
 //! | `pick` | [`Pick`] | [`Picked`] | `view` |
 //! | `images` | - | [`ImageList`] | `view` |
@@ -126,6 +127,19 @@
 //!   taken the last; another publishes at its own size, while it fits.
 //! - `input`: hands the game's layers the events in order, as its window would, as the frame
 //!   starts.
+//! - `press`: clicks a UI's button or widget at the middle of what shows of it, through `input`, as
+//!   a player would. A button presses, a toggle flips, a drop-down opens or closes its options, a
+//!   text field takes the focus and the caret, and a slider takes its middle value. Then it runs
+//!   `ticks` ticks, if given, as a held `input` does. It fails, clicking nothing, with:
+//!   - `ui.no_ui`: no UI of the name `ui` gives;
+//!   - `ui.no_node`: no node of the name, in `ui` if given;
+//!   - `ui.ambiguous_node`: nodes of the name in several UIs, without `ui`;
+//!   - `ui.wrong_kind`: a node that's no button or widget;
+//!   - `ui.disabled`: a disabled node;
+//!   - `ui.hidden`: a node that doesn't show, it or a node above hidden, or that its lists, its
+//!     clipping containers or the view's edges hide;
+//!   - `ui.no_input`: a node of a UI that takes no input, or that the last frame didn't draw;
+//!   - `api.bad_params`: `ticks` of 0 or past 10,000; `api.stopped` for `ticks` while stopped.
 //! - `look`: sets parts of the look, the view settings clients share, until a client changes it or
 //!   the run ends; the last setter of a part wins. Set as a frame starts, which draws with it; `{}`
 //!   or no params answers the look as it is. `api.bad_params`, saying why, for:
@@ -142,6 +156,9 @@
 //!   name, with what each holds and its size, in the frame's order. They follow the look: with the
 //!   light drawn or an image shown, every pass's but antialiasing's, which a frame showing an image
 //!   doesn't make; with a part of shading, none after the view's passes.
+//! - `entities`: with `fields`, each entity's values of them, as `get` reads one. Fails with
+//!   `reflect.unknown_type` for a field's type that no component has, and as `get` does for a path
+//!   that a listed entity's component lacks.
 //! - `entity` answers an object of `id`, `name`, `parent`, `children`, `components`
 //!   (`{"Transform":{...},...}`) and `space` (`{"matrix":[...],"rotation":[...]}`), and `bounds`
 //!   and `instance` where they apply:
@@ -186,8 +203,7 @@
 //!   in a game with no asset root; `asset.unlisted` if the root can't be listed.
 //! - `ui`: each UI the layers added (ARCHITECTURE.md's Events and layers), its nodes laid out for
 //!   the view, so a client checks a layout as data. Changes nothing but a layout whose tree, texts
-//!   or view changed since a frame drew it, which it lays out again. A click at a button's pixels,
-//!   through `input`, presses it.
+//!   or view changed since a frame drew it, which it lays out again. `press` clicks a node by name.
 //! - `snapshot`: saves the whole world as a file a run given `--restore` starts from. A stopped
 //!   game's file records that it's stopped; one taken while a copy plays saves the world as edited
 //!   too, so a restored run goes on as it was, paused if it was. `api.not_ticked` before the first
@@ -247,9 +263,9 @@
 //!
 //! The main thread answers all but `hello`, `ping`, `logs`, `note` and `debug` as a frame starts,
 //! those that came before it, the rest as the next starts. While the window is minimized and no
-//! frames run, it answers between frames, but `step`, `capture`, `frames`, `pick` and `images`,
-//! which need frames, fail with `api.paused`. While a file dialog or Windows' window menu holds the
-//! main thread, or a script has stopped, they wait.
+//! frames run, it answers between frames, but `step`, `capture`, `frames`, `pick`, `images`, and
+//! an `input` or `press` that runs ticks, which need frames, fail with `api.paused`. While a file
+//! dialog or Windows' window menu holds the main thread, or a script has stopped, they wait.
 //!
 //! The connection's own thread answers `hello`, `ping`, `logs`, `note` and `debug` as it reads
 //! them, so a `logs` or `debug` that waits holds up the connection's later requests: follow the
@@ -1283,7 +1299,10 @@ pub enum ImageKind {
 }
 
 /// What `entities` takes: those with component `with`, or all, in the order queries find them,
-/// skipping `skip` and taking at most `take`, 100 by default.
+/// skipping `skip` and taking at most `take`, 100 by default; and the `fields` to read of each.
+///
+/// A field is a component's type, for the whole component, or its type, `.` and a path as `get`
+/// takes it: `Transform`, `Transform.translation`, `Sprite.rect[1]`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entities {
@@ -1293,6 +1312,9 @@ pub struct Entities {
     pub skip: usize,
     #[serde(default = "page")]
     pub take: usize,
+    /// Left out when empty, so an engine older than fields takes the request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
 }
 
 fn page() -> usize {
@@ -1313,7 +1335,8 @@ pub struct EntityList {
 /// An entity as `entities` lists it.
 ///
 /// Its ID; its name, its `Name`'s, or else for a model's node the node's name in the model's file;
-/// its parent's ID; its children's, in order; and its components' types, in registration order.
+/// its parent's ID; its children's, in order; its components' types, in registration order; and
+/// the values of the [`Entities::fields`] asked, by field.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listed {
     pub id: String,
@@ -1323,6 +1346,9 @@ pub struct Listed {
     #[serde(default)]
     pub children: Vec<String>,
     pub components: Vec<String>,
+    /// A field of a component it lacks is left out, and the whole map unless fields were asked.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub fields: serde_json::Map<String, Value>,
 }
 
 /// What `entity` takes: an entity's ID or name.
@@ -1678,6 +1704,59 @@ pub enum UiValue {
     Number(f32),
     On(bool),
     Choice(usize),
+}
+
+/// What `press` takes: the button or widget to click, its UI, and the ticks to run after.
+///
+/// `ui` is the name the UI's layer gave it, needed only where several UIs have a node of the name.
+/// `ticks` runs from 1 to 10,000.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Press {
+    pub node: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticks: Option<u64>,
+}
+
+/// What `press` answers: the UI and node clicked; the view pixel clicked, from its top left; what
+/// the UIs gave their layers of the click, in order; and the ticks run as it answered, as
+/// [`Status::ticks`].
+///
+/// An empty `events` means no UI took the click, as when another UI's node covers the node.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pressed {
+    pub ui: String,
+    pub node: String,
+    pub at: [f64; 2],
+    pub events: Vec<UiEvent>,
+    pub ticks: u64,
+}
+
+/// What a UI gave its layer of input: the UI's name, what happened, its node and value.
+///
+/// Every kind but `back` has a node. `changed` has the value a slider, toggle or drop-down took. A
+/// text field's text is its node's, which `ui` lists.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UiEvent {
+    pub ui: String,
+    pub kind: UiEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<UiValue>,
+}
+
+/// What a UI's input did: a button `pressed`, the focus moved to a node, a widget's value
+/// `changed`, or `back` asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiEventKind {
+    Pressed,
+    Focused,
+    Changed,
+    Back,
 }
 
 /// The methods that change nothing, which a client may send again whether or not the first was

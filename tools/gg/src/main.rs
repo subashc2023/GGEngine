@@ -438,6 +438,26 @@ A click at (400, 300), then a tick:
 A drag from (330, 280) to (640, 390), the button down 8 ticks with the cursor at its end:
   gg input --hold 8 '[{\"cursor\":[330,280]}, {\"button\":{\"button\":\"left\",\"pressed\":true}},
     {\"cursor\":[640,390]}]'
+A `.ui` button is pressed by name with `gg press`.
+",
+            },
+            Help {
+                name: "press",
+                usage: "press <NODE> [--ui <UI>] [--ticks <N>]",
+                summary: "Click a `.ui` button or widget by name, as a player would",
+                details: "\
+NODE is a node's name, as `ui` lists it; `--ui` names its UI where several have one so named. The
+click is at the middle of what shows of it, through `input`: a button presses, a toggle flips, a
+drop-down opens or closes, a text field takes the focus, a slider takes its middle value.
+`--ticks N` then runs N ticks before answering, as `step` does, so the game has acted on it.
+
+Prints the UI, the node, the pixel clicked `at`, the `ticks`, and `events`, what the UIs gave the
+game's layers: each one's `ui`, `kind` (`pressed`, `focused`, `changed` or `back`), `node` and a
+widget's `value`. No `events` means no UI took the click, as when another covers it.
+
+Refused, clicking nothing: `ui.disabled`, `ui.hidden` (it or a node above hidden, or scrolled or
+clipped out of sight), `ui.wrong_kind` (no button or widget), `ui.no_input` (its UI takes no input
+or didn't draw), `ui.no_node`, `ui.ambiguous_node` (give `--ui`), `ui.no_ui`.
 ",
             },
             Help {
@@ -448,9 +468,15 @@ A drag from (330, 280) to (640, 390), the button down 8 ticks with the cursor at
             },
             Help {
                 name: "entities",
-                usage: "entities [--with <COMPONENT>] [--skip <N>] [--take <N>]",
+                usage: "entities [--with <COMPONENT>] [--fields <FIELDS>] [--skip <N>] [--take <N>]",
                 summary: "List its entities, those with COMPONENT, N at a time (100)",
-                details: "",
+                details: "\
+Each one's ID, name, parent, children and components' types. `--fields` reads fields of each too,
+under its `fields`, FIELDS split by `,`: a component's type for the whole component, or its type,
+`.` and a path as `get` takes it. An entity without the component goes without the field. Every unit's position and
+health in one call:
+  gg entities --with Unit --fields Transform.translation,Unit.health
+",
             },
             Help {
                 name: "entity",
@@ -519,7 +545,7 @@ Each UI's focus and whether it takes input. Each node's name, kind, parent, rect
 [x, y, width, height] from the view's top left in the canvas's units (1,080 to its height) and in
 its pixels (`pixels`, which `input` clicks at, as `capture` has them), whether it shows, what it
 says, what a widget holds, and whether a button or widget is disabled, focused or pressed. Press a
-button by clicking its pixels with `input`; type into a text field clicked so with `text`.
+button or widget by name with `press`; type into a text field pressed so with `input`'s `text`.
 ",
             },
             Help {
@@ -811,7 +837,7 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 22] = [
+const VALUED: [&str; 25] = [
     "--engine",
     "--viewpoints",
     "--rect",
@@ -834,6 +860,9 @@ const VALUED: [&str; 22] = [
     "--show",
     "--within",
     "--hold",
+    "--fields",
+    "--ui",
+    "--ticks",
 ];
 
 /// The arguments after a command's name; what follows `--` is for the game.
@@ -1050,7 +1079,9 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         "run" | "check" | "ship" => build_args(name, &mut parsed)?,
         "fetch" | "new" => project_args(name, &mut parsed)?,
         "wait" | "step" | "scene" | "snapshot" => control_args(name, &mut parsed)?,
-        "input" | "capture" | "frames" | "look" | "pick" | "probe" => view_args(name, &mut parsed)?,
+        "input" | "press" | "capture" | "frames" | "look" | "pick" | "probe" => {
+            view_args(name, &mut parsed)?
+        }
         "sessions" | "logs" | "entities" | "assets" | "entity" | "get" => {
             read_args(name, &mut parsed)?
         }
@@ -1252,6 +1283,21 @@ fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             }
             call(parsed, "input", params)?
         }
+        "press" => {
+            let usage = "press <NODE> [--ui <UI>] [--ticks <N>]";
+            let node = parsed.positional(1, 1, usage)?.remove(0);
+            let ticks = parsed.value("--ticks").map(|ticks| {
+                ticks
+                    .parse::<u64>()
+                    .map_err(|_| bad(format!("`--ticks` takes a number of ticks, not `{ticks}`")))
+            });
+            let press = gg_api::Press {
+                node,
+                ui: parsed.value("--ui"),
+                ticks: ticks.transpose()?,
+            };
+            call(parsed, "press", serde_json::to_value(press).expect("JSON"))?
+        }
         "capture" => {
             let usage = "capture [--own] [--show <NAME>[,<NAME>...]]... [PATH]";
             let path = parsed.positional(0, 1, usage)?;
@@ -1406,18 +1452,27 @@ fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             }
         }
         "entities" => {
-            parsed.positional(
-                0,
-                0,
-                "entities [--with <COMPONENT>] [--skip <N>] [--take <N>]",
-            )?;
+            let usage =
+                "entities [--with <COMPONENT>] [--fields <FIELDS>] [--skip <N>] [--take <N>]";
+            parsed.positional(0, 0, usage)?;
             let with = parsed.value("--with");
             let skip: usize = parsed.number("--skip", 0)?;
             let take: usize = parsed.number("--take", 100)?;
+            let given = parsed.values("--fields");
+            let fields = (given.iter().flat_map(|fields| fields.split(',')))
+                .map(|field| field.trim().to_owned())
+                .filter(|field| !field.is_empty())
+                .collect();
+            let entities = gg_api::Entities {
+                with,
+                skip,
+                take,
+                fields,
+            };
             call(
                 parsed,
                 "entities",
-                json!({"with": with, "skip": skip, "take": take}),
+                serde_json::to_value(entities).expect("JSON"),
             )?
         }
         "assets" => {
@@ -1660,6 +1715,29 @@ mod tests {
             panic!("a call");
         };
         assert_eq!(params, json!({"with": "Sprite", "skip": 0, "take": 5}));
+        let fields = [
+            "entities",
+            "--fields",
+            "Transform.translation, Unit",
+            "--fields",
+            "Name",
+        ];
+        let Ok(Command::Call { params, .. }) = parsed(&fields) else {
+            panic!("a call");
+        };
+        let fields = json!(["Transform.translation", "Unit", "Name"]);
+        assert_eq!(params["fields"], fields);
+        let Ok(Command::Call { method, params, .. }) =
+            parsed(&["press", "end_turn", "--ui", "fight", "--ticks", "2"])
+        else {
+            panic!("a call");
+        };
+        let press = json!({"node": "end_turn", "ui": "fight", "ticks": 2});
+        assert_eq!((method.as_str(), params), ("press", press));
+        let Ok(Command::Call { params, .. }) = parsed(&["press", "play"]) else {
+            panic!("a call");
+        };
+        assert_eq!(params, json!({"node": "play"}), "unasked options stay out");
         let Ok(Command::Call {
             pick,
             method,
@@ -2069,6 +2147,9 @@ mod tests {
             &["input", r#"{"key":{"key":"KeyW","pressed":true}}"#],
             &["input", "[]", "[]"],
             &["input", "--hold", "long", "[]"],
+            &["press"],
+            &["press", "play", "quit"],
+            &["press", "play", "--ticks", "soon"],
             &["status", "--frames", "2"],
             &["status", "extra"],
             &["step", "many"],

@@ -1425,6 +1425,7 @@ mod imp {
                         .map(|&child| id(child).to_string())
                         .collect(),
                     components: Vec::new(),
+                    fields: serde_json::Map::new(),
                 });
             let list = gg_api::EntityList {
                 total,

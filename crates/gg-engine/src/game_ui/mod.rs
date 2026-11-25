@@ -647,6 +647,10 @@ impl GameUi {
         let done = state.event(event, cursor, input, fonts);
         let copied = state.copied.take();
         uis.consumed |= takes;
+        #[cfg(feature = "dev")]
+        if let (Some(heard), Some(done)) = (&mut uis.heard, &done) {
+            heard.push((self, done.clone()));
+        }
         if let Some(copied) = copied {
             cx.copy(&copied);
         }

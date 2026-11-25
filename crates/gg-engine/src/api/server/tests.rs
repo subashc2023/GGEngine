@@ -169,6 +169,7 @@ struct Read {
     page: EntityList,
     rest: EntityList,
     all: EntityList,
+    fielded: EntityList,
     entity: Value,
     kid: Value,
     sprite: Value,
@@ -205,7 +206,10 @@ fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
             ("get", json!({"id": hero, "component": "Nope"})),
             ("step", json!({"ticks": 0})),
             ("bogus", Value::Null),
+            ("entities", json!({"fields": ["Nope.x"]})),
+            ("entities", json!({"fields": ["Transform.nope"]})),
         ];
+        let fields = json!({"fields": ["Transform.translation.y", "Name"]});
         Read {
             paused: client.call_as("pause", ()).expect("pauses"),
             stepped: client.call_as("step", json!({"ticks": 3})).expect("steps"),
@@ -216,6 +220,7 @@ fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
                 .call_as("entities", json!({"skip": 4}))
                 .expect("the rest"),
             all: client.call_as("entities", ()).expect("them all"),
+            fielded: client.call_as("entities", fields).expect("fields"),
             entity: client
                 .call_as("entity", json!({"id": hero}))
                 .expect("the hero"),
@@ -264,6 +269,20 @@ fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
     let listed = |id: &str| listed(id).expect("listed");
     assert_eq!(listed(&hero).children, std::slice::from_ref(&kid));
     assert_eq!(listed(&kid).parent.as_ref(), Some(&hero));
+    assert!(
+        read.all
+            .entities
+            .iter()
+            .all(|listed| listed.fields.is_empty())
+    );
+    // A field of a component an entity lacks is left out.
+    let fielded = |id: &str| read.fielded.entities.iter().find(|listed| listed.id == id);
+    let fields = |id: &str| &fielded(id).expect("listed").fields;
+    let hero_y = fields(&hero).get("Transform.translation.y");
+    assert_eq!(hero_y, Some(&json!(2.0)));
+    assert!(fields(&hero).contains_key("Name"));
+    let kid_fields: Vec<&String> = fields(&kid).keys().collect();
+    assert_eq!(kid_fields, ["Transform.translation.y"]);
     assert_eq!(read.entity["name"], "Hero");
     assert_eq!(read.entity["parent"], Value::Null);
     assert_eq!(read.entity["children"], json!([kid]));
@@ -318,6 +337,8 @@ fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
         "reflect.unknown_type",
         "api.bad_params",
         "api.unknown_method",
+        "reflect.unknown_type",
+        "reflect.no_field",
     ];
     assert_eq!(read.refused, codes);
 }
@@ -2542,6 +2563,124 @@ fn a_held_input_lets_go_after_exactly_its_ticks() {
     assert!(!cx.input().button_down(MouseButton::Left));
 }
 
+/// Hands its UI each event and keeps the buttons it pressed, as a game's menu does.
+struct Menu {
+    ui: crate::GameUi,
+    pressed: Rc<std::cell::RefCell<Vec<String>>>,
+}
+
+impl crate::Layer for Menu {
+    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> std::ops::ControlFlow<()> {
+        if let Some(crate::UiEvent::Pressed(name)) = self.ui.event(cx, event) {
+            self.pressed.borrow_mut().push(name.to_string());
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
+/// `press` clicks a UI's button or widget by name, answering what the UIs gave their layers, and
+/// with `ticks` steps after it. It refuses, clicking nothing, what a click wouldn't press.
+#[test]
+fn a_press_clicks_a_ui_node_by_name_and_says_what_the_ui_gave() {
+    let scratch = Scratch::new("api-press");
+    fs::create_dir_all(&scratch.0).expect("a directory");
+    let path = scratch.0.join("menu.ui");
+    let file = r#"(nodes: [
+            Column(gap: 20.0, children: [
+                Button(name: "play", width: Fixed(400.0), height: Fixed(80.0)),
+                Button(name: "quit", width: Fixed(400.0), height: Fixed(80.0)),
+                Button(name: "gone", width: Fixed(400.0), height: Fixed(80.0)),
+                Toggle(name: "sound", text: "SOUND", width: Fixed(400.0), height: Fixed(80.0)),
+                Text(name: "title", text: "TITLE"),
+            ]),
+        ])"#;
+    fs::write(&path, file).expect("written");
+    let (mut api, session) = started("Api Press");
+    let mut cx = Context::seeded(5);
+    let ui = cx.add_ui("menu", &path).expect("added");
+    // Of the same file, never drawn.
+    cx.add_ui("pause", &path).expect("added");
+    ui.set_disabled(&mut cx, "quit", true).expect("disabled");
+    ui.set_visible(&mut cx, "gone", false).expect("hidden");
+    let pressed = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut stack = Stack::default();
+    stack.push_layer(Menu {
+        ui,
+        pressed: pressed.clone(),
+    });
+    let view = Viewport {
+        origin: [0, 0],
+        size: [1920, 1080],
+    };
+    let mut stepper = Stepper::default();
+    let client = |mut client: Client| {
+        let refused = [
+            json!({"node": "play"}),
+            json!({"node": "play", "ui": "nope"}),
+            json!({"node": "nope"}),
+            json!({"node": "title", "ui": "menu"}),
+            json!({"node": "play", "ui": "pause"}),
+            json!({"node": "gone", "ui": "menu"}),
+            json!({"node": "quit", "ui": "menu"}),
+        ];
+        let refused = refused.map(|params| client.call("press", params).expect_err("refused").code);
+        let press =
+            |client: &mut Client, params: Value| client.call_as::<gg_api::Pressed>("press", params);
+        let play = press(&mut client, json!({"node": "play", "ui": "menu"})).expect("pressed");
+        let sound = press(&mut client, json!({"node": "sound", "ui": "menu"})).expect("flipped");
+        let paused: Status = client.call_as("pause", ()).expect("paused");
+        let stepped = json!({"node": "play", "ui": "menu", "ticks": 2});
+        let stepped = press(&mut client, stepped).expect("pressed and stepped");
+        (refused, play, sound, paused, stepped)
+    };
+    let (refused, play, sound, paused, stepped) = serving(
+        &mut api,
+        &mut cx,
+        &mut stack,
+        &mut stepper,
+        session,
+        client,
+        |_, cx, _| {
+            ui.draw(cx);
+            cx.extract(&mut Extracted::default(), view);
+        },
+    );
+    let codes = [
+        "ui.ambiguous_node",
+        "ui.no_ui",
+        "ui.no_node",
+        "ui.wrong_kind",
+        "ui.no_input",
+        "ui.hidden",
+        "ui.disabled",
+    ];
+    assert_eq!(refused, codes);
+    assert_eq!((play.ui.as_str(), play.node.as_str()), ("menu", "play"));
+    // The top of a column of four 80-unit buttons 20 apart and a text, centered in the view.
+    assert_eq!(play.at[0], 960.0);
+    let given = |pressed: &gg_api::Pressed| {
+        let events = pressed.events.iter();
+        events
+            .map(|event| (event.kind, event.node.clone(), event.value))
+            .collect::<Vec<_>>()
+    };
+    let named = |name: &str| Some(name.to_owned());
+    let focused = (gg_api::UiEventKind::Focused, named("play"), None);
+    let clicked = (gg_api::UiEventKind::Pressed, named("play"), None);
+    assert_eq!(given(&play), [focused.clone(), clicked.clone()]);
+    assert!(play.events.iter().all(|event| event.ui == "menu"));
+    let flipped = (
+        gg_api::UiEventKind::Changed,
+        named("sound"),
+        Some(gg_api::UiValue::On(true)),
+    );
+    assert_eq!(given(&sound).last(), Some(&flipped));
+    // The cursor comes back from the toggle, and the press steps its ticks.
+    assert_eq!(given(&stepped), [focused, clicked]);
+    assert_eq!(stepped.ticks, paused.ticks + 2);
+    assert_eq!(*pressed.borrow(), ["play", "play"]);
+}
+
 /// Publishing the view to memory the client made: the next frame back takes it to the render thread
 /// with what paces frames by it. A name that opens no memory is refused, leaving publishing as it
 /// was; `null` stops it.
@@ -3510,9 +3649,39 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         with: Some("Sprite".to_owned()),
         skip: 0,
         take: 100,
+        fields: Vec::new(),
     };
     let given = json!({"with": "Sprite"});
     assert_eq!(parse(&request("entities", given)), Ok(entities));
+    let given = json!({"fields": ["Transform", "Sprite.rect[1]", "A.b.c"]});
+    let Ok(Call::Entities { fields, .. }) = parse(&request("entities", given)) else {
+        panic!("fields parse");
+    };
+    let split = |component: &str, path: &str| (component.to_owned(), path.to_owned());
+    let expected = [
+        split("Transform", ""),
+        split("Sprite", "rect[1]"),
+        split("A", "b.c"),
+    ];
+    assert_eq!(fields, expected);
+    for field in ["", ".x", "Transform."] {
+        let refused = parse(&request("entities", json!({"fields": [field]})));
+        assert!(
+            refused.is_err_and(|failure| failure.code == "api.bad_params"),
+            "{field:?}"
+        );
+    }
+    let given = json!({"node": "play", "ticks": 2});
+    let press = Call::Press {
+        node: "play".to_owned(),
+        ui: None,
+        ticks: Some(2),
+    };
+    assert_eq!(parse(&request("press", given)), Ok(press));
+    for ticks in [0, MOST_STEPS + 1] {
+        let refused = parse(&request("press", json!({"node": "play", "ticks": ticks})));
+        assert!(refused.is_err_and(|failure| failure.code == "api.bad_params"));
+    }
     let assets = Call::Assets {
         kind: Some(AssetKind::Model),
         skip: 2,
