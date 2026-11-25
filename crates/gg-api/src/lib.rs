@@ -829,9 +829,10 @@ pub struct Input {
     /// The ticks to hold the keys and buttons the events press and leave down, 1 to 10,000.
     ///
     /// The engine releases them as the frame after the last of those ticks starts, then answers
-    /// with the [`Status`], as `step` does; until then, frames run no tick past it. Paused, the
-    /// hold steps its ticks. Without it, `input` answers `{}` at once and keys stay down until an
-    /// event releases them.
+    /// with the [`Status`], as `step` does; until then, frames run no tick past it. The next tick
+    /// to run sees the release. Events that leave nothing down, such as a click's, just run the
+    /// ticks. Paused, the hold steps its ticks. Without it, `input` answers `{}` at once, before a
+    /// tick sees the events, and keys stay down until an event releases them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<u64>,
 }

@@ -21,7 +21,7 @@ pub(crate) struct Args {
     /// A headless run ticks in real time instead of a tick a frame as fast as it can.
     pub(crate) real_time: bool,
     pub(crate) frames: Option<u64>,
-    /// A headless run's view in pixels, if not 1280 by 720.
+    /// A headless run's frame in pixels, if not 1280 by 720; a docked view takes less.
     pub(crate) size: Option<[u32; 2]>,
     /// The frame captured through RenderDoc, from 1.
     pub(crate) capture: Option<NonZeroU64>,
@@ -48,6 +48,8 @@ pub(crate) struct Args {
     pub(crate) restore: Option<PathBuf>,
     /// Without a snapshot, start stopped, the world as edited, until the tool API's `play`.
     pub(crate) stopped: bool,
+    /// Without a snapshot, start paused at tick 0, until the tool API's `resume`.
+    pub(crate) paused: bool,
     /// The session the run hosts, joins, serves or connects to; a host or server makes a code if
     /// not given one.
     pub(crate) net: Option<Net>,
@@ -139,7 +141,7 @@ pub(crate) enum Dump {
 }
 
 /// The run flags a replay refuses: it renders, records and serves nothing.
-const NOT_REPLAYED: [&str; 25] = [
+const NOT_REPLAYED: [&str; 26] = [
     "--record",
     "--restore",
     "--headless",
@@ -156,6 +158,7 @@ const NOT_REPLAYED: [&str; 25] = [
     "--render-scale",
     "--no-api",
     "--stopped",
+    "--paused",
     "--host",
     "--join",
     "--serve",
@@ -182,7 +185,8 @@ Options:
   --real-time         With --headless, a tick's time a frame: a watched game, or peers over --link,
                       play as windowed ones do; --frames and --capture count frames as they come
   --frames <N>        Exit after N frames
-  --size <WxH>        With --headless, the view's size in pixels, such as `320x180` (1280x720)
+  --size <WxH>        With --headless, the frame's size in pixels, such as `320x180` (1280x720);
+                      development builds dock the view below a tab bar, as `status` gives it
   --capture <N>       Capture frame N through RenderDoc, in a run under `renderdoccmd capture`
   --gpu <NAME>        Use the GPU whose name contains NAME, such as `amd`
   --validation        Run under Vulkan validation (the default in debug builds)
@@ -206,6 +210,8 @@ as their files change, logging `Shader reloaded`, `Model reloaded` and the like,
   --stopped           Start stopped until the API's `play`: the world the layers attach is the world
                       as edited, which only the API's edits, `scene open` and `scene new`, and scene
                       files' saves change. With --restore, stopped or playing as the snapshot's was
+  --paused            Start paused until the API's `resume`, so a tool steps from the first tick.
+                      With --restore, paused or not as the snapshot's was
   --restore <PATH>    Start from a snapshot, which the API's `snapshot` writes, not a fresh world
 
 Determinism:
@@ -283,6 +289,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         api: true,
         restore: None,
         stopped: false,
+        paused: false,
         net: None,
         code: None,
         relay: None,
@@ -425,7 +432,7 @@ fn option(
             let size = value_of(flag)?;
             parsed.size = Some(sides(&size).ok_or_else(|| {
                 bad(format!(
-                    "`--size` takes the view's width and height in pixels, each from 1 to \
+                    "`--size` takes the frame's width and height in pixels, each from 1 to \
                      {MAX_TEXTURE_SIZE}, such as `320x180`, not `{size}`"
                 ))
             })?);
@@ -482,6 +489,7 @@ fn development(
     match flag {
         "--no-api" => parsed.api = false,
         "--stopped" => parsed.stopped = true,
+        "--paused" => parsed.paused = true,
         // The last wins: `gg run` gives it after the game's own.
         "--restore" => parsed.restore = Some(value_of(flag)?.into()),
         _ => return Ok(false),
@@ -642,6 +650,21 @@ fn check(parsed: &Args) -> Result<()> {
             "`--stopped` starts the run stopped, and the tool API's `stop` brings back the world \
              as edited between ticks, taking its ticks back, which a recording's replay can't \
              follow, so it takes no `--record`"
+                .to_owned(),
+        ));
+    }
+    if parsed.paused && !(cfg!(feature = "dev") && parsed.api) {
+        return Err(bad(
+            "`--paused` starts the run paused until the tool API's `resume`, which only \
+             development builds serve, and not with `--no-api`"
+                .to_owned(),
+        ));
+    }
+    if parsed.paused && parsed.net.is_some() {
+        return Err(bad(
+            "`--paused` starts the run paused, but a networked session's runs play from start to \
+             end, so that their worlds don't part, so it takes no `--host`, `--join`, `--serve` or \
+             `--connect`"
                 .to_owned(),
         ));
     }
@@ -840,6 +863,10 @@ mod tests {
         let stopped = parse_strs(&["--stopped", "--restore", "a.snapshot"]);
         let stopped = stopped.map(|args| args.unwrap().stopped);
         assert_eq!(stopped.map_err(|error| error.code()), expected);
+        // And a paused start (only the API resumes), recorded or not.
+        let paused = parse_strs(&["--paused", "--record", "run.recording"]);
+        let paused = paused.map(|args| args.unwrap().paused);
+        assert_eq!(paused.map_err(|error| error.code()), expected);
         // The last snapshot wins.
         let args = parse_strs(&["--restore", "a.snapshot", "--restore=b.snapshot"]);
         let restore = args.unwrap().unwrap().restore;
@@ -1065,6 +1092,8 @@ mod tests {
             &["--stopped", "--record", "run.recording"],
             &["--stopped", "--host", "0.0.0.0:7700"],
             &["--stopped", "--join", "127.0.0.1:7700"],
+            &["--paused", "--no-api"],
+            &["--paused", "--serve", "0.0.0.0:7700"],
             &["--rollback"],
             &["--link", "100,20,5"],
             &[

@@ -76,6 +76,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | `gg run` patching edits to constants, and restarting on crashes from data and on manifest edits | Agents tune constants live, or data crashes a game |
 | `gg run --peers 2` windows apart, through a relay or embedded; an app's name and run defaults in a manifest, the sandbox's too | Someone needs them |
 | `gg input`: the cursor in canvas units, clicks that leave the OS cursor ungrabbed | An agent plays a game through it |
+| Through the API: chosen fields of many entities in one call, `pick` naming the entity's parent, a world point's pixel | An agent reads many entities, or aims in 3D |
 
 ### Shipping and CI
 

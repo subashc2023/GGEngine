@@ -36,7 +36,7 @@ use ship::Ship;
 /// `gg help`'s head.
 const OVERVIEW: &str = "\
 Usage: gg [options] <command> [options]   options before or after it: `gg --pid 7 status`
-       gg help [<command>]               a command's options, output and codes
+       gg help [<command>]               a command's options, output and codes; `--help` after it too
 
 In a game's project (the directory of its `project.ron` beside its `Cargo.toml`, or one below it),
 or the one `--project` names, gg builds the project's game, runs cargo in its directory and talks to
@@ -423,10 +423,21 @@ EVENTS is a JSON array of the API's input events, handed over in order as a fram
 - a scroll: {\"scroll\":{\"lines\":[0,1]}};
 - the keys' focus: {\"focused\":true}.
 
-A key or button stays down until an event releases it. `--hold N` releases those the events press
-and leave down after exactly N ticks (64 a second), then prints the status, as `step` does. Frames
-run no tick past the release meanwhile. Paused, it steps the N ticks. Past 30 s (1,920 ticks), give
-`--timeout`. Refused while the game is stopped.
+A key or button stays down until an event releases it. Without `--hold`, `input` prints `{}` at
+once, and paused, no tick sees the events before a `step`.
+
+`--hold N` releases the keys and buttons the events press and leave down after exactly N ticks (64
+a second), then prints the status, as `step` does. Events that leave nothing down, such as a
+click's, just run the N ticks. The next tick sees the release. Frames run no tick past it
+meanwhile. Paused, it steps the N ticks. Past 30 s (1,920 ticks), give `--timeout`. Refused while
+the game is stopped.
+
+A click at (400, 300), then a tick:
+  gg input --hold 1 '[{\"cursor\":[400,300]}, {\"button\":{\"button\":\"left\",\"pressed\":true}},
+    {\"button\":{\"button\":\"left\",\"pressed\":false}}]'
+A drag from (330, 280) to (640, 390), the button down 8 ticks with the cursor at its end:
+  gg input --hold 8 '[{\"cursor\":[330,280]}, {\"button\":{\"button\":\"left\",\"pressed\":true}},
+    {\"cursor\":[640,390]}]'
 ",
             },
             Help {
@@ -1028,6 +1039,11 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
     let Some((name, args)) = args.split_first() else {
         return Ok(Command::Help(overview()));
     };
+    // `gg COMMAND --help` is `gg help COMMAND`, as agents try first; after `--`, it's the game's.
+    let asked = (args.iter().take_while(|arg| *arg != "--")).any(|arg| arg == "--help");
+    if asked && !matches!(name.as_str(), "help" | "-h" | "--help") {
+        return section(name).map(Command::Help);
+    }
     let mut parsed = Parsed::new(args)?;
     let command = match name.as_str() {
         "help" | "-h" | "--help" => help_args(&mut parsed)?,
@@ -1593,7 +1609,7 @@ mod tests {
             let refused = parsed(&[name]).err().map(|failure| failure.message);
             let unknown = refused.is_some_and(|message| message.contains("there's no command"));
             assert!(!unknown, "{name}");
-            for args in [["help", name], ["--help", name]] {
+            for args in [["help", name], ["--help", name], [name, "--help"]] {
                 let Ok(Command::Help(text)) = parsed(&args) else {
                     panic!("{args:?}");
                 };
@@ -1602,6 +1618,11 @@ mod tests {
                 assert!(text.contains(help.details.trim_end()), "{text}");
             }
         }
+        let game_help = parsed(&["run", "sandbox", "--", "--help"]);
+        assert!(
+            !matches!(game_help, Ok(Command::Help(_))),
+            "the game's own `--help`"
+        );
         let refused = parsed(&["help", "nonsense"]).err().expect("refused");
         assert_eq!(refused.code, "gg.args");
         for named in ["`nonsense`", "`run`", "`save-prefab`", "`gg help`"] {

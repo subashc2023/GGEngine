@@ -1,7 +1,7 @@
 //! The Vulkan instance: the loader, validation, and the messenger that logs what Vulkan reports.
 
 use std::borrow::Cow;
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CStr, CString, OsStr, c_char, c_void};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -77,7 +77,9 @@ impl Instance {
     /// under the validation layer if `desc.validation` and installed, as
     /// [`Instance::validation`] tells.
     /// The loader is the one the OS finds by name, but a macOS app's bundle loads its own,
-    /// `Contents/Frameworks/libvulkan.1.dylib`, by path.
+    /// `Contents/Frameworks/libvulkan.1.dylib`, by path. On macOS without one by name, it's the
+    /// Vulkan SDK's or Homebrew's, by path: in `VULKAN_SDK`'s lib, `/usr/local/lib` or
+    /// `/opt/homebrew/lib`.
     ///
     /// Fails with:
     /// - `gpu.no_loader` without a loader.
@@ -95,9 +97,7 @@ impl Instance {
                 // whose exports have the signatures ash expects.
                 unsafe { ash::Entry::load_from(loader) }
             }
-            // SAFETY: the library ash loads, vulkan-1.dll or libvulkan, is the Khronos loader,
-            // whose exports have the signatures ash expects.
-            None => unsafe { ash::Entry::load() },
+            None => load_installed(),
         };
         let entry = entry.map_err(|error| {
             let message = match &bundled {
@@ -105,6 +105,11 @@ impl Instance {
                     "can't load the Vulkan loader the app's bundle holds, {}",
                     loader.display()
                 ),
+                None if cfg!(target_os = "macos") => {
+                    "can't load the Vulkan loader, by name, from `VULKAN_SDK`'s lib, \
+                     /usr/local/lib or /opt/homebrew/lib; install the Vulkan SDK"
+                        .to_owned()
+                }
                 None => {
                     "can't load the Vulkan loader; install a GPU driver that supports Vulkan 1.4"
                         .to_owned()
@@ -357,6 +362,44 @@ fn bundled_loader(exe: &Path, os: &str) -> Option<PathBuf> {
     Some(contents.join("Frameworks").join("libvulkan.1.dylib"))
 }
 
+/// Loads the Vulkan loader the OS finds by name, else the first of [`installed_loaders`] there is.
+/// Fails with the first's error, by name, when none is there.
+fn load_installed() -> std::result::Result<ash::Entry, ash::LoadingError> {
+    // SAFETY: the library ash loads, vulkan-1.dll or libvulkan, is the Khronos loader, whose
+    // exports have the signatures ash expects.
+    let by_name = match unsafe { ash::Entry::load() } {
+        Ok(entry) => return Ok(entry),
+        Err(error) => error,
+    };
+    let sdk = std::env::var_os("VULKAN_SDK");
+    let installed = installed_loaders(std::env::consts::OS, sdk.as_deref());
+    let Some(loader) = installed.into_iter().find(|loader| loader.is_file()) else {
+        return Err(by_name);
+    };
+    debug!(path = %loader.display(), "Loading the Vulkan loader the OS didn't find by name");
+    // SAFETY: the library is the Khronos loader the Vulkan SDK or Homebrew installed, whose
+    // exports have the signatures ash expects.
+    unsafe { ash::Entry::load_from(&loader) }
+}
+
+/// Where the Vulkan SDK and Homebrew install the loader on `os`, as [`std::env::consts::OS`] gives
+/// it: first in `sdk`, `VULKAN_SDK`'s value, then the SDK's system-wide install and Homebrew's.
+///
+/// Only macOS has any. Its dyld finds a library named alone in `/usr/lib`, but in `/usr/local/lib`
+/// only through `DYLD_FALLBACK_LIBRARY_PATH`. Cargo sets that for what it runs. A game an installed
+/// `gg run` starts goes without, as does anything a system binary such as `nohup` starts: SIP
+/// drops it. The loader finds drivers and layers by their manifests' relative paths.
+fn installed_loaders(os: &str, sdk: Option<&OsStr>) -> Vec<PathBuf> {
+    if os != "macos" {
+        return Vec::new();
+    }
+    let sdk = sdk.map(|sdk| Path::new(sdk).join("lib"));
+    sdk.into_iter()
+        .chain(["/usr/local/lib", "/opt/homebrew/lib"].map(PathBuf::from))
+        .map(|lib| lib.join("libvulkan.1.dylib"))
+        .collect()
+}
+
 fn engine_version() -> u32 {
     let part = |number: &str| number.parse().unwrap_or(0);
     vk::make_api_version(
@@ -532,5 +575,26 @@ mod tests {
         ] {
             assert_eq!(bundled_loader(exe, os), None, "{} on {os}", exe.display());
         }
+    }
+
+    /// On macOS, a loader the OS doesn't find by name is looked for where `VULKAN_SDK` says, then
+    /// where the SDK and Homebrew install it; elsewhere, nowhere.
+    #[test]
+    fn macos_looks_for_the_sdks_loader() {
+        let sdk = OsStr::new("/Users/ada/VulkanSDK/1.4.363.1/macOS");
+        let installed = [
+            "/usr/local/lib/libvulkan.1.dylib",
+            "/opt/homebrew/lib/libvulkan.1.dylib",
+        ]
+        .map(PathBuf::from);
+        let with_sdk = installed_loaders("macos", Some(sdk));
+        assert_eq!(
+            with_sdk[0],
+            Path::new("/Users/ada/VulkanSDK/1.4.363.1/macOS/lib/libvulkan.1.dylib")
+        );
+        assert_eq!(with_sdk[1..], installed);
+        assert_eq!(installed_loaders("macos", None), installed);
+        assert!(installed_loaders("linux", Some(sdk)).is_empty());
+        assert!(installed_loaders("windows", None).is_empty());
     }
 }

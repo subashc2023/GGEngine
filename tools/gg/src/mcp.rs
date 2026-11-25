@@ -500,7 +500,8 @@ const TOOLS: &[Tool] = &[
         name: "input",
         description: "Hands the game's layers input events, in order, as its window would, as a \
                       frame starts. Release each key and button you press: the game holds it down \
-                      until then, or give `hold`.",
+                      until then, or give `hold`. Without `hold`, it answers `{}` before a tick \
+                      sees the events; paused, none does until a `step`.",
         properties: || {
             json!({
                 "events": input(),
@@ -510,8 +511,10 @@ const TOOLS: &[Tool] = &[
                     "maximum": 10000,
                     "description": "Ticks (64 a second) to hold the keys and buttons the events \
                                     press and leave down. They're released after exactly that \
-                                    many, and the answer is the status then, as `step`'s. Paused, \
-                                    the hold steps its ticks; refused while stopped.",
+                                    many, and the answer is the status then, as `step`'s; the \
+                                    next tick sees the release. With none left down, such as a \
+                                    click's, it just runs the ticks. Paused, the hold steps its \
+                                    ticks; refused while stopped.",
                 },
             })
         },

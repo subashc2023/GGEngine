@@ -311,6 +311,7 @@ impl Handler<'_> {
             &mut self.stepper,
             snapshot,
             self.args.stopped,
+            self.args.paused,
             self.api.is_some(),
         )?;
         Ok(())

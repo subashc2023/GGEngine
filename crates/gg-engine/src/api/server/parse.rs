@@ -145,7 +145,8 @@ pub(super) enum Call {
 pub(super) struct Hold {
     /// The ticks to hold for, from 1 to [`MOST_STEPS`].
     pub(super) ticks: u64,
-    /// A release of each key and button the events press and leave down, in the order pressed.
+    /// A release of each key and button the events press and leave down, in the order pressed:
+    /// none for a click, whose hold only runs its ticks.
     pub(super) releases: Vec<InputEvent>,
 }
 
@@ -183,9 +184,8 @@ fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
 ///
 /// - `api.unknown_method`.
 /// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); an
-///   `input` with an unknown key, a `hold` of 0 or past [`MOST_STEPS`] ticks, or a `hold` whose
-///   events leave nothing down; a `scene`
-///   path missing, unwanted or not `.ron`, or `discard` given to `save`; a `save_prefab` path not
+///   `input` with an unknown key, or a `hold` of 0 or past [`MOST_STEPS`] ticks; a `scene` path
+///   missing, unwanted or not `.ron`, or `discard` given to `save`; a `save_prefab` path not
 ///   `.prefab`; a `frames` `dir` not an absolute directory path, a `count` of 0 or past
 ///   [`gg_api::MOST_FRAMES`], or invalid viewpoints or `rect` (no area).
 /// - `api.bad_request`: a second `hello`.
@@ -404,15 +404,10 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
                     let what = format!("holds from 1 to {MOST_STEPS} ticks, not {ticks}");
                     return Err(bad_params(method, what));
                 }
-                Some(ticks) => {
-                    let releases = releases(&events);
-                    if releases.is_empty() {
-                        let what = "holds the keys and buttons its events press and leave down, \
-                                    and they leave none down";
-                        return Err(bad_params(method, what));
-                    }
-                    Some(Hold { ticks, releases })
-                }
+                Some(ticks) => Some(Hold {
+                    ticks,
+                    releases: releases(&events),
+                }),
                 None => None,
             };
             Call::Input(events, hold)

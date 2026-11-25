@@ -104,6 +104,7 @@ pub(crate) fn run_headless(
         &mut stepper,
         snapshot,
         args.stopped,
+        args.paused,
         api.is_some(),
     );
     let rendered = started.and_then(|()| {
@@ -267,6 +268,7 @@ pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>)
         snapshot,
         false,
         false,
+        false,
     )?;
     let mut frames = 0;
     while args.frames.is_none_or(|limit| frames < limit) {
@@ -310,7 +312,7 @@ pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>)
 /// With a `snapshot`, it starts from the snapshot's world at its ticks, not the world the layers
 /// attach, stopped or playing as the snapshot's run was ([`Stack::restore`], given whether a tool
 /// API `serves` the run), and paused if it was (development builds only). Without one, it starts
-/// from the attached world, stopped if `stopped` (`--stopped`).
+/// from the attached world, stopped if `stopped` (`--stopped`) and paused if `paused` (`--paused`).
 ///
 /// A development build first scans the assets under the app's root, before the layers load
 /// (`Context::start_assets`), and has a thread watch them if the API serves the run. Then, unless
@@ -326,6 +328,7 @@ pub(crate) fn start(
     stepper: &mut Stepper,
     snapshot: Option<Snapshot>,
     stopped: bool,
+    paused: bool,
     serves: bool,
 ) -> Result<()> {
     #[cfg(feature = "dev")]
@@ -344,10 +347,9 @@ pub(crate) fn start(
         // Before the layers load, so music they play as they load waits for the run to play. A
         // snapshot's playing run follows the same way from its first frame.
         let snapshot = snapshot.as_ref();
-        let paused = snapshot.is_some_and(|snapshot| snapshot.paused);
         cx.follow_playback(
             stopped || snapshot.is_some_and(|snapshot| snapshot.stopped),
-            paused,
+            snapshot.map_or(paused, |snapshot| snapshot.paused),
         );
     }
     let (stopped, paused) = match snapshot {
@@ -358,7 +360,7 @@ pub(crate) fn start(
         }
         None => {
             stack.attach(cx)?;
-            (stopped, false)
+            (stopped, paused)
         }
     };
     #[cfg(feature = "dev")]
@@ -1423,7 +1425,7 @@ pub(crate) mod tests {
             let mut cx = Context::new(None);
             cx.root = Some(scratch.0.clone());
             let stepper = &mut Stepper::default();
-            start(&mut stack, &mut cx, stepper, None, false, serves).expect("started");
+            start(&mut stack, &mut cx, stepper, None, false, false, serves).expect("started");
             let writes = serves && !joins;
             let case = format!("serves: {serves}, joins: {joins}");
             assert_eq!(found.get(), Some(writes), "{case}");

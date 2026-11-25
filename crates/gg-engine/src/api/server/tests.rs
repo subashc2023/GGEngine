@@ -1420,6 +1420,7 @@ fn a_snapshot_that_quits_is_written_first_and_nothing_after_it_applies() {
         &mut restored,
         Some(snapshot),
         false,
+        false,
         true,
     )
     .expect("restored");
@@ -2471,8 +2472,9 @@ fn input_reaches_the_layers_as_the_windows_would() {
 }
 
 /// A held `input` lets go of what it pressed and left down after exactly its ticks, though each
-/// frame owes three: the frame before the release runs fewer. Paused, the hold steps its ticks.
-/// Each answers the status as it lets go, with whether layers want the cursor grabbed.
+/// frame owes three: the frame before the release runs fewer. Paused, the hold steps its ticks,
+/// and a click's, leaving nothing down, only steps them. Each answers the status as it lets go,
+/// with whether layers want the cursor grabbed.
 #[test]
 fn a_held_input_lets_go_after_exactly_its_ticks() {
     let (mut api, session) = started("Api Held Input");
@@ -2488,17 +2490,21 @@ fn a_held_input_lets_go_after_exactly_its_ticks() {
             {"key": {"key": "KeyA", "pressed": false}},
             {"button": {"button": "left", "pressed": true}},
         ]);
-        let refused = [
-            json!({"events": events, "hold": 0}),
-            json!({"events": [{"key": {"key": "KeyW", "pressed": false}}], "hold": 4}),
-        ]
-        .map(|params| client.call("input", params).expect_err("refused").code);
+        let refused = (client.call("input", json!({"events": events, "hold": 0})))
+            .expect_err("refused")
+            .code;
         let held = json!({"events": events, "hold": 4});
         let running: Status = client.call_as("input", held).expect("held");
         let _: Status = client.call_as("pause", ()).expect("paused");
         let held = json!({"events": events, "hold": 2});
         let paused: Status = client.call_as("input", held).expect("held while paused");
-        (refused, running, paused)
+        let click = json!([
+            {"button": {"button": "right", "pressed": true}},
+            {"button": {"button": "right", "pressed": false}},
+        ]);
+        let clicked = json!({"events": click, "hold": 3});
+        let clicked: Status = client.call_as("input", clicked).expect("a click stepped");
+        (refused, running, paused, clicked)
     });
     // Each tick's number, and whether W was down through it.
     let mut ticks = Vec::new();
@@ -2513,8 +2519,8 @@ fn a_held_input_lets_go_after_exactly_its_ticks() {
         stepper.step(Tick::DT * 3, tick, || Duration::ZERO);
         thread::sleep(Duration::from_millis(1));
     }
-    let (refused, running, paused) = client.join().expect("the client didn't panic");
-    assert_eq!(refused, ["api.bad_params"; 2]);
+    let (refused, running, paused, clicked) = client.join().expect("the client didn't panic");
+    assert_eq!(refused, "api.bad_params");
     // The first tick and count of each run of ticks with W down.
     let mut held: Vec<(u64, u64)> = Vec::new();
     for &(number, down) in &ticks {
@@ -2530,6 +2536,7 @@ fn a_held_input_lets_go_after_exactly_its_ticks() {
     );
     assert_eq!((running.ticks, running.paused), (held[0].0 + 4, false));
     assert_eq!((paused.ticks, paused.paused), (held[1].0 + 2, true));
+    assert_eq!((clicked.ticks, clicked.paused), (paused.ticks + 3, true));
     assert!(running.cursor_grabbed && paused.cursor_grabbed);
     assert!(!cx.input().key_down(Key::KeyW));
     assert!(!cx.input().button_down(MouseButton::Left));
