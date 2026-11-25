@@ -1,0 +1,8 @@
+(
+    game: "tps",
+    assets: ".",
+    scenes: [
+        "scenes",
+    ],
+    start: "scenes/main.ron",
+)

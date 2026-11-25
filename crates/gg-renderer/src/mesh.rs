@@ -5,13 +5,13 @@ use std::ffi::CString;
 use std::sync::Arc;
 use std::thread;
 
-use gg_core::math::{Mat4, Vec3};
+use gg_core::math::{Mat4, Vec3, Vec4};
 use gg_core::{Error, Result};
 #[cfg(doc)]
 use gg_gpu::Format;
 use gg_gpu::{ComputePipeline, Device, Faces, GpuBuffer, Pipeline};
 
-use crate::{Draws, parallel, shader};
+use crate::{Draws, model, parallel, shader};
 
 mod cull;
 mod draw;
@@ -245,12 +245,14 @@ impl MeshPass {
                 .and_then(Option::as_ref)
                 .filter(|shader| shader.meshlets.is_some())
         };
-        for (run, transform, material) in self.scene.instances() {
+        for (run, transform, params) in self.scene.instances() {
             if traced(run.shader).is_some() {
+                let (material, tint) = model::material_and_tint(params);
                 out.push(TracedInstance {
                     mesh: run.mesh,
                     transform,
                     material,
+                    tint,
                     both_faces: run.faces == Faces::Both,
                     masked: traced(run.shader).is_some_and(|shader| shader.masked),
                 });
@@ -263,11 +265,12 @@ impl MeshPass {
             let params = &draws.params[run.params.clone()];
             for (i, &transform) in draws.transforms[run.instances.clone()].iter().enumerate() {
                 let at = i * shader.params_size;
-                let material = bytemuck::pod_read_unaligned(&params[at..at + 4]);
+                let (material, tint) = model::material_and_tint(&params[at..]);
                 out.push(TracedInstance {
                     mesh: run.mesh,
                     transform,
                     material,
+                    tint,
                     both_faces: run.faces == Faces::Both,
                     masked: shader.masked,
                 });
@@ -286,13 +289,14 @@ pub(crate) struct TracedMesh<'a> {
     pub(crate) positions: Positions,
 }
 
-/// An instance the path tracer traces: its mesh, transform, material, whether rays find its back
-/// faces, and whether its material's cutoff masks it.
+/// An instance the path tracer traces: its mesh, transform, material, tint, whether rays find its
+/// back faces, and whether its material's cutoff masks it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TracedInstance {
     pub(crate) mesh: u32,
     pub(crate) transform: Mat4,
     pub(crate) material: u32,
+    pub(crate) tint: Vec4,
     pub(crate) both_faces: bool,
     pub(crate) masked: bool,
 }

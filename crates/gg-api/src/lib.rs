@@ -14,6 +14,14 @@
 //! stable dotted names, such as `ecs.no_entity`). The first request is [`Hello`]. The session file
 //! names the protocol's revision, [`PROTOCOL`].
 //!
+//! # Entities
+//!
+//! Where a request takes an entity (`entity`, `get`, `save_prefab`, `pick`'s `within`, and the `id`
+//! and `parent` of [`Operation`]s), its value is an ID or a name. Text of 16 hex digits is an ID.
+//! Any other is the `Name` of the one entity that has it, else the request fails with
+//! `ecs.no_entity`, naming the text, for none, or `ecs.ambiguous_name`, listing their IDs, for
+//! several. The IDs a request makes (`create`'s `id`, `duplicate`'s `copies`) are IDs alone.
+//!
 //! # Methods
 //!
 //! `-` is none; `needs` is a [grant](#grants)'s capability. Notes follow the table.
@@ -205,7 +213,8 @@
 //!   - `engine.no_root`: no asset root;
 //!   - `api.no_scene`: a game run from its package or networked, as `scene`'s `save` does, and
 //!     while a copy of the world as edited plays (`stop` takes its entities away);
-//!   - `ecs.no_entity`: an ID no living entity has;
+//!   - `ecs.no_entity`: an ID or name no living entity has; `ecs.ambiguous_name`: a name several
+//!     have;
 //!   - `ecs.prefab_entity`: an entity an instance's prefab gives; `scene.prefab_variant`: an
 //!     instance's root; `ecs.model_node`: a model's node;
 //!   - `asset.outside_root`: a path outside the asset root, whose folder isn't there, or that the
@@ -1201,8 +1210,8 @@ pub struct By {
 /// What `pick` takes: the view's pixel `at`, `[x, y]` from its top left, as `input`'s cursor and a
 /// capture's PNG have it.
 ///
-/// `within`, an entity's ID, as an editor's pick: where it's the root of the model drawn at the
-/// pixel, or one of its nodes, the answer is the node drawn there rather than the root. A `within`
+/// `within`, an entity's ID or name, as an editor's pick: where it's the root of the model drawn at
+/// the pixel, or one of its nodes, the answer is the node drawn there rather than the root. A `within`
 /// of no living entity is as none.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1301,7 +1310,7 @@ pub struct Listed {
     pub components: Vec<String>,
 }
 
-/// What `entity` takes: an entity's ID.
+/// What `entity` takes: an entity's ID or name.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entity {
@@ -1340,8 +1349,8 @@ pub struct Instanced {
     pub added: Vec<String>,
 }
 
-/// What `save_prefab` takes: the entity `id` to save with its descendants, and the prefab's `path`,
-/// if any.
+/// What `save_prefab` takes: the entity `id` (an ID or name) to save with its descendants, and the
+/// prefab's `path`, if any.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavePrefab {
@@ -1360,8 +1369,8 @@ pub struct SavedPrefab {
     pub ticks: u64,
 }
 
-/// What `get` takes: an entity's ID, a component type, and a field's path, such as `translation.x`
-/// or `rect[1]`, empty for the whole component.
+/// What `get` takes: an entity's ID or name, a component type, and a field's path, such as
+/// `translation.x` or `rect[1]`, empty for the whole component.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
@@ -1727,8 +1736,8 @@ pub struct Patched {
 /// An authoring change to the world, as `apply` takes it.
 ///
 /// Written `{"set":{"id":...,"component":...,"path":...,"value":...}}`, a key naming it, holding an
-/// object of what it takes. It names entities by ID, and carries values as [Values](crate#values)
-/// say.
+/// object of what it takes. It names entities by ID or name ([Entities](crate#entities)), and
+/// carries values as [Values](crate#values) say.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {

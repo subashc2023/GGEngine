@@ -1,5 +1,5 @@
-// Models' meshes, shaded as shading.slang says, each instance with its own transform, ID and
-// material. It writes its ID, and its motion in the world since the frame before, for
+// Models' meshes, shaded as shading.slang says, each instance with its own transform, ID,
+// material and tint. It writes its ID, and its motion in the world since the frame before, for
 // antialiasing. `Params` matches `Params` in src/model.rs byte for byte.
 //
 // As is, it's for blended materials: it discards what's fully transparent, for picks, and writes
@@ -22,7 +22,16 @@
 struct Params {
     // The material's index in the frame's table.
     uint material;
+    // Linear RGBA multiplying the base color, alpha included: words 1 to 4, as visibility.slang
+    // reads them. An array, as a float4 would align the struct to 16 bytes.
+    float tint[4];
 };
+
+// Instance `instance`'s tint.
+float4 tint_of(uint instance) {
+    Params params = push.params[instance];
+    return float4(params.tint[0], params.tint[1], params.tint[2], params.tint[3]);
+}
 
 [[vk::push_constant]] ConstantBuffer<Push<PackedVertex, Params>> push;
 
@@ -167,7 +176,8 @@ Shaded fragment_main(Varyings input, bool front: SV_IsFrontFace) {
     // pick their levels undefined, and the normal's too. Base, emission and specular-glossiness
     // specular colors decode from sRGB as sampled; other maps, and glossiness in alpha, read as
     // stored.
-    float4 color = sampled(material, 0, input.uv) * material.color * input.color;
+    float4 color =
+        sampled(material, 0, input.uv) * material.color * input.color * tint_of(input.instance);
     float4 surface = sampled(material, 1, input.uv);
     float2 mapped = sampled(material, 2, input.uv).xy * 2.0 - 1.0;
     float occlusion = 1.0 + material.occlusion_strength * (sampled(material, 3, input.uv).r - 1.0);
@@ -219,7 +229,8 @@ void shadow_main(Varyings input) {
     // the device.
     Frame frame = loadAligned<8>(push.frame);
     Material material = frame.materials[push.params[input.instance].material];
-    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.color.a;
+    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.color.a
+        * tint_of(input.instance).a;
     if (alpha < material.cutoff) {
         discard;
     }
@@ -238,7 +249,8 @@ float4 normal_main(Varyings input, bool front: SV_IsFrontFace) : SV_Target0 {
     // Sampled before the discard, as `fragment_main` says why.
     float2 mapped = sampled(material, 2, input.uv).xy * 2.0 - 1.0;
 #if defined(MASKED)
-    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.color.a;
+    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.color.a
+        * tint_of(input.instance).a;
     if (alpha < material.cutoff) {
         discard;
     }
@@ -341,7 +353,8 @@ Seen seen(Visible input, uint triangle) {
     // Loaded whole, as `shadow_main` says why.
     Frame frame = loadAligned<8>(push.frame);
     Material material = frame.materials[push.params[input.instance].material];
-    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.alpha;
+    float alpha = sampled(material, 0, input.uv).a * material.color.a * input.alpha
+        * tint_of(input.instance).a;
     if (alpha < material.cutoff) {
         discard;
     }

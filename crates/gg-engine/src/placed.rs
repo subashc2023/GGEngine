@@ -1,17 +1,18 @@
 //! Where the world's entities are: each one's matrix to world space (its transform's, then its
-//! ancestors' in turn) and its rotation. They're kept from frame to frame as the latest tick left
-//! them, and placed again only where a transform or parent changed, with what it carries. A root
-//! carrying nothing, outside tables whose places are held elsewhere, isn't kept: drawing reads its
-//! transform, and [`Placed::kept`] finds its place from it. Also where entities on their way
-//! between ticks draw this frame, which follows only what the latest tick moved.
+//! ancestors' in turn), its rotation, and its tint (its own [`Tint`] times its ancestors'). They're
+//! kept from frame to frame as the latest tick left them, and placed again only where a transform,
+//! tint or parent changed, with what it carries. A root carrying nothing, outside tables whose
+//! places are held elsewhere, isn't kept: drawing reads its transform and tint, and
+//! [`Placed::kept`] finds its place from it. Also where entities on their way between ticks draw
+//! this frame, which follows only what the latest tick moved.
 
 use std::mem;
 
-use gg_core::math::{DAffine3, DVec3, Quat};
+use gg_core::math::{DAffine3, DVec3, Quat, Vec4};
 
 use crate::ecs::ComponentId;
 use crate::interpolation::{self, Past};
-use crate::{Entity, Parent, Transform, World};
+use crate::{Entity, Parent, Tint, Transform, World};
 
 /// Where the world's entities are, by slot. Kept from frame to frame: it allocates nothing once
 /// grown.
@@ -25,6 +26,8 @@ pub(crate) struct Placed {
     /// By slot: where its entity is as the latest tick left it. `None` is the origin, unturned, at
     /// its own size: a root without a transform, and what it carries without one.
     kept: Vec<Option<Place>>,
+    /// By slot: its entity's tint as the latest tick left it, for one placed in `kept`.
+    tints: Vec<Vec4>,
     /// By slot: whether its entity was last placed as a root carrying nothing, whose place isn't
     /// in `kept` but its transform's.
     own: Vec<bool>,
@@ -44,7 +47,7 @@ pub(crate) struct Placed {
     drawn: Vec<Option<Place>>,
     drawing: u32,
     moving: Vec<Entity>,
-    stack: Vec<(Entity, Option<Place>)>,
+    stack: Vec<(Entity, Option<Place>, Vec4)>,
 }
 
 /// Where an entity is: its matrix to the world's space, in `f64` (its transform's, then each
@@ -91,9 +94,9 @@ impl Place {
 
 impl Placed {
     /// Places `world`'s entities that changed since last placed, or all in another world: each
-    /// whose transform or parent changed or that joined a table (as spawning or giving a
-    /// transform or parent does), and what each carries, from the topmost changed. A root
-    /// carrying nothing, in a table without component `held`, is left to its transform: not
+    /// whose transform, tint or parent changed or that joined a table (as spawning, or giving or
+    /// taking a transform, tint or parent, does), and what each carries, from the topmost changed.
+    /// A root carrying nothing, in a table without component `held`, is left to its transform: not
     /// placed, nor among [`changed`](Self::changed) (see [`kept`](Self::kept)). Cost follows what
     /// changed and what it carries, apart from a look over each table's marks.
     pub(crate) fn place(&mut self, world: &World, held: Option<ComponentId>) {
@@ -109,6 +112,7 @@ impl Placed {
         let mut list = mem::take(&mut self.list);
         list.clear();
         let (transform, parent) = (world.component::<Transform>(), world.component::<Parent>());
+        let tint = world.component::<Tint>();
         for table in world.tables() {
             let entities = table.entities();
             let roots = !parent.is_some_and(|id| table.has(id));
@@ -123,6 +127,7 @@ impl Placed {
                 Some(table.joined()),
                 transform.and_then(|id| table.changed(id)),
                 parent.and_then(|id| table.changed(id)),
+                tint.and_then(|id| table.changed(id)),
             ];
             for marks in marks.into_iter().flatten() {
                 if marks.since(since) {
@@ -221,28 +226,29 @@ impl Placed {
                 top = parent;
                 up = world.parent(top).expect("a parent is alive");
             }
-            let under = up.and_then(|parent| {
+            let (under, tint) = up.map_or((None, Vec4::ONE), |parent| {
                 let slot = parent.slot();
                 debug_assert_eq!(self.entities[slot], parent, "a parent is placed before");
-                self.place_of(world, parent)
+                (self.place_of(world, parent), self.tint_of(world, parent))
             });
-            self.walk(world, top, under, drawn);
+            self.walk(world, top, (under, tint), drawn);
         }
     }
 
-    /// Places `top`, under its parent's place `under`, and what it carries, as the latest tick
-    /// left them; or draws them, with `drawn`, as [`draw`](Self::draw) says.
+    /// Places `top`, under its parent's place and tint `under`, and what it carries, as the latest
+    /// tick left them; or draws them, with `drawn`, as [`draw`](Self::draw) says.
     fn walk(
         &mut self,
         world: &World,
         top: Entity,
-        under: Option<Place>,
+        (under, tinted): (Option<Place>, Vec4),
         drawn: Option<(&Past, f32, u64)>,
     ) {
         let transform = world.component::<Transform>();
+        let tint = world.component::<Tint>();
         let pass = self.pass;
-        self.stack.push((top, under));
-        while let Some((entity, under)) = self.stack.pop() {
+        self.stack.push((top, under, tinted));
+        while let Some((entity, under, tinted)) = self.stack.pop() {
             let (index, row) = world.table_row(entity).expect("a placed entity is alive");
             let (index, row) = (index as usize, row as usize);
             let table = &world.tables()[index];
@@ -254,6 +260,8 @@ impl Placed {
                 None => transforms[row],
             });
             let place = Place::under(under, local.as_ref());
+            let own = tint.and_then(|id| table.column::<Tint>(id));
+            let tinted = own.map_or(tinted, |tints| tinted * tints[row].0);
             let slot = entity.slot();
             self.placed[slot] = pass;
             if drawn.is_some() {
@@ -262,12 +270,14 @@ impl Placed {
             } else {
                 self.entities[slot] = entity;
                 self.kept[slot] = place;
+                self.tints[slot] = tinted;
                 self.own[slot] = false;
                 self.again[slot] = pass;
                 self.changed.push(entity);
             }
             let children = world.children(entity).expect("a placed entity is alive");
-            self.stack.extend(children.map(|child| (child, place)));
+            self.stack
+                .extend(children.map(|child| (child, place, tinted)));
         }
     }
 
@@ -295,6 +305,25 @@ impl Placed {
         match self.own[slot] {
             true => Place::under(None, world.get::<Transform>(entity)),
             false => self.kept[slot],
+        }
+    }
+
+    /// `entity`'s tint, if placed: its own [`Tint`] times its ancestors', as the latest tick left
+    /// them; white for none.
+    pub(crate) fn tint(&self, world: &World, entity: Entity) -> Vec4 {
+        let slot = entity.slot();
+        match self.entities.get(slot) == Some(&entity) {
+            true => self.tint_of(world, entity),
+            false => Vec4::ONE,
+        }
+    }
+
+    /// The tint of `entity`, placed in its slot: a root left to its transform has its own.
+    fn tint_of(&self, world: &World, entity: Entity) -> Vec4 {
+        let slot = entity.slot();
+        match self.own[slot] {
+            true => world.get::<Tint>(entity).map_or(Vec4::ONE, |tint| tint.0),
+            false => self.tints[slot],
         }
     }
 
@@ -327,6 +356,7 @@ impl Placed {
         if self.entities.len() < slots {
             self.entities.resize(slots, Entity::DEAD);
             self.kept.resize(slots, None);
+            self.tints.resize(slots, Vec4::ONE);
             self.own.resize(slots, false);
             self.drawn.resize(slots, None);
             self.found.resize(slots, 0);
@@ -387,7 +417,7 @@ impl Placed {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::Vec3;
+    use gg_core::math::{Vec3, Vec4};
 
     use super::*;
 
@@ -404,8 +434,8 @@ mod tests {
     }
 
     /// Places `world` with `kept`, as each frame does, checks each live one of `entities` against
-    /// a fresh placing, bit for bit, advances the world's change tick as a frame's drawing does,
-    /// and returns the entities placed again, sorted.
+    /// a fresh placing, place and tint bit for bit, advances the world's change tick as a frame's
+    /// drawing does, and returns the entities placed again, sorted.
     fn place(world: &mut World, kept: &mut Placed, entities: &[Entity]) -> Vec<Entity> {
         kept.place(world, None);
         let fresh = Placed::of(world, &Past::default(), 1.0);
@@ -415,6 +445,8 @@ mod tests {
                 bits(fresh.kept(world, entity)),
                 "{entity}"
             );
+            let tints = [kept.tint(world, entity), fresh.tint(world, entity)];
+            assert_eq!(tints[0], tints[1], "{entity}'s tint");
             let pose = world.pose(entity).expect("alive");
             let place = kept.kept(world, entity).expect("placed");
             assert_eq!(format!("{:?}", pose.matrix), format!("{:?}", place.matrix));
@@ -500,6 +532,47 @@ mod tests {
         let copy = world.clone();
         world.clone_from(&copy);
         assert_eq!(place(&mut world, &mut kept, &all), sorted([f, g]));
+    }
+
+    /// A kept placing tints as a fresh one does, each entity its own tint times its ancestors', as
+    /// tints come, change and go. It places again, and lists, what a changed tint tints.
+    #[test]
+    fn a_kept_placing_tints_as_a_fresh_one_does() {
+        let mut world = World::default();
+        let half = Tint(Vec4::splat(0.5));
+        let red = Tint(Vec4::new(1.0, 0.0, 0.0, 1.0));
+        let root = world.spawn((at(1.0, 0.0), red));
+        let [a, b] = [at(0.5, 1.0), at(-2.0, 0.25)].map(|to| world.spawn((to, half)));
+        let bare = world.spawn(half);
+        let c = world.spawn(at(3.0, -1.0));
+        let lone = world.spawn((at(0.0, 2.0), red));
+        for (child, parent) in [(a, root), (b, a), (c, bare)] {
+            world.set_parent(child, Some(parent)).expect("no cycle");
+        }
+        let all = [root, a, b, bare, c, lone];
+        let mut kept = Placed::default();
+        place(&mut world, &mut kept, &all);
+        let tint = |kept: &Placed, world: &World, entity| kept.tint(world, entity);
+        assert_eq!(tint(&kept, &world, b), Vec4::new(0.25, 0.0, 0.0, 0.25));
+        assert_eq!(tint(&kept, &world, c), half.0);
+        assert_eq!(
+            tint(&kept, &world, lone),
+            red.0,
+            "a root left to its transform"
+        );
+
+        world.get_mut::<Tint>(a).expect("tinted").0 = Vec4::ONE;
+        assert_eq!(place(&mut world, &mut kept, &all), sorted([a, b]));
+        assert_eq!(tint(&kept, &world, b), Vec4::new(0.5, 0.0, 0.0, 0.5));
+        world.remove::<Tint>(root).expect("alive");
+        assert_eq!(place(&mut world, &mut kept, &all), sorted([root, a, b]));
+        assert_eq!(tint(&kept, &world, b), half.0);
+        world.insert(c, red).expect("alive");
+        assert_eq!(place(&mut world, &mut kept, &all), sorted([c]));
+        assert_eq!(tint(&kept, &world, c), red.0 * half.0);
+        world.get_mut::<Tint>(lone).expect("tinted").0 = Vec4::ONE;
+        assert_eq!(place(&mut world, &mut kept, &all), []);
+        assert_eq!(tint(&kept, &world, lone), Vec4::ONE);
     }
 
     /// Between ticks, what the latest tick moved draws on its way, with what it carries (each

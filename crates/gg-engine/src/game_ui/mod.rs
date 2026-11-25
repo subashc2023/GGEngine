@@ -17,6 +17,8 @@
 //! - Focusable: button and the widgets (slider, toggle, drop-down, text field).
 //! - Containers: row, column, stack, and list (a column that clips and scrolls).
 //!
+//! A text, or a button's, breaks lines only at `\n`: it doesn't wrap to its node's width.
+//!
 //! # Use
 //!
 //! A layer adds a UI ([`Context::add_ui`]), gets a [`GameUi`], and each frame passes it input

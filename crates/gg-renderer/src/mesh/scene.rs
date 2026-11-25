@@ -348,8 +348,9 @@ impl Kept {
         &self.runs
     }
 
-    /// Each instance in draw order: its run, its transform and its parameters' first word.
-    pub(crate) fn instances(&self) -> impl Iterator<Item = (&SceneRun, Mat4, u32)> + '_ {
+    /// Each instance in draw order: its run, its transform and its parameters' bytes, as many as
+    /// any draw's.
+    pub(crate) fn instances(&self) -> impl Iterator<Item = (&SceneRun, Mat4, &[u8])> + '_ {
         self.runs.iter().flat_map(move |run| {
             let slots = &self.order[run.first as usize..(run.first + run.count) as usize];
             slots.iter().map(move |&slot| {
@@ -357,7 +358,7 @@ impl Kept {
                 (
                     run,
                     Mat4::from_cols_array(&record.transform),
-                    record.params[0],
+                    bytemuck::cast_slice(&record.params),
                 )
             })
         })

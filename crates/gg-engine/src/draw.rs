@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use gg_core::math::{DVec3, Mat4, Quat};
+use gg_core::math::{DVec3, Mat4, Quat, Vec4};
 use gg_renderer::{Circle, Draws, MeshDraw, Shaders, Sprite};
 
 use crate::ecs::ComponentId;
@@ -106,6 +106,7 @@ struct Group {
 /// - Between ticks each draws `alpha` of the way from what `past` has it draw from to where the
 ///   tick left it; at 1, where the tick left it.
 /// - Each draw's ID is its entity's, which picks read back.
+/// - A model's mesh draws tinted as `placed` has its entity's [`Tint`](crate::Tint).
 /// - A child draws where its ancestors carry it, as `placed` has it, ordered by where the tick
 ///   left it. Roots, in tables without a [`Parent`], draw by their transforms; those drawing
 ///   between ticks blend first, in table order, in runs of rows the job system's threads take.
@@ -396,14 +397,20 @@ impl Scratch {
                     let columns = |index: u32| {
                         let (table, transforms, drawn) = placing(index);
                         let meshes = table.column::<MeshDraw>(mesh).expect("it has meshes");
-                        (transforms, meshes, drawn)
+                        (transforms, (meshes, table.entities()), drawn)
                     };
                     for item in items {
                         let found = found(&mut meshes_at, item.segment, columns);
-                        let (transforms, meshes, drawn) = found;
+                        let (transforms, (meshes, entities), drawn) = found;
                         let row = item.row as usize;
                         let at = matrix(transforms, drawn, row);
-                        draws.push_draw(at, &meshes[row], item.id.get());
+                        let tint = placed.tint(world, entities[row]);
+                        if tint == Vec4::ONE {
+                            draws.push_draw(at, &meshes[row], item.id.get());
+                        } else {
+                            let draw = meshes[row].tinted(tint, shaders);
+                            draws.push_draw(at, &draw, item.id.get());
+                        }
                     }
                 }
                 Kind::Particles => {
@@ -702,10 +709,11 @@ mod tests {
     use std::path::Path;
 
     use gg_core::math::{Quat, Vec3, Vec4};
-    use gg_renderer::{Blend, Mesh, Meshes, Shader, Shaders, Textures};
+    use gg_renderer::{AlphaMode, Blend, Mesh, Meshes, Shader, Shaders, Textures};
 
     use super::*;
-    use crate::{Component, Entity};
+    use crate::testing::model_draw;
+    use crate::{Component, Entity, Tint};
 
     #[derive(Clone, Copy, Component)]
     struct Marked;
@@ -1258,6 +1266,51 @@ mod tests {
             &mut Scratch::default(),
         );
         assert_eq!(draws, expected);
+    }
+
+    /// A blending model's draw takes its entity's tint times its ancestors', a root's its own; a
+    /// draw through another shader takes none.
+    #[test]
+    fn blending_model_draws_take_their_tints() {
+        let mut shaders = Shaders::default();
+        let model = model_draw(&mut shaders, AlphaMode::Blend);
+        let flat = flat_color(&mut shaders, Blend::Alpha);
+        let flat = MeshDraw::new(add_triangle(&mut Meshes::default()), flat, Vec4::ONE);
+        let at = |x: f32, z: f32| Transform {
+            translation: DVec3::new(f64::from(x), 0.0, f64::from(z)),
+            ..Transform::IDENTITY
+        };
+        let (red, half) = (Vec4::new(1.0, 0.0, 0.0, 1.0), Vec4::splat(0.5));
+        let mut world = World::default();
+        let root = world.spawn((at(1.0, 0.1), model, Tint(red)));
+        let child = world.spawn((at(0.5, 0.1), model, Tint(half)));
+        let other = world.spawn((at(2.0, 0.3), flat, Tint(half)));
+        world.set_parent(child, Some(root)).expect("no cycle");
+        let id = |entity: Entity| world.id(entity).expect("alive").get();
+        let mut want = Draws::default();
+        want.draw_scene();
+        let (root_at, carried) = (at(1.0, 0.1).matrix(), at(0.5, 0.1).matrix());
+        let wanted = [
+            (root_at, model.tinted(red, &shaders), root),
+            (root_at * carried, model.tinted(red * half, &shaders), child),
+            (at(2.0, 0.3).matrix(), flat, other),
+        ];
+        for (matrix, draw, entity) in wanted {
+            want.push_draw(from_origin(matrix, DVec3::ZERO), &draw, id(entity));
+        }
+        let mut draws = Draws::default();
+        draw_world(
+            &world,
+            &Past::default(),
+            &Placed::of(&world, &Past::default(), 1.0),
+            (1.0, DVec3::ZERO),
+            0,
+            &mut draws,
+            &mut shaders,
+            &mut Fonts::new(&mut Textures::default()),
+            &mut Scratch::default(),
+        );
+        assert_eq!(draws, want);
     }
 
     /// Circles draw among the rest back to front by z; at one z over sprites, under blending

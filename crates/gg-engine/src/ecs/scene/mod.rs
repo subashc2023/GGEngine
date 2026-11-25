@@ -23,6 +23,13 @@
 //! - What's opaque isn't saved: a load builds each component on
 //!   [`Component::base`](crate::Component::base).
 //! - Values nest at most [`MAX_DEPTH`] levels.
+//!
+//! A load takes more than the canonical form, so a scene written by hand names only what it needs:
+//!
+//! - A field left out takes its default.
+//! - An integer stands for a float: `scale: (2, 1, 1)`.
+//! - An asset goes by its path from the asset root, as `ModelRoot("models/rock.gltf")`, with or
+//!   without an ID file. A save writes its ID.
 
 mod read;
 #[cfg(feature = "dev")]

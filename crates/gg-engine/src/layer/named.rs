@@ -26,7 +26,7 @@ use crate::recording::text::Text;
 #[cfg(doc)]
 use crate::snapshot::Snapshot;
 use crate::snapshot::{self, Again};
-use crate::{Model, Prefab};
+use crate::{Model, Prefab, Shape};
 
 impl Context {
     /// Loads each texture, model, font and prefab `names` names, as
@@ -136,9 +136,19 @@ impl Context {
     /// already takes the names alone ([`load_path`](Self::load_path)). Gives the path from the
     /// asset root its name led to, if any.
     ///
-    /// Fails like [`asset_path`](Self::asset_path) and [`add_model`](Self::add_model), and with
-    /// `asset.outside_root` for a file outside the root, as through `..` or a link.
+    /// A `gg:` name is a [`Shape`]'s, which every run makes alike, so no file or given name is
+    /// looked for.
+    ///
+    /// Fails like [`asset_path`](Self::asset_path) and [`add_model`](Self::add_model), with
+    /// `asset.outside_root` for a file outside the root, as through `..` or a link, and with
+    /// `asset.unknown_shape` for a `gg:` name that isn't a shape's.
     fn load_model_named(&mut self, name: &str, stand_in: bool) -> (Option<Arc<str>>, Result<()>) {
+        if let Some(shape) = Shape::named(name) {
+            let added = shape.map(|shape| {
+                self.shape(shape);
+            });
+            return (None, added);
+        }
         let path = match self.asset_path(name, "model", stand_in) {
             Ok(path) => path,
             Err(error) => return (None, Err(error)),

@@ -62,9 +62,9 @@ pub struct MeshDraw {
     pub(super) opaque: bool,
     /// Whether it draws only its mesh's fronts, as a material that isn't double-sided does.
     pub(crate) culls: bool,
-    pub(super) params: [u8; MeshDraw::MAX_PARAMS],
+    pub(crate) params: [u8; MeshDraw::MAX_PARAMS],
     /// How many bytes of `params` are used.
-    pub(super) len: u8,
+    pub(crate) len: u8,
 }
 
 impl MeshDraw {

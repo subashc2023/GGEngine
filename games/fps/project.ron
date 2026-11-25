@@ -1,0 +1,8 @@
+(
+    game: "fps",
+    assets: ".",
+    scenes: [
+        "scenes",
+    ],
+    start: "scenes/main.ron",
+)

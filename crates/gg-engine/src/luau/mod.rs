@@ -478,14 +478,15 @@ impl Scripts {
     /// type's name, which [`World::add_default`] takes to give an entity the script. A development
     /// build reloads the file as it's saved ([`Scripts`]), unless the run reads its game's package
     /// ([`App::project`](crate::App::project)), which holds it. Loading the same path again takes
-    /// the script's own place.
+    /// the script's own place. Register the Rust component types a script names first: its chunk
+    /// finds only those already registered.
     ///
     /// # Errors
     ///
     /// - `script.unreadable`: the file can't be read, isn't a regular file or isn't UTF-8.
     /// - `script.pow`, `script.header`: refused as [`Scripts`] says.
-    /// - `script.bad`: it doesn't compile, fails as its chunk runs, or returns other than the
-    ///   component `gg.declare` returned.
+    /// - `script.bad`: it doesn't compile, fails as its chunk runs (as by naming a type not yet
+    ///   registered), or returns other than the component `gg.declare` returned.
     /// - `reflect.name_taken`: another has the component type.
     /// - Any error of declaring the type.
     pub fn load(&mut self, cx: &mut Context, path: impl AsRef<Path>) -> Result<String> {

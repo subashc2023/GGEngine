@@ -1,9 +1,9 @@
 //! The world's opaque meshes in the renderer's scene: each entity with a transform and a
-//! [`MeshDraw`] whose shader writes depth has a scene slot, set as its draw, place or table
+//! [`MeshDraw`] whose shader writes depth has a scene slot, set as its draw, place, tint or table
 //! changes and cleared as it goes, so drawing costs what changed.
 
-use gg_core::math::DVec3;
-use gg_renderer::{MeshDraw, Scene};
+use gg_core::math::{DVec3, Vec4};
+use gg_renderer::{MeshDraw, Scene, Shaders};
 
 use crate::placed::Placed;
 use crate::skins::Skins;
@@ -31,11 +31,13 @@ pub(crate) struct OpaqueMeshes {
 
 impl OpaqueMeshes {
     /// Has `scene` hold `world`'s opaque meshes as `placed` has them draw this frame (a skinned
-    /// entity's with `skins`' mesh of its own), setting and removing what changed since the last
-    /// call: everything, in another world; else each entity
+    /// entity's with `skins`' mesh of its own), tinted as `placed` says through `shaders`' model
+    /// shaders, setting and removing what changed since the last call: everything, in another
+    /// world; else each entity
     ///
     /// - whose mesh changed or that joined a table (spawned, or given a mesh or transform);
-    /// - that `placed` placed again, or that draws between ticks or did last frame and doesn't now;
+    /// - that `placed` placed again (its tint among what it places), or that draws between ticks or
+    ///   did last frame and doesn't now;
     /// - that `skins` gave a mesh of its own this frame;
     /// - held that went, lost its transform or mesh, or whose mesh no longer writes depth (found
     ///   by looking over all held, once entities' rows changed);
@@ -46,7 +48,7 @@ impl OpaqueMeshes {
         &mut self,
         world: &World,
         placed: &Placed,
-        skins: &Skins,
+        (skins, shaders): (&Skins, &Shaders),
         scene: &mut Scene,
         origin: DVec3,
     ) {
@@ -58,6 +60,7 @@ impl OpaqueMeshes {
         };
         self.seen = Some((serial, version, world.change_tick()));
         let pass = self.next_pass(world);
+        let drawn = (skins, shaders);
         let moved_origin = self.origin != origin;
         self.origin = origin;
         if since.is_none() {
@@ -85,7 +88,7 @@ impl OpaqueMeshes {
                 if entity != Entity::DEAD
                     && let Some(draw) = opaque(world, entity)
                 {
-                    self.set(world, placed, skins, scene, entity, draw, pass);
+                    self.set(world, placed, drawn, scene, entity, draw, pass);
                 }
             }
         }
@@ -109,7 +112,7 @@ impl OpaqueMeshes {
                 }
                 let slot = entity.slot();
                 if meshes[row].batch().is_some() {
-                    self.set(world, placed, skins, scene, entity, &meshes[row], pass);
+                    self.set(world, placed, drawn, scene, entity, &meshes[row], pass);
                 } else if self.held[slot] == entity {
                     scene.remove(slot as u32);
                     self.held[slot] = Entity::DEAD;
@@ -122,7 +125,7 @@ impl OpaqueMeshes {
             if self.held[entity.slot()] == entity
                 && let Some(draw) = opaque(world, entity)
             {
-                self.set(world, placed, skins, scene, entity, draw, pass);
+                self.set(world, placed, drawn, scene, entity, draw, pass);
             }
         }
         moved.clear();
@@ -131,8 +134,8 @@ impl OpaqueMeshes {
         self.moved = moved;
     }
 
-    /// Sets `entity`'s `draw` (or its skinned mesh) in its slot of `scene`, unless pass `pass`
-    /// already has.
+    /// Sets `entity`'s `draw` (or its skinned mesh), tinted, in its slot of `scene`, unless pass
+    /// `pass` already has.
     #[expect(
         clippy::too_many_arguments,
         reason = "what setting a slot reads, each apart"
@@ -141,7 +144,7 @@ impl OpaqueMeshes {
         &mut self,
         world: &World,
         placed: &Placed,
-        skins: &Skins,
+        (skins, shaders): (&Skins, &Shaders),
         scene: &mut Scene,
         entity: Entity,
         draw: &MeshDraw,
@@ -158,7 +161,12 @@ impl OpaqueMeshes {
             .expect("a drawn entity is placed");
         let id = world.id(entity).expect("a row's entity is alive").get();
         let matrix = from_origin(place.matrix, self.origin);
-        scene.set(slot as u32, matrix, &skins.draw_of(entity, draw), id);
+        let mut draw = skins.draw_of(entity, draw);
+        let tint = placed.tint(world, entity);
+        if tint != Vec4::ONE {
+            draw = draw.tinted(tint, shaders);
+        }
+        scene.set(slot as u32, matrix, &draw, id);
     }
 
     /// Starts a pass, with room for `world`'s slots; returns its number.
@@ -190,10 +198,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use gg_core::math::{DAffine3, Mat4};
-    use gg_renderer::Uploads;
+    use gg_renderer::{AlphaMode, Uploads};
 
     use super::*;
+    use crate::Tint;
     use crate::interpolation::{self, Past};
+    use crate::testing::model_draw;
     use crate::transform::from_origin;
 
     fn at(x: f32) -> Transform {
@@ -216,13 +226,14 @@ mod tests {
     /// changed.
     fn frame(
         world: &mut World,
-        (placed, opaque, scene): &mut (Placed, OpaqueMeshes, Scene),
+        (placed, opaque, scene, shaders): &mut (Placed, OpaqueMeshes, Scene, Shaders),
         (past, alpha, started): (&Past, f32, u64),
         held: &mut Held,
     ) -> Vec<u32> {
         placed.place(world, world.component::<MeshDraw>());
         placed.draw(world, past, alpha, started, world.component::<MeshDraw>());
-        opaque.hold(world, placed, &Skins::default(), scene, DVec3::ZERO);
+        let drawn = (&Skins::default(), &*shaders);
+        opaque.hold(world, placed, drawn, scene, DVec3::ZERO);
         world.advance();
         let mut changed = Vec::new();
         for change in scene.changes() {
@@ -255,7 +266,12 @@ mod tests {
         world.set_parent(b, Some(parent)).expect("no cycle");
         world.spawn((at(4.0), draw(false)));
         world.spawn(draw(true));
-        let mut state = (Placed::default(), OpaqueMeshes::default(), Scene::default());
+        let mut state = (
+            Placed::default(),
+            OpaqueMeshes::default(),
+            Scene::default(),
+            Shaders::default(),
+        );
         let mut held = Held::new();
         let past = Past::default();
         let still = (&past, 1.0, 0);
@@ -327,6 +343,70 @@ mod tests {
         assert_eq!(after, [0; 0]);
     }
 
+    /// A model's draw takes its entity's tint times its ancestors': a tinted root (as a model's)
+    /// tints what it carries, a tinted child under it multiplies, and changing or removing a tint
+    /// sets what it tints again the next frame. Untinted draws stay white; a draw through another
+    /// shader takes none.
+    #[test]
+    fn model_draws_take_the_tints_they_inherit() {
+        let mut shaders = Shaders::default();
+        let model = model_draw(&mut shaders, AlphaMode::Opaque);
+        let mut state = (
+            Placed::default(),
+            OpaqueMeshes::default(),
+            Scene::default(),
+            shaders,
+        );
+        let mut world = World::default();
+        let (red, half) = (Vec4::new(1.0, 0.0, 0.0, 1.0), Vec4::splat(0.5));
+        let root = world.spawn((at(0.0), Tint(red)));
+        let node = world.spawn((at(1.0), model));
+        let inner = world.spawn((at(2.0), model, Tint(half)));
+        let plain = world.spawn((at(3.0), model));
+        let other = world.spawn((at(4.0), draw(true), Tint(half)));
+        world.set_parent(node, Some(root)).expect("no cycle");
+        world.set_parent(inner, Some(node)).expect("no cycle");
+        let mut held = Held::new();
+        let still = (&Past::default(), 1.0, 0);
+        let slot = |entity: Entity| entity.slot() as u32;
+        // Each of the four's draw as the scene holds it.
+        let drawn = |held: &Held| [node, inner, plain, other].map(|entity| held[&slot(entity)].2);
+        let tinted = |state: &(_, _, _, Shaders), tint| model.tinted(tint, &state.3);
+
+        frame(&mut world, &mut state, still, &mut held);
+        let want = [
+            tinted(&state, red),
+            tinted(&state, red * half),
+            model,
+            draw(true),
+        ];
+        assert_eq!(drawn(&held), want);
+        assert_ne!(want[0], model, "a tinted model draw differs");
+
+        let green = Vec4::new(0.0, 1.0, 0.0, 1.0);
+        world.get_mut::<Tint>(root).expect("tinted").0 = green;
+        let changed = frame(&mut world, &mut state, still, &mut held);
+        assert_eq!(changed, [slot(node), slot(inner)]);
+        let want = [
+            tinted(&state, green),
+            tinted(&state, green * half),
+            model,
+            draw(true),
+        ];
+        assert_eq!(drawn(&held), want);
+
+        world.remove::<Tint>(inner).expect("alive");
+        assert_eq!(
+            frame(&mut world, &mut state, still, &mut held),
+            [slot(inner)]
+        );
+        world.remove::<Tint>(root).expect("alive");
+        let changed = frame(&mut world, &mut state, still, &mut held);
+        assert_eq!(changed, [slot(node), slot(inner)]);
+        assert_eq!(drawn(&held), [model, model, model, draw(true)]);
+        assert_eq!(frame(&mut world, &mut state, still, &mut held), [0; 0]);
+    }
+
     /// A moved frame origin has the scene hold every opaque mesh again from it, though none moved
     /// (a child where its parent carries it); a later frame from that origin changes nothing.
     #[test]
@@ -346,7 +426,8 @@ mod tests {
         let mut hold = |world: &mut World, origin: DVec3| {
             placed.place(world, world.component::<MeshDraw>());
             placed.draw(world, &past, 1.0, 0, world.component::<MeshDraw>());
-            opaque.hold(world, &placed, &Skins::default(), &mut scene, origin);
+            let drawn = (&Skins::default(), &Shaders::default());
+            opaque.hold(world, &placed, drawn, &mut scene, origin);
             world.advance();
             let changes = scene.changes();
             let mut set: Vec<(u32, Mat4)> = changes

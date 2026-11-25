@@ -51,7 +51,7 @@ use hierarchy::Links;
 pub use hierarchy::{Parent, Pose};
 pub use id::EntityId;
 use id::IdStream;
-pub(crate) use id::mix64;
+pub(crate) use id::{mix64, splitmix64};
 pub use log::Log;
 pub(crate) use nodes::node_id;
 pub use ops::Operation;

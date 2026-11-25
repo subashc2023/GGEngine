@@ -1,0 +1,25 @@
+(
+    entities: {
+        "2f6c3a91d8e4b057": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "7b1e94c2a05d63f8": (
+            Effects: (),
+            Fight: (rng: (state: 20260101)),
+            Name: ("Fight"),
+        ),
+    },
+)

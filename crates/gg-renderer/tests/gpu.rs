@@ -95,6 +95,7 @@ fn main() -> ExitCode {
         path_traced_light_accumulates_until_the_view_moves,
         path_traced_masks_cover_as_the_raster_draws_them,
         path_traced_emission_shows_but_lights_nothing,
+        path_traced_tints_show_as_the_rasters,
         path_traced_light_is_even_where_a_normal_map_turns_from_the_view,
         path_traced_light_is_even_off_a_mirror_after_a_rough_bounce,
         specular_glossiness_shades_as_its_metallic_roughness_equal,
@@ -160,6 +161,7 @@ fn main() -> ExitCode {
         depth_matches_its_reference,
         levels_of_detail_match_their_reference,
         models_match_their_reference,
+        tinted_models_match_their_reference,
         skinned_meshes_move_with_their_joints,
         particles_match_their_reference,
         mixed_textures_match_their_reference,
@@ -221,6 +223,8 @@ fn main() -> ExitCode {
         surfaces_cast_no_shadows_on_themselves,
         shadowed_models_match_their_reference,
         models_match_their_reference,
+        tinted_models_match_their_reference,
+        path_traced_tints_show_as_the_rasters,
         mixed_textures_match_their_reference,
         picks_answer_what_their_frame_drew,
         the_scene_draws_as_draws_do,
@@ -3036,6 +3040,160 @@ fn models_match_their_reference() {
     let drew = drawn_again(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     assert_eq!(drew, drawn);
     check(renderer, "models", WIDTH, HEIGHT);
+}
+
+/// Tinted plates of white materials over a white floor, against their reference, held by the scene
+/// or pushed, under a light down 2 for each 1 along +X that shadows them a unit along +X. At X -2,
+/// opaque: untinted, red and green. At X 1: masked blue, masked at a quarter alpha (below its
+/// cutoff, so neither it nor its shadow shows), and blended yellow at half alpha.
+fn tinted_models_match_their_reference() {
+    const SIZE: u32 = 128;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let white = Material {
+        workflow: metallic(0.0, 1.0),
+        ..Material::default()
+    };
+    let materials = [
+        white,
+        Material {
+            alpha: AlphaMode::Mask { cutoff: 0.5 },
+            ..white
+        },
+        Material {
+            alpha: AlphaMode::Blend,
+            ..white
+        },
+    ];
+    let [opaque, masked, blended] = materials.map(|material| {
+        let material = stores.materials.add(&material);
+        MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders)
+    });
+    let tint = |draw: &MeshDraw, [r, g, b, a]: [f32; 4]| {
+        draw.tinted(Vec4::new(r, g, b, a), &stores.shaders)
+    };
+    let plate = |x: f32, z: f32| facing_up(1.0, Vec3::new(x, 2.0, z));
+    let held = [
+        (opaque, plate(-2.0, -2.5)),
+        (tint(&opaque, [1.0, 0.2, 0.2, 1.0]), plate(-2.0, 0.0)),
+        (tint(&masked, [1.0, 1.0, 1.0, 0.25]), plate(1.0, 0.0)),
+    ];
+    let pushed = [
+        (opaque, facing_up(20.0, Vec3::ZERO)),
+        (tint(&opaque, [0.2, 1.0, 0.2, 1.0]), plate(-2.0, 2.5)),
+        (tint(&masked, [0.2, 0.2, 1.0, 1.0]), plate(1.0, -2.5)),
+        (tint(&blended, [1.0, 1.0, 0.2, 0.5]), plate(1.0, 2.5)),
+    ];
+    let mut draws = Draws::default();
+    draws.draw_scene();
+    for (slot, (draw, at)) in (0..).zip(held) {
+        stores.scene.set(slot, at, &draw, u64::from(slot) + 1);
+    }
+    for (draw, at) in pushed {
+        draws.push_draw(at, &draw, 0);
+    }
+    let viewpoint = looking_down(Vec3::new(0.0, 5.0, 0.0), 8.0, 21.0);
+    let viewport = filling([SIZE, SIZE]);
+    stores.lights = vec![sun(Vec3::new(1.0, -2.0, 0.0), Some(100.0))];
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let frame = frame_pixels(&mut renderer);
+    // The pixel at `x`, `z` from the origin, the view's center.
+    let at = |x: f32, z: f32| {
+        let pixel = [(64.0 + 16.0 * x) as u32, (64.0 + 16.0 * z) as u32];
+        pixel_at(&frame, SIZE, pixel)
+    };
+    let (plain, red, green) = (at(-2.0, -2.5), at(-2.0, 0.0), at(-2.0, 2.5));
+    assert!(plain[0] > 100 && plain[0] == plain[1], "untinted {plain:?}");
+    assert!(red[0] > 100 && red[1] < red[0] / 2, "red {red:?}");
+    assert!(green[1] > 100 && green[0] < green[1] / 2, "green {green:?}");
+    let blue = at(1.0, -2.5);
+    assert!(blue[2] > 100 && blue[0] < blue[2] / 2, "blue {blue:?}");
+    // The faded masked plate shows the floor, unshadowed, as farther along +X.
+    let floor = at(3.0, 0.0);
+    assert!(close(at(1.0, 0.0), floor), "the faded plate");
+    assert!(close(at(2.0, 0.0), floor), "the faded plate's shadow");
+    check(renderer, "tinted models", SIZE, SIZE);
+}
+
+/// Unlit white squares, tinted or not, held by the scene or pushed, under no light or sky: each
+/// shows its tint, and a masked one tinted below its cutoff shows what's behind it, drawn and, on a
+/// GPU with ray queries, traced.
+fn path_traced_tints_show_as_the_rasters() {
+    const SIZE: u32 = 64;
+    let tracing = tracing_renderer(SIZE, SIZE);
+    let traces = tracing.is_some();
+    let mut renderer = tracing.unwrap_or_else(|| renderer(SIZE, SIZE));
+    let mut stores = Stores::default();
+    let square = model_square(&mut stores.meshes);
+    let unlit = Material {
+        unlit: true,
+        ..Material::default()
+    };
+    let materials = [
+        unlit,
+        Material {
+            alpha: AlphaMode::Mask { cutoff: 0.5 },
+            ..unlit
+        },
+    ];
+    let [opaque, masked] = materials.map(|material| {
+        let material = stores.materials.add(&material);
+        MeshDraw::with_material(square, material, &stores.materials, &mut stores.shaders)
+    });
+    let tints = [
+        Vec4::new(0.5, 0.25, 1.0, 1.0),
+        Vec4::new(1.0, 1.0, 1.0, 0.25),
+        Vec4::new(0.25, 1.0, 0.5, 1.0),
+        Vec4::new(0.5, 0.5, 0.25, 1.0),
+    ];
+    let tinted = |draw: &MeshDraw, tint| draw.tinted(tint, &stores.shaders);
+    // 16 pixels a unit: the scene's at Z -1, the pushed at Z 1, X -1, 0 and 1 in turn.
+    let up = |x: f32, z: f32| facing_up(1.0, Vec3::new(x, 0.0, z));
+    let held = [
+        (opaque, up(-1.0, -1.0)),
+        (tinted(&opaque, tints[0]), up(0.0, -1.0)),
+        (tinted(&masked, tints[1]), up(1.0, -1.0)),
+    ];
+    let pushed = [
+        (tinted(&opaque, tints[2]), up(-1.0, 1.0)),
+        (tinted(&masked, tints[3]), up(0.0, 1.0)),
+    ];
+    let mut draws = Draws::default();
+    draws.draw_scene();
+    for (slot, (draw, at)) in (0..).zip(held) {
+        stores.scene.set(slot, at, &draw, u64::from(slot) + 1);
+    }
+    for (draw, at) in pushed {
+        draws.push_draw(at, &draw, 0);
+    }
+    let viewpoint = looking_down(Vec3::new(0.0, 2.0, 0.0), 4.0, 4.0);
+    let viewport = filling([SIZE, SIZE]);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
+    let mut frames = vec![(frame_pixels(&mut renderer), "raster")];
+    if traces {
+        let traced = traced(&mut renderer, &mut stores, viewport, viewpoint, &draws, 4);
+        frames.push((traced, "traced"));
+    }
+    let centers = [[16, 16], [32, 16], [48, 16], [16, 48], [32, 48], [48, 48]];
+    for (frame, what) in &frames {
+        let [plain, a, faded, b, c, empty] =
+            centers.map(|center| linear_mean(frame, SIZE, center, 4));
+        let expected = [
+            (plain, Vec3::ONE),
+            (a, tints[0].truncate()),
+            (b, tints[2].truncate()),
+            (c, tints[3].truncate()),
+            (faded, empty),
+        ];
+        for (i, (shown, expected)) in expected.into_iter().enumerate() {
+            assert!(
+                (shown - expected).abs().max_element() < 0.02,
+                "{what}: square {i} shows {shown}, not {expected}"
+            );
+        }
+    }
+    shut_down(renderer);
 }
 
 /// A skinned strip of two joints, at its foot and middle, against its reference: its top turned,

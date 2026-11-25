@@ -11,7 +11,6 @@ use tracing::{debug, warn};
 
 use super::Context;
 use super::world::no_root;
-use crate::Entity;
 #[cfg(feature = "dev")]
 use crate::World;
 use crate::assets::Asset;
@@ -27,6 +26,7 @@ use crate::perf;
 #[cfg(feature = "dev")]
 use crate::scene_files;
 use crate::scene_files::SceneFile;
+use crate::{Entity, Shape};
 
 impl Context {
     /// Makes the cells of the world's [`Cells`](crate::Cells) of folder `folder` that have no file,
@@ -722,9 +722,13 @@ impl Context {
     ) -> Stage {
         let mut models = Vec::new();
         for asset in missing {
+            // A shape has no file to read: `load_assets_of` makes it.
             let Asset::Model(name) = asset else {
                 continue;
             };
+            if Shape::named(name).is_some() {
+                continue;
+            }
             // What fails here, `load_assets_of` says as it loads them.
             let Ok(path) = self.asset_path(name, "model", false) else {
                 continue;

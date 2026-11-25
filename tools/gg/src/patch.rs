@@ -751,11 +751,14 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
             if hash != known.hash {
                 // Only the game's modules have their text kept.
                 let edit = match &known.text {
+                    _ if module && tests_only(path, baseline) => Edit::Same,
                     Some(old) => classify::classify(old, &String::from_utf8_lossy(&content)),
                     None if module => Edit::Rebuild("an edit to a module that isn't UTF-8"),
                     None => Edit::Rebuild(OUTSIDE),
                 };
                 match edit {
+                    // The build's own code is what the game runs: keep its hash.
+                    Edit::Same => hash = known.hash,
                     Edit::Bodies { attach: false } => {}
                     Edit::Bodies { attach: true } => attach.push(path.clone()),
                     Edit::Unreadable => unreadable = Some(path.clone()),
@@ -768,6 +771,44 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
         }
     }
     Diff::Bodies(hashes, unreadable, attach)
+}
+
+/// Whether the module at `path` is built only for tests: declared apart under `#[cfg(test)]`, as
+/// `#[cfg(test)] mod tests;`, in a module of the build's, as a file of its own or of one that is.
+fn tests_only(path: &Path, baseline: &Baseline) -> bool {
+    let (Some(dir), Some(stem)) = (path.parent(), path.file_stem()) else {
+        return false;
+    };
+    // `dir/name.rs` and `dir/name/mod.rs` are the module `name`, declared in a file of `dir`'s.
+    let (name, dir) = if stem == "mod" {
+        match (dir.file_name(), dir.parent()) {
+            (Some(name), Some(parent)) => (name, parent),
+            _ => return false,
+        }
+    } else {
+        (stem, dir)
+    };
+    let name = name.to_string_lossy();
+    let mut parents: Vec<PathBuf> = ["mod.rs", "main.rs", "lib.rs"]
+        .iter()
+        .map(|file| dir.join(file))
+        .collect();
+    if let (Some(up), Some(base)) = (dir.parent(), dir.file_name()) {
+        parents.push(up.join(base).with_extension("rs"));
+    }
+    parents.retain(|parent| parent != path);
+    parents.iter().any(|parent| {
+        let Some(Known {
+            text: Some(text), ..
+        }) = baseline.files.get(parent)
+        else {
+            return false;
+        };
+        let root = parent
+            .file_stem()
+            .is_some_and(|stem| stem == "main" || stem == "lib");
+        classify::declares_test(text, &name) || (!root && tests_only(parent, baseline))
+    })
 }
 
 /// What patches watch, as cargo says of the game's package: its modules (the `.rs` files under its
@@ -1039,6 +1080,67 @@ mod tests {
         write("game/src/extra.rs", "");
         let added = "a module added or removed";
         assert!(matches!(now(), Diff::Rebuild(_, why) if why == added));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// What the game's binary doesn't hold, test code, changes nothing: the module's `mod tests {}`
+    /// and the files declared apart under `#[cfg(test)]`, a file of one included.
+    #[test]
+    fn edits_to_test_code_change_nothing() {
+        let root = std::env::temp_dir().join(format!("gg-tested-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().expect("a directory")).expect("a directory");
+            fs::write(path, text).expect("written");
+        };
+        let game = "mod ship;\n\n#[cfg(test)]\nmod tests;\n\nfn main() {\n    run(1);\n}\n\n\
+                    fn run(_: u32) {}\n\n#[cfg(test)]\nmod checks {\n    fn one() {}\n}\n";
+        write("Cargo.toml", "[workspace]");
+        write("Cargo.lock", "version = 4");
+        write("game/Cargo.toml", "[package]");
+        write("game/src/main.rs", game);
+        write("game/src/ship.rs", "pub fn sail() {}\n");
+        write("game/src/tests.rs", "mod deep;\n\nfn test() {}\n");
+        write("game/src/tests/deep.rs", "fn deeper() {}\n");
+        let files = ["Cargo.toml", "Cargo.lock", "game/Cargo.toml"];
+        let sources = Sources {
+            modules: root.join("game/src"),
+            game: root.join("game"),
+            dirs: Vec::new(),
+            files: files.iter().map(|file| root.join(file)).collect(),
+            lock: root.join("Cargo.lock"),
+        };
+        let baseline = Baseline::new(&sources);
+        let now = || diff(&sources, &baseline, &sources.scan());
+        let unchanged = |diff: Diff| {
+            matches!(diff, Diff::Bodies(hashes, None, attach)
+                if hashes == baseline.modules && attach.is_empty())
+        };
+        // Each edit here changes the file's length, as one within the clock's resolution of the
+        // last may leave its time.
+        write(
+            "game/src/main.rs",
+            &game.replace("fn one() {}", "fn one() { two(); }"),
+        );
+        assert!(unchanged(now()), "an inline module of tests");
+        write("game/src/main.rs", game);
+        write("game/src/tests.rs", "mod deep;\n\nfn test() { help(); }\n");
+        assert!(unchanged(now()), "a file declared under cfg(test)");
+        write("game/src/tests/deep.rs", "struct Deeper;\n");
+        assert!(
+            unchanged(now()),
+            "a file of a file declared under cfg(test)"
+        );
+        // A module the game builds is its own.
+        write("game/src/ship.rs", "pub fn sail() { go(); }\n");
+        let Diff::Bodies(hashes, None, _) = now() else {
+            panic!("bodies");
+        };
+        let ship = root.join("game/src/ship.rs");
+        assert_ne!(hashes[&ship], baseline.modules[&ship]);
+        write("game/src/ship.rs", "pub fn sail(by: u32) {}\n");
+        assert!(matches!(now(), Diff::Rebuild(file, _) if file == ship));
         let _ = fs::remove_dir_all(&root);
     }
 

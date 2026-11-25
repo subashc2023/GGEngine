@@ -1308,6 +1308,41 @@ mod tests {
         );
     }
 
+    /// Shapes come back under their handles, drawing: one a layer asked for as it attached, which a
+    /// restored run's layers don't ask for again, and one text named. Each is made again at its
+    /// note, with no file to find.
+    #[test]
+    fn shapes_come_back_under_their_handles() {
+        let mut saved = Context::seeded(3);
+        let sphere = saved.shape(crate::Shape::Sphere);
+        saved.load_named([Asset::Model("gg:cube")], false);
+        let cube = saved.world().assets().model("gg:cube").expect("loaded");
+        let models = [sphere, cube];
+        let world = saved.world_mut();
+        let roots = models.map(|model| model.spawn(world, Transform::IDENTITY));
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
+        let snapshot = snapshot.expect("read");
+
+        let mut restored = Context::seeded(4);
+        restored.load_restored(snapshot.added());
+        let notes = restored.world().assets().added();
+        assert_eq!(notes, saved.world().assets().added(), "every note alike");
+        snapshot
+            .restore(restored.world_mut(), &[])
+            .expect("restored");
+        let world = restored.world();
+        for (root, model) in roots.into_iter().zip(models) {
+            let root_model = world.get::<crate::ModelRoot>(root);
+            assert_eq!(root_model, Some(&crate::ModelRoot(model)));
+            let mut nodes = world.children(root).expect("alive");
+            let node = nodes.next().expect("a node");
+            assert!(world.get::<MeshDraw>(node).is_some(), "drawing");
+        }
+        assert_eq!(world.hash(), saved.world().hash());
+    }
+
     /// What's opaque comes back though the snapshot's run drew a circle between two loads, which
     /// added the engine's circle shader: the restored run adds it again at its note, so the
     /// texture's note, and every index after it, are the snapshot's.

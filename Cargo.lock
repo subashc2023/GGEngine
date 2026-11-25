@@ -381,6 +381,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cards"
+version = "0.1.0"
+dependencies = [
+ "gg-api",
+ "gg-engine",
+]
+
+[[package]]
 name = "cc"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1149,6 +1157,14 @@ name = "foreign-types-shared"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
+
+[[package]]
+name = "fps"
+version = "0.1.0"
+dependencies = [
+ "gg-api",
+ "gg-engine",
+]
 
 [[package]]
 name = "futures-channel"
@@ -2897,6 +2913,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "platformer"
+version = "0.1.0"
+dependencies = [
+ "gg-api",
+ "gg-engine",
+]
+
+[[package]]
 name = "player"
 version = "0.1.0"
 dependencies = [
@@ -3242,6 +3266,14 @@ name = "rtrb"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5974e397833d890f2f74963408e0d4a6cd8eda2f6a445ae06750291b5d7a997e"
+
+[[package]]
+name = "rts"
+version = "0.1.0"
+dependencies = [
+ "gg-api",
+ "gg-engine",
+]
 
 [[package]]
 name = "rustc-hash"
@@ -3946,6 +3978,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow",
+]
+
+[[package]]
+name = "topdown"
+version = "0.1.0"
+dependencies = [
+ "gg-api",
+ "gg-engine",
+]
+
+[[package]]
+name = "tps"
+version = "0.1.0"
+dependencies = [
+ "gg-api",
+ "gg-engine",
 ]
 
 [[package]]

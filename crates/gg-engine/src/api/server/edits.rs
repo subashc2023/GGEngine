@@ -8,6 +8,7 @@ use gg_core::{Error, Result};
 use serde_json::Value;
 
 use super::connection::Reply;
+use super::world::Subject;
 use super::{Api, failure};
 use crate::api::json;
 use crate::assets::Asset;
@@ -202,8 +203,12 @@ impl json::Names for Gathering<'_> {
 /// `given`'s operations, values read by `world`'s component and field types ([`json::read`] with
 /// `names`).
 ///
-/// Fails, naming the operation, with `ecs.bad_id` for an invalid ID, `reflect.unknown_type` for an
-/// unregistered component type, like a path to a missing field, and like `json::read` for a value.
+/// Fails, naming the operation, with:
+///
+/// - `ecs.bad_id`: an invalid ID for a new entity;
+/// - `ecs.no_entity` or `ecs.ambiguous_name`: a name ([`Subject::resolve`]);
+/// - `reflect.unknown_type`: an unregistered component type, and likewise a path to a missing field;
+/// - what `json::read` fails with, for a value.
 pub(super) fn operations(
     world: &World,
     names: &dyn json::Names,
@@ -238,8 +243,9 @@ pub(super) fn operations(
 /// [`World::reparent_in_place`] as the request comes. Outside a lockstep session the edit applies
 /// at once.
 fn reparent_in_place(world: &World, id: &str, parent: Option<&str>) -> Result<Vec<Operation>> {
-    let parent = parent.map(str::parse).transpose()?;
-    Ok(world.reparent_in_place(id.parse()?, parent))
+    let parent = parent.map(|parent| Subject::of(parent).resolve(world));
+    let parent = parent.transpose()?;
+    Ok(world.reparent_in_place(Subject::of(id).resolve(world)?, parent))
 }
 
 fn operation_of(
@@ -249,7 +255,9 @@ fn operation_of(
 ) -> Result<Operation> {
     use gg_api::Operation as Given;
 
-    let id = |text: &str| text.parse::<EntityId>();
+    // An entity as a request names it, by ID or name; `fresh` is the ID a new entity is to have.
+    let id = |text: &str| Subject::of(text).resolve(world);
+    let fresh = |text: &str| text.parse::<EntityId>();
     let maybe = |text: Option<String>| text.as_deref().map(id).transpose();
     // The type of `component`'s field at `path`.
     let field = |component: &str, path: &str| -> Result<Type> {
@@ -276,7 +284,7 @@ fn operation_of(
             parent,
             components,
         } => Operation::Create {
-            entity: maybe(made)?,
+            entity: made.as_deref().map(fresh).transpose()?,
             parent: maybe(parent)?,
             components: components
                 .iter()
@@ -285,7 +293,10 @@ fn operation_of(
         },
         Given::Duplicate { id: of, copies } => Operation::Duplicate {
             entity: id(&of)?,
-            copies: copies.iter().map(|copy| id(copy)).collect::<Result<_>>()?,
+            copies: copies
+                .iter()
+                .map(|copy| fresh(copy))
+                .collect::<Result<_>>()?,
         },
         Given::Delete { id: of } => Operation::Delete { entity: id(&of)? },
         Given::Add {

@@ -99,20 +99,21 @@ impl Context {
         self.files.packaged().is_some()
     }
 
-    /// A context without a window, renderer or stack, drawing entity IDs from `seed`. For calling
-    /// a layer's [`attach`](Layer::attach) and [`tick`](Layer::tick)s directly, as a test does,
-    /// so the simulation is the same on every run and machine. Textures decode on the calling
-    /// thread as they're added; pixels that don't decode load and warn, as in a run.
-    #[doc(hidden)]
+    /// A context without a window, renderer or stack, drawing entity IDs from `seed`: for a game's
+    /// tests to call a layer's [`attach`](Layer::attach) and [`tick`](Layer::tick)s directly, so
+    /// the simulation is the same on every run and machine.
+    ///
+    /// Textures decode on the calling thread as they're added; pixels that don't decode load and
+    /// warn, as in a run. No frame is drawn, so [`view`](Self::view) and [`ray`](Self::ray) have
+    /// nothing.
     pub fn seeded(seed: u64) -> Self {
         Self::with_world(None, World::seeded(seed))
     }
 
     /// Names assets by their paths relative to `root` ([`App::root`](crate::App::root)), and in a
-    /// development build by the IDs in the ID files under it, which it reads and never writes. For
-    /// a [`seeded`](Self::seeded) context: the world's hash reads textures' names, which must
-    /// match a game's runs wherever its files are.
-    #[doc(hidden)]
+    /// development build by the IDs in the ID files under it, which it reads and never writes.
+    /// For a [`seeded`](Self::seeded) context that loads a game's scenes: the world's hash reads
+    /// textures' names, which must match the game's runs wherever its files are.
     #[must_use]
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = Some(root.into());
@@ -217,6 +218,7 @@ impl Context {
             world.register::<crate::Cells>()?;
             world.register::<crate::Viewer>()?;
             world.register::<crate::Streamed>()?;
+            world.register::<crate::Tint>()?;
             world.register_saved::<Physics2D>()?;
             world.register_saved::<Physics3D>()?;
             world.register_saved::<crate::scene_change::SceneIn>()?;
@@ -268,6 +270,7 @@ impl Context {
             outline_root: Vec::new(),
             outline_walk: Vec::new(),
             view: None,
+            drawn: None,
             shown: None,
             shown_bytes: Vec::new(),
             shown_new: false,

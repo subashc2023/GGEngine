@@ -594,6 +594,22 @@ Targets fragment_main(Varyings input) {
         assert_eq!(fs::read(&out).unwrap(), first, "the same bytes");
     }
 
+    /// A scene naming a built-in shape cooks as it is, the package holding no file for the shape,
+    /// which every run makes itself.
+    #[test]
+    fn a_scene_naming_a_shape_cooks_without_it() {
+        let scene = SCENE.replace(
+            "{}",
+            "{\n        \"0000000000000100\": (\n            ModelRoot: (\"gg:cube\"),\n        ),\n    }",
+        );
+        let files = [("project.ron", PROJECT), ("scenes/main.ron", &*scene)];
+        let fixture = Fixture::new("shape", &files);
+        let out = fixture.0.join("target/game.ggpk");
+        let cooked = cook(&fixture.0, &out).unwrap_or_else(|error| panic!("{error:#}"));
+        let held: Vec<&str> = cooked.iter().map(|cooked| &*cooked.path).collect();
+        assert_eq!(held, ["scenes/main.ron"]);
+    }
+
     /// A model cooks to what a run reads: its primitives, each with levels of detail, the first its
     /// own triangles, and its images, compressed as what they hold, with full mip chains.
     #[test]

@@ -686,13 +686,19 @@ impl Api {
                 self.look.seen = seen.filter(gg_api::Viewpoint::is_finite);
                 reply.result(&self.look);
             }
-            Call::Pick(at, within) => self.picks.push(Picking {
-                at,
-                within,
-                ticket: None,
-                named: names,
-                reply,
-            }),
+            Call::Pick(at, within) => {
+                let within = within.map(|within| within.resolve(cx.world()));
+                match within.transpose() {
+                    Ok(within) => self.picks.push(Picking {
+                        at,
+                        within,
+                        ticket: None,
+                        named: names,
+                        reply,
+                    }),
+                    Err(error) => reply.send(Err(failure(&error))),
+                }
+            }
             Call::Images => self.images_asked.push(reply),
             _ => unreachable!("`answer` passes the view's calls alone"),
         }
@@ -712,12 +718,18 @@ impl Api {
             Call::Entities { with, skip, take } => {
                 reply.send(list(world, with.as_deref(), skip, take));
             }
-            Call::Entity(id) => reply.send(entity(world, cx.meshes(), id)),
+            Call::Entity(id) => reply.send(match id.resolve(world) {
+                Ok(id) => entity(world, cx.meshes(), id),
+                Err(error) => Err(failure(&error)),
+            }),
             Call::Get {
                 id,
                 component,
                 path,
-            } => reply.send(field(world, id, &component, &path)),
+            } => reply.send(match id.resolve(world) {
+                Ok(id) => field(world, id, &component, &path),
+                Err(error) => Err(failure(&error)),
+            }),
             Call::Types => reply.result(&json::describe(world)),
             Call::Hash => {
                 let hash = world.hash();
@@ -886,8 +898,11 @@ impl Api {
                     Err(failure) => reply.send(Err(failure)),
                 }
             }
-            Call::SavePrefab { id, path } => match save_prefab(cx, stack, id, path) {
-                Ok(saved) => {
+            Call::SavePrefab { id, path } => match id
+                .resolve(cx.world())
+                .and_then(|id| Ok((id, save_prefab(cx, stack, id, path)?)))
+            {
+                Ok((id, saved)) => {
                     let name = cx.world().assets().prefab_name(saved.prefab).to_owned();
                     // Checked as the save wrote the file, against this world: it applies.
                     let link = Operation::Link {

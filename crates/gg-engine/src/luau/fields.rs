@@ -138,7 +138,8 @@ pub(super) fn component(lua: &Lua, name: LuaString) -> mlua::Result<Table> {
         let Some(id) = world.component_named(&name) else {
             let names = crate::reflect::list(world.component_types());
             return Err(mlua::Error::runtime(format!(
-                "there's no component type `{}`; the component types are {names}",
+                "there's no component type `{}`; the component types are {names}. A Rust type \
+                 registers before a script that names it loads (`World::register`)",
                 &*name
             )));
         };

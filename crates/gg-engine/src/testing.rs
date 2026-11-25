@@ -1,6 +1,6 @@
 //! What tests share: the shapes an egui pass paints (development builds, which have the UI), the
-//! codes of logged events, and the lock that keeps core-hungry tests from running beside
-//! clock-paced ones.
+//! codes of logged events, the lock that keeps core-hungry tests from running beside clock-paced
+//! ones, and model draws.
 
 use std::fmt;
 use std::sync::mpsc::Sender;
@@ -10,6 +10,10 @@ use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use egui::Shape;
 #[cfg(feature = "dev")]
 use egui::epaint::ClippedShape;
+use gg_core::math::{Vec2, Vec3, Vec4};
+use gg_renderer::{
+    AlphaMode, Material, Materials, MeshDraw, Meshes, ModelMesh, ModelVertex, Shaders,
+};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{self, Layer};
@@ -103,4 +107,24 @@ pub(crate) fn logged() -> Logged {
         _codes: set,
         _other: other,
     }
+}
+
+/// A draw of a model's triangle, of a material of alpha mode `alpha`, through `shaders`' model
+/// shader for it: untinted.
+pub(crate) fn model_draw(shaders: &mut Shaders, alpha: AlphaMode) -> MeshDraw {
+    let corner = ModelVertex {
+        position: Vec3::ZERO,
+        uv: Vec2::ZERO,
+        color: Vec4::ONE,
+        normal: Vec3::Z,
+        tangent: Vec4::X,
+    };
+    let packed = ModelMesh::pack("triangle", &[corner; 3], vec![0, 1, 2], Vec::new());
+    let mesh = (Meshes::default()).add_model("triangle", &packed.expect("a mesh"));
+    let mut materials = Materials::default();
+    let material = materials.add(&Material {
+        alpha,
+        ..Material::default()
+    });
+    MeshDraw::with_material(mesh.expect("a mesh"), material, &materials, shaders)
 }

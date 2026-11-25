@@ -47,6 +47,7 @@ struct Traced {
     vertices: [u32; 2],
     indices: [u32; 2],
     material: u32,
+    tint: [f32; 4],
     unused: u32,
 }
 
@@ -266,6 +267,7 @@ impl TracePass {
                 vertices: halves(mesh.vertices.address()),
                 indices: halves(mesh.indices.address() + first_index),
                 material: found.material,
+                tint: found.tint.to_array(),
                 unused: 0,
             });
         }

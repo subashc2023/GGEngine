@@ -76,7 +76,7 @@ const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 /// The state steps by an odd constant, so it visits all 2^64 values before repeating, and the mix
 /// is a bijection, so a stream gives 2^64 different numbers before repeating. The mix can be
 /// undone, so one number gives away the rest of its stream: they're not secrets.
-pub(super) fn splitmix64(state: &mut u64) -> u64 {
+pub(crate) fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(GAMMA);
     mix64(*state)
 }

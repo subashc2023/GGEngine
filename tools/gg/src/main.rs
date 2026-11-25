@@ -133,6 +133,8 @@ file (`watching`). Then:
   started (`main`, a layer's `load` and `restored`), and any change after a failed rebuild;
 - an edit inside a layer's `attach` patches (`patched` names its module in `attach`), the game
   warning `gg.attach_changed`. It shows only in a run started afresh, as restarts keep the world.
+  `gg scene open <SCENE> --discard` reloads the open scene's entities from its file, a fresh world
+  without a new run; entities the game's code made stay.
 A game waiting for a rebuild gets one at any change; a restarted one gets the edits since its build
 patched in at once. A patch never answered (`patch_unanswered`) is sent again with every edit since
 the build. The game logs failures as warnings too: `gg.patch_failed`, `gg.rebuild_failed`. Once the
@@ -364,12 +366,12 @@ back to the game:
             },
             Help {
                 name: "pick",
-                usage: "pick <X> <Y> [--within <ID>]",
+                usage: "pick <X> <Y> [--within <ENTITY>]",
                 summary: "The entity its view shows at pixel X, Y",
                 details: "\
 Prints its ID and name, `null` for none. X, Y are from the view's top left, as a capture has it, the
 look included. A model's node gives the model's root, but `--within` the root or one of its nodes
-gives the node itself, as the editor picks parts.
+gives the node itself, as the editor picks parts. ENTITY is an ID or a name, as `entity` takes it.
 ",
             },
             Help {
@@ -419,6 +421,9 @@ EVENTS is a JSON array of the API's input events, handed over in order as a fram
 - a mouse button: {\"button\":{\"button\":\"left\",\"pressed\":true}};
 - a scroll: {\"scroll\":{\"lines\":[0,1]}};
 - the keys' focus: {\"focused\":true}.
+
+A key or button stays down until an event releases it. To hold one for an exact number of ticks:
+`pause`, `input` to press, `step N`, `input` to release, then `resume`.
 ",
             },
             Help {
@@ -435,18 +440,19 @@ EVENTS is a JSON array of the API's input events, handed over in order as a fram
             },
             Help {
                 name: "entity",
-                usage: "entity <ID>",
+                usage: "entity <ENTITY>",
                 summary: "An entity and its components' values",
                 details: "\
-For an instance's entity, its root or one its prefab gives, `instance` too: what differs from its
+ENTITY is an ID, or the name of the one entity with it: its `Name`, which `entities` lists. For an
+instance's entity, its root or one its prefab gives, `instance` too: what differs from its
 prefab, each component's fields, and the components it adds.
 ",
             },
             Help {
                 name: "get",
-                usage: "get <ID> <COMPONENT> [PATH]",
+                usage: "get <ENTITY> <COMPONENT> [PATH]",
                 summary: "A component's value, or its field at PATH, such as `translation.x`",
-                details: "",
+                details: "ENTITY is an ID or a name, as `entity` takes it.\n",
             },
             Help {
                 name: "types",
@@ -507,30 +513,31 @@ button by clicking its pixels with `input`; type into a text field clicked so wi
                 usage: "apply <OPERATIONS>",
                 summary: "Apply operations as one edit, all or none, which `undo` takes back",
                 details: "\
-OPERATIONS is a JSON array of the API's operations, applied between ticks. Among them:
-- {\"unlink\":{\"id\":ID}} unlinks a prefab's instance into entities of its own;
-- {\"revert\":{\"id\":ID,\"component\":C,\"path\":P}} sets a field of an instance's entity back to its
-  prefab's.
+OPERATIONS is a JSON array of the API's operations, applied between ticks; each `id` and `parent` is
+an entity's ID or the name of the one entity with it. Among them:
+- {\"unlink\":{\"id\":ENTITY}} unlinks a prefab's instance into entities of its own;
+- {\"revert\":{\"id\":ENTITY,\"component\":C,\"path\":P}} sets a field of an instance's entity back
+  to its prefab's.
 ",
             },
             Help {
                 name: "save-prefab",
-                usage: "save-prefab <ID> [PATH]",
+                usage: "save-prefab <ENTITY> [PATH]",
                 summary: "Save an entity and its descendants as a new prefab, linked to it",
                 details: "\
 Writes the prefab and its ID file at PATH, in a folder under the asset root that its scan reaches,
-or in `prefabs` named after the entity, writing over nothing; and links ID to it as one edit, which
-`undo` unlinks, leaving the file. Its entities keep their IDs. Refused while a copy plays. Prints the
-prefab's path and name.
+or in `prefabs` named after the entity, writing over nothing; and links ENTITY to it as one edit,
+which `undo` unlinks, leaving the file. Its entities keep their IDs. Refused while a copy plays.
+Prints the prefab's path and name. ENTITY is an ID or a name, as `entity` takes it.
 ",
             },
             Help {
                 name: "set",
-                usage: "set <ID> <COMPONENT> <PATH> <VALUE>",
+                usage: "set <ENTITY> <COMPONENT> <PATH> <VALUE>",
                 summary: "Set a component's field, or the whole component, as one edit",
                 details: "\
 PATH is a field, such as `translation.x`, or empty for the whole component. VALUE is JSON, or else a
-string.
+string. ENTITY is an ID or a name, as `entity` takes it.
 ",
             },
             Help {
@@ -1308,7 +1315,7 @@ fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             call(parsed, "look", look)?
         }
         "pick" => {
-            let given = parsed.positional(2, 2, "pick <X> <Y> [--within <ID>]")?;
+            let given = parsed.positional(2, 2, "pick <X> <Y> [--within <ENTITY>]")?;
             let at = given.iter().map(|given| {
                 let at = given.parse::<f64>().ok().filter(|at| at.is_finite());
                 at.ok_or_else(|| {
@@ -1399,11 +1406,11 @@ fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             )?
         }
         "entity" => {
-            let id = parsed.positional(1, 1, "entity <ID>")?.remove(0);
+            let id = parsed.positional(1, 1, "entity <ENTITY>")?.remove(0);
             call(parsed, "entity", json!({"id": id}))?
         }
         "get" => {
-            let mut given = parsed.positional(2, 3, "get <ID> <COMPONENT> [PATH]")?;
+            let mut given = parsed.positional(2, 3, "get <ENTITY> <COMPONENT> [PATH]")?;
             let path = if given.len() == 3 {
                 given.remove(2)
             } else {
@@ -1433,7 +1440,7 @@ fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             call(parsed, "apply", json!({"operations": operations}))?
         }
         "save-prefab" => {
-            let given = parsed.positional(1, 2, "save-prefab <ID> [PATH]")?;
+            let given = parsed.positional(1, 2, "save-prefab <ENTITY> [PATH]")?;
             let mut params = json!({"id": given[0]});
             if let Some(path) = given.get(1) {
                 params["path"] = json!(absolute(path)?);
@@ -1441,7 +1448,7 @@ fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             call(parsed, "save_prefab", params)?
         }
         "set" => {
-            let given = parsed.positional(4, 4, "set <ID> <COMPONENT> <PATH> <VALUE>")?;
+            let given = parsed.positional(4, 4, "set <ENTITY> <COMPONENT> <PATH> <VALUE>")?;
             let value =
                 serde_json::from_str(&given[3]).unwrap_or_else(|_| Value::String(given[3].clone()));
             let set =

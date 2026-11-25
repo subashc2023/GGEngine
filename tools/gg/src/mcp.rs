@@ -443,7 +443,7 @@ const TOOLS: &[Tool] = &[
                 "at": numbers(2, "The pixel, [x, y] from the view's top left, as a capture's PNG \
                                   has it"),
                 "within": {"type": "string",
-                           "description": "The ID of the model's root, or of one of its nodes: \
+                           "description": "The ID or name of the model's root, or of one of its nodes: \
                                            answers the node drawn at the pixel, not the root"},
             })
         },
@@ -523,7 +523,7 @@ const TOOLS: &[Tool] = &[
                       instance's root; `overrides`, each component differing from its prefab with \
                       the fields that differ (`\"\"` for the whole), as `revert` takes them; and \
                       `added`, the components its prefab doesn't give.",
-        properties: || json!({"id": id()}),
+        properties: || json!({"id": entity()}),
         required: &["id"],
     },
     Tool {
@@ -532,7 +532,7 @@ const TOOLS: &[Tool] = &[
                       `rect[1]`.",
         properties: || {
             json!({
-                "id": id(),
+                "id": entity(),
                 "component": {"type": "string"},
                 "path": {"type": "string", "default": ""},
             })
@@ -646,7 +646,7 @@ const TOOLS: &[Tool] = &[
                       ID.",
         properties: || {
             json!({
-                "id": id(),
+                "id": entity(),
                 "path": {
                     "type": "string",
                     "description": "The prefab's file, from the game's asset root, in a folder \
@@ -664,7 +664,7 @@ const TOOLS: &[Tool] = &[
                       component for an empty path, as an edit `undo` takes back.",
         properties: || {
             json!({
-                "id": id(),
+                "id": entity(),
                 "component": {"type": "string"},
                 "path": {"type": "string", "default": ""},
                 "value": {"description": "As `entity` shows values"},
@@ -774,6 +774,13 @@ fn tools() -> Value {
         })
     };
     TOOLS.iter().map(tool).collect()
+}
+
+/// An entity, as the tool API takes one.
+fn entity() -> Value {
+    json!({"type": "string",
+           "description": "An entity's ID, 16 hex digits, or else the `Name` of the one entity \
+                           with it"})
 }
 
 fn id() -> Value {

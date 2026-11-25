@@ -33,7 +33,7 @@ use crate::package;
 use crate::perf;
 #[cfg(doc)]
 use crate::{Animator, MeshDraw, ModelRoot, PrefabRoot, World};
-use crate::{Model, Prefab, prefab};
+use crate::{Model, Prefab, Shape, prefab};
 
 impl Context {
     /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with,
@@ -411,6 +411,36 @@ impl Context {
         };
         self.added("model", &format!("{named} {}", model_types()));
         Ok(model)
+    }
+
+    /// The model of built-in `shape`, added the first time it's asked for and given again after,
+    /// as [`add_model`](Self::add_model) gives a file's. Text names it by [`Shape::name`], as
+    /// `gg:cube`, which loads it alike. Once [removed](Self::remove_model), it's added anew.
+    pub fn shape(&mut self, shape: Shape) -> Model {
+        let name = shape.name();
+        let model = match self.assets.live_model(name) {
+            Some(model) => model,
+            None => {
+                let _zone = gg_core::zone!();
+                let stores = model::Stores {
+                    meshes: &mut self.meshes,
+                    shaders: &mut self.shaders,
+                    textures: &mut self.textures,
+                    materials: &mut self.materials,
+                };
+                let (path, imported) = (Path::new(name), shape.imported());
+                let added = model::add(name, path, imported, stores, &mut self.loader);
+                // It has no image to find room for, and its mesh packs.
+                let (nodes, made) = added.expect("a shape adds");
+                // No file, so no ID: its name is its path.
+                let model =
+                    self.add_assets(|assets| assets.add_model(name.into(), name.into(), nodes));
+                self.loaded.made.push(made);
+                model
+            }
+        };
+        self.added("model", &format!("{name} {}", model_types()));
+        model
     }
 
     /// Removes `texture`, a texture or a sprite sheet's (`sheet.texture`) that a layer added or

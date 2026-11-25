@@ -40,6 +40,9 @@ and the APIs still change.
   SPIR-V the reference images expect.
 - A C and C++ compiler, for VMA, Luau, zstd and meshoptimizer.
 - On Linux: `pkgconf`, `libudev-dev` and `libasound2-dev` (Debian names).
+- For edits that patch into a running game: `dx`, dioxus-cli at the release of the workspace's
+  `subsecond` (`cargo install dioxus-cli --version 0.7.2 --locked`). Without it, `cargo gg run`
+  rebuilds and restarts the game for every edit.
 - For `cargo gg ship`: cargo-about 0.9.2.
 
 ## Quick start

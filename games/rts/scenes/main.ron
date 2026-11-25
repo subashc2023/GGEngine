@@ -1,0 +1,401 @@
+(
+    entities: {
+        "012530bc284b852a": (
+            Name: ("Rock 4"),
+            Obstacle: (
+                radius: 1.1,
+            ),
+            Transform: (
+                translation: (9.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.0, 1.9, 2.0),
+            ),
+        ),
+        "0c8d2dca1087d971": (
+            Name: ("Unit 5"),
+            Transform: (
+                translation: (-4.5, 0.0, 5.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Unit: (
+                speed: 6.0,
+                radius: 0.5,
+                selected: false,
+                moving: false,
+                target: (-4.5, 5.5),
+                stalled: 0,
+            ),
+        ),
+        "118294e54c8a2c3c": (
+            Name: ("Unit 2"),
+            Transform: (
+                translation: (-1.5, 0.0, 3.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Unit: (
+                speed: 6.0,
+                radius: 0.5,
+                selected: false,
+                moving: false,
+                target: (-1.5, 3.0),
+                stalled: 0,
+            ),
+        ),
+        "143e94af41ce0f05": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Ground"),
+            Tint: ((0.22, 0.35, 0.16, 1.0)),
+            Transform: (
+                translation: (0.0, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (60.0, 1.0, 60.0),
+            ),
+        ),
+        "48c98cab7866e606": (
+            Light: (
+                kind: Directional,
+                color: (1.0, 0.96, 0.9),
+                intensity: 120000.0,
+                range: None,
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: true,
+                shadow_distance: 80.0,
+            ),
+            Name: ("Sun"),
+            Transform: (
+                translation: (0.0, 10.0, 0.0),
+                rotation: (-0.4155384, 0.2661003, 0.1285411, 0.86023),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4da9c9af9631e294": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            RtsCamera: (
+                focus: (0.0, 0.0),
+                distance: 24.0,
+                pitch: 0.95,
+                pan: (0.0, 0.0),
+            ),
+            Transform: (
+                translation: (0.0, 19.5219721, 13.9603941),
+                rotation: (-0.4573384, -0.0, -0.0, 0.8892927),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "566bb317039d588b": (
+            Name: ("Unit 7"),
+            Transform: (
+                translation: (1.5, 0.0, 5.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Unit: (
+                speed: 6.0,
+                radius: 0.5,
+                selected: false,
+                moving: false,
+                target: (1.5, 5.5),
+                stalled: 0,
+            ),
+        ),
+        "94928b7da1cb53d3": (
+            Name: ("Unit 6"),
+            Transform: (
+                translation: (-1.5, 0.0, 5.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Unit: (
+                speed: 6.0,
+                radius: 0.5,
+                selected: false,
+                moving: false,
+                target: (-1.5, 5.5),
+                stalled: 0,
+            ),
+        ),
+        "97e6ed38095c507e": (
+            Name: ("Unit 3"),
+            Transform: (
+                translation: (1.5, 0.0, 3.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Unit: (
+                speed: 6.0,
+                radius: 0.5,
+                selected: false,
+                moving: false,
+                target: (1.5, 3.0),
+                stalled: 0,
+            ),
+        ),
+        "9d35034b60a2b16d": (
+            Name: ("Rock 3"),
+            Obstacle: (
+                radius: 2.2,
+            ),
+            Transform: (
+                translation: (-1.0, 0.0, -9.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.0, 1.6, 4.0),
+            ),
+        ),
+        "a250a77e0b2f47b1": (
+            Name: ("Rock 1"),
+            Obstacle: (
+                radius: 1.65,
+            ),
+            Transform: (
+                translation: (-6.0, 0.0, -3.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.0, 1.0, 3.0),
+            ),
+        ),
+        "a26afe9c8dca3011": (
+            Name: ("Rock 2"),
+            Obstacle: (
+                radius: 1.32,
+            ),
+            Transform: (
+                translation: (5.0, 0.0, -5.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.4, 1.3, 2.4),
+            ),
+        ),
+        "a2c62f0f7429e706": (
+            Name: ("Unit 8"),
+            Transform: (
+                translation: (4.5, 0.0, 5.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Unit: (
+                speed: 6.0,
+                radius: 0.5,
+                selected: false,
+                moving: false,
+                target: (4.5, 5.5),
+                stalled: 0,
+            ),
+        ),
+        "c83c28a752d102cc": (
+            Name: ("Unit 4"),
+            Transform: (
+                translation: (4.5, 0.0, 3.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Unit: (
+                speed: 6.0,
+                radius: 0.5,
+                selected: false,
+                moving: false,
+                target: (4.5, 3.0),
+                stalled: 0,
+            ),
+        ),
+        "d443a1185575c125": (
+            Environment: (
+                exposure: 15.0,
+                adaptation: None,
+                tonemapper: PbrNeutral,
+                antialiasing: Taa,
+                sky: Atmosphere((
+                    rayleigh: (5.802, 13.558, 33.1),
+                    mie: 3.996,
+                    mie_absorption: 0.444,
+                    mie_anisotropy: 0.8,
+                    ozone: (0.65, 1.881, 0.085),
+                    ground_albedo: (0.3, 0.3, 0.3),
+                    altitude: 0.0,
+                    sun_size: 0.00935,
+                )),
+                sky_luminance: 30000.0,
+                sky_rotation: 0.0,
+                bloom: 0.04,
+                grade: (
+                    temperature: 0.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    slope: (1.0, 1.0, 1.0),
+                    offset: (0.0, 0.0, 0.0),
+                    power: (1.0, 1.0, 1.0),
+                ),
+                ambient_occlusion: Some((
+                    radius: 0.5,
+                    strength: 1.0,
+                )),
+                fog: None,
+                reflections: None,
+                depth_of_field: None,
+                motion_blur: None,
+                lens: (
+                    vignette: 0.0,
+                    chromatic_aberration: 0.0,
+                    grain: 0.0,
+                ),
+            ),
+            Name: ("Environment"),
+        ),
+        "dcbd11ac41ddba32": (
+            Name: ("Unit 1"),
+            Transform: (
+                translation: (-4.5, 0.0, 3.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            Unit: (
+                speed: 6.0,
+                radius: 0.5,
+                selected: false,
+                moving: false,
+                target: (-4.5, 3.0),
+                stalled: 0,
+            ),
+        ),
+        "08d3c230d60da975": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Rock Shape"),
+            Parent: ("012530bc284b852a"),
+            Tint: ((0.45, 0.45, 0.48, 1.0)),
+            Transform: (
+                translation: (0.0, 0.75, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.5, 1.0),
+            ),
+        ),
+        "a5729c2437e01b42": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("0c8d2dca1087d971"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "9a8cad97df547732": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("118294e54c8a2c3c"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "30d99ad4fbbfad54": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("566bb317039d588b"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "110e57c5d42496e2": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("94928b7da1cb53d3"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "5732ed3e6238de4c": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("97e6ed38095c507e"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "282445cae0b0aee7": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Rock Shape"),
+            Parent: ("9d35034b60a2b16d"),
+            Tint: ((0.45, 0.45, 0.48, 1.0)),
+            Transform: (
+                translation: (0.0, 0.75, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.5, 1.0),
+            ),
+        ),
+        "393eeefc48205b6f": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Rock Shape"),
+            Parent: ("a250a77e0b2f47b1"),
+            Tint: ((0.45, 0.45, 0.48, 1.0)),
+            Transform: (
+                translation: (0.0, 0.75, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.5, 1.0),
+            ),
+        ),
+        "364a54b72f072c6f": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Rock Shape"),
+            Parent: ("a26afe9c8dca3011"),
+            Tint: ((0.45, 0.45, 0.48, 1.0)),
+            Transform: (
+                translation: (0.0, 0.75, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.5, 1.0),
+            ),
+        ),
+        "e951556a08dc01a8": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("a2c62f0f7429e706"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "0d02f1dad349cb28": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("c83c28a752d102cc"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "2fa35f5ff7fa0661": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Unit Shape"),
+            Parent: ("dcbd11ac41ddba32"),
+            Tint: ((0.15, 0.4, 0.9, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+    },
+)

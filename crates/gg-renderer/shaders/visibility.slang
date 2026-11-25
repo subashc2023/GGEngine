@@ -52,8 +52,8 @@ struct ShadePush {
     // run's draw of them, eight words, then the meshlets it kept, as meshlets.slang keeps them.
     uint* commands;
     // What each of the culling's views keeps of the instances (cull.slang): their transforms, the
-    // view passes' ones the frame before, and their parameters' words, the first the material's
-    // index.
+    // view passes' ones the frame before, and their parameters' words: model.slang's `Params`,
+    // the material's index, then the tint.
     float4x4* transforms;
     uint* params;
     // The visibility buffer, bindless, and the view's colors and motion, storage images; for
@@ -97,6 +97,7 @@ uint byte_of(uint word, uint byte) {
 // `normal_down`, the unit normal's.
 struct Shown {
     Material material;
+    float4 tint;
     float3 world;
     float3 was;
     float2 uv;
@@ -131,6 +132,8 @@ Shown shown_at(Shading shading, Material* materials, uint2 pixel, uint2 seen) {
     uint params = slot * shading.params_words + run.params_output + place * run.params_words;
     Shown out;
     out.material = materials[push.params[params]];
+    out.tint = float4(asfloat(push.params[params + 1]), asfloat(push.params[params + 2]),
+                      asfloat(push.params[params + 3]), asfloat(push.params[params + 4]));
     // The mesh's buffer, as model.slang reads `push.vertices`: its address's two words cast to a
     // pointer, as a 64-bit integer would need the shaderInt64 feature.
     uint* words = bit_cast<uint*>(run.vertices);
@@ -214,8 +217,8 @@ void shade_main(uint3 pixel: SV_DispatchThreadID) {
     float2 uv_across = shown.uv_across;
     float2 uv_down = shown.uv_down;
     // As `fragment_main` samples them, and an opaque or masked material's alpha of 1.
-    float4 color =
-        sampled_by(material, 0, uv, uv_across, uv_down) * material.color * shown.vertex_color;
+    float4 color = sampled_by(material, 0, uv, uv_across, uv_down) * material.color
+        * shown.vertex_color * shown.tint;
     float4 surface = sampled_by(material, 1, uv, uv_across, uv_down);
     float2 mapped = sampled_by(material, 2, uv, uv_across, uv_down).xy * 2.0 - 1.0;
     float occlusion = 1.0

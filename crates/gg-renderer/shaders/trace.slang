@@ -39,10 +39,17 @@ struct Traced {
     // each, as visibility.slang's runs hold them.
     uint2 vertices;
     uint2 indices;
-    // Its material's index.
+    // Its material's index, and its tint, linear RGBA multiplying the base color, alpha included:
+    // an array, as a float4 would align the struct to 16 bytes.
     uint material;
+    float tint[4];
     uint unused;
 };
+
+// `traced`'s tint.
+float4 tint_of(Traced traced) {
+    return float4(traced.tint[0], traced.tint[1], traced.tint[2], traced.tint[3]);
+}
 
 // The view, and how many paths its pixels have taken.
 struct Trace {
@@ -126,7 +133,7 @@ float4 sampled_at(Material material, uint which, float2 uv) {
 
 // Whether candidate `primitive` of the instance of custom index `instance`, a masked material's
 // triangle, covers where its second and third corners weigh `weights`: where its alpha, its color
-// map's at level 0 times its factor's and its vertices', is at least its cutoff.
+// map's at level 0 times its factor's, its vertices' and its tint's, is at least its cutoff.
 bool covers(Material* materials, uint instance, uint primitive, float2 weights) {
     Traced traced = push.traced[instance];
     uint* words = bit_cast<uint*>(traced.vertices);
@@ -141,7 +148,7 @@ bool covers(Material* materials, uint instance, uint primitive, float2 weights) 
     float2 uv = w.x * a.uv + w.y * b.uv + w.z * c.uv;
     float alpha = w.x * a.color.a + w.y * b.color.a + w.z * c.color.a;
     Material material = materials[traced.material];
-    alpha *= sampled_at(material, 0, uv).a * material.color.a;
+    alpha *= sampled_at(material, 0, uv).a * material.color.a * tint_of(traced).a;
     return alpha >= material.cutoff;
 }
 
@@ -194,8 +201,8 @@ bool unoccluded(RaytracingAccelerationStructure tlas, Material* materials, float
 }
 
 // What a hit found of its mesh, in the world: its material, the point, its interpolated normal and
-// tangent as shading takes them, its UV and vertices' color, the triangle's unit normal on the side
-// its mesh winds counterclockwise, and whether the ray came from that side.
+// tangent as shading takes them, its UV, its vertices' color times its tint, the triangle's unit
+// normal on the side its mesh winds counterclockwise, and whether the ray came from that side.
 struct Found {
     Material material;
     float3 world;
@@ -242,7 +249,7 @@ Found found(Material* materials, Hit hit, float3 direction) {
     out.normal = w.x * ta.normal + w.y * tb.normal + w.z * tc.normal;
     out.tangent = w.x * ta.tangent + w.y * tb.tangent + w.z * tc.tangent;
     out.uv = w.x * a.uv + w.y * b.uv + w.z * c.uv;
-    out.color = w.x * a.color + w.y * b.color + w.z * c.color;
+    out.color = (w.x * a.color + w.y * b.color + w.z * c.color) * tint_of(traced);
     // A mirroring transform reverses the winding the cross product follows.
     out.geometric = normalize(cross(wb - wa, wc - wa)) * ta.side;
     out.front = dot(out.geometric, direction) < 0.0;

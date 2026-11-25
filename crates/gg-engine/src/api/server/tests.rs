@@ -25,7 +25,7 @@ use super::connection::{
 use super::files::{engine_named, prune};
 use super::parse::{METHODS, MOST_STEPS, parse};
 use super::view::{CAPTURE_WAIT, TRACE_WAIT};
-use super::world::listed;
+use super::world::{Subject, listed};
 use crate::api::Waiting;
 use crate::args::Net;
 use crate::dirs::tests::Scratch;
@@ -320,6 +320,58 @@ fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
         "api.unknown_method",
     ];
     assert_eq!(read.refused, codes);
+}
+
+/// Where a request takes an entity's ID it takes the name of the one entity with it.
+#[test]
+fn an_entity_is_named_by_its_id_or_by_the_one_entity_with_its_name() {
+    let (mut api, session) = started("Api Names");
+    let mut cx = Context::seeded(1);
+    let world = cx.world_mut();
+    let hero = world.spawn((Transform::IDENTITY, Name("Hero".to_owned())));
+    let twins = [(); 2].map(|()| world.spawn(Name("Twin".to_owned())));
+    let id = |entity| world.id(entity).expect("alive").to_string();
+    let hero = id(hero);
+    let twins = twins.map(id);
+    let mut stepper = Stepper::default();
+    let asked = (hero.clone(), twins.clone());
+    let client = move |mut client: Client| {
+        let (hero, _) = asked;
+        let field = |id: &str| json!({"id": id, "component": "Transform", "path": "translation.y"});
+        let entity =
+            |client: &mut Client, id: &str| client.call_as::<Value>("entity", json!({"id": id}));
+        let by_name = entity(&mut client, "Hero").expect("by name");
+        let by_id = entity(&mut client, &hero).expect("by ID");
+        let got: f64 = client
+            .call_as("get", field("Hero"))
+            .expect("a field by name");
+        let none = entity(&mut client, "Nobody").expect_err("no such name");
+        let two = entity(&mut client, "Twin").expect_err("two with the name");
+        let set = json!({"operations": [{"set": {"id": "Hero", "component": "Transform",
+            "path": "translation.y", "value": 5.0}}]});
+        let applied = client.call("apply", set);
+        (by_name, by_id, got, none, two, applied.is_ok())
+    };
+    let (by_name, by_id, got, none, two, applied) = serving(
+        &mut api,
+        &mut cx,
+        &mut Stack::default(),
+        &mut stepper,
+        session,
+        client,
+        |_, _, _| {},
+    );
+    assert_eq!(by_name, by_id);
+    assert_eq!(by_name["name"], "Hero");
+    assert_eq!(got, 0.0);
+    assert_eq!(none.code, "ecs.no_entity");
+    assert!(none.message.contains("Nobody"), "{}", none.message);
+    assert_eq!(two.code, "ecs.ambiguous_name");
+    assert!(two.message.contains("Twin"), "{}", two.message);
+    for id in &twins {
+        assert!(two.message.contains(id.as_str()), "{}", two.message);
+    }
+    assert!(applied, "an operation names an entity as well");
 }
 
 /// The first request is `hello` with the token; the connection's thread answers `ping` while no
@@ -1063,6 +1115,52 @@ fn an_edit_loads_the_textures_it_names() {
     let sprite = cx.world().get::<Sprite>(hero).expect("a sprite");
     let texture = sprite.texture.expect("a texture");
     assert_eq!(cx.world().assets().path(texture), Some("assets/stone.png"));
+}
+
+/// An edit naming a built-in shape has it made before the edit's read, as a file's model is
+/// loaded: a created root spawns its node. A `gg:` name that's no shape's is refused with why.
+#[test]
+fn an_edit_makes_the_shapes_it_names() {
+    let (mut api, session) = started("Api Shapes");
+    let mut cx = Context::seeded(3);
+    let mut stepper = Stepper::default();
+    stepper.pause();
+    let client = move |mut client: Client| {
+        let create = |model: &str| {
+            let components = json!({"Transform": {}, "ModelRoot": {"0": model}});
+            json!({"operations": [{"create": {"components": components}}]})
+        };
+        let applied = client.call_as::<Applied>("apply", create("gg:capsule"));
+        let refused = client.call("apply", create("gg:cone"));
+        (applied, refused.expect_err("no such shape"))
+    };
+    let (applied, refused) = serving(
+        &mut api,
+        &mut cx,
+        &mut Stack::default(),
+        &mut stepper,
+        session,
+        client,
+        |_, _, _| {},
+    );
+    let applied = applied.expect("created");
+    assert_eq!(refused.code, "api.no_model", "{}", refused.message);
+    assert!(
+        refused.message.contains("asset.unknown_shape"),
+        "{}",
+        refused.message
+    );
+    let world = cx.world();
+    let id = applied.entities[0].parse::<EntityId>().expect("an ID");
+    let root = world.entity(id).expect("created");
+    let capsule = world.assets().model("gg:capsule").expect("made");
+    assert_eq!(
+        world.get::<crate::ModelRoot>(root),
+        Some(&crate::ModelRoot(capsule))
+    );
+    let node = world.children(root).expect("alive").next().expect("a node");
+    let drawn = world.get::<crate::MeshDraw>(node);
+    assert!(drawn.is_some(), "drawing");
 }
 
 /// What [`clients_apply_edits_and_each_undoes_its_own`]'s clients get.
@@ -3398,14 +3496,22 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
     let pick = parse(&request("pick", json!({"at": [3, 4.5]})));
     assert_eq!(pick, Ok(Call::Pick([3.0, 4.5], None)));
     let within = json!({"at": [3, 4.5], "within": "00000000000000ff"});
-    let id = "00000000000000ff".parse().expect("an ID");
+    let id = Subject::Id("00000000000000ff".parse().expect("an ID"));
     assert_eq!(
         parse(&request("pick", within)),
         Ok(Call::Pick([3.0, 4.5], Some(id)))
     );
+    let within = json!({"at": [3, 4.5], "within": "Hero"});
+    assert_eq!(
+        parse(&request("pick", within)),
+        Ok(Call::Pick(
+            [3.0, 4.5],
+            Some(Subject::Name("Hero".to_owned()))
+        ))
+    );
     let saved = |path: Option<&str>| {
         Ok(Call::SavePrefab {
-            id: "00000000000000ff".parse().expect("an ID"),
+            id: Subject::Id("00000000000000ff".parse().expect("an ID")),
             path: path.map(PathBuf::from),
         })
     };
@@ -3422,7 +3528,6 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
             "api.bad_params",
         ),
         (json!({"path": "lamp.prefab"}), "api.bad_params"),
-        (json!({"id": "ff"}), "ecs.bad_id"),
     ] {
         let refused = parse(&request("save_prefab", params.clone())).err();
         assert_eq!(
@@ -3567,11 +3672,6 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         ("look", json!({"render_scale": "half"}), "api.bad_params"),
         ("pick", Value::Null, "api.bad_params"),
         ("pick", json!({"at": [1]}), "api.bad_params"),
-        (
-            "pick",
-            json!({"at": [1, 2], "within": "x"}),
-            "api.bad_params",
-        ),
         ("images", json!({"all": true}), "api.bad_params"),
         ("input", Value::Null, "api.bad_params"),
         (
@@ -3583,7 +3683,6 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         ("assets", json!({"take": 10_001}), "api.bad_params"),
         ("assets", json!({"kind": "sound"}), "api.bad_params"),
         ("ui", json!({"name": "menu"}), "api.bad_params"),
-        ("entity", json!({"id": "nope"}), "ecs.bad_id"),
         ("patch", Value::Null, "api.bad_params"),
         ("patch", json!({ "table": relative }), "api.bad_params"),
         ("patch", extra, "api.bad_params"),

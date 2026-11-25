@@ -910,7 +910,8 @@ fn identify(
             let code = "asset.no_id";
             let message = format!(
                 "{path} has no ID file, and this run writes none, serving no tool API or joining \
-                 a lockstep session: a run that serves it writes one, to commit beside {path}"
+                 a lockstep session: `gg run` writes one, to commit beside {path}. Until then, \
+                 scenes name it by its path"
             );
             if once(&mut next.warned, code, path) {
                 warn!(code, path, "{message}");

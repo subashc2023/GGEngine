@@ -186,7 +186,8 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
   own trait object or function pointer reaches waits for a rebuild. subsecond patches only the
   binary's crate, so a game's crate is a binary with no library, and its statics start over at each
   patch, so a game keeps its state in the world. Any other change rebuilds and restarts the game
-  from a snapshot taken just before, matching changed components by field name: a new field (even
+  from a snapshot taken just before, matching changed components by field name, a new field taking
+  its default. Such changes include a new field (even
   of a type declared in a function body) or component, a constant, an engine edit, or an edit to
   `main`, `load` or `restored`, which ran before any patch could. An edit inside `attach` is
   patched, but restarts start from snapshots, so only a fresh run shows it (`gg.attach_changed`).
@@ -313,7 +314,8 @@ own lines.
   and tuples directly, and whose trailing commas keep an added entry off its neighbors' lines. The
   engine writes scenes itself, so their bytes depend on no library, line ending or Rust release;
   `ron` only reads them, through reflection ([the form](crates/gg-engine/src/ecs/scene/mod.rs)). A
-  scene writes every field and no type's name, so a rename touches only its keys. A load checks
+  scene writes every field and no type's name, so a rename touches only its keys. A load gives a
+  field left out its default, so a scene written by hand names only what differs. A load checks
   everything before it spawns anything; a refusal names its line and column, and its entity,
   component and field.
 - **Stable IDs.** Every entity has a persistent ID, separate from its runtime handle, that files,
@@ -344,7 +346,9 @@ own lines.
   [ecs/prefab.rs](crates/gg-engine/src/ecs/prefab.rs)).
 - **Models in scenes.** A `ModelRoot` spawns the model's nodes under it. Scenes save the root alone
   and tools edit no node, so the model's file stays the nodes' one source; what code changes of a
-  node lasts the run ([model.rs](crates/gg-engine/src/model.rs)).
+  node lasts the run ([model.rs](crates/gg-engine/src/model.rs)). Built-in shapes are models
+  without a file: text names them `gg:cube`, `gg:sphere`, `gg:capsule` and `gg:plane`, reserved
+  names that find no file, and every run makes them alike ([shape.rs](crates/gg-engine/src/shape.rs)).
 - **UIs.** A `.ui` file is a tree of named nodes ([game_ui](crates/gg-engine/src/game_ui/mod.rs)),
   written by people and agents, never by the engine. Every button and widget has a name, by which
   code is told of its presses and changes and tools find it. A UI's state is the run's, not the

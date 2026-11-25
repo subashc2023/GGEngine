@@ -1,0 +1,8 @@
+(
+    game: "platformer",
+    assets: ".",
+    scenes: [
+        "scenes",
+    ],
+    start: "scenes/main.ron",
+)

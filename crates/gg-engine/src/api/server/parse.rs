@@ -12,9 +12,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use subsecond::JumpTable;
 
-use super::failure;
 use super::view::{checked_viewpoint, look, shown};
-use crate::{EntityId, Key};
+use super::world::Subject;
+use crate::Key;
 
 /// Listed by `api.unknown_method`.
 pub(super) const METHODS: [&str; 35] = [
@@ -96,16 +96,16 @@ pub(super) enum Call {
     /// The look's parts to set, checked, the viewpoint's rotation normalized.
     Look(gg_api::Look),
     /// The view pixel to pick at, and optionally the entity whose model to pick within.
-    Pick([f64; 2], Option<EntityId>),
+    Pick([f64; 2], Option<Subject>),
     Images,
     Entities {
         with: Option<String>,
         skip: usize,
         take: usize,
     },
-    Entity(EntityId),
+    Entity(Subject),
     Get {
-        id: EntityId,
+        id: Subject,
         component: String,
         path: String,
     },
@@ -128,7 +128,7 @@ pub(super) enum Call {
     Apply(Vec<gg_api::Operation>, Option<u64>),
     /// The entity to save as a prefab and link, and the prefab's path (a checked `.prefab`).
     SavePrefab {
-        id: EntityId,
+        id: Subject,
         path: Option<PathBuf>,
     },
     /// Undoes or redoes the named author's edits, else the client's.
@@ -150,7 +150,6 @@ pub(super) enum Call {
 ///   `.prefab`; a `frames` `dir` not an absolute directory path, a `count` of 0 or past
 ///   [`gg_api::MOST_FRAMES`], or invalid viewpoints or `rect` (no area).
 /// - `api.bad_request`: a second `hello`.
-/// - `ecs.bad_id`: an invalid ID.
 pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
     let method = request.method.as_str();
     let params = &request.params;
@@ -225,7 +224,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
                 return Err(bad_params(method, what));
             }
             Call::SavePrefab {
-                id: entity_id(&id)?,
+                id: Subject::of(&id),
                 path,
             }
         }
@@ -343,11 +342,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
         "look" => Call::Look(look(method, take(method, params)?)?),
         "pick" => {
             let gg_api::Pick { at, within } = take(method, params)?;
-            let within = within.map(|id| id.parse::<EntityId>()).transpose();
-            let within = within.map_err(|error| {
-                bad_params(method, format!("takes `within`, an entity's ID: {error}"))
-            })?;
-            Call::Pick(at, within)
+            Call::Pick(at, within.as_deref().map(Subject::of))
         }
         "images" => none(method, params).map(|()| Call::Images)?,
         "view" => {
@@ -377,7 +372,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
         }
         "entity" => {
             let gg_api::Entity { id } = take(method, params)?;
-            Call::Entity(entity_id(&id)?)
+            Call::Entity(Subject::of(&id))
         }
         "assets" => {
             let gg_api::Assets { kind, skip, take } = self::take(method, params)?;
@@ -393,9 +388,8 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
                 component,
                 path,
             } = take(method, params)?;
-            let id = entity_id(&id)?;
             Call::Get {
-                id,
+                id: Subject::of(&id),
                 component,
                 path,
             }
@@ -435,9 +429,4 @@ fn none(method: &str, params: &Value) -> Result<(), Failure> {
 
 pub(super) fn bad_params(method: &str, what: impl Display) -> Failure {
     Failure::new("api.bad_params", format!("`{method}` {what}"))
-}
-
-/// The entity ID in `text`; `ecs.bad_id` if none.
-fn entity_id(text: &str) -> Result<EntityId, Failure> {
-    text.parse().map_err(|error| failure(&error))
 }

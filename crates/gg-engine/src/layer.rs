@@ -6,6 +6,7 @@ mod catalog;
 mod cell_stream;
 mod frame;
 mod named;
+mod ray;
 #[cfg(feature = "dev")]
 mod reload;
 mod run;
@@ -411,6 +412,8 @@ pub struct Context {
     outline_walk: Vec<Entity>,
     /// Where the game's view was in the last handed-off frame, while it had an area.
     view: Option<Viewport>,
+    /// The viewpoint the last handed-off frame drew from, once one has.
+    drawn: Option<Viewpoint>,
     /// The size of the pixels the view shows in place of what's drawn, while it shows any; the
     /// bytes [`show_pixels`](Self::show_pixels) last wrote, which the next handed-off frame takes;
     /// and whether they're new since a frame was.

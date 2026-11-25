@@ -1,0 +1,66 @@
+(
+    nodes: [
+        Column(
+            width: Fill(1.0),
+            height: Fill(1.0),
+            padding: (60.0, 40.0),
+            gap: 24.0,
+            children: [
+                Panel(
+                    width: Fill(1.0),
+                    color: (0.25, 0.05, 0.07, 0.9),
+                    radius: 16.0,
+                    padding: (32.0, 24.0),
+                    children: [
+                        Column(
+                            gap: 8.0,
+                            children: [
+                                Text(name: "enemy", text: "ENEMY", size: 56.0),
+                                Text(name: "intent", text: "INTENT", size: 32.0, color: (0.9, 0.6, 0.6, 1.0)),
+                            ],
+                        ),
+                    ],
+                ),
+                Text(name: "log", text: "", size: 32.0, color: (0.7, 0.8, 1.0, 1.0)),
+                Stack(height: Fill(1.0)),
+                Panel(
+                    width: Fill(1.0),
+                    color: (0.05, 0.1, 0.25, 0.9),
+                    radius: 16.0,
+                    padding: (32.0, 24.0),
+                    children: [
+                        Row(
+                            gap: 60.0,
+                            children: [
+                                Text(name: "player", text: "PLAYER", size: 48.0),
+                                Text(name: "energy", text: "ENERGY", size: 48.0, color: (1.0, 0.85, 0.3, 1.0)),
+                                Text(name: "piles", text: "PILES", size: 36.0, color: (0.7, 0.7, 0.8, 1.0)),
+                            ],
+                        ),
+                    ],
+                ),
+                Row(
+                    width: Fill(1.0),
+                    gap: 24.0,
+                    align: (Start, End),
+                    children: [
+                        Button(name: "card0", text: "CARD", width: Fixed(260.0), height: Fixed(340.0), radius: 20.0, size: 34.0),
+                        Button(name: "card1", text: "CARD", width: Fixed(260.0), height: Fixed(340.0), radius: 20.0, size: 34.0),
+                        Button(name: "card2", text: "CARD", width: Fixed(260.0), height: Fixed(340.0), radius: 20.0, size: 34.0),
+                        Button(name: "card3", text: "CARD", width: Fixed(260.0), height: Fixed(340.0), radius: 20.0, size: 34.0),
+                        Button(name: "card4", text: "CARD", width: Fixed(260.0), height: Fixed(340.0), radius: 20.0, size: 34.0),
+                        Stack(width: Fill(1.0)),
+                        Button(
+                            name: "end_turn",
+                            text: "END TURN",
+                            width: Fixed(300.0),
+                            height: Fixed(120.0),
+                            radius: 20.0,
+                            looks: (normal: (color: (0.6, 0.3, 0.05, 1.0), text_color: (1.0, 1.0, 1.0, 1.0))),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)

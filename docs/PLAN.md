@@ -75,6 +75,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Cleaning up old JSON logs and a killed run's patch libraries | They pile up |
 | `gg run` patching edits to constants, and restarting on crashes from data and on manifest edits | Agents tune constants live, or data crashes a game |
 | `gg run --peers 2` windows apart, through a relay or embedded; an app's name and run defaults in a manifest, the sandbox's too | Someone needs them |
+| `gg input`: a hold of N ticks in one call, the cursor in canvas units, clicks that leave the OS cursor ungrabbed; `cursor_grabbed` in `status` | An agent plays a game through it |
 
 ### Shipping and CI
 
@@ -155,6 +156,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Bindings: per user, rebound in a UI, chords, modifiers, dead zones, sticks as buttons, labels for prompts | A game ships settings or shows bindings |
 | Gamepads polled in `Input`, connect events and names, one per player, rumble, in an embedded game | Local multiplayer, rumble, or a pad in the editor |
 | An engine type for an action's state, holds shorter than a tick, fewer stick commands, a raw-mouse fly camera, zoom by keys | A game needs one |
+| The cursor as a binding; a first-person look and walk of the engine's | Two games write their own |
 
 ### Assets and cooking
 
@@ -201,6 +203,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Deferred | Add when |
 |---|---|
 | Scripts: `has` a component, find by `Name`, strings, input, random numbers from the world, a machine's state; create and destroy hooks | A script needs it |
+| Calls into a script with arguments, or events scripts hook | A game hands a script what happened, as the card demo encodes plays in a field |
 | A tick's budget for all of a game's script calls, or one by time in development builds | A runaway script's crawl gets in the way |
 | luau-lsp type definitions, and debugging over DAP (`gg dap`) | Someone works on scripts in a code editor |
 | Debugger: watches, expressions, conditions, logpoints, stops on errors, chunk breakpoints, stepping from a pause, keys | Someone debugs at length |
@@ -210,7 +213,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 
 | Deferred | Add when |
 |---|---|
-| Physics: polygons, hulls, damping, a set mass, bodies under parents, children's colliders, rotation locked per axis | Each with its first game use |
+| Physics: polygons, hulls, damping, a set mass, bodies under parents, children's colliders, rotation locked per axis, contacts' normals and points, collision layers by name | Each with its first game use |
 | Characters of other shapes, turning; casts giving every hit, overlaps, filters, 2D casts | Each with its first game use |
 | Joints: ragdolls, breaking, multibody, turned frames, spherical limits and motors, to world points, gizmos in the editor | A game breaks, hinges or ragdolls |
 | A restitution threshold, gravity from a scene, unsimulated colliders told apart, mesh colliders' outlines | rapier gains one, or someone is confused |

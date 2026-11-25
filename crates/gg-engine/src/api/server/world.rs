@@ -11,7 +11,7 @@ use super::failure;
 use crate::api::json;
 use crate::bounds;
 use crate::ecs::Pose;
-use crate::{Context, Entity, EntityId, PrefabRoot, World};
+use crate::{Context, Entity, EntityId, Name, PrefabRoot, World};
 
 /// An `assets` waiting for a look at the asset root (numbered by `Context::ask_assets`), and its
 /// page.
@@ -21,6 +21,51 @@ pub(super) struct Listing {
     pub(super) kind: Option<AssetKind>,
     pub(super) skip: usize,
     pub(super) take: usize,
+}
+
+/// An entity as a request names it: by its ID, or by its [`Name`]'s text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Subject {
+    Id(EntityId),
+    Name(String),
+}
+
+impl Subject {
+    /// Text that parses as an ID is one; any other is a name.
+    pub(super) fn of(text: &str) -> Self {
+        text.parse()
+            .map_or_else(|_| Self::Name(text.to_owned()), Self::Id)
+    }
+
+    /// The ID, or the ID of the one entity with the name.
+    ///
+    /// Fails with `ecs.no_entity` for a name none has, and `ecs.ambiguous_name`, listing their
+    /// IDs, for a name several have.
+    pub(super) fn resolve(&self, world: &World) -> Result<EntityId, Error> {
+        let name = match self {
+            Self::Id(id) => return Ok(*id),
+            Self::Name(name) => name,
+        };
+        let named = world.entities(Some("Name"))?;
+        let named = named.filter(|&entity| world.get::<Name>(entity).is_some_and(|n| n.0 == *name));
+        let ids: Vec<EntityId> = named.filter_map(|entity| world.id(entity)).collect();
+        match ids[..] {
+            [] => {
+                let message = format!("no living entity is named `{name}`, and it isn't an ID");
+                Err(Error::new("ecs.no_entity", message))
+            }
+            [id] => Ok(id),
+            _ => {
+                let listed: Vec<String> = ids.iter().map(ToString::to_string).collect();
+                let message = format!(
+                    "{} entities are named `{name}`, IDs {}: give one's ID",
+                    ids.len(),
+                    listed.join(", ")
+                );
+                Err(Error::new("ecs.ambiguous_name", message))
+            }
+        }
+    }
 }
 
 /// The page of `world`'s entities `entities` asks for.

@@ -29,7 +29,9 @@ Lifecycle, in order:
    assigns a local of the chunk (`script.state`).
 2. **Chunk.** The file's top level runs at load, at each reload, and when a lockstep joiner or a
    run restored from a snapshot loads it. It must call `gg.declare` once and return the result,
-   else `script.bad`. It may read, and call `gg.component`, `gg.declare` and `gg.quat`. It runs
+   else `script.bad`. It may read, and call `gg.component`, `gg.declare` and `gg.quat`.
+   `gg.component` finds only types already registered, so a game registers its Rust component
+   types before it loads a script that names them, else `script.bad`. The chunk runs
    again where its changes are already made, so `gg.spawn`, `gg.despawn`, `gg.add`, `gg.remove`,
    `gg.tween`, `gg.play`, `gg.set_param` and field writes fail in it with `script.loading`,
    refusing the script. Once it has run, every table it keeps, globals included, is frozen; a

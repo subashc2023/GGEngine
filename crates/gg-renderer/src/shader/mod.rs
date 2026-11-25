@@ -534,6 +534,12 @@ impl Shaders {
         self.lazy(slot, spirv, shadow, meshlets.as_ref(), blend, true)
     }
 
+    /// Whether shader `index` is one of the engine's model shaders, whose draws take
+    /// [`model::Params`]: the first three of [`LAZY`]'s slots.
+    pub(crate) fn is_model(&self, index: u32) -> bool {
+        self.lazy[..3].contains(&Some(index))
+    }
+
     /// Adds the engine's model shader for each alpha mode not yet asked for, as
     /// [`MeshDraw::with_material`](crate::MeshDraw::with_material) does on first use. Then a
     /// material made later, as by a model read again, adds none, which would shift the indices of

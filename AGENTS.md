@@ -94,6 +94,8 @@ Run the game under `cargo gg run`, in the background. It serves the tool API, pa
 inside function bodies as they're saved, and restarts from a snapshot after other changes, crashes
 or hangs. A layer's `attach` builds the world, and restarts skip it: an edit there shows only in a
 fresh run. `cargo gg help run` has the details. `cargo gg mcp` serves the same commands over MCP.
+While the game runs, call `target/debug/gg`, which `cargo gg run` built, or the installed `gg`:
+`cargo gg` waits on the build's lock while `gg run` rebuilds the game.
 
 ### Debugging and measuring
 

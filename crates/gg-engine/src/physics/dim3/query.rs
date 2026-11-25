@@ -49,6 +49,27 @@ impl Cast {
         self.toward.try_normalize().filter(|_| goes)
     }
 
+    /// Where this cast meets the plane through `point` whose normal is `normal` (any length but 0),
+    /// ahead of [`from`](Self::from) and within [`max_distance`](Self::max_distance): where a
+    /// cursor's [ray](crate::Context::ray) meets the ground (`DVec3::ZERO`, `Vec3::Y`) or a 2D
+    /// game's z = 0 plane (`DVec3::ZERO`, `Vec3::Z`).
+    ///
+    /// `None` for a cast that goes nowhere (as [`World::cast_ray`] reads one), one parallel to the
+    /// plane, a plane behind it or beyond its distance, or a `point` or `normal` that isn't finite
+    /// or is 0.
+    pub fn meets_plane(&self, point: DVec3, normal: Vec3) -> Option<DVec3> {
+        let way = self.way()?;
+        let normal = normal.as_dvec3();
+        let (way, length) = (way.as_dvec3(), normal.length());
+        let closing = way.dot(normal);
+        // `way` is an `f32`'s unit: a rounded direction along the plane still counts as parallel.
+        let across = closing.abs() > length * 1e-6;
+        let distance = (point - self.from).dot(normal) / closing;
+        let reached = distance >= 0.0 && distance <= f64::from(self.max_distance);
+        (across && reached && length.is_finite() && point.is_finite())
+            .then(|| self.from + way * distance)
+    }
+
     /// This cast, passing through `entity`'s colliders.
     pub fn excluding(self, entity: Entity) -> Self {
         Self {
@@ -205,6 +226,39 @@ mod tests {
         );
         step(&mut world, 1);
         (world, floor, boxed)
+    }
+
+    /// A cast meets a plane ahead of it and within its distance, wherever the plane's normal faces,
+    /// and never one parallel to it or behind.
+    #[test]
+    fn casts_meet_planes_ahead_of_them() {
+        let down = Cast::new(DVec3::new(1.0, 4.0, -2.0), Vec3::new(0.0, -3.0, 0.0));
+        let ground = down.meets_plane(DVec3::ZERO, Vec3::Y).expect("the ground");
+        assert!(
+            ground.abs_diff_eq(DVec3::new(1.0, 0.0, -2.0), 1e-9),
+            "{ground}"
+        );
+        let shifted = down.meets_plane(DVec3::new(9.0, 1.0, 9.0), Vec3::new(0.0, -2.0, 0.0));
+        assert_eq!(shifted, Some(DVec3::new(1.0, 1.0, -2.0)));
+        let slanted = Cast::new(DVec3::new(0.0, 4.0, 0.0), Vec3::new(0.0, -1.0, 1.0));
+        let slanted = slanted.meets_plane(DVec3::ZERO, Vec3::Y).expect("slanted");
+        assert!(
+            slanted.abs_diff_eq(DVec3::new(0.0, 0.0, 4.0), 1e-5),
+            "{slanted}"
+        );
+        assert_eq!(down.within(3.9).meets_plane(DVec3::ZERO, Vec3::Y), None);
+        assert!(down.within(4.0).meets_plane(DVec3::ZERO, Vec3::Y).is_some());
+        let up = Cast::new(DVec3::new(0.0, 4.0, 0.0), Vec3::Y);
+        assert_eq!(up.meets_plane(DVec3::ZERO, Vec3::Y), None);
+        let along = Cast::new(DVec3::new(0.0, 4.0, 0.0), Vec3::X);
+        assert_eq!(along.meets_plane(DVec3::ZERO, Vec3::Y), None);
+        assert_eq!(down.meets_plane(DVec3::ZERO, Vec3::ZERO), None);
+        let nowhere = Cast::new(DVec3::new(0.0, 4.0, 0.0), Vec3::ZERO);
+        assert_eq!(nowhere.meets_plane(DVec3::ZERO, Vec3::Y), None);
+        // A 2D game's plane, from in front.
+        let front = Cast::new(DVec3::new(2.0, 3.0, 5.0), Vec3::NEG_Z);
+        let front = front.meets_plane(DVec3::ZERO, Vec3::Z);
+        assert_eq!(front, Some(DVec3::new(2.0, 3.0, 0.0)));
     }
 
     /// A ray hits the nearest collider in its way, passes through its excluded entity's, and stops

@@ -1,0 +1,27 @@
+[package]
+name = "platformer"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# GPU drivers apply per-game profiles by executable name: engine executables get a `gg-` prefix to
+# stay clear of such matches.
+[[bin]]
+name = "gg-platformer"
+path = "src/main.rs"
+
+[dependencies]
+gg-engine.workspace = true
+
+[build-dependencies]
+# Digests what the game's code is compiled from, which its sessions name its build by.
+gg-api.workspace = true
+
+[features]
+default = ["dev"]
+# A development build, which serves the tool API, applies its scene file's saves and reloads its
+# assets as they change. A build without it runs from the game's package, as shipping builds do.
+dev = ["gg-engine/dev"]
+
+[lints]
+workspace = true

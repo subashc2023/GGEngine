@@ -9,7 +9,10 @@
 //!   threads.
 //! - Reflection describes component types so tools reach them by name; the Inspector edits them.
 //! - Scripts: components that act at ticks.
-//! - Physics, 2D and 3D, through rapier; its state is a world resource.
+//! - Physics, 2D and 3D, through rapier; its state is a world resource. [`World::cast_ray`] and
+//!   [`World::cast_shape`] find what a ray or a moving shape meets in 3D.
+//! - Random numbers a seed draws alike on every machine ([`Rng`]), and logging to the run's JSON
+//!   log through [`tracing`].
 //! - Navigation: a navmesh baked from static colliders, paths over it, and agents that walk them
 //!   round each other.
 //! - Animation: flipbooks and tweens. Particle emitters, whose particles the frames emit and own.
@@ -21,7 +24,8 @@
 //! - Per-frame measures for the log and the Performance panel. The grid a tool's view shows in an
 //!   axis plane.
 //! - Assets: images as textures; glTF models, whose nodes spawn as entities, with
-//!   metallic-roughness materials the world's lights light; fonts baked into fields that draw text
+//!   metallic-roughness materials the world's lights light; built-in [`Shape`]s, models without a
+//!   file; a [`Tint`] per entity over its models' colors; fonts baked into fields that draw text
 //!   crisp at any size, shaped and laid out.
 //! - Audio through kira: sounds ticks queue and layers play, panned and faded as the view hears
 //!   them (a 2D view by where they show, a perspective camera by direction and distance); music,
@@ -176,15 +180,18 @@ pub mod recording;
 pub mod reflect;
 mod render_thread;
 mod renderer_components;
+mod rng;
 mod scene_change;
 mod scene_files;
 mod script;
+mod shape;
 mod skins;
 mod sky;
 mod snapshot;
 mod sync_test;
 #[cfg(test)]
 mod testing;
+mod tint;
 mod transform;
 // `dev` alone has the UI.
 #[cfg(feature = "dev")]
@@ -290,19 +297,27 @@ pub use physics::{
 pub use prefab::{Prefab, PrefabRoot};
 use recording::Recorder;
 pub use reflect::Reflect;
+pub use rng::Rng;
 pub use script::{Script, run_scripts};
+pub use shape::Shape;
 pub use sky::{Atmosphere, Sky};
 use snapshot::Snapshot;
+/// Logging, as the engine logs: to the run's JSON log, which `gg logs` reads, and to its console.
+/// Log with fields. A warning or error has a stable code: `warn!(code = "game.no_spawn", %name,
+/// "no spawn point")`. Info and above reach the log without `RUST_LOG`.
+pub use tint::Tint;
+pub use tracing;
 pub use transform::Transform;
 
 /// What most games name, for `use gg_engine::prelude::*;`.
 pub mod prelude {
     pub use crate::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+    pub use crate::tracing::{debug, error, info, warn};
     pub use crate::{
-        Actions, Align, App, Binding, Blend, Bus, Change, Commands, Component, Context, Entity,
-        Error, Event, Font, Key, Layer, Mesh, MouseButton, PadButton, Place, Projection, Reflect,
-        Scripts, Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Transform, World,
-        step_animation, step_navigation, step_physics,
+        Actions, Align, App, Binding, Blend, Bus, Camera, Cast, Change, Commands, Component,
+        Context, Entity, Error, Event, Font, Key, Layer, Mesh, MouseButton, PadButton, Place,
+        Projection, Reflect, Rng, Scripts, Shader, Shape, Sound, Source, Sprite, Stick, TextStyle,
+        Tick, Tint, Toward, Transform, World, step_animation, step_navigation, step_physics,
     };
 }
 

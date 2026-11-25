@@ -1,7 +1,10 @@
 //! Telling an edit inside function bodies, which a patch carries, from one that needs a rebuild.
 
 use syn::visit_mut::{self, VisitMut};
-use syn::{Attribute, Block, File, ImplItemFn, Item, ItemFn, ItemImpl, Stmt, TraitItemFn};
+use syn::{
+    Attribute, Block, File, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, Stmt,
+    TraitItemFn,
+};
 
 /// What an edit to a module is, as a patch sees it.
 #[derive(Debug, PartialEq)]
@@ -9,6 +12,9 @@ pub(crate) enum Edit {
     /// Inside function bodies, which a patch carries. `attach` if among them is a `Layer` impl's
     /// `attach`, which builds the world only as a run starts afresh, not in one that keeps it.
     Bodies { attach: bool },
+    /// Only items under `#[cfg(test)]` differ, which the game's binary doesn't hold: nothing to
+    /// patch.
+    Same,
     /// The new text doesn't parse. A patch's build shows what rustc makes of it; if it builds,
     /// rustc read what gg can't, so the game is rebuilt.
     Unreadable,
@@ -18,8 +24,9 @@ pub(crate) enum Edit {
 
 /// What the edit from `old`, a module's text as of the game's build, to `new` is.
 ///
-/// Inside function bodies if the two are the same token for token, but for non-`const` function
-/// bodies (their declared items aside) and doc comments.
+/// `Same` if the two differ only in items under `#[cfg(test)]`. Else inside function bodies if the
+/// two are the same token for token, but for non-`const` function
+/// bodies (their declared items aside) and doc comments, leaving out items under `#[cfg(test)]`.
 ///
 /// An edit inside code that runs as the game starts (`main`, a `Layer`'s `load` and `restored`)
 /// needs a rebuild: a patch would come after they ran. So does an edit to code only they call,
@@ -34,6 +41,14 @@ pub(crate) fn classify(old: &str, new: &str) -> Edit {
     let Ok(new) = syn::parse_file(new) else {
         return Edit::Unreadable;
     };
+    if old != new {
+        let (mut old_bare, mut new_bare) = (old.clone(), new.clone());
+        untested(&mut old_bare);
+        untested(&mut new_bare);
+        if old_bare == new_bare {
+            return Edit::Same;
+        }
+    }
     if bare(old.clone(), Keep::None) != bare(new.clone(), Keep::None) {
         return Edit::Rebuild("an edit outside function bodies");
     }
@@ -57,9 +72,10 @@ enum Keep {
     Attach,
 }
 
-/// `file` without doc comments (`#[doc]` attributes) and without non-`const` function bodies,
-/// but for the items declared in them and the bodies `keep` keeps.
+/// `file` without doc comments (`#[doc]` attributes), `#[cfg(test)]` items and non-`const`
+/// function bodies, but for the items declared in them and the bodies `keep` keeps.
 fn bare(mut file: File, keep: Keep) -> File {
+    untested(&mut file);
     let mut bare = Bare { keep, layer: false };
     bare.visit_file_mut(&mut file);
     file
@@ -123,6 +139,94 @@ impl VisitMut for Bare {
     }
 }
 
+/// Takes the items under `#[cfg(test)]` out of `file`, however deep in modules and impls (not in
+/// function bodies, which [`Items`] sees to).
+fn untested(file: &mut File) {
+    Untested.visit_file_mut(file);
+}
+
+struct Untested;
+
+impl VisitMut for Untested {
+    fn visit_file_mut(&mut self, file: &mut File) {
+        file.items.retain(|item| !tested(item));
+        visit_mut::visit_file_mut(self, file);
+    }
+
+    fn visit_item_mod_mut(&mut self, item: &mut ItemMod) {
+        if let Some((_, items)) = &mut item.content {
+            items.retain(|item| !tested(item));
+        }
+        visit_mut::visit_item_mod_mut(self, item);
+    }
+
+    fn visit_item_impl_mut(&mut self, item: &mut ItemImpl) {
+        item.items.retain(|item| !tested_impl(item));
+        visit_mut::visit_item_impl_mut(self, item);
+    }
+}
+
+/// Whether `attrs` hold `#[cfg(test)]`.
+fn cfg_test(attrs: &[Attribute]) -> bool {
+    let test = |attr: &Attribute| {
+        attr.path().is_ident("cfg") && attr.parse_args::<syn::Ident>().is_ok_and(|id| id == "test")
+    };
+    attrs.iter().any(test)
+}
+
+/// Whether `item` is under `#[cfg(test)]`.
+fn tested(item: &Item) -> bool {
+    match item {
+        Item::Const(item) => cfg_test(&item.attrs),
+        Item::Enum(item) => cfg_test(&item.attrs),
+        Item::ExternCrate(item) => cfg_test(&item.attrs),
+        Item::Fn(item) => cfg_test(&item.attrs),
+        Item::ForeignMod(item) => cfg_test(&item.attrs),
+        Item::Impl(item) => cfg_test(&item.attrs),
+        Item::Macro(item) => cfg_test(&item.attrs),
+        Item::Mod(item) => cfg_test(&item.attrs),
+        Item::Static(item) => cfg_test(&item.attrs),
+        Item::Struct(item) => cfg_test(&item.attrs),
+        Item::Trait(item) => cfg_test(&item.attrs),
+        Item::TraitAlias(item) => cfg_test(&item.attrs),
+        Item::Type(item) => cfg_test(&item.attrs),
+        Item::Union(item) => cfg_test(&item.attrs),
+        Item::Use(item) => cfg_test(&item.attrs),
+        _ => false,
+    }
+}
+
+/// Whether `item`, of an impl, is under `#[cfg(test)]`.
+fn tested_impl(item: &ImplItem) -> bool {
+    match item {
+        ImplItem::Const(item) => cfg_test(&item.attrs),
+        ImplItem::Fn(item) => cfg_test(&item.attrs),
+        ImplItem::Type(item) => cfg_test(&item.attrs),
+        ImplItem::Macro(item) => cfg_test(&item.attrs),
+        _ => false,
+    }
+}
+
+/// Whether the module `name`, in the file whose text is `parent`, is declared apart from its
+/// `parent` and under `#[cfg(test)]`, as `#[cfg(test)] mod tests;`: its file isn't in the game's
+/// binary.
+pub(crate) fn declares_test(parent: &str, name: &str) -> bool {
+    struct Find<'a>(&'a str, bool);
+    impl VisitMut for Find<'_> {
+        fn visit_item_mod_mut(&mut self, item: &mut ItemMod) {
+            let apart = item.content.is_none() && item.ident == self.0;
+            self.1 |= apart && cfg_test(&item.attrs);
+            visit_mut::visit_item_mod_mut(self, item);
+        }
+    }
+    let Ok(mut file) = syn::parse_file(parent) else {
+        return false;
+    };
+    let mut find = Find(name, false);
+    find.visit_file_mut(&mut file);
+    find.1
+}
+
 /// Empties `block` but for the items declared in it, however deep, in order.
 fn keep_items(block: &mut Block) {
     let mut items = Items(Vec::new());
@@ -135,7 +239,9 @@ struct Items(Vec<Item>);
 
 impl VisitMut for Items {
     fn visit_item_mut(&mut self, item: &mut Item) {
-        self.0.push(item.clone());
+        if !tested(item) {
+            self.0.push(item.clone());
+        }
     }
 }
 
@@ -268,6 +374,92 @@ fn main() {
         assert_eq!(classify(MODULE, &beside), Edit::Bodies { attach: true });
         let other = classify(MODULE, &edited("self.x = 1.0;", "self.x = 4.0;"));
         assert_eq!(other, Edit::Bodies { attach: false });
+    }
+
+    /// Items under `#[cfg(test)]`, a module of tests and a declaration of one apart aren't in the
+    /// game's binary: an edit to them, or adding or removing one, is no change.
+    #[test]
+    fn edits_to_test_code_are_no_change() {
+        let tested = format!(
+            "{MODULE}
+#[cfg(test)]
+mod tests {{
+    use super::*;
+
+    #[test]
+    fn steers() {{
+        assert_eq!(1, 1);
+    }}
+}}
+
+#[cfg(test)]
+mod more;
+
+#[cfg(test)]
+fn helper() -> u32 {{
+    1
+}}
+
+#[cfg(test)]
+impl Ship {{
+    fn at(&self) -> f32 {{
+        self.x
+    }}
+}}
+
+impl Ship {{
+    #[cfg(test)]
+    fn peek(&self) -> f32 {{
+        self.x
+    }}
+}}
+"
+        );
+        for (from, to) in [
+            ("assert_eq!(1, 1);", "assert_eq!(2, 2);\n        helper();"),
+            ("fn steers()", "fn steers_right()"),
+            ("use super::*;", "use super::*;\n    use std::fmt;"),
+            ("mod more;", "mod fewer;"),
+            (
+                "fn helper() -> u32 {\n    1",
+                "fn helper() -> f32 {\n    1.0",
+            ),
+            ("self.x\n    }\n}\n\nimpl", "self.x * 2.0\n    }\n}\n\nimpl"),
+            ("fn peek(&self) -> f32", "fn peek(&self) -> f64"),
+        ] {
+            assert_eq!(tested.matches(from).count(), 1, "{from}");
+            let edited = tested.replace(from, to);
+            assert_eq!(classify(&tested, &edited), Edit::Same, "{from} -> {to}");
+        }
+        // Added or removed.
+        let module = format!("{MODULE}\n#[cfg(test)]\nmod tests {{\n    fn one() {{}}\n}}\n");
+        assert_eq!(classify(MODULE, &module), Edit::Same);
+        assert_eq!(classify(&module, MODULE), Edit::Same);
+        // Beside an edit inside a function body, it's that edit alone.
+        let beside = tested.replace("assert_eq!(1, 1);", "assert_eq!(3, 3);");
+        let beside = beside.replace("self.x += 1.0;", "self.x += 2.0;");
+        assert_eq!(classify(&tested, &beside), Edit::Bodies { attach: false });
+        // Not under `#[cfg(test)]`, a module of that name is the game's.
+        let plain = MODULE.replace(
+            "fn main()",
+            "mod tests {\n    pub fn one() {}\n}\n\nfn main()",
+        );
+        let outside = Edit::Rebuild("an edit outside function bodies");
+        assert_eq!(classify(MODULE, &plain), outside);
+    }
+
+    #[test]
+    fn a_module_declared_apart_under_cfg_test_is_found() {
+        let parent = "mod ship;\n\n#[cfg(test)]\nmod tests;\n\nmod inner {\n    #[cfg(test)]\n    mod checks;\n}\n";
+        for name in ["tests", "checks"] {
+            assert!(declares_test(parent, name), "{name}");
+        }
+        for name in ["ship", "nope"] {
+            assert!(!declares_test(parent, name), "{name}");
+        }
+        assert!(!declares_test("mod tests {}", "tests"));
+        assert!(!declares_test("#[cfg(test)] mod tests {}", "tests"));
+        assert!(!declares_test("fn {", "tests"));
     }
 
     #[test]

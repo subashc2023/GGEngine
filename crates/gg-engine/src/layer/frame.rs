@@ -457,7 +457,7 @@ impl Context {
         (self.opaque).hold(
             &self.world,
             &self.placed,
-            &self.skins,
+            (&self.skins, &self.shaders),
             &mut self.scene,
             origin,
         );
@@ -647,6 +647,7 @@ impl Context {
         let (seer, viewpoint) = seen;
         let viewpoint = camera::checked(viewpoint, seer, &mut self.projection);
         frame.viewpoint = viewpoint;
+        self.drawn = Some(viewpoint);
         frame.origin = self.origin;
         self.origin = followed(self.origin, viewpoint.position);
         let perspective = matches!(viewpoint.projection, crate::Projection::Perspective { .. });

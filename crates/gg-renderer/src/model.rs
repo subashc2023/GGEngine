@@ -380,11 +380,17 @@ impl Entry {
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
 pub struct Params {
     material: MaterialId,
+    /// Linear RGBA multiplying the base color, alpha included. Scalars, not a `Vec4`: the struct
+    /// stays 4-byte aligned, 20 bytes, as Slang lays out `float tint[4]` after a `uint`.
+    tint: [f32; 4],
 }
+
+/// Where a model draw's tint starts in its parameters' bytes.
+const TINT: usize = std::mem::offset_of!(Params, tint);
 
 impl MeshDraw {
     /// A draw of `mesh` with `material`, one of `materials`, through the engine's model shader for
-    /// its alpha mode (which `shaders` adds when first asked), with its faces.
+    /// its alpha mode (which `shaders` adds when first asked), with its faces, untinted.
     ///
     /// # Panics
     ///
@@ -398,10 +404,38 @@ impl MeshDraw {
         let Some(&(alpha, double_sided)) = materials.drawn.get(material.index as usize) else {
             panic!("material {} is one of another `Materials`", material.index);
         };
-        let mut draw = Self::new(mesh, shaders.model(alpha), Params { material });
+        let params = Params {
+            material,
+            tint: [1.0; 4],
+        };
+        let mut draw = Self::new(mesh, shaders.model(alpha), params);
         draw.culls = !double_sided;
         draw
     }
+
+    /// The same draw with its tint multiplied by `tint`, linear RGBA, if it draws through one of
+    /// `shaders`' model shaders; any other draw as it is. The tint multiplies the base color,
+    /// alpha included.
+    ///
+    /// Its shader's index alone says what its parameters hold: they're bytes, and a game's shader
+    /// may take as many.
+    pub fn tinted(&self, tint: Vec4, shaders: &Shaders) -> Self {
+        let mut draw = *self;
+        if shaders.is_model(self.shader) && usize::from(self.len) == size_of::<Params>() {
+            let (_, own) = material_and_tint(self.params());
+            let tint = (own * tint).to_array();
+            let bytes = bytemuck::bytes_of(&tint);
+            draw.params[TINT..TINT + bytes.len()].copy_from_slice(bytes);
+        }
+        draw
+    }
+}
+
+/// A model draw's material index and tint, from its parameters' bytes.
+pub(crate) fn material_and_tint(params: &[u8]) -> (u32, Vec4) {
+    let material = bytemuck::pod_read_unaligned(&params[..4]);
+    let tint: [f32; 4] = bytemuck::pod_read_unaligned(&params[TINT..TINT + 16]);
+    (material, Vec4::from_array(tint))
 }
 
 #[cfg(test)]
@@ -455,9 +489,37 @@ mod tests {
         assert!(opaque.batch().is_some() && masked.batch().is_some());
         assert_eq!(blended.batch(), None);
         assert_eq!((opaque.culls, masked.culls), (true, false));
-        // Each draw's parameters are its material's table index.
-        assert_eq!(masked.params(), 1u32.to_le_bytes());
-        assert_eq!(opaque_again.params(), 3u32.to_le_bytes());
+        // Each draw's parameters are its material's table index, then its tint, white.
+        assert_eq!(material_and_tint(masked.params()), (1, Vec4::ONE));
+        assert_eq!(material_and_tint(opaque_again.params()), (3, Vec4::ONE));
+        assert_eq!(masked.params().len(), 20);
+    }
+
+    /// A model draw takes a tint after its material; a game's draw with as many bytes of
+    /// parameters keeps its own.
+    #[test]
+    fn only_model_draws_take_a_tint() {
+        let mut meshes = Meshes::default();
+        let mut shaders = Shaders::default();
+        let mut materials = Materials::default();
+        let packed = crate::ModelMesh::pack("a", &[corner(); 3], vec![0, 1, 2], Vec::new());
+        let mesh = meshes.add_model("a", &packed.unwrap()).unwrap();
+        let material = materials.add(&Material::default());
+        let draw = MeshDraw::with_material(mesh, material, &materials, &mut shaders);
+        let red = Vec4::new(1.0, 0.0, 0.0, 0.5);
+        let tinted = draw.tinted(red, &shaders);
+        assert_eq!(material_and_tint(tinted.params()), (0, red));
+        assert_eq!(tinted.with_mesh(mesh), tinted);
+        let twice = tinted.tinted(Vec4::splat(0.5), &shaders);
+        assert_eq!(
+            material_and_tint(twice.params()).1,
+            red * 0.5,
+            "tints multiply"
+        );
+        // Another shader of the same vertex type, taking 20 bytes too.
+        let other = crate::shader::Shader::<PackedVertex, [f32; 5]>::new(shaders.count(), true);
+        let own = MeshDraw::new(mesh, other, [2.0; 5]);
+        assert_eq!(own.tinted(red, &shaders), own);
     }
 
     /// Each material's entry is written when added and replaced, the last waiting write replacing
