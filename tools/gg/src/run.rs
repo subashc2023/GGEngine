@@ -101,6 +101,9 @@ const SNAPSHOT: Duration = Duration::from_secs(60);
 /// The `closed` event's reason.
 const CLOSED: &str = "gg's stdin closed, as the tool that started it ended";
 
+/// The `quit` event's reason.
+const QUIT_ASKED: &str = "`gg quit` asked, while no game ran";
+
 /// How long a game asked to quit has to end before it's killed.
 const QUIT: Duration = Duration::from_secs(10);
 
@@ -160,9 +163,16 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     // Before the build: the tool may end under way.
     let closed = run.embedded.then(closes);
     let building = Instant::now();
-    let First::Built(patches) = first_build(run, &told, closed.as_deref())? else {
-        event(&json!({"event": "closed", "why": CLOSED}));
-        return Ok(true);
+    let patches = match first_build(run, &told, closed.as_deref())? {
+        First::Built(patches) => patches,
+        First::Closed => {
+            event(&json!({"event": "closed", "why": CLOSED}));
+            return Ok(true);
+        }
+        First::Quit => {
+            event(&json!({"event": "quit", "why": QUIT_ASKED}));
+            return Ok(true);
+        }
     };
     let exe = match &patches {
         Some(patches) => patches.exe().to_owned(),
@@ -235,13 +245,16 @@ enum First {
     Built(Option<Box<Patches>>),
     /// The embedding tool ended while the run waited for a change.
     Closed,
+    /// `gg quit` asked the run to end while it waited for a change.
+    Quit,
 }
 
 /// Builds `run`'s game the first time ([`Patches::new`]), returning its patches.
 ///
 /// While it watches the sources (patches and restarts on), a failed build prints `build_failed`
 /// and tells `waiting` with rustc's errors until the sources change, then builds again.
-/// [`First::Closed`] if `closed` says the tool ended meanwhile.
+/// [`First::Closed`] if `closed` says the tool ended meanwhile, and [`First::Quit`] if `gg quit`
+/// asked ([`Told::asked_to_quit`]).
 ///
 /// # Errors
 ///
@@ -267,6 +280,9 @@ fn first_build(run: &Run, told: &Told, closed: Option<&AtomicBool>) -> Result<Fi
             let (now, looked) = (Instant::now(), runs::now_ms());
             if closed.is_some_and(|closed| closed.load(Ordering::Relaxed)) {
                 return Ok(First::Closed);
+            }
+            if told.asked_to_quit() {
+                return Ok(First::Quit);
             }
             if watcher.changed(now) {
                 break;
@@ -455,6 +471,13 @@ impl Supervisor<'_> {
                 rebuilt = true;
             }
             self.tell(&games, waits, looked);
+            if self.asked_to_quit(&games) {
+                event(&json!({"event": "quit", "why": QUIT_ASKED}));
+                for peer in &self.peers {
+                    let _ = fs::remove_file(&peer.snapshot);
+                }
+                return Ok(true);
+            }
             let mut happened = None;
             for (peer, game) in games.iter_mut().enumerate() {
                 if let Some(what) = self.tend(peer, game)? {
@@ -553,6 +576,14 @@ impl Supervisor<'_> {
             (_, why) => why.clone(),
         };
         told.tell(&State { why, ..state }, looked);
+    }
+
+    /// Whether `gg quit` asked the run to end ([`Told::asked_to_quit`]) as it waits for a rebuild,
+    /// with no game and no build under way: one under way would hold the quit until it ends.
+    fn asked_to_quit(&self, games: &[Game]) -> bool {
+        let waits = games.is_empty()
+            && (self.patches.as_ref()).is_none_or(|patches| patches.state(&[]).phase == "waiting");
+        waits && (self.told.as_ref()).is_some_and(Told::asked_to_quit)
     }
 
     fn told(&self, state: State) {

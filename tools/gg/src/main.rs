@@ -124,12 +124,15 @@ a restart skips, builds the world.
 
 `run` ends as the game comes to its own end (its window closes, `quit` asks or its frames run out),
 whatever its status; as a game that never served the API ends; and, with restarts off
-(`--snapshot 0`, or `--record`, `--replay` or `--no-api` in ARGS), as the game ends at all.
+(`--snapshot 0`, or `--record`, `--replay` or `--no-api` in ARGS), as the game ends at all. While it
+waits with no game, as after a failed build, `gg quit` ends it (`quit`).
 
 Patches need dx (Dioxus's tool) on the PATH, of the root Cargo.toml's `subsecond` release. They're
 off with `--no-patch`, `--release`, restarts off, or a library beside PACKAGE's binary, which no
 patch reaches (`patches_off` says why). gg builds with `dx build --fat-binary`, printing each stage
-and, while compiling, the crates done of dx's count, every 5 s at most (`building`). It watches
+and, while compiling, the crates done of dx's count, every 5 s at most (`building`). One such build
+runs at a time in a target directory, as two of dx's links at once can fail: the others are
+`queued`. It watches
 PACKAGE's modules, the workspace's packages it builds with, and the workspace's manifest and lock
 file (`watching`). Then:
 - an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
@@ -801,7 +804,10 @@ A stopped script waits inside its tick, and the game with it. The commands but `
                 name: "quit",
                 usage: "quit",
                 summary: "End it cleanly, as closing its window does, without asking",
-                details: "",
+                details: "\
+With no game, as after a failed build, the `gg run` waiting for a change to rebuild it ends instead,
+answering `{\"run\": PID}`, its process.
+",
             },
             Help {
                 name: "call",

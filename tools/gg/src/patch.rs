@@ -166,7 +166,11 @@ impl Patches {
         let mut baseline = Baseline::new(&sources);
         let fat = builder.build().map_err(|failure| {
             let message = match &builder {
-                Builder::Dx(_) => format!("{}; `--no-patch` builds with cargo", failure.message),
+                // First: dx's own failures follow pages of the linker's warnings.
+                Builder::Dx(_) => format!(
+                    "`--no-patch` builds with cargo, if dx fails where cargo doesn't; {}",
+                    failure.message
+                ),
                 Builder::Cargo { .. } => failure.message,
             };
             Failure::new(failure.code, message)

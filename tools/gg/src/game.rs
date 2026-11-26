@@ -211,11 +211,23 @@ fn host_of(sessions: &[&Session]) -> Option<usize> {
     peers.then_some(if a.player == Some(0) { 0 } else { 1 })
 }
 
-/// Sends `method` with `params` to the game `pick` picks.
+/// Sends `method` with `params` to the game `pick` picks. A `quit` that no game answers ends the
+/// `gg run` waiting without one ([`runs::quit`]).
 ///
 /// Fails as the call does; a late answer says what the game waits for ([`waits`]).
 pub(crate) fn call(pick: &Pick, method: &str, params: Value) -> Result<Box<RawValue>, Failure> {
-    let answered = connect(pick)?.call(method, params);
+    let mut client = match connect(pick) {
+        Ok(client) => client,
+        Err(down)
+            if method == "quit" && matches!(&*down.code, "gg.build_failed" | "gg.waiting") =>
+        {
+            let ended = runs::quit(pick, down)?;
+            return serde_json::value::to_raw_value(&ended)
+                .map_err(|error| Failure::new("gg.run", error.to_string()));
+        }
+        Err(failure) => return Err(failure),
+    };
+    let answered = client.call(method, params);
     answered.map_err(|failure| waits(pick, method, failure))
 }
 

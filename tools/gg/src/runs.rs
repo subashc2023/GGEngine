@@ -80,6 +80,12 @@ pub(crate) fn path(target: &Path, package: &str) -> PathBuf {
     target.join(format!("gg-run-{package}.json"))
 }
 
+/// The file through which `gg quit` asks the run whose file is `told` to end ([`quit`]). It holds
+/// the run's process ID, so a request left over never ends a later run.
+fn quit_path(told: &Path) -> PathBuf {
+    told.with_extension("quit")
+}
+
 /// Milliseconds since the Unix epoch, the file's unit.
 pub(crate) fn now_ms() -> u64 {
     let since = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
@@ -92,6 +98,7 @@ pub(crate) fn now_ms() -> u64 {
 /// drop.
 pub(crate) struct Told {
     path: PathBuf,
+    gg: u32,
     shared: Arc<Mutex<Value>>,
     ending: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -124,6 +131,7 @@ impl Told {
         });
         Self {
             path,
+            gg,
             shared,
             ending,
             thread: Some(thread),
@@ -136,6 +144,17 @@ impl Told {
             fill(&mut told, state, looked);
         }
     }
+
+    /// Whether `gg quit` asked this run to end ([`quit`]); takes the request if so. The run asks
+    /// only while it waits, with no game to answer `quit` itself.
+    pub(crate) fn asked_to_quit(&self) -> bool {
+        let at = quit_path(&self.path);
+        let asked = fs::read_to_string(&at).is_ok_and(|gg| gg.trim() == self.gg.to_string());
+        if asked {
+            let _ = fs::remove_file(&at);
+        }
+        asked
+    }
 }
 
 impl Drop for Told {
@@ -145,6 +164,7 @@ impl Drop for Told {
             let _ = thread.join();
         }
         let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(quit_path(&self.path));
     }
 }
 
@@ -200,10 +220,11 @@ fn runs_in(target: &Path, project: Option<&Path>) -> Vec<Value> {
     ours.collect()
 }
 
-/// The only run of `pick`'s project and `--pid`; none of several.
+/// The only run of `pick`'s project and `--pid`, with the target directory it's in; none of
+/// several.
 ///
 /// Fails with `gg.cargo` if cargo can't name the target directory.
-fn picked(pick: &Pick) -> Result<Option<Value>, Failure> {
+fn picked(pick: &Pick) -> Result<Option<(PathBuf, Value)>, Failure> {
     let target = build::target_dir(pick.project.as_deref().and_then(Path::parent))?;
     let mut runs = runs_in(&target, pick.project.as_deref());
     if let Some(pid) = pick.pid {
@@ -212,7 +233,7 @@ fn picked(pick: &Pick) -> Result<Option<Value>, Failure> {
         });
     }
     Ok(match runs.len() {
-        1 => runs.pop(),
+        1 => runs.pop().map(|told| (target, told)),
         _ => None,
     })
 }
@@ -226,8 +247,53 @@ fn picked(pick: &Pick) -> Result<Option<Value>, Failure> {
 ///
 /// `None` if no run, or several, do.
 pub(crate) fn down(pick: &Pick) -> Option<Failure> {
-    let told = picked(pick).ok()??;
+    let (_, told) = picked(pick).ok()??;
     Some(down_as(&told))
+}
+
+/// Asks the `gg run` `pick` picks to end, as `gg quit` does when no game answers, if it waits with
+/// none for a change to its sources, as after a failed build. Writes the request beside the run's
+/// file ([`quit_path`]), which the run's waits poll, and returns `{"run": PID}`, its process, once
+/// its file is gone.
+///
+/// # Errors
+///
+/// - `down`, why no game answers, if no run waits, or several do
+/// - `gg.timeout` if the run doesn't end within the pick's timeout, as when it began a build first
+/// - `gg.run` if the request can't be written
+pub(crate) fn quit(pick: &Pick, down: Failure) -> Result<Value, Failure> {
+    let Ok(Some((target, told))) = picked(pick) else {
+        return Err(down);
+    };
+    let (Some(gg), Some(package)) = (told["gg"].as_u64(), told["package"].as_str()) else {
+        return Err(down);
+    };
+    if told["state"] != "waiting" {
+        return Err(down);
+    }
+    let at = path(&target, package);
+    let request = quit_path(&at);
+    fs::write(&request, gg.to_string()).map_err(|error| {
+        let message = format!(
+            "can't ask the `gg run` in process {gg} to end, writing {}: {error}",
+            request.display()
+        );
+        Failure::new("gg.run", message)
+    })?;
+    let start = Instant::now();
+    while start.elapsed() < pick.timeout {
+        if !at.exists() {
+            return Ok(json!({"run": gg}));
+        }
+        thread::sleep(WRITE);
+    }
+    let _ = fs::remove_file(&request);
+    let message = format!(
+        "the `gg run` in process {gg} didn't end within {} s of being asked, as when a change \
+         began a build first; `gg quit` asks the game once it runs",
+        pick.timeout.as_secs()
+    );
+    Err(Failure::new("gg.timeout", message))
 }
 
 fn down_as(told: &Value) -> Failure {
@@ -526,6 +592,53 @@ mod tests {
         let listed = about_files(&events);
         let latest: Vec<Value> = (0..MOST_FILE_EVENTS).map(reload).collect();
         assert_eq!(listed, latest, "the latest files'");
+    }
+
+    /// `quit` ends a run that waits without a game, through a request it takes as its own alone;
+    /// a run doing anything else is left to say why no game answers.
+    #[test]
+    fn quit_ends_a_run_that_waits_without_a_game() {
+        // gg's directory, in the workspace, so cargo names its target directory; no project there
+        // is any other run's.
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let target = build::target_dir(Some(here)).expect("the target directory");
+        let project = here.join(format!("quit-{}.ron", std::process::id()));
+        let package = format!("quit-{}", std::process::id());
+        let at = path(&target, &package);
+        let failed = Failure::new("gg.build", "error[E0308]: mismatched types");
+        let waiting = State {
+            error: Some(failed),
+            ..State::new("waiting")
+        };
+        let told = Told::start(at.clone(), 4242, &package, Some(&project), &waiting);
+        // Another run's request is left alone.
+        fs::write(quit_path(&at), "4243").expect("written");
+        let others = told.asked_to_quit();
+        let down = || Failure::new("gg.build_failed", "its last build failed");
+        // Running: not asked.
+        told.tell(&State::new("running"), now_ms());
+        thread::sleep(WRITE * 2);
+        let running = quit(&pick(Some(project.clone())), down()).map_err(|failure| failure.code);
+        told.tell(&waiting, now_ms());
+        thread::sleep(WRITE * 2);
+        // The run's side: its wait polls for the request, then ends.
+        let run = thread::spawn(move || {
+            let start = Instant::now();
+            while !told.asked_to_quit() && start.elapsed() < Duration::from_secs(5) {
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let ended = quit(&pick(Some(project)), down()).map_err(|failure| failure.code);
+        run.join().expect("no panic");
+        let left = (at.exists(), quit_path(&at).exists());
+        assert!(!others, "a request for another run");
+        assert_eq!(running, Err("gg.build_failed".to_owned()));
+        assert_eq!(ended, Ok(json!({"run": 4242})));
+        assert_eq!(
+            left,
+            (false, false),
+            "the run's file and the request are gone"
+        );
     }
 
     /// A game down says what its run does, with the build's errors.

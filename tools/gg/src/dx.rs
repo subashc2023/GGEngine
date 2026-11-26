@@ -1,7 +1,7 @@
 //! Dioxus's `dx`, for `gg run`'s patches: checking its release, building the game to take patches,
 //! printing progress, building patches, and mending their thunks on Windows on x86-64.
 
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,8 @@ pub(crate) struct Dx {
     bin: String,
     root: PathBuf,
     cache: PathBuf,
+    /// Held across each build, by every package's in the target directory ([`Dx::hold`]).
+    lock: PathBuf,
 }
 
 /// A build patches are built against: its executable, and `BuildsFinished`'s `client` as JSON,
@@ -55,15 +57,20 @@ impl Dx {
             bin: package.bin.clone(),
             root: package.root.clone(),
             cache: package.target.join("gg").join("dx").join(name),
+            lock: package.target.join("gg").join("dx.lock"),
         }
     }
 
-    /// Builds with `dx build --fat-binary`, printing `building` as [`Progress`] says, and
-    /// [`forget`](Self::forget)s the environment dx wrote, success or not.
+    /// Builds with `dx build --fat-binary`, holding the target directory's builds ([`hold`]),
+    /// printing `building` as [`Progress`] says, and [`forget`](Self::forget)s the environment dx
+    /// wrote, success or not.
     ///
-    /// Fails with `gg.build` if dx can't run, the build fails, or no executable results (dx's own
-    /// link failed).
+    /// Fails with `gg.build` if the lock can't be taken, dx can't run, the build fails, or no
+    /// executable results (dx's own link failed).
+    ///
+    /// [`hold`]: Self::hold
     pub(crate) fn build(&self) -> Result<Fat, Failure> {
+        let _held = self.hold()?;
         // dx makes it too, but says less if it can't.
         let _ = fs::create_dir_all(&self.cache);
         let args = ["build", "--fat-binary"];
@@ -111,6 +118,40 @@ impl Dx {
         for dir in fs::read_dir(&self.cache).into_iter().flatten().flatten() {
             let _ = fs::remove_file(dir.path().join("rustc_wrapper_args.txt"));
         }
+    }
+
+    /// Takes the lock of dx's builds in the target directory, held until the file drops: printing
+    /// `building` at stage `queued` first if another process holds it.
+    ///
+    /// dx links each game against an archive of its libraries, written beside the executable and
+    /// named by a hash of their names, sizes and times. Games of the same dependencies share it,
+    /// and one's link while another's writes it fails: `Failed to write executable`.
+    ///
+    /// Fails with `gg.build` if the file can't be opened or locked.
+    fn hold(&self) -> Result<File, Failure> {
+        let failed = |error: io::Error| {
+            let message = format!("can't lock {}: {error}", self.lock.display());
+            Failure::new("gg.build", message)
+        };
+        if let Some(dir) = self.lock.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&self.lock)
+            .map_err(failed)?;
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(error)) => return Err(failed(error)),
+        }
+        let why = "another `gg run` builds with dx in this target directory, and two of dx's links \
+                   at once can fail";
+        event(&json!({"event": "building", "stage": "queued", "why": why}));
+        file.lock().map_err(failed)?;
+        Ok(file)
     }
 
     /// Builds a patch of the modules as they are now, for a process of build `fat` whose `main` is
@@ -675,6 +716,7 @@ mod tests {
             bin,
             root,
             cache: cache.clone(),
+            lock: cache.join("dx.lock"),
         }
         .forget();
         let left: Vec<String> = (fs::read_dir(&windows).expect("a directory").flatten())
@@ -682,6 +724,36 @@ mod tests {
             .collect();
         let _ = fs::remove_dir_all(&cache);
         assert_eq!(left, ["link_args.json"]);
+    }
+
+    /// Two packages' builds in one target directory take turns: the second waits for the first's
+    /// lock to drop.
+    #[test]
+    fn builds_in_one_target_directory_take_turns() {
+        let target = std::env::temp_dir().join(format!("gg-dx-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&target);
+        let dx = |name: &str| Dx {
+            package: name.to_owned(),
+            bin: name.to_owned(),
+            root: target.clone(),
+            cache: target.join("gg").join("dx").join(name),
+            lock: target.join("gg").join("dx.lock"),
+        };
+        let (rts, fps) = (dx("rts"), dx("fps"));
+        let held = rts.hold().expect("the lock");
+        let (sent, got) = std::sync::mpsc::channel();
+        let waiting = thread::spawn(move || {
+            let held = fps.hold();
+            let _ = sent.send(());
+            held.is_ok()
+        });
+        let blocked = got.recv_timeout(Duration::from_millis(300)).is_err();
+        drop(held);
+        let took = got.recv_timeout(Duration::from_secs(5)).is_ok();
+        let fps_held = waiting.join().expect("no panic");
+        let _ = fs::remove_dir_all(&target);
+        assert!(blocked, "the second waits while the first holds it");
+        assert!(took && fps_held, "then takes it");
     }
 
     /// A PE image for x86-64 with a code section of `code` and a data section of `data`.
