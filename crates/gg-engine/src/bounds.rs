@@ -1,5 +1,6 @@
-//! The sphere round what an entity and its descendants draw: the tool API's `entity` answers it as
-//! `bounds`, and the editor frames it.
+//! The sphere and boxes round what an entity and its descendants draw: the tool API's `entity`
+//! answers them as `bounds` and `box`, the editor frames the sphere, and the Bounds overlay draws a
+//! box.
 
 use gg_core::math::{DAffine3, DVec3, Vec3};
 use gg_renderer::{Circle, MeshDraw, Meshes, Sprite};
@@ -75,6 +76,18 @@ pub(crate) fn boxed(
     if !into_root.is_finite() {
         return None;
     }
+    Some((placed, box_in(world, meshes, root, into_root)?))
+}
+
+/// The box along the world's axes round what `root` and its descendants draw, as [`boxed`] reads
+/// them: the tool API's `entity` answers it as `box`.
+pub(crate) fn world_box(world: &World, meshes: &Meshes, root: Entity) -> Option<[DVec3; 2]> {
+    box_in(world, meshes, root, DAffine3::IDENTITY)
+}
+
+/// The box round what `root` and its descendants draw in the space `space` takes the world into,
+/// as [`boxed`] says.
+fn box_in(world: &World, meshes: &Meshes, root: Entity, space: DAffine3) -> Option<[DVec3; 2]> {
     let mut bounds: Option<[DVec3; 2]> = None;
     let mut stack = vec![root];
     while let Some(entity) = stack.pop() {
@@ -95,7 +108,7 @@ pub(crate) fn boxed(
         if own.iter().all(Option::is_none) {
             continue;
         }
-        let pose = into_root * world.pose(entity).ok()?.matrix;
+        let pose = space * world.pose(entity).ok()?.matrix;
         for [low, high] in own.into_iter().flatten() {
             let [low, high] = [low, high].map(Vec3::as_dvec3);
             for corner in 0..8 {
@@ -110,7 +123,7 @@ pub(crate) fn boxed(
             }
         }
     }
-    Some((placed, bounds?))
+    bounds
 }
 
 /// The smallest sphere that holds both `a` and `b`.
@@ -237,6 +250,18 @@ mod tests {
             corner.distance(DVec3::new(11.0, 1.0, 0.0)) < 1e-9,
             "{corner}"
         );
+        // Along the world's axes, turned a right angle about Z: 2 across and 20 up.
+        let world_corners = [DVec3::new(-9.0, -1.0, 0.0), DVec3::new(11.0, 1.0, 0.0)];
+        assert_eq!(world_box(&world, &meshes, wall), Some(world_corners));
+        let turned = Transform {
+            rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            scale: Vec3::new(20.0, 2.0, 1.0),
+            ..at(0.0)
+        };
+        let turned = world.spawn((turned, Sprite::default()));
+        let [low, high] = world_box(&world, &meshes, turned).expect("a box");
+        assert!(low.distance(DVec3::new(-1.0, -10.0, 0.0)) < 1e-5, "{low}");
+        assert!(high.distance(DVec3::new(1.0, 10.0, 0.0)) < 1e-5, "{high}");
         // A child's mesh, its cube round its sphere, two units along the root's X.
         let child = world.spawn((at(2.0), mesh(&mut meshes, Vec3::ZERO, 1.0)));
         let root = world.spawn(at(100.0));

@@ -457,10 +457,10 @@ pub struct Physics3D {
     unmoved: Vec<Entity>,
     /// What a character hit as it moved; a workspace like `pipeline`.
     hits: Vec<CharacterCollision>,
-    /// Where each character touched what it hit in the last step, with the normals there, in the
-    /// world's space: for the Contacts overlay, as rapier's contacts leave characters out. A
-    /// workspace too.
-    touched: Vec<(Entity, Vector, Vector)>,
+    /// Each character, what it hit as it moved in the last step, where and the normal there, in
+    /// the world's space: for the Contacts overlay and the tool API's `entity`, as rapier's
+    /// contacts leave characters out. A workspace too.
+    touched: Vec<(Entity, Option<Entity>, Vector, Vector)>,
     /// The kinematic bodies that go by their velocities, with those velocities, which the
     /// characters' moves hold them from meanwhile; a workspace too.
     moving: Vec<character::Moving>,
@@ -977,6 +977,12 @@ impl Physics3D {
         self.contacts.events()
     }
 
+    /// Each character and what it hit as it moved in the last step, a pair a hit.
+    #[cfg(feature = "dev")]
+    pub(crate) fn character_hits(&self) -> impl Iterator<Item = (Entity, Entity)> + '_ {
+        (self.touched.iter()).filter_map(|&(character, hit, ..)| Some((character, hit?)))
+    }
+
     fn body_of(&self, entity: Entity) -> Option<RigidBodyHandle> {
         let body = self.links.get(entity).map(|linked| linked.body);
         body.or_else(|| self.characters.get(entity).map(|character| character.body))
@@ -1039,7 +1045,7 @@ pub(super) fn contact_points(world: &World, each: &mut impl FnMut(Option<Entity>
             }
         }
     }
-    for &(entity, at, normal) in &physics.touched {
+    for &(entity, _, at, normal) in &physics.touched {
         let [at, normal] = [at, normal].map(|v| DVec3::new(v.x, v.y, v.z));
         each(Some(entity), at, normal);
     }

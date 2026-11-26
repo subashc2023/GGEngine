@@ -128,7 +128,12 @@
 //!   opened. A run `--embedded` renders at the memory's size and runs a frame once the client has
 //!   taken the last; another publishes at its own size, while it fits.
 //! - `input`: hands the game's layers the events in order, as its window would, as the frame
-//!   starts.
+//!   starts, after each [`InputEvent::Wait`]'s ticks. It fails with:
+//!   - `api.bad_params`: a key `code` doesn't name, a wait of 0, or waits and `hold` past 10,000
+//!     ticks together; `api.stopped` for either while stopped;
+//!   - as `project` does for an [`InputEvent::Aim`]'s entity, and `api.unseen` where the view
+//!     doesn't show its point as it's handed. Events after it aren't handed, and a `hold` lets go
+//!     of what those before it left down.
 //! - `press`: clicks a UI's button or widget at the middle of what shows of it, through `input`, as
 //!   a player would. A button presses, a toggle flips, a drop-down opens or closes its options, a
 //!   text field takes the focus and the caret, and a slider takes its middle value. Then it runs
@@ -158,8 +163,8 @@
 //! - `cast`, `project`: answer at once, from the viewpoint and view the last frame drew, as the
 //!   game's `Context::ray` reads them; `cast` sees the colliders as the last tick left them. Both
 //!   fail with `api.no_view` before a frame has drawn the view, and in replays. `cast` sees 3D
-//!   colliders alone; `pick` serves 2D games. `project` fails with `api.bad_params` for neither or
-//!   both of `entity` and `point`, or a point that isn't finite.
+//!   colliders, and 2D ones in the plane z = 0. `project` fails with `api.bad_params` for neither
+//!   or both of `entity` and `point`, or a point that isn't finite.
 //! - `images`: the images [`Shown::Image`] names that the next frame that renders makes, by debug
 //!   name, with what each holds and its size, in the frame's order. They follow the look: with the
 //!   light drawn or an image shown, every pass's but antialiasing's, which a frame showing an image
@@ -168,8 +173,8 @@
 //!   `reflect.unknown_type` for a field's type that no component has, and as `get` does for a path
 //!   that a listed entity's component lacks.
 //! - `entity` answers an object of `id`, `name`, `parent`, `children`, `components`
-//!   (`{"Transform":{...},...}`) and `space` (`{"matrix":[...],"rotation":[...]}`), and `bounds`
-//!   and `instance` where they apply:
+//!   (`{"Transform":{...},...}`), `space` (`{"matrix":[...],"rotation":[...]}`) and `touching`,
+//!   and `bounds`, `box` and `instance` where they apply:
 //!   - `name`, as [`Listed`] has it; `components`, in their types' registration order;
 //!   - `space`: where its `Transform`'s space sits in the world as the last tick left it, as its
 //!     parent's pose, 16 floats column by column, and a rotation, `[x, y, z, w]`, without the
@@ -177,6 +182,11 @@
 //!   - `bounds`: a [`Sphere`], `{"center":[x,y,z],"radius":r}`, round what the entity and those
 //!     under it draw, as the last tick left them: meshes, sprites and circles, not text, particles,
 //!     lines or a mesh of unknown extent. Absent where nothing draws;
+//!   - `box`: a [`Box3`], `{"min":[x,y,z],"max":[x,y,z]}`, the box along the world's axes round
+//!     the same, closer than `bounds` round a long wall or a scaled sprite;
+//!   - `touching` ([`Touching`]): the entities its colliders touched at the last step of physics,
+//!     as the game's `World::contacts` has them, and those a character hit as it moved (one
+//!     standing still hits nothing, not even its floor);
 //!   - `instance` ([`Instanced`]), for an instance's entity: what differs from its prefab, as a
 //!     scene saves it. Reading it parses the prefab's text, changing nothing.
 //! - `types`: the component types and the descriptions of the types they hold, by which values are
@@ -852,19 +862,20 @@ pub struct View {
     pub memory: Option<String>,
 }
 
-/// What `input` takes: the events to hand the game's layers, in order, and how long to hold what
-/// they press.
+/// What `input` takes: the events to hand the game's layers, in order, with the ticks to
+/// [wait](InputEvent::Wait) between them, and how long to hold what they press.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
     pub events: Vec<InputEvent>,
-    /// The ticks to hold the keys and buttons the events press and leave down, 1 to 10,000.
+    /// The ticks to hold the keys and buttons the events press and leave down, after the last
+    /// event: 1 to 10,000, with the waits.
     ///
     /// The engine releases them as the frame after the last of those ticks starts, then answers
     /// with the [`Status`], as `step` does; until then, frames run no tick past it. The next tick
     /// to run sees the release. Events that leave nothing down, such as a click's, just run the
-    /// ticks. Paused, the hold steps its ticks. Without it, `input` answers `{}` at once, before a
-    /// tick sees the events, and keys stay down until an event releases them.
+    /// ticks. Paused, the hold steps its ticks. Without it or a wait, `input` answers `{}` at once,
+    /// before a tick sees the events. Without it, keys stay down until an event releases them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<u64>,
 }
@@ -901,6 +912,14 @@ pub enum InputEvent {
     Scroll(Scroll),
     /// The view gained or lost the keys.
     Focused(bool),
+    /// Ticks to run before the events after it are handed, at least 1: a key held across a jump,
+    /// or a click once a unit has walked. Paused, they're stepped; frames run no tick past them.
+    /// `input` then answers with the [`Status`] once the last event is handed, or its hold ends.
+    Wait(u64),
+    /// The cursor moved to where the view shows an entity, by ID or name: the pixel `project`
+    /// answers as `at`. It's read as the event is handed, so a moving target is aimed at where it
+    /// is then.
+    Aim(String),
 }
 
 /// A mouse button: `"left"`, `"right"`, `"middle"`, the side buttons `"back"` and `"forward"`, or
@@ -1343,16 +1362,22 @@ pub struct Pick {
 }
 
 /// What `pick` answers: the entity the view shows at the pixel, by ID, and its name as [`Listed`]
-/// has it when answered.
+/// has it when answered; then its parent's, as a unit's for its shape.
 ///
 /// For a model's node it's the model's root, which tools change in its place, unless
-/// [`Pick::within`] names that root or one of its nodes. Both are `None` outside the view or where
-/// no entity draws. The name alone is `None` for an entity gone by the answer, whose ID is kept,
-/// and for a connection without `read` of `Name`, which `view` alone isn't.
+/// [`Pick::within`] names that root or one of its nodes. All are `None` outside the view or where
+/// no entity draws. A name alone is `None` for an entity gone by the answer, whose ID is kept,
+/// and for a connection without `read` of `Name`, which `view` alone isn't. The parent's are `None`
+/// for a root.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Picked {
     pub id: Option<String>,
     pub name: Option<String>,
+    /// Absent from an engine older than parents in picks.
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub parent_name: Option<String>,
 }
 
 /// What `cast` takes: the view's pixel `at` to cast through, as [`Pick::at`], else the view's
@@ -1369,11 +1394,15 @@ pub struct Cast {
     pub exclude: Option<String>,
 }
 
-/// What `cast` answers: the entity whose 3D collider the ray hits first, as [`Picked`] names it.
+/// What `cast` answers: the entity whose collider the ray hits first, as [`Picked`] names it.
 ///
 /// Both are `None` where it hits nothing, and the rest are absent. `point` is where it hits in the
 /// world, `normal` the unit vector out of the surface there, and `distance` how far from the view's
 /// camera, in units. A ray starting inside a collider hits it at 0, with a zero normal.
+///
+/// A 2D collider is hit where the ray meets the plane z = 0, which 2D physics lies in, if it holds
+/// that point: its normal is along Z, toward the camera. Of several holding it, the one of the
+/// lowest ID.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Hit {
     pub id: Option<String>,
@@ -1514,6 +1543,24 @@ pub struct Entity {
 pub struct Sphere {
     pub center: [f64; 3],
     pub radius: f32,
+}
+
+/// A box along the world's axes, by its least and most corners, as `entity` answers `box`, in world
+/// units.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Box3 {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+/// An entity another touched, as `entity` answers `touching`: by ID, its name, and whether either's
+/// collider is a sensor, so they overlap rather than push.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Touching {
+    pub id: String,
+    pub name: Option<String>,
+    pub sensor: bool,
 }
 
 /// What `entity` answers under `instance`, for an instance's entity, its root or one its prefab
@@ -2666,7 +2713,8 @@ mod tests {
     fn input_events_read_as_their_docs_say() {
         let json = r#"{"events": [{"key": {"key": "KeyW", "pressed": true}}, "cursor_left",
             {"button": {"button": {"other": 9}, "pressed": false}}, {"scroll": {"lines": [0, 1]}},
-            {"cursor": [1.5, 2]}, {"text": "a"}, {"focused": false}, {"motion": [3, -4.5]}]}"#;
+            {"cursor": [1.5, 2]}, {"text": "a"}, {"focused": false}, {"motion": [3, -4.5]},
+            {"wait": 12}, {"aim": "Enemy 1"}]}"#;
         let input: Input = serde_json::from_str(json).unwrap();
         let expected = [
             InputEvent::Key {
@@ -2684,10 +2732,17 @@ mod tests {
             InputEvent::Text("a".to_owned()),
             InputEvent::Focused(false),
             InputEvent::Motion([3.0, -4.5]),
+            InputEvent::Wait(12),
+            InputEvent::Aim("Enemy 1".to_owned()),
         ];
         assert_eq!(input.events, expected);
-        let refused = r#"{"events": [{"key": {"key": "KeyW", "pressed": true, "held": true}}]}"#;
-        assert!(serde_json::from_str::<Input>(refused).is_err());
+        for refused in [
+            r#"{"events": [{"key": {"key": "KeyW", "pressed": true, "held": true}}]}"#,
+            r#"{"events": [{"wait": -1}]}"#,
+            r#"{"events": [{"aim": 3}]}"#,
+        ] {
+            assert!(serde_json::from_str::<Input>(refused).is_err(), "{refused}");
+        }
     }
 
     /// A part left out is kept, `null` gives it back to the game, a value sets it; a projection is
@@ -2963,11 +3018,19 @@ mod tests {
         for refused in ["{}", r#"{"at": [3]}"#, r#"{"at": [3, 4], "frame": 1}"#] {
             assert!(serde_json::from_str::<Pick>(refused).is_err(), "{refused}");
         }
+        // An older engine's, without a parent.
         let picked = r#"{"id": "2b7e151628aed2a6", "name": null}"#;
-        let expected = Picked {
+        let mut expected = Picked {
             id: Some("2b7e151628aed2a6".to_owned()),
             name: None,
+            parent: None,
+            parent_name: None,
         };
+        assert_eq!(serde_json::from_str::<Picked>(picked).unwrap(), expected);
+        let picked = r#"{"id": "2b7e151628aed2a6", "name": null, "parent": "00000000000000a0",
+            "parent_name": "Unit 1"}"#;
+        expected.parent = Some("00000000000000a0".to_owned());
+        expected.parent_name = Some("Unit 1".to_owned());
         assert_eq!(serde_json::from_str::<Picked>(picked).unwrap(), expected);
         let capture: Capture = serde_json::from_str("{}").unwrap();
         assert_eq!(

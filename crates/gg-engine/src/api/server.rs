@@ -29,8 +29,10 @@ mod world;
 pub use view::{api_viewpoint, engine_viewpoint};
 pub(crate) use world::instanced;
 
+use std::collections::VecDeque;
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
+use std::mem;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,31 +64,73 @@ use crate::{Context, patch};
 use connection::{Reply, accept};
 use edits::{Offer, answer_done, assets_named, operations, save_prefab, words};
 use files::{Taken, Writing, write_pngs, write_snapshots};
-use parse::{Call, Hold, bad_params};
+use parse::{Call, Hold, Projecting, bad_params};
 use view::{Capturing, Filming, Picking, input_event};
-use world::{Listing, assets, entity, field, list};
+use world::{Listing, Subject, assets, entity, field, list};
 
-/// A held `input`, or a `press` given ticks, waiting for the simulation to reach `until`, its last
-/// tick's number plus one, to hand its `releases`, then answer: the status, or the press's answer
-/// with the ticks run.
+/// An `input` with waits or a hold, or a `press` given ticks, waiting for the simulation to reach
+/// `until`, the number of the tick after its next run's wait. Then it hands that run's events, and
+/// once none is left, lets go of what `handed` left down if `lets_go`, and answers: the status, or
+/// the press's answer with the ticks run.
 struct Holding {
     until: u64,
-    releases: Vec<InputEvent>,
+    /// Each run still to hand, with the ticks it waits; a hold's, of no events.
+    runs: VecDeque<(u64, Vec<InputEvent>)>,
+    handed: Vec<InputEvent>,
+    lets_go: bool,
     pressed: Option<gg_api::Pressed>,
     reply: Reply,
 }
 
-/// Hands `events` to egui's next pass and the layers, as their window would: the layers get what
-/// egui doesn't keep ([`Handed::hand`](crate::api::Handed::hand)).
-fn hand(cx: &mut Context, stack: &mut Stack, events: &[InputEvent]) {
+impl Holding {
+    /// Lets go of what `handed` left down, if it lets go.
+    fn let_go(&self, cx: &mut Context, stack: &mut Stack) {
+        if self.lets_go {
+            let releases = parse::releases(&self.handed);
+            hand(cx, stack, &releases, &mut Vec::new()).expect("a release aims at nothing");
+        }
+    }
+}
+
+/// Hands `events` to egui's next pass and the layers, as their window would, each added to
+/// `handed`: the layers get what egui doesn't keep ([`Handed::hand`](crate::api::Handed::hand)). An
+/// aim is a move of the cursor to where the view shows its entity, as `project` answers it.
+///
+/// Fails at an aim as `project` does, or with `api.unseen` where the view doesn't show its entity's
+/// point, handing none after it.
+fn hand(
+    cx: &mut Context,
+    stack: &mut Stack,
+    events: &[InputEvent],
+    handed: &mut Vec<InputEvent>,
+) -> Result<(), Failure> {
     let origin = cx.view().map_or([0, 0], |view| view.origin);
     for given in events {
+        let aimed;
+        let given = match given {
+            InputEvent::Aim(name) => {
+                let projected = view::project(cx, Projecting::Entity(Subject::of(name)))?;
+                let at = projected.at.ok_or_else(|| {
+                    let message = format!(
+                        "the view doesn't show {name}: its point, at {:?}, is outside the view or \
+                         behind the camera, as `project` says",
+                        projected.point
+                    );
+                    Failure::new("api.unseen", message)
+                })?;
+                aimed = InputEvent::Cursor(at);
+                &aimed
+            }
+            given => given,
+        };
+        handed.push(given.clone());
         if cx.dev.handed.hand(given, origin) {
             continue;
         }
         let event = input_event(given, origin);
         let _ = stack.event(cx, &event.expect("checked as it was read"));
     }
+    Ok(())
 }
 
 /// The most of the clients' picks a frame asks: half what a frame reads back, leaving the game's
@@ -465,23 +509,27 @@ impl Api {
         for (reply, _) in ran.collect::<Vec<_>>() {
             reply.result(&self.status(cx, stepper));
         }
-        let held = self
+        let due = self
             .holds
             .extract_if(.., |holding| holding.until <= stepper.ticks);
-        for Holding {
-            releases,
-            pressed,
-            reply,
-            ..
-        } in held.collect::<Vec<_>>()
-        {
-            hand(cx, stack, &releases);
-            match pressed {
-                Some(pressed) => reply.result(&gg_api::Pressed {
+        for mut holding in due.collect::<Vec<_>>() {
+            let (_, run) = holding.runs.pop_front().expect("a holding waits for a run");
+            if let Err(failure) = hand(cx, stack, &run, &mut holding.handed) {
+                holding.let_go(cx, stack);
+                holding.reply.send(Err(failure));
+                continue;
+            }
+            if let Some(&(ticks, _)) = holding.runs.front() {
+                self.hold_for(stepper, holding, ticks);
+                continue;
+            }
+            holding.let_go(cx, stack);
+            match holding.pressed {
+                Some(pressed) => holding.reply.result(&gg_api::Pressed {
                     ticks: stepper.ticks,
                     ..pressed
                 }),
-                None => reply.result(&self.status(cx, stepper)),
+                None => holding.reply.result(&self.status(cx, stepper)),
             }
         }
         let answered = cx.assets_answered();
@@ -635,18 +683,25 @@ impl Api {
                 let until = stepper.ticks + stepper.steps();
                 self.steps.push((reply, until));
             }
-            Call::Input(events, Some(Hold { ticks, releases })) => {
-                hand(cx, stack, &events);
-                if stepper.paused() {
-                    stepper.step_by(ticks);
-                }
-                let until = stepper.ticks + ticks;
-                self.holds.push(Holding {
-                    until,
-                    releases,
+            Call::Input(events, Some(Hold { runs, lets_go })) => {
+                let mut holding = Holding {
+                    until: 0,
+                    runs: runs.into(),
+                    handed: Vec::new(),
+                    lets_go,
                     pressed: None,
                     reply,
-                });
+                };
+                match hand(cx, stack, &events, &mut holding.handed) {
+                    Ok(()) => {
+                        let ticks = holding.runs.front().expect("a hold has runs").0;
+                        self.hold_for(stepper, holding, ticks);
+                    }
+                    Err(failure) => {
+                        holding.let_go(cx, stack);
+                        holding.reply.send(Err(failure));
+                    }
+                }
             }
             Call::Press { node, ui, ticks } => match cx.ui_aim(ui.as_deref(), &node) {
                 Ok((ui, at)) => {
@@ -661,7 +716,9 @@ impl Api {
                             pressed: false,
                         },
                     ];
-                    let events = cx.ui_heard(|cx| hand(cx, stack, &click));
+                    let events = cx.ui_heard(|cx| {
+                        hand(cx, stack, &click, &mut Vec::new()).expect("a click aims at nothing");
+                    });
                     let pressed = gg_api::Pressed {
                         ui,
                         node,
@@ -671,15 +728,15 @@ impl Api {
                     };
                     match ticks {
                         Some(ticks) => {
-                            if stepper.paused() {
-                                stepper.step_by(ticks);
-                            }
-                            self.holds.push(Holding {
-                                until: stepper.ticks + ticks,
-                                releases: Vec::new(),
+                            let holding = Holding {
+                                until: 0,
+                                runs: VecDeque::from([(ticks, Vec::new())]),
+                                handed: Vec::new(),
+                                lets_go: false,
                                 pressed: Some(pressed),
                                 reply,
-                            });
+                            };
+                            self.hold_for(stepper, holding, ticks);
                         }
                         None => reply.result(&pressed),
                     }
@@ -693,6 +750,15 @@ impl Api {
             _ => unreachable!("`answer` passes the run's controls alone"),
         }
         quit
+    }
+
+    /// Has `holding` wait `ticks` for its next run, stepping them while paused.
+    fn hold_for(&mut self, stepper: &mut Stepper, mut holding: Holding, ticks: u64) {
+        if stepper.paused() {
+            stepper.step_by(ticks);
+        }
+        holding.until = stepper.ticks + ticks;
+        self.holds.push(holding);
     }
 
     /// A pick answers names if `names`.
@@ -778,10 +844,10 @@ impl Api {
                     reply.send(Err(Failure::new("api.view", message)));
                 }
             },
-            Call::Input(events, None) => {
-                hand(cx, stack, &events);
-                reply.send(Ok("{}".to_owned()));
-            }
+            Call::Input(events, None) => match hand(cx, stack, &events, &mut Vec::new()) {
+                Ok(()) => reply.send(Ok("{}".to_owned())),
+                Err(failure) => reply.send(Err(failure)),
+            },
             Call::Overlays(asked) => {
                 cx.dev.overlays.apply(&asked);
                 reply.result(&cx.dev.overlays.report());
@@ -1068,12 +1134,11 @@ impl Api {
         for (waiting, _) in self.steps.drain(..) {
             waiting.send(Err(Failure::new("api.stopped", message)));
         }
-        for Holding {
-            releases, reply, ..
-        } in self.holds.drain(..)
-        {
-            hand(cx, stack, &releases);
-            reply.send(Err(Failure::new("api.stopped", message)));
+        for holding in mem::take(&mut self.holds) {
+            holding.let_go(cx, stack);
+            holding
+                .reply
+                .send(Err(Failure::new("api.stopped", message)));
         }
         stepper.stop_before(None);
     }

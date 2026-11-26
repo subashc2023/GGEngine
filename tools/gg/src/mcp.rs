@@ -500,8 +500,9 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "pick",
         description: "The entity the view shows at a pixel, as it's shown, the look included: its \
-                      ID and name, both null outside the view or where none draws; a model's node \
-                      gives the model's root, which tools change in its place. Answers about four \
+                      ID and name, then its `parent` and `parent_name`, as a unit's for its \
+                      shape; all null outside the view or where none draws. A model's node gives \
+                      the model's root, which tools change in its place. Answers about four \
                       frames on, and fails while the game runs no frames, as while its window is \
                       minimized.",
         properties: || {
@@ -518,12 +519,13 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "cast",
         description: "What a ray from the view's camera through a pixel, or the view's middle where \
-                      a crosshair is, hits first of the 3D colliders, sensors skipped: the \
-                      entity's ID and name, the `point` hit, the surface's `normal` there and the \
-                      `distance` from the camera; ID and name null for none. Reads the camera the \
-                      last frame drew and the colliders as the last tick left them, as a game's \
-                      shot does: what a shot would hit, where `pick` says what shows, a HUD \
-                      included. Fails with api.no_view before a frame has drawn the view.",
+                      a crosshair is, hits first of the colliders, sensors skipped, a 2D one \
+                      where it holds the point the ray crosses z = 0: the entity's ID and name, \
+                      the `point` hit, the surface's `normal` there and the `distance` from the \
+                      camera; ID and name null for none. Reads the camera the last frame drew \
+                      and the colliders as the last tick left them, as a game's shot does: what \
+                      a shot would hit, where `pick` says what shows, a HUD included. Fails with \
+                      api.no_view before a frame has drawn the view.",
         properties: || {
             json!({
                 "at": numbers(2, "The pixel, [x, y] from the view's top left, as `pick` takes \
@@ -601,9 +603,10 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "input",
         description: "Hands the game's layers input events, in order, as its window would, as a \
-                      frame starts. Release each key and button you press: the game holds it down \
-                      until then, or give `hold`. Without `hold`, it answers `{}` before a tick \
-                      sees the events; paused, none does until a `step`.",
+                      frame starts, a `wait` running ticks between them. Release each key and \
+                      button you press: the game holds it down until then, or give `hold`. \
+                      Without `hold` or a `wait`, it answers `{}` before a tick sees the events; \
+                      paused, none does until a `step`.",
         properties: || {
             json!({
                 "events": input(),
@@ -612,11 +615,11 @@ const TOOLS: &[Tool] = &[
                     "minimum": 1,
                     "maximum": 10000,
                     "description": "Ticks (64 a second) to hold the keys and buttons the events \
-                                    press and leave down. They're released after exactly that \
-                                    many, and the answer is the status then, as `step`'s; the \
-                                    next tick sees the release. With none left down, such as a \
-                                    click's, it just runs the ticks. Paused, the hold steps its \
-                                    ticks; refused while stopped.",
+                                    press and leave down, after the last event. They're released \
+                                    after exactly that many, and the answer is the status then, \
+                                    as `step`'s; the next tick sees the release. With none left \
+                                    down, such as a click's, it just runs the ticks. Paused, the \
+                                    hold steps its ticks; refused while stopped.",
                 },
             })
         },
@@ -679,8 +682,13 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "entity",
-        description: "An entity: its ID, name, parent, children and components' values. For an \
-                      instance's entity (its root, or one its prefab gives), `instance` too: the \
+        description: "An entity: its ID, name, parent, children and components' values; \
+                      `bounds`, the sphere round what it and those under it draw, and `box`, the \
+                      box along the world's axes round the same, `{\"min\", \"max\"}`; and \
+                      `touching`, the entities its colliders touched at the last step of physics \
+                      and those a character hit as it moved (none standing still), each \
+                      `{\"id\", \"name\", \"sensor\"}`. For an instance's entity (its root, or \
+                      one its prefab gives), `instance` too: the \
                       outermost instance's `root` and `prefab`; `link`, its own prefab, if it's an \
                       instance's root; `overrides`, each component differing from its prefab with \
                       the fields that differ (`\"\"` for the whole), as `revert` takes them; and \
@@ -1071,6 +1079,23 @@ fn input() -> Value {
             variant("focused", json!({
                 "type": "boolean",
                 "description": "The view gained or lost the keys",
+            })),
+            variant("wait", json!({
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000,
+                "description": "Ticks (64 a second) to run before the events after it, stepped \
+                                while paused: a key held across a jump, a click once a unit has \
+                                walked. The answer is then the status once the last event is \
+                                handed or the hold ends, as `step`'s. The waits and `hold` run \
+                                10,000 ticks at most together",
+            })),
+            variant("aim", json!({
+                "type": "string",
+                "description": "The ID or name of an entity to move the cursor to, at the pixel \
+                                `project` answers for it, read as the event is handed so a moving \
+                                target is aimed at where it is then. Fails with api.unseen, \
+                                handing nothing after it, where the view doesn't show it",
             })),
         ]},
     })
@@ -1608,6 +1633,8 @@ mod tests {
             },
             InputEvent::Scroll(Scroll::Lines([0.0, 1.0])),
             InputEvent::Focused(true),
+            InputEvent::Wait(3),
+            InputEvent::Aim("Player".to_owned()),
         ];
         let mut kinds: Vec<String> = (each.iter())
             .map(|event| {
@@ -1620,7 +1647,9 @@ mod tests {
                     | InputEvent::Motion(_)
                     | InputEvent::Button { .. }
                     | InputEvent::Scroll(_)
-                    | InputEvent::Focused(_) => {}
+                    | InputEvent::Focused(_)
+                    | InputEvent::Wait(_)
+                    | InputEvent::Aim(_) => {}
                 }
                 match serde_json::to_value(event).expect("an event") {
                     Value::String(kind) => kind,

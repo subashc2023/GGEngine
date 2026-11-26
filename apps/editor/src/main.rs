@@ -160,6 +160,8 @@ mod tests {
             entity: gg_api::Picked {
                 id: Some("2b7e151628aed2a6".to_owned()),
                 name: Some("Crate".to_owned()),
+                parent: None,
+                parent_name: None,
             },
             quantized: String::new(),
         }

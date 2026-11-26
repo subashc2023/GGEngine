@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use gg_api::{Button, Failure, Hit, ImageList, InputEvent, Looked, Picked, Projected};
 use gg_core::Result;
-use gg_core::math::{DVec3, Quat, Vec4};
+use gg_core::math::{DVec3, Quat, Vec3, Vec4};
 use gg_renderer::{MIN_RENDER_SCALE, Projection, Viewpoint};
 use tracing::warn;
 
@@ -22,7 +22,7 @@ use crate::api::Shown;
 use crate::grid::Plane;
 use crate::layer::Outlining;
 use crate::render_thread::{Extracted, Publish, Shot};
-use crate::{Context, EntityId, Event, Key, MouseButton, Scroll, bounds};
+use crate::{Context, Entity, EntityId, Event, Key, MouseButton, Scroll, bounds};
 
 /// The longest a `capture` waits for a frame showing every texture and mesh added before it, none
 /// still decoding or streaming. Then it takes the next frame anyway, saying so.
@@ -286,11 +286,18 @@ impl Api {
                 root
             };
             let id = entity.map_or(shown, |entity| world.id(entity));
-            let name = entity.filter(|_| named);
-            let name = name.and_then(|entity| world.name(entity));
+            let name = |entity: Option<Entity>| {
+                let name = entity
+                    .filter(|_| named)
+                    .and_then(|entity| world.name(entity));
+                name.map(str::to_owned)
+            };
+            let parent = entity.and_then(|entity| world.parent(entity).ok().flatten());
             reply.result(&Picked {
                 id: id.map(|id| id.to_string()),
-                name: name.map(str::to_owned),
+                name: name(entity),
+                parent: (parent.and_then(|parent| world.id(parent))).map(|id| id.to_string()),
+                parent_name: name(parent),
             });
         }
         let (bare, shown) = (self.bare, &self.shown);
@@ -484,10 +491,10 @@ fn engine_projection(given: gg_api::Projection) -> Projection {
     }
 }
 
-/// `shot` cropped to `rect` (`[x, y, width, height]` from its top left), whole without one;
-/// `None` if they don't overlap.
 /// What a ray from the view's camera through the view's pixel `at`, else its middle, hits first
-/// of the 3D colliders, past `exclude`'s, as `cast` answers it; with its entity's name if `named`.
+/// of the colliders, past `exclude`'s, as `cast` answers it; with its entity's name if `named`. A
+/// 2D collider is hit where the ray meets the plane z = 0
+/// ([`World::collider_at_2d`](crate::World::collider_at_2d)).
 ///
 /// Fails with `api.no_view` before a frame has drawn the view, and in replays; and as `exclude`
 /// resolves. An `exclude` of no living entity excludes none.
@@ -517,12 +524,23 @@ pub(super) fn cast(
         return Ok(hit);
     };
     ray.exclude = exclude.and_then(|id| world.entity(id));
-    if let Some(found) = world.cast_ray(ray) {
-        hit.id = world.id(found.entity).map(|id| id.to_string());
-        hit.name = (world.name(found.entity).filter(|_| named)).map(str::to_owned);
-        hit.point = Some(found.point.to_array());
-        hit.normal = Some(found.normal.to_array());
-        hit.distance = Some(found.distance);
+    let solid = (world.cast_ray(ray)).map(|hit| (hit.entity, hit.point, hit.normal, hit.distance));
+    // A 2D collider, where the ray meets the plane 2D physics lies in, facing the camera.
+    let flat = ray.meets_plane(DVec3::ZERO, Vec3::Z).and_then(|point| {
+        let entity = world.collider_at_2d(point.truncate(), ray.exclude)?;
+        let normal = Vec3::new(0.0, 0.0, -ray.toward.z.signum());
+        Some((entity, point, normal, ray.from.distance(point) as f32))
+    });
+    let first = match (solid, flat) {
+        (Some(solid), Some(flat)) if flat.3 < solid.3 => Some(flat),
+        (solid, flat) => solid.or(flat),
+    };
+    if let Some((entity, point, normal, distance)) = first {
+        hit.id = world.id(entity).map(|id| id.to_string());
+        hit.name = (world.name(entity).filter(|_| named)).map(str::to_owned);
+        hit.point = Some(point.to_array());
+        hit.normal = Some(normal.to_array());
+        hit.distance = Some(distance);
     }
     Ok(hit)
 }
@@ -569,6 +587,8 @@ fn undrawn() -> Failure {
     Failure::new("api.no_view", message)
 }
 
+/// `shot` cropped to `rect` (`[x, y, width, height]` from its top left), whole without one;
+/// `None` if they don't overlap.
 fn crop(shot: &Arc<Shot>, rect: Option<[u32; 4]>) -> Option<Arc<Shot>> {
     let Some([x, y, width, height]) = rect else {
         return Some(shot.clone());
@@ -694,7 +714,8 @@ pub(super) fn shown(method: &str, show: &gg_api::Shown) -> Result<(), Failure> {
 }
 
 /// `given` as the layers get it: a cursor position over the view, at `origin` in the main window,
-/// becomes the window's. `None` for an unknown key name.
+/// becomes the window's. `None` for an unknown key name, and a wait or an aim, which the server
+/// makes into ticks and a cursor first.
 pub(super) fn input_event(given: &InputEvent, origin: [u32; 2]) -> Option<Event<'_>> {
     let event = match *given {
         InputEvent::Key {
@@ -730,6 +751,7 @@ pub(super) fn input_event(given: &InputEvent, origin: [u32; 2]) -> Option<Event<
             Event::Scroll(Scroll::Pixels { x, y })
         }
         InputEvent::Focused(focused) => Event::Focused(focused),
+        InputEvent::Wait(_) | InputEvent::Aim(_) => return None,
     };
     Some(event)
 }

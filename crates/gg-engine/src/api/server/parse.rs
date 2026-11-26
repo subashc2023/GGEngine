@@ -95,7 +95,8 @@ pub(super) enum Call {
     },
     /// The shared memory to publish the view to; `None` stops.
     View(Option<String>),
-    /// Events to hand the layers, each key event naming a real key, and what to release after.
+    /// Events to hand the layers at once, each key event naming a real key, and what to hand after
+    /// waits or let go of after a hold, if either follows.
     Input(Vec<InputEvent>, Option<Hold>),
     /// A UI's node to click, by name, the UI's name if given, and the ticks to run after, from 1
     /// to [`MOST_STEPS`].
@@ -166,18 +167,19 @@ pub(super) enum Projecting {
     Point([f64; 3]),
 }
 
-/// What a held `input` lets go of, and when.
+/// What an `input` hands after its first events, and when, as the ticks run.
 #[derive(Debug, PartialEq)]
 pub(super) struct Hold {
-    /// The ticks to hold for, from 1 to [`MOST_STEPS`].
-    pub(super) ticks: u64,
-    /// A release of each key and button the events press and leave down, in the order pressed:
-    /// none for a click, whose hold only runs its ticks.
-    pub(super) releases: Vec<InputEvent>,
+    /// Each wait's ticks with the events after it, in order; then a `hold`'s ticks, with none.
+    /// The ticks together are from 1 to [`MOST_STEPS`].
+    pub(super) runs: Vec<(u64, Vec<InputEvent>)>,
+    /// Whether to let go of what the events leave down once the runs are done: a `hold`'s.
+    pub(super) lets_go: bool,
 }
 
-/// A release of each key and button `events` press and leave down, in the order pressed.
-fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
+/// A release of each key and button `events` press and leave down, in the order pressed: none for
+/// a click's.
+pub(super) fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
     let mut down: Vec<InputEvent> = Vec::new();
     for given in events {
         let release = match given {
@@ -210,7 +212,8 @@ fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
 ///
 /// - `api.unknown_method`.
 /// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); an
-///   `input` with an unknown key, or a `hold` of 0 or past [`MOST_STEPS`] ticks; a `press` of 0
+///   `input` with an unknown key, a `hold` or wait of 0, or the two past [`MOST_STEPS`] ticks
+///   together; a `press` of 0
 ///   or past [`MOST_STEPS`] ticks; a `project` of neither or both of an entity and a finite
 ///   point; an `entities` field without a type; a `scene` path
 ///   missing, unwanted or not `.ron`, or `discard` given to `save`; a `save_prefab` path not
@@ -463,18 +466,33 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
                     format!("names keys by their W3C `code`, as `KeyW`, and `{key}` is none");
                 return Err(bad_params(method, what));
             }
-            let hold = match hold {
-                Some(ticks) if !(1..=MOST_STEPS).contains(&ticks) => {
-                    let what = format!("holds from 1 to {MOST_STEPS} ticks, not {ticks}");
-                    return Err(bad_params(method, what));
+            if hold == Some(0) {
+                return Err(bad_params(method, "holds at least 1 tick, not 0"));
+            }
+            // The events up to the first wait go at once; each wait's, after its ticks.
+            let mut first = Vec::new();
+            let mut runs: Vec<(u64, Vec<InputEvent>)> = Vec::new();
+            for given in events {
+                match (given, runs.last_mut()) {
+                    (InputEvent::Wait(0), _) => {
+                        return Err(bad_params(method, "waits at least 1 tick, not 0"));
+                    }
+                    (InputEvent::Wait(ticks), _) => runs.push((ticks, Vec::new())),
+                    (given, Some((_, run))) => run.push(given),
+                    (given, None) => first.push(given),
                 }
-                Some(ticks) => Some(Hold {
-                    ticks,
-                    releases: releases(&events),
-                }),
-                None => None,
-            };
-            Call::Input(events, hold)
+            }
+            runs.extend(hold.map(|ticks| (ticks, Vec::new())));
+            let ticks = (runs.iter()).try_fold(0, |sum: u64, &(ticks, _)| sum.checked_add(ticks));
+            if ticks.is_none_or(|ticks| ticks > MOST_STEPS) {
+                let what = format!("waits and holds {MOST_STEPS} ticks at most together");
+                return Err(bad_params(method, what));
+            }
+            let hold = (!runs.is_empty()).then_some(Hold {
+                runs,
+                lets_go: hold.is_some(),
+            });
+            Call::Input(first, hold)
         }
         "press" => {
             let gg_api::Press { node, ui, ticks } = take(method, params)?;

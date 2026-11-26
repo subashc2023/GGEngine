@@ -221,8 +221,10 @@ impl Physics3D {
                 world,
             );
             // rapier's casts give what was hit's point and normal in the world's space.
-            let touched =
-                (self.hits.iter()).map(|hit| (character.entity, hit.hit.witness1, hit.hit.normal1));
+            let touched = (self.hits.iter()).map(|hit| {
+                let other = super::body_entity(&self.rapier, hit.handle);
+                (character.entity, other, hit.hit.witness1, hit.hit.normal1)
+            });
             self.touched.extend(touched);
         }
         self.release_moving();

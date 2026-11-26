@@ -2569,6 +2569,123 @@ fn a_held_input_lets_go_after_exactly_its_ticks() {
     assert!(!cx.input().button_down(MouseButton::Left));
 }
 
+/// An `input`'s waits hand each run of events after exactly its ticks, though each frame owes
+/// three, and an aim moves the cursor to where the view shows its entity as its run is handed. An
+/// aim the view doesn't show fails, handing nothing after it, and a hold lets go of what came
+/// before. An aim needs `view` and `read`, as `project` does.
+#[test]
+fn waits_hand_each_run_after_its_ticks_and_aims_find_their_entity() {
+    use std::f32::consts::FRAC_PI_2;
+
+    use gg_core::math::Quat;
+    use gg_renderer::Projection;
+
+    let (mut api, session) = started("Api Waits");
+    let mut cx = Context::seeded(5);
+    let world = cx.world_mut();
+    let at = |x, z| Transform {
+        translation: DVec3::new(x, 0.0, z),
+        ..Transform::IDENTITY
+    };
+    world.spawn((at(3.0, -10.0), Name("Target".to_owned())));
+    world.spawn((at(0.0, 5.0), Name("Behind".to_owned())));
+    // As the cast's test: three across at 10 deep is at (57.5, 25) of the view.
+    cx.set_viewpoint(Viewpoint {
+        position: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        projection: Projection::Perspective {
+            fov: FRAC_PI_2,
+            near: 0.1,
+        },
+    });
+    let view = Viewport {
+        origin: [10, 20],
+        size: [100, 50],
+    };
+    cx.extract(&mut Extracted::default(), view);
+    let mut stack = Stack::default();
+    let mut stepper = Stepper::default();
+    let granted = session.clone();
+    let client = thread::spawn(move || {
+        let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
+        let events = json!([
+            {"key": {"key": "KeyW", "pressed": true}},
+            {"wait": 3},
+            {"aim": "Target"},
+            {"key": {"key": "KeyD", "pressed": true}},
+            {"wait": 2},
+            {"key": {"key": "KeyW", "pressed": false}},
+        ]);
+        let held = json!({"events": events, "hold": 2});
+        let waited: Status = client.call_as("input", held).expect("waited");
+        let mut refused = |params| client.call("input", params).expect_err("refused").code;
+        let key = |key, pressed| json!({"key": {"key": key, "pressed": pressed}});
+        let refusals = [
+            refused(json!({"events": [{"wait": 0}]})),
+            refused(json!({"events": [{"wait": 9000}], "hold": 1001})),
+            refused(json!({"events": [{"aim": "Nobody"}]})),
+            refused(json!({"events": [{"aim": "Behind"}]})),
+            refused(json!({"events": [
+                key("KeyS", true), {"wait": 1}, {"aim": "Behind"}, key("KeyA", true),
+            ], "hold": 1})),
+        ];
+        let grant = Some(vec!["input".to_owned()]);
+        let connected = Client::connect_granted(&granted, "test", grant, DEADLINE);
+        let mut player = connected.expect("it connects");
+        let aimed = player.call("input", json!({"events": [{"aim": "Target"}]}));
+        let ungranted = aimed.expect_err("ungranted").code;
+        let alone = player.call("input", json!({"events": [key("KeyE", true)]}));
+        (waited, refusals, ungranted, alone.is_ok())
+    });
+    // Each tick's number, whether W and D were down through it, and the cursor.
+    let mut ticks = Vec::new();
+    let start = Instant::now();
+    while !client.is_finished() {
+        assert!(start.elapsed() < DEADLINE, "the client never finished");
+        api.serve(&mut cx, &mut stack, &mut stepper);
+        let tick = |tick: Tick| {
+            let input = cx.input();
+            let down = [Key::KeyW, Key::KeyD].map(|key| input.key_down(key));
+            ticks.push((tick.number, down, input.cursor()));
+            true
+        };
+        stepper.step(Tick::DT * 3, tick, || Duration::ZERO);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let (waited, refusals, ungranted, alone) = client.join().expect("the client didn't panic");
+    let first = ticks
+        .iter()
+        .find(|(_, [w, _], _)| *w)
+        .expect("W went down")
+        .0;
+    let downs = |key: usize| {
+        let down = ticks.iter().filter(|(_, down, _)| down[key]);
+        down.map(|&(number, ..)| number - first).collect::<Vec<_>>()
+    };
+    assert_eq!(downs(0), [0, 1, 2, 3, 4], "W for both waits");
+    assert_eq!(
+        downs(1),
+        [3, 4, 5, 6],
+        "D after the first, for the second and the hold"
+    );
+    assert_eq!(waited.ticks, first + 7);
+    let aimed = ticks.iter().find(|&&(number, ..)| number == first + 3);
+    let [x, y] = aimed.and_then(|&(.., cursor)| cursor).expect("aimed");
+    assert!(
+        (x - 67.5).abs() < 1e-9 && (y - 45.0).abs() < 1e-9,
+        "{x}, {y}"
+    );
+    let before = ticks.iter().find(|&&(number, ..)| number == first + 2);
+    assert_eq!(before.and_then(|&(.., cursor)| cursor), None, "not yet");
+    let unseen = "api.unseen".to_owned();
+    let expected = ["api.bad_params", "api.bad_params", "ecs.no_entity"].map(str::to_owned);
+    assert_eq!(refusals[..3], expected);
+    assert_eq!(refusals[3..], [unseen.clone(), unseen]);
+    assert!(!cx.input().key_down(Key::KeyS), "let go of");
+    assert!(!cx.input().key_down(Key::KeyA), "not handed");
+    assert_eq!((ungranted.as_str(), alone), ("api.ungranted", true));
+}
+
 /// Hands its UI each event and keeps the buttons it pressed, as a game's menu does.
 struct Menu {
     ui: crate::GameUi,
@@ -3497,9 +3614,9 @@ fn a_capture_with_a_pixel_answers_its_bytes_and_writes_nothing() {
     assert!(written.is_file(), "a path asked for is written");
 }
 
-/// A pick answers the entity drawn at its pixel, named; none where nothing is or outside the view.
-/// An entity gone by the answer, or any for a client with `view` but not `read` of `Name`, is given
-/// by ID alone.
+/// A pick answers the entity drawn at its pixel, named, and its parent; none where nothing is or
+/// outside the view. An entity gone by the answer, or any for a client with `view` but not `read`
+/// of `Name`, is given by ID alone.
 #[test]
 fn a_pick_is_answered_with_the_entity_drawn_there() {
     let (mut api, session) = started("Api Picks");
@@ -3507,7 +3624,9 @@ fn a_pick_is_answered_with_the_entity_drawn_there() {
     let world = cx.world_mut();
     let hero = world.spawn((Transform::IDENTITY, Name("Hero".to_owned())));
     let ghost = world.spawn((Transform::IDENTITY, Name("Ghost".to_owned())));
-    let [hero, ghost] = [hero, ghost].map(|entity| world.id(entity).expect("alive"));
+    let squad = world.spawn((Transform::IDENTITY, Name("Squad".to_owned())));
+    world.set_parent(hero, Some(squad)).expect("alive");
+    let [hero, ghost, squad] = [hero, ghost, squad].map(|entity| world.id(entity).expect("alive"));
     world
         .despawn(world.entity(ghost).expect("alive"))
         .expect("despawned");
@@ -3529,7 +3648,8 @@ fn a_pick_is_answered_with_the_entity_drawn_there() {
             let grant = Some(grant.iter().map(|&name| name.to_owned()).collect());
             let connected = Client::connect_granted(&granted, "test", grant, DEADLINE);
             let mut client = connected.expect("it connects");
-            pick(&mut client, [3.5, 4.0]).name
+            let picked = pick(&mut client, [3.5, 4.0]);
+            (picked.name, picked.parent_name)
         });
         (picked, names)
     };
@@ -3559,19 +3679,22 @@ fn a_pick_is_answered_with_the_entity_drawn_there() {
         client,
         back,
     );
-    let picked = picked.map(|picked| (picked.id, picked.name));
+    let picked = picked.map(|picked| (picked.id, picked.name, picked.parent, picked.parent_name));
+    let squad = (Some(squad.to_string()), Some("Squad".to_owned()));
     let expected = [
-        (Some(hero.to_string()), Some("Hero".to_owned())),
-        (None, None),
-        (Some(ghost.to_string()), None),
-        (None, None),
+        (
+            Some(hero.to_string()),
+            Some("Hero".to_owned()),
+            squad.0,
+            squad.1,
+        ),
+        (None, None, None, None),
+        (Some(ghost.to_string()), None, None, None),
+        (None, None, None, None),
     ];
     assert_eq!(picked, expected);
-    assert_eq!(
-        names,
-        [None, Some("Hero".to_owned())],
-        "`view`, then `read:Name` too"
-    );
+    let named = (Some("Hero".to_owned()), Some("Squad".to_owned()));
+    assert_eq!(names, [(None, None), named], "`view`, then `read:Name` too");
     assert!(api.picks.is_empty());
 }
 
@@ -3719,6 +3842,94 @@ fn a_cast_hits_the_collider_through_a_pixel_and_a_projection_finds_a_point() {
         (right.abs() - std::f64::consts::PI).abs() < 1e-9,
         "{behind:?}"
     );
+}
+
+/// A cast meets a 2D collider where it holds the point the ray crosses z = 0, facing the camera.
+/// `entity` answers what an entity touched at the last step, each way, and the box along the
+/// world's axes round what it draws.
+#[test]
+fn a_cast_hits_2d_colliders_and_an_entity_says_what_it_touches_and_its_box() {
+    use gg_core::math::{Quat, Vec2};
+    use gg_renderer::{Projection, Sprite};
+
+    use crate::{BodyType, BoxCollider2D, RigidBody2D};
+
+    let mut cx = Context::seeded(13);
+    let world = cx.world_mut();
+    let at = |x, y| Transform {
+        translation: DVec3::new(x, y, 0.0),
+        ..Transform::IDENTITY
+    };
+    let body = |body_type| RigidBody2D {
+        body_type,
+        ..RigidBody2D::default()
+    };
+    let size = |width, height| BoxCollider2D {
+        size: Vec2::new(width, height),
+        ..BoxCollider2D::default()
+    };
+    let named = |name: &str| Name(name.to_owned());
+    let ground = (at(0.0, 0.0), body(BodyType::Static), size(8.0, 1.0));
+    let ground = world.spawn((ground.0, ground.1, ground.2, named("Ground")));
+    // Sunk into the ground a little, to touch it at the first step.
+    let crate_ = (at(0.0, 0.95), body(BodyType::Dynamic), size(1.0, 1.0));
+    let crate_ = world.spawn((crate_.0, crate_.1, crate_.2, named("Crate")));
+    let wall = Transform {
+        scale: Vec3::new(4.0, 1.0, 1.0),
+        ..at(20.0, 0.0)
+    };
+    let wall = world.spawn((wall, Sprite::default()));
+    crate::physics::step_physics(world);
+    let [ground, crate_, wall] =
+        [ground, crate_, wall].map(|entity| world.id(entity).expect("alive"));
+    // From 10 up, 5 pixels a unit: the view's middle is over the origin.
+    cx.set_viewpoint(Viewpoint {
+        position: DVec3::new(0.0, 0.0, 10.0),
+        rotation: Quat::IDENTITY,
+        projection: Projection::Orthographic {
+            height: 10.0,
+            near: 0.1,
+            far: 100.0,
+        },
+    });
+    let view = Viewport {
+        origin: [0, 0],
+        size: [100, 50],
+    };
+    cx.extract(&mut Extracted::default(), view);
+    let cast = |at, exclude: Option<&str>| {
+        let exclude = exclude.map(Subject::of);
+        view::cast(&cx, at, exclude, true).expect("a cast")
+    };
+    let middle = cast(None, None);
+    assert_eq!(
+        (middle.id, middle.name.as_deref()),
+        (Some(ground.to_string()), Some("Ground"))
+    );
+    assert_eq!(
+        (middle.point, middle.normal),
+        (Some([0.0; 3]), Some([0.0, 0.0, 1.0]))
+    );
+    assert!(middle.distance.is_some_and(|distance| distance > 0.0));
+    assert_eq!(cast(None, Some("Ground")).id, None, "past it, nothing");
+    // A unit up, over the crate alone.
+    let above = cast(Some([50.0, 20.0]), None);
+    assert_eq!(above.id, Some(crate_.to_string()));
+    let answer = |id| {
+        let text = super::world::entity(cx.world(), cx.meshes(), id).expect("an entity");
+        serde_json::from_str::<Value>(&text).expect("JSON")
+    };
+    let touching =
+        |id: EntityId, name| json!([{"id": id.to_string(), "name": name, "sensor": false}]);
+    assert_eq!(answer(crate_)["touching"], touching(ground, "Ground"));
+    assert_eq!(answer(ground)["touching"], touching(crate_, "Crate"));
+    let wall = answer(wall);
+    assert_eq!(wall["touching"], json!([]));
+    assert_eq!(
+        wall["box"],
+        json!({"min": [18.0, -0.5, 0.0], "max": [22.0, 0.5, 0.0]})
+    );
+    assert!(answer(crate_).get("box").is_none(), "nothing drawn");
 }
 
 /// A pick of a model's node is answered with the model's root, but within the model: the node drawn

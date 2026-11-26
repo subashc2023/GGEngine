@@ -465,6 +465,30 @@ pub(crate) fn draw_colliders(
     dim3::joint_lines(world, poses, &mut joined);
 }
 
+/// The entities `entity` touched at the last step of physics, alive and each once by ID, with
+/// whether a sensor's: its [contacts](World::contacts), then what a character hit as it moved, or
+/// what hit it, which rapier's contacts leave out. The tool API's `entity` answers them.
+#[cfg(feature = "dev")]
+pub(crate) fn touching(world: &World, entity: Entity) -> Vec<(Entity, bool)> {
+    let contacts = world.contacts();
+    let mut touching: Vec<_> =
+        (contacts.filter_map(|c| Some((c.other(entity)?, c.sensor)))).collect();
+    if let Some(physics) = world.resource::<Physics3D>() {
+        let hits = physics
+            .character_hits()
+            .filter_map(|(character, hit)| match entity {
+                _ if character == entity => Some((hit, false)),
+                _ if hit == entity => Some((character, false)),
+                _ => None,
+            });
+        touching.extend(hits);
+    }
+    touching.retain(|&(other, _)| world.contains(other));
+    touching.sort_by_key(|&(other, sensor)| (world.id(other), sensor));
+    touching.dedup();
+    touching
+}
+
 /// Gives `each` where the colliders touching after the last step of physics push, 2D's contacts
 /// then 3D's: the first collider's body's entity, if any; the point halfway between the colliders'
 /// surfaces; and the unit normal, from the first collider toward the second. Points are the

@@ -99,7 +99,11 @@ impl Handed {
             }
             InputEvent::Text(ref text) => (egui::Event::Text(text.clone()), keys),
             InputEvent::Focused(focused) => (egui::Event::WindowFocused(focused), false),
-            InputEvent::CursorEntered | InputEvent::Motion(_) => return false,
+            // The server makes waits and aims into ticks and a cursor first.
+            InputEvent::CursorEntered
+            | InputEvent::Motion(_)
+            | InputEvent::Wait(_)
+            | InputEvent::Aim(_) => return false,
         };
         self.events.push(event);
         keeps

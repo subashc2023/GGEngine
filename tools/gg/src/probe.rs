@@ -96,6 +96,8 @@ mod tests {
         let picked = Picked {
             id: Some("2b7e151628aed2a6".to_owned()),
             name: None,
+            parent: None,
+            parent_name: None,
         };
         decode(&captured, [1.0, 0.5], &picked, looked)
     }
@@ -165,7 +167,7 @@ mod tests {
         close(&probe["distance"], 0.1 / depth, 1e-4);
         assert_eq!(
             probe["entity"],
-            json!({"id": "2b7e151628aed2a6", "name": null})
+            json!({"id": "2b7e151628aed2a6", "name": null, "parent": null, "parent_name": null})
         );
         assert!(
             probe["quantized"]

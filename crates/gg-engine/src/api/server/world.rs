@@ -1,7 +1,7 @@
 //! What the reads answer of the world and of the asset root.
 
 use gg_api::asset::AssetKind;
-use gg_api::{AssetList, EntityList, Failure, Listed, ListedAsset, ListedOrphan};
+use gg_api::{AssetList, EntityList, Failure, Listed, ListedAsset, ListedOrphan, Touching};
 use gg_core::Error;
 use gg_core::math::DMat4;
 use gg_renderer::Meshes;
@@ -9,9 +9,9 @@ use gg_renderer::Meshes;
 use super::connection::Reply;
 use super::failure;
 use crate::api::json;
-use crate::bounds;
 use crate::ecs::Pose;
 use crate::{Context, Entity, EntityId, Name, PrefabRoot, World};
+use crate::{bounds, physics};
 
 /// An `assets` waiting for a look at the asset root (numbered by `Context::ask_assets`), and its
 /// page.
@@ -189,7 +189,7 @@ pub(super) fn listed(world: &World, entity: Entity) -> Listed {
     }
 }
 
-/// Entity `id` as `entity` answers it, its `bounds` from the extents `meshes` keeps.
+/// Entity `id` as `entity` answers it, its `bounds` and `box` from the extents `meshes` keeps.
 pub(super) fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<String, Failure> {
     let entity = found(world, id)?;
     let about = |error: Error| failure(&error);
@@ -244,6 +244,22 @@ pub(super) fn entity(world: &World, meshes: &Meshes, id: EntityId) -> Result<Str
         json::float32(&mut out, radius as f32);
         out.push('}');
     }
+    if let Some([min, max]) = bounds::world_box(world, meshes, entity) {
+        out.push_str(",\"box\":{\"min\":");
+        json::float64s(&mut out, &min.to_array());
+        out.push_str(",\"max\":");
+        json::float64s(&mut out, &max.to_array());
+        out.push('}');
+    }
+    let touching = physics::touching(world, entity).into_iter();
+    let touching = touching.map(|(other, sensor)| Touching {
+        id: world.id(other).expect("alive").to_string(),
+        name: world.name(other).map(str::to_owned),
+        sensor,
+    });
+    out.push_str(",\"touching\":");
+    let touching: Vec<_> = touching.collect();
+    out.push_str(&serde_json::to_string(&touching).expect("contacts serialize"));
     // An instance whose prefab no longer loads gives none; its load warned.
     if let Some(instanced) = instanced(world, entity) {
         out.push_str(",\"instance\":");

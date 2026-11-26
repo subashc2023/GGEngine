@@ -427,11 +427,12 @@ Passes, for `--skip`: `ambient_occlusion`, `reflections`, `shadows`, `fog`, `blo
                 usage: "pick <X> <Y> [--within <ENTITY>]",
                 summary: "The entity its view shows at pixel X, Y",
                 details: "\
-Prints its ID and name, `null` for none. X, Y are from the view's top left, as a capture has it, the
-look included. A model's node gives the model's root, but `--within` the root or one of its nodes
-gives the node itself, as the editor picks parts. ENTITY is an ID or a name, as `entity` takes it.
-What the game draws over the world shows on top: a crosshair or HUD gives `null`. `cast` says what a
-shot through the pixel would hit.
+Prints its ID and name, then its `parent` and `parent_name`, as a unit's for its shape; `null`s for
+none. X, Y are from the view's top left, as a capture has it, the look included. A model's node
+gives the model's root, but `--within` the root or one of its nodes gives the node itself, as the
+editor picks parts. ENTITY is an ID or a name, as `entity` takes it. What the game draws over the
+world shows on top: a crosshair or HUD gives `null`. `cast` says what a shot through the pixel would
+hit.
 ",
             },
             Help {
@@ -439,12 +440,13 @@ shot through the pixel would hit.
                 usage: "cast [<X> <Y>] [--exclude <ENTITY>]",
                 summary: "What a ray from its camera through pixel X, Y, or the view's middle, hits",
                 details: "\
-Prints the entity whose 3D collider it hits first, by ID and name, with the `point` hit, the surface's
-`normal` there and the `distance` from the camera; `null`s for none. It reads the camera the last
-frame drew and the colliders as the last tick left them, as a game's own ray does, sensors skipped.
-X, Y are from the view's top left, as `pick` takes them; without them, the view's middle, where a
-crosshair is. `--exclude` passes through ENTITY's colliders: the player's, for a camera inside or
-behind it. `pick` serves 2D games, and says what shows rather than what's solid.
+Prints the entity whose collider it hits first, by ID and name, with the `point` hit, the surface's
+`normal` there and the `distance` from the camera; `null`s for none. A 2D collider is hit where it
+holds the point the ray crosses z = 0, its normal along Z toward the camera. It reads the camera
+the last frame drew and the colliders as the last tick left them, as a game's own ray does, sensors
+skipped. X, Y are from the view's top left, as `pick` takes them; without them, the view's middle,
+where a crosshair is. `--exclude` passes through ENTITY's colliders: the player's, for a camera
+inside or behind it. `pick` says what shows rather than what's solid.
 ",
             },
             Help {
@@ -456,9 +458,10 @@ Prints `at`, the view's pixel [x, y] as `pick` takes it, or `null` outside the v
 camera; `turn`, the radians [right, up] the camera turns to face it, about its own axes, `null`
 without perspective; and `distance` from the camera. Hidden or not: `pick` at `at` says what shows.
 An entity's point is the middle of what it draws, as `entity`'s `bounds`, else its origin; ENTITY is
-an ID or a name. To aim a game that turns its camera by mouse motion, move the mouse by `turn`
-divided by the game's sensitivity in radians per pixel, sign as the game reads it; a camera that
-orbits its player moves as it turns, so `project` again.
+an ID or a name. `input`'s {\"aim\":ENTITY} moves the cursor to `at` itself. To aim a game that
+turns its camera by mouse motion, move the mouse by `turn` divided by the game's sensitivity in
+radians per pixel, sign as the game reads it; a camera that orbits its player moves as it turns,
+so `project` again.
 ",
             },
             Help {
@@ -507,16 +510,21 @@ EVENTS is a JSON array of the API's input events, handed over in order as a fram
 - the mouse's raw motion right and down, as with the cursor grabbed: {\"motion\":[X,Y]};
 - a mouse button: {\"button\":{\"button\":\"left\",\"pressed\":true}};
 - a scroll: {\"scroll\":{\"lines\":[0,1]}};
-- the keys' focus: {\"focused\":true}.
+- the keys' focus: {\"focused\":true};
+- N ticks before the events after it: {\"wait\":N};
+- the cursor at the pixel `project` gives an entity, by ID or name: {\"aim\":\"Enemy 1\"}. It's
+  read as it's handed, after the waits before it, so a moving target is aimed at where it is then.
+  It fails with `api.unseen` where the view doesn't show it, handing nothing after it.
 
-A key or button stays down until an event releases it. Without `--hold`, `input` prints `{}` at
-once, and paused, no tick sees the events before a `step`.
+A key or button stays down until an event releases it. Without `--hold` or a wait, `input` prints
+`{}` at once, and paused, no tick sees the events before a `step`. With a wait, frames run no tick
+past it, and paused, it steps its ticks; it prints the status once the last event is handed.
 
-`--hold N` releases the keys and buttons the events press and leave down after exactly N ticks (64
-a second), then prints the status, as `step` does. Events that leave nothing down, such as a
-click's, just run the N ticks. The next tick sees the release. Frames run no tick past it
-meanwhile. Paused, it steps the N ticks. Past 30 s (1,920 ticks), give `--timeout`. Refused while
-the game is stopped.
+`--hold N` releases the keys and buttons the events press and leave down exactly N ticks (64 a
+second) after the last event, then prints the status, as `step` does. Events that leave nothing
+down, such as a click's, just run the N ticks. The next tick sees the release. Frames run no tick
+past it meanwhile. Paused, it steps the N ticks. The waits and N run 10,000 ticks at most together;
+past 30 s (1,920 ticks), give `--timeout`. Both are refused while the game is stopped.
 
 A click at (400, 300), then a tick:
   gg input --hold 1 '[{\"cursor\":[400,300]}, {\"button\":{\"button\":\"left\",\"pressed\":true}},
@@ -524,6 +532,12 @@ A click at (400, 300), then a tick:
 A drag from (330, 280) to (640, 390), the button down 8 ticks with the cursor at its end:
   gg input --hold 8 '[{\"cursor\":[330,280]}, {\"button\":{\"button\":\"left\",\"pressed\":true}},
     {\"cursor\":[640,390]}]'
+A jump held 20 ticks while running right, then a click on an enemy where it is then:
+  gg input --hold 1 '[{\"key\":{\"key\":\"KeyD\",\"pressed\":true}},
+    {\"key\":{\"key\":\"Space\",\"pressed\":true}}, {\"wait\":20},
+    {\"key\":{\"key\":\"Space\",\"pressed\":false}}, {\"aim\":\"Enemy 1\"},
+    {\"button\":{\"button\":\"left\",\"pressed\":true}},
+    {\"button\":{\"button\":\"left\",\"pressed\":false}}]'
 A `.ui` button is pressed by name with `gg press`.
 ",
             },
@@ -569,9 +583,14 @@ health in one call:
                 usage: "entity <ENTITY>",
                 summary: "An entity and its components' values",
                 details: "\
-ENTITY is an ID, or the name of the one entity with it: its `Name`, which `entities` lists. For an
-instance's entity, its root or one its prefab gives, `instance` too: what differs from its
-prefab, each component's fields, and the components it adds.
+ENTITY is an ID, or the name of the one entity with it: its `Name`, which `entities` lists. Prints
+its ID, name, parent, children and components' values, and where they apply:
+- `bounds`, the sphere round what it and those under it draw, and `box`, the box along the world's
+  axes round the same, closer round a long wall or a scaled sprite;
+- `touching`, the entities its colliders touched at the last step of physics, each by ID and name
+  with whether a sensor's, and those a character hit as it moved; one standing still hits nothing;
+- `instance`, for an instance's entity, its root or one its prefab gives: what differs from its
+  prefab, each component's fields, and the components it adds.
 ",
             },
             Help {

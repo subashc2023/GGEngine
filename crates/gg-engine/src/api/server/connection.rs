@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use gg_api::{Failure, Hello, Pulse, Request};
+use gg_api::{Failure, Hello, InputEvent, Pulse, Request};
 use serde::Serialize;
 use serde_json::Value;
 use tracing::{Level, debug, info, warn};
@@ -311,7 +311,16 @@ pub(super) fn needs(call: &Call) -> Vec<Capability> {
         | Call::Images => vec![View],
         Call::Project(Projecting::Point(_)) => vec![View],
         Call::Project(Projecting::Entity(_)) => vec![View, Read(None)],
-        Call::Input(..) | Call::Press { .. } => vec![Input],
+        // An aim reads where its entity is, as `project` does.
+        Call::Input(events, hold) => {
+            let runs = (hold.iter()).flat_map(|hold| hold.runs.iter().flat_map(|(_, run)| run));
+            let aims = (events.iter().chain(runs)).any(|given| matches!(given, InputEvent::Aim(_)));
+            match aims {
+                true => vec![Input, View, Read(None)],
+                false => vec![Input],
+            }
+        }
+        Call::Press { .. } => vec![Input],
         Call::Get { component, .. } => vec![Read(Some(component.clone()))],
         Call::Entities { .. }
         | Call::Entity(_)

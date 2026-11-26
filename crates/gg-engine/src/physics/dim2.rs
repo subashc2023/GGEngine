@@ -11,7 +11,8 @@ use rapier2d::prelude::{
     ActiveCollisionTypes, BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle,
     ColliderSet, Group, ImpulseJointSet, IntegrationParameters, InteractionGroups,
     InteractionTestMode, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
-    RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, Rotation, SoftBodySet, Vector,
+    QueryFilter, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, Rotation,
+    SoftBodySet, Vector,
 };
 use serde::{Deserialize, Serialize};
 
@@ -572,6 +573,28 @@ impl Physics2D {
         self.contacts.events()
     }
 
+    /// The entity of the lowest ID whose collider holds `point`, of those alive in `world`, but
+    /// sensors and `exclude`'s ([`World::collider_at_2d`]).
+    fn collider_at(&self, world: &World, point: DVec2, exclude: Option<Entity>) -> Option<Entity> {
+        let rapier = &self.rapier;
+        let alive = |collider| body_entity(rapier, collider).filter(|&e| world.contains(e));
+        let predicate = |handle: ColliderHandle, _: &Collider| alive(handle).is_some();
+        let mut filter = QueryFilter::new().exclude_sensors().predicate(&predicate);
+        let excluded = exclude.and_then(|entity| self.links.get(entity));
+        if let Some(linked) = excluded {
+            filter = filter.exclude_rigid_body(linked.body);
+        }
+        let dispatcher = rapier.narrow_phase.query_dispatcher();
+        let queries = (rapier.broad_phase).as_query_pipeline(
+            dispatcher,
+            &rapier.bodies,
+            &rapier.colliders,
+            filter,
+        );
+        let holding = queries.intersect_point(at(point));
+        (holding.filter_map(|(handle, _)| alive(handle))).min_by_key(|&entity| world.id(entity))
+    }
+
     /// Takes out each body whose entity is gone, lost its `RigidBody2D` or `Transform`, or came
     /// under a parent; the rest keep their order.
     fn unlink_gone(&mut self, world: &World) {
@@ -634,6 +657,19 @@ impl Physics2D {
                 rigid_body.angular_velocity = angular_velocity;
             }
         }
+    }
+}
+
+impl World {
+    /// The entity whose 2D collider holds `point`, in the XY plane 2D physics lies in: what's
+    /// under a 2D game's cursor, where [`Context::ray`](crate::Context::ray) meets z = 0
+    /// ([`Cast::meets_plane`](crate::Cast::meets_plane)).
+    ///
+    /// Sensors, `exclude`'s colliders and those of entities gone are skipped; of several, the
+    /// entity of the lowest ID. Nothing for a world that has never stepped 2D physics. It sees the
+    /// colliders as the last step left them, none made since.
+    pub fn collider_at_2d(&self, point: DVec2, exclude: Option<Entity>) -> Option<Entity> {
+        (self.resource::<Physics2D>()?).collider_at(self, point, exclude)
     }
 }
 

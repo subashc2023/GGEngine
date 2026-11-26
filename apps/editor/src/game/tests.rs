@@ -2267,6 +2267,8 @@ fn a_texture_let_go_on_the_view_sets_the_texture_of_the_sprite_there() {
     let found = |id: Option<EntityId>| gg_api::Picked {
         id: id.map(|id| id.to_string()),
         name: id.map(|_| "Pillar".to_owned()),
+        parent: None,
+        parent_name: None,
     };
     let set = |name: &str| {
         let texture = reflect::Value::String(name.to_owned());
@@ -2322,6 +2324,8 @@ fn a_font_let_go_on_the_view_sets_the_font_of_the_text_there() {
     let found = gg_api::Picked {
         id: Some(entity.to_string()),
         name: Some("Target".to_owned()),
+        parent: None,
+        parent_name: None,
     };
     ends.found.send((ticket, Ok(found))).expect("sent");
     game.take_picks();
