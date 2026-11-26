@@ -1113,6 +1113,12 @@ fn the_engines_components_defaults_make_them() {
     }
     let error = world.default_of("Inner").expect_err("a type of fields");
     assert_eq!(error.code(), "reflect.unknown_type");
+    // A field's name, given for its component's, names the component.
+    let error = world.default_of("translation").expect_err("a field's name");
+    assert_eq!(error.code(), "reflect.unknown_type");
+    let says = "there's no component type `translation`, but there's a field: \
+                `Transform.translation`; the component types are ";
+    assert!(error.to_string().starts_with(says), "{error}");
 }
 
 #[test]

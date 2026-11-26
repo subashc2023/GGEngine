@@ -116,7 +116,9 @@ breakpoint, in a file dialog or in the window menu. A game that ends before its 
 waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`).
 `snapshot_failed` says why one fails; a game that hasn't ticked since it started refuses one, and
 the next is asked for quietly. Pauses and stops last across restarts. Only the world, its entities'
-components, survives; a layer's own fields and statics start over. A field a rebuild adds takes its
+components, survives; a layer's own fields and statics start over, and what `input` held down is
+up. A value the code put in a component, as a shot's speed in its velocity, keeps the old
+constant's. A field a rebuild adds takes its
 default, the game warning `snapshot.changed`. A layer's `load` makes its assets; its `attach`, which
 a restart skips, builds the world.
 
@@ -246,8 +248,9 @@ package in the engine's lock, as `--package NAME` would name both.
                 summary: "Its ticks, pause and stop state, frames, entities, view and open scene",
                 details: "\
 - `scene`: the open scene's file.
-- `unsaved`: whether the scene differs from its file, as a playing game's ticks make it.
-- `edited`: whether authors edited it since it was saved or opened.
+- `unsaved`: whether the scene, as the world holds it now, differs from its file. A game playing
+  from its start changes it as it ticks, so it's true once anything moves.
+- `edited`: whether authors edited it since it was saved or opened, which ticks never set.
 - `cells`: in a world of cells, how many are in, and how many out keep what they held.
 - `cursor_grabbed`: whether the game wants the cursor grabbed, so it looks about by `motion`.
 ",
@@ -445,8 +448,9 @@ Prints the entity whose collider it hits first, by ID and name, with the `point`
 holds the point the ray crosses z = 0, its normal along Z toward the camera. It reads the camera
 the last frame drew and the colliders as the last tick left them, as a game's own ray does, sensors
 skipped. X, Y are from the view's top left, as `pick` takes them; without them, the view's middle,
-where a crosshair is. `--exclude` passes through ENTITY's colliders: the player's, for a camera
-inside or behind it. `pick` says what shows rather than what's solid.
+where a crosshair is. It passes through colliders the camera is inside, as a first-person player's;
+`--exclude` passes through ENTITY's too, as a player's in front of the camera. `pick` says what
+shows rather than what's solid.
 ",
             },
             Help {
@@ -458,7 +462,7 @@ Prints `at`, the view's pixel [x, y] as `pick` takes it, or `null` outside the v
 camera; `turn`, the radians [right, up] the camera turns to face it, about its own axes, `null`
 without perspective; and `distance` from the camera. Hidden or not: `pick` at `at` says what shows.
 An entity's point is the middle of what it draws, as `entity`'s `bounds`, else its origin; ENTITY is
-an ID or a name. `input`'s {\"aim\":ENTITY} moves the cursor to `at` itself. To aim a game that
+an ID or a name. `input`'s {\"aim\":ENTITY} or {\"aim\":[X,Y,Z]} moves the cursor to `at`. To aim a game that
 turns its camera by mouse motion, move the mouse by `turn` divided by the game's sensitivity in
 radians per pixel, sign as the game reads it; a camera that orbits its player moves as it turns,
 so `project` again.
@@ -511,10 +515,11 @@ EVENTS is a JSON array of the API's input events, handed over in order as a fram
 - a mouse button: {\"button\":{\"button\":\"left\",\"pressed\":true}};
 - a scroll: {\"scroll\":{\"lines\":[0,1]}};
 - the keys' focus: {\"focused\":true};
-- N ticks before the events after it: {\"wait\":N};
-- the cursor at the pixel `project` gives an entity, by ID or name: {\"aim\":\"Enemy 1\"}. It's
-  read as it's handed, after the waits before it, so a moving target is aimed at where it is then.
-  It fails with `api.unseen` where the view doesn't show it, handing nothing after it;
+- N ticks before the events after it, 0 for none: {\"wait\":N};
+- the cursor at the pixel `project` gives an entity, by ID or name, or a point of the world:
+  {\"aim\":\"Enemy 1\"}, {\"aim\":[26,0,-26]}. It's read as it's handed, after the waits before
+  it, so a moving target is aimed at where it is then. It fails with `api.unseen` where the view
+  doesn't show it, handing nothing after it;
 - a gamepad's button, its stick at [X,Y] (right and up positive, length 1 at most), or its trigger
   from 0 to 1, on pad 0 unless `pad` says: {\"pad_button\":{\"button\":\"south\",\"pressed\":true}},
   {\"pad_stick\":{\"stick\":\"left\",\"value\":[0.5,0]}},
@@ -595,14 +600,14 @@ or didn't draw), `ui.no_node`, `ui.ambiguous_node` (give `--ui`), `ui.no_ui`.
             },
             Help {
                 name: "entities",
-                usage: "entities [--with <COMPONENT>] [--fields <FIELDS>] [--skip <N>] [--take <N>]",
+                usage: "entities [<COMPONENT>] [--fields <FIELDS>] [--skip <N>] [--take <N>]",
                 summary: "List its entities, those with COMPONENT, N at a time (100)",
                 details: "\
-Each one's ID, name, parent, children and components' types. `--fields` reads fields of each too,
+Each one's ID, name, parent, children and components' types. `--with COMPONENT` is COMPONENT too. `--fields` reads fields of each too,
 under its `fields`, FIELDS split by `,`: a component's type for the whole component, or its type,
 `.` and a path as `get` takes it. An entity without the component goes without the field. Every unit's position and
 health in one call:
-  gg entities --with Unit --fields Transform.translation,Unit.health
+  gg entities Unit --fields Transform.translation,Unit.health
 ",
             },
             Help {
@@ -755,12 +760,13 @@ whole. VALUE is JSON, or else a string, shaped as `entity` shows values. ENTITY 
             },
             Help {
                 name: "logs",
-                usage: "logs [--level <LEVEL>] [--follow]",
+                usage: "logs [<LEVEL>] [--follow]",
                 summary: "Its log's events at LEVEL (`warn`) and above",
                 details: "\
 Prints a line per event, as its JSON log has it, of the last 10,000 the game keeps; with
 `--follow`, then each as it's logged, until the game ends. LEVEL is `error`, `warn`, `info`, `debug`
-or `trace`. A game's own `info!` lines, such as a goal reached, need `--level info`. An agent can't
+or `trace`, given alone or as `--level`. A game's own `info!` lines, such as a goal reached, need
+`gg logs info`. An agent can't
 hear the game: windowed and embedded runs log each sound or music started, `Sound started` or
 `Music started`, at `debug`.
 ",
@@ -1685,12 +1691,13 @@ fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             Command::Sessions(parsed.scope()?.map(|scope| scope.manifest))
         }
         "logs" => {
-            parsed.positional(0, 0, "logs [--level <LEVEL>] [--follow]")?;
-            let level = parsed.value("--level").unwrap_or_else(|| "warn".to_owned());
+            let given = parsed.positional(0, 1, "logs [<LEVEL>] [--follow]")?;
+            let level = given.into_iter().next().or_else(|| parsed.value("--level"));
+            let level = level.unwrap_or_else(|| "warn".to_owned());
             let level = level.to_ascii_lowercase();
             if !gg_api::LEVELS.contains(&level.as_str()) {
                 return Err(bad(format!(
-                    "`--level` is `error`, `warn`, `info`, `debug` or `trace`, not `{level}`"
+                    "LEVEL is `error`, `warn`, `info`, `debug` or `trace`, not `{level}`"
                 )));
             }
             Command::Logs {
@@ -1700,10 +1707,9 @@ fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             }
         }
         "entities" => {
-            let usage =
-                "entities [--with <COMPONENT>] [--fields <FIELDS>] [--skip <N>] [--take <N>]";
-            parsed.positional(0, 0, usage)?;
-            let with = parsed.value("--with");
+            let usage = "entities [<COMPONENT>] [--fields <FIELDS>] [--skip <N>] [--take <N>]";
+            let given = parsed.positional(0, 1, usage)?;
+            let with = given.into_iter().next().or_else(|| parsed.value("--with"));
             let skip: usize = parsed.number("--skip", 0)?;
             let take: usize = parsed.number("--take", 100)?;
             let given = parsed.values("--fields");

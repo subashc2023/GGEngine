@@ -132,11 +132,23 @@ impl World {
     /// distance that isn't 0 or more. It sees the colliders as the last step left them, none made
     /// since; a ray that starts inside one hits it there.
     pub fn cast_ray(&self, cast: Cast) -> Option<Hit3D> {
+        self.ray(cast, false)
+    }
+
+    /// As [`cast_ray`](Self::cast_ray), passing through the colliders `cast.from` is inside, as a
+    /// first-person camera is inside its player's.
+    #[cfg(feature = "dev")]
+    pub(crate) fn cast_ray_from_outside(&self, cast: Cast) -> Option<Hit3D> {
+        self.ray(cast, true)
+    }
+
+    fn ray(&self, cast: Cast, from_outside: bool) -> Option<Hit3D> {
         let physics = self.resource::<Physics3D>()?;
         let toward = cast.way()?;
         let ray = Ray::new(at(cast.from), vector(toward));
         let max_distance = f64::from(cast.max_distance);
-        physics.cast(self, cast.exclude, |queries| {
+        let inside = from_outside.then_some(cast.from);
+        physics.cast(self, cast.exclude, inside, |queries| {
             let (collider, hit) = queries.cast_ray_and_get_normal(&ray, max_distance, true)?;
             let point = cast.from + toward.as_dvec3() * hit.time_of_impact;
             let normal = Vec3::from_array(hit.normal.to_array().map(|x| x as f32));
@@ -158,7 +170,7 @@ impl World {
             stop_at_penetration: true,
             compute_impact_geometry_on_penetration: true,
         };
-        physics.cast(self, cast.exclude, |queries| {
+        physics.cast(self, cast.exclude, None, |queries| {
             let cast = |shape: &dyn Shape| queries.cast_shape(&at, vector(toward), shape, options);
             let (collider, hit) = shape.with(cast)?;
             let point = DVec3::from_array(hit.witness1.to_array());
@@ -169,12 +181,13 @@ impl World {
 }
 
 impl Physics3D {
-    /// Runs `cast` against the colliders, skipping sensors, `exclude`'s and those of entities
-    /// gone from `world`, and adds the entity hit.
+    /// Runs `cast` against the colliders, skipping sensors, `exclude`'s, those of entities gone
+    /// from `world` and those holding the point `inside`, and adds the entity hit.
     fn cast(
         &self,
         world: &World,
         exclude: Option<Entity>,
+        inside: Option<DVec3>,
         cast: impl FnOnce(&QueryPipeline<'_>) -> Option<Cast3D>,
     ) -> Option<Hit3D> {
         let rapier = &self.rapier;
@@ -183,7 +196,16 @@ impl Physics3D {
             let bits = u64::try_from(body.user_data).ok()?;
             Entity::from_bits(bits).filter(|&entity| world.contains(entity))
         };
-        let alive = |_: ColliderHandle, collider: &Collider| entity_of(collider).is_some();
+        let outside = |collider: &Collider| {
+            inside.is_none_or(|point| {
+                !collider
+                    .shape()
+                    .contains_point(collider.position(), at(point))
+            })
+        };
+        let alive = |_: ColliderHandle, collider: &Collider| {
+            entity_of(collider).is_some() && outside(collider)
+        };
         let mut filter = QueryFilter::new().exclude_sensors().predicate(&alive);
         if let Some(body) = exclude.and_then(|entity| self.body_of(entity)) {
             filter = filter.exclude_rigid_body(body);

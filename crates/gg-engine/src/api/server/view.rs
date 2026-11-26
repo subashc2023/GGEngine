@@ -493,8 +493,8 @@ fn engine_projection(given: gg_api::Projection) -> Projection {
 }
 
 /// What a ray from the view's camera through the view's pixel `at`, else its middle, hits first
-/// of the colliders, past `exclude`'s, as `cast` answers it; with its entity's name if `named`. A
-/// 2D collider is hit where the ray meets the plane z = 0
+/// of the colliders, past `exclude`'s and those the camera is inside, as `cast` answers it; with
+/// its entity's name if `named`. A 2D collider is hit where the ray meets the plane z = 0
 /// ([`World::collider_at_2d`](crate::World::collider_at_2d)).
 ///
 /// Fails with `api.no_view` before a frame has drawn the view, and in replays; and as `exclude`
@@ -525,7 +525,8 @@ pub(super) fn cast(
         return Ok(hit);
     };
     ray.exclude = exclude.and_then(|id| world.entity(id));
-    let solid = (world.cast_ray(ray)).map(|hit| (hit.entity, hit.point, hit.normal, hit.distance));
+    let solid = world.cast_ray_from_outside(ray);
+    let solid = solid.map(|hit| (hit.entity, hit.point, hit.normal, hit.distance));
     // A 2D collider, where the ray meets the plane 2D physics lies in, facing the camera.
     let flat = ray.meets_plane(DVec3::ZERO, Vec3::Z).and_then(|point| {
         let entity = world.collider_at_2d(point.truncate(), ray.exclude)?;

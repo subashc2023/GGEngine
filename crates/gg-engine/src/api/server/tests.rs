@@ -2570,9 +2570,9 @@ fn a_held_input_lets_go_after_exactly_its_ticks() {
 }
 
 /// An `input`'s waits hand each run of events after exactly its ticks, though each frame owes
-/// three, and an aim moves the cursor to where the view shows its entity as its run is handed. An
-/// aim the view doesn't show fails, handing nothing after it, and a hold lets go of what came
-/// before. An aim needs `view` and `read`, as `project` does.
+/// three, and a wait of 0 waits for none. An aim moves the cursor to where the view shows its
+/// entity or point as its run is handed. An aim the view doesn't show fails, handing nothing after
+/// it, and a hold lets go of what came before. An aim needs `view` and `read`, as `project` does.
 #[test]
 fn waits_hand_each_run_after_its_ticks_and_aims_find_their_entity() {
     use std::f32::consts::FRAC_PI_2;
@@ -2610,18 +2610,20 @@ fn waits_hand_each_run_after_its_ticks_and_aims_find_their_entity() {
         let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
         let events = json!([
             {"key": {"key": "KeyW", "pressed": true}},
+            {"wait": 0},
             {"wait": 3},
             {"aim": "Target"},
             {"key": {"key": "KeyD", "pressed": true}},
             {"wait": 2},
             {"key": {"key": "KeyW", "pressed": false}},
+            {"aim": [-3.0, 0.0, -10.0]},
         ]);
         let held = json!({"events": events, "hold": 2});
         let waited: Status = client.call_as("input", held).expect("waited");
         let mut refused = |params| client.call("input", params).expect_err("refused").code;
         let key = |key, pressed| json!({"key": {"key": key, "pressed": pressed}});
         let refusals = [
-            refused(json!({"events": [{"wait": 0}]})),
+            refused(json!({"events": [{"aim": [3.0, 0.0]}]})),
             refused(json!({"events": [{"wait": 9000}], "hold": 1001})),
             refused(json!({"events": [{"aim": "Nobody"}]})),
             refused(json!({"events": [{"aim": "Behind"}]})),
@@ -2677,6 +2679,14 @@ fn waits_hand_each_run_after_its_ticks_and_aims_find_their_entity() {
     );
     let before = ticks.iter().find(|&&(number, ..)| number == first + 2);
     assert_eq!(before.and_then(|&(.., cursor)| cursor), None, "not yet");
+    let pointed = ticks.iter().find(|&&(number, ..)| number == first + 5);
+    let [x, y] = pointed
+        .and_then(|&(.., cursor)| cursor)
+        .expect("aimed at the point");
+    assert!(
+        (x - 52.5).abs() < 1e-9 && (y - 45.0).abs() < 1e-9,
+        "{x}, {y}"
+    );
     let unseen = "api.unseen".to_owned();
     let expected = ["api.bad_params", "api.bad_params", "ecs.no_entity"].map(str::to_owned);
     assert_eq!(refusals[..3], expected);
@@ -3852,8 +3862,8 @@ fn a_pick_is_answered_with_the_entity_drawn_there() {
     assert!(api.picks.is_empty());
 }
 
-/// A cast from the view's middle hits the nearest 3D collider, or the next past one excluded,
-/// named for a client that reads names; through a pixel beside them, or outside the view, it hits
+/// A cast from the view's middle hits the nearest 3D collider, past the one the camera is inside,
+/// or the next past one excluded, named for a client that reads names; through a pixel beside them, or outside the view, it hits
 /// nothing. A projection gives an entity's pixel, the camera's turn to it and its distance; a point
 /// behind the camera has no pixel. Both fail before a frame has drawn the view.
 #[test]
@@ -3888,6 +3898,8 @@ fn a_cast_hits_the_collider_through_a_pixel_and_a_projection_finds_a_point() {
     };
     let ball = SphereCollider3D::default();
     let named = |name: &str| Name(name.to_owned());
+    // The camera stands inside it, as in a first-person player's.
+    world.spawn((at(0.0, 0.0), fixed, ball, named("Eye")));
     let near = world.spawn((at(0.0, -5.0), fixed, ball, named("Near")));
     let far = world.spawn((at(0.0, -10.0), fixed, ball, named("Far")));
     world.spawn((at(3.0, -10.0), named("Beside")));

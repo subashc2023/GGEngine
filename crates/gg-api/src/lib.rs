@@ -131,14 +131,14 @@
 //! - `input`: hands the game's layers the events in order, as its window would, as the frame
 //!   starts, after each [`InputEvent::Wait`]'s ticks. It fails with:
 //!   - `api.bad_params`: a key `code` doesn't name, a stick past 1 from rest, a trigger outside 0
-//!     to 1, a wait of 0, or waits and `hold` past 10,000 ticks together; `api.stopped` for either
-//!     while stopped;
+//!     to 1, or waits and `hold` past 10,000 ticks together; `api.stopped` for either while
+//!     stopped;
 //!   - `api.no_action`, naming the actions, for an [`InputEvent::Action`] no layer binds;
 //!     `api.bad_params` for its value of another kind than the action's, or that none of its
 //!     bindings gives. Every action is checked before any event is handed, and read again as
 //!     it's handed;
-//!   - as `project` does for an [`InputEvent::Aim`]'s entity, and `api.unseen` where the view
-//!     doesn't show its point as it's handed. Events after it aren't handed, and a `hold` lets go
+//!   - as `project` does for an [`InputEvent::Aim`]'s entity or point, and `api.unseen` where the
+//!     view doesn't show its point as it's handed. Events after it aren't handed, and a `hold` lets go
 //!     of what those before it left down.
 //! - `actions`: the actions the layers bind, by name, with their bindings, as each layer's
 //!   `Layer::actions` gives them, so a client learns the game's controls and sets them by name.
@@ -920,14 +920,14 @@ pub enum InputEvent {
     Scroll(Scroll),
     /// The view gained or lost the keys.
     Focused(bool),
-    /// Ticks to run before the events after it are handed, at least 1: a key held across a jump,
-    /// or a click once a unit has walked. Paused, they're stepped; frames run no tick past them.
+    /// Ticks to run before the events after it are handed: a key held across a jump, or a click
+    /// once a unit has walked. A wait of 0 waits for none. Paused, they're stepped; frames run no tick past them.
     /// `input` then answers with the [`Status`] once the last event is handed, or its hold ends.
     Wait(u64),
-    /// The cursor moved to where the view shows an entity, by ID or name: the pixel `project`
-    /// answers as `at`. It's read as the event is handed, so a moving target is aimed at where it
-    /// is then.
-    Aim(String),
+    /// The cursor moved to where the view shows an entity, by ID or name, or a point of the world:
+    /// the pixel `project` answers as `at`. It's read as the event is handed, so a moving target is
+    /// aimed at where it is then.
+    Aim(Aimed),
     /// A gamepad's button went down or up. `pad` numbers the gamepad, 0 if left out. A trigger's
     /// press as a button is `left_trigger` or `right_trigger`, apart from its travel.
     PadButton {
@@ -963,12 +963,27 @@ pub enum InputEvent {
     },
 }
 
+/// What an [`InputEvent::Aim`] aims at: `"Enemy 1"`, an entity by ID or name, or `[x, y, z]`, a
+/// point of the world.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "an entity's ID or name, or a point's `[x, y, z]`"
+)]
+pub enum Aimed {
+    Entity(String),
+    Point([f64; 3]),
+}
+
 /// An action's value, as [`InputEvent::Action`] sets it.
 ///
 /// A number for a button or an axis, `[x, y]` for a pair of axes, each from -1 to 1. A pair longer
 /// than 1 is as long as 1, as the game's `Actions` makes keys held diagonally.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(
+    untagged,
+    expecting = "an action's `value`: a number for a button or an axis, `[x, y]` for a pair of axes"
+)]
 pub enum ActionValue {
     Axis(f32),
     Axis2([f32; 2]),
@@ -1535,7 +1550,8 @@ pub struct Picked {
 /// middle, where a crosshair is.
 ///
 /// `exclude`, an entity's ID or name, whose colliders the ray passes through: the player's, for a
-/// camera inside or behind it. A shot in a game skips its shooter the same way.
+/// camera behind it. A shot in a game skips its shooter the same way. The ray passes through the
+/// colliders the camera is inside without it, as a first-person player's.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cast {
@@ -2865,7 +2881,7 @@ mod tests {
         let json = r#"{"events": [{"key": {"key": "KeyW", "pressed": true}}, "cursor_left",
             {"button": {"button": {"other": 9}, "pressed": false}}, {"scroll": {"lines": [0, 1]}},
             {"cursor": [1.5, 2]}, {"text": "a"}, {"focused": false}, {"motion": [3, -4.5]},
-            {"wait": 12}, {"aim": "Enemy 1"},
+            {"wait": 12}, {"aim": "Enemy 1"}, {"aim": [1, 2.5, -3]},
             {"pad_button": {"button": "dpad_up", "pressed": true}},
             {"pad_stick": {"pad": 1, "stick": "right", "value": [0.5, -1]}},
             {"pad_trigger": {"trigger": "left", "value": 0.25}},
@@ -2889,7 +2905,8 @@ mod tests {
             InputEvent::Focused(false),
             InputEvent::Motion([3.0, -4.5]),
             InputEvent::Wait(12),
-            InputEvent::Aim("Enemy 1".to_owned()),
+            InputEvent::Aim(Aimed::Entity("Enemy 1".to_owned())),
+            InputEvent::Aim(Aimed::Point([1.0, 2.5, -3.0])),
             InputEvent::PadButton {
                 pad: 0,
                 button: PadButton::DPadUp,
@@ -2923,12 +2940,20 @@ mod tests {
             r#"{"events": [{"key": {"key": "KeyW", "pressed": true, "held": true}}]}"#,
             r#"{"events": [{"wait": -1}]}"#,
             r#"{"events": [{"aim": 3}]}"#,
+            r#"{"events": [{"aim": [1, 2]}]}"#,
             r#"{"events": [{"pad_button": {"button": "d_pad_up", "pressed": true}}]}"#,
             r#"{"events": [{"action": {"name": "Run", "value": [1, 0, 0]}}]}"#,
             r#"{"events": [{"action": {"name": "Run", "held": true}}]}"#,
         ] {
             assert!(serde_json::from_str::<Input>(refused).is_err(), "{refused}");
         }
+        // A value of another shape says what a value is, not serde's variants.
+        let fast = r#"{"events": [{"action": {"name": "Run", "value": "fast"}}]}"#;
+        let error = serde_json::from_str::<Input>(fast).unwrap_err().to_string();
+        assert!(
+            error.starts_with("an action's `value`: a number"),
+            "{error}"
+        );
     }
 
     /// A binding's sources are written as `input` names them.

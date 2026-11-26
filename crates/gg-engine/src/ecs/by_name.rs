@@ -257,9 +257,26 @@ impl World {
     pub(super) fn named(&self, name: &str) -> Result<ComponentId> {
         self.components.named(name).ok_or_else(|| {
             let names = reflect::list(self.component_types());
-            let what = match self.types().find(name) {
-                Some(_) => format!("`{name}` is a type of fields, not a component"),
-                None => format!("there's no component type `{name}`"),
+            let types = self.types();
+            // A field's name given for its component's, as `translation` for `Transform`'s.
+            let holding = |component: &&str| {
+                let shape = types.find(component).map(|index| &types.info(index).shape);
+                let fields = match shape {
+                    Some(Shape::Struct { fields, .. }) => &fields[..],
+                    _ => &[],
+                };
+                fields.iter().any(|field| field.name == name)
+            };
+            let fields: Vec<String> = (self.component_types().filter(holding))
+                .map(|component| format!("`{component}.{name}`"))
+                .collect();
+            let what = match (types.find(name), &fields[..]) {
+                (Some(_), _) => format!("`{name}` is a type of fields, not a component"),
+                (None, []) => format!("there's no component type `{name}`"),
+                (None, fields) => format!(
+                    "there's no component type `{name}`, but there's a field: {}",
+                    fields.join(", ")
+                ),
             };
             Error::new(
                 "reflect.unknown_type",

@@ -44,8 +44,8 @@ use std::time::{Duration, Instant};
 
 use gg_api::view::{Pacer, Writer};
 use gg_api::{
-    Authored, By, CellCounts, Failure, Hash, History, InputEvent, Looked, Scene, SceneAction,
-    Session, Status, Welcome,
+    Aimed, Authored, By, CellCounts, Failure, Hash, History, InputEvent, Looked, Scene,
+    SceneAction, Session, Status, Welcome,
 };
 use gg_core::log::Events;
 use gg_core::{Error, Result};
@@ -95,7 +95,7 @@ impl Holding {
 
 /// Hands `events` to egui's next pass and the layers, as their window would, each added to
 /// `handed`: the layers get what egui doesn't keep ([`Handed::hand`](crate::api::Handed::hand)). An
-/// aim is a move of the cursor to where the view shows its entity, as `project` answers it; an
+/// aim is a move of the cursor to where the view shows its entity or point, as `project` answers it; an
 /// action, the events of the binding that gives its value ([`actions::events`]), read as it's
 /// handed.
 ///
@@ -111,12 +111,16 @@ fn hand(
     for given in events {
         let made;
         let given = match given {
-            InputEvent::Aim(name) => {
-                let projected = view::project(cx, Projecting::Entity(Subject::of(name)))?;
+            InputEvent::Aim(aimed) => {
+                let (projecting, what) = match aimed {
+                    Aimed::Entity(name) => (Projecting::Entity(Subject::of(name)), name.as_str()),
+                    Aimed::Point(point) => (Projecting::Point(*point), "the point"),
+                };
+                let projected = view::project(cx, projecting)?;
                 let at = projected.at.ok_or_else(|| {
                     let message = format!(
-                        "the view doesn't show {name}: its point, at {:?}, is outside the view or \
-                         behind the camera, as `project` says",
+                        "the view doesn't show {what} at {:?}: it's outside the view or behind \
+                         the camera, as `project` says",
                         projected.point
                     );
                     Failure::new("api.unseen", message)

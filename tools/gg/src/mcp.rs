@@ -532,8 +532,9 @@ const TOOLS: &[Tool] = &[
                                   it; the view's middle without it"),
                 "exclude": {"type": "string",
                             "description": "The ID or name of an entity whose colliders the ray \
-                                            passes through: the player's, for a camera inside or \
-                                            behind it"},
+                                            passes through, as a player's in front of the camera. \
+                                            Colliders the camera is inside are passed through \
+                                            without it"},
             })
         },
         required: &[],
@@ -1127,7 +1128,7 @@ fn input() -> Value {
             })),
             variant("wait", json!({
                 "type": "integer",
-                "minimum": 1,
+                "minimum": 0,
                 "maximum": 10000,
                 "description": "Ticks (64 a second) to run before the events after it, stepped \
                                 while paused: a key held across a jump, a click once a unit has \
@@ -1136,11 +1137,15 @@ fn input() -> Value {
                                 10,000 ticks at most together",
             })),
             variant("aim", json!({
-                "type": "string",
-                "description": "The ID or name of an entity to move the cursor to, at the pixel \
-                                `project` answers for it, read as the event is handed so a moving \
-                                target is aimed at where it is then. Fails with api.unseen, \
-                                handing nothing after it, where the view doesn't show it",
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                ],
+                "description": "The ID or name of an entity, or a point of the world's [x, y, z], \
+                                to move the cursor to, at the pixel `project` answers for it, read \
+                                as the event is handed so a moving target is aimed at where it is \
+                                then. Fails with api.unseen, handing nothing after it, where the \
+                                view doesn't show it",
             })),
             variant("pad_button", json!({
                 "type": "object",
@@ -1744,7 +1749,7 @@ mod tests {
             InputEvent::Scroll(Scroll::Lines([0.0, 1.0])),
             InputEvent::Focused(true),
             InputEvent::Wait(3),
-            InputEvent::Aim("Player".to_owned()),
+            InputEvent::Aim(gg_api::Aimed::Entity("Player".to_owned())),
             InputEvent::PadButton {
                 pad: 0,
                 button: gg_api::PadButton::South,

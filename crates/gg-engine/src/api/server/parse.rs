@@ -528,9 +528,8 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
             let mut runs: Vec<(u64, Vec<InputEvent>)> = Vec::new();
             for given in events {
                 match (given, runs.last_mut()) {
-                    (InputEvent::Wait(0), _) => {
-                        return Err(bad_params(method, "waits at least 1 tick, not 0"));
-                    }
+                    // A computed wait may come to 0, which waits for nothing.
+                    (InputEvent::Wait(0), _) => {}
                     (InputEvent::Wait(ticks), _) => runs.push((ticks, Vec::new())),
                     (given, Some((_, run))) => run.push(given),
                     (given, None) => first.push(given),
