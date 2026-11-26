@@ -555,6 +555,13 @@ pub(crate) struct Dev {
     pub(crate) started: std::time::SystemTime,
     /// The look the tool API's clients set, which frames draw with over what the layers set.
     pub(crate) look: crate::api::Look,
+    /// Which debug overlays are on, which frames draw under the look.
+    pub(crate) overlays: crate::debug_overlays::State,
+    /// The simulation as the main loop left it this frame, for the Simulation overlay.
+    pub(crate) sim: Sim,
+    /// The session's numbers as the main loop read them this frame, for the Network overlay;
+    /// `None` without one.
+    pub(crate) net: Option<crate::net::NetStats>,
     /// The project's scenes folders, which the tool API's `scene` opens and saves scene files in.
     pub(crate) folders: Vec<PathBuf>,
     /// The project's directory, where its manifest is, and its fetch list, which an ID no asset
@@ -600,6 +607,9 @@ impl Dev {
         Self {
             started: std::time::SystemTime::UNIX_EPOCH,
             look: crate::api::Look::default(),
+            overlays: crate::debug_overlays::State::default(),
+            sim: Sim::default(),
+            net: None,
             folders: Vec::new(),
             project_dir: None,
             given: None,
@@ -622,6 +632,25 @@ impl Dev {
     pub(crate) fn start_frame(&mut self) {
         self.started = std::time::SystemTime::now();
     }
+}
+
+/// Where the simulation stands, copied from the stepper each frame.
+#[cfg(feature = "dev")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Sim {
+    /// The number of the next tick: those run so far in this world.
+    pub(crate) tick: u64,
+    pub(crate) state: SimState,
+}
+
+/// Whether the simulation steps in real time, as the tool API's `pause` and `stop` set.
+#[cfg(feature = "dev")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SimState {
+    #[default]
+    Running,
+    Paused,
+    Stopped,
 }
 
 /// A build without `dev`'s [`Dev`]: nothing.

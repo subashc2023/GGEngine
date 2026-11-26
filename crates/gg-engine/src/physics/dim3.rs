@@ -991,12 +991,7 @@ fn remove_body(rapier: &mut Rapier, body: RigidBodyHandle) {
 /// Each touching (or, with a sensor, overlapping) pair of colliders, as their bodies' entities
 /// and whether a sensor's, in rapier's order.
 fn touching(rapier: &Rapier) -> impl Iterator<Item = (Entity, Entity, bool)> + '_ {
-    let entity = |collider: ColliderHandle| {
-        let body = rapier
-            .bodies
-            .get(rapier.colliders.get(collider)?.parent()?)?;
-        Entity::from_bits(u64::try_from(body.user_data).ok()?)
-    };
+    let entity = |collider| body_entity(rapier, collider);
     let narrow_phase = &rapier.narrow_phase;
     let contacts = (narrow_phase.contact_pairs())
         .filter(|pair| pair.has_any_active_contact())
@@ -1006,6 +1001,37 @@ fn touching(rapier: &Rapier) -> impl Iterator<Item = (Entity, Entity, bool)> + '
         .map(|(a, b, _)| (a, b, true));
     let pairs = contacts.chain(overlaps);
     pairs.filter_map(move |(a, b, sensor)| Some((entity(a)?, entity(b)?, sensor)))
+}
+
+/// The entity of the body `collider` is on, if any.
+fn body_entity(rapier: &Rapier, collider: ColliderHandle) -> Option<Entity> {
+    let body = rapier
+        .bodies
+        .get(rapier.colliders.get(collider)?.parent()?)?;
+    Entity::from_bits(u64::try_from(body.user_data).ok()?)
+}
+
+/// Gives `each` the contacts of the last step, as [`contact_points`](super::contact_points) says.
+#[cfg(feature = "dev")]
+pub(super) fn contact_points(world: &World, each: &mut impl FnMut(Option<Entity>, DVec3, DVec3)) {
+    let Some(physics) = world.resource::<Physics3D>() else {
+        return;
+    };
+    let rapier = &physics.rapier;
+    for pair in rapier.narrow_phase.contact_pairs() {
+        let entity = body_entity(rapier, pair.collider1);
+        for manifold in pair.solver_manifolds() {
+            let n = manifold.data.normal;
+            let normal = DVec3::new(n.x, n.y, n.z);
+            for contact in &manifold.data.solver_contacts {
+                let (a, b) = manifold
+                    .data
+                    .solver_contact_world_points(contact, &rapier.bodies);
+                let middle = DVec3::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, (a.z + b.z) / 2.0);
+                each(entity, middle, normal);
+            }
+        }
+    }
 }
 
 /// Body user data: how casts and contacts find the entity.

@@ -140,7 +140,7 @@ fn app() -> App {
     let app = App::new("Showcase")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    app.layer(Showcase::new()).dev_panels()
+    app.layer(Showcase::new()).debug_overlays()
 }
 
 /// The game's scripts, by their paths from its directory. Each declares the component it is.

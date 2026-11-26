@@ -1338,6 +1338,36 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Partings {
     }
 }
 
+/// The Network overlay's numbers: a host and its joiner say their roles, delays and links, and have
+/// sent and taken bytes once they've played.
+#[cfg(feature = "dev")]
+#[test]
+fn peers_give_the_network_overlay_their_roles_delays_and_traffic() {
+    use super::{NetRole, NetStats};
+
+    let _real_time = crate::testing::real_time();
+    let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+    let mut joiner = Peer::joiner(&mut host);
+    assert_eq!(
+        host.stack.net_stats().map(|net| net.role),
+        Some(NetRole::Host)
+    );
+    join(&mut host, &mut joiner);
+    play(&mut host, &mut joiner, 20);
+    let (ours, theirs): (NetStats, NetStats) = [&mut host, &mut joiner]
+        .map(|peer| peer.stack.net_stats().expect("a session"))
+        .into();
+    assert_eq!((ours.role, theirs.role), (NetRole::Host, NetRole::Joiner));
+    assert_eq!((ours.links, theirs.links), (1, 1));
+    assert_eq!(ours.delay, Some(host.net().delay));
+    assert_eq!(ours.window, 0);
+    for net in [ours, theirs] {
+        assert!(net.bytes.iter().all(|&bytes| bytes > 0), "{net:?}");
+    }
+    let alone = Stack::default();
+    assert_eq!(alone.net_stats(), None);
+}
+
 /// A joiner joins within [`DELAY`] ticks of the host's start (it has sent no inputs before) and
 /// starts from its world; each tick runs on both players' commands on both peers, which hash alike.
 /// Worlds that part are named at their tick once by each peer, the joiner naming the field they

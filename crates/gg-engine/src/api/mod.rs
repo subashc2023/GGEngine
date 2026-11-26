@@ -63,28 +63,34 @@ impl Look {
     /// Turns off in `frame`, as extracted from the game's environment and lights, each pass the
     /// look leaves out, unless the frame is bare. See [`gg_api::Pass`].
     pub(crate) fn leave_out(&self, frame: &mut crate::render_thread::Extracted) {
-        use gg_api::Pass;
-        if self.bare {
-            return;
+        if !self.bare {
+            leave_out(&self.skip, frame);
         }
-        for pass in &self.skip {
-            match pass {
-                Pass::AmbientOcclusion => frame.ambient_occlusion = None,
-                Pass::Reflections => frame.reflections = None,
-                Pass::Shadows => {
-                    for light in &mut frame.lights {
-                        light.shadow_distance = None;
-                    }
+    }
+}
+
+/// Turns off in `frame`, as extracted from the game's environment and lights, each pass in `skip`.
+/// See [`gg_api::Pass`].
+#[cfg(feature = "dev")]
+pub(crate) fn leave_out(skip: &[gg_api::Pass], frame: &mut crate::render_thread::Extracted) {
+    use gg_api::Pass;
+    for pass in skip {
+        match pass {
+            Pass::AmbientOcclusion => frame.ambient_occlusion = None,
+            Pass::Reflections => frame.reflections = None,
+            Pass::Shadows => {
+                for light in &mut frame.lights {
+                    light.shadow_distance = None;
                 }
-                Pass::Fog => frame.fog = None,
-                Pass::Bloom => frame.bloom = 0.0,
-                Pass::DepthOfField => frame.depth_of_field = None,
-                Pass::MotionBlur => frame.motion_blur = None,
-                Pass::Antialiasing => frame.antialiasing = gg_renderer::Antialiasing::None,
-                Pass::Grade => frame.grade = gg_renderer::Grade::IDENTITY,
-                Pass::Lens => frame.lens = gg_renderer::Lens::NONE,
-                Pass::Adaptation => frame.adaptation = None,
             }
+            Pass::Fog => frame.fog = None,
+            Pass::Bloom => frame.bloom = 0.0,
+            Pass::DepthOfField => frame.depth_of_field = None,
+            Pass::MotionBlur => frame.motion_blur = None,
+            Pass::Antialiasing => frame.antialiasing = gg_renderer::Antialiasing::None,
+            Pass::Grade => frame.grade = gg_renderer::Grade::IDENTITY,
+            Pass::Lens => frame.lens = gg_renderer::Lens::NONE,
+            Pass::Adaptation => frame.adaptation = None,
         }
     }
 }

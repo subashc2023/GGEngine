@@ -621,6 +621,13 @@ windows of their own. Tools take a dockspace (`App::view_panel`), where the game
 too but never leaves the main window, whose input alone reaches the layers, and draw their windows'
 title bars (`App::custom_title_bar`). Games keep the OS's frame.
 
+A game starts as just the game: its development build's debug overlays (`App::debug_overlays`)
+show nothing until turned on. The key below Esc opens their bar; `--overlays` and the tool API's
+`overlays` set them too, and the last set is kept for the next run. Stats and the Inspector's
+panels are egui's. World overlays draw lines with the world, as colliders' outlines do, so captures
+show them; the Render menu's channel and passes go under the look's. A game names its own
+overlays as it asks whether each is on (`Context::debug_overlay`).
+
 A game's own UI is apart from egui, on the view's canvas (`Context::canvas`): text and sprites
 anchored to the view and scaled with its height, drawn into the view, so captures show them. A
 `.ui` file is a tree of named nodes, which a layer adds (`Context::add_ui`) and drives by name

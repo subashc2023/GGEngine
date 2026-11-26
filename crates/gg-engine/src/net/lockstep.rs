@@ -329,6 +329,28 @@ impl Lockstep {
         self.player() == 0
     }
 
+    /// The peer's numbers for the Network overlay.
+    #[cfg(feature = "dev")]
+    pub(super) fn stats(&self) -> super::NetStats {
+        use super::{NetRole, NetStats};
+        let trip = self.link.as_ref().and_then(Link::trip);
+        NetStats {
+            role: if self.hosts() {
+                NetRole::Host
+            } else {
+                NetRole::Joiner
+            },
+            trip: trip.map(|(mean, _)| mean),
+            deviation: trip.map(|(_, deviation)| deviation),
+            delay: Some(self.delay),
+            window: self.window,
+            waits: self.waits,
+            rolled: self.rolled,
+            bytes: self.link.as_ref().map_or([0; 2], Link::bytes),
+            links: usize::from(self.link.is_some()),
+        }
+    }
+
     /// Where the session stands for this peer ([`SessionPhase`]).
     pub(super) fn phase(&self) -> SessionPhase {
         let heard = self.find.heard();

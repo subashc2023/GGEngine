@@ -44,6 +44,18 @@ impl Input {
         self.cursor
     }
 
+    /// The keys held, in no order, for the debug overlays.
+    #[cfg(feature = "dev")]
+    pub(crate) fn keys_down(&self) -> impl Iterator<Item = Key> + '_ {
+        self.keys.iter().copied()
+    }
+
+    /// The mouse buttons held, in no order, for the debug overlays.
+    #[cfg(feature = "dev")]
+    pub(crate) fn buttons_down(&self) -> impl Iterator<Item = MouseButton> + '_ {
+        self.buttons.iter().copied()
+    }
+
     pub(crate) fn record(&mut self, event: &Event<'_>) {
         match *event {
             Event::Key { key, pressed, .. } => hold(&mut self.keys, key, pressed),

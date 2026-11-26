@@ -2924,6 +2924,48 @@ fn a_looks_render_scale_replaces_the_games_own_until_given_back() {
     assert_eq!((cx.dev.look.render_scale, cx.dev.look.revision), (None, 2));
 }
 
+/// `overlays` turns debug overlays on and off by name, in any case, and answers each with the
+/// Render menu's choices. A name no overlay has waits; one both on and off is refused, the
+/// overlays as they were.
+#[test]
+fn overlays_turn_on_and_off_by_name_and_answer_each() {
+    let (mut api, session) = started("Api Overlays");
+    let mut cx = Context::seeded(8);
+    cx.dev.overlays.engine = true;
+    let mut stepper = Stepper::default();
+    let client = |mut client: Client| {
+        let asked = json!({"on": ["fps", "Enemy_aim"], "channel": "normal", "skip": ["fog"]});
+        let set = client.call_as::<gg_api::Overlaid>("overlays", asked);
+        let refused = client.call("overlays", json!({"on": ["fps"], "off": ["FPS"]}));
+        let read = client.call_as::<gg_api::Overlaid>("overlays", Value::Null);
+        (set.expect("set"), refused.err(), read.expect("read"))
+    };
+    let (set, refused, read) = serving(
+        &mut api,
+        &mut cx,
+        &mut Stack::default(),
+        &mut stepper,
+        session,
+        client,
+        |_, _, _| {},
+    );
+    let on = set.overlays.iter().filter(|overlay| overlay.on);
+    assert_eq!(
+        on.map(|overlay| &overlay.name[..]).collect::<Vec<_>>(),
+        ["FPS"]
+    );
+    assert_eq!(set.waiting, ["Enemy_aim"]);
+    assert_eq!(set.channel, Some(gg_api::Shown::Normal));
+    assert_eq!(set.skip, [gg_api::Pass::Fog]);
+    assert!(!set.bar);
+    assert_eq!(refused.expect("refused").code, "api.bad_params");
+    assert_eq!(read, set, "the overlays as they were");
+    assert!(
+        cx.dev.overlays.asked("enemy aim"),
+        "the game's, once it asks"
+    );
+}
+
 /// A look's left-out passes are a set: any order or repeats answer once each in
 /// [`gg_api::Pass::ALL`]'s order, and the same set again is no revision. An empty list gives the
 /// part back, as `null` does. Frames get the set as answered.
@@ -4019,6 +4061,23 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         ),
         ("look", json!({"show": {"image": ""}}), "api.bad_params"),
         ("look", json!({"show": "albedo"}), "api.bad_params"),
+        (
+            "overlays",
+            json!({"on": ["a"], "off": ["A"]}),
+            "api.bad_params",
+        ),
+        ("overlays", json!({"on": [""]}), "api.bad_params"),
+        (
+            "overlays",
+            json!({"channel": "path_traced"}),
+            "api.bad_params",
+        ),
+        (
+            "overlays",
+            json!({"channel": {"image": "view depth"}}),
+            "api.bad_params",
+        ),
+        ("overlays", json!({"shown": true}), "api.bad_params"),
         ("scene", Value::Null, "api.bad_params"),
         ("scene", json!({"action": "close"}), "api.bad_params"),
         ("scene", json!({"action": "open"}), "api.bad_params"),

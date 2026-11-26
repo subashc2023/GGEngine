@@ -23,13 +23,12 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, with the engine's Performance and Inspector panels: what `main` runs, and what its
-/// recordings replay.
+/// The game, with the engine's debug overlays: what `main` runs, and what its recordings replay.
 fn app() -> App {
     let app = App::new("rts")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    app.layer(Game::new()).dev_panels()
+    app.layer(Game::new()).debug_overlays()
 }
 
 /// The ground's half side, which units and the camera's focus stay within.

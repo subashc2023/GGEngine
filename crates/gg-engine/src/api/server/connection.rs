@@ -303,9 +303,12 @@ pub(super) fn needs(call: &Call) -> Vec<Capability> {
             .flatten()
             .collect(),
         Call::Frames { .. } => vec![View, Files],
-        Call::View(_) | Call::Look(_) | Call::Pick(..) | Call::Cast(..) | Call::Images => {
-            vec![View]
-        }
+        Call::View(_)
+        | Call::Look(_)
+        | Call::Overlays(_)
+        | Call::Pick(..)
+        | Call::Cast(..)
+        | Call::Images => vec![View],
         Call::Project(Projecting::Point(_)) => vec![View],
         Call::Project(Projecting::Entity(_)) => vec![View, Read(None)],
         Call::Input(..) | Call::Press { .. } => vec![Input],

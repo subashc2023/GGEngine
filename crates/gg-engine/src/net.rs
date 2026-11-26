@@ -494,6 +494,40 @@ pub(crate) enum Session {
     Client(Box<Client>),
 }
 
+/// A session's numbers for the Network overlay, copied each frame.
+#[cfg(feature = "dev")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NetStats {
+    pub(crate) role: NetRole,
+    /// The round trip's mean in seconds, and its deviation where timed on, as the lockstep
+    /// link's is; none before one is timed. A client's is its hello's to its world; a server's
+    /// links time none.
+    pub(crate) trip: Option<f64>,
+    pub(crate) deviation: Option<f64>,
+    /// The ticks a peer's inputs go ahead; none for a server or client.
+    pub(crate) delay: Option<u64>,
+    /// The most ticks a rollback peer runs on predictions; 0 for lockstep, which predicts none.
+    pub(crate) window: u64,
+    /// Ticks that waited for the other's inputs (a client's: its stalls), and rollbacks, the ticks
+    /// they reran and the most at once.
+    pub(crate) waits: u64,
+    pub(crate) rolled: [u64; 3],
+    /// Bytes sent and taken on every link so far.
+    pub(crate) bytes: [u64; 2],
+    /// The links to peers or clients.
+    pub(crate) links: usize,
+}
+
+/// What a run is in its session, as [`NetStats`] says.
+#[cfg(feature = "dev")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NetRole {
+    Host,
+    Joiner,
+    Server,
+    Client,
+}
+
 impl Session {
     /// Starts the session `net` says, keyed by `code`, for app `app` of build `build` with `layers`
     /// bottom up ([`Lockstep::start`], [`Server::start`], [`Client::start`]). A host or server
@@ -594,6 +628,16 @@ impl Session {
                 phase: net.phase(),
             }),
             Self::Server(_) | Self::Client(_) => None,
+        }
+    }
+
+    /// The session's numbers for the Network overlay.
+    #[cfg(feature = "dev")]
+    pub(crate) fn stats(&self) -> NetStats {
+        match self {
+            Self::Peer(net) => net.stats(),
+            Self::Server(server) => server.stats(),
+            Self::Client(client) => client.stats(),
         }
     }
 

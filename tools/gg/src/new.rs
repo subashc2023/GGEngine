@@ -93,13 +93,12 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, with the engine's Performance and Inspector panels: what `main` runs, and what its
-/// recordings replay.
+/// The game, with the engine's debug overlays: what `main` runs, and what its recordings replay.
 fn app() -> App {
     let app = App::new("{name}")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    app.layer(Game::new()).dev_panels()
+    app.layer(Game::new()).debug_overlays()
 }
 
 /// What the player steers: it moves `speed` units a second along `heading`.

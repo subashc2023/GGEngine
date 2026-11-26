@@ -75,6 +75,7 @@ pub(crate) fn run_headless(
     let mut cx = Context::of_run(None, app, embedded);
     cx.set_render_scale(args.render_scale);
     api::debug(&api, &mut cx);
+    crate::debug_overlays::start(&mut cx, args.overlays.as_deref());
     let mut clock = Clock::default();
     let mut stepper = match app.headless_step {
         Some(_) => Stepper::default(),
@@ -431,6 +432,10 @@ pub(crate) fn run_frame(
         stepper.jump_to(ticks);
     }
     cx.session = stack.session_status();
+    #[cfg(feature = "dev")]
+    {
+        cx.dev.net = stack.net_stats();
+    }
     let owed = stack.paced(dt);
     // As the requests served before the frame left it, before its ticks queue sounds.
     cx.follow_playback(stepper.stopped(), stepper.paused());
@@ -442,6 +447,10 @@ pub(crate) fn run_frame(
         stack.tick(cx, tick)
     };
     stepper.step(owed, tick, || start.elapsed());
+    #[cfg(feature = "dev")]
+    {
+        cx.dev.sim = stepper.sim();
+    }
     // In a world edited while no tick runs, cells come and go around the look's viewpoint.
     if stepper.stopped() {
         cx.stream_stopped();
@@ -853,6 +862,21 @@ impl Stepper {
     /// Whether the simulation is stopped: never in a build without `dev`.
     pub(crate) fn stopped(&self) -> bool {
         self.stopped
+    }
+
+    /// The tick and state the Simulation overlay shows.
+    #[cfg(feature = "dev")]
+    fn sim(&self) -> crate::layer::Sim {
+        use crate::layer::SimState;
+        let state = match (self.stopped, self.paused) {
+            (true, _) => SimState::Stopped,
+            (false, true) => SimState::Paused,
+            (false, false) => SimState::Running,
+        };
+        crate::layer::Sim {
+            tick: self.ticks,
+            state,
+        }
     }
 }
 
@@ -1463,6 +1487,33 @@ pub(crate) mod tests {
             assert!(run_frame(&mut stack, cx, dt, stepper, None).is_none());
         }
         assert_eq!(*calls.borrow(), ["tick 0", "update", "tick 1", "update"]);
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn each_frame_copies_the_simulations_tick_and_state_to_the_context() {
+        use crate::layer::{Sim, SimState};
+        let mut stack = Stack::default();
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx).expect("loaded");
+        let mut stepper = Stepper::lockstep();
+        let mut frame = |stepper: &mut Stepper| {
+            assert!(run_frame(&mut stack, &mut cx, Duration::ZERO, stepper, None).is_none());
+            cx.dev.sim
+        };
+        let at = |tick, state| Sim { tick, state };
+        assert_eq!(frame(&mut stepper), at(1, SimState::Running));
+        assert_eq!(frame(&mut stepper), at(2, SimState::Running));
+        stepper.pause();
+        assert_eq!(frame(&mut stepper), at(2, SimState::Paused));
+        stepper.step_by(2);
+        assert_eq!(frame(&mut stepper), at(4, SimState::Paused));
+        stepper.stop();
+        assert_eq!(frame(&mut stepper), at(4, SimState::Stopped));
+        stepper.play();
+        stepper.resume();
+        assert_eq!(frame(&mut stepper), at(5, SimState::Running));
+        assert_eq!(cx.dev.net, None);
     }
 
     /// A stopped run's frames bring a world's cells in around the look's viewpoint, as the editor's

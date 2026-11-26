@@ -10,6 +10,8 @@
 
 use std::f32::consts::TAU;
 
+#[cfg(feature = "dev")]
+use gg_core::math::DVec3;
 use gg_core::math::{Mat4, Vec3, Vec4, libm};
 use gg_renderer::{Draws, Line, Shaders};
 use tracing::warn;
@@ -436,6 +438,16 @@ pub(crate) fn draw_colliders(
     };
     dim2::joint_lines(world, poses, &mut joined);
     dim3::joint_lines(world, poses, &mut joined);
+}
+
+/// Gives `each` where the colliders touching after the last step of physics push, 2D's contacts
+/// then 3D's: the first collider's body's entity, if any; the point halfway between the colliders'
+/// surfaces; and the unit normal, from the first collider toward the second. Points are the
+/// world's, in `f64`; a 2D contact's Z is 0.
+#[cfg(feature = "dev")]
+pub(crate) fn contact_points(world: &World, each: &mut impl FnMut(Option<Entity>, DVec3, DVec3)) {
+    dim2::contact_points(world, each);
+    dim3::contact_points(world, each);
 }
 
 /// Gives `each` a joint's lines in the world's space, with `id`, its entity's: from where `poses`

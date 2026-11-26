@@ -1,7 +1,7 @@
 gg-recording 3
 app Shards
 engine 0.1.0 debug
-layers Shards PerfPanel Inspector
+layers Shards DebugOverlays
 seed c4179b95bc8c875a
 named List([String("c65ed95dbb8061f1"), String("textures/pillar.png")])
 named List([String("ee4245ad5be9c53d"), String("models/crystal.gltf")])

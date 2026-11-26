@@ -442,6 +442,60 @@ const TOOLS: &[Tool] = &[
         required: &[],
     },
     Tool {
+        name: "overlays",
+        description: "Turns the game's debug overlays on and off, those its key below Esc's bar \
+                      offers in a development build with `App::debug_overlays`, and answers each \
+                      overlay's `name`, `group` (stats, inspect, world, game) and whether it's \
+                      `on`, the names on that no overlay has yet (`waiting`), the `channel`, the \
+                      passes left out (`skip`) and whether the `bar` shows. World overlays \
+                      (colliders, contacts, velocities, navigation, cells, bounds, axes, names, \
+                      skeletons, cameras, lights, sounds) draw with the world, so `capture` shows \
+                      them; stats and panels are UI, which it doesn't. Kept for the game's next \
+                      runs. Leave every part out to read them.",
+        properties: || {
+            json!({
+                "on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Names to turn on, in any case, `_` or `-` for a space: the \
+                                    engine's, such as `fps`, `memory`, `log`, `inspector`, \
+                                    `colliders`, `velocities`, `bounds` or `names`, or the \
+                                    game's own, which waits until the game asks for it",
+                },
+                "off": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Names to turn off; a name in both `on` and `off` is refused",
+                },
+                "only": {
+                    "type": "boolean",
+                    "description": "Turn every overlay off before `on` and `off` apply",
+                },
+                "channel": {
+                    "type": ["string", "null"],
+                    "enum": ["base_color", "normal", "surface_normal", "metallic", "roughness",
+                             "occlusion", "emission", "specular_color", "direct_light",
+                             "sky_light", "reflection", "diffuse_light", "specular_light",
+                             "traced_reflection", "reflection_rays", null],
+                    "description": "The part of shading the view shows in place of its light, as \
+                                    the bar's Render menu picks it; null for the light. The look's \
+                                    `show` wins over it",
+                },
+                "skip": {
+                    "type": "array",
+                    "items": {"enum": passes()},
+                    "description": "The passes the view leaves out, in place of those before, \
+                                    with the look's own; `[]` for none",
+                },
+                "bar": {
+                    "type": "boolean",
+                    "description": "Whether the overlays' bar shows over the top of the view",
+                },
+            })
+        },
+        required: &[],
+    },
+    Tool {
         name: "pick",
         description: "The entity the view shows at a pixel, as it's shown, the look included: its \
                       ID and name, both null outside the view or where none draws; a model's node \
@@ -1073,7 +1127,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         // `scene`'s and `save_prefab`'s paths stay as given: from the asset root.
         "step" | "scene" | "pick" | "cast" | "project" | "input" | "press" | "entities"
         | "entity" | "get" | "apply" | "save_prefab" | "undo" | "redo" | "edits" | "assets"
-        | "debug" => call(name, Value::Object(arguments)),
+        | "debug" | "overlays" => call(name, Value::Object(arguments)),
         "look" | "frames" => {
             // A name that isn't a variant's is an image's, as in `capture`.
             if let Some(show) = arguments.get_mut("show")

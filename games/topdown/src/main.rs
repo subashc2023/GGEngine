@@ -11,6 +11,7 @@
 
 use std::ops::ControlFlow;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use gg_engine::math::DVec3;
 use gg_engine::prelude::*;
@@ -20,17 +21,19 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, with the engine's Performance and Inspector panels: what `main` runs, and what its
-/// recordings replay.
+/// The game, with the engine's debug overlays: what `main` runs, and what its recordings replay.
 fn app() -> App {
     let app = App::new("topdown")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    app.layer(Game::new()).dev_panels()
+    app.layer(Game::new()).debug_overlays()
 }
 
 /// Where the player starts, and goes back to when an enemy touches it.
 const START: Vec2 = Vec2::new(0.0, 0.0);
+
+/// The Enemy aim overlay's lines: linear RGBA.
+const AIM: Vec4 = Vec4::new(1.0, 0.25, 0.2, 0.8);
 
 /// The z the camera sees from.
 const CAMERA_Z: f64 = 10.0;
@@ -105,6 +108,8 @@ struct Game {
     dead: Vec<Entity>,
     /// The player's place this tick.
     player_at: Vec<Vec2>,
+    /// The enemies' places, for the Enemy aim overlay, kept to reuse its memory.
+    enemies_at: Vec<Vec3>,
 }
 
 impl Game {
@@ -128,6 +133,7 @@ impl Game {
             commands: Vec::new(),
             dead: Vec::new(),
             player_at: Vec::new(),
+            enemies_at: Vec::new(),
         }
     }
 }
@@ -190,6 +196,24 @@ impl Layer for Game {
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
         Some(&mut self.commands)
+    }
+
+    /// Draws the game's own debug overlay, Enemy aim, while it's on: a line from each enemy to the
+    /// player it walks at. The overlays' bar lists it under Game.
+    fn update(&mut self, cx: &mut Context, _: Duration) {
+        if !cx.debug_overlay("Enemy aim") {
+            return;
+        }
+        let player = cx.world().query::<(&Player, &Transform)>().next();
+        let Some(player) = player.map(|(_, at)| at.translation.as_vec3()) else {
+            return;
+        };
+        self.enemies_at.clear();
+        let enemies = cx.world().query::<(&Enemy, &Transform)>();
+        (self.enemies_at).extend(enemies.map(|(_, at)| at.translation.as_vec3()));
+        for &enemy in &self.enemies_at {
+            cx.draw_line(enemy, player, AIM, 2.0);
+        }
     }
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {

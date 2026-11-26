@@ -466,6 +466,23 @@ impl Server {
         }
     }
 
+    /// The server's numbers for the Network overlay.
+    #[cfg(feature = "dev")]
+    pub(super) fn stats(&self) -> super::NetStats {
+        let bytes = self.clients.iter().map(|client| client.link.bytes());
+        super::NetStats {
+            role: super::NetRole::Server,
+            trip: None,
+            deviation: None,
+            delay: None,
+            window: 0,
+            waits: 0,
+            rolled: [0; 3],
+            bytes: bytes.fold([0; 2], |sum, [sent, taken]| [sum[0] + sent, sum[1] + taken]),
+            links: self.clients.len(),
+        }
+    }
+
     /// Logs, as the run ends, each client's link ([`Link::ended`]) and what the server sent
     /// (`net.served`): worlds, states and their bytes; ticks that sent none, as the states thread
     /// was still writing; tables the states wrote, and kept as the client's base had them; and

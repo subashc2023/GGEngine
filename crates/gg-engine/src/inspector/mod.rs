@@ -165,6 +165,8 @@ pub struct Inspector {
     not_done: Option<String>,
     /// What the panels and the link did since the last tick, which makes it.
     queued: Queue,
+    /// Which panels and menus it shows: the debug overlays' choice, else all.
+    pub(crate) showing: Showing,
     /// Whose edit goes on, if a set was queued since the last seal, operation, undo or redo,
     /// which end it: a seal queued otherwise would end none.
     open: Option<Gesture>,
@@ -277,6 +279,25 @@ struct Edit {
 
 /// What a pass of the panels found to do, for [`Inspector::queue`]: widgets' sets of the picked
 /// entity's fields, menu and Ctrl+D operations, input cues, and the Edit menu's step.
+/// Which of the Inspector's panels and menus show: all, unless the debug overlays hold it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Showing {
+    pub(crate) entities: bool,
+    pub(crate) inspector: bool,
+    /// The Edit and Entity menus. Their keys work either way.
+    pub(crate) menus: bool,
+}
+
+impl Default for Showing {
+    fn default() -> Self {
+        Self {
+            entities: true,
+            inspector: true,
+            menus: true,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Pass {
     sets: Vec<Edit>,
@@ -386,21 +407,28 @@ impl Layer for Inspector {
             Some(remote) => remote.pending(self.picked),
             None => self.pending(),
         };
-        ui.menu("Edit", |ui| pass.chosen = self.edit_menu(ui, &labels));
-        ui.menu("Entity", |ui| {
-            self.entity_menu(source, ui, &mut pass.operations)
-        });
-        ui.panel("Entities", |ui| self.entities(source, ui, &mut pass));
-        ui.panel("Inspector", |ui| {
-            // Again: the Entities panel may just have changed the pick.
-            let pending = match &remote {
-                Some(remote) => remote.pending(self.picked),
-                None => self.pending(),
-            };
-            // A new panel floats smaller than its contents.
-            let scroll = egui::ScrollArea::vertical();
-            scroll.show(ui, |ui| self.inspect(source, ui, &mut pass, &pending));
-        });
+        let showing = self.showing;
+        if showing.menus {
+            ui.menu("Edit", |ui| pass.chosen = self.edit_menu(ui, &labels));
+            ui.menu("Entity", |ui| {
+                self.entity_menu(source, ui, &mut pass.operations)
+            });
+        }
+        if showing.entities {
+            ui.panel("Entities", |ui| self.entities(source, ui, &mut pass));
+        }
+        if showing.inspector {
+            ui.panel("Inspector", |ui| {
+                // Again: the Entities panel may just have changed the pick.
+                let pending = match &remote {
+                    Some(remote) => remote.pending(self.picked),
+                    None => self.pending(),
+                };
+                // A new panel floats smaller than its contents.
+                let scroll = egui::ScrollArea::vertical();
+                scroll.show(ui, |ui| self.inspect(source, ui, &mut pass, &pending));
+            });
+        }
         // The Edit and Entity menus' keys, wherever the panels are.
         pass.cues.read(ui.egui());
         self.duplicate_picked(source, &mut pass);

@@ -549,6 +549,7 @@ impl Api {
                 | Call::View(_)
                 | Call::Input(_, None)
                 | Call::Look(_)
+                | Call::Overlays(_)
                 | Call::Pick(..)
                 | Call::Cast(..)
                 | Call::Project(_)
@@ -776,6 +777,10 @@ impl Api {
             Call::Input(events, None) => {
                 hand(cx, stack, &events);
                 reply.send(Ok("{}".to_owned()));
+            }
+            Call::Overlays(asked) => {
+                cx.dev.overlays.apply(&asked);
+                reply.result(&cx.dev.overlays.report());
             }
             Call::Look(given) => {
                 self.set_look(cx, given, client);

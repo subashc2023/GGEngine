@@ -26,13 +26,12 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, with the engine's Performance and Inspector panels: what `main` runs, and what its
-/// recordings replay.
+/// The game, with the engine's debug overlays: what `main` runs, and what its recordings replay.
 fn app() -> App {
     let app = App::new("tps")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    app.layer(Game::new()).dev_panels()
+    app.layer(Game::new()).debug_overlays()
 }
 
 /// The furthest a rig looks down and up, in radians: the camera orbits, so up puts it low.

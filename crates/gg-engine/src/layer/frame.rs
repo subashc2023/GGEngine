@@ -21,6 +21,8 @@ use crate::camera::Camera;
 use crate::canvas::Canvas;
 #[cfg(feature = "dev")]
 use crate::cells::CellState;
+#[cfg(feature = "dev")]
+use crate::debug_overlays::{self, Overlay};
 use crate::draw::{self, Poses};
 use crate::environment;
 #[cfg(doc)]
@@ -416,6 +418,21 @@ impl Context {
         Some((*self.outline_root.first()?, color, width))
     }
 
+    /// Whether the game's own debug overlay `name` is on, such as `"Enemy aim"`, for the game to
+    /// draw it this frame. The first ask lists it in the [`DebugOverlays`](crate::DebugOverlays)'
+    /// Game menu and the tool API's `overlays`, which turn it on and off; it's off until then,
+    /// unless `--overlays` or the last run turned it on. A name the engine's overlays have, such
+    /// as `"Colliders"`, gives that one's state. Always `false` without `dev`.
+    pub fn debug_overlay(&mut self, name: &str) -> bool {
+        #[cfg(feature = "dev")]
+        return self.dev.overlays.asked(name);
+        #[cfg(not(feature = "dev"))]
+        {
+            let _ = name;
+            false
+        }
+    }
+
     /// Whether the world's colliders' outlines draw: see
     /// [`set_colliders_shown`](Self::set_colliders_shown). Not at first.
     pub fn colliders_shown(&self) -> bool {
@@ -491,6 +508,8 @@ impl Context {
             let viewpoint = self.dev.look.viewpoint.or(self.viewpoint).or(seen);
             self.draw_grid(&viewpoint.unwrap_or_default(), plane);
             self.draw_cells();
+        } else if !self.dev.look.bare && self.dev.overlays.on(Overlay::Cells) {
+            self.draw_cells();
         }
         let (world, past, placed) = (&self.world, &self.past, &self.placed);
         let (draws, shaders, fonts) = (&mut self.draws, &mut self.shaders, &mut self.fonts);
@@ -500,7 +519,11 @@ impl Context {
             world, past, placed, drawn, ticks, draws, shaders, fonts, scratch,
         );
         let (colliders, navmesh) = (self.colliders_drawn(), self.navmesh_drawn());
-        if (colliders || navmesh)
+        #[cfg(feature = "dev")]
+        let overlays = !self.dev.look.bare && self.dev.overlays.world();
+        #[cfg(not(feature = "dev"))]
+        let overlays = false;
+        if (colliders || navmesh || overlays)
             && let Some(poses) = Poses::new(world, past, placed, alpha, self.origin)
         {
             let scale = self.scale() as f32;
@@ -510,6 +533,22 @@ impl Context {
             }
             if navmesh {
                 navigation::draw_navigation(world, &poses, scale, over, shaders);
+            }
+            #[cfg(feature = "dev")]
+            if overlays {
+                let state = &self.dev.overlays;
+                // What the frame will draw from, and whether that's a camera's own view.
+                let set = self.dev.look.viewpoint.or(self.viewpoint);
+                let seen = self.seen;
+                let mut frame = debug_overlays::world::Frame {
+                    meshes: &self.meshes,
+                    fonts: &mut self.fonts,
+                    audio: &self.audio,
+                    viewpoint: set.or(seen.map(|(_, seen)| seen)),
+                    from: seen.map(|(id, _)| id).filter(|_| set.is_none()),
+                    view: self.view,
+                };
+                debug_overlays::world::draw(state, world, &poses, &mut frame, scale, over, shaders);
             }
         }
         // What changes after, until the next frame draws, is marked past what this one saw.
@@ -559,16 +598,24 @@ impl Context {
     /// bare, or else as the layers set.
     fn colliders_drawn(&self) -> bool {
         #[cfg(feature = "dev")]
-        if !self.dev.look.bare
-            && let Some(shown) = self.dev.look.colliders
-        {
-            return shown;
+        if !self.dev.look.bare {
+            if let Some(shown) = self.dev.look.colliders {
+                return shown;
+            }
+            if self.dev.overlays.on(Overlay::Colliders) {
+                return true;
+            }
         }
         self.colliders
     }
 
-    /// Whether the frame draws the navmesh and the agents' paths, as the layers set.
+    /// Whether the frame draws the navmesh and the agents' paths, as the layers set or the
+    /// Navigation overlay, unless the frame is bare.
     fn navmesh_drawn(&self) -> bool {
+        #[cfg(feature = "dev")]
+        if !self.dev.look.bare && self.dev.overlays.on(Overlay::Navigation) {
+            return true;
+        }
         self.navmesh
     }
 
@@ -683,12 +730,18 @@ impl Context {
             self.dev.look.seen = Some(frame.viewpoint);
             frame.look = self.dev.look.revision;
             frame.bare = self.dev.look.bare;
-            frame.show = self.dev.look.shown();
+            // The look's, else the overlays' Render menu's.
+            let bare = self.dev.look.bare;
+            let channel = (self.dev.overlays.channel).filter(|_| !bare);
+            frame.show = (self.dev.look.shown()).or(channel.map(crate::api::Shown::Shading));
             // The game's own scale stays in `render_scale`, which a layer reads back.
             if let Some(scale) = self.dev.look.render_scale.filter(|_| !self.dev.look.bare) {
                 frame.render_scale = scale;
             }
             self.dev.look.leave_out(frame);
+            if !bare {
+                crate::api::leave_out(&self.dev.overlays.skip, frame);
+            }
             // As the look's viewpoint shows, so that a frame that turns to or from it is cut to.
             frame.looked = matches!(seer, Seer::Look(_));
         }

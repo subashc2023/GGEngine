@@ -56,7 +56,7 @@ fn app() -> App {
     let app = App::new("Shards")
         .project(env!("CARGO_MANIFEST_DIR"))
         .source(env!("GG_SOURCE"));
-    app.layer(Shards::new()).dev_panels()
+    app.layer(Shards::new()).debug_overlays()
 }
 
 /// How far the arena's inside reaches from its middle, across and up.

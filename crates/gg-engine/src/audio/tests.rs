@@ -527,3 +527,32 @@ fn music_reads_whole_and_refuses_what_isnt_any() {
     };
     assert_eq!(error.code(), "engine.bad_music");
 }
+
+/// Playing sounds give where they play from, those from nowhere left out, and an entity's sound
+/// follows it while it lives and stays where it was after.
+#[cfg(feature = "dev")]
+#[test]
+fn places_give_where_positional_sounds_play() {
+    let mut audio = mocked();
+    let sound = audio.add("chime", silence(48_000));
+    let mut world = World::default();
+    let entity = world.spawn(Transform::IDENTITY);
+    audio.play(sound, Place::Nowhere, &world);
+    audio.play(sound, Place::At(DVec3::X), &world);
+    audio.play(sound, Place::On(entity), &world);
+    render(&mut audio);
+    let places = |audio: &Audio<MockBackend>, world: &World| {
+        let mut found = Vec::new();
+        audio.places(world, &mut |entity, at| found.push((entity, at)));
+        found
+    };
+    assert_eq!(
+        places(&audio, &world),
+        [(None, DVec3::X), (Some(entity), DVec3::ZERO)]
+    );
+    world
+        .get_mut::<Transform>(entity)
+        .expect("alive")
+        .translation = DVec3::Y;
+    assert_eq!(places(&audio, &world)[1], (Some(entity), DVec3::Y));
+}

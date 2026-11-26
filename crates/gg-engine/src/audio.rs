@@ -40,7 +40,7 @@ const FADE: f32 = 1.0;
 /// Distances in world units from a camera with perspective: full volume within the first,
 /// silence from the second, linear in decibels between. kira's spatial tracks' defaults
 /// (`SpatialTrackDistances`).
-const HEARD: [f32; 2] = [1.0, 100.0];
+pub(crate) const HEARD: [f32; 2] = [1.0, 100.0];
 
 /// Panning of a sound straight out to a side of a camera with perspective: kira's spatial tracks'
 /// default spatialization strength, so the other ear still hears it.
@@ -392,6 +392,22 @@ impl Audio {
 }
 
 impl<B: Backend> Audio<B> {
+    /// Gives `each` where each sound playing from a place in the world is, and its entity if it
+    /// plays from one: where the latest tick left the entity while it lives, else where it was
+    /// last. Sounds from nowhere are left out.
+    #[cfg(feature = "dev")]
+    pub(crate) fn places(&self, world: &World, each: &mut impl FnMut(Option<Entity>, DVec3)) {
+        for (_, spot) in &self.playing {
+            match *spot {
+                Spot::Nowhere => {}
+                Spot::At(at) => each(None, at),
+                Spot::On(entity, last) => {
+                    each(Some(entity), position(world, entity).unwrap_or(last))
+                }
+            }
+        }
+    }
+
     pub(crate) fn add(&mut self, name: &str, data: StaticSoundData) -> Sound {
         let index = u32::try_from(self.sounds.len()).expect("fewer than 2³² sounds");
         self.sounds.push((name.into(), data));

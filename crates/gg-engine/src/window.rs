@@ -302,6 +302,7 @@ impl Handler<'_> {
         self.cx.set_max_fps(max);
         self.cx.set_render_scale(self.args.render_scale);
         api::debug(&self.api, &mut self.cx);
+        crate::debug_overlays::start(&mut self.cx, self.args.overlays.as_deref());
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
         let snapshot = self.snapshot.take();

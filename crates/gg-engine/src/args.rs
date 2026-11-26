@@ -65,6 +65,8 @@ pub(crate) struct Args {
     pub(crate) mods: Option<PathBuf>,
     /// The package the run reads its asset root's files from.
     pub(crate) package: Option<PathBuf>,
+    /// The debug overlays on as the run starts, by name, in place of those kept: `none` for none.
+    pub(crate) overlays: Option<Vec<String>>,
 }
 
 /// A run's end of a networked session: a lockstep host or joiner, or a server or its client.
@@ -213,6 +215,8 @@ as their files change, logging `Shader reloaded`, `Model reloaded` and the like,
   --paused            Start paused until the API's `resume`, so a tool steps from the first tick.
                       With --restore, paused or not as the snapshot's was
   --restore <PATH>    Start from a snapshot, which the API's `snapshot` writes, not a fresh world
+  --overlays <LIST>   Start with these debug overlays on, as `fps,colliders`, in place of those
+                      the last run kept, or `none`: the key below Esc opens their bar
 
 Determinism:
   --record <PATH>     Record the run: its seed, its layers' commands and its hash each tick
@@ -297,6 +301,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         link: None,
         mods: None,
         package: None,
+        overlays: None,
     };
     // The first flag given that a replay refuses.
     let mut not_replayed = None;
@@ -492,6 +497,14 @@ fn development(
         "--paused" => parsed.paused = true,
         // The last wins: `gg run` gives it after the game's own.
         "--restore" => parsed.restore = Some(value_of(flag)?.into()),
+        "--overlays" => {
+            let list = value_of(flag)?;
+            let names = list
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            parsed.overlays = Some(names.map(str::to_owned).collect());
+        }
         _ => return Ok(false),
     }
     Ok(true)

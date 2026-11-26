@@ -168,6 +168,12 @@ impl Stack {
         self.net.as_ref().and_then(Session::status)
     }
 
+    /// The session's numbers for the Network overlay, if networked.
+    #[cfg(feature = "dev")]
+    pub(crate) fn net_stats(&self) -> Option<crate::net::NetStats> {
+        self.net.as_ref().map(Session::stats)
+    }
+
     /// Runs each tick, a replay's too, again as a SyncTest (`--sync-test`; see
     /// [`tick`](Self::tick)). Call before the layers attach.
     pub(crate) fn sync_test(&mut self) {

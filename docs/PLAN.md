@@ -39,6 +39,9 @@ Each phase's milestones, and what each deferred, are in git history.
   often as its microsurface does, `path_traced` shown and captured through the tool API, the
   raster's light held to it and its multiple scattering fitted to the walk, its tests on lavapipe
   (2026-11-18)
+- **Debug overlays** in place of games' panels: a bar under the key below Esc, stats, the
+  Inspector's panels, lines in the world, shading channels and passes, a game's own, `gg overlays`
+  (2026-11-25)
 
 ## Open
 
@@ -68,6 +71,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | RenderDoc captures through the tool API, several a run, after streaming, with synchronization validation | An agent needs a frame's GPU work |
 | Captures on macOS, and of the editor's view (`api.no_view`) | Someone captures there |
 | More through the API: each pass's GPU time, shadow draw counts, exposure, streaming, sounds playing, mods loaded, a run's last event, each log line's tick | An agent needs it |
+| More debug overlays: a script's own, after a `gg.draw_line`; wireframe and overdraw views; sprites and lines counted apart; the stats and panels in a capture's image; a game's own key for the bar; a server's round trips, which its links don't time; a pad gone, which no event says | A game or an agent needs one |
 | Debug views of lights per cluster, shadow cascades, TAA's history and the navmesh; `gg probe` at its sources' precision | They need debugging by sight |
 | Through the API: game actions pressed and listed by name, `gg mv` with the ID file | An agent plays through it, or loses IDs |
 | Steps while minimized (`api.paused`); requests, and the compositor, answered while a dialog or a script's stop holds the main thread | A tool needs them |

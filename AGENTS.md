@@ -103,9 +103,12 @@ While the game runs, call `target/debug/gg`, which `cargo gg run` built, or the 
   While it runs: `cargo gg logs --follow` and `cargo gg status`. `--help` covers `RUST_LOG`.
 - A run that doesn't end in an error logs `engine.perf`: frame times, where they went, and memory.
   Compare release builds run headless for the same number of frames.
-- Live frame times: the Performance panel; in the editor, the game's first. The title bar's gear
-  limits the frame rate; in the editor, its own and the game's (the look's `max_fps`), and sets
-  the game's render scale (the look's `render_scale`).
+- A game's debug overlays (`App::debug_overlays`): the key below Esc opens their bar, and
+  `cargo gg overlays --on colliders,velocities` turns them on. World overlays draw lines a capture
+  shows; stats and panels are UI, which it doesn't.
+- Live frame times: a game's FPS and Frame overlays, or the Performance panel; in the editor, the
+  game's first. A drawn title bar's gear limits the frame rate; the editor's, its own and the
+  game's (the look's `max_fps`), and sets the game's render scale (the look's `render_scale`).
   `--max-fps N` or `--vsync` caps frames; at 2 to 10 fps you can watch frame by frame.
 - How a frame is made: `cargo gg capture --show` and `cargo gg probe`. Tracy and RenderDoc:
   [gg-renderer's AGENTS.md](crates/gg-renderer/AGENTS.md).

@@ -797,6 +797,23 @@ impl Client {
         self.hello = None;
     }
 
+    /// The client's numbers for the Network overlay.
+    #[cfg(feature = "dev")]
+    pub(super) fn stats(&self) -> super::NetStats {
+        let [corrections, ticks, most, _] = self.corrected;
+        super::NetStats {
+            role: super::NetRole::Client,
+            trip: (!self.trip.is_zero()).then_some(self.trip.as_secs_f64()),
+            deviation: None,
+            delay: None,
+            window: 0,
+            waits: self.stalls.logged().0,
+            rolled: [corrections, ticks, most],
+            bytes: self.link.as_ref().map_or([0; 2], Link::bytes),
+            links: usize::from(self.link.is_some()),
+        }
+    }
+
     /// Logs, as the run ends, its link to the server, if any ([`Link::ended`]), and how it was
     /// corrected (`net.corrected`): times, ticks run again, the most at once, states taken, and its
     /// [`Stalls`].

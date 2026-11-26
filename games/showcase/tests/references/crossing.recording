@@ -1,7 +1,7 @@
 gg-recording 7
 app Showcase
 engine 0.1.0 release
-layers Showcase PerfPanel Inspector
+layers Showcase DebugOverlays
 seed dd2b8dbadc73d27b
 named List([String("378f7dddb11ce002"), String("textures/glow.png")])
 named List([String("48899f3b379ae447"), String("models/crystal.gltf")])

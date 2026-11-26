@@ -17,7 +17,7 @@ use super::world::Subject;
 use crate::Key;
 
 /// Listed by `api.unknown_method`.
-pub(super) const METHODS: [&str; 38] = [
+pub(super) const METHODS: [&str; 39] = [
     "hello",
     "ping",
     "status",
@@ -33,6 +33,7 @@ pub(super) const METHODS: [&str; 38] = [
     "input",
     "press",
     "look",
+    "overlays",
     "pick",
     "cast",
     "project",
@@ -105,6 +106,8 @@ pub(super) enum Call {
     },
     /// The look's parts to set, checked, the viewpoint's rotation normalized.
     Look(gg_api::Look),
+    /// The debug overlays to turn on and off, and the Render menu's choices, checked.
+    Overlays(gg_api::Overlays),
     /// The view pixel to pick at, and optionally the entity whose model to pick within.
     Pick([f64; 2], Option<Subject>),
     /// The view pixel to cast through, else its middle, and the entity whose colliders it skips.
@@ -415,6 +418,13 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
             }
         }
         "look" => Call::Look(look(method, take(method, params)?)?),
+        "overlays" => {
+            let asked: gg_api::Overlays = take(method, params)?;
+            if let Some(problem) = crate::debug_overlays::state::check(&asked) {
+                return Err(bad_params(method, problem));
+            }
+            Call::Overlays(asked)
+        }
         "pick" => {
             let gg_api::Pick { at, within } = take(method, params)?;
             Call::Pick(at, within.as_deref().map(Subject::of))

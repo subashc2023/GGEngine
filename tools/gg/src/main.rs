@@ -382,6 +382,30 @@ back to the game:
 ",
             },
             Help {
+                name: "overlays",
+                usage: "overlays [--on <LIST>] [--off <LIST>] [--only] [--channel <NAME>] [--skip <LIST>] [--bar | --no-bar]",
+                summary: "Read or set its debug overlays: stats, panels, lines in the world, a part of shading, passes",
+                details: "\
+A game shows them with `App::debug_overlays`, in a development build; the key below Esc opens their
+bar. Prints each overlay's name, group (stats, inspect, world, game) and whether it's on, the names
+on that no overlay has yet (`waiting`), the channel, the passes left out and whether the bar shows.
+A LIST is names separated by commas, in any case, `_` or `-` for a space. Which are on is kept for
+the game's next runs, unless it starts with `-- --overlays <LIST>`.
+  --on <LIST>       Turn these on; a name no overlay has yet waits for the game's own of that name
+  --off <LIST>      Turn these off
+  --only            Turn every overlay off first
+  --channel <NAME>  Show a part of shading in place of the light, named as `capture --show` names
+                    it, or `light`; the look's `show` wins over it
+  --skip <LIST>     Leave out these passes, named as the look's `skip` names them, or `none`
+  --bar, --no-bar   Show or hide the bar
+Stats, numbers over the view: `fps`, `frame`, `memory`, `rendering`, `simulation`, `input`,
+`network`, `log`. Inspect, panels: `performance`, `entities`, `inspector`. World, lines and labels
+drawn with the world, which `capture` shows: `colliders`, `contacts`, `velocities`, `navigation`,
+`cells`, `bounds`, `axes`, `names`, `skeletons`, `cameras`, `lights`, `sounds`. Game: the game's
+own, as it names them. Stats and panels are UI, which `capture` doesn't show.
+",
+            },
+            Help {
                 name: "pick",
                 usage: "pick <X> <Y> [--within <ENTITY>]",
                 summary: "The entity its view shows at pixel X, Y",
@@ -919,7 +943,7 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 26] = [
+const VALUED: [&str; 29] = [
     "--engine",
     "--viewpoints",
     "--rect",
@@ -946,6 +970,9 @@ const VALUED: [&str; 26] = [
     "--fields",
     "--ui",
     "--ticks",
+    "--on",
+    "--off",
+    "--channel",
 ];
 
 /// The arguments after a command's name; what follows `--` is for the game.
@@ -1162,8 +1189,8 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         "run" | "check" | "ship" => build_args(name, &mut parsed)?,
         "fetch" | "new" => project_args(name, &mut parsed)?,
         "wait" | "step" | "scene" | "snapshot" => control_args(name, &mut parsed)?,
-        "input" | "press" | "capture" | "frames" | "look" | "pick" | "cast" | "project"
-        | "probe" => view_args(name, &mut parsed)?,
+        "input" | "press" | "capture" | "frames" | "look" | "overlays" | "pick" | "cast"
+        | "project" | "probe" => view_args(name, &mut parsed)?,
         "sessions" | "logs" | "entities" | "assets" | "entity" | "get" => {
             read_args(name, &mut parsed)?
         }
@@ -1468,6 +1495,50 @@ fn view_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
                 return Err(bad("LOOK is a JSON object of the look's parts".to_owned()));
             }
             call(parsed, "look", look)?
+        }
+        "overlays" => {
+            let usage = "overlays [--on <LIST>] [--off <LIST>] [--only] [--channel <NAME>] \
+                         [--skip <LIST>] [--bar | --no-bar]";
+            parsed.positional(0, 0, usage)?;
+            let names = |given: Vec<String>| -> Vec<String> {
+                (given.iter().flat_map(|names| names.split(',')))
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            };
+            let mut params = json!({});
+            let on = names(parsed.values("--on"));
+            if !on.is_empty() {
+                params["on"] = json!(on);
+            }
+            let off = names(parsed.values("--off"));
+            if !off.is_empty() {
+                params["off"] = json!(off);
+            }
+            if parsed.switch("--only") {
+                params["only"] = json!(true);
+            }
+            if let Some(channel) = parsed.value("--channel") {
+                params["channel"] = match channel.trim() {
+                    "light" => Value::Null,
+                    channel => json!(channel),
+                };
+            }
+            if let Some(skip) = parsed.value("--skip") {
+                params["skip"] = match skip.trim() {
+                    "none" => json!([]),
+                    _ => json!(names(vec![skip])),
+                };
+            }
+            match (parsed.switch("--bar"), parsed.switch("--no-bar")) {
+                (true, true) => {
+                    return Err(bad("`--bar` and `--no-bar` don't go together".to_owned()));
+                }
+                (bar, no_bar) if bar || no_bar => params["bar"] = json!(bar),
+                _ => {}
+            }
+            call(parsed, "overlays", params)?
         }
         "pick" => {
             let given = parsed.positional(2, 2, "pick <X> <Y> [--within <ENTITY>]")?;
@@ -2077,6 +2148,41 @@ mod tests {
                 &["look", r#"{"skip":["fog","shadows"]}"#],
                 json!({"skip": ["fog", "shadows"]}),
             ),
+            (&["overlays"], json!({})),
+            (
+                &[
+                    "overlays",
+                    "--on",
+                    "fps, colliders",
+                    "--on=Enemy aim",
+                    "--off",
+                    "log",
+                ],
+                json!({"on": ["fps", "colliders", "Enemy aim"], "off": ["log"]}),
+            ),
+            (
+                &[
+                    "overlays",
+                    "--only",
+                    "--channel",
+                    "normal",
+                    "--skip",
+                    "fog,bloom",
+                    "--bar",
+                ],
+                json!({"only": true, "channel": "normal", "skip": ["fog", "bloom"], "bar": true}),
+            ),
+            (
+                &[
+                    "overlays",
+                    "--channel",
+                    "light",
+                    "--skip",
+                    "none",
+                    "--no-bar",
+                ],
+                json!({"channel": null, "skip": [], "bar": false}),
+            ),
             // A pixel outside the view too; the game answers none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
             (&["cast"], json!({})),
@@ -2277,6 +2383,9 @@ mod tests {
             &["look", "{not json"],
             &["look", "[]"],
             &["look", "{}", "{}"],
+            &["overlays", "fps"],
+            &["overlays", "--bar", "--no-bar"],
+            &["overlays", "--on"],
             &["pick", "1"],
             &["pick", "1", "2", "3"],
             &["pick", "left", "2"],

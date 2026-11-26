@@ -1254,6 +1254,76 @@ pub struct By {
     pub render_scale: Option<String>,
 }
 
+/// What `overlays` takes: the debug overlays a development build's game shows over its view, by
+/// name as [`Overlaid`] lists them, in any case, `_` and `-` matching a space.
+///
+/// `only` turns every overlay off first, then `on` turns its own on and `off` its own off; a name
+/// in both is refused. A part left out keeps what it was. A name no overlay has yet waits for a
+/// game's of that name ([`Overlaid::waiting`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Overlays {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub off: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub only: bool,
+    /// The part of shading the view shows in place of its light, as the overlays' Render menu
+    /// picks it; `null` for the light. Parts of shading alone: the look's `show` takes images
+    /// and path tracing, and wins over this.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel: Option<Option<Shown>>,
+    /// The passes the view leaves out, in place of those before; the look's `skip` adds its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip: Option<Vec<Pass>>,
+    /// Whether the overlays' bar shows, as the key below Esc opens and closes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bar: Option<bool>,
+}
+
+/// What `overlays` answers: each overlay and whether it's on, then the Render menu's choices.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Overlaid {
+    /// The engine's, in the bar's order, while the game has them (`App::debug_overlays`); then
+    /// the game's, in the order it first asked for each.
+    pub overlays: Vec<Overlay>,
+    /// Names turned on that no overlay has yet, as given.
+    pub waiting: Vec<String>,
+    pub channel: Option<Shown>,
+    /// In [`Pass::ALL`]'s order, each once.
+    pub skip: Vec<Pass>,
+    pub bar: bool,
+}
+
+/// A debug overlay, as [`Overlaid`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overlay {
+    pub name: String,
+    pub group: OverlayGroup,
+    pub on: bool,
+}
+
+/// The menu of the overlays' bar an [`Overlay`] is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayGroup {
+    /// Numbers in a corner of the view: frame times, memory, the simulation, input, the network,
+    /// the log.
+    Stats,
+    /// The Performance, Entities and Inspector panels.
+    Inspect,
+    /// Lines and labels in the world, which captures show: colliders, velocities, bounds and the
+    /// like.
+    World,
+    /// A game's own, named as it asks for it.
+    Game,
+}
+
 /// What `pick` takes: the view's pixel `at`, `[x, y]` from its top left, as `input`'s cursor and a
 /// capture's PNG have it.
 ///

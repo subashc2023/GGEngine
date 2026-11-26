@@ -346,6 +346,18 @@ impl Link {
         }
     }
 
+    /// The round trip's mean and deviation in seconds, once timed.
+    #[cfg(feature = "dev")]
+    pub(super) fn trip(&self) -> Option<(f64, f64)> {
+        Some((self.trip.mean?, self.trip.deviation))
+    }
+
+    /// The bytes sent and taken so far, as `net.traffic` logs them.
+    #[cfg(feature = "dev")]
+    pub(super) fn bytes(&self) -> [u64; 2] {
+        self.traffic.bytes()
+    }
+
     /// Takes the times ([`write_times`](Self::write_times)) of a packet that came at `now`: its
     /// `clock`, which this end's packets echo unless a later one has come; and `echoed`, if it
     /// echoes this end's: that clock and the milliseconds the other held it. The time since, less

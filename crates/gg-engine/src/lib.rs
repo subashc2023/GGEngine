@@ -35,8 +35,8 @@
 //!
 //! Development builds (`dev`) add the project's manifest and assets' ID files; hot reload of
 //! shaders, textures, models, fonts, prefabs, UIs, sounds and music; the OS's file dialogs; and
-//! egui's UI, which layers draw through `Ui`: the dock, its title bars, and the Inspector and
-//! Performance panels.
+//! egui's UI, which layers draw through `Ui`: the dock, its title bars, the Inspector and
+//! Performance panels, and a game's [`DebugOverlays`].
 //!
 //! A game in one file, a square turning before a camera. [`prelude`] names what most games use;
 //! `cargo gg new` makes a game like it, its world in a scene file.
@@ -49,7 +49,7 @@
 //! use gg_engine::prelude::*;
 //!
 //! fn main() -> ExitCode {
-//!     gg_engine::run(App::new("Hello").layer(Hello).dev_panels())
+//!     gg_engine::run(App::new("Hello").layer(Hello).debug_overlays())
 //! }
 //!
 //! struct Hello;
@@ -107,6 +107,12 @@ mod chrome;
 #[doc(hidden)]
 pub mod cook;
 mod cooked;
+// Without `dev`'s UI, `none.rs` holds a layer that does nothing.
+#[cfg(feature = "dev")]
+mod debug_overlays;
+#[cfg(not(feature = "dev"))]
+#[path = "debug_overlays/none.rs"]
+mod debug_overlays;
 #[cfg(feature = "dev")]
 pub mod dialog;
 mod dirs;
@@ -238,6 +244,7 @@ pub use camera::{
 };
 pub use canvas::{CANVAS_HEIGHT, Canvas};
 pub use cells::{Cell, Cells, Streamed, Viewer};
+pub use debug_overlays::DebugOverlays;
 #[doc(inline)]
 pub use dock::Ui;
 #[doc(inline)]
@@ -594,10 +601,19 @@ impl App {
         self
     }
 
-    /// Adds the [`PerfPanel`] and [`Inspector`] overlays, in that order.
+    /// Adds the [`PerfPanel`] and [`Inspector`] overlays, in that order: for a tool with a
+    /// [custom title bar](Self::custom_title_bar), whose View menu closes them. A game takes
+    /// [`debug_overlays`](Self::debug_overlays).
     #[must_use]
     pub fn dev_panels(self) -> Self {
         self.overlay(PerfPanel).overlay(Inspector::default())
+    }
+
+    /// Adds the [`DebugOverlays`] overlay, which a development build's key below Esc opens: the
+    /// Performance, Entities and Inspector panels among them. Add it last, so it's on top.
+    #[must_use]
+    pub fn debug_overlays(self) -> Self {
+        self.overlay(DebugOverlays::default())
     }
 
     /// Has the UI draw the app's window frames instead of the OS: for tools, which want the room.
