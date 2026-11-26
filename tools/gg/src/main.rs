@@ -132,9 +132,9 @@ off with `--no-patch`, `--release`, restarts off, or a library beside PACKAGE's 
 patch reaches (`patches_off` says why). gg builds with `dx build --fat-binary`, printing each stage
 and, while compiling, the crates done of dx's count, every 5 s at most (`building`). One such build
 runs at a time in a target directory, as two of dx's links at once can fail: the others are
-`queued`. It watches
-PACKAGE's modules, the workspace's packages it builds with, and the workspace's manifest and lock
-file (`watching`). Then:
+`queued`. After each, it removes dx's archives of libraries, about 1 GB each, that no package's last
+build links against (`pruned`). It watches PACKAGE's modules, the workspace's packages it builds
+with, and the workspace's manifest and lock file (`watching`). Then:
 - an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
   between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
 - any other change rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or

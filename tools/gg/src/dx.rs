@@ -1,13 +1,14 @@
 //! Dioxus's `dx`, for `gg run`'s patches: checking its release, building the game to take patches,
 //! printing progress, building patches, and mending their thunks on Windows on x86-64.
 
+use std::collections::HashSet;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use gg_api::Failure;
 use serde_json::{Value, json};
@@ -63,7 +64,8 @@ impl Dx {
 
     /// Builds with `dx build --fat-binary`, holding the target directory's builds ([`hold`]),
     /// printing `building` as [`Progress`] says, and [`forget`](Self::forget)s the environment dx
-    /// wrote, success or not.
+    /// wrote, success or not. After a build, [`prune`](Self::prune)s dx's archives, printing
+    /// `pruned` if it removed any.
     ///
     /// Fails with `gg.build` if the lock can't be taken, dx can't run, the build fails, or no
     /// executable results (dx's own link failed).
@@ -71,6 +73,7 @@ impl Dx {
     /// [`hold`]: Self::hold
     pub(crate) fn build(&self) -> Result<Fat, Failure> {
         let _held = self.hold()?;
+        let started = SystemTime::now();
         // dx makes it too, but says less if it can't.
         let _ = fs::create_dir_all(&self.cache);
         let args = ["build", "--fat-binary"];
@@ -93,7 +96,16 @@ impl Dx {
         let mut head = Vec::new();
         let read = File::open(&fat.exe).and_then(|file| file.take(18).read_to_end(&mut head));
         let why = match read {
-            Ok(_) if executable(&head) => return Ok(fat),
+            Ok(_) if executable(&head) => {
+                let pruned = fat.exe.parent().and_then(|dir| self.prune(dir, started));
+                if let Some((archives, bytes)) = pruned.filter(|&(archives, _)| archives > 0) {
+                    let why = "no package's last build in this target directory links against them";
+                    event(
+                        &json!({"event": "pruned", "archives": archives, "bytes": bytes, "why": why}),
+                    );
+                }
+                return Ok(fat);
+            }
             Ok(_) => "isn't an executable".to_owned(),
             Err(error) => format!("can't be read: {error}"),
         };
@@ -152,6 +164,53 @@ impl Dx {
         event(&json!({"event": "building", "stage": "queued", "why": why}));
         file.lock().map_err(failed)?;
         Ok(file)
+    }
+
+    /// Removes the archives in `dir`, beside the executable, that no package's last build linked
+    /// against, with their lists; returns how many and their bytes. None if this build's archive
+    /// can't be told, as when dx didn't link: then it removes nothing.
+    ///
+    /// dx writes `libdeps-{hash}.a`, about 1 GB, unless it's there, and never removes one: a
+    /// change to any library makes another. It writes `rlibs-{hash}.txt` after each link of the
+    /// archive. Holding the lock, the list written since `started` is this build's, whose hash
+    /// gg records under the package's name in `gg/dx-archives`. Another package's archive stays
+    /// while it's that package's record.
+    fn prune(&self, dir: &Path, started: SystemTime) -> Option<(usize, u64)> {
+        let mut files = Vec::new();
+        let mut linked: Option<(String, SystemTime)> = None;
+        for entry in fs::read_dir(dir).ok()?.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some((hash, list)) = archived(&name) else {
+                continue;
+            };
+            let written = entry.metadata().and_then(|metadata| metadata.modified());
+            if list
+                && let Ok(written) = written
+                && written >= started
+                && linked.as_ref().is_none_or(|(_, newest)| written > *newest)
+            {
+                linked = Some((hash.to_owned(), written));
+            }
+            files.push((hash.to_owned(), list, entry.path()));
+        }
+        let (hash, _) = linked?;
+        let records = self.lock.with_file_name("dx-archives");
+        let _ = fs::create_dir_all(&records);
+        fs::write(records.join(&self.package), &hash).ok()?;
+        let kept: HashSet<String> = (fs::read_dir(&records).ok()?.flatten())
+            .filter_map(|record| fs::read_to_string(record.path()).ok())
+            .map(|hash| hash.trim().to_owned())
+            .collect();
+        let (mut archives, mut bytes) = (0, 0);
+        for (hash, list, path) in files {
+            let size = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+            if !kept.contains(&hash) && fs::remove_file(&path).is_ok() && !list {
+                archives += 1;
+                bytes += size;
+            }
+        }
+        Some((archives, bytes))
     }
 
     /// Builds a patch of the modules as they are now, for a process of build `fat` whose `main` is
@@ -226,6 +285,17 @@ impl Dx {
         };
         Failure::new("gg.build", message)
     }
+}
+
+/// The hash of a file dx writes beside an executable to link it, `libdeps-{hash}.a` or
+/// `rlibs-{hash}.txt`, and whether it's the list. dx's hash is 8 hexadecimal digits.
+fn archived(name: &str) -> Option<(&str, bool)> {
+    let (hash, list) = match name.strip_prefix("libdeps-") {
+        Some(rest) => (rest.strip_suffix(".a")?, false),
+        None => (name.strip_prefix("rlibs-")?.strip_suffix(".txt")?, true),
+    };
+    let hex = hash.len() == 8 && hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+    hex.then_some((hash, list))
 }
 
 fn cant(error: std::io::Error) -> Failure {
@@ -754,6 +824,65 @@ mod tests {
         let _ = fs::remove_dir_all(&target);
         assert!(blocked, "the second waits while the first holds it");
         assert!(took && fps_held, "then takes it");
+    }
+
+    /// A build keeps the archive it linked against and another package's record, removing the
+    /// rest with their lists; one that can't tell its own removes nothing.
+    #[test]
+    fn a_build_removes_the_archives_no_packages_last_build_links_against() {
+        assert_eq!(archived("libdeps-0216e4f8.a"), Some(("0216e4f8", false)));
+        assert_eq!(archived("rlibs-0216e4f8.txt"), Some(("0216e4f8", true)));
+        assert_eq!(archived("libdeps-game.a"), None);
+        assert_eq!(archived("libdeps-0216e4f8.rlib"), None);
+        let target = std::env::temp_dir().join(format!("gg-dx-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&target);
+        let dir = target.join("desktop-dev");
+        let records = target.join("gg").join("dx-archives");
+        fs::create_dir_all(&dir).expect("a directory");
+        fs::create_dir_all(&records).expect("a directory");
+        let rts = Dx {
+            package: "rts".to_owned(),
+            bin: "rts".to_owned(),
+            root: target.clone(),
+            cache: target.join("gg").join("dx").join("rts"),
+            lock: target.join("gg").join("dx.lock"),
+        };
+        let started = SystemTime::now();
+        let archive = |hash: &str, linked: SystemTime| {
+            fs::write(dir.join(format!("libdeps-{hash}.a")), [0; 100]).expect("written");
+            let list = File::create(dir.join(format!("rlibs-{hash}.txt"))).expect("written");
+            list.set_modified(linked).expect("dated");
+        };
+        let before = started - Duration::from_secs(60);
+        let after = started + Duration::from_secs(1);
+        // fps's record, two no build links against any more, and this build's.
+        for hash in ["0000aaaa", "1111bbbb", "2222cccc"] {
+            archive(hash, before);
+        }
+        archive("3333dddd", after);
+        fs::write(records.join("fps"), "0000aaaa").expect("written");
+        for other in ["libdeps.a", "gg-rts"] {
+            fs::write(dir.join(other), "").expect("written");
+        }
+        let left = || {
+            let mut left: Vec<String> = (fs::read_dir(&dir).expect("a directory").flatten())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            left.sort();
+            left
+        };
+        let untold = rts.prune(&dir, after + Duration::from_secs(1));
+        let all = left().len();
+        let pruned = rts.prune(&dir, started);
+        let (left, record) = (left(), fs::read_to_string(records.join("rts")));
+        let _ = fs::remove_dir_all(&target);
+        assert_eq!(untold, None, "no list written since it started");
+        assert_eq!(all, 10);
+        assert_eq!(pruned, Some((2, 200)));
+        let archives = ["libdeps-0000aaaa.a", "libdeps-3333dddd.a", "libdeps.a"];
+        let lists = ["rlibs-0000aaaa.txt", "rlibs-3333dddd.txt"];
+        assert_eq!(left, [&["gg-rts"][..], &archives, &lists].concat());
+        assert_eq!(record.ok().as_deref(), Some("3333dddd"));
     }
 
     /// A PE image for x86-64 with a code section of `code` and a data section of `data`.
