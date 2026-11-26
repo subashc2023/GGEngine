@@ -40,8 +40,9 @@ Each phase's milestones, and what each deferred, are in git history.
   raster's light held to it and its multiple scattering fitted to the walk, its tests on lavapipe
   (2026-11-18)
 - **Debug overlays** in place of games' panels: a bar under the key below Esc, stats, the
-  Inspector's panels, lines in the world, shading channels and passes, a game's own, `gg overlays`
-  (2026-11-25)
+  Inspector's panels, lines in the world, shading channels and passes, a game's own, `gg overlays`;
+  then, after agents debugged eight games through them, `gg input` reaching egui, boxes for bounds,
+  characters' contacts and velocities, and what each overlay drew (2026-11-25)
 
 ## Open
 
@@ -70,14 +71,15 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Tokens for clients without the session file, grants narrower or kept to one scene, the project in `hello` | A client on another machine, or kept to less |
 | RenderDoc captures through the tool API, several a run, after streaming, with synchronization validation | An agent needs a frame's GPU work |
 | Captures on macOS, and of the editor's view (`api.no_view`) | Someone captures there |
-| More through the API: each pass's GPU time, shadow draw counts, exposure, streaming, sounds playing, mods loaded, a run's last event, each log line's tick | An agent needs it |
-| More debug overlays: a script's own, after a `gg.draw_line`; wireframe and overdraw views; sprites and lines counted apart; the stats and panels in a capture's image; a game's own key for the bar; a server's round trips, which its links don't time; a pad gone, which no event says | A game or an agent needs one |
+| More through the API: each pass's GPU time, shadow draw counts, exposure, streaming, sounds playing, mods loaded, a run's last event, each log line's tick, the stats overlays' numbers | An agent needs it |
+| More debug overlays: a script's own, after a `gg.draw_line`; wireframe and overdraw views; sprites and lines counted apart; the stats and panels in a capture's image; a game's own key for the bar; a server's round trips, which its links don't time; a pad gone, which no event says; a cast's ray and hit; skeletons and axes over their meshes, which needs depth modes; lights in their own colors; colors kept apart from a game's; sounds while paused | A game or an agent needs one |
 | Debug views of lights per cluster, shadow cascades, TAA's history and the navmesh; `gg probe` at its sources' precision | They need debugging by sight |
-| Through the API: game actions pressed and listed by name, `gg mv` with the ID file | An agent plays through it, or loses IDs |
+| Through the API: game actions pressed and listed by name, `gg mv` with the ID file, pads' input | An agent plays through it, or loses IDs |
 | Steps while minimized (`api.paused`); requests, and the compositor, answered while a dialog or a script's stop holds the main thread | A tool needs them |
 | `gg fetch` of archives, and a scene's load of an unfetched file saying `gg fetch` fetches it | A project fetches an archive, or someone is lost |
 | Cleaning up old JSON logs and a killed run's patch libraries | They pile up |
 | `gg run` patching edits to constants, and restarting on crashes from data and on manifest edits | Agents tune constants live, or data crashes a game |
+| `gg run --peers 2` passing a game's flags such as `--paused`, which `engine.args` refuses now; the peers' windows placed apart; a restart keeping the overlays' bar open and the Inspector's pick | Someone runs peers paused, or a restart loses their place |
 | `gg run --peers 2` windows apart, through a relay or embedded; an app's name and run defaults in a manifest, the sandbox's too | Someone needs them |
 | `gg input`: the cursor in canvas units, clicks that leave the OS cursor ungrabbed, events at ticks within one call (a key held across jumps), `--aim ENTITY` putting the cursor where `project` puts it | An agent plays a game through it |
 | Through the API: `pick` naming the entity's parent, `cast` through 2D colliders or of a shape, an entity's contacts (whether it stands on ground), box bounds beside `entity`'s sphere | An agent needs one |

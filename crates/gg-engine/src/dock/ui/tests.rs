@@ -1643,3 +1643,20 @@ fn node_ids_keep_increasing_through_a_reset_and_a_load() {
     assert_eq!(loaded.len(), before.len());
     assert!(after(&reset, &loaded), "{reset:?}, then {loaded:?}");
 }
+
+#[test]
+fn a_panel_a_layer_places_floats_there_once_it_shows_while_the_rest_cascade() {
+    let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
+    dock.floats
+        .push(("B", Align2::RIGHT_TOP, vec2(-12.0, 48.0)));
+    let run = Run::showing(dock, &["A", "B"]);
+    let place = |panel| {
+        let id = run.layout().find(panel).expect("in the dock");
+        run.dock.layout.floating(id).expect("floats").place
+    };
+    let min = [SCREEN.x - NEW_SIZE.x - 12.0, 48.0];
+    let size = NEW_SIZE.into();
+    assert_eq!(place("B"), Place::Main { min, size });
+    let min = [48.0, 48.0];
+    assert_eq!(place("A"), Place::Main { min, size });
+}

@@ -210,6 +210,7 @@ impl Physics3D {
     /// Writes its velocity and `grounded` into its entity's controller, as they changed.
     pub(super) fn move_characters(&mut self, world: &mut World) {
         self.hold_moving();
+        self.touched.clear();
         for character in &mut self.characters.linked {
             move_character(
                 &mut self.rapier,
@@ -219,6 +220,10 @@ impl Physics3D {
                 &mut self.hits,
                 world,
             );
+            // rapier's casts give what was hit's point and normal in the world's space.
+            let touched =
+                (self.hits.iter()).map(|hit| (character.entity, hit.hit.witness1, hit.hit.normal1));
+            self.touched.extend(touched);
         }
         self.release_moving();
     }

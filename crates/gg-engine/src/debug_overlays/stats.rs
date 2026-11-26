@@ -306,9 +306,11 @@ fn backing() -> Frame {
         .inner_margin(6)
 }
 
-/// Light monospaced text, so numbers keep their places as they change.
+/// Light monospaced text, so numbers keep their places as they change, a line a label: an area
+/// sizes itself to its last frame's contents, so a line that grew would wrap.
 fn numbers(ui: &mut egui::Ui) {
     ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
     ui.visuals_mut().override_text_color = Some(Color32::from_gray(230));
     ui.spacing_mut().item_spacing.y = 2.0;
 }

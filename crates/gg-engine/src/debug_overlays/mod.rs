@@ -20,6 +20,7 @@ pub(crate) mod world;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
+use egui::Align2;
 use gg_core::math::Vec4;
 
 pub(crate) use state::{Overlay, State, keep, start};
@@ -33,18 +34,29 @@ use crate::{
 const PICKED: Vec4 = Vec4::new(1.0, 0.55, 0.1, 1.0);
 const PICKED_WIDTH: f32 = 2.0;
 
+/// Where the Inspect menu's panels first float in the window, and how far from there in points:
+/// Entities and the Inspector down the right below the bar, Performance at the bottom.
+const PANELS: [(&str, Align2, [f32; 2]); 3] = [
+    ("Entities", Align2::RIGHT_TOP, [-12.0, 48.0]),
+    ("Inspector", Align2::RIGHT_TOP, [-12.0, 300.0]),
+    ("Performance", Align2::CENTER_BOTTOM, [0.0, -12.0]),
+];
+
 /// A development build's debug overlays over a game's view, which an app adds as its top overlay
 /// ([`App::debug_overlays`](crate::App::debug_overlays)).
 ///
 /// - The key below Esc opens and closes a bar of menus: Stats, Inspect, World, Render and Game,
 ///   each a list of overlays to turn on and off, then All off. The key doesn't reach the layers
 ///   below, and does nothing while a text field has the keys.
+/// - While the bar is open it has the mouse: the window lets a grabbed cursor go, and the mouse's
+///   motion doesn't reach the layers below.
 /// - Stats: numbers at the view's top left, below the bar while it shows, and the log's at its
 ///   bottom left. Clicks pass through them.
-/// - Inspect: the Performance, Entities and Inspector panels, floating over the view. With the bar
-///   open and Entities or Inspector on, a left click in the view picks what's drawn there for the
-///   Inspector (Ctrl, Cmd on macOS, adds or removes it), which outlines it. The click doesn't reach
-///   the layers below.
+/// - Inspect: the Performance, Entities and Inspector panels, floating over the view: Entities and
+///   the Inspector down its right, Performance at its bottom, until moved. With the bar open and
+///   Entities or Inspector on, a left click in the view picks what's drawn there for the Inspector
+///   (Ctrl, Cmd on macOS, adds or removes it), which outlines it. The click doesn't reach the
+///   layers below.
 /// - World: lines and labels drawn with the world, which `gg capture` shows.
 /// - Render: a part of shading in place of the view's light, and passes to leave out.
 /// - Game: the game's own, which [`Context::debug_overlay`] names as it asks whether each is on.
@@ -148,6 +160,8 @@ impl Layer for DebugOverlays {
                 }
                 ControlFlow::Break(())
             }
+            // The bar has the mouse: a grabbed look doesn't turn under it.
+            Event::MouseMotion { .. } if cx.dev.overlays.bar => ControlFlow::Break(()),
             _ => ControlFlow::Continue(()),
         }
     }
@@ -158,6 +172,10 @@ impl Layer for DebugOverlays {
             false => 0.0,
         };
         self.stats.show(cx, ui.egui(), top);
+        // Apart from each other and the stats at the top left.
+        for (panel, align, offset) in PANELS {
+            ui.float_new(panel, align, offset.into());
+        }
         let state = &cx.dev.overlays;
         if state.on(Overlay::Performance) {
             PerfPanel.ui(cx, ui);

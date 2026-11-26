@@ -152,11 +152,12 @@ fn whats_on_is_kept_for_the_next_run_unless_the_flag_names_others() {
     let mut after = context();
     state::start(&mut after, None);
     assert!(after.dev.overlays.on(Overlay::Fps));
-    // `none` turns none on.
+    // `none` turns none on, and leaves the kept channel and passes out.
     let mut none = context();
     state::start(&mut none, Some(&["none".to_owned()]));
     let none = &none.dev.overlays;
     assert!(!Overlay::ALL.into_iter().any(|overlay| none.on(overlay)));
+    assert_eq!((none.channel, none.skip.as_slice()), (None, &[][..]));
 }
 
 #[test]
@@ -195,6 +196,11 @@ fn the_key_below_esc_opens_and_closes_the_bar_and_stops_there() {
     assert!(press(&mut cx, Key::Backquote, true, false).is_break());
     assert!(!cx.dev.overlays.bar);
     assert!(press(&mut cx, Key::KeyA, true, false).is_continue());
+    // While it's open, the mouse's motion doesn't turn a grabbed look below.
+    let motion = Event::MouseMotion { x: 4.0, y: 0.0 };
+    assert!(overlays.event(&mut cx, &motion).is_continue());
+    cx.dev.overlays.bar = true;
+    assert!(overlays.event(&mut cx, &motion).is_break());
 }
 
 #[test]

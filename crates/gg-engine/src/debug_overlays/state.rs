@@ -136,13 +136,13 @@ impl Overlay {
             Self::Entities => "The Entities panel. With the bar open, a click in the view picks",
             Self::Inspector => "The Inspector panel: the picked entity's components",
             Self::Colliders => "Colliders' outlines and joints",
-            Self::Contacts => "Where colliders touch, and which way they push",
-            Self::Velocities => "Bodies' velocities, as far as each goes in a quarter second",
+            Self::Contacts => "Where colliders and characters touch, and which way they push",
+            Self::Velocities => "How far bodies and characters go in a quarter second",
             Self::Navigation => "The navmesh and agents' paths",
             Self::Cells => "The world's cells, those in and those refused",
-            Self::Bounds => "Each drawn entity's bounding sphere",
+            Self::Bounds => "The box round what each root entity draws",
             Self::Axes => "Each entity's X (red), Y (green) and Z (blue)",
-            Self::Names => "Each entity's name, else its ID",
+            Self::Names => "Each root entity's name, else its ID",
             Self::Skeletons => "Skinned models' joints, each joined to its parent",
             Self::Cameras => "Cameras' frusta, but the one the view sees from",
             Self::Lights => "Lights' directions, ranges and cones",
@@ -209,6 +209,9 @@ pub(crate) struct State {
     /// The passes left out, in [`Pass::ALL`]'s order, each once, with the look's.
     pub(crate) skip: Vec<Pass>,
     pub(crate) bar: bool,
+    /// What each World overlay drew in the last frame, lines and labels, which `overlays`
+    /// reports: 0 for one on that found nothing to show.
+    pub(crate) drew: super::world::Drew,
     /// Whether what's kept changed since it was kept.
     changed: bool,
 }
@@ -344,11 +347,14 @@ impl State {
                 name: overlay.name().to_owned(),
                 group: overlay.group(),
                 on: self.on(overlay),
+                drew: (overlay.group() == OverlayGroup::World && self.on(overlay))
+                    .then(|| self.drew[overlay as usize]),
             });
         let game = self.game.iter().map(|(name, on)| gg_api::Overlay {
             name: name.clone(),
             group: OverlayGroup::Game,
             on: *on,
+            drew: None,
         });
         gg_api::Overlaid {
             overlays: engine.chain(game).collect(),

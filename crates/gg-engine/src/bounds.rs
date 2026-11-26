@@ -1,7 +1,7 @@
 //! The sphere round what an entity and its descendants draw: the tool API's `entity` answers it as
 //! `bounds`, and the editor frames it.
 
-use gg_core::math::{DVec3, Vec3};
+use gg_core::math::{DAffine3, DVec3, Vec3};
 use gg_renderer::{Circle, MeshDraw, Meshes, Sprite};
 
 use crate::{Entity, Transform, World};
@@ -53,6 +53,64 @@ pub(crate) fn of(world: &World, meshes: &Meshes, root: Entity) -> Option<Sphere>
         }
     }
     bounds
+}
+
+/// The box round what `root` and its descendants draw, least and most corners in `root`'s space,
+/// as the latest tick left them, with `root`'s pose, which places it: each draw's box through its
+/// pose, merged. The Bounds overlay draws it, a box hugging a long wall or a scaled sprite where a
+/// sphere would reach far past it.
+///
+/// - Mesh: the box `meshes` keeps, else the cube round its sphere.
+/// - Sprite or circle: its unit square, flat.
+/// - Left out as [`of`] leaves them out.
+///
+/// `None` if nothing draws, `root` isn't alive or its pose has no inverse.
+pub(crate) fn boxed(
+    world: &World,
+    meshes: &Meshes,
+    root: Entity,
+) -> Option<(DAffine3, [DVec3; 2])> {
+    let placed = world.pose(root).ok()?.matrix;
+    let into_root = placed.inverse();
+    if !into_root.is_finite() {
+        return None;
+    }
+    let mut bounds: Option<[DVec3; 2]> = None;
+    let mut stack = vec![root];
+    while let Some(entity) = stack.pop() {
+        stack.extend(world.children(entity).ok()?);
+        if world.get::<Transform>(entity).is_none() {
+            continue;
+        }
+        let mut own = [None; 2];
+        own[0] = world.get::<MeshDraw>(entity).and_then(|draw| {
+            let round = |(center, radius): (Vec3, f32)| [center - radius, center + radius];
+            meshes
+                .box_of(draw)
+                .or_else(|| meshes.sphere_of(draw).map(round))
+        });
+        if world.get::<Sprite>(entity).is_some() || world.get::<Circle>(entity).is_some() {
+            own[1] = Some([Vec3::new(-0.5, -0.5, 0.0), Vec3::new(0.5, 0.5, 0.0)]);
+        }
+        if own.iter().all(Option::is_none) {
+            continue;
+        }
+        let pose = into_root * world.pose(entity).ok()?.matrix;
+        for [low, high] in own.into_iter().flatten() {
+            let [low, high] = [low, high].map(Vec3::as_dvec3);
+            for corner in 0..8 {
+                let pick = |bit: usize, axis: usize| match corner >> bit & 1 {
+                    0 => low[axis],
+                    _ => high[axis],
+                };
+                let at = pose.transform_point3(DVec3::new(pick(0, 0), pick(1, 1), pick(2, 2)));
+                if at.is_finite() {
+                    bounds = Some(bounds.map_or([at, at], |[l, h]| [l.min(at), h.max(at)]));
+                }
+            }
+        }
+    }
+    Some((placed, bounds?))
 }
 
 /// The smallest sphere that holds both `a` and `b`.
@@ -159,6 +217,41 @@ mod tests {
             f64::from(half_diagonal),
         );
         close(of(&world, &meshes, circle), DVec3::ZERO, f64::from(SQUARE));
+    }
+
+    #[test]
+    fn a_box_hugs_a_scaled_sprite_and_holds_children_in_the_root_s_space() {
+        let (mut world, mut meshes) = (World::default(), Meshes::default());
+        let wall = Transform {
+            scale: Vec3::new(20.0, 2.0, 1.0),
+            ..at(1.0)
+        };
+        let wall = world.spawn((wall, Sprite::default()));
+        let (placed, [low, high]) = boxed(&world, &meshes, wall).expect("a box");
+        assert_eq!(
+            [low, high],
+            [DVec3::new(-0.5, -0.5, 0.0), DVec3::new(0.5, 0.5, 0.0)]
+        );
+        let corner = placed.transform_point3(high);
+        assert!(
+            corner.distance(DVec3::new(11.0, 1.0, 0.0)) < 1e-9,
+            "{corner}"
+        );
+        // A child's mesh, its cube round its sphere, two units along the root's X.
+        let child = world.spawn((at(2.0), mesh(&mut meshes, Vec3::ZERO, 1.0)));
+        let root = world.spawn(at(100.0));
+        world.set_parent(child, Some(root)).expect("alive");
+        let (placed, [low, high]) = boxed(&world, &meshes, root).expect("a box");
+        assert!(low.distance(DVec3::new(1.0, -1.0, -1.0)) < 1e-9, "{low}");
+        assert!(high.distance(DVec3::new(3.0, 1.0, 1.0)) < 1e-9, "{high}");
+        assert!(
+            placed
+                .transform_point3(low)
+                .distance(DVec3::new(101.0, -1.0, -1.0))
+                < 1e-9
+        );
+        let empty = world.spawn(at(0.0));
+        assert_eq!(boxed(&world, &meshes, empty), None);
     }
 
     #[test]

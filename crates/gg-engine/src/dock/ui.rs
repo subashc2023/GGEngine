@@ -93,6 +93,18 @@ impl<'a> Ui<'a> {
         self.dock.panel(self.root, name, add_contents);
     }
 
+    /// Floats panel `name`, once it shows and if the layout lacks it, at `align` of the main
+    /// window below its title bar, moved by `offset` points: in place of where new panels cascade
+    /// from the top left.
+    /// [`App::dock`](crate::App::dock) docking it wins.
+    pub(crate) fn float_new(&mut self, name: &'static str, align: egui::Align2, offset: Vec2) {
+        let floats = &mut self.dock.floats;
+        match floats.iter_mut().find(|(each, ..)| *each == name) {
+            Some(float) => *float = (name, align, offset),
+            None => floats.push((name, align, offset)),
+        }
+    }
+
     /// Adds menu `name` to the main window's menus this frame, drawing `add_contents` while it's
     /// open. Menus come in the order layers add them, bottom layer first; a second of the same
     /// name in a frame doesn't show. From the frame after the first shows, a button opens a drawer
@@ -238,6 +250,8 @@ pub(crate) struct Dock {
     drawn: HashSet<NodeId>,
     /// Panels shown this frame that the layout lacks, placed as the frame ends.
     new: Vec<String>,
+    /// Where layers float panels the layout lacks, by name ([`Ui::float_new`]).
+    floats: Vec<(&'static str, Align2, Vec2)>,
     /// A tab clicked this frame; its panel shows from the next, so the layout holds still while
     /// panels draw.
     clicked: Option<String>,
@@ -397,6 +411,7 @@ impl Dock {
             arrangement,
             drawn: HashSet::new(),
             new: Vec::new(),
+            floats: Vec::new(),
             clicked: None,
             drag: None,
             hover: None,
@@ -695,8 +710,15 @@ impl Dock {
         for panel in new {
             let n = self.layout.floating.len() % 8;
             let at = 48.0 + 24.0 * n as f32;
+            let min = match self.floats.iter().find(|(name, ..)| *name == panel) {
+                Some(&(_, align, offset)) => {
+                    let rect = align.align_size_within_rect(NEW_SIZE, self.below_bar);
+                    (rect.min + offset).into()
+                }
+                None => [at, at],
+            };
             let place = Place::Main {
-                min: [at, at],
+                min,
                 size: NEW_SIZE.into(),
             };
             self.layout.add(panel.clone(), place, &self.docked);
@@ -862,6 +884,9 @@ impl Dock {
         let response = Area::new(Id::unique(("gg dock group", id)))
             .order(Order::Middle)
             .current_pos(min)
+            // Known from its first frame, or the constraint would move it as if it filled the
+            // window.
+            .default_size(size)
             .movable(false)
             // Off the title bar.
             .constrain_to(self.arrangement.area)

@@ -467,6 +467,10 @@ pub(crate) fn run_frame(
     gg_core::plot!("alpha", f64::from(alpha));
     cx.draw_world(alpha, stepper.time(alpha), stepper.ticks);
     let updated = Instant::now();
+    #[cfg(feature = "dev")]
+    if ui.is_none() {
+        cx.dev.handed.no_pass();
+    }
     let pass = ui.map(|ui| run_ui(stack, cx, ui));
     cx.perf
         .ran(ticked - start, updated - ticked, updated.elapsed());
@@ -475,8 +479,9 @@ pub(crate) fn run_frame(
 
 /// Has the layers draw their UI in a pass of egui's ([`run_frame`]).
 #[cfg(feature = "dev")]
-fn run_ui(stack: &mut Stack, cx: &mut Context, (egui, dock, input): EguiPass<'_>) -> Passed {
+fn run_ui(stack: &mut Stack, cx: &mut Context, (egui, dock, mut input): EguiPass<'_>) -> Passed {
     let _zone = gg_core::zone!("egui");
+    cx.dev.handed.take(egui, &mut input);
     let mut layers_draw = false;
     // egui may run the pass again in a frame, if it asks.
     let output = egui.run_ui(input, |root| {

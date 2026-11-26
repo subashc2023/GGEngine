@@ -457,6 +457,10 @@ pub struct Physics3D {
     unmoved: Vec<Entity>,
     /// What a character hit as it moved; a workspace like `pipeline`.
     hits: Vec<CharacterCollision>,
+    /// Where each character touched what it hit in the last step, with the normals there, in the
+    /// world's space: for the Contacts overlay, as rapier's contacts leave characters out. A
+    /// workspace too.
+    touched: Vec<(Entity, Vector, Vector)>,
     /// The kinematic bodies that go by their velocities, with those velocities, which the
     /// characters' moves hold them from meanwhile; a workspace too.
     moving: Vec<character::Moving>,
@@ -529,6 +533,7 @@ impl Default for Physics3D {
             joints: Links::default(),
             unmoved: Vec::new(),
             hits: Vec::new(),
+            touched: Vec::new(),
             moving: Vec::new(),
             contacts: Contacts::default(),
         }
@@ -546,6 +551,7 @@ impl Clone for Physics3D {
             joints: self.joints.clone(),
             unmoved: self.unmoved.clone(),
             hits: Vec::new(),
+            touched: Vec::new(),
             moving: Vec::new(),
             contacts: self.contacts.clone(),
         }
@@ -828,6 +834,7 @@ impl Saved for Physics3D {
             joints,
             unmoved: entities(saved.unmoved),
             hits: Vec::new(),
+            touched: Vec::new(),
             moving: Vec::new(),
             contacts: Contacts::load(saved.contacts, world),
         })
@@ -1031,6 +1038,10 @@ pub(super) fn contact_points(world: &World, each: &mut impl FnMut(Option<Entity>
                 each(entity, middle, normal);
             }
         }
+    }
+    for &(entity, at, normal) in &physics.touched {
+        let [at, normal] = [at, normal].map(|v| DVec3::new(v.x, v.y, v.z));
+        each(Some(entity), at, normal);
     }
 }
 

@@ -4,12 +4,14 @@
 //!
 //! Lines are [`WIDTH`] points wide and carry their entity's ID, so a pick of a line finds the
 //! entity. Like colliders', they show except where an opaque mesh is nearer, so a skeleton inside
-//! its mesh shows only where the mesh doesn't hide it.
+//! its mesh shows only where the mesh doesn't hide it. A shape holding the eye of a viewpoint with
+//! perspective, such as a first-person player's own box, is left out: from inside it would span
+//! the view.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::fmt::Write;
 
-use gg_core::math::{DVec3, Mat4, Quat, Vec2, Vec3, Vec4, libm};
+use gg_core::math::{DAffine3, DVec3, Mat4, Quat, Vec2, Vec3, Vec4, libm};
 use gg_renderer::{Draws, Line, Meshes, Projection, Shaders, Viewpoint, Viewport};
 
 use super::{Overlay, State};
@@ -20,7 +22,8 @@ use crate::ecs::node_id;
 use crate::font::{Align, Fonts, TextStyle};
 use crate::light::{Light, LightKind};
 use crate::{
-    Entity, EntityId, ModelRoot, Parent, RigidBody2D, RigidBody3D, Transform, World, bounds,
+    CharacterController3D, Entity, EntityId, ModelRoot, Parent, RigidBody2D, RigidBody3D,
+    Transform, World, bounds,
 };
 
 /// Contacts' color, linear: magenta, apart from colliders' green.
@@ -29,7 +32,7 @@ const CONTACTS: Vec4 = Vec4::new(1.0, 0.2, 0.8, 1.0);
 const VELOCITIES: Vec4 = Vec4::new(1.0, 0.95, 0.15, 1.0);
 /// Angular velocities' arcs: a paler yellow than the arrows.
 const SPINS: Vec4 = Vec4::new(1.0, 1.0, 0.6, 1.0);
-/// Bounding spheres' color: violet.
+/// Bounding boxes' color: violet.
 const BOUNDS: Vec4 = Vec4::new(0.6, 0.4, 1.0, 1.0);
 /// Axes' colors, X, Y and Z: red, green and blue, as the grid's axes and gizmos have them.
 const AXES: [Vec4; 3] = [
@@ -55,16 +58,23 @@ const WIDTH: f32 = 2.0;
 const LOOK_AHEAD: f32 = 0.25;
 /// The least turn an arc shows, in radians: less is a dot.
 const MIN_SPIN: f32 = 0.02;
-/// How far a cross reaches each way of its middle, in units, for contacts and markers.
+/// How far a cross reaches each way of its middle, in units, for lights and sounds.
 const CROSS: f32 = 0.1;
-/// How long a contact's normal is, in units.
-const NORMAL: f32 = 0.4;
-/// How tall names' text is, in points.
+/// How far a contact's cross reaches each way of its middle, and how long its normal's arrow is,
+/// in points: the same size near and far.
+const CONTACT_POINTS: f32 = 5.0;
+const NORMAL_POINTS: f32 = 28.0;
+/// An axis's least and most length, in units: half its entity's scale along it, between them.
+const AXIS: [f32; 2] = [0.15, 2.0];
+/// How tall names' text is, and how far above what its entity draws it sits, in points.
 const NAME_POINTS: f32 = 12.0;
+const NAME_GAP: f32 = 4.0;
 /// How far a perspective camera's frustum reaches, in units: its projection has no far plane.
 const FRUSTUM: f32 = 5.0;
-/// How long a directional light's arrow is, in units.
-const DIRECTION: f32 = 2.0;
+/// How far in front of the viewpoint a directional light's arrow shows, in units, and how long it
+/// is, in points: such a light is everywhere, so it shows where it's seen.
+const AHEAD: f32 = 2.0;
+const DIRECTION_POINTS: f32 = 80.0;
 /// How far a spot light's cone reaches without a range, in units.
 const SPOT: f32 = 3.0;
 /// Lines in a circle: round to within a pixel up to some 500 pixels across.
@@ -83,13 +93,15 @@ pub(crate) struct Frame<'a> {
     pub(crate) view: Option<Viewport>,
 }
 
+/// What each overlay drew in a frame, lines and labels, by [`Overlay`] as a number.
+pub(crate) type Drew = [u32; Overlay::ALL.len()];
+
 /// Draws the World menu's overlays `state` has on, but those the frame draws itself: colliders,
-/// navigation and cells. `scale` is the window's points to pixels.
+/// navigation and cells. `scale` is the window's points to pixels. Returns what each drew.
 ///
-/// - Bounds and Sounds draw one circle in the XY plane where the viewpoint has no perspective
-///   (a 2D game's), else three round the sphere.
-/// - Names face the viewpoint and stay about [`NAME_POINTS`] tall wherever it is.
-/// - Bounds read where the latest tick left entities; the rest, where they draw.
+/// - Bounds and Sounds draw flat where the viewpoint has no perspective (a 2D game's).
+/// - Contacts, names and a directional light's arrow keep their size in points wherever they are.
+/// - Bounds and names' places read where the latest tick left entities; the rest, where they draw.
 pub(crate) fn draw(
     state: &State,
     world: &World,
@@ -98,29 +110,37 @@ pub(crate) fn draw(
     scale: f32,
     over: &mut Draws,
     shaders: &mut Shaders,
-) {
+) -> Drew {
     let _zone = gg_core::zone!();
     let mut out = Out::new(over, shaders, poses.origin(), WIDTH * scale);
     let viewpoint = frame.viewpoint.unwrap_or_default();
     let view = frame.view.filter(|view| view.size[1] > 0);
+    let flat = matches!(viewpoint.projection, Projection::Orthographic { .. });
+    let along_z = (viewpoint.rotation * Vec3::NEG_Z).z.abs() > 0.999;
     let look = Look {
         viewpoint,
-        flat: matches!(viewpoint.projection, Projection::Orthographic { .. }),
+        flat,
+        plane: (flat && along_z).then_some(Vec3::Z),
+        eye: (!flat).then_some(viewpoint.position),
         aspect: view.map_or(16.0 / 9.0, |view| view.aspect()),
         pixels: view.map_or(1080, |view| view.size[1]) as f32,
         scale,
         from: frame.from,
     };
     if state.on(Overlay::Contacts) {
-        contacts(world, &mut out);
+        out.drawing = Overlay::Contacts;
+        contacts(world, &look, &mut out);
     }
     if state.on(Overlay::Bounds) {
+        out.drawing = Overlay::Bounds;
         bounds(world, frame.meshes, &look, &mut out);
     }
     if state.on(Overlay::Skeletons) {
+        out.drawing = Overlay::Skeletons;
         skeletons(world, poses, &mut out);
     }
     if state.on(Overlay::Sounds) {
+        out.drawing = Overlay::Sounds;
         sounds(world, frame.audio, &look, &mut out);
     }
     let per_entity = [
@@ -131,27 +151,41 @@ pub(crate) fn draw(
         Overlay::Lights,
     ];
     if !per_entity.into_iter().any(|overlay| state.on(overlay)) {
-        return;
+        return out.drew;
     }
     let mut text = String::new();
     each_posed(world, poses, |posed| {
         if state.on(Overlay::Velocities) {
+            out.drawing = Overlay::Velocities;
             velocity(world, posed, &mut out);
         }
         if state.on(Overlay::Axes) {
-            axes(posed, &mut out);
+            out.drawing = Overlay::Axes;
+            axes(posed, &look, &mut out);
         }
         if state.on(Overlay::Cameras) {
+            out.drawing = Overlay::Cameras;
             camera(world, poses, posed, &look, &mut out);
         }
         if state.on(Overlay::Lights) {
-            light(world, poses, posed, &mut out);
+            out.drawing = Overlay::Lights;
+            light(world, poses, posed, &look, &mut out);
         }
         if state.on(Overlay::Names) {
+            out.drawing = Overlay::Names;
             text.clear();
-            name(world, posed, &look, &mut text, frame.fonts, &mut out);
+            name(
+                world,
+                frame.meshes,
+                posed,
+                &look,
+                &mut text,
+                frame.fonts,
+                &mut out,
+            );
         }
     });
+    out.drew
 }
 
 /// What the frame is seen from, as the overlays read it.
@@ -159,6 +193,11 @@ struct Look {
     viewpoint: Viewpoint,
     /// Whether the viewpoint has no perspective.
     flat: bool,
+    /// The plane arrows' heads lie in, by its normal: Z's where the viewpoint looks along it with
+    /// no perspective, as a 2D game's does; else none, and heads have four barbs.
+    plane: Option<Vec3>,
+    /// Where the viewpoint is, if it has perspective: what holds it isn't drawn.
+    eye: Option<DVec3>,
     /// The view's width over its height.
     aspect: f32,
     /// The view's height in pixels.
@@ -166,6 +205,27 @@ struct Look {
     /// The window's points to pixels.
     scale: f32,
     from: Option<EntityId>,
+}
+
+impl Look {
+    /// How many units a point of the window spans at `at`, at its distance from the viewpoint.
+    /// `None` at or behind a perspective viewpoint's near plane.
+    fn per_point(&self, at: DVec3) -> Option<f32> {
+        let viewpoint = &self.viewpoint;
+        let per_pixel = match viewpoint.projection {
+            Projection::Orthographic { height, .. } => height / self.pixels,
+            Projection::Perspective { fov, near } => {
+                let forward = (viewpoint.rotation * Vec3::NEG_Z).as_dvec3();
+                let depth = (at - viewpoint.position).dot(forward) as f32;
+                if depth.is_nan() || depth <= near {
+                    return None;
+                }
+                2.0 * depth * libm::tanf(fov / 2.0) / self.pixels
+            }
+        };
+        let per_point = per_pixel * self.scale;
+        (per_point > 0.0 && per_point.is_finite()).then_some(per_point)
+    }
 }
 
 /// An entity that has a transform, and where it draws.
@@ -188,12 +248,12 @@ impl Posed {
         self.id.get()
     }
 
-    /// How far its overlays reach, in units: half its largest scale, so they read at its size,
-    /// but not past what's seen or so small it's a dot.
+    /// How far its arcs reach, in units: half its largest scale, so they read at its size, but
+    /// not past what's seen or so small it's a dot.
     fn size(&self) -> f32 {
         let axes = [self.matrix.x_axis, self.matrix.y_axis, self.matrix.z_axis];
         let scale = axes.map(|axis| axis.truncate().length());
-        (scale.into_iter().fold(0.0, f32::max) * 0.5).clamp(0.15, 2.0)
+        (scale.into_iter().fold(0.0, f32::max) * 0.5).clamp(AXIS[0], AXIS[1])
     }
 }
 
@@ -230,6 +290,9 @@ struct Out<'a> {
     width: f32,
     /// A unit circle in the XY plane, from +X counterclockwise and back.
     ring: [Vec2; SEGMENTS + 1],
+    /// What each overlay drew so far, and the one drawing.
+    drew: Drew,
+    drawing: Overlay,
 }
 
 impl<'a> Out<'a> {
@@ -244,6 +307,8 @@ impl<'a> Out<'a> {
             origin,
             width,
             ring,
+            drew: [0; Overlay::ALL.len()],
+            drawing: Overlay::Contacts,
         }
     }
 
@@ -260,6 +325,7 @@ impl<'a> Out<'a> {
             width: self.width,
         };
         (self.draws).push_line(self.shaders, Mat4::IDENTITY, line, id);
+        self.drew[self.drawing as usize] += 1;
     }
 
     /// A line along each axis, `reach` each way of `at`.
@@ -285,6 +351,30 @@ impl<'a> Out<'a> {
         if !flat {
             self.circle(center, y, z, color, id);
             self.circle(center, z, x, color, id);
+        }
+    }
+
+    /// The edges of the box from `low` to `high` that `placed` places, in the world's space: each
+    /// once, so a flat box has four and a line one.
+    fn cuboid(&mut self, placed: DAffine3, [low, high]: [DVec3; 2], color: Vec4, id: u64) {
+        let corner = |bits: usize| {
+            let pick = |bit: usize, axis: usize| match bits & bit {
+                0 => low[axis],
+                _ => high[axis],
+            };
+            self.at(placed.transform_point3(DVec3::new(pick(1, 0), pick(2, 1), pick(4, 2))))
+        };
+        let corners: [Vec3; 8] = std::array::from_fn(corner);
+        // The axes it has no extent along, as bits: their edges are points, their faces one.
+        let none = [1, 2, 4]
+            .into_iter()
+            .enumerate()
+            .filter(|&(axis, _)| low[axis] == high[axis])
+            .fold(0, |bits, (_, bit)| bits | bit);
+        for bit in [1, 2, 4].into_iter().filter(|bit| none & bit == 0) {
+            for bits in (0..8).filter(|bits| bits & (bit | none) == 0) {
+                self.line(corners[bits], corners[bits | bit], color, id);
+            }
         }
     }
 
@@ -346,20 +436,25 @@ impl<'a> Out<'a> {
     }
 }
 
-/// Contacts: a cross at each point where colliders touch, and a line along its normal.
-fn contacts(world: &World, out: &mut Out<'_>) {
+/// Contacts: a cross at each point where colliders touch, characters among them, and an arrow
+/// along its normal, [`CONTACT_POINTS`] and [`NORMAL_POINTS`] points long.
+fn contacts(world: &World, look: &Look, out: &mut Out<'_>) {
     crate::physics::contact_points(world, &mut |entity, at, normal| {
+        let Some(per_point) = look.per_point(at) else {
+            return;
+        };
         let id = entity
             .and_then(|entity| world.id(entity))
             .map_or(0, EntityId::get);
         let at = out.at(at);
-        out.cross(at, CROSS, CONTACTS, id);
-        out.line(at, at + normal.as_vec3() * NORMAL, CONTACTS, id);
+        out.cross(at, CONTACT_POINTS * per_point, CONTACTS, id);
+        let tip = at + normal.as_vec3() * (NORMAL_POINTS * per_point);
+        out.arrow(at, tip, look.plane, CONTACTS, id);
     });
 }
 
-/// Velocities: an arrow from each body as far as it goes in [`LOOK_AHEAD`] seconds, and an arc
-/// round it as far as it turns, 2D's about Z.
+/// Velocities: an arrow from each body or character as far as it goes in [`LOOK_AHEAD`] seconds,
+/// and an arc round a body as far as it turns, 2D's about Z.
 fn velocity(world: &World, posed: &Posed, out: &mut Out<'_>) {
     let (at, id, radius) = (posed.at(), posed.pick(), posed.size());
     if let Some(body) = world.get::<RigidBody2D>(posed.entity) {
@@ -376,62 +471,93 @@ fn velocity(world: &World, posed: &Posed, out: &mut Out<'_>) {
             out.spin(at, axis, angle, radius, SPINS, id);
         }
     }
+    if let Some(character) = world.get::<CharacterController3D>(posed.entity) {
+        let to = at + character.velocity * LOOK_AHEAD;
+        out.arrow(at, to, None, VELOCITIES, id);
+    }
 }
 
-/// Bounds: each root's bounding sphere, as `meshes` have it.
+/// Bounds: the box round what each root draws, in its space ([`bounds::boxed`]), but one holding
+/// the eye.
 fn bounds(world: &World, meshes: &Meshes, look: &Look, out: &mut Out<'_>) {
     for (root, _) in world.query::<(Entity, &Transform)>() {
         if world.get::<Parent>(root).is_some() {
             continue;
         }
-        let (Some((center, radius)), Some(id)) = (bounds::of(world, meshes, root), world.id(root))
+        let (Some((placed, corners)), Some(id)) =
+            (bounds::boxed(world, meshes, root), world.id(root))
         else {
             continue;
         };
-        let center = out.at(center);
-        out.sphere(center, radius as f32, look.flat, BOUNDS, id.get());
-    }
-}
-
-/// Axes: a line along each of an entity's axes as it draws, [`Posed::size`] long.
-fn axes(posed: &Posed, out: &mut Out<'_>) {
-    let (at, size) = (posed.at(), posed.size());
-    let matrix = posed.matrix;
-    let directions = [matrix.x_axis, matrix.y_axis, matrix.z_axis];
-    for (direction, color) in directions.into_iter().zip(AXES) {
-        let direction = direction.truncate().normalize_or_zero();
-        if direction != Vec3::ZERO {
-            out.line(at, at + direction * size, color, posed.pick());
+        let [low, high] = corners;
+        let holds = |eye: DVec3| {
+            let eye = placed.inverse().transform_point3(eye);
+            eye.cmpge(low).all() && eye.cmple(high).all()
+        };
+        if !look.eye.is_some_and(holds) {
+            out.cuboid(placed, corners, BOUNDS, id.get());
         }
     }
 }
 
-/// Names: each entity's name, else its ID, above where it draws, facing the viewpoint.
+/// Axes: an arrow along each of an entity's axes as it draws, half its scale along it long,
+/// within [`AXIS`], but the camera's the view sees from. A 2D game's view leaves out Z, which
+/// points along it.
+fn axes(posed: &Posed, look: &Look, out: &mut Out<'_>) {
+    if look.from == Some(posed.id) {
+        return;
+    }
+    let at = posed.at();
+    let matrix = posed.matrix;
+    let directions = [matrix.x_axis, matrix.y_axis, matrix.z_axis];
+    let shown = if look.plane.is_some() { 2 } else { 3 };
+    for (axis, color) in directions.into_iter().zip(AXES).take(shown) {
+        let axis = axis.truncate();
+        let length = (axis.length() * 0.5).clamp(AXIS[0], AXIS[1]);
+        let direction = axis.normalize_or_zero();
+        if direction != Vec3::ZERO {
+            out.arrow(at, at + direction * length, look.plane, color, posed.pick());
+        }
+    }
+}
+
+/// Names: a root entity's name, else its ID, centered [`NAME_GAP`] points above what it and its
+/// descendants draw, else above it, facing the viewpoint. Parts have none: a part's label would
+/// land on its root's, as a unit's shape or a model's nodes would.
 fn name(
     world: &World,
+    meshes: &Meshes,
     posed: &Posed,
     look: &Look,
     text: &mut String,
     fonts: &mut Fonts,
     out: &mut Out<'_>,
 ) {
-    let viewpoint = &look.viewpoint;
-    let at = posed.at();
-    let forward = (viewpoint.rotation * Vec3::NEG_Z).as_dvec3();
-    let depth = ((out.origin + at.as_dvec3() - viewpoint.position).dot(forward)) as f32;
-    let per_pixel = match viewpoint.projection {
-        Projection::Orthographic { height, .. } => height / look.pixels,
-        Projection::Perspective { fov, near } => {
-            if depth.is_nan() || depth <= near {
-                return;
-            }
-            2.0 * depth * libm::tanf(fov / 2.0) / look.pixels
-        }
-    };
-    if !(per_pixel > 0.0 && per_pixel.is_finite()) {
+    if world.get::<Parent>(posed.entity).is_some() || look.from == Some(posed.id) {
         return;
     }
-    match world.name(posed.entity) {
+    let named = world.name(posed.entity);
+    // How far above the entity's origin its box's top is, in the world's Y, where the latest
+    // tick left them.
+    let lift = bounds::boxed(world, meshes, posed.entity).map_or(0.0, |(placed, [low, high])| {
+        let top = (0..8).map(|bits: usize| {
+            let pick = |bit: usize, axis: usize| match bits & bit {
+                0 => low[axis],
+                _ => high[axis],
+            };
+            placed
+                .transform_point3(DVec3::new(pick(1, 0), pick(2, 1), pick(4, 2)))
+                .y
+        });
+        let top = top.fold(f64::NEG_INFINITY, f64::max);
+        (top - placed.translation.y) as f32
+    });
+    let at = posed.at() + Vec3::Y * lift.max(0.0);
+    let Some(per_point) = look.per_point(out.origin + at.as_dvec3()) else {
+        return;
+    };
+    let at = at + Vec3::Y * (NAME_GAP * per_point);
+    match named {
         Some(name) => text.push_str(name),
         None => {
             let _ = write!(text, "{}", posed.id);
@@ -439,13 +565,14 @@ fn name(
     }
     let style = TextStyle {
         font: None,
-        size: NAME_POINTS * look.scale * per_pixel,
+        size: NAME_POINTS * per_point,
         color: NAMES,
         align: [Align::Center, Align::End],
     };
-    let placed = Mat4::from_rotation_translation(viewpoint.rotation, at);
+    let placed = Mat4::from_rotation_translation(look.viewpoint.rotation, at);
     let glyphs = fonts.lay_out(placed, text, &style, posed.pick());
     out.draws.extend_glyphs(out.shaders, glyphs);
+    out.drew[Overlay::Names as usize] += 1;
 }
 
 /// Skeletons: each joint of a skinned model joined to the joint above it, where they draw.
@@ -527,9 +654,10 @@ fn camera(world: &World, poses: &Poses<'_>, posed: &Posed, look: &Look, out: &mu
     }
 }
 
-/// Lights: a directional light's arrow along its direction, a point light's sphere of its range,
-/// a spot light's cone to its range, or [`SPOT`] units without one; and a cross at each.
-fn light(world: &World, poses: &Poses<'_>, posed: &Posed, out: &mut Out<'_>) {
+/// Lights: a cross at each; a directional light's arrow along its direction, [`AHEAD`] units in
+/// front of the viewpoint; a point light's sphere of its range, but one holding the eye; a spot
+/// light's cone to its range, or [`SPOT`] units without one.
+fn light(world: &World, poses: &Poses<'_>, posed: &Posed, look: &Look, out: &mut Out<'_>) {
     let Some(light) = world.get::<Light>(posed.entity) else {
         return;
     };
@@ -541,9 +669,20 @@ fn light(world: &World, poses: &Poses<'_>, posed: &Posed, out: &mut Out<'_>) {
         .filter(|range| *range > 0.0 && range.is_finite());
     out.cross(at, CROSS, LIGHTS, id);
     match light.kind {
-        LightKind::Directional => out.arrow(at, at + forward * DIRECTION, None, LIGHTS, id),
+        LightKind::Directional => {
+            let viewpoint = &look.viewpoint;
+            let ahead = viewpoint.position + (viewpoint.rotation * Vec3::NEG_Z * AHEAD).as_dvec3();
+            if let Some(per_point) = look.per_point(ahead) {
+                let (middle, half) = (
+                    out.at(ahead),
+                    forward * (DIRECTION_POINTS * per_point / 2.0),
+                );
+                out.arrow(middle - half, middle + half, None, LIGHTS, id);
+            }
+        }
         LightKind::Point => {
-            if let Some(range) = range {
+            let holds = |eye: DVec3| eye.distance(position) <= f64::from(range.unwrap_or(0.0));
+            if let Some(range) = range.filter(|_| !look.eye.is_some_and(holds)) {
                 out.sphere(at, range, false, LIGHTS, id);
             }
         }
@@ -562,20 +701,24 @@ fn light(world: &World, poses: &Poses<'_>, posed: &Posed, out: &mut Out<'_>) {
 }
 
 /// Sounds: a cross where each sound playing from a place in the world is, and circles round it
-/// as far as it's heard at full volume and at all, where the viewpoint has perspective.
+/// as far as it's heard at full volume and at all, but those holding the eye.
 fn sounds(world: &World, audio: &Audio, look: &Look, out: &mut Out<'_>) {
     audio.places(world, &mut |entity, at| {
         let id = entity
             .and_then(|entity| world.id(entity))
             .map_or(0, EntityId::get);
-        sound(out.at(at), id, look, out);
+        let eye = look.eye.map(|eye| eye.distance(at) as f32);
+        sound(out.at(at), id, look, eye, out);
     });
 }
 
-/// A sound's marks at `at`, picked as `id`.
-fn sound(at: Vec3, id: u64, look: &Look, out: &mut Out<'_>) {
+/// A sound's marks at `at`, picked as `id`, `eye` as far from it as the eye is, if it's known.
+fn sound(at: Vec3, id: u64, look: &Look, eye: Option<f32>, out: &mut Out<'_>) {
     out.cross(at, CROSS, SOUNDS, id);
-    for heard in HEARD {
+    for heard in HEARD
+        .into_iter()
+        .filter(|&heard| eye.is_none_or(|eye| eye > heard))
+    {
         out.sphere(at, heard, look.flat, SOUNDS, id);
     }
 }
@@ -585,14 +728,16 @@ mod tests {
     use std::sync::Arc;
 
     use gg_core::math::DVec3;
-    use gg_renderer::{Circle, Sprite};
+    use gg_renderer::Sprite;
 
     use super::*;
     use crate::animation::Skin;
     use crate::gltf::Part;
     use crate::model::Nodes;
     use crate::render_thread::Extracted;
-    use crate::{BoxCollider2D, BoxCollider3D, Context, Name, step_physics};
+    use crate::{
+        BoxCollider2D, BoxCollider3D, CapsuleCollider3D, Context, Name, Shape, step_physics,
+    };
 
     const VIEWPORT: Viewport = Viewport {
         origin: [0, 0],
@@ -629,11 +774,38 @@ mod tests {
         cx.world_mut().spawn((Transform::IDENTITY, camera));
     }
 
+    /// A transform `units` in front of a camera at the origin.
+    fn ahead(units: f64) -> Transform {
+        Transform {
+            translation: DVec3::new(0.0, 0.0, -units),
+            ..Transform::IDENTITY
+        }
+    }
+
     #[test]
-    fn axes_draw_three_lines_an_entity() {
+    fn axes_draw_an_arrow_an_axis_and_the_api_says_how_many_lines() {
         let mut cx = Context::seeded(1);
+        cx.dev.overlays.engine = true;
         cx.world_mut().spawn(Transform::IDENTITY);
-        assert_eq!(adds_lines(&mut cx, Overlay::Axes), 3);
+        // The default viewpoint looks along Z without perspective: X and Y, two barbs each.
+        assert_eq!(adds_lines(&mut cx, Overlay::Axes), 6);
+        let report = cx.dev.overlays.report();
+        let axes = report.overlays.iter().find(|o| o.name == "Axes");
+        assert_eq!(axes.and_then(|axes| axes.drew), None, "off: nothing to say");
+        drawn(&mut cx, Some(Overlay::Axes));
+        let report = cx.dev.overlays.report();
+        let drew = |name: &str| report.overlays.iter().find(|o| o.name == name)?.drew;
+        assert_eq!((drew("Axes"), drew("Bounds")), (Some(6), None));
+        // With perspective, Z too, and four barbs each; none for the camera seen from.
+        seen_from(
+            &mut cx,
+            Projection::Perspective {
+                fov: 0.8,
+                near: 0.1,
+            },
+        );
+        cx.world_mut().spawn(ahead(5.0));
+        assert_eq!(adds_lines(&mut cx, Overlay::Axes), 2 * 15);
     }
 
     #[test]
@@ -660,6 +832,13 @@ mod tests {
         let before = drawn(&mut cx, Some(Overlay::Velocities));
         cx.world_mut().spawn((Transform::IDENTITY, body));
         // A shaft and four barbs.
+        assert_eq!(drawn(&mut cx, Some(Overlay::Velocities)) - before, 5);
+        let walking = CharacterController3D {
+            velocity: Vec3::new(3.0, 0.0, 0.0),
+            ..CharacterController3D::default()
+        };
+        let before = drawn(&mut cx, Some(Overlay::Velocities));
+        cx.world_mut().spawn((Transform::IDENTITY, walking));
         assert_eq!(drawn(&mut cx, Some(Overlay::Velocities)) - before, 5);
     }
 
@@ -712,19 +891,20 @@ mod tests {
     }
 
     #[test]
-    fn bounds_draw_circles_round_what_draws() {
+    fn bounds_draw_a_box_round_what_each_root_draws() {
         let mut cx = Context::seeded(1);
         cx.world_mut()
             .spawn((Transform::IDENTITY, Sprite::default()));
-        // The default viewpoint has no perspective: one circle.
-        assert_eq!(adds_lines(&mut cx, Overlay::Bounds), SEGMENTS);
+        // A sprite's box is flat: four edges.
+        assert_eq!(adds_lines(&mut cx, Overlay::Bounds), 4);
+        let cube = cx.shape(Shape::Cube);
+        cube.spawn(cx.world_mut(), ahead(5.0));
+        assert_eq!(adds_lines(&mut cx, Overlay::Bounds), 4 + 12);
     }
 
     #[test]
-    fn bounds_draw_three_circles_where_the_view_has_perspective() {
+    fn boxes_and_outlines_holding_the_eye_are_left_out() {
         let mut cx = Context::seeded(1);
-        cx.world_mut()
-            .spawn((Transform::IDENTITY, Circle::default()));
         seen_from(
             &mut cx,
             Projection::Perspective {
@@ -732,17 +912,90 @@ mod tests {
                 near: 0.1,
             },
         );
-        assert_eq!(adds_lines(&mut cx, Overlay::Bounds), 3 * SEGMENTS);
+        // A cube and a collider round the camera, as a first-person player's own.
+        let cube = cx.shape(Shape::Cube);
+        let round = cube.spawn(cx.world_mut(), Transform::IDENTITY);
+        cx.world_mut()
+            .insert(round, BoxCollider3D::default())
+            .expect("alive");
+        assert_eq!(drawn(&mut cx, Some(Overlay::Bounds)), drawn(&mut cx, None));
+        assert_eq!(
+            drawn(&mut cx, Some(Overlay::Colliders)),
+            drawn(&mut cx, None)
+        );
+        let seen = cube.spawn(cx.world_mut(), ahead(5.0));
+        cx.world_mut()
+            .insert(seen, BoxCollider3D::default())
+            .expect("alive");
+        assert_eq!(adds_lines(&mut cx, Overlay::Bounds), 12);
+        assert_eq!(adds_lines(&mut cx, Overlay::Colliders), 12);
     }
 
     #[test]
-    fn names_draw_text_for_named_entities_and_ids_for_the_rest() {
+    fn names_label_roots_by_name_else_id_but_not_parts() {
         let mut cx = Context::seeded(1);
-        cx.world_mut()
-            .spawn((Transform::IDENTITY, Name("hero".into())));
+        let unit = cx
+            .world_mut()
+            .spawn((Transform::IDENTITY, Name("Unit 1".into())));
         let named = adds_lines(&mut cx, Overlay::Names);
-        cx.world_mut().spawn(Transform::IDENTITY);
-        assert!(adds_lines(&mut cx, Overlay::Names) > named);
+        let root = cx.world_mut().spawn(Transform::IDENTITY);
+        let both = adds_lines(&mut cx, Overlay::Names);
+        assert!(both > named, "a root's ID");
+        let part = cx.world_mut().spawn(Transform::IDENTITY);
+        cx.world_mut().set_parent(part, Some(root)).expect("alive");
+        assert_eq!(adds_lines(&mut cx, Overlay::Names), both, "a part has none");
+        // A unit's shape, named, and its model's nodes, named in the model's file: on the unit's
+        // label, so none.
+        let mut shapes = crate::model::tests::imported();
+        for node in &mut shapes.parts {
+            node.name = Some("Cube".into());
+        }
+        let (model, _) = crate::model::tests::added(&mut cx, "m", shapes);
+        let shape = model.spawn(cx.world_mut(), Transform::IDENTITY);
+        let world = cx.world_mut();
+        world
+            .insert(shape, Name("Unit Shape".into()))
+            .expect("alive");
+        world.set_parent(shape, Some(unit)).expect("alive");
+        let node = world.children(shape).expect("alive").next();
+        assert_eq!(world.name(node.expect("a node")), Some("Cube"));
+        assert_eq!(adds_lines(&mut cx, Overlay::Names), both, "parts have none");
+    }
+
+    #[test]
+    fn contacts_show_where_a_character_stands() {
+        let mut cx = Context::seeded(1);
+        let floor = Transform {
+            scale: Vec3::new(10.0, 1.0, 10.0),
+            ..Transform::IDENTITY
+        };
+        let fixed = RigidBody3D {
+            body_type: crate::BodyType::Static,
+            ..RigidBody3D::default()
+        };
+        cx.world_mut()
+            .spawn((floor, fixed, BoxCollider3D::default()));
+        let standing = Transform {
+            translation: DVec3::new(0.0, 1.6, 0.0),
+            ..Transform::IDENTITY
+        };
+        let capsule = CapsuleCollider3D::default();
+        // Walking: one standing still moves by nothing, touching nothing.
+        let walking = CharacterController3D {
+            velocity: Vec3::new(1.0, 0.0, 0.0),
+            ..CharacterController3D::default()
+        };
+        cx.world_mut().spawn((standing, capsule, walking));
+        for _ in 0..30 {
+            step_physics(cx.world_mut());
+        }
+        assert_eq!(
+            cx.world().contacts().count(),
+            0,
+            "rapier's leave characters out"
+        );
+        // A cross and an arrow with two barbs, in the default viewpoint's plane.
+        assert!(adds_lines(&mut cx, Overlay::Contacts) >= 6);
     }
 
     #[test]
@@ -829,15 +1082,29 @@ mod tests {
         let look = |flat| Look {
             viewpoint,
             flat,
+            plane: None,
+            eye: None,
             aspect: 1.0,
             pixels: 64.0,
             scale: 1.0,
             from: None,
         };
-        sound(Vec3::ONE, 7, &look(true), &mut out);
+        sound(Vec3::ONE, 7, &look(true), None, &mut out);
         assert_eq!(out.draws.len(), 3 + 2 * SEGMENTS);
-        sound(Vec3::ONE, 7, &look(false), &mut out);
+        sound(Vec3::ONE, 7, &look(false), None, &mut out);
         assert_eq!(out.draws.len(), 2 * (3 + 2 * SEGMENTS) + 4 * SEGMENTS);
+        // Heard where the eye is, a sound has no circle round it there.
+        let before = out.draws.len();
+        sound(Vec3::ONE, 7, &look(false), Some(HEARD[0] + 0.5), &mut out);
+        assert_eq!(
+            out.draws.len() - before,
+            3 + 3 * SEGMENTS,
+            "the eye is in the outer sphere"
+        );
+        assert_eq!(
+            out.drew[Overlay::Contacts as usize] as usize,
+            out.draws.len()
+        );
     }
 
     #[test]

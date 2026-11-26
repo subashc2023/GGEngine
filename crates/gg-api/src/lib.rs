@@ -1306,6 +1306,10 @@ pub struct Overlay {
     pub name: String,
     pub group: OverlayGroup,
     pub on: bool,
+    /// For an engine's World overlay that's on, the lines and labels it drew in the last frame: 0
+    /// says it found nothing to show, such as velocities with nothing that moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drew: Option<u32>,
 }
 
 /// The menu of the overlays' bar an [`Overlay`] is in.

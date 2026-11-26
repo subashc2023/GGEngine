@@ -445,8 +445,10 @@ const TOOLS: &[Tool] = &[
         name: "overlays",
         description: "Turns the game's debug overlays on and off, those its key below Esc's bar \
                       offers in a development build with `App::debug_overlays`, and answers each \
-                      overlay's `name`, `group` (stats, inspect, world, game) and whether it's \
-                      `on`, the names on that no overlay has yet (`waiting`), the `channel`, the \
+                      overlay's `name`, `group` (stats, inspect, world, game), whether it's \
+                      `on` and, for a World overlay on, the lines and labels it `drew` in the last \
+                      frame (0: nothing to show), the names on that no overlay has yet \
+                      (`waiting`), the `channel`, the \
                       passes left out (`skip`) and whether the `bar` shows. World overlays \
                       (colliders, contacts, velocities, navigation, cells, bounds, axes, names, \
                       skeletons, cameras, lights, sounds) draw with the world, so `capture` shows \

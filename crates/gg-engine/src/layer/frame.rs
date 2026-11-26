@@ -5,8 +5,8 @@ use std::mem;
 use bytemuck::NoUninit;
 use gg_core::math::{DVec3, Mat4, Vec3, Vec4};
 use gg_renderer::{
-    Antialiasing, Circle, Grade, Line, MAX_PICKS, MIN_RENDER_SCALE, Mesh, Shader, Sprite,
-    Tonemapper, Viewpoint, Viewport,
+    Antialiasing, Circle, Grade, Line, MAX_PICKS, MIN_RENDER_SCALE, Mesh, Projection, Shader,
+    Sprite, Tonemapper, Viewpoint, Viewport,
 };
 use tracing::warn;
 
@@ -101,8 +101,8 @@ impl Context {
 
     /// Sets where the game's view sees the world from this frame. Frames where no layer sets one
     /// use the primary entity with a [`Camera`] and a [`Transform`], else [`Viewpoint::default`].
-    /// A projection that can't project (see [`Projection`](crate::Projection)) is drawn as the
-    /// last that could, or the default's, and warns once (`engine.bad_projection`).
+    /// A projection that can't project (see [`Projection`]) is drawn as the last that could, or
+    /// the default's, and warns once (`engine.bad_projection`).
     pub fn set_viewpoint(&mut self, viewpoint: Viewpoint) {
         self.viewpoint = Some(viewpoint);
     }
@@ -502,14 +502,21 @@ impl Context {
         self.environment = environment::seen(world, &mut self.environment_tie);
         (self.lit).find(world, past, placed, (alpha, self.origin), self.tick_started);
         self.time = time;
+        // What each World overlay draws, for the tool API's `overlays`.
+        #[cfg(feature = "dev")]
+        let mut drew = [0; Overlay::ALL.len()];
         #[cfg(feature = "dev")]
         if let Some(plane) = self.dev.look.grid.filter(|_| !self.dev.look.bare) {
             let seen = self.seen.map(|(_, seen)| seen);
             let viewpoint = self.dev.look.viewpoint.or(self.viewpoint).or(seen);
             self.draw_grid(&viewpoint.unwrap_or_default(), plane);
+            let before = self.over.len();
             self.draw_cells();
+            drew[Overlay::Cells as usize] = count(before, self.over.len());
         } else if !self.dev.look.bare && self.dev.overlays.on(Overlay::Cells) {
+            let before = self.over.len();
             self.draw_cells();
+            drew[Overlay::Cells as usize] = count(before, self.over.len());
         }
         let (world, past, placed) = (&self.world, &self.past, &self.placed);
         let (draws, shaders, fonts) = (&mut self.draws, &mut self.shaders, &mut self.fonts);
@@ -523,33 +530,58 @@ impl Context {
         let overlays = !self.dev.look.bare && self.dev.overlays.world();
         #[cfg(not(feature = "dev"))]
         let overlays = false;
+        // What the frame will draw from, and whether that's a camera's own view.
+        #[cfg(feature = "dev")]
+        let set = self.dev.look.viewpoint.or(self.viewpoint);
+        #[cfg(not(feature = "dev"))]
+        let set = self.viewpoint;
+        let seen = self.seen;
+        let viewpoint = set.or(seen.map(|(_, seen)| seen));
+        let eye = (viewpoint.filter(|v| matches!(v.projection, Projection::Perspective { .. })))
+            .map(|v| (v.position - self.origin).as_vec3());
         if (colliders || navmesh || overlays)
             && let Some(poses) = Poses::new(world, past, placed, alpha, self.origin)
         {
             let scale = self.scale() as f32;
             let (over, shaders) = (&mut self.over, &mut self.shaders);
             if colliders {
-                physics::draw_colliders(world, &poses, scale, over, shaders);
+                let _before = over.len();
+                physics::draw_colliders(world, &poses, scale, eye, over, shaders);
+                #[cfg(feature = "dev")]
+                {
+                    drew[Overlay::Colliders as usize] = count(_before, over.len());
+                }
             }
             if navmesh {
+                let _before = over.len();
                 navigation::draw_navigation(world, &poses, scale, over, shaders);
+                #[cfg(feature = "dev")]
+                {
+                    drew[Overlay::Navigation as usize] = count(_before, over.len());
+                }
             }
             #[cfg(feature = "dev")]
             if overlays {
                 let state = &self.dev.overlays;
-                // What the frame will draw from, and whether that's a camera's own view.
-                let set = self.dev.look.viewpoint.or(self.viewpoint);
-                let seen = self.seen;
                 let mut frame = debug_overlays::world::Frame {
                     meshes: &self.meshes,
                     fonts: &mut self.fonts,
                     audio: &self.audio,
-                    viewpoint: set.or(seen.map(|(_, seen)| seen)),
+                    viewpoint,
                     from: seen.map(|(id, _)| id).filter(|_| set.is_none()),
                     view: self.view,
                 };
-                debug_overlays::world::draw(state, world, &poses, &mut frame, scale, over, shaders);
+                let own = debug_overlays::world::draw(
+                    state, world, &poses, &mut frame, scale, over, shaders,
+                );
+                for (drew, own) in drew.iter_mut().zip(own) {
+                    *drew += own;
+                }
             }
+        }
+        #[cfg(feature = "dev")]
+        {
+            self.dev.overlays.drew = drew;
         }
         // What changes after, until the next frame draws, is marked past what this one saw.
         self.world.advance();
@@ -587,7 +619,7 @@ impl Context {
                     from,
                     to,
                     color,
-                    width: 1.5,
+                    width: CELL_WIDTH * self.scale() as f32,
                 };
                 (self.over).push_line(&mut self.shaders, Mat4::IDENTITY, line, 0);
             }
@@ -822,10 +854,20 @@ fn relative(transform: Mat4, origin: DVec3) -> Mat4 {
     relative
 }
 
+/// How wide the edges of cells draw, in points: as colliders' outlines.
+#[cfg(feature = "dev")]
+const CELL_WIDTH: f32 = 2.0;
+
+/// How many draws a part of a frame added, from `before` to `after`.
+#[cfg(feature = "dev")]
+fn count(before: usize, after: usize) -> u32 {
+    u32::try_from(after.saturating_sub(before)).unwrap_or(u32::MAX)
+}
+
 /// The color of the edges of a cell in, as [`Context::draw_cells`] draws them: a light blue, apart
 /// from the grid's axes' colors.
 #[cfg(feature = "dev")]
-const CELL_IN: Vec4 = Vec4::new(0.3, 0.7, 1.0, 0.6);
+const CELL_IN: Vec4 = Vec4::new(0.3, 0.7, 1.0, 0.9);
 
 /// The color of the edges of a cell refused, as [`Context::draw_cells`] draws them.
 #[cfg(feature = "dev")]

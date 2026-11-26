@@ -76,10 +76,14 @@ struct Holding {
     reply: Reply,
 }
 
-/// Hands `events` to the layers, as their window would.
+/// Hands `events` to egui's next pass and the layers, as their window would: the layers get what
+/// egui doesn't keep ([`Handed::hand`](crate::api::Handed::hand)).
 fn hand(cx: &mut Context, stack: &mut Stack, events: &[InputEvent]) {
     let origin = cx.view().map_or([0, 0], |view| view.origin);
     for given in events {
+        if cx.dev.handed.hand(given, origin) {
+            continue;
+        }
         let event = input_event(given, origin);
         let _ = stack.event(cx, &event.expect("checked as it was read"));
     }

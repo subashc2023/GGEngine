@@ -337,6 +337,25 @@ impl ModelMesh {
         Ok(mesh)
     }
 
+    /// The box round its vertices as they unpack, least and most corners, unless it's skinned
+    /// (its clips move them) or has none.
+    pub fn unskinned_box(&self) -> Option<[Vec3; 2]> {
+        let first = self
+            .vertices
+            .first()
+            .filter(|_| self.skin.is_empty())?
+            .position;
+        let (low, high) = (self.vertices.iter()).fold((first, first), |(low, high), vertex| {
+            let at = vertex.position;
+            (
+                std::array::from_fn(|i| low[i].min(at[i])),
+                std::array::from_fn(|i| high[i].max(at[i])),
+            )
+        });
+        let Packing { offset, step, .. } = self.packing;
+        Some([low, high].map(|steps| offset + Vec3::from_array(steps.map(f32::from)) * step))
+    }
+
     /// Its vertices' positions, unpacked as the model shaders do.
     pub fn positions(&self) -> Vec<Vec3> {
         let Packing { offset, step, .. } = self.packing;
@@ -734,6 +753,7 @@ mod tests {
         let joints = weighed.joints.map(u32::from);
         let weights = weighed.weights.map(u32::from);
         assert_eq!(halves.as_flattened(), [joints, weights].as_flattened());
+        assert_eq!(mesh.unskinned_box(), None, "its clips move its vertices");
         let mut cut = mesh.clone();
         cut.meshlets.levels = vec![[0, 1]];
         assert!(cut.check("cut").is_err(), "skinned and cut into meshlets");
@@ -768,6 +788,11 @@ mod tests {
                 "{unpacked} {point}"
             );
         }
+        // So does the box, at its least and most corners.
+        let [low, high] = mesh.unskinned_box().expect("unskinned, with vertices");
+        let want = [Vec3::new(-3.25, 0.1, 10.0), Vec3::new(7.0, 2.0, 10.25)];
+        assert!((low - want[0]).abs().max_element() <= step / 2.0, "{low}");
+        assert!((high - want[1]).abs().max_element() <= step / 2.0, "{high}");
         // The sphere holds them as they unpack, which is what draws.
         let Lods { center, radius, .. } = mesh.lods;
         let apart = |p: &Vec3| p.as_dvec3().distance(center.as_dvec3());

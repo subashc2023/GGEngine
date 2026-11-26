@@ -543,17 +543,19 @@ impl Handler<'_> {
     }
 
     /// Grabs or releases the cursor as the layers want ([`Context::set_cursor_grabbed`]), while
-    /// the window has focus and, in a dockspace, the view shows and has the keys. Locks where the
-    /// platform does (Windows, macOS, Wayland), else confines it (X11, which still reports raw
-    /// motion past the edges); warns `engine.cursor_grab` if neither works. [`Dock::grab_at`]
-    /// covers a grab starting off the view.
+    /// the window has focus, the debug overlays' bar is closed and, in a dockspace, the view shows
+    /// and has the keys. Locks where the platform does (Windows, macOS, Wayland), else confines it
+    /// (X11, which still reports raw motion past the edges); warns `engine.cursor_grab` if neither
+    /// works. [`Dock::grab_at`] covers a grab starting off the view.
     fn hold_cursor(&mut self) {
         let Some(window) = &self.window else {
             return;
         };
+        // The debug overlays' bar takes the mouse while it's open.
         #[cfg(feature = "dev")]
         let view = (self.view_input.as_ref())
-            .is_none_or(|input| input.focused() && self.dock.view().is_positive());
+            .is_none_or(|input| input.focused() && self.dock.view().is_positive())
+            && !self.cx.dev.overlays.bar;
         #[cfg(not(feature = "dev"))]
         let view = true;
         let grab = self.cx.cursor_grabbed() && view && window.has_focus();

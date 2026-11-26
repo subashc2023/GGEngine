@@ -394,6 +394,26 @@ enum Outline {
     },
 }
 
+impl Outline {
+    /// Whether it holds `point`, in the space its matrix places it in: a 2D shape holds none.
+    fn holds(&self, point: Vec3) -> bool {
+        let local = |placed: &Mat4| placed.inverse().transform_point3(point);
+        match *self {
+            Self::Rect(_) | Self::Circle(_) => false,
+            Self::Cuboid(placed) => local(&placed).abs().max_element() <= 0.5,
+            Self::Sphere(placed) => local(&placed).length() <= 1.0,
+            Self::Capsule {
+                placed,
+                radius,
+                half,
+            } => {
+                let at = local(&placed);
+                (at - Vec3::Y * at.y.clamp(-half, half)).length() <= radius
+            }
+        }
+    }
+}
+
 /// Draws into `draws` the outline of each 2D and 3D collider in `world` whose entity has a
 /// [`Transform`], 2 points wide in a window of `scale` pixels a point, where `poses` draws its
 /// entity, with the entity's ID so a pick finds it: 2D colliders first. Then each joint's
@@ -403,17 +423,22 @@ enum Outline {
 /// They draw over the view except where an opaque mesh is nearer, not nudged toward the camera.
 /// Sprites test depth without writing it, so an outline shows from behind a sprite as from in
 /// front; a joint inside its bodies' meshes shows only where they don't hide it.
+///
+/// A 3D collider holding `eye`, where a viewpoint with perspective is, from the poses' origin, is
+/// left out: seen from inside, as a first-person player's own, it would span the view.
 pub(crate) fn draw_colliders(
     world: &World,
     poses: &Poses<'_>,
     scale: f32,
+    eye: Option<Vec3>,
     draws: &mut Draws,
     shaders: &mut Shaders,
 ) {
     let _zone = gg_core::zone!();
     let width = OUTLINE_WIDTH * scale;
     let ring = ring();
-    let mut each = |outline, id| match outline {
+    let mut each = |outline: Outline, id| match outline {
+        _ if eye.is_some_and(|eye| outline.holds(eye)) => {}
         Outline::Rect(placed) => draws.push_rect(shaders, placed, OUTLINE, width, id),
         outline => lines(outline, &ring, |placed, from, to| {
             let line = Line {

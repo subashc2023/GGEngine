@@ -105,7 +105,9 @@ ends when gg does, however gg ends. A second `run` of PACKAGE is refused (`gg.ru
   -- <ARGS>             A headless game given `--real-time` ticks in real time, to be watched
 
 Events, a JSON line each (the game's and cargo's output go to stderr): `started`, `serving` (the
-tool API), and as it ends `exited`, `crashed` or `hung`, with the errors its log holds.
+tool API), and as it ends `exited`, `crashed` or `hung`, with the errors its log holds. `hung` gives
+the file its threads' stacks were sampled into before it was ended, as `stacks`: by `sample` on
+macOS, `gdb` on Linux if it's installed and may attach; `null` where neither could.
 
 Restarts, from the last snapshot: after a crash or a hang; after a rebuild (`rebuilt`), from a
 snapshot taken in the same request as the quit, so no edit is lost between them; and at once
@@ -387,10 +389,12 @@ back to the game:
                 summary: "Read or set its debug overlays: stats, panels, lines in the world, a part of shading, passes",
                 details: "\
 A game shows them with `App::debug_overlays`, in a development build; the key below Esc opens their
-bar. Prints each overlay's name, group (stats, inspect, world, game) and whether it's on, the names
-on that no overlay has yet (`waiting`), the channel, the passes left out and whether the bar shows.
-A LIST is names separated by commas, in any case, `_` or `-` for a space. Which are on is kept for
-the game's next runs, unless it starts with `-- --overlays <LIST>`.
+bar, and `input` reaches its menus and panels as a person's clicks do. Prints each overlay's name,
+group (stats, inspect, world, game), whether it's on and, for a World overlay on, the lines and
+labels it `drew` in the last frame, 0 when it found nothing to show; then the names on that no
+overlay has yet (`waiting`), the channel, the passes left out and whether the bar shows. A LIST is
+names separated by commas, in any case, `_` or `-` for a space. Which are on is kept for the game's
+next runs, unless it starts with `-- --overlays <LIST>`.
   --on <LIST>       Turn these on; a name no overlay has yet waits for the game's own of that name
   --off <LIST>      Turn these off
   --only            Turn every overlay off first
@@ -399,10 +403,23 @@ the game's next runs, unless it starts with `-- --overlays <LIST>`.
   --skip <LIST>     Leave out these passes, named as the look's `skip` names them, or `none`
   --bar, --no-bar   Show or hide the bar
 Stats, numbers over the view: `fps`, `frame`, `memory`, `rendering`, `simulation`, `input`,
-`network`, `log`. Inspect, panels: `performance`, `entities`, `inspector`. World, lines and labels
-drawn with the world, which `capture` shows: `colliders`, `contacts`, `velocities`, `navigation`,
-`cells`, `bounds`, `axes`, `names`, `skeletons`, `cameras`, `lights`, `sounds`. Game: the game's
-own, as it names them. Stats and panels are UI, which `capture` doesn't show.
+`network`, `log`. Inspect, panels: `performance`, `entities`, `inspector`. Game: the game's own, as
+it names them. Stats and panels are UI, which `capture` doesn't show. World, lines and labels drawn
+with the world, which `capture` shows; a shape round a first-person view's eye is left out:
+  colliders   Outlines and joints, green
+  contacts    Where colliders and characters touch: a cross, and an arrow along the push
+  velocities  Arrows as far as bodies and characters go in a quarter second, arcs as they turn
+  navigation  The navmesh and agents' paths
+  cells       The world's cells: blue in, red refused
+  bounds      The box round what each root entity draws, violet
+  axes        Arrows along each entity's X, Y and Z, half its scale along each long
+  names       Each root entity's name, else its ID, above what it draws
+  skeletons   Skinned models' joints, each joined to its parent
+  cameras     Other cameras' frusta
+  lights      Point lights' ranges, spot lights' cones, a directional light's arrow ahead
+  sounds      Where sounds play, with circles as far as they're heard
+Passes, for `--skip`: `ambient_occlusion`, `reflections`, `shadows`, `fog`, `bloom`,
+`depth_of_field`, `motion_blur`, `antialiasing`, `grade`, `lens`, `adaptation`.
 ",
             },
             Help {

@@ -614,19 +614,21 @@ Ticks, updates and UI go up from the bottom. Headless runs have no window or gam
 their layers tick, update and draw UI all the same.
 
 egui is the development UI, and in development builds the top overlay: it sees every event first
-and keeps what it wants, but never a release. An app that draws none stops running it. The dock,
-through `Ui`, is the engine's own, since egui's docking crates can't put a panel in a window of its
-own: panels dock around a central area that stays the game's, or float, over the main window or in
-windows of their own. Tools take a dockspace (`App::view_panel`), where the game's view is a panel
+and keeps what it wants, but never a release. The tool API's input takes the same path: egui's next
+pass hears it, and the layers get what egui doesn't keep. An app that draws none stops running it.
+The dock, through `Ui`, is the engine's own, since egui's docking crates can't put a panel in a
+window of its own: panels dock around a central area that stays the game's, or float, over the main
+window or in windows of their own. Tools take a dockspace (`App::view_panel`), where the game's view is a panel
 too but never leaves the main window, whose input alone reaches the layers, and draw their windows'
 title bars (`App::custom_title_bar`). Games keep the OS's frame.
 
 A game starts as just the game: its development build's debug overlays (`App::debug_overlays`)
-show nothing until turned on. The key below Esc opens their bar; `--overlays` and the tool API's
-`overlays` set them too, and the last set is kept for the next run. Stats and the Inspector's
-panels are egui's. World overlays draw lines with the world, as colliders' outlines do, so captures
-show them; the Render menu's channel and passes go under the look's. A game names its own
-overlays as it asks whether each is on (`Context::debug_overlay`).
+show nothing until turned on. The key below Esc opens their bar, which takes the mouse while open:
+a grabbed cursor is let go. `--overlays` and the tool API's `overlays` set them too, and the last
+set is kept for the next run. Stats and the Inspector's panels are egui's. World overlays draw
+lines with the world, as colliders' outlines do, so captures show them; the Render menu's channel
+and passes go under the look's. A game names its own overlays as it asks whether each is on
+(`Context::debug_overlay`).
 
 A game's own UI is apart from egui, on the view's canvas (`Context::canvas`): text and sprites
 anchored to the view and scaled with its height, drawn into the view, so captures show them. A

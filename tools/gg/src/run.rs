@@ -697,6 +697,8 @@ impl Supervisor<'_> {
         if game.moved.elapsed() <= limit {
             return Ok(None);
         }
+        let stacks = self.exe.with_file_name(format!("hung-{}.txt", game.pid));
+        let stacks = sample_stacks(game.pid, &stacks).then_some(stacks);
         let _ = game.child.kill();
         let _ = game.child.wait();
         let (log, errors) = self.remains(peer, game);
@@ -707,6 +709,7 @@ impl Supervisor<'_> {
             "seconds": limit.as_secs(),
             "log": log,
             "errors": errors,
+            "stacks": stacks,
         }));
         Ok(Some(game.failed(self.served)))
     }
@@ -1361,6 +1364,55 @@ fn wait(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStat
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// The longest a hung game's stacks take to sample before it's killed anyway.
+const SAMPLING: Duration = Duration::from_secs(10);
+
+/// Writes where each of process `pid`'s threads is to `path`, as the platform's sampler sees it:
+/// `sample` on macOS, `gdb` on Linux where it's installed and may attach. Returns whether it did.
+/// A hang's stacks say what it waits on, which its log can't.
+fn sample_stacks(pid: u32, path: &Path) -> bool {
+    let pid = pid.to_string();
+    let mut command = if cfg!(target_os = "macos") {
+        let mut sample = Command::new("/usr/bin/sample");
+        sample
+            .args([pid.as_str(), "1", "-mayDie", "-file"])
+            .arg(path);
+        sample.stdout(Stdio::null());
+        sample
+    } else if cfg!(target_os = "linux") {
+        let Ok(file) = fs::File::create(path) else {
+            return false;
+        };
+        let mut gdb = Command::new("gdb");
+        gdb.args(["-p", &pid, "-batch", "-ex", "thread apply all bt"]);
+        gdb.stdout(file);
+        gdb
+    } else {
+        return false;
+    };
+    let Ok(mut sampler) = command.stdin(Stdio::null()).stderr(Stdio::null()).spawn() else {
+        let _ = fs::remove_file(path);
+        return false;
+    };
+    let started = Instant::now();
+    let done = loop {
+        match sampler.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if started.elapsed() < SAMPLING => thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = sampler.kill();
+                let _ = sampler.wait();
+                break false;
+            }
+        }
+    };
+    let written = done && fs::metadata(path).is_ok_and(|file| file.len() > 0);
+    if !written {
+        let _ = fs::remove_file(path);
+    }
+    written
 }
 
 #[cfg(test)]

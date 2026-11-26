@@ -209,6 +209,9 @@ pub struct Meshes {
     /// Each mesh's bounding sphere, center and radius in its own space, by handle. `None` without a
     /// finite sphere, or once removed.
     spheres: Vec<Option<(Vec3, f32)>>,
+    /// Each mesh's box, least and most corners in its own space, by handle, where its vertices'
+    /// positions are read: a model's, unskinned. `None` for the rest, or once removed.
+    boxes: Vec<Option<[Vec3; 2]>>,
     /// The engine's grid mesh, added when first asked for.
     grid: Option<u32>,
 }
@@ -305,8 +308,15 @@ impl Meshes {
         self.spheres.get(draw.mesh as usize).copied().flatten()
     }
 
-    /// Keeps `lods`' sphere for mesh `index`, unless removed.
-    fn keep_sphere(&mut self, index: u32, lods: &Lods) {
+    /// The box round `draw`'s mesh's vertices as they unpack, its least and most corners in its
+    /// space, readable before it streams: a model's mesh, unskinned, as a skinned one's clips move
+    /// its vertices. `None` for the rest, or removed.
+    pub fn box_of(&self, draw: &MeshDraw) -> Option<[Vec3; 2]> {
+        self.boxes.get(draw.mesh as usize).copied().flatten()
+    }
+
+    /// Keeps `lods`' sphere and the box `corners` for mesh `index`, unless removed.
+    fn keep_bounds(&mut self, index: u32, lods: &Lods, corners: Option<[Vec3; 2]>) {
         if self.removed.contains(&index) {
             return;
         }
@@ -315,10 +325,14 @@ impl Meshes {
             .is_finite()
             .then_some((lods.center, lods.radius));
         match self.spheres.get_mut(index as usize) {
-            Some(kept) => *kept = sphere,
+            Some(kept) => {
+                *kept = sphere;
+                self.boxes[index as usize] = corners;
+            }
             None => {
                 debug_assert_eq!(self.spheres.len(), index as usize, "handles come in order");
                 self.spheres.push(sphere);
+                self.boxes.push(corners);
             }
         }
     }
@@ -395,7 +409,7 @@ impl Meshes {
         mesh.check(name)?;
         let index = self.count;
         self.count += 1;
-        self.keep_sphere(index, &mesh.lods);
+        self.keep_bounds(index, &mesh.lods, mesh.unskinned_box());
         self.changes
             .push(Change::Added(Added::model(index, false, name, mesh)));
         Ok(Mesh::new(index))
@@ -411,7 +425,7 @@ impl Meshes {
     ) -> Mesh<V> {
         let index = self.count;
         self.count += 1;
-        self.keep_sphere(index, &lods);
+        self.keep_bounds(index, &lods, None);
         self.changes.push(Change::Added(Added {
             index,
             replacement: false,
@@ -484,7 +498,7 @@ impl Meshes {
             check_lods(name, indices, lods)?;
         }
         let lods = lods.unwrap_or_else(|| Lods::whole(indices.len()));
-        self.keep_sphere(mesh.index, &lods);
+        self.keep_bounds(mesh.index, &lods, None);
         self.replace_added(Added {
             index: mesh.index,
             replacement: true,
@@ -519,7 +533,7 @@ impl Meshes {
             "mesh {name:?} replaces one of another `Meshes`"
         );
         model.check(name)?;
-        self.keep_sphere(mesh.index, &model.lods);
+        self.keep_bounds(mesh.index, &model.lods, model.unskinned_box());
         self.replace_added(Added::model(mesh.index, true, name, model));
         Ok(())
     }
@@ -572,6 +586,7 @@ impl Meshes {
         let removed = self.removed.insert(index);
         if removed {
             self.spheres[index as usize] = None;
+            self.boxes[index as usize] = None;
             self.changes.push(Change::Removed(index));
         }
         removed
@@ -672,6 +687,7 @@ impl Default for Meshes {
             count: 0,
             removed: HashSet::new(),
             spheres: Vec::new(),
+            boxes: Vec::new(),
             grid: None,
         };
         let quad = meshes

@@ -3,6 +3,8 @@
 //! and what frames have paused for, which `ping` reports.
 
 #[cfg(feature = "dev")]
+mod handed;
+#[cfg(feature = "dev")]
 pub(crate) mod json;
 #[cfg(feature = "dev")]
 mod server;
@@ -16,6 +18,8 @@ use crate::layer::Stack;
 use crate::main_loop::Stepper;
 use crate::render_thread::{Render, RenderThread};
 
+#[cfg(feature = "dev")]
+pub(crate) use handed::Handed;
 #[cfg(feature = "dev")]
 pub(crate) use server::{Api, instanced};
 #[cfg(feature = "dev")]

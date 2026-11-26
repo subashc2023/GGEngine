@@ -557,6 +557,8 @@ pub(crate) struct Dev {
     pub(crate) look: crate::api::Look,
     /// Which debug overlays are on, which frames draw under the look.
     pub(crate) overlays: crate::debug_overlays::State,
+    /// What the tool API handed the window since egui's last pass, for that pass.
+    pub(crate) handed: crate::api::Handed,
     /// The simulation as the main loop left it this frame, for the Simulation overlay.
     pub(crate) sim: Sim,
     /// The session's numbers as the main loop read them this frame, for the Network overlay;
@@ -608,6 +610,7 @@ impl Dev {
             started: std::time::SystemTime::UNIX_EPOCH,
             look: crate::api::Look::default(),
             overlays: crate::debug_overlays::State::default(),
+            handed: crate::api::Handed::default(),
             sim: Sim::default(),
             net: None,
             folders: Vec::new(),
