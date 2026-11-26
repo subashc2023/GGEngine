@@ -25,7 +25,7 @@
 //!   axis plane.
 //! - Assets: images as textures; glTF models, whose nodes spawn as entities, with
 //!   metallic-roughness materials the world's lights light; built-in [`Shape`]s, models without a
-//!   file; a [`Tint`] per entity over its models' colors; fonts baked into fields that draw text
+//!   file; a [`Tint`] per entity over the colors it draws; fonts baked into fields that draw text
 //!   crisp at any size, shaped and laid out.
 //! - Audio through kira: sounds ticks queue and layers play, panned and faded as the view hears
 //!   them (a 2D view by where they show, a perspective camera by direction and distance); music,

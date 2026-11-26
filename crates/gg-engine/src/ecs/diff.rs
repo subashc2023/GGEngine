@@ -115,7 +115,8 @@ impl World {
     /// - a parent it changes is changed.
     ///
     /// What the world holds already (a game's own change) is left out, and so is an entity the
-    /// file held that the world has since deleted. The world keeps what the file doesn't change.
+    /// file held that the world has since deleted, as [`scene_left_out`](Self::scene_left_out)
+    /// lists. The world keeps what the file doesn't change.
     ///
     /// New entities come first, alone, as [`SceneEdit::Creates`], so the rest may hold them once
     /// made; the caller asks again for the rest. So do changed instance links:
@@ -381,6 +382,41 @@ impl World {
             .collect();
         operations.extend(deletes);
         Ok(SceneEdit::Changes(operations))
+    }
+
+    /// The entities scene `new` holds otherwise than `old` that the world has deleted since, which
+    /// [`scene_edit`](Self::scene_edit) leaves out, in ID order, each with the
+    /// [`Name`](crate::Name) the file gives it.
+    ///
+    /// - Asked once the edit applied, it also has each new entity left out under one deleted.
+    /// - The entities a prefab's instance gives are left to its root.
+    ///
+    /// Fails like [`load_scene`](Self::load_scene) for `new` and `old`.
+    #[cfg(feature = "dev")]
+    pub(crate) fn scene_left_out(
+        &self,
+        old: &str,
+        new: &str,
+    ) -> Result<Vec<(EntityId, Option<String>)>> {
+        let _zone = gg_core::zone!();
+        let mut before = self.emptied();
+        before.load_scene(old)?;
+        let mut after = self.emptied();
+        after.load_scene(new)?;
+        let given = given(&after)?;
+        let mut left: Vec<EntityId> = scene_ids(&after)
+            .filter(|&id| self.entity(id).is_none() && !given.contains(&id))
+            .filter(|&id| before.entity(id).is_none() || differs(id, &before, &after).is_some())
+            .collect();
+        left.sort_unstable();
+        let named = |id: EntityId| {
+            let entity = after.entity(id).expect("alive");
+            (
+                id,
+                after.get::<crate::Name>(entity).map(|name| name.0.clone()),
+            )
+        };
+        Ok(left.into_iter().map(named).collect())
     }
 
     /// Checks that scene `text` would load, by [`load_scene`](Self::load_scene) into this world
@@ -907,7 +943,8 @@ mod tests {
 
     /// A scene edit keeps what the world changed that the file doesn't and leaves alone what the
     /// world deleted: new entities first, then sets, an add, a remove, a reparent and a delete,
-    /// which one undo reverses. Asked again, it finds nothing left.
+    /// which one undo reverses. Asked again, it finds nothing left, and names the deleted entity it
+    /// left out.
     #[cfg(feature = "dev")]
     #[test]
     fn a_scene_edit_takes_the_world_from_the_files_old_text_to_its_new() {
@@ -1011,6 +1048,11 @@ mod tests {
             SceneEdit::Changes(Vec::new()),
             "nothing left"
         );
+        assert_eq!(
+            world.scene_left_out(&old, &new).expect("both load"),
+            [(c_id, None)],
+            "c, which the game deleted and the file moved; not b, which the file deleted"
+        );
         assert_eq!(log.edits().len(), 1, "one edit");
         assert!(log.undo(&mut world).expect("undone"));
         assert_eq!(world.dump(), before);
@@ -1038,8 +1080,8 @@ mod tests {
     }
 
     /// A scene edit leaves alone a component the game took away that the file doesn't change, and
-    /// what goes under an entity the game deleted. It deletes what the file no longer holds under
-    /// an entity it moves out from under another it deletes.
+    /// what goes under an entity the game deleted, which it names. It deletes what the file no
+    /// longer holds under an entity it moves out from under another it deletes.
     #[cfg(feature = "dev")]
     #[test]
     fn a_scene_edit_leaves_alone_what_the_game_took_away() {
@@ -1053,6 +1095,7 @@ mod tests {
         let mut world = World::seeded(13);
         world.register::<Transform>().expect("registered");
         world.register::<Count>().expect("registered");
+        world.register::<crate::Name>().expect("registered");
         world.load_scene(&old).expect("loaded");
         let [g1_id, k_id, g2_id, x_id, p_id] =
             [g1, k, g2, x, p].map(|entity| file.id(entity).expect("alive"));
@@ -1072,7 +1115,7 @@ mod tests {
             },
         )
         .expect("alive");
-        let n = file.spawn(Transform::IDENTITY);
+        let n = file.spawn((Transform::IDENTITY, crate::Name("Kid".to_owned())));
         file.set_parent(n, Some(p)).expect("no cycle");
         let new = file.save_scene(&[k, x, p]).expect("saved");
         let SceneEdit::Changes(changes) = world.scene_edit(Some(&old), &new).expect("an edit")
@@ -1093,9 +1136,13 @@ mod tests {
             world.get::<Transform>(x_here).map(|at| at.translation.x),
             Some(1.0)
         );
-        assert!(
-            world.entity(file.id(n).expect("alive")).is_none(),
-            "its parent is gone"
+        let n_id = file.id(n).expect("alive");
+        assert!(world.entity(n_id).is_none(), "its parent is gone");
+        // Not p, which the file doesn't change.
+        assert_eq!(
+            world.scene_left_out(&old, &new).expect("both load"),
+            [(n_id, Some("Kid".to_owned()))],
+            "n, under p, which the game deleted, by the name the file gives"
         );
     }
 

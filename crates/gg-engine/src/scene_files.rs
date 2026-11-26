@@ -249,9 +249,11 @@ mod watch {
 
     /// At a frame's start, between ticks, applies scene files saved since the last look, at most
     /// one look per [`LOOK`]: the edit from the file's text as last applied to its text now,
-    /// through `stack`, which records it. Logs `scene.applied`. A file that doesn't load, or whose
-    /// edit the world refuses, warns with the error's code and changes nothing; the next save is
-    /// compared with the file as last applied. In lockstep the host offers each save for a tick
+    /// through `stack`, which records it. Logs `scene.applied`, naming the entities whose changes
+    /// it left out as the world has deleted them since ([`World::scene_left_out`]). A file that
+    /// doesn't load, or whose edit the world refuses, warns with the error's code and changes
+    /// nothing; the next save is compared with the file as last applied. In lockstep the host
+    /// offers each save for a tick
     /// both peers apply it before ([`Stack::offer_save`]). A joiner doesn't look, nor does a run
     /// reading a package, whose scenes aren't files.
     pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
@@ -412,19 +414,19 @@ mod watch {
             false => (old, Ok(text.clone())),
         };
         let mut operations = 0;
+        let mut left_out = Vec::new();
         let applied = new.and_then(|new| {
             let found = cx.world().scene_edit(old.as_deref(), &new)?;
             match found {
                 SceneEdit::Changes(changes) => {
                     operations = changes.len();
-                    if changes.is_empty() {
-                        return Ok(());
+                    if !changes.is_empty() {
+                        let apply = Edit::Apply {
+                            author: author(),
+                            operations: changes,
+                        };
+                        edit(cx, apply)?;
                     }
-                    let apply = Edit::Apply {
-                        author: author(),
-                        operations: changes,
-                    };
-                    edit(cx, apply).map(drop)
                 }
                 SceneEdit::Creates(creates) => {
                     operations = creates.len();
@@ -448,9 +450,15 @@ mod watch {
                         author: author(),
                         operations: rest,
                     };
-                    edit(cx, append).map(drop)
+                    edit(cx, append)?;
                 }
             }
+            // Asked once applied, when what the file adds is made. It's for the log alone, so a
+            // failure, which the edit's loads make unlikely, leaves the log without it.
+            if let Some(old) = &old {
+                left_out = cx.world().scene_left_out(old, &new).unwrap_or_default();
+            }
+            Ok(())
         });
         match &applied {
             Ok(()) => {
@@ -458,7 +466,9 @@ mod watch {
                     code = "scene.applied",
                     path = %path,
                     operations,
-                    "Applied the scene file's changes to the world"
+                    left_out = left_out.len(),
+                    "Applied the scene file's changes to the world{}",
+                    left_out_told(&left_out)
                 );
                 file.text = text;
                 let made = &mut cx.scenes.open.made;
@@ -476,6 +486,30 @@ mod watch {
             }
         }
         applied
+    }
+
+    /// How many entities left out a `scene.applied` names; it counts the rest.
+    const NAMED: usize = 5;
+
+    /// What a `scene.applied` message adds for the entities its edit left out, as
+    /// [`World::scene_left_out`] gives them: nothing for none.
+    pub(super) fn left_out_told(left_out: &[(EntityId, Option<String>)]) -> String {
+        if left_out.is_empty() {
+            return String::new();
+        }
+        let named = left_out.iter().take(NAMED).map(|(id, name)| match name {
+            Some(name) => format!("{name} ({id})"),
+            None => id.to_string(),
+        });
+        let mut told = format!(
+            ", leaving out its changes to entities the world has deleted since: {}",
+            named.collect::<Vec<_>>().join(", ")
+        );
+        if left_out.len() > NAMED {
+            told.push_str(&format!(" and {} more", left_out.len() - NAMED));
+        }
+        told.push_str("; reloading the scene brings them back");
+        told
     }
 }
 

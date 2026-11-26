@@ -12,7 +12,7 @@ use crate::jobs;
 use crate::particles::{Clock, Emitters, ParticleEmitter};
 use crate::placed::Placed;
 use crate::transform::from_origin;
-use crate::{Entity, EntityId, Parent, Text, Transform, World};
+use crate::{Entity, EntityId, Parent, Text, Tint, Transform, World};
 
 /// What drawing sorts and computes, kept between frames so it allocates nothing once grown. A
 /// frame that changes no entity's row and no z reuses the last frame's ID order.
@@ -106,7 +106,8 @@ struct Group {
 /// - Between ticks each draws `alpha` of the way from what `past` has it draw from to where the
 ///   tick left it; at 1, where the tick left it.
 /// - Each draw's ID is its entity's, which picks read back.
-/// - A model's mesh draws tinted as `placed` has its entity's [`Tint`](crate::Tint).
+/// - A sprite's, circle's or text's color, or a model mesh's base color, multiplies by its
+///   entity's [`Tint`]: a child's as `placed` has it, a root's its own. Particles take none.
 /// - A child draws where its ancestors carry it, as `placed` has it, ordered by where the tick
 ///   left it. Roots, in tables without a [`Parent`], draw by their transforms; those drawing
 ///   between ticks blend first, in table order, in runs of rows the job system's threads take.
@@ -166,6 +167,7 @@ impl Scratch {
             mesh,
             emitter,
             parent,
+            ..
         } = columns;
         let Self {
             segments,
@@ -305,6 +307,7 @@ impl Scratch {
             text,
             mesh,
             emitter,
+            tint,
             ..
         } = columns;
         let Self {
@@ -317,7 +320,7 @@ impl Scratch {
             ..
         } = self;
         let tables = world.tables();
-        // A segment's table, transforms, and what its rows draw by.
+        // A segment's table, transforms, what its rows draw by, and its tints if it has them.
         let placing = |index: u32| {
             let segment = &segments[index as usize];
             let table = &tables[segment.table as usize];
@@ -328,7 +331,8 @@ impl Scratch {
                 (false, Some(start)) => Drawn::Blended(&blended[start..]),
                 (false, None) => Drawn::Transforms,
             };
-            (table, transforms, drawn)
+            let tints = tint.and_then(|id| table.column::<Tint>(id));
+            (table, transforms, drawn, tints)
         };
         let matrix = |transforms: &[Transform], drawn: Drawn<'_>, row: usize| match drawn {
             Drawn::Transforms => transforms[row].matrix_from(origin),
@@ -337,6 +341,12 @@ impl Scratch {
                 let place = placed.drawn(world, entities[row]);
                 from_origin(place.expect("a drawn entity is placed").matrix, origin)
             }
+        };
+        // A row's tint: a child's times its ancestors', as placed; a root's, its own. Read from
+        // the table's column, so a table without tints costs a multiply by white.
+        let tinted = |tints: Option<&[Tint]>, drawn: Drawn<'_>, row: usize| match drawn {
+            Drawn::Placed(entities) => placed.tint(world, entities[row]),
+            Drawn::Transforms | Drawn::Blended(_) => tints.map_or(Vec4::ONE, |tints| tints[row].0),
         };
         // Kept across groups, whose segments' indices differ.
         let mut sprites_at = [None; AT_HAND];
@@ -348,46 +358,51 @@ impl Scratch {
                 Kind::Sprite => {
                     let sprite = sprite.expect("a table has sprites");
                     let columns = |index: u32| {
-                        let (table, transforms, drawn) = placing(index);
+                        let (table, transforms, drawn, tints) = placing(index);
                         let sprites = table.column::<Sprite>(sprite).expect("it has sprites");
-                        (transforms, sprites, drawn)
+                        (transforms, sprites, drawn, tints)
                     };
                     draws.extend_sprites(items.iter().map(|item| {
                         let found = found(&mut sprites_at, item.segment, columns);
-                        let (transforms, sprites, drawn) = found;
+                        let (transforms, sprites, drawn, tints) = found;
                         let row = item.row as usize;
-                        (matrix(transforms, drawn, row), sprites[row], item.id.get())
+                        let mut sprite = sprites[row];
+                        sprite.color *= tinted(tints, drawn, row);
+                        (matrix(transforms, drawn, row), sprite, item.id.get())
                     }));
                 }
                 Kind::Circle => {
                     let circle = circle.expect("a table has circles");
                     let columns = |index: u32| {
-                        let (table, transforms, drawn) = placing(index);
+                        let (table, transforms, drawn, tints) = placing(index);
                         let circles = table.column::<Circle>(circle).expect("it has circles");
-                        (transforms, circles, drawn)
+                        (transforms, circles, drawn, tints)
                     };
                     let circles = items.iter().map(|item| {
                         let found = found(&mut circles_at, item.segment, columns);
-                        let (transforms, circles, drawn) = found;
+                        let (transforms, circles, drawn, tints) = found;
                         let row = item.row as usize;
-                        (matrix(transforms, drawn, row), circles[row], item.id.get())
+                        let mut circle = circles[row];
+                        circle.color *= tinted(tints, drawn, row);
+                        (matrix(transforms, drawn, row), circle, item.id.get())
                     });
                     draws.extend_circles(shaders, circles);
                 }
                 Kind::Text => {
                     let text = text.expect("a table has texts");
                     let columns = |index: u32| {
-                        let (table, transforms, drawn) = placing(index);
+                        let (table, transforms, drawn, tints) = placing(index);
                         let texts = table.column::<Text>(text).expect("it has texts");
-                        (transforms, texts, drawn)
+                        (transforms, texts, drawn, tints)
                     };
                     for item in items {
                         let found = found(&mut texts_at, item.segment, columns);
-                        let (transforms, texts, drawn) = found;
+                        let (transforms, texts, drawn, tints) = found;
                         let row = item.row as usize;
                         let at = matrix(transforms, drawn, row);
                         let shown = &texts[row];
-                        let style = shown.style();
+                        let mut style = shown.style();
+                        style.color *= tinted(tints, drawn, row);
                         let glyphs = fonts.lay_out(at, &shown.text, &style, item.id.get());
                         draws.extend_glyphs(shaders, glyphs);
                     }
@@ -395,16 +410,16 @@ impl Scratch {
                 Kind::Mesh => {
                     let mesh = mesh.expect("a table has meshes");
                     let columns = |index: u32| {
-                        let (table, transforms, drawn) = placing(index);
+                        let (table, transforms, drawn, tints) = placing(index);
                         let meshes = table.column::<MeshDraw>(mesh).expect("it has meshes");
-                        (transforms, (meshes, table.entities()), drawn)
+                        (transforms, meshes, drawn, tints)
                     };
                     for item in items {
                         let found = found(&mut meshes_at, item.segment, columns);
-                        let (transforms, (meshes, entities), drawn) = found;
+                        let (transforms, meshes, drawn, tints) = found;
                         let row = item.row as usize;
                         let at = matrix(transforms, drawn, row);
-                        let tint = placed.tint(world, entities[row]);
+                        let tint = tinted(tints, drawn, row);
                         if tint == Vec4::ONE {
                             draws.push_draw(at, &meshes[row], item.id.get());
                         } else {
@@ -416,7 +431,7 @@ impl Scratch {
                 Kind::Particles => {
                     let emitter = emitter.expect("a table has emitters");
                     let columns = |index: u32| {
-                        let (table, transforms, drawn) = placing(index);
+                        let (table, transforms, drawn, _) = placing(index);
                         let emitters = table.column::<ParticleEmitter>(emitter);
                         (transforms, emitters.expect("it has emitters"), drawn)
                     };
@@ -453,6 +468,7 @@ struct Columns {
     mesh: Option<ComponentId>,
     emitter: Option<ComponentId>,
     parent: Option<ComponentId>,
+    tint: Option<ComponentId>,
 }
 
 impl Columns {
@@ -464,6 +480,7 @@ impl Columns {
             mesh: world.component::<MeshDraw>(),
             emitter: world.component::<ParticleEmitter>(),
             parent: world.component::<Parent>(),
+            tint: world.component::<Tint>(),
         }
     }
 }
@@ -1308,6 +1325,80 @@ mod tests {
             &mut draws,
             &mut shaders,
             &mut Fonts::new(&mut Textures::default()),
+            &mut Scratch::default(),
+        );
+        assert_eq!(draws, want);
+    }
+
+    /// Sprites, circles and text multiply their colors by their entity's tint: a root's own, a
+    /// child's times its ancestors', a drawless pivot's too. An untinted sprite draws as it is.
+    #[test]
+    fn sprites_circles_and_text_take_their_tints() {
+        let (red, half) = (Vec4::new(1.0, 0.0, 0.0, 1.0), Vec4::splat(0.5));
+        let sprite = Sprite {
+            color: Vec4::new(0.2, 0.4, 0.6, 0.8),
+            ..Sprite::default()
+        };
+        let circle = Circle {
+            color: Vec4::new(0.8, 0.6, 0.4, 1.0),
+            ..Circle::default()
+        };
+        let text = Text {
+            text: "Hi".to_owned(),
+            ..Text::default()
+        };
+        let mut world = World::default();
+        let root = world.spawn((at_x(1.0, 0.1), sprite, Tint(red)));
+        let plain = world.spawn((at_x(2.0, 0.2), sprite));
+        let pivot = world.spawn((at_x(3.0, 0.0), Tint(half)));
+        let ringed = world.spawn((at_x(0.5, 0.3), circle, Tint(red)));
+        let label = world.spawn((at_x(-0.5, 0.4), text.clone()));
+        for child in [ringed, label] {
+            world.set_parent(child, Some(pivot)).expect("no cycle");
+        }
+
+        let id = |entity: Entity| world.id(entity).expect("alive");
+        let mut textures = Textures::default();
+        let mut fonts = Fonts::new(&mut textures);
+        let mut shaders = Shaders::default();
+        let mut want = Draws::default();
+        want.draw_scene();
+        let red_sprite = Sprite {
+            color: sprite.color * red,
+            ..sprite
+        };
+        let root_at = at_x(1.0, 0.1).matrix_from(DVec3::ZERO);
+        sprite_of(&mut want, root_at, red_sprite, id(root));
+        let plain_at = at_x(2.0, 0.2).matrix_from(DVec3::ZERO);
+        sprite_of(&mut want, plain_at, sprite, id(plain));
+        let carried =
+            |local: Transform| from_origin(at_x(3.0, 0.0).matrix() * local.matrix(), DVec3::ZERO);
+        let both = Circle {
+            color: circle.color * (half * red),
+            ..circle
+        };
+        let ring = (carried(at_x(0.5, 0.3)), both, id(ringed).get());
+        want.extend_circles(&mut shaders, iter::once(ring));
+        let mut style = text.style();
+        style.color *= half;
+        let glyphs = fonts.lay_out(
+            carried(at_x(-0.5, 0.4)),
+            &text.text,
+            &style,
+            id(label).get(),
+        );
+        let glyphs: Vec<_> = glyphs.collect();
+        want.extend_glyphs(&mut shaders, glyphs.into_iter());
+        let mut draws = Draws::default();
+        draw_world(
+            &world,
+            &Past::default(),
+            &Placed::of(&world, &Past::default(), 1.0),
+            (1.0, DVec3::ZERO),
+            0,
+            &mut draws,
+            &mut Shaders::default(),
+            &mut fonts,
             &mut Scratch::default(),
         );
         assert_eq!(draws, want);

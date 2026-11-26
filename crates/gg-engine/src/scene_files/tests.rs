@@ -233,6 +233,60 @@ fn a_scene_file_saved_applies_as_an_edit_of_its_own() {
     );
 }
 
+/// A save changing only an entity the game deleted since applies, as nothing, and is logged.
+#[test]
+fn a_save_changing_what_the_game_deleted_applies_nothing_and_is_logged() {
+    let logged = crate::testing::logged();
+    let dir = Scratch::new("scene-files-left-out");
+    let (mut file, ids) = project(&dir.0, 2);
+    let mut cx = started(&dir.0);
+    let mut stack = Stack::default();
+    look_now(&mut cx, &mut stack);
+    let gone = cx.world().entity(ids[0]).expect("loaded");
+    cx.world_mut().despawn(gone).expect("alive");
+    let moved = file.entity(ids[0]).expect("alive");
+    let at = Transform {
+        translation: DVec3::X,
+        ..Transform::IDENTITY
+    };
+    file.insert(moved, at).expect("alive");
+    let roots: Vec<Entity> = ids
+        .iter()
+        .map(|&id| file.entity(id).expect("alive"))
+        .collect();
+    let text = file.save_scene(&roots).expect("saved");
+    save(&dir.0.join("scenes").join("main.ron"), &text, 2);
+    look_now(&mut cx, &mut stack);
+    assert!(authors(&cx).is_empty(), "nothing to apply");
+    assert_eq!(cx.scenes.files[0].text, text, "applied");
+    let codes: Vec<String> = logged.codes.try_iter().collect();
+    assert!(
+        codes.iter().any(|code| code == "scene.applied"),
+        "{codes:?}"
+    );
+}
+
+/// What `scene.applied` says of the entities left out: each by name and ID, or ID alone, the
+/// first five, then how many more; nothing for none.
+#[test]
+fn scene_applied_names_the_first_entities_left_out_and_counts_the_rest() {
+    assert_eq!(watch::left_out_told(&[]), "");
+    let id = |n| EntityId::new(n).expect("not zero");
+    let one = watch::left_out_told(&[(id(0xab), Some("Enemy 3".to_owned()))]);
+    assert_eq!(
+        one,
+        ", leaving out its changes to entities the world has deleted since: Enemy 3 \
+         (00000000000000ab); reloading the scene brings them back"
+    );
+    let seven: Vec<_> = (1..=7).map(|n| (id(n), None)).collect();
+    let told = watch::left_out_told(&seven);
+    assert!(
+        told.contains(": 0000000000000001, ") && told.contains("0000000000000005 and 2 more;"),
+        "{told}"
+    );
+    assert!(!told.contains("0000000000000006"), "{told}");
+}
+
 /// A scene file saved while a copy plays applies to the copy, and after `stop` to the world as
 /// edited too (which holds the file as last applied there), as the file's own edit.
 #[test]

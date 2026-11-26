@@ -673,8 +673,9 @@ whole. VALUE is JSON, or else a string, shaped as `entity` shows values. ENTITY 
                 details: "\
 Prints a line per event, as its JSON log has it, of the last 10,000 the game keeps; with
 `--follow`, then each as it's logged, until the game ends. LEVEL is `error`, `warn`, `info`, `debug`
-or `trace`. An agent can't hear the game: windowed and embedded runs log each sound or music
-started, `Sound started` or `Music started`, at `debug`.
+or `trace`. A game's own `info!` lines, such as a goal reached, need `--level info`. An agent can't
+hear the game: windowed and embedded runs log each sound or music started, `Sound started` or
+`Music started`, at `debug`.
 ",
             },
             Help {

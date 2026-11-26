@@ -1,15 +1,19 @@
-//! Tints: the component that colors an entity's model draws and what it carries.
+//! Tints: the component that colors what an entity and what it carries draw.
 
 use gg_core::math::Vec4;
 
 use crate::Component;
 
-/// A color multiplying the models an entity draws, linear RGBA, alpha included.
+/// A color multiplying what an entity draws, linear RGBA, alpha included.
 ///
-/// It multiplies the base color of the entity's model draws ([`MeshDraw::with_material`]'s) and
-/// of everything it carries: its children, a model root's nodes. Tints down the hierarchy multiply,
-/// as transforms do. No tint is white. Other shaders' draws ignore it. A red cube or a team's color
-/// needs no model file of its own.
+/// It multiplies the colors of the entity's [`Sprite`], [`Circle`] and [`Text`](crate::Text),
+/// and the base color of its model draws ([`MeshDraw::with_material`]'s). It tints everything the
+/// entity carries too: its children, a model root's nodes. Tints down the hierarchy multiply, as
+/// transforms do. No tint is white. Particles and other shaders' meshes ignore it. A red cube, a
+/// hit's flash or a team's color needs no asset of its own.
+///
+/// [`Sprite`]: crate::Sprite
+/// [`Circle`]: crate::Circle
 ///
 /// [`MeshDraw::with_material`]: crate::MeshDraw::with_material
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
