@@ -630,13 +630,16 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "actions",
-        description: "The game's actions, to learn its controls without reading its code: each \
-                      `name`, its `layer`, `kind` (`button`; `axis`, -1 to 1; `axis2`, [x, y]) \
-                      and `bindings`, each a list of sources named as `input` hands them: a \
-                      button's one; an axis's negative then positive; a pair of axes' left, \
-                      right, down and up. Set one by name with `input`'s `action` event. A layer \
-                      lists its `Actions` through `Layer::actions`; a game's layer that doesn't \
-                      lists none.",
+        description: "The game's controls, to learn them without reading its code. `actions`: \
+                      each `name`, its `layer`, `kind` (`button`; `axis`, -1 to 1; `axis2`, \
+                      [x, y]), `does` (what its value moves, in what units, and when) and \
+                      `bindings`, each a list of sources named as `input` hands them: a button's \
+                      one; an axis's negative then positive; a pair of axes' left, right, down \
+                      and up. Set one by name with `input`'s `action` event. `controls`: what the \
+                      layers read apart from actions, each with its `layer`, `reads` (a source, \
+                      or \"motion\", \"scroll\" or \"cursor\", handed as `input`'s events of those \
+                      names) and `does`. A layer lists them through `Layer::actions`; a game's \
+                      layer that doesn't lists none.",
         properties: || json!({}),
         required: &[],
     },

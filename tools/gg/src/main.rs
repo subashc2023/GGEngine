@@ -564,13 +564,20 @@ A `.ui` button is pressed by name with `gg press`.
                 usage: "actions",
                 summary: "Its actions, what each control does, and the keys and pads bound to each",
                 details: "\
-Prints each action its layers bind, from the top layer down: `name`, `layer`, `kind` and
-`bindings`. `kind` is `button`, `axis` (-1 to 1) or `axis2` ([x, y]). Each binding lists what it
-reads: a button's source; an axis's negative, then positive; a pair of axes' left, right, down, up.
-Sources are named as `input` hands them: {\"key\":\"Space\"}, {\"button\":\"left\"},
+Prints each action its layers bind, from the top layer down: `name`, `layer`, `kind`, `does` and
+`bindings`. `kind` is `button`, `axis` (-1 to 1) or `axis2` ([x, y]). `does` is what the game says
+it does: what its value moves, in what units, and when. Each binding lists what it reads: a
+button's source; an axis's negative, then positive; a pair of axes' left, right, down, up. Sources
+are named as `input` hands them: {\"key\":\"Space\"}, {\"button\":\"left\"},
 {\"pad_button\":\"south\"}, {\"pad_stick\":[\"left\",\"up\"]} or {\"pad_trigger\":\"right\"}.
-`input` sets an action by name: {\"action\":{\"name\":\"Jump\"}}. A layer lists its `Actions`
-through `Layer::actions`; a game's layer that doesn't lists none.
+`input` sets an action by name: {\"action\":{\"name\":\"Jump\"}}.
+
+Then `controls`: what the layers read apart from their actions, each with its `layer`, `reads` and
+`does`. `reads` is a source, or the mouse's \"motion\", \"scroll\" or \"cursor\", which `input`
+hands as its events of those names. A look's `does` gives its radians a unit of motion.
+
+A layer lists them through `Layer::actions`, from its `Actions`' `describe` and
+`describe_control`; a game's layer that doesn't lists none.
 ",
             },
             Help {

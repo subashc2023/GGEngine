@@ -135,6 +135,11 @@ impl Game {
         let steer = [Binding::WASD, Binding::ARROWS, Binding::stick(Stick::Left)];
         let bound = actions.bind_all(steer.map(|binding| (Act::Steer, binding)));
         bound.expect("the bindings are pairs of axes, of other sources");
+        // What `gg actions` says each does, so an agent plays without reading this code. Name what
+        // the value moves, its units, and the fields that set them or that it changes;
+        // `describe_control` lists the mouse's look, clicks and wheel the same way.
+        let steer = "Moves the player: [x, y], right and up; 1 is `Player.speed` units a second";
+        actions.describe(Act::Steer, steer);
         Self {
             actions,
             commands: Vec::new(),
@@ -184,8 +189,8 @@ impl Layer for Game {
     }
 
     /// What `gg actions` lists, and `gg input` presses by name.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> Controls {
+        self.actions.controls()
     }
 
     fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
@@ -254,7 +259,8 @@ A game made with GGEngine, a workspace of its own, which builds against
 
 As `gg new` made it, its start scene, `scenes/main.ron`, holds a camera and a square with the
 game's `Player` component. `src/main.rs` registers `Player`, binds the arrow keys, WASD and a pad's
-left stick, which `gg actions` lists, and moves the square at each tick by the commands they queue.
+left stick, and moves the square at each tick by the commands they queue. `gg actions` lists them
+with what each does, as `Actions::describe` says it: keep that true as controls change.
 
 The engine's rules hold here as in its own games. Read, in the engine: `AGENTS.md`, how to work with
 it; `ARCHITECTURE.md`, its design, and what keeps a simulation the same on every platform;

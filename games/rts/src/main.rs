@@ -133,6 +133,39 @@ impl Game {
         let pan = [Binding::WASD, Binding::ARROWS];
         let bound = actions.bind_all(pan.map(|binding| (Act::Pan, binding)));
         bound.expect("the bindings are pairs of axes");
+        // What `gg actions` says each control does.
+        let pan = format!(
+            "Pans `RtsCamera.focus`, the point of the ground (y = 0) the camera looks at: [x, y], \
+             right and up the screen, which are +x and -z. 1 is {PAN_SPEED} units a second times \
+             `RtsCamera.distance` / 24. The focus stays within {BOUND} units of the origin"
+        );
+        actions.describe(Act::Pan, pan);
+        let zoom = format!(
+            "Moves the camera {ZOOM_STEP} units closer to its focus a line scrolled up, positive \
+             `y`, and away a line down, keeping `RtsCamera.distance` within {} to {}",
+            ZOOM[0], ZOOM[1]
+        );
+        actions.describe_control(Control::Scroll, zoom);
+        let select = format!(
+            "Pressed off the UI, it starts a selection at the cursor, and letting go ends it. \
+             A drag under {CLICK_PIXELS} pixels is a click that selects the unit under the \
+             cursor alone, or clears the selection over empty ground. A longer drag selects \
+             the units on the ground inside its box. `Unit.selected` says which are"
+        );
+        let left = Control::Source(Source::Button(MouseButton::Left));
+        actions.describe_control(left, select);
+        let order = format!(
+            "Pressed off the UI, it orders the selected units to the ground point under the \
+             cursor, in a grid {FORMATION} units apart around it and within {BOUND} units of \
+             the origin, setting each one's `Unit.target` and `Unit.moving`. A unit that gains \
+             little for {STALL} ticks in a row, or {NEAR_STALL} within its radius of its target, \
+             stops short"
+        );
+        let right = Control::Source(Source::Button(MouseButton::Right));
+        actions.describe_control(right, order);
+        let cursor = "Where the cursor is picks what a click selects or the ground an order goes \
+                      to, and a drag's box follows it";
+        actions.describe_control(Control::Cursor, cursor);
         Self {
             actions,
             commands: Vec::new(),
@@ -207,8 +240,8 @@ impl Layer for Game {
     }
 
     /// What `gg actions` lists, and `gg input` presses by name.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> Controls {
+        self.actions.controls()
     }
 
     fn update(&mut self, cx: &mut Context, _: std::time::Duration) {

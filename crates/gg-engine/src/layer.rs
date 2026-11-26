@@ -75,7 +75,7 @@ use crate::scene_files::SceneFiles;
 #[cfg(feature = "dev")]
 use crate::scene_files::{self, SceneFile};
 use crate::skins::Skins;
-use crate::{Binding, Entity, EntityId, Event, Input, Ui, World};
+use crate::{Controls, Entity, EntityId, Event, Input, Ui, World};
 
 /// A part of an app that the main loop drives.
 ///
@@ -176,12 +176,12 @@ pub trait Layer {
         None
     }
 
-    /// Each binding of the layer's [`Actions`](crate::Actions), with its action's name, as
-    /// [`Actions::bindings`](crate::Actions::bindings) gives them. The tool API's `actions` lists
-    /// them, so an agent learns the game's controls, and its `input` presses an action by name
-    /// through them. None, the default, for a layer that binds no actions.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        Vec::new()
+    /// The layer's controls, as [`Actions::controls`](crate::Actions::controls) gives them: its
+    /// actions' bindings, what each does, and the controls it reads apart from them. The tool API's
+    /// `actions` lists them, so an agent learns the game's controls without reading its code, and
+    /// its `input` presses an action by name through them. None, the default.
+    fn actions(&self) -> Controls {
+        Controls::default()
     }
 
     /// Called every frame, after the frame's ticks, with the time since the last frame. The time is

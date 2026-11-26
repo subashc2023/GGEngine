@@ -120,6 +120,27 @@ impl Game {
             ),
         ]);
         bound.expect("the bindings are each of one kind, of other sources");
+        // What `gg actions` says each control does.
+        let walk = "Walks the player on the level: [x, y], right and forward of where it faces by \
+                    `Player.yaw` alone; 1 is `Player.speed` units a second";
+        actions.describe(Act::Move, walk);
+        let jump = "Jumps if the player stands, leaving the ground at `Player.jump_speed` units a \
+                    second; a press in the air does nothing. Gravity is 9.81 units a second \
+                    squared, times `CharacterController3D.gravity`";
+        actions.describe(Act::Jump, jump);
+        let look = "Turns the view while the cursor is grabbed, `Player.sensitivity` radians a \
+                    unit: right turns right, lowering `Player.yaw`, and down looks down, lowering \
+                    `Player.pitch`. The pitch stops at 89° either way";
+        actions.describe_control(Control::Motion, look);
+        let fire = format!(
+            "A press grabs the cursor; once it's grabbed, each fires along the view from the eye, \
+             removing the `Target` it hits first, up to {RANGE} units. Each shot counts in \
+             `Player.shots`, and each hit in `Player.hits`"
+        );
+        let click = Control::Source(Source::Button(MouseButton::Left));
+        actions.describe_control(click, fire);
+        let escape = Control::Source(Source::Key(Key::Escape));
+        actions.describe_control(escape, "Lets go of the cursor, so the mouse stops looking");
         Self {
             actions,
             commands: Vec::new(),
@@ -242,8 +263,8 @@ impl Layer for Game {
     }
 
     /// What `gg actions` lists, and `gg input` presses by name.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> Controls {
+        self.actions.controls()
     }
 
     /// Grabs the cursor while the mouse looks, and draws the crosshair.

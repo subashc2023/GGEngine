@@ -28,7 +28,7 @@ use crate::scene_files;
 use crate::snapshot::{Run, Snapshot};
 use crate::sync_test::SyncTest;
 #[cfg(feature = "dev")]
-use crate::{Binding, Ui};
+use crate::{Controls, Ui};
 use crate::{Event, World};
 
 /// Layers from the bottom up, with the overlays above the layers.
@@ -88,16 +88,13 @@ impl Stack {
         &self.names
     }
 
-    /// Each binding of the layers' actions, from the top layer down, with its layer's name and its
-    /// action's: what [`Layer::actions`] gives.
+    /// Each layer's controls, from the top layer down, with its name: what [`Layer::actions`]
+    /// gives.
     #[cfg(feature = "dev")]
-    pub(crate) fn actions(&self) -> Vec<(&'static str, String, Binding)> {
+    pub(crate) fn actions(&self) -> Vec<(&'static str, Controls)> {
         let layers = (self.layers.iter().zip(&self.names)).rev();
         layers
-            .flat_map(|(layer, &name)| {
-                let bindings = layer.actions().into_iter();
-                bindings.map(move |(action, binding)| (name, action, binding))
-            })
+            .map(|(layer, &name)| (name, layer.actions()))
             .collect()
     }
 
@@ -1189,7 +1186,7 @@ impl<L: Layer> Layer for Hot<L> {
         HotFn::current(L::commands).call((&mut self.0,))
     }
 
-    fn actions(&self) -> Vec<(String, Binding)> {
+    fn actions(&self) -> Controls {
         HotFn::current(L::actions).call((&self.0,))
     }
 

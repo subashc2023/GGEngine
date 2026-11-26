@@ -43,6 +43,9 @@ Each phase's milestones, and what each deferred, are in git history.
   Inspector's panels, lines in the world, shading channels and passes, a game's own, `gg overlays`;
   then, after agents debugged eight games through them, `gg input` reaching egui, boxes for bounds,
   characters' contacts and velocities, and what each overlay drew (2026-11-25)
+- **Games played by their controls**: `gg actions` listing each action's bindings and what it does,
+  and the controls read apart from actions; `gg input` setting actions by name, pads, and aims at
+  points; then four games played to their goals by agents, and their controls said (2026-11-26)
 
 ## Open
 
@@ -75,7 +78,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | More debug overlays: a script's own, after a `gg.draw_line`; wireframe and overdraw views; sprites and lines counted apart; the stats and panels in a capture's image; a game's own key for the bar; a server's round trips, which its links don't time; a pad gone, which no event says; a cast's ray and hit; skeletons and axes over their meshes, which needs depth modes; lights in their own colors; colors kept apart from a game's; sounds while paused | A game or an agent needs one |
 | Debug views of lights per cluster, shadow cascades, TAA's history and the navmesh; `gg probe` at its sources' precision | They need debugging by sight |
 | Through the API: `gg mv` with the ID file; fields printed at each tick of a `step` or `input`, as a jump's height; in 2D, the way from one entity to another and the pixels a unit; a world reset to its scene file, without what code made | An agent loses IDs, samples a jump, aims by stick or resets a world |
-| `gg actions` saying what each action does, its units and limits; a game's controls that aren't actions, as mouse look, clicks and the wheel, with a look's radians a unit | An agent plays a game without reading its code: four of four playtesters read it |
+| A game's rules through the API, as `gg actions` gives its controls: what its enemies do, what wins | An agent plays a game it's given no goal for |
 | Steps while minimized (`api.paused`); requests, and the compositor, answered while a dialog or a script's stop holds the main thread | A tool needs them |
 | `gg fetch` of archives, and a scene's load of an unfetched file saying `gg fetch` fetches it | A project fetches an archive, or someone is lost |
 | Cleaning up old JSON logs and a killed run's patch libraries | They pile up |

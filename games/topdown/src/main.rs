@@ -128,6 +128,21 @@ impl Game {
                 .chain(fire.map(|binding| (Act::Fire, binding))),
         );
         bound.expect("the bindings are of one kind each, of other sources");
+        // What `gg actions` says each control does.
+        let walk = "Walks the player: [x, y], right and up the screen; 1 is `Player.speed` units \
+                    a second";
+        actions.describe(Act::Steer, walk);
+        let stick = "Aims the player along the right stick's [x, y], right and up, once the stick \
+                     is pushed past 0.3; a weaker push keeps the aim";
+        actions.describe(Act::AimStick, stick);
+        let shoot = format!(
+            "Held, fires a shot along the aim every {SHOT_EVERY} ticks, at {SHOT_SPEED} units a \
+             second for {SHOT_TICKS} ticks. A shot removes the `Enemy` it hits and itself"
+        );
+        actions.describe(Act::Fire, shoot);
+        let cursor = "Aims the player at the point of the ground under the cursor, each time the \
+                      cursor moves, until the right stick aims again";
+        actions.describe_control(Control::Cursor, cursor);
         Self {
             actions,
             commands: Vec::new(),
@@ -199,8 +214,8 @@ impl Layer for Game {
     }
 
     /// What `gg actions` lists, and `gg input` presses by name.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> Controls {
+        self.actions.controls()
     }
 
     /// Draws the game's own debug overlay, Enemy aim, while it's on: a line from each enemy to the

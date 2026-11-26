@@ -1,11 +1,11 @@
 //! The layers' actions as the tool API lists them, and an `input` action handed as the events of a
 //! binding that gives its value, as a player's keys or stick would.
 
-use gg_api::{ActionKind, ActionList, ActionValue, Failure, InputEvent};
+use gg_api::{ActionKind, ActionList, ActionValue, Failure, InputEvent, Pointer, Reads};
 use gg_core::math::Vec2;
 
 use crate::layer::Stack;
-use crate::{Binding, MouseButton, PadButton, Source, Stick, Toward, Trigger};
+use crate::{Binding, Control, Controls, MouseButton, PadButton, Source, Stick, Toward, Trigger};
 
 /// Each gamepad button as the engine and the protocol name it.
 const PAD_BUTTONS: [(PadButton, gg_api::PadButton); 17] = [
@@ -28,24 +28,59 @@ const PAD_BUTTONS: [(PadButton, gg_api::PadButton); 17] = [
     (PadButton::DPadRight, gg_api::PadButton::DPadRight),
 ];
 
-/// What `actions` answers: the layers' actions, from the top layer down.
+/// What `actions` answers: the layers' controls, from the top layer down.
 pub(super) fn list(stack: &Stack) -> ActionList {
     let mut actions: Vec<gg_api::Action> = Vec::new();
-    for (layer, name, binding) in stack.actions() {
-        let sources = binding.sources().map(api_source).collect();
-        let listed =
-            (actions.iter_mut()).find(|action| action.layer == layer && action.name == name);
-        match listed {
-            Some(action) => action.bindings.push(sources),
-            None => actions.push(gg_api::Action {
-                name,
-                layer: layer.to_owned(),
-                kind: kind(binding),
-                bindings: vec![sources],
-            }),
+    let mut controls = Vec::new();
+    for (layer, listed) in stack.actions() {
+        let Controls {
+            bindings,
+            described,
+            others,
+        } = listed;
+        let first = actions.len();
+        for (name, binding) in bindings {
+            let sources = binding.sources().map(api_source).collect();
+            match actions[first..]
+                .iter_mut()
+                .find(|action| action.name == name)
+            {
+                Some(action) => action.bindings.push(sources),
+                None => actions.push(gg_api::Action {
+                    does: described
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .map(|d| d.1.clone()),
+                    name,
+                    layer: layer.to_owned(),
+                    kind: kind(binding),
+                    bindings: vec![sources],
+                }),
+            }
         }
+        controls.extend(others.into_iter().map(|(control, does)| gg_api::Control {
+            layer: layer.to_owned(),
+            reads: match control {
+                Control::Source(source) => Reads::Source(api_source(source)),
+                Control::Motion => Reads::Pointer(Pointer::Motion),
+                Control::Scroll => Reads::Pointer(Pointer::Scroll),
+                Control::Cursor => Reads::Pointer(Pointer::Cursor),
+            },
+            does,
+        }));
     }
-    ActionList { actions }
+    ActionList { actions, controls }
+}
+
+/// Each binding of the layers' actions, from the top layer down, with its layer's name and its
+/// action's.
+fn bound(stack: &Stack) -> Vec<(&'static str, String, Binding)> {
+    let layers = stack.actions().into_iter();
+    let each = |(layer, listed): (&'static str, Controls)| {
+        let bindings = listed.bindings.into_iter();
+        bindings.map(move |(action, binding)| (layer, action, binding))
+    };
+    layers.flat_map(each).collect()
 }
 
 /// The events that set the action `name` to `value`, of the top layer that binds an action so
@@ -61,7 +96,7 @@ pub(super) fn events(
     name: &str,
     value: Option<ActionValue>,
 ) -> Result<Vec<InputEvent>, Failure> {
-    let bound = stack.actions();
+    let bound = bound(stack);
     let Some(&(layer, ..)) = bound.iter().find(|(_, action, _)| action == name) else {
         let mut names: Vec<&str> = Vec::new();
         for (_, action, _) in &bound {

@@ -2718,20 +2718,20 @@ impl crate::Layer for Controlled {
         std::ops::ControlFlow::Continue(())
     }
 
-    fn actions(&self) -> Vec<(String, crate::Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> crate::Controls {
+        self.actions.controls()
     }
 }
 
-/// `actions` lists the layers' actions with their bindings, and `input` sets one by name through
-/// the first binding that gives its value, letting go of the others: keys for -1, 0 and 1, the
-/// stick between. A name no layer binds, or a value of another kind or that no binding gives,
-/// fails, handing nothing, even past a wait. A hold brings a stick back to rest, and a gamepad's
-/// own events reach the actions too.
+/// `actions` lists the layers' actions with their bindings and what they do, and the controls read
+/// apart from them. `input` sets an action by name through the first binding that gives its value,
+/// letting go of the others: keys for -1, 0 and 1, the stick between. A name no layer binds, or a
+/// value of another kind or that no binding gives, fails, handing nothing, even past a wait. A hold
+/// brings a stick back to rest, and a gamepad's own events reach the actions too.
 #[test]
 fn actions_are_listed_and_set_by_name_through_their_bindings() {
-    use crate::{Binding, Change, PadButton, Source, Stick, Toward};
-    use gg_api::{ActionKind, ActionList};
+    use crate::{Binding, Change, Control, MouseButton, PadButton, Source, Stick, Toward};
+    use gg_api::{ActionKind, ActionList, Pointer, Reads};
     use gg_core::math::Vec2;
 
     let (mut api, session) = started("Api Actions");
@@ -2757,6 +2757,12 @@ fn actions_are_listed_and_set_by_name_through_their_bindings() {
         (Act::Move, Binding::ARROWS),
     ]);
     bound.expect("each action's bindings are of one kind");
+    actions.describe(Act::Jump, "Jumps");
+    actions.describe(Act::Run, "Walks");
+    actions.describe(Act::Run, "Runs: 1 is 6 units a second");
+    let click = Control::Source(Source::Button(MouseButton::Left));
+    actions.describe_control(Control::Motion, "Looks: 0.0025 radians a unit");
+    actions.describe_control(click, "Fires");
     let changes = Rc::default();
     stack.push_layer(Controlled {
         actions,
@@ -2827,6 +2833,29 @@ fn actions_are_listed_and_set_by_name_through_their_bindings() {
     let south = gg_api::Source::PadButton(gg_api::PadButton::South);
     let space = gg_api::Source::Key("Space".to_owned());
     assert_eq!(listed.actions[1].bindings, [[space], [south]]);
+    // What was said last, by action; none for Move.
+    let does: Vec<Option<&str>> = (listed.actions.iter())
+        .map(|action| action.does.as_deref())
+        .collect();
+    assert_eq!(
+        does,
+        [Some("Runs: 1 is 6 units a second"), Some("Jumps"), None]
+    );
+    let left = gg_api::Source::Button(gg_api::Button::Left);
+    let controls: Vec<(&str, &Reads, &str)> = (listed.controls.iter())
+        .map(|c| (c.layer.as_str(), &c.reads, c.does.as_str()))
+        .collect();
+    assert_eq!(
+        controls,
+        [
+            (
+                "Controlled",
+                &Reads::Pointer(Pointer::Motion),
+                "Looks: 0.0025 radians a unit"
+            ),
+            ("Controlled", &Reads::Source(left), "Fires"),
+        ]
+    );
     assert_eq!(refused[0], "api.no_action");
     assert_eq!(refused[1..7], ["api.bad_params"; 6]);
     assert_eq!(refused[7], "api.no_action");

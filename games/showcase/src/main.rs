@@ -419,6 +419,36 @@ impl Showcase {
             ),
         ]);
         bound.expect("the game's bindings are each of one kind, of other sources");
+        // What `gg actions` says each control does.
+        let walk = "Walks every entity with a `Walk` component, in `walk.ron` and `cells.ron`: \
+                    [x, y], right and up. Up walks forward along where it faces at `Walk.speed` \
+                    units a second; right turns it right at `Walk.turn_speed` radians a second";
+        actions.describe(Act::Walk, walk);
+        let jump = "Jumps every `Walk` entity that stands, leaving the ground at `Walk.jump_speed` \
+                    units a second; a press in the air does nothing";
+        actions.describe(Act::Jump, jump);
+        let look = "In `listen.ron`, turns the camera while the cursor is grabbed, \
+                    `Look.sensitivity` radians a unit: right turns right, lowering `Look.yaw`, and \
+                    down looks down, lowering `Look.pitch`. The pitch stops at 89° either way";
+        actions.describe_control(Control::Motion, look);
+        let click = "In `listen.ron`, a press in the view, off its UI, grabs the cursor. In \
+                     `ui.ron`, a press with the cursor on the HUD's button counts a click. In \
+                     `menu.ron` and `widgets.ron`, a press chooses the button or widget under the \
+                     cursor";
+        let left = Control::Source(Source::Button(MouseButton::Left));
+        actions.describe_control(left, click);
+        let cursor =
+            "In `menu.ron` and `widgets.ron`, the cursor over a button or widget focuses it";
+        actions.describe_control(Control::Cursor, cursor);
+        let escape = Control::Source(Source::Key(Key::Escape));
+        let back = "Lets go of the grabbed cursor, so the mouse stops looking. In `menu.ron` it \
+                    also presses back";
+        actions.describe_control(escape, back);
+        let next = "Changes to the next scene in name order, wrapping from the last to the first";
+        actions.describe_control(Control::Source(Source::Key(Key::PageDown)), next);
+        let before = "Changes to the previous scene in name order, wrapping from the first to the \
+                      last";
+        actions.describe_control(Control::Source(Source::Key(Key::PageUp)), before);
         Self {
             scripts: Scripts::new().expect("Luau starts"),
             actions,
@@ -493,8 +523,8 @@ impl Layer for Showcase {
     }
 
     /// What `gg actions` lists, and `gg input` presses by name.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> Controls {
+        self.actions.controls()
     }
 
     /// Grabs the cursor while it wants it for the looks, plays the music while a jukebox is in the

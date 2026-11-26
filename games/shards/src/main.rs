@@ -226,6 +226,38 @@ impl Shards {
             (Act::Choose, pad(PadButton::South)),
         ]);
         bound.expect("the game's bindings are each of one kind, of other sources");
+        // What `gg actions` says each control does.
+        let steer = format!(
+            "Steers the player's disc: [x, y], right and up, and 1 is {SPEED} units a second. The \
+             disc slides toward that velocity. It does nothing while the menu is open"
+        );
+        actions.describe(Act::Steer, steer);
+        let dash = format!(
+            "Dashes the player's disc along its steering at {DASH_SPEED} times its speed, at once, \
+             for {DASH_TICKS} ticks. The next dash is ready {DASH_EVERY} ticks after the last, and \
+             a press before that does nothing. It does nothing while the menu is open"
+        );
+        actions.describe(Act::Dash, dash);
+        let menu = "Opens the menu over the match, which goes on, and lets go of the disc; a press \
+                    with the menu open closes it and the disc steers again";
+        actions.describe(Act::Menu, menu);
+        let up = "In the menu, moves the focus up one item, wrapping from the first to the last. \
+                  Outside it, does nothing as an action";
+        actions.describe(Act::Up, up);
+        let down = "In the menu, moves the focus down one item, wrapping from the last to the \
+                    first. Outside it, does nothing as an action";
+        actions.describe(Act::Down, down);
+        let choose = "In the menu, chooses the focused item: Resume closes the menu, New match \
+                      zeroes both players' scores and wins, puts both discs at their starts and \
+                      closes it, and Quit ends the run. Outside it, does nothing";
+        actions.describe(Act::Choose, choose);
+        let over = "In the menu, the cursor over an item focuses it";
+        actions.describe_control(Control::Cursor, over);
+        let click = Control::Source(Source::Button(MouseButton::Left));
+        actions.describe_control(
+            click,
+            "In the menu, a press with the cursor over an item chooses it, as Choose does",
+        );
         Self {
             player: 0,
             actions,
@@ -343,8 +375,8 @@ impl Layer for Shards {
     }
 
     /// What `gg actions` lists, and `gg input` presses by name.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> Controls {
+        self.actions.controls()
     }
 
     fn update(&mut self, cx: &mut Context, _: Duration) {

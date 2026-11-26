@@ -150,6 +150,37 @@ impl Game {
             ),
         ]);
         bound.expect("the bindings are pairs of axes, of other sources");
+        // What `gg actions` says each control does.
+        let walk = "Walks the player on the level: [x, y], right and forward of where the camera \
+                    looks by `Rig.yaw` alone; 1 is `Player.speed` units a second. The player turns \
+                    to face its way, or the camera's while aiming";
+        actions.describe(Act::Steer, walk);
+        let jump = "Jumps if the player stands, leaving the ground at `Player.jump_speed` units a \
+                    second; a press in the air does nothing. Gravity is 9.81 units a second \
+                    squared, times `CharacterController3D.gravity`";
+        actions.describe(Act::Jump, jump);
+        let look = format!(
+            "Turns the camera around the player while the cursor is grabbed, `Rig.sensitivity` \
+             radians a unit. Right turns right, lowering `Rig.yaw`, kept within 0 to 2π; down \
+             looks down, lowering `Rig.pitch`, kept within {} to {}",
+            PITCH[0], PITCH[1]
+        );
+        actions.describe_control(Control::Motion, look);
+        let click = Control::Source(Source::Button(MouseButton::Left));
+        let fire = format!(
+            "A click in the view grabs the cursor, unless it is over the UI, and fires nothing. \
+             Once it's grabbed, each click fires a ray from the camera's center, removing the \
+             `Target` it hits first, up to {RANGE} units. A hit adds to `Score.hits` and \
+             `Score.points`"
+        );
+        actions.describe_control(click, fire);
+        let aim = Control::Source(Source::Button(MouseButton::Right));
+        let zoom = "While the cursor is grabbed, holding it aims: the camera moves closer to \
+                    the player and the player faces where the camera looks. Letting go stops it";
+        actions.describe_control(aim, zoom);
+        let escape = Control::Source(Source::Key(Key::Escape));
+        let release = "Lets go of the cursor, so the mouse stops looking, and stops aiming";
+        actions.describe_control(escape, release);
         Self {
             actions,
             commands: Vec::new(),
@@ -200,8 +231,8 @@ impl Layer for Game {
     }
 
     /// What `gg actions` lists, and `gg input` presses by name.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> Controls {
+        self.actions.controls()
     }
 
     /// Grabs the cursor while the world has a rig to turn with it.

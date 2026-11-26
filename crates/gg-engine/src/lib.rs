@@ -232,7 +232,7 @@ use tracing::{debug, error, info, warn};
 
 use package::{Files, Package};
 
-pub use actions::{Actions, Binding, Change, Source, Toward};
+pub use actions::{Actions, Binding, Change, Control, Controls, Source, Toward};
 pub use animation::{
     AnimationParam, AnimationState, AnimationStates, Animator, BlendPoint, Curve, Ease, Flipbook,
     ParamCondition, ParamTest, ParamValue, Play, Playback, StateMotion, StateTransition, Tween,
@@ -322,9 +322,10 @@ pub mod prelude {
     pub use crate::tracing::{debug, error, info, warn};
     pub use crate::{
         Actions, Align, App, Binding, Blend, Bus, Camera, Cast, Change, Commands, Component,
-        Context, Entity, Error, Event, Font, Key, Layer, Mesh, MouseButton, PadButton, Place,
-        Projection, Reflect, Rng, Scripts, Shader, Shape, Sound, Source, Sprite, Stick, TextStyle,
-        Tick, Tint, Toward, Transform, World, step_animation, step_navigation, step_physics,
+        Context, Control, Controls, Entity, Error, Event, Font, Key, Layer, Mesh, MouseButton,
+        PadButton, Place, Projection, Reflect, Rng, Scripts, Shader, Shape, Sound, Source, Sprite,
+        Stick, TextStyle, Tick, Tint, Toward, Transform, World, step_animation, step_navigation,
+        step_physics,
     };
 }
 

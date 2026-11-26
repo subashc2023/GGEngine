@@ -100,6 +100,17 @@ impl Game {
             ),
         ]);
         bound.expect("each action's bindings are of one kind");
+        // What `gg actions` says each control does.
+        let run = "Runs the player: -1 left, 1 right; 1 is `Player.speed` units a second, less \
+                   what the ground's friction takes";
+        actions.describe(Act::Run, run);
+        let jump = format!(
+            "Asks the player to jump, and the press stays wanted for {JUMP_BUFFER} ticks: the \
+             player leaves the ground at `Player.jump_speed` units a second on the first tick it \
+             stands, so a press just before landing counts. Gravity is {} units a second squared",
+            -GRAVITY
+        );
+        actions.describe(Act::Jump, jump);
         Self {
             actions,
             commands: Vec::new(),
@@ -148,8 +159,8 @@ impl Layer for Game {
     }
 
     /// What `gg actions` lists, and `gg input` presses by name.
-    fn actions(&self) -> Vec<(String, Binding)> {
-        self.actions.bindings()
+    fn actions(&self) -> Controls {
+        self.actions.controls()
     }
 
     fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {

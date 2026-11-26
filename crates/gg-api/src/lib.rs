@@ -140,8 +140,9 @@
 //!   - as `project` does for an [`InputEvent::Aim`]'s entity or point, and `api.unseen` where the
 //!     view doesn't show its point as it's handed. Events after it aren't handed, and a `hold` lets go
 //!     of what those before it left down.
-//! - `actions`: the actions the layers bind, by name, with their bindings, as each layer's
-//!   `Layer::actions` gives them, so a client learns the game's controls and sets them by name.
+//! - `actions`: the actions the layers bind, by name, with their bindings and what each does, and
+//!   the controls they read apart from them, as each layer's `Layer::actions` gives them. A client
+//!   learns the game's controls without reading its code, and sets actions by name.
 //! - `press`: clicks a UI's button or widget at the middle of what shows of it, through `input`, as
 //!   a player would. A button presses, a toggle flips, a drop-down opens or closes its options, a
 //!   text field takes the focus and the caret, and a slider takes its middle value. Then it runs
@@ -1045,11 +1046,14 @@ pub enum Toward {
     Up,
 }
 
-/// What `actions` answers: the actions the game's layers bind, from the top layer down, each
-/// layer's in the order it first bound them.
+/// What `actions` answers: the game's controls, from the top layer down. Actions come in the order
+/// each layer first bound them, and other controls in the order it listed them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActionList {
     pub actions: Vec<Action>,
+    /// What the layers read apart from their actions, such as a look by the mouse or a click.
+    #[serde(default)]
+    pub controls: Vec<Control>,
 }
 
 /// An action as `actions` lists it, which `input`'s [`InputEvent::Action`] sets by name.
@@ -1060,9 +1064,46 @@ pub struct Action {
     /// The layer's type's name, without its path.
     pub layer: String,
     pub kind: ActionKind,
+    /// What it does in the game, as the layer says: what its value moves, in what units, and when.
+    /// `None` where the layer doesn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub does: Option<String>,
     /// Each binding's sources, in the order bound: a button's one; an axis's negative then
     /// positive; a pair of axes' left, right, down and up.
     pub bindings: Vec<Vec<Source>>,
+}
+
+/// A control a layer reads apart from its actions, as `actions` lists it, which `input` hands as
+/// its events.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Control {
+    /// The layer's type's name, without its path.
+    pub layer: String,
+    pub reads: Reads,
+    /// What it does in the game, as the layer says, with its units, as a look's radians a unit.
+    pub does: String,
+}
+
+/// What a [`Control`] reads, named as `input` hands it: a [`Source`], such as `{"button":"left"}`;
+/// or the mouse's `"motion"`, `"scroll"` or `"cursor"`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a source, as `{\"key\":\"Escape\"}`, or `\"motion\"`, `\"scroll\"` or `\"cursor\"`"
+)]
+pub enum Reads {
+    Source(Source),
+    Pointer(Pointer),
+}
+
+/// The mouse's input that isn't a button: its raw `motion`, as a look reads it with the cursor
+/// grabbed; its wheel's `scroll`; or where the `cursor` is, as an aim or a click reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pointer {
+    Motion,
+    Scroll,
+    Cursor,
 }
 
 /// How an action reads its bindings: as a button, held or not; an axis, -1 to 1; or a pair of
@@ -2969,6 +3010,31 @@ mod tests {
         let written = serde_json::to_string(&sources).unwrap();
         let expected = r#"[{"key":"Space"},{"button":"left"},{"pad_button":"south"},{"pad_stick":["left","up"]},{"pad_trigger":"right"}]"#;
         assert_eq!(written, expected);
+    }
+
+    /// A control is written as `input` names what it reads, and a list without controls or an
+    /// action's `does` still reads.
+    #[test]
+    fn controls_read_as_input_names_them() {
+        let reads = [
+            Reads::Source(Source::Button(Button::Left)),
+            Reads::Pointer(Pointer::Motion),
+            Reads::Pointer(Pointer::Scroll),
+            Reads::Pointer(Pointer::Cursor),
+        ];
+        let written = serde_json::to_string(&reads).unwrap();
+        let expected = r#"[{"button":"left"},"motion","scroll","cursor"]"#;
+        assert_eq!(written, expected);
+        assert_eq!(serde_json::from_str::<Vec<Reads>>(&written).unwrap(), reads);
+        let error = serde_json::from_str::<Reads>(r#""wheel""#).unwrap_err();
+        assert!(error.to_string().starts_with("a source, as"), "{error}");
+        let old = r#"{"actions": [{"name": "Jump", "layer": "Game", "kind": "button",
+            "bindings": [[{"key": "Space"}]]}]}"#;
+        let list: ActionList = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            (list.actions[0].does.as_ref(), list.controls.len()),
+            (None, 0)
+        );
     }
 
     /// A part left out is kept, `null` gives it back to the game, a value sets it; a projection is

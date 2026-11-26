@@ -130,6 +130,31 @@ impl Binding {
     }
 }
 
+/// A control a layer reads apart from its actions, as [`Actions::describe_control`] lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    /// A key, a mouse button, or a gamepad's button, stick or trigger, as a binding reads it.
+    Source(Source),
+    /// The mouse's raw motion, as a look with the cursor grabbed reads it.
+    Motion,
+    /// The wheel or a touchpad's scroll.
+    Scroll,
+    /// Where the cursor is over the view, as an aim reads it, or a click at it.
+    Cursor,
+}
+
+/// A layer's controls, as [`Actions::controls`] gives them: what its
+/// [`Layer::actions`](crate::Layer::actions) gives the tool API.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Controls {
+    /// Each binding, in the order bound, with its action's name as `Debug` writes it.
+    pub bindings: Vec<(String, Binding)>,
+    /// What actions do, by name, as [`Actions::describe`] says.
+    pub described: Vec<(String, String)>,
+    /// The controls the layer reads apart from its actions, and what each does.
+    pub others: Vec<(Control, String)>,
+}
+
 /// A change of an action's value, from [`Actions::event`], for the layer to queue as a command its
 /// next tick applies.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -180,6 +205,10 @@ pub struct Actions<A> {
     held: Vec<Held>,
     /// How many bindings have been made.
     made: u32,
+    /// What actions do, as [`describe`](Self::describe) says.
+    described: Vec<(A, String)>,
+    /// What [`describe_control`](Self::describe_control) lists.
+    others: Vec<(Control, String)>,
 }
 
 impl<A> Default for Actions<A> {
@@ -189,6 +218,8 @@ impl<A> Default for Actions<A> {
             bindings: Vec::new(),
             held: Vec::new(),
             made: 0,
+            described: Vec::new(),
+            others: Vec::new(),
         }
     }
 }
@@ -333,13 +364,48 @@ impl<A: Copy + Eq + Debug> Actions<A> {
         self.value(action)
     }
 
-    /// Each binding, in the order bound, with its action's name as `Debug` writes it: what a
-    /// layer's [`Layer::actions`](crate::Layer::actions) gives the tool API.
-    pub fn bindings(&self) -> Vec<(String, Binding)> {
+    /// Says what `action` does, for `gg actions` to list, in place of what was said before.
+    ///
+    /// Say what its value moves in the game, in what units and when, so an agent plays without
+    /// reading the code: "Walks the player: 1 is `Player.speed` units a second". Name the fields
+    /// that set its numbers, and those it changes, which the agent reads back.
+    pub fn describe(&mut self, action: A, does: impl Into<String>) {
+        let does = does.into();
+        match self.described.iter_mut().find(|(a, _)| *a == action) {
+            Some((_, said)) => *said = does,
+            None => self.described.push((action, does)),
+        }
+    }
+
+    /// Lists a control the layer reads apart from its actions, such as a look by the mouse's motion
+    /// or a click at the cursor, with what it does, in place of what was said of it before.
+    ///
+    /// Say it as [`describe`](Self::describe) does. Give a look's units, as radians a unit of
+    /// motion, and when it reads, as only while the cursor is grabbed.
+    pub fn describe_control(&mut self, control: Control, does: impl Into<String>) {
+        let does = does.into();
+        match self.others.iter_mut().find(|(c, _)| *c == control) {
+            Some((_, said)) => *said = does,
+            None => self.others.push((control, does)),
+        }
+    }
+
+    /// The layer's controls: each binding in the order bound, what actions do, and the controls
+    /// listed apart, with actions named as `Debug` writes them. What a layer's
+    /// [`Layer::actions`](crate::Layer::actions) gives the tool API.
+    pub fn controls(&self) -> Controls {
+        let name = |action: A| format!("{action:?}");
         let bindings = self.bindings.iter();
-        bindings
-            .map(|&(action, binding, _)| (format!("{action:?}"), binding))
-            .collect()
+        let described = self.described.iter();
+        Controls {
+            bindings: bindings
+                .map(|&(a, binding, _)| (name(a), binding))
+                .collect(),
+            described: described
+                .map(|(a, does)| (name(*a), does.clone()))
+                .collect(),
+            others: self.others.clone(),
+        }
     }
 
     /// `action`'s value; at rest if unbound.
@@ -489,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn bindings_are_listed_in_the_order_bound_by_their_actions_names() {
+    fn controls_are_listed_in_the_order_bound_or_said_by_their_actions_names() {
         let mut actions = Actions::default();
         let space = Binding::Button(Source::Key(Key::Space));
         let south = Binding::Button(Source::PadButton(PadButton::South));
@@ -499,10 +565,32 @@ mod tests {
             (Act::Jump, south),
         ];
         actions.bind_all(bound).expect("bound");
-        let listed = actions.bindings();
-        let names: Vec<&str> = listed.iter().map(|(name, _)| name.as_str()).collect();
+        actions.describe(Act::Move, "Walks");
+        actions.describe(Act::Jump, "Hops");
+        actions.describe(Act::Move, "Walks: 1 is 5 units a second");
+        actions.describe_control(Control::Scroll, "Zooms");
+        actions.describe_control(Control::Motion, "Looks");
+        actions.describe_control(Control::Scroll, "Zooms: a line is a tenth closer");
+        let Controls {
+            bindings,
+            described,
+            others,
+        } = actions.controls();
+        let names: Vec<&str> = bindings.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["Jump", "Move", "Jump"]);
-        assert_eq!(listed[2].1, south);
+        assert_eq!(bindings[2].1, south);
+        let said = |name: &str, does: &str| (name.to_owned(), does.to_owned());
+        let described_so = [
+            said("Move", "Walks: 1 is 5 units a second"),
+            said("Jump", "Hops"),
+        ];
+        assert_eq!(described, described_so);
+        let zooms = "Zooms: a line is a tenth closer".to_owned();
+        let others_so = [
+            (Control::Scroll, zooms),
+            (Control::Motion, "Looks".to_owned()),
+        ];
+        assert_eq!(others, others_so);
     }
 
     #[test]
