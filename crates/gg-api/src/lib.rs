@@ -39,6 +39,7 @@
 //! | `view` | [`View`] | `{}` | `view` |
 //! | `input` | [`Input`] | `{}` | `input` |
 //! | `press` | [`Press`] | [`Pressed`] | `input` |
+//! | `actions` | - | [`ActionList`] | `input` |
 //! | `look` | [`Look`] | [`Looked`] | `view` |
 //! | `pick` | [`Pick`] | [`Picked`] | `view` |
 //! | `cast` | [`Cast`] | [`Hit`] | `view` |
@@ -129,11 +130,18 @@
 //!   taken the last; another publishes at its own size, while it fits.
 //! - `input`: hands the game's layers the events in order, as its window would, as the frame
 //!   starts, after each [`InputEvent::Wait`]'s ticks. It fails with:
-//!   - `api.bad_params`: a key `code` doesn't name, a wait of 0, or waits and `hold` past 10,000
-//!     ticks together; `api.stopped` for either while stopped;
+//!   - `api.bad_params`: a key `code` doesn't name, a stick past 1 from rest, a trigger outside 0
+//!     to 1, a wait of 0, or waits and `hold` past 10,000 ticks together; `api.stopped` for either
+//!     while stopped;
+//!   - `api.no_action`, naming the actions, for an [`InputEvent::Action`] no layer binds;
+//!     `api.bad_params` for its value of another kind than the action's, or that none of its
+//!     bindings gives. Every action is checked before any event is handed, and read again as
+//!     it's handed;
 //!   - as `project` does for an [`InputEvent::Aim`]'s entity, and `api.unseen` where the view
 //!     doesn't show its point as it's handed. Events after it aren't handed, and a `hold` lets go
 //!     of what those before it left down.
+//! - `actions`: the actions the layers bind, by name, with their bindings, as each layer's
+//!   `Layer::actions` gives them, so a client learns the game's controls and sets them by name.
 //! - `press`: clicks a UI's button or widget at the middle of what shows of it, through `input`, as
 //!   a player would. A button presses, a toggle flips, a drop-down opens or closes its options, a
 //!   text field takes the focus and the caret, and a slider takes its middle value. Then it runs
@@ -920,6 +928,149 @@ pub enum InputEvent {
     /// answers as `at`. It's read as the event is handed, so a moving target is aimed at where it
     /// is then.
     Aim(String),
+    /// A gamepad's button went down or up. `pad` numbers the gamepad, 0 if left out. A trigger's
+    /// press as a button is `left_trigger` or `right_trigger`, apart from its travel.
+    PadButton {
+        #[serde(default)]
+        pad: u32,
+        button: PadButton,
+        pressed: bool,
+    },
+    /// A gamepad's stick moved to `value`, `[x, y]`: right and up positive, of length at most 1,
+    /// `[0, 0]` at rest.
+    PadStick {
+        #[serde(default)]
+        pad: u32,
+        stick: Stick,
+        value: [f32; 2],
+    },
+    /// A gamepad's trigger moved to `value`: 0 at rest, 1 all the way.
+    PadTrigger {
+        #[serde(default)]
+        pad: u32,
+        trigger: Trigger,
+        value: f32,
+    },
+    /// An action a layer binds, by name as `actions` lists it, set to `value`. It's handed as the
+    /// events of the first binding that gives the value, as a player's keys or stick would, on pad
+    /// 0, and of the others let go of. Keys and buttons give -1, 0 and 1 alone; sticks and
+    /// triggers, values between.
+    Action {
+        name: String,
+        /// A button's 1, pressed, the default, or 0; an axis's -1 to 1; a pair of axes' `[x, y]`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<ActionValue>,
+    },
+}
+
+/// An action's value, as [`InputEvent::Action`] sets it.
+///
+/// A number for a button or an axis, `[x, y]` for a pair of axes, each from -1 to 1. A pair longer
+/// than 1 is as long as 1, as the game's `Actions` makes keys held diagonally.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActionValue {
+    Axis(f32),
+    Axis2([f32; 2]),
+}
+
+/// A gamepad's button, by position as keys are.
+///
+/// `south` is Xbox's A and PlayStation's Cross, `select` View and Create, `start` Menu and Options.
+/// Shoulders are the bumpers above the triggers; thumbs are the sticks pressed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PadButton {
+    South,
+    East,
+    North,
+    West,
+    LeftShoulder,
+    RightShoulder,
+    LeftTrigger,
+    RightTrigger,
+    Select,
+    Start,
+    Mode,
+    LeftThumb,
+    RightThumb,
+    #[serde(rename = "dpad_up")]
+    DPadUp,
+    #[serde(rename = "dpad_down")]
+    DPadDown,
+    #[serde(rename = "dpad_left")]
+    DPadLeft,
+    #[serde(rename = "dpad_right")]
+    DPadRight,
+}
+
+/// A gamepad's stick: `"left"` or `"right"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stick {
+    Left,
+    Right,
+}
+
+/// A gamepad's trigger: `"left"` or `"right"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    Left,
+    Right,
+}
+
+/// A stick's way: `"left"`, `"right"`, `"down"` or `"up"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Toward {
+    Left,
+    Right,
+    Down,
+    Up,
+}
+
+/// What `actions` answers: the actions the game's layers bind, from the top layer down, each
+/// layer's in the order it first bound them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionList {
+    pub actions: Vec<Action>,
+}
+
+/// An action as `actions` lists it, which `input`'s [`InputEvent::Action`] sets by name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Action {
+    /// As the layer's code writes it in debug output, such as `Jump`.
+    pub name: String,
+    /// The layer's type's name, without its path.
+    pub layer: String,
+    pub kind: ActionKind,
+    /// Each binding's sources, in the order bound: a button's one; an axis's negative then
+    /// positive; a pair of axes' left, right, down and up.
+    pub bindings: Vec<Vec<Source>>,
+}
+
+/// How an action reads its bindings: as a button, held or not; an axis, -1 to 1; or a pair of
+/// axes, across and up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionKind {
+    Button,
+    Axis,
+    Axis2,
+}
+
+/// What a binding reads, named as `input` hands it: `{"key":"KeyW"}`, `{"button":"left"}`,
+/// `{"pad_button":"south"}`, a stick's way `{"pad_stick":["left","up"]}`, or
+/// `{"pad_trigger":"right"}`'s travel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    Key(String),
+    Button(Button),
+    PadButton(PadButton),
+    PadStick(Stick, Toward),
+    PadTrigger(Trigger),
 }
 
 /// A mouse button: `"left"`, `"right"`, `"middle"`, the side buttons `"back"` and `"forward"`, or
@@ -2714,7 +2865,12 @@ mod tests {
         let json = r#"{"events": [{"key": {"key": "KeyW", "pressed": true}}, "cursor_left",
             {"button": {"button": {"other": 9}, "pressed": false}}, {"scroll": {"lines": [0, 1]}},
             {"cursor": [1.5, 2]}, {"text": "a"}, {"focused": false}, {"motion": [3, -4.5]},
-            {"wait": 12}, {"aim": "Enemy 1"}]}"#;
+            {"wait": 12}, {"aim": "Enemy 1"},
+            {"pad_button": {"button": "dpad_up", "pressed": true}},
+            {"pad_stick": {"pad": 1, "stick": "right", "value": [0.5, -1]}},
+            {"pad_trigger": {"trigger": "left", "value": 0.25}},
+            {"action": {"name": "Jump"}}, {"action": {"name": "Run", "value": -1}},
+            {"action": {"name": "Move", "value": [0.5, 1]}}]}"#;
         let input: Input = serde_json::from_str(json).unwrap();
         let expected = [
             InputEvent::Key {
@@ -2734,15 +2890,60 @@ mod tests {
             InputEvent::Motion([3.0, -4.5]),
             InputEvent::Wait(12),
             InputEvent::Aim("Enemy 1".to_owned()),
+            InputEvent::PadButton {
+                pad: 0,
+                button: PadButton::DPadUp,
+                pressed: true,
+            },
+            InputEvent::PadStick {
+                pad: 1,
+                stick: Stick::Right,
+                value: [0.5, -1.0],
+            },
+            InputEvent::PadTrigger {
+                pad: 0,
+                trigger: Trigger::Left,
+                value: 0.25,
+            },
+            InputEvent::Action {
+                name: "Jump".to_owned(),
+                value: None,
+            },
+            InputEvent::Action {
+                name: "Run".to_owned(),
+                value: Some(ActionValue::Axis(-1.0)),
+            },
+            InputEvent::Action {
+                name: "Move".to_owned(),
+                value: Some(ActionValue::Axis2([0.5, 1.0])),
+            },
         ];
         assert_eq!(input.events, expected);
         for refused in [
             r#"{"events": [{"key": {"key": "KeyW", "pressed": true, "held": true}}]}"#,
             r#"{"events": [{"wait": -1}]}"#,
             r#"{"events": [{"aim": 3}]}"#,
+            r#"{"events": [{"pad_button": {"button": "d_pad_up", "pressed": true}}]}"#,
+            r#"{"events": [{"action": {"name": "Run", "value": [1, 0, 0]}}]}"#,
+            r#"{"events": [{"action": {"name": "Run", "held": true}}]}"#,
         ] {
             assert!(serde_json::from_str::<Input>(refused).is_err(), "{refused}");
         }
+    }
+
+    /// A binding's sources are written as `input` names them.
+    #[test]
+    fn sources_are_written_as_input_names_them() {
+        let sources = [
+            Source::Key("Space".to_owned()),
+            Source::Button(Button::Left),
+            Source::PadButton(PadButton::South),
+            Source::PadStick(Stick::Left, Toward::Up),
+            Source::PadTrigger(Trigger::Right),
+        ];
+        let written = serde_json::to_string(&sources).unwrap();
+        let expected = r#"[{"key":"Space"},{"button":"left"},{"pad_button":"south"},{"pad_stick":["left","up"]},{"pad_trigger":"right"}]"#;
+        assert_eq!(written, expected);
     }
 
     /// A part left out is kept, `null` gives it back to the game, a value sets it; a projection is

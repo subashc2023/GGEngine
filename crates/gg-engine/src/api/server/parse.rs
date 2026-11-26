@@ -8,6 +8,7 @@ use gg_api::{
     Apply, Capture, Failure, Field, Input, InputEvent, Request, SavePrefab, Scene, SceneAction,
     Step, View,
 };
+use gg_core::math::Vec2;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use subsecond::JumpTable;
@@ -17,7 +18,7 @@ use super::world::Subject;
 use crate::Key;
 
 /// Listed by `api.unknown_method`.
-pub(super) const METHODS: [&str; 39] = [
+pub(super) const METHODS: [&str; 40] = [
     "hello",
     "ping",
     "status",
@@ -32,6 +33,7 @@ pub(super) const METHODS: [&str; 39] = [
     "view",
     "input",
     "press",
+    "actions",
     "look",
     "overlays",
     "pick",
@@ -98,6 +100,8 @@ pub(super) enum Call {
     /// Events to hand the layers at once, each key event naming a real key, and what to hand after
     /// waits or let go of after a hold, if either follows.
     Input(Vec<InputEvent>, Option<Hold>),
+    /// The layers' actions to list.
+    Actions,
     /// A UI's node to click, by name, the UI's name if given, and the ticks to run after, from 1
     /// to [`MOST_STEPS`].
     Press {
@@ -177,27 +181,64 @@ pub(super) struct Hold {
     pub(super) lets_go: bool,
 }
 
-/// A release of each key and button `events` press and leave down, in the order pressed: none for
-/// a click's.
+/// A release of each key and button `events` press and leave down, and a return to rest of each
+/// stick and trigger they leave away from it, in the order pressed: none for a click's.
 pub(super) fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
     let mut down: Vec<InputEvent> = Vec::new();
     for given in events {
-        let release = match given {
-            InputEvent::Key { key, .. } => InputEvent::Key {
-                key: key.clone(),
-                pressed: false,
-                repeat: false,
-            },
-            &InputEvent::Button { button, .. } => InputEvent::Button {
+        let (release, pressed) = match *given {
+            InputEvent::Key {
+                ref key, pressed, ..
+            } => {
+                let key = key.clone();
+                let release = InputEvent::Key {
+                    key,
+                    pressed: false,
+                    repeat: false,
+                };
+                (release, pressed)
+            }
+            InputEvent::Button { button, pressed } => {
+                let release = InputEvent::Button {
+                    button,
+                    pressed: false,
+                };
+                (release, pressed)
+            }
+            InputEvent::PadButton {
+                pad,
                 button,
-                pressed: false,
-            },
+                pressed,
+            } => {
+                let release = InputEvent::PadButton {
+                    pad,
+                    button,
+                    pressed: false,
+                };
+                (release, pressed)
+            }
+            InputEvent::PadStick { pad, stick, value } => {
+                let rest = InputEvent::PadStick {
+                    pad,
+                    stick,
+                    value: [0.0; 2],
+                };
+                (rest, value != [0.0; 2])
+            }
+            InputEvent::PadTrigger {
+                pad,
+                trigger,
+                value,
+            } => {
+                let rest = InputEvent::PadTrigger {
+                    pad,
+                    trigger,
+                    value: 0.0,
+                };
+                (rest, value != 0.0)
+            }
             _ => continue,
         };
-        let pressed = matches!(
-            given,
-            InputEvent::Key { pressed: true, .. } | InputEvent::Button { pressed: true, .. }
-        );
         down.retain(|held| *held != release);
         if pressed {
             down.push(release);
@@ -212,8 +253,8 @@ pub(super) fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
 ///
 /// - `api.unknown_method`.
 /// - `api.bad_params`: parameters the method doesn't take; an invalid `look` ([`look`]); an
-///   `input` with an unknown key, a `hold` or wait of 0, or the two past [`MOST_STEPS`] ticks
-///   together; a `press` of 0
+///   `input` with an unknown key, a stick past 1 or a trigger outside 0 to 1, a `hold` or wait of
+///   0, or the two past [`MOST_STEPS`] ticks together; a `press` of 0
 ///   or past [`MOST_STEPS`] ticks; a `project` of neither or both of an entity and a finite
 ///   point; an `entities` field without a type; a `scene` path
 ///   missing, unwanted or not `.ron`, or `discard` given to `save`; a `save_prefab` path not
@@ -233,6 +274,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
         "hash" => none(method, params).map(|()| Call::Hash)?,
         "cells" => none(method, params).map(|()| Call::Cells)?,
         "ui" => none(method, params).map(|()| Call::Ui)?,
+        "actions" => none(method, params).map(|()| Call::Actions)?,
         "snapshot" => {
             let gg_api::Snapshot { path, quit } = take(method, params)?;
             if path.as_deref().is_some_and(|path| !path.is_absolute()) {
@@ -457,13 +499,25 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
         }
         "input" => {
             let Input { events, hold } = take(method, params)?;
-            let unknown = events.iter().find_map(|given| match given {
-                InputEvent::Key { key, .. } if Key::from_name(key).is_none() => Some(key),
+            let refused = events.iter().find_map(|given| match *given {
+                InputEvent::Key { ref key, .. } if Key::from_name(key).is_none() => Some(format!(
+                    "names keys by their W3C `code`, as `KeyW`, and `{key}` is none"
+                )),
+                // Past 1 by a rounding's width, as [0.70711, 0.70711], it's taken as 1.
+                InputEvent::PadStick { value, .. }
+                    if Vec2::from(value).is_nan() || Vec2::from(value).length() > 1.001 =>
+                {
+                    let [x, y] = value;
+                    Some(format!(
+                        "moves a stick to `[x, y]` of length at most 1, not [{x}, {y}]"
+                    ))
+                }
+                InputEvent::PadTrigger { value, .. } if !(0.0..=1.0).contains(&value) => {
+                    Some(format!("moves a trigger from 0 to 1, not {value}"))
+                }
                 _ => None,
             });
-            if let Some(key) = unknown {
-                let what =
-                    format!("names keys by their W3C `code`, as `KeyW`, and `{key}` is none");
+            if let Some(what) = refused {
                 return Err(bad_params(method, what));
             }
             if hold == Some(0) {

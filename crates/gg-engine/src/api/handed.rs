@@ -99,11 +99,16 @@ impl Handed {
             }
             InputEvent::Text(ref text) => (egui::Event::Text(text.clone()), keys),
             InputEvent::Focused(focused) => (egui::Event::WindowFocused(focused), false),
-            // The server makes waits and aims into ticks and a cursor first.
+            // The server makes waits, aims and actions into ticks, a cursor and a binding's events
+            // first. egui hears no gamepad.
             InputEvent::CursorEntered
             | InputEvent::Motion(_)
             | InputEvent::Wait(_)
-            | InputEvent::Aim(_) => return false,
+            | InputEvent::Aim(_)
+            | InputEvent::Action { .. }
+            | InputEvent::PadButton { .. }
+            | InputEvent::PadStick { .. }
+            | InputEvent::PadTrigger { .. } => return false,
         };
         self.events.push(event);
         keeps

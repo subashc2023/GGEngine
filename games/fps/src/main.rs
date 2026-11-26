@@ -241,6 +241,11 @@ impl Layer for Game {
         Some(&mut self.commands)
     }
 
+    /// What `gg actions` lists, and `gg input` presses by name.
+    fn actions(&self) -> Vec<(String, Binding)> {
+        self.actions.bindings()
+    }
+
     /// Grabs the cursor while the mouse looks, and draws the crosshair.
     fn update(&mut self, cx: &mut Context, _: std::time::Duration) {
         cx.set_cursor_grabbed(self.grab);

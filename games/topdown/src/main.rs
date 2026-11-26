@@ -198,6 +198,11 @@ impl Layer for Game {
         Some(&mut self.commands)
     }
 
+    /// What `gg actions` lists, and `gg input` presses by name.
+    fn actions(&self) -> Vec<(String, Binding)> {
+        self.actions.bindings()
+    }
+
     /// Draws the game's own debug overlay, Enemy aim, while it's on: a line from each enemy to the
     /// player it walks at. The overlays' bar lists it under Game.
     fn update(&mut self, cx: &mut Context, _: Duration) {

@@ -604,7 +604,9 @@ const TOOLS: &[Tool] = &[
         name: "input",
         description: "Hands the game's layers input events, in order, as its window would, as a \
                       frame starts, a `wait` running ticks between them. Release each key and \
-                      button you press: the game holds it down until then, or give `hold`. \
+                      button you press, and bring sticks and triggers back to rest: the game \
+                      holds them until then, or give `hold`. Set the game's actions by name, as \
+                      `actions` lists them, with `action` events. \
                       Without `hold` or a `wait`, it answers `{}` before a tick sees the events; \
                       paused, none does until a `step`.",
         properties: || {
@@ -614,8 +616,8 @@ const TOOLS: &[Tool] = &[
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 10000,
-                    "description": "Ticks (64 a second) to hold the keys and buttons the events \
-                                    press and leave down, after the last event. They're released \
+                    "description": "Ticks (64 a second) to hold what the events press and leave \
+                                    down or away from rest, after the last event. It's let go \
                                     after exactly that many, and the answer is the status then, \
                                     as `step`'s; the next tick sees the release. With none left \
                                     down, such as a click's, it just runs the ticks. Paused, the \
@@ -624,6 +626,18 @@ const TOOLS: &[Tool] = &[
             })
         },
         required: &["events"],
+    },
+    Tool {
+        name: "actions",
+        description: "The game's actions, to learn its controls without reading its code: each \
+                      `name`, its `layer`, `kind` (`button`; `axis`, -1 to 1; `axis2`, [x, y]) \
+                      and `bindings`, each a list of sources named as `input` hands them: a \
+                      button's one; an axis's negative then positive; a pair of axes' left, \
+                      right, down and up. Set one by name with `input`'s `action` event. A layer \
+                      lists its `Actions` through `Layer::actions`; a game's layer that doesn't \
+                      lists none.",
+        properties: || json!({}),
+        required: &[],
     },
     Tool {
         name: "press",
@@ -978,6 +992,37 @@ fn numbers(count: usize, description: &str) -> Value {
 }
 
 /// An object of one key, as gg-api writes an enum's variant with a value.
+/// Each gamepad button as `input` names it.
+const PAD_BUTTONS: [&str; 17] = [
+    "south",
+    "east",
+    "north",
+    "west",
+    "left_shoulder",
+    "right_shoulder",
+    "left_trigger",
+    "right_trigger",
+    "select",
+    "start",
+    "mode",
+    "left_thumb",
+    "right_thumb",
+    "dpad_up",
+    "dpad_down",
+    "dpad_left",
+    "dpad_right",
+];
+
+/// The schema of an input event's gamepad.
+fn pad() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 0,
+        "default": 0,
+        "description": "The gamepad's number",
+    })
+}
+
 fn variant(name: &str, value: Value) -> Value {
     json!({
         "type": "object",
@@ -1096,6 +1141,71 @@ fn input() -> Value {
                                 `project` answers for it, read as the event is handed so a moving \
                                 target is aimed at where it is then. Fails with api.unseen, \
                                 handing nothing after it, where the view doesn't show it",
+            })),
+            variant("pad_button", json!({
+                "type": "object",
+                "description": "A gamepad's button went down or up, by position: `south` is \
+                                Xbox's A and PlayStation's Cross. A trigger's press as a button \
+                                is `left_trigger` or `right_trigger`, apart from its travel",
+                "properties": {
+                    "pad": pad(),
+                    "button": {"type": "string", "enum": PAD_BUTTONS},
+                    "pressed": {"type": "boolean"},
+                },
+                "required": ["button", "pressed"],
+                "additionalProperties": false,
+            })),
+            variant("pad_stick", json!({
+                "type": "object",
+                "description": "A gamepad's stick moved",
+                "properties": {
+                    "pad": pad(),
+                    "stick": {"type": "string", "enum": ["left", "right"]},
+                    "value": numbers(2, "[x, y]: right and up positive, of length at most 1, \
+                                         [0, 0] at rest"),
+                },
+                "required": ["stick", "value"],
+                "additionalProperties": false,
+            })),
+            variant("pad_trigger", json!({
+                "type": "object",
+                "description": "A gamepad's trigger moved",
+                "properties": {
+                    "pad": pad(),
+                    "trigger": {"type": "string", "enum": ["left", "right"]},
+                    "value": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "0 at rest, 1 all the way",
+                    },
+                },
+                "required": ["trigger", "value"],
+                "additionalProperties": false,
+            })),
+            variant("action", json!({
+                "type": "object",
+                "description": "One of the game's actions, by name as `actions` lists it, set to \
+                                `value`. It's handed as the events of the first binding that \
+                                gives the value, as a player's keys or stick would, on pad 0, \
+                                the others let go of: keys and buttons give -1, 0 and 1; sticks \
+                                and triggers, values between. Fails with api.no_action, naming the actions, for a name \
+                                no layer binds, handing nothing",
+                "properties": {
+                    "name": {"type": "string"},
+                    "value": {"anyOf": [
+                        {
+                            "type": "number",
+                            "minimum": -1,
+                            "maximum": 1,
+                            "description": "A button's 1, pressed, the default, or 0, released; \
+                                            an axis's -1 to 1",
+                        },
+                        numbers(2, "A pair of axes' [x, y], each -1 to 1"),
+                    ]},
+                },
+                "required": ["name"],
+                "additionalProperties": false,
             })),
         ]},
     })
@@ -1635,6 +1745,25 @@ mod tests {
             InputEvent::Focused(true),
             InputEvent::Wait(3),
             InputEvent::Aim("Player".to_owned()),
+            InputEvent::PadButton {
+                pad: 0,
+                button: gg_api::PadButton::South,
+                pressed: true,
+            },
+            InputEvent::PadStick {
+                pad: 0,
+                stick: gg_api::Stick::Left,
+                value: [0.0, 1.0],
+            },
+            InputEvent::PadTrigger {
+                pad: 0,
+                trigger: gg_api::Trigger::Left,
+                value: 1.0,
+            },
+            InputEvent::Action {
+                name: "Jump".to_owned(),
+                value: None,
+            },
         ];
         let mut kinds: Vec<String> = (each.iter())
             .map(|event| {
@@ -1649,7 +1778,11 @@ mod tests {
                     | InputEvent::Scroll(_)
                     | InputEvent::Focused(_)
                     | InputEvent::Wait(_)
-                    | InputEvent::Aim(_) => {}
+                    | InputEvent::Aim(_)
+                    | InputEvent::PadButton { .. }
+                    | InputEvent::PadStick { .. }
+                    | InputEvent::PadTrigger { .. }
+                    | InputEvent::Action { .. } => {}
                 }
                 match serde_json::to_value(event).expect("an event") {
                     Value::String(kind) => kind,
@@ -1661,6 +1794,11 @@ mod tests {
         named.sort_unstable();
         kinds.sort_unstable();
         assert_eq!(named, kinds);
+        // Each button the schema names is one the protocol reads.
+        for button in PAD_BUTTONS {
+            let read = serde_json::from_value::<gg_api::PadButton>(json!(button));
+            assert!(read.is_ok(), "{button}");
+        }
     }
 
     /// A tool failing before a game is reached answers `isError`; an unknown tool is a protocol

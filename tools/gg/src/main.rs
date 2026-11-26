@@ -514,16 +514,26 @@ EVENTS is a JSON array of the API's input events, handed over in order as a fram
 - N ticks before the events after it: {\"wait\":N};
 - the cursor at the pixel `project` gives an entity, by ID or name: {\"aim\":\"Enemy 1\"}. It's
   read as it's handed, after the waits before it, so a moving target is aimed at where it is then.
-  It fails with `api.unseen` where the view doesn't show it, handing nothing after it.
+  It fails with `api.unseen` where the view doesn't show it, handing nothing after it;
+- a gamepad's button, its stick at [X,Y] (right and up positive, length 1 at most), or its trigger
+  from 0 to 1, on pad 0 unless `pad` says: {\"pad_button\":{\"button\":\"south\",\"pressed\":true}},
+  {\"pad_stick\":{\"stick\":\"left\",\"value\":[0.5,0]}},
+  {\"pad_trigger\":{\"trigger\":\"right\",\"value\":1}};
+- an action, by name as `actions` lists it: {\"action\":{\"name\":\"Jump\"}} presses a button, and
+  a `value` of 0 lets go; an axis takes -1 to 1, as {\"action\":{\"name\":\"Run\",\"value\":-1}},
+  and a pair of axes [X,Y]. It's handed as the first binding that gives the value, the others let
+  go of: keys and buttons give -1, 0 and 1; sticks and triggers, values between. `api.no_action`
+  names the actions for a name no layer binds, and nothing is handed.
 
-A key or button stays down until an event releases it. Without `--hold` or a wait, `input` prints
-`{}` at once, and paused, no tick sees the events before a `step`. With a wait, frames run no tick
-past it, and paused, it steps its ticks; it prints the status once the last event is handed.
+A key or button stays down, and a stick or trigger away from rest, until an event lets go of it.
+Without `--hold` or a wait, `input` prints `{}` at once, and paused, no tick sees the events before
+a `step`. With a wait, frames run no tick past it, and paused, it steps its ticks; it prints the
+status once the last event is handed.
 
-`--hold N` releases the keys and buttons the events press and leave down exactly N ticks (64 a
-second) after the last event, then prints the status, as `step` does. Events that leave nothing
-down, such as a click's, just run the N ticks. The next tick sees the release. Frames run no tick
-past it meanwhile. Paused, it steps the N ticks. The waits and N run 10,000 ticks at most together;
+`--hold N` lets go of what the events press and leave down exactly N ticks (64 a second) after the
+last event, then prints the status, as `step` does. Events that leave nothing down, such as a
+click's, just run the N ticks. The next tick sees the release. Frames run no tick past it
+meanwhile. Paused, it steps the N ticks. The waits and N run 10,000 ticks at most together;
 past 30 s (1,920 ticks), give `--timeout`. Both are refused while the game is stopped.
 
 A click at (400, 300), then a tick:
@@ -538,7 +548,24 @@ A jump held 20 ticks while running right, then a click on an enemy where it is t
     {\"key\":{\"key\":\"Space\",\"pressed\":false}}, {\"aim\":\"Enemy 1\"},
     {\"button\":{\"button\":\"left\",\"pressed\":true}},
     {\"button\":{\"button\":\"left\",\"pressed\":false}}]'
+A run right with a 20-tick jump, by the actions `gg actions` names, let go of a tick after:
+  gg input --hold 1 '[{\"action\":{\"name\":\"Run\",\"value\":1}}, {\"action\":{\"name\":\"Jump\"}},
+    {\"wait\":20}, {\"action\":{\"name\":\"Jump\",\"value\":0}}]'
 A `.ui` button is pressed by name with `gg press`.
+",
+            },
+            Help {
+                name: "actions",
+                usage: "actions",
+                summary: "Its actions, what each control does, and the keys and pads bound to each",
+                details: "\
+Prints each action its layers bind, from the top layer down: `name`, `layer`, `kind` and
+`bindings`. `kind` is `button`, `axis` (-1 to 1) or `axis2` ([x, y]). Each binding lists what it
+reads: a button's source; an axis's negative, then positive; a pair of axes' left, right, down, up.
+Sources are named as `input` hands them: {\"key\":\"Space\"}, {\"button\":\"left\"},
+{\"pad_button\":\"south\"}, {\"pad_stick\":[\"left\",\"up\"]} or {\"pad_trigger\":\"right\"}.
+`input` sets an action by name: {\"action\":{\"name\":\"Jump\"}}. A layer lists its `Actions`
+through `Layer::actions`; a game's layer that doesn't lists none.
 ",
             },
             Help {
@@ -1204,8 +1231,9 @@ fn command_first(args: &[String]) -> Result<Vec<String>, Failure> {
 
 /// The game's methods that gg's commands and MCP's tools of the same name call with no parameters.
 /// Each side adds one: gg's `quit` (MCP has no tool) and MCP's `snapshot` (gg's takes a path).
-const NO_PARAMETERS: [&str; 10] = [
+const NO_PARAMETERS: [&str; 11] = [
     "status", "pause", "resume", "play", "stop", "types", "hash", "cells", "ui", "images",
+    "actions",
 ];
 
 /// Fails with `gg.args` for arguments that aren't a command's, and as `Parsed::scope` does.
@@ -2251,6 +2279,7 @@ mod tests {
                 json!({"kind": "model", "skip": 0, "take": 5}),
             ),
             (&["ui"], Value::Null),
+            (&["actions"], Value::Null),
             (&["debug"], json!({"wait_ms": 0})),
             (
                 &["debug", "break", "scripts/spin.luau", "10", "12"],

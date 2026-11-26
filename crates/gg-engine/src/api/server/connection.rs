@@ -320,7 +320,7 @@ pub(super) fn needs(call: &Call) -> Vec<Capability> {
                 false => vec![Input],
             }
         }
-        Call::Press { .. } => vec![Input],
+        Call::Press { .. } | Call::Actions => vec![Input],
         Call::Get { component, .. } => vec![Read(Some(component.clone()))],
         Call::Entities { .. }
         | Call::Entity(_)

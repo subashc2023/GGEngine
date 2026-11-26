@@ -641,7 +641,9 @@ Input enters the simulation only as commands. A layer polls `Context::input` for
 or binds `Actions` and queues each change of an action's value. What an action holds is a component
 its commands set, so a tap between two frames applies at one tick, a hold at every tick, and
 snapshots and replays keep it. A recording holds actions' changes, never keys, so binding them to
-others changes none. Mouse look adds the mouse's raw motion up into a command of its own: motion is
+others changes none. A layer lists its bindings (`Layer::actions`), so the tool API names a game's
+controls. Its `input` sets an action by name through a binding's events: the game hears what a
+player's keys or stick would send, nothing more. Mouse look adds the mouse's raw motion up into a command of its own: motion is
 a distance moved, not a value as an action holds. Losing focus lets go of everything held, keys,
 buttons, actions and pads, since not every platform reports the releases that come out of focus.
 What Escape does is the game's.

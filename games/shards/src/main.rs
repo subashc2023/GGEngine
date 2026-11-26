@@ -342,6 +342,11 @@ impl Layer for Shards {
         Some(&mut self.commands)
     }
 
+    /// What `gg actions` lists, and `gg input` presses by name.
+    fn actions(&self) -> Vec<(String, Binding)> {
+        self.actions.bindings()
+    }
+
     fn update(&mut self, cx: &mut Context, _: Duration) {
         if let Some((square, shader)) = self.floor {
             let floor = Floor {

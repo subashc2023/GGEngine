@@ -183,6 +183,11 @@ impl Layer for Game {
         Some(&mut self.commands)
     }
 
+    /// What `gg actions` lists, and `gg input` presses by name.
+    fn actions(&self) -> Vec<(String, Binding)> {
+        self.actions.bindings()
+    }
+
     fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         // Queued now, so the next tick applies them.
         let commands = &mut self.commands;
@@ -249,7 +254,7 @@ A game made with GGEngine, a workspace of its own, which builds against
 
 As `gg new` made it, its start scene, `scenes/main.ron`, holds a camera and a square with the
 game's `Player` component. `src/main.rs` registers `Player`, binds the arrow keys, WASD and a pad's
-left stick, and moves the square at each tick by the commands they queue.
+left stick, which `gg actions` lists, and moves the square at each tick by the commands they queue.
 
 The engine's rules hold here as in its own games. Read, in the engine: `AGENTS.md`, how to work with
 it; `ARCHITECTURE.md`, its design, and what keeps a simulation the same on every platform;

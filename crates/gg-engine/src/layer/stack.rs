@@ -14,8 +14,6 @@ use tracing::{error, info, warn};
 #[cfg(feature = "dev")]
 use super::Edited;
 use super::{Asked, Commands, Context, Layer, Tick};
-#[cfg(feature = "dev")]
-use crate::Ui;
 use crate::edits::Edit;
 #[cfg(feature = "dev")]
 use crate::edits::{Authors, Done};
@@ -29,6 +27,8 @@ use crate::reflect::Value;
 use crate::scene_files;
 use crate::snapshot::{Run, Snapshot};
 use crate::sync_test::SyncTest;
+#[cfg(feature = "dev")]
+use crate::{Binding, Ui};
 use crate::{Event, World};
 
 /// Layers from the bottom up, with the overlays above the layers.
@@ -86,6 +86,19 @@ impl Stack {
     /// The names of the layers' types, from the bottom up.
     pub(crate) fn names(&self) -> &[&'static str] {
         &self.names
+    }
+
+    /// Each binding of the layers' actions, from the top layer down, with its layer's name and its
+    /// action's: what [`Layer::actions`] gives.
+    #[cfg(feature = "dev")]
+    pub(crate) fn actions(&self) -> Vec<(&'static str, String, Binding)> {
+        let layers = (self.layers.iter().zip(&self.names)).rev();
+        layers
+            .flat_map(|(layer, &name)| {
+                let bindings = layer.actions().into_iter();
+                bindings.map(move |(action, binding)| (name, action, binding))
+            })
+            .collect()
     }
 
     /// Has `recorder` record the run, from the layers' attach.
@@ -1174,6 +1187,10 @@ impl<L: Layer> Layer for Hot<L> {
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
         HotFn::current(L::commands).call((&mut self.0,))
+    }
+
+    fn actions(&self) -> Vec<(String, Binding)> {
+        HotFn::current(L::actions).call((&self.0,))
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {

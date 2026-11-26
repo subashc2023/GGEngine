@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 
 use gg_api::{Button, Failure, Hit, ImageList, InputEvent, Looked, Picked, Projected};
 use gg_core::Result;
-use gg_core::math::{DVec3, Quat, Vec3, Vec4};
+use gg_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{MIN_RENDER_SCALE, Projection, Viewpoint};
 use tracing::warn;
 
+use super::actions;
 use super::connection::Reply;
 use super::files::{Png, Writing};
 use super::parse::{Projecting, bad_params};
@@ -22,7 +23,7 @@ use crate::api::Shown;
 use crate::grid::Plane;
 use crate::layer::Outlining;
 use crate::render_thread::{Extracted, Publish, Shot};
-use crate::{Context, Entity, EntityId, Event, Key, MouseButton, Scroll, bounds};
+use crate::{Context, Entity, EntityId, Event, Key, MouseButton, Pad, Scroll, bounds};
 
 /// The longest a `capture` waits for a frame showing every texture and mesh added before it, none
 /// still decoding or streaming. Then it takes the next frame anyway, saying so.
@@ -714,8 +715,8 @@ pub(super) fn shown(method: &str, show: &gg_api::Shown) -> Result<(), Failure> {
 }
 
 /// `given` as the layers get it: a cursor position over the view, at `origin` in the main window,
-/// becomes the window's. `None` for an unknown key name, and a wait or an aim, which the server
-/// makes into ticks and a cursor first.
+/// becomes the window's. `None` for an unknown key name, and a wait, an aim or an action, which the
+/// server makes into ticks, a cursor and a binding's events first.
 pub(super) fn input_event(given: &InputEvent, origin: [u32; 2]) -> Option<Event<'_>> {
     let event = match *given {
         InputEvent::Key {
@@ -751,7 +752,30 @@ pub(super) fn input_event(given: &InputEvent, origin: [u32; 2]) -> Option<Event<
             Event::Scroll(Scroll::Pixels { x, y })
         }
         InputEvent::Focused(focused) => Event::Focused(focused),
-        InputEvent::Wait(_) | InputEvent::Aim(_) => return None,
+        InputEvent::PadButton {
+            pad,
+            button,
+            pressed,
+        } => Event::PadButton {
+            pad: Pad(pad as usize),
+            button: actions::pad_button(button),
+            pressed,
+        },
+        InputEvent::PadStick { pad, stick, value } => Event::PadStick {
+            pad: Pad(pad as usize),
+            stick: actions::stick(stick),
+            value: Vec2::from(value).clamp_length_max(1.0),
+        },
+        InputEvent::PadTrigger {
+            pad,
+            trigger,
+            value,
+        } => Event::PadTrigger {
+            pad: Pad(pad as usize),
+            trigger: actions::trigger(trigger),
+            value,
+        },
+        InputEvent::Wait(_) | InputEvent::Aim(_) | InputEvent::Action { .. } => return None,
     };
     Some(event)
 }

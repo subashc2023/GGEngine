@@ -206,6 +206,11 @@ impl Layer for Game {
         Some(&mut self.commands)
     }
 
+    /// What `gg actions` lists, and `gg input` presses by name.
+    fn actions(&self) -> Vec<(String, Binding)> {
+        self.actions.bindings()
+    }
+
     fn update(&mut self, cx: &mut Context, _: std::time::Duration) {
         let rings = &mut self.scratch.rings;
         rings.clear();

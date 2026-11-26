@@ -103,7 +103,9 @@ impl Binding {
         }
     }
 
-    fn sources(self) -> impl Iterator<Item = Source> {
+    /// Its sources: a button's one; an axis's negative then positive; a pair of axes' left, right,
+    /// down and up.
+    pub(crate) fn sources(self) -> impl Iterator<Item = Source> {
         let (sources, count) = match self {
             Self::Button(source) => ([source; 4], 1),
             Self::Axis { negative, positive } => ([negative, positive, negative, positive], 2),
@@ -331,6 +333,15 @@ impl<A: Copy + Eq + Debug> Actions<A> {
         self.value(action)
     }
 
+    /// Each binding, in the order bound, with its action's name as `Debug` writes it: what a
+    /// layer's [`Layer::actions`](crate::Layer::actions) gives the tool API.
+    pub fn bindings(&self) -> Vec<(String, Binding)> {
+        let bindings = self.bindings.iter();
+        bindings
+            .map(|&(action, binding, _)| (format!("{action:?}"), binding))
+            .collect()
+    }
+
     /// `action`'s value; at rest if unbound.
     fn value(&self, action: A) -> Vec2 {
         let found = self.actions.iter().find(|(a, ..)| *a == action);
@@ -475,6 +486,23 @@ mod tests {
             feed(&mut actions, &[left(false)]),
             [Change::Released(Act::Jump)]
         );
+    }
+
+    #[test]
+    fn bindings_are_listed_in_the_order_bound_by_their_actions_names() {
+        let mut actions = Actions::default();
+        let space = Binding::Button(Source::Key(Key::Space));
+        let south = Binding::Button(Source::PadButton(PadButton::South));
+        let bound = [
+            (Act::Jump, space),
+            (Act::Move, Binding::WASD),
+            (Act::Jump, south),
+        ];
+        actions.bind_all(bound).expect("bound");
+        let listed = actions.bindings();
+        let names: Vec<&str> = listed.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["Jump", "Move", "Jump"]);
+        assert_eq!(listed[2].1, south);
     }
 
     #[test]

@@ -147,6 +147,11 @@ impl Layer for Game {
         Some(&mut self.commands)
     }
 
+    /// What `gg actions` lists, and `gg input` presses by name.
+    fn actions(&self) -> Vec<(String, Binding)> {
+        self.actions.bindings()
+    }
+
     fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         // Queued now, so the next tick applies them.
         let commands = &mut self.commands;

@@ -492,6 +492,11 @@ impl Layer for Showcase {
         Some(&mut self.commands)
     }
 
+    /// What `gg actions` lists, and `gg input` presses by name.
+    fn actions(&self) -> Vec<(String, Binding)> {
+        self.actions.bindings()
+    }
+
     /// Grabs the cursor while it wants it for the looks, plays the music while a jukebox is in the
     /// world, and draws the HUD while a HUD is.
     fn update(&mut self, cx: &mut Context, _: Duration) {

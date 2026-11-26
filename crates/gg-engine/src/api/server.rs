@@ -19,6 +19,7 @@
 //! to a view's memory, and leaving the picks to the next non-bare frame, so no pick reads a view a
 //! client isn't shown. A windowed game shows bare frames in its window for a frame or two.
 
+mod actions;
 mod connection;
 mod edits;
 mod files;
@@ -94,10 +95,12 @@ impl Holding {
 
 /// Hands `events` to egui's next pass and the layers, as their window would, each added to
 /// `handed`: the layers get what egui doesn't keep ([`Handed::hand`](crate::api::Handed::hand)). An
-/// aim is a move of the cursor to where the view shows its entity, as `project` answers it.
+/// aim is a move of the cursor to where the view shows its entity, as `project` answers it; an
+/// action, the events of the binding that gives its value ([`actions::events`]), read as it's
+/// handed.
 ///
-/// Fails at an aim as `project` does, or with `api.unseen` where the view doesn't show its entity's
-/// point, handing none after it.
+/// Fails, handing none after it, at an aim as `project` does, or with `api.unseen` where the view
+/// doesn't show its entity's point; at an action, as `actions::events` does.
 fn hand(
     cx: &mut Context,
     stack: &mut Stack,
@@ -106,7 +109,7 @@ fn hand(
 ) -> Result<(), Failure> {
     let origin = cx.view().map_or([0, 0], |view| view.origin);
     for given in events {
-        let aimed;
+        let made;
         let given = match given {
             InputEvent::Aim(name) => {
                 let projected = view::project(cx, Projecting::Entity(Subject::of(name)))?;
@@ -118,17 +121,23 @@ fn hand(
                     );
                     Failure::new("api.unseen", message)
                 })?;
-                aimed = InputEvent::Cursor(at);
-                &aimed
+                made = vec![InputEvent::Cursor(at)];
+                &made[..]
             }
-            given => given,
+            InputEvent::Action { name, value } => {
+                made = actions::events(stack, name, *value)?;
+                &made[..]
+            }
+            given => std::slice::from_ref(given),
         };
-        handed.push(given.clone());
-        if cx.dev.handed.hand(given, origin) {
-            continue;
+        for given in given {
+            handed.push(given.clone());
+            if cx.dev.handed.hand(given, origin) {
+                continue;
+            }
+            let event = input_event(given, origin);
+            let _ = stack.event(cx, &event.expect("checked as it was read"));
         }
-        let event = input_event(given, origin);
-        let _ = stack.event(cx, &event.expect("checked as it was read"));
     }
     Ok(())
 }
@@ -600,6 +609,7 @@ impl Api {
                 | Call::Frames { .. }
                 | Call::View(_)
                 | Call::Input(_, None)
+                | Call::Actions
                 | Call::Look(_)
                 | Call::Overlays(_)
                 | Call::Pick(..)
@@ -684,6 +694,12 @@ impl Api {
                 self.steps.push((reply, until));
             }
             Call::Input(events, Some(Hold { runs, lets_go })) => {
+                // A misnamed action hands nothing, though its bindings are read again as handed.
+                let after = runs.iter().flat_map(|(_, run)| run);
+                if let Err(failure) = actions::check(stack, events.iter().chain(after)) {
+                    reply.send(Err(failure));
+                    return quit;
+                }
                 let mut holding = Holding {
                     until: 0,
                     runs: runs.into(),
@@ -844,10 +860,14 @@ impl Api {
                     reply.send(Err(Failure::new("api.view", message)));
                 }
             },
-            Call::Input(events, None) => match hand(cx, stack, &events, &mut Vec::new()) {
-                Ok(()) => reply.send(Ok("{}".to_owned())),
-                Err(failure) => reply.send(Err(failure)),
-            },
+            Call::Input(events, None) => {
+                let checked = actions::check(stack, &events);
+                match checked.and_then(|()| hand(cx, stack, &events, &mut Vec::new())) {
+                    Ok(()) => reply.send(Ok("{}".to_owned())),
+                    Err(failure) => reply.send(Err(failure)),
+                }
+            }
+            Call::Actions => reply.result(&actions::list(stack)),
             Call::Overlays(asked) => {
                 cx.dev.overlays.apply(&asked);
                 reply.result(&cx.dev.overlays.report());

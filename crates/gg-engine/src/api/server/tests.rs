@@ -2686,6 +2686,160 @@ fn waits_hand_each_run_after_its_ticks_and_aims_find_their_entity() {
     assert_eq!((ungranted.as_str(), alone), ("api.ungranted", true));
 }
 
+/// What [`Controlled`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Act {
+    Run,
+    Jump,
+    Move,
+}
+
+/// Binds actions to keys and a gamepad and keeps each change they give, as a game's layer does.
+struct Controlled {
+    actions: crate::Actions<Act>,
+    changes: Rc<std::cell::RefCell<Vec<crate::Change<Act>>>>,
+}
+
+impl crate::Layer for Controlled {
+    fn event(&mut self, _: &mut Context, event: &Event<'_>) -> std::ops::ControlFlow<()> {
+        let changes = &self.changes;
+        self.actions
+            .event(event, |change| changes.borrow_mut().push(change));
+        std::ops::ControlFlow::Continue(())
+    }
+
+    fn actions(&self) -> Vec<(String, crate::Binding)> {
+        self.actions.bindings()
+    }
+}
+
+/// `actions` lists the layers' actions with their bindings, and `input` sets one by name through
+/// the first binding that gives its value, letting go of the others: keys for -1, 0 and 1, the
+/// stick between. A name no layer binds, or a value of another kind or that no binding gives,
+/// fails, handing nothing, even past a wait. A hold brings a stick back to rest, and a gamepad's
+/// own events reach the actions too.
+#[test]
+fn actions_are_listed_and_set_by_name_through_their_bindings() {
+    use crate::{Binding, Change, PadButton, Source, Stick, Toward};
+    use gg_api::{ActionKind, ActionList};
+    use gg_core::math::Vec2;
+
+    let (mut api, session) = started("Api Actions");
+    let mut cx = Context::seeded(5);
+    let mut stack = Stack::default();
+    let mut actions = crate::Actions::default();
+    let keys = |negative, positive| Binding::Axis {
+        negative: Source::Key(negative),
+        positive: Source::Key(positive),
+    };
+    let stick = |negative, positive| Binding::Axis {
+        negative: Source::PadStick(Stick::Left, negative),
+        positive: Source::PadStick(Stick::Left, positive),
+    };
+    let bound = actions.bind_all([
+        (Act::Run, keys(Key::KeyA, Key::KeyD)),
+        (Act::Run, stick(Toward::Left, Toward::Right)),
+        (Act::Jump, Binding::Button(Source::Key(Key::Space))),
+        (
+            Act::Jump,
+            Binding::Button(Source::PadButton(PadButton::South)),
+        ),
+        (Act::Move, Binding::ARROWS),
+    ]);
+    bound.expect("each action's bindings are of one kind");
+    let changes = Rc::default();
+    stack.push_layer(Controlled {
+        actions,
+        changes: Rc::clone(&changes),
+    });
+    let mut stepper = Stepper::default();
+    let client = |mut client: Client| {
+        let listed: ActionList = client.call_as("actions", ()).expect("listed");
+        let mut input = |events: Value| client.call("input", json!({"events": events}));
+        let action = |name: &str, value: Value| json!({"action": {"name": name, "value": value}});
+        let handed = [
+            json!([action("Run", json!(1)), {"action": {"name": "Jump"}}]),
+            json!([action("Run", json!(-0.5))]),
+            json!([action("Jump", json!(0)), {"pad_button": {"button": "south", "pressed": true}}]),
+            json!([action("Move", json!([1, 1]))]),
+        ];
+        for events in handed {
+            input(events).expect("handed");
+        }
+        let refusals = [
+            json!([{"key": {"key": "KeyE", "pressed": true}}, {"action": {"name": "Jmp"}}]),
+            json!([action("Move", json!([0.5, 0]))]),
+            json!([action("Jump", json!(0.5))]),
+            json!([action("Run", json!([1, 0]))]),
+            json!([{"action": {"name": "Run"}}]),
+            json!([{"pad_stick": {"stick": "left", "value": [1, 1]}}]),
+            json!([{"pad_trigger": {"trigger": "left", "value": 2}}]),
+        ];
+        let mut refused: Vec<String> = (refusals.into_iter())
+            .map(|events| input(events).expect_err("refused").code)
+            .collect();
+        let waited = json!({"events": [
+            {"key": {"key": "KeyQ", "pressed": true}}, {"wait": 1}, {"action": {"name": "Nope"}},
+        ], "hold": 1});
+        refused.push(client.call("input", waited).expect_err("refused").code);
+        let held = json!({"events": [action("Run", json!(0.25))], "hold": 2});
+        let _: Status = client.call_as("input", held).expect("held");
+        (listed, refused)
+    };
+    let (listed, refused) = serving(
+        &mut api,
+        &mut cx,
+        &mut stack,
+        &mut stepper,
+        session,
+        client,
+        |_, _, _| {},
+    );
+    let kinds: Vec<(&str, &str, ActionKind, usize)> = (listed.actions.iter())
+        .map(|action| {
+            let (name, layer) = (action.name.as_str(), action.layer.as_str());
+            (name, layer, action.kind, action.bindings.len())
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("Run", "Controlled", ActionKind::Axis, 2),
+            ("Jump", "Controlled", ActionKind::Button, 2),
+            ("Move", "Controlled", ActionKind::Axis2, 1),
+        ]
+    );
+    let stick = |toward| gg_api::Source::PadStick(gg_api::Stick::Left, toward);
+    assert_eq!(
+        listed.actions[0].bindings[1],
+        [stick(gg_api::Toward::Left), stick(gg_api::Toward::Right)]
+    );
+    let south = gg_api::Source::PadButton(gg_api::PadButton::South);
+    let space = gg_api::Source::Key("Space".to_owned());
+    assert_eq!(listed.actions[1].bindings, [[space], [south]]);
+    assert_eq!(refused[0], "api.no_action");
+    assert_eq!(refused[1..7], ["api.bad_params"; 6]);
+    assert_eq!(refused[7], "api.no_action");
+    assert!(!cx.input().key_down(Key::KeyE) && !cx.input().key_down(Key::KeyQ));
+    let diagonal = Vec2::ONE.clamp_length_max(1.0);
+    assert_eq!(
+        *changes.borrow(),
+        [
+            Change::Axis(Act::Run, 1.0),
+            Change::Pressed(Act::Jump),
+            // D let go of, then the stick.
+            Change::Axis(Act::Run, 0.0),
+            Change::Axis(Act::Run, -0.5),
+            Change::Released(Act::Jump),
+            Change::Pressed(Act::Jump),
+            Change::Axis2(Act::Move, Vec2::X),
+            Change::Axis2(Act::Move, diagonal),
+            Change::Axis(Act::Run, 0.25),
+            Change::Axis(Act::Run, 0.0),
+        ]
+    );
+}
+
 /// Hands its UI each event and keeps the buttons it pressed, as a game's menu does.
 struct Menu {
     ui: crate::GameUi,
@@ -4095,6 +4249,7 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
     let given = json!({"kind": "model", "skip": 2});
     assert_eq!(parse(&request("assets", given)), Ok(assets));
     assert_eq!(parse(&request("ui", Value::Null)), Ok(Call::Ui));
+    assert_eq!(parse(&request("actions", Value::Null)), Ok(Call::Actions));
     assert_eq!(parse(&request("cells", json!({}))), Ok(Call::Cells));
     // As `dx tools hotpatch` prints it: string keys, the library a path from the root.
     let lib = std::env::temp_dir().join("patch.dll");

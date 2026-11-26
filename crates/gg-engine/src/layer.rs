@@ -75,7 +75,7 @@ use crate::scene_files::SceneFiles;
 #[cfg(feature = "dev")]
 use crate::scene_files::{self, SceneFile};
 use crate::skins::Skins;
-use crate::{Entity, EntityId, Event, Input, Ui, World};
+use crate::{Binding, Entity, EntityId, Event, Input, Ui, World};
 
 /// A part of an app that the main loop drives.
 ///
@@ -87,6 +87,7 @@ use crate::{Entity, EntityId, Event, Input, Ui, World};
 /// | Each frame, after its ticks | [`update`], then [`ui`] |
 /// | A SyncTest reruns a tick | [`swapped`] |
 /// | The run ends, top down | [`detach`] |
+/// | The tool API lists or presses actions | [`actions`] |
 ///
 /// Every method defaults to nothing; keeping `ui`'s default also tells the engine the layer draws
 /// no UI.
@@ -112,6 +113,7 @@ use crate::{Entity, EntityId, Event, Input, Ui, World};
 /// [`ui`]: Self::ui
 /// [`swapped`]: Self::swapped
 /// [`detach`]: Self::detach
+/// [`actions`]: Self::actions
 pub trait Layer {
     /// Called once at start, before any layer attaches, in a restored run too. Makes what the layer
     /// draws with (textures, meshes, shaders) and registers its world's component types, which a
@@ -172,6 +174,14 @@ pub trait Layer {
     /// input, what its UI keeps) replays another way.
     fn commands(&mut self) -> Option<&mut dyn Commands> {
         None
+    }
+
+    /// Each binding of the layer's [`Actions`](crate::Actions), with its action's name, as
+    /// [`Actions::bindings`](crate::Actions::bindings) gives them. The tool API's `actions` lists
+    /// them, so an agent learns the game's controls, and its `input` presses an action by name
+    /// through them. None, the default, for a layer that binds no actions.
+    fn actions(&self) -> Vec<(String, Binding)> {
+        Vec::new()
     }
 
     /// Called every frame, after the frame's ticks, with the time since the last frame. The time is
