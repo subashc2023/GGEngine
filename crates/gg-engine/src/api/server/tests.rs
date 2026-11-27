@@ -19,7 +19,7 @@ use tracing::Level;
 use super::*;
 
 use super::connection::{
-    Answer, HELLO_TIMEOUT, InFlight, MOST_SAYING_HELLO, granted, needs, note, read_hello,
+    Answer, HELLO_TIMEOUT, InFlight, Keyed, MOST_SAYING_HELLO, granted, needs, note, read_hello,
     same_token,
 };
 use super::files::{engine_named, prune};
@@ -118,6 +118,7 @@ fn reply(id: u64, to: &Sender<Answer>) -> Reply {
         id,
         to: to.clone(),
         flight: Arc::new(InFlight::default()).take(),
+        keyed: None,
     }
 }
 
@@ -716,6 +717,8 @@ fn a_request_needs_what_its_method_and_the_types_it_names_need() {
             id: 1,
             method: method.to_owned(),
             params,
+            key: None,
+            again: false,
         };
         let call = parse(&request).expect("a call");
         let refused = granted(&grant, method, &needs(&call)).err();
@@ -915,6 +918,100 @@ fn a_stop_no_client_asks_about_goes_on_with_its_breakpoints_cleared() {
         "{}",
         got.refused.message
     );
+}
+
+/// A request with a key is done once: sent again with that key, from another connection too, it
+/// gets the first's answer, and nothing more is done. Another key is done again.
+#[test]
+fn a_request_sent_again_with_its_key_is_answered_not_done_again() {
+    let (mut api, session) = started("Api Keyed");
+    let mut cx = Context::seeded(1);
+    let again = session.clone();
+    let client = move |mut client: Client| {
+        let status =
+            |client: &mut Client| -> Status { client.call_as("status", ()).expect("a status") };
+        let _: Status = client.call_as("pause", ()).expect("paused");
+        let before = status(&mut client).ticks;
+        let step = || json!({"ticks": 2});
+        let first = client
+            .call_keyed("step", step(), Some("k1"))
+            .expect("stepped");
+        let mut other = Client::connect(&again, "other", DEADLINE).expect("it connects");
+        let second = other
+            .call_keyed("step", step(), Some("k1"))
+            .expect("answered");
+        let after = status(&mut client).ticks;
+        let third = client
+            .call_keyed("step", step(), Some("k2"))
+            .expect("stepped");
+        let last = status(&mut client).ticks;
+        (
+            before,
+            first.get().to_owned(),
+            second.get().to_owned(),
+            after,
+            third.get().to_owned(),
+            last,
+        )
+    };
+    let (before, first, second, after, third, last) = serving(
+        &mut api,
+        &mut cx,
+        &mut Stack::default(),
+        &mut Stepper::default(),
+        session,
+        client,
+        |_, _, _| {},
+    );
+    assert_eq!(first, second, "the first's answer");
+    assert_eq!(after, before + 2, "stepped once");
+    assert_ne!(third, first);
+    assert_eq!(last, before + 4, "another key steps again");
+}
+
+/// A request whose key is under way waits for that one's answer, and gets it too; one of another
+/// method with the key is apart. The oldest answered key goes once [`gg_api::KEPT_KEYS`] more are
+/// answered, one under way staying: sent again then, it's refused, doing nothing.
+#[test]
+fn a_request_whose_key_is_under_way_gets_that_ones_answer() {
+    let keyed = Arc::new(Mutex::new(Keyed::default()));
+    let (to, answers) = mpsc::channel();
+    let take =
+        |method: &str, key: &str, id| Keyed::take(&keyed, method, key, false, reply(id, &to));
+    let waiting = take("step", "w", 0).expect("not kept yet");
+    let first = take("step", "k", 1).expect("not kept yet");
+    assert!(take("step", "k", 2).is_none());
+    assert!(answers.try_recv().is_err(), "nothing answered yet");
+    first.send(Ok("7".to_owned()));
+    let mut lines: Vec<String> = answers.try_iter().map(|(line, _)| line).collect();
+    lines.sort();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].contains("\"id\":1") && lines[1].contains("\"id\":2"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| line.contains("\"result\":7")),
+        "{lines:?}"
+    );
+    assert!(take("step", "k", 3).is_none());
+    assert!(answers.try_recv().is_ok(), "answered as it was");
+    assert!(take("look", "k", 4).is_some(), "another method's");
+    for key in 0..gg_api::KEPT_KEYS {
+        let reply = take("step", &key.to_string(), 5).expect("not kept yet");
+        reply.send(Ok("0".to_owned()));
+    }
+    let again = Keyed::take(&keyed, "step", "k", true, reply(6, &to));
+    assert!(again.is_none(), "not done again");
+    let refused = answers
+        .try_iter()
+        .last()
+        .map(|(line, _)| line)
+        .unwrap_or_default();
+    assert!(refused.contains("api.forgotten"), "{refused}");
+    assert!(take("step", "k", 7).is_some(), "forgotten, so done anew");
+    assert!(take("step", "w", 7).is_none(), "still under way");
+    drop(waiting);
 }
 
 /// A token matches only if every byte does: not with a differing first or last byte, a prefix,
@@ -3340,6 +3437,8 @@ fn a_looks_render_scale_replaces_the_games_own_until_given_back() {
             id: 1,
             method: "look".to_owned(),
             params,
+            key: None,
+            again: false,
         };
         let parsed = parse(&request).expect("a scale in range");
         let Call::Look(look) = parsed else {
@@ -4394,6 +4493,8 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         id: 1,
         method: method.to_owned(),
         params,
+        key: None,
+        again: false,
     };
     assert_eq!(parse(&request("step", Value::Null)), Ok(Call::Step(1)));
     assert_eq!(parse(&request("play", Value::Null)), Ok(Call::Play));

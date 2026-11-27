@@ -225,6 +225,18 @@ const TOOLS: &[Tool] = &[
         required: &[],
     },
     Tool {
+        name: "retry",
+        description: "Sends the last call that changes the game and went unanswered \
+                      (`api.timeout`, `api.closed`) again, with the key it went with, so the game \
+                      that took it answers as it did rather than doing it again; it waits as the \
+                      call did. The game's end forgets it. Fails with `gg.no_retry` if none is \
+                      kept; `api.forgotten`, doing nothing, if the game no longer keeps its \
+                      answer, having answered 64 keyed calls since; and `gg.no_keys` for a game \
+                      of an older engine, which ignores keys.",
+        properties: || json!({}),
+        required: &[],
+    },
+    Tool {
         name: "rebuild",
         description: "Call after an edit `wait` says was patched in, but that the game won't run \
                       again, as in a function reached only through the game's own trait objects \
@@ -1290,6 +1302,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         game::call(pick, method, params).map(|result| Ran::Json(result.get().to_owned()))
     };
     match name {
+        "retry" => game::retry(pick).map(|result| Ran::Json(result.get().to_owned())),
         "sessions" => {
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }

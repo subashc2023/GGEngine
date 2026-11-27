@@ -234,6 +234,8 @@ struct Shared {
     events: &'static Events,
     run: u64,
     debugger: Arc<Debugger>,
+    /// The answers to requests given a key ([`connection::Keyed`]).
+    keyed: Arc<Mutex<connection::Keyed>>,
 }
 
 /// A request for the main loop: its client, whether that client may `read` `Name` (which a `pick`
@@ -296,6 +298,7 @@ impl Api {
             pid,
             engine: session.engine.clone(),
             log: session.log.clone(),
+            keys: true,
         };
         let welcome = serde_json::to_string(&welcome).expect("a welcome serializes");
         let (to_main, incoming) = mpsc::channel();
@@ -306,6 +309,7 @@ impl Api {
             events,
             run,
             debugger: Arc::default(),
+            keyed: Arc::default(),
         });
         let (pngs, to_write) = mpsc::channel();
         thread::Builder::new()

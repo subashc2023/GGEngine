@@ -1,5 +1,6 @@
 //! A connection's threads: its hello and grant, the requests it answers itself, and its answers.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::mem;
 use std::net::{TcpListener, TcpStream};
@@ -47,13 +48,25 @@ pub(super) struct Reply {
     pub(super) id: u64,
     pub(super) to: Sender<Answer>,
     pub(super) flight: Flight,
+    /// The request's key and the answers kept by key, which the answer goes into, for the
+    /// requests with that key waiting and to come ([`Keyed`]).
+    pub(super) keyed: Option<(Arc<Mutex<Keyed>>, String)>,
 }
 
 /// An answer line; its [`Flight`] is given up once the line is written.
 pub(super) type Answer = (String, Flight);
 
 impl Reply {
-    pub(super) fn send(self, answer: Result<String, Failure>) {
+    pub(super) fn send(mut self, answer: Result<String, Failure>) {
+        if let Some((keyed, key)) = self.keyed.take() {
+            let waiting = keyed
+                .lock()
+                .expect("no thread panics holding it")
+                .answered(&key, &answer);
+            for reply in waiting {
+                reply.send(answer.clone());
+            }
+        }
         let line = gg_api::answer_line(self.id, answer.as_deref());
         let _ = self.to.send((line, self.flight));
     }
@@ -70,6 +83,93 @@ impl Reply {
         let (landed, landing) = mpsc::channel();
         self.flight.1 = Some(landed);
         landing
+    }
+}
+
+/// The answers to the last [`gg_api::KEPT_KEYS`] requests given a key ([`Request::key`]), by method
+/// and key, from any connection, and the requests under way with theirs waiting for them. A
+/// request of a method and key kept is answered as the first was, and not done again. Only those
+/// answered are dropped, the oldest first.
+#[derive(Default)]
+pub(super) struct Keyed {
+    answers: HashMap<String, Keeping>,
+    /// The keys kept, the oldest first.
+    order: VecDeque<String>,
+}
+
+enum Keeping {
+    Waiting(Vec<Reply>),
+    Answered(Result<String, Failure>),
+}
+
+impl Keyed {
+    /// Takes `reply`, to a request of `method` with `key`: answers it as the first such request
+    /// was, or holds it until that one is answered, and returns `None`; or for a pair not kept,
+    /// keeps it and returns the reply, whose answer goes in. A request sent `again` for a pair not
+    /// kept fails with `api.forgotten`.
+    pub(super) fn take(
+        this: &Arc<Mutex<Self>>,
+        method: &str,
+        key: &str,
+        again: bool,
+        mut reply: Reply,
+    ) -> Option<Reply> {
+        let key = format!("{method} {key}");
+        let mut keyed = this.lock().expect("no thread panics holding it");
+        match keyed.answers.get_mut(&key) {
+            Some(Keeping::Answered(answer)) => {
+                let answer = answer.clone();
+                drop(keyed);
+                reply.send(answer);
+                None
+            }
+            Some(Keeping::Waiting(replies)) => {
+                replies.push(reply);
+                None
+            }
+            None if again => {
+                drop(keyed);
+                let message = format!(
+                    "the game no longer keeps `{method}`'s answer for its key, so it did nothing: \
+                     read what it changes before sending it anew"
+                );
+                reply.send(Err(Failure::new("api.forgotten", message)));
+                None
+            }
+            None => {
+                let answered = |keyed: &Self, key: &String| {
+                    matches!(keyed.answers.get(key), Some(Keeping::Answered(_)))
+                };
+                let kept = keyed
+                    .order
+                    .iter()
+                    .filter(|key| answered(&keyed, key))
+                    .count();
+                if kept >= gg_api::KEPT_KEYS
+                    && let Some(at) = keyed.order.iter().position(|key| answered(&keyed, key))
+                    && let Some(oldest) = keyed.order.remove(at)
+                {
+                    keyed.answers.remove(&oldest);
+                }
+                keyed
+                    .answers
+                    .insert(key.clone(), Keeping::Waiting(Vec::new()));
+                keyed.order.push_back(key.clone());
+                reply.keyed = Some((Arc::clone(this), key));
+                Some(reply)
+            }
+        }
+    }
+
+    /// Keeps `answer` as `key`'s, if kept, returning the replies waiting for it.
+    fn answered(&mut self, key: &str, answer: &Result<String, Failure>) -> Vec<Reply> {
+        match self.answers.get_mut(key) {
+            Some(keeping) => match mem::replace(keeping, Keeping::Answered(answer.clone())) {
+                Keeping::Waiting(replies) => replies,
+                Keeping::Answered(_) => Vec::new(),
+            },
+            None => Vec::new(),
+        }
     }
 }
 
@@ -207,6 +307,7 @@ fn connection(
         id,
         to: to.clone(),
         flight: in_flight.take(),
+        keyed: None,
     };
     reply.send(Ok(welcome.to_owned()));
     let names = grant.reads("Name");
@@ -219,6 +320,17 @@ fn connection(
             id: request.id,
             to: to.clone(),
             flight,
+            keyed: None,
+        };
+        // A request with a key already taken is answered as that one was, not done again.
+        let reply = match request.key.as_deref() {
+            Some(key) => {
+                match Keyed::take(&shared.keyed, &request.method, key, request.again, reply) {
+                    Some(reply) => reply,
+                    None => continue,
+                }
+            }
+            None => reply,
         };
         let own = match request.method.as_str() {
             "logs" => Some(Capability::Read(None)),

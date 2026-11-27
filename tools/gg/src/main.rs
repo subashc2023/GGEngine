@@ -855,6 +855,19 @@ answering `{\"run\": PID}`, its process.
 ",
             },
             Help {
+                name: "retry",
+                usage: "retry",
+                summary: "Send the last unanswered call that changed it again, done once",
+                details: "\
+A command that changes the game goes with a key. If no answer comes (`api.timeout`, `api.closed`),
+the game may have taken it, and gg keeps it for that game: `retry` sends it again with that key,
+and the game answers as it did rather than doing it again. The game's end forgets it. Fails with
+`gg.no_retry` if none is kept; `api.forgotten`, doing nothing, if the game no longer keeps its
+answer, having answered 64 keyed calls since; and `gg.no_keys` for a game of an older engine, which
+ignores keys.
+",
+            },
+            Help {
                 name: "call",
                 usage: "call <METHOD> [<PARAMS>]",
                 summary: "Send METHOD with PARAMS, as JSON, and print what it answers",
@@ -955,6 +968,8 @@ enum Command {
     Mcp(Pick),
     /// Waits, at most the time given, until the picked `gg run` runs the saved edits' code.
     Wait(Pick, Duration),
+    /// Sends the last unanswered call that changes the game again, with its key.
+    Retry(Pick),
     /// Has the picked `gg run` rebuild the game, waiting at most the time given for it to run;
     /// started afresh if `true`.
     Rebuild(Pick, Duration, bool),
@@ -1014,6 +1029,10 @@ fn main() -> ExitCode {
             true
         }),
         Command::Mcp(pick) => mcp::serve(pick).map(|()| true),
+        Command::Retry(pick) => game::retry(&pick).map(|result| {
+            print(result.get());
+            true
+        }),
         Command::Wait(pick, timeout) => runs::wait(&pick, timeout).map(|told| {
             print(&told.to_string());
             true
@@ -1335,6 +1354,10 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             edit_args(name, &mut parsed)?
         }
         "debug" => debug_args(&mut parsed)?,
+        "retry" => {
+            parsed.positional(0, 0, "retry")?;
+            Command::Retry(parsed.pick()?)
+        }
         "mcp" => mcp_args(&mut parsed)?,
         "call" => call_args(&mut parsed)?,
         method if NO_PARAMETERS.contains(&method) || method == "quit" => {
@@ -1934,6 +1957,15 @@ mod tests {
     fn parsed(args: &[&str]) -> Result<Command, Failure> {
         let args: Vec<String> = args.iter().map(|&arg| arg.to_owned()).collect();
         parse(&args)
+    }
+
+    #[test]
+    fn retry_takes_a_pick_alone() {
+        let Ok(Command::Retry(pick)) = parsed(&["--pid", "7", "retry"]) else {
+            panic!("a retry");
+        };
+        assert_eq!(pick.pid, Some(7));
+        assert!(parsed(&["retry", "apply"]).is_err());
     }
 
     #[test]

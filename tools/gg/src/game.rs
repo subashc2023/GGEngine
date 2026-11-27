@@ -1,6 +1,7 @@
 //! The running games: finding them by session file, calling them, reading their logs.
 
 use std::fs;
+use std::hash::{BuildHasher, RandomState};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -227,8 +228,110 @@ pub(crate) fn call(pick: &Pick, method: &str, params: Value) -> Result<Box<RawVa
         }
         Err(failure) => return Err(failure),
     };
-    let answered = client.call(method, params);
-    answered.map_err(|failure| waits(pick, method, failure))
+    let (pid, keys) = (client.welcome().pid, client.welcome().keys);
+    // A game of an older engine ignores keys.
+    if !gg_api::changes(method) || !keys {
+        let answered = client.call(method, params);
+        return answered.map_err(|failure| waits(pick, method, failure));
+    }
+    // Keyed, so `gg retry` can send it again if no answer comes.
+    let key = new_key();
+    let answered = client.call_keyed(method, params.clone(), Some(&key));
+    let Ok(path) = Unanswered::path(pick, pid) else {
+        return answered.map_err(|failure| waits(pick, method, failure));
+    };
+    match answered {
+        Err(failure) if unanswered(&failure) => {
+            let failure = waits(pick, method, failure);
+            let kept = Unanswered {
+                method: method.to_owned(),
+                params,
+                key,
+            };
+            Err(match kept.keep(&path) {
+                Ok(()) => Failure::new(
+                    failure.code,
+                    format!("{}; `gg retry` does so", failure.message),
+                ),
+                Err(_) => failure,
+            })
+        }
+        answered => answered.map_err(|failure| waits(pick, method, failure)),
+    }
+}
+
+/// Whether `failure` leaves a call unanswered, which the game may have taken.
+fn unanswered(failure: &Failure) -> bool {
+    matches!(failure.code.as_str(), "api.timeout" | "api.closed")
+}
+
+/// A key no other call has: 64 bits from `RandomState`, as hex.
+fn new_key() -> String {
+    format!("{:016x}", RandomState::new().hash_one(std::process::id()))
+}
+
+/// The last call that changed a game and went unanswered, which `gg retry` sends again: the
+/// method, its parameters and its key.
+struct Unanswered {
+    method: String,
+    params: Value,
+    key: String,
+}
+
+impl Unanswered {
+    /// `gg-retry-<pid>.json` in `pick`'s target directory, for the game in process `pid`.
+    fn path(pick: &Pick, pid: u32) -> Result<PathBuf, Failure> {
+        let target = build::target_dir(pick.project.as_deref().and_then(Path::parent))?;
+        Ok(target.join(format!("gg-retry-{pid}.json")))
+    }
+
+    fn keep(&self, path: &Path) -> Result<(), Failure> {
+        let kept = json!({"method": self.method, "params": self.params, "key": self.key});
+        let written = fs::write(path, kept.to_string());
+        written.map_err(|error| Failure::new("gg.retry", error.to_string()))
+    }
+
+    /// The call kept at `path`, if one is, whole.
+    fn read(path: &Path) -> Option<Self> {
+        let kept: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+        Some(Self {
+            method: kept["method"].as_str()?.to_owned(),
+            params: kept["params"].clone(),
+            key: kept["key"].as_str()?.to_owned(),
+        })
+    }
+}
+
+/// Sends the picked game's last call that changed it and went unanswered again, with its key, so
+/// the game answers as it did rather than doing it again ([`gg_api::Request::key`]). Forgets it
+/// once answered. A game that ended takes it along.
+///
+/// Fails with:
+/// - `gg.no_retry` if none of the game's is kept;
+/// - `gg.no_keys` for a game of an older engine, which ignores keys;
+/// - `api.forgotten` if the game no longer keeps its answer, having answered 64 keyed calls
+///   since: it did nothing;
+/// - as the call does, `api.timeout` keeping it for another retry.
+pub(crate) fn retry(pick: &Pick) -> Result<Box<RawValue>, Failure> {
+    let mut client = connect(pick)?;
+    let (pid, app) = (client.welcome().pid, client.welcome().app.clone());
+    if !client.welcome().keys {
+        let message = format!(
+            "{app}, process {pid}, is of an engine that ignores keys, so a retry may do the call \
+             again: read what it changes before sending it again"
+        );
+        return Err(Failure::new("gg.no_keys", message));
+    }
+    let path = Unanswered::path(pick, pid)?;
+    let Some(kept) = Unanswered::read(&path) else {
+        let message = format!("no call that changes {app}, process {pid}, went unanswered");
+        return Err(Failure::new("gg.no_retry", message));
+    };
+    let answered = client.call_again(&kept.method, kept.params, &kept.key);
+    if !answered.as_ref().is_err_and(unanswered) {
+        let _ = fs::remove_file(&path);
+    }
+    answered.map_err(|failure| waits(pick, &kept.method, failure))
 }
 
 /// The API's `Shown` for `given`: a unit variant's name, as `roughness`, stays a string; any other
@@ -453,6 +556,38 @@ mod tests {
     use gg_api::Request;
 
     use super::*;
+
+    /// An unanswered call kept for `gg retry` reads back whole, apart for each game; a file that
+    /// isn't one reads as none.
+    #[test]
+    fn an_unanswered_call_is_kept_whole() {
+        let dir = std::env::temp_dir().join(format!("gg-retry-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a directory");
+        let path = dir.join("gg-retry-42.json");
+        let kept = Unanswered {
+            method: "step".to_owned(),
+            params: json!({"ticks": 3}),
+            key: new_key(),
+        };
+        kept.keep(&path).expect("kept");
+        let read = Unanswered::read(&path).expect("kept");
+        assert_eq!(read.method, "step");
+        assert_eq!((read.params, read.key), (kept.params, kept.key));
+        assert_ne!(new_key(), new_key());
+        fs::write(&path, "{\"method\": \"step\"}").expect("written");
+        assert!(Unanswered::read(&path).is_none());
+        let pick = Pick {
+            pid: None,
+            app: None,
+            timeout: Duration::from_secs(1),
+            client: "test".to_owned(),
+            grant: None,
+            project: None,
+        };
+        let [one, other] = [1, 2].map(|pid| Unanswered::path(&pick, pid).expect("a path"));
+        assert_ne!(one, other);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn write_session(dir: &Path, pid: u32, project: Option<PathBuf>) {
         fs::create_dir_all(dir).expect("a directory");

@@ -12,7 +12,9 @@
 //! `{"id":1,"method":"step","params":{"ticks":2}}`, `params` left out for none; its answer
 //! `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}` ([`Failure`]; codes are
 //! stable dotted names, such as `ecs.no_entity`). The first request is [`Hello`]. The session file
-//! names the protocol's revision, [`PROTOCOL`].
+//! names the protocol's revision, [`PROTOCOL`]. A request given a `key` ([`Request::key`]) is done
+//! once: sent again with it, as after `api.timeout`, it gets the first one's answer, or fails with
+//! `api.forgotten` if the game no longer keeps it.
 //!
 //! # Entities
 //!
@@ -480,7 +482,20 @@ pub struct Request {
     /// `null`, and left out, for a method that takes nothing.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub params: Value,
+    /// Makes sending it again safe: a request of the same method and key as one the game already
+    /// took, from any client, gets that one's answer, when it comes, and isn't done again. The game
+    /// keeps the last [`KEPT_KEYS`] answered, and every one under way, until it starts again
+    /// ([`Welcome::keys`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Whether it's sent again, with its `key`: then it's done only as an answer kept, and fails
+    /// with `api.forgotten`, doing nothing, for a key the game no longer keeps.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub again: bool,
 }
+
+/// How many [`Request::key`]s a game keeps the answers of.
+pub const KEPT_KEYS: usize = 64;
 
 /// An answer to a request, a line of JSON: its result, or the error it failed with.
 #[derive(Debug, Deserialize)]
@@ -592,6 +607,10 @@ pub struct Welcome {
     pub engine: String,
     /// As [`Session::log`].
     pub log: Option<PathBuf>,
+    /// Whether it does a request with a [`Request::key`] once; a game of an older engine, without
+    /// the field, ignores keys.
+    #[serde(default)]
+    pub keys: bool,
 }
 
 /// What `ping` answers: frames run, and why frames are paused.
@@ -599,8 +618,8 @@ pub struct Welcome {
 /// `frames` stops counting if the main thread hangs. `waiting`: `minimized`, while the main window
 /// has no area; `dialog`, while a file dialog is open; `menu`, while Windows' window menu is;
 /// `loading`, while it loads a scene file or assets, or uploads new ones to the GPU, if nothing
-/// else holds; `breakpoint`, while a script has stopped (`debug`), which comes
-/// first as it holds the main thread whatever else frames wait for.
+/// else holds; `breakpoint`, while a script has stopped (`debug`), which comes first as it holds
+/// the main thread whatever else frames wait for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pulse {
     pub frames: u64,
@@ -2190,7 +2209,7 @@ pub fn changes(method: &str) -> bool {
 pub fn unanswered(method: &str) -> &'static str {
     if changes(method) {
         "; the game may have taken it, and it may yet apply, or have applied: read what it changes \
-         before sending it again"
+         before sending it again, or send it with the same `key`, which the game does once"
     } else {
         ""
     }
@@ -2630,6 +2649,7 @@ impl Client {
                 pid: session.pid,
                 engine: session.engine.clone(),
                 log: session.log.clone(),
+                keys: false,
             },
             broken: false,
         };
@@ -2665,6 +2685,42 @@ impl Client {
     /// or late request the game took may still apply: either's message says so of a method that
     /// [`changes`] the game.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Box<RawValue>, Failure> {
+        self.send(method, params, None, false)
+    }
+
+    /// Like [`call`](Self::call), the request given `key` ([`Request::key`]), so that sending it
+    /// again with the same key, as after `api.timeout`, gets its answer rather than doing it again.
+    ///
+    /// Fails as `call` does.
+    pub fn call_keyed(
+        &mut self,
+        method: &str,
+        params: Value,
+        key: Option<&str>,
+    ) -> Result<Box<RawValue>, Failure> {
+        self.send(method, params, key, false)
+    }
+
+    /// Sends request `method` again with `params` and `key`, as [`call_keyed`](Self::call_keyed)
+    /// sent it: it gets the answer the game kept for it, and nothing is done again.
+    ///
+    /// Fails as `call` does, and with `api.forgotten` if the game no longer keeps the key.
+    pub fn call_again(
+        &mut self,
+        method: &str,
+        params: Value,
+        key: &str,
+    ) -> Result<Box<RawValue>, Failure> {
+        self.send(method, params, Some(key), true)
+    }
+
+    fn send(
+        &mut self,
+        method: &str,
+        params: Value,
+        key: Option<&str>,
+        again: bool,
+    ) -> Result<Box<RawValue>, Failure> {
         let closed = || Failure::new("api.closed", "the connection to the game closed");
         if self.broken {
             return Err(closed());
@@ -2675,6 +2731,8 @@ impl Client {
             id,
             method: method.to_owned(),
             params,
+            key: key.map(str::to_owned),
+            again,
         };
         let mut line = serde_json::to_string(&request).expect("a request always serializes");
         line.push('\n');
