@@ -23,8 +23,11 @@ use gg_engine::{
     Viewport,
 };
 
-/// How much the view spans from its bottom to its top in perspective: 60°.
+/// How much the view spans from its bottom to its top in perspective as it starts: 60°. A viewpoint
+/// it adopts gives its own.
 const FOV: f32 = PI / 3.0;
+/// The least and most field of view it takes from a viewpoint: 1° and 170°.
+const FOVS: [f32; 2] = [PI / 180.0, 17.0 * PI / 18.0];
 /// How much of the world the view spans, bottom to top, at the pivot as it starts.
 const START_HEIGHT: f32 = 10.0;
 /// The least and most distance from the pivot.
@@ -228,7 +231,7 @@ impl Pose {
             yaw: 0.0,
             pitch: 0.0,
             roll: 0.0,
-            distance: START_HEIGHT / 2.0 / tan_half_fov(),
+            distance: START_HEIGHT / 2.0 / tan_half(FOV),
         }
     }
 
@@ -268,6 +271,10 @@ pub struct OrbitCamera {
     /// Where it is, or, while it eases, where it's going.
     pose: Pose,
     pub perspective: bool,
+    /// How much the view spans from its bottom to its top in perspective: [`FOV`], or the
+    /// perspective viewpoint's it last adopted, within [`FOVS`]. Orthographic, it sees as tall a
+    /// piece of the world as this would at the pivot.
+    fov: f32,
     ease: Option<Ease>,
     drag: Option<Drag>,
     /// Where the cursor last was in the main window, in physical pixels.
@@ -298,6 +305,7 @@ impl OrbitCamera {
         Self {
             pose: Pose::start(),
             perspective: false,
+            fov: FOV,
             ease: None,
             drag: None,
             cursor: None,
@@ -305,7 +313,7 @@ impl OrbitCamera {
         }
     }
 
-    /// What the game's view sees from: orthographic, `2 * distance * tan(FOV / 2)` of the world
+    /// What the game's view sees from: orthographic, `2 * distance * tan(fov / 2)` of the world
     /// from bottom to top, as perspective sees at the pivot, and far enough both ways to see any
     /// plane through it; in perspective, from a near plane a ten-thousandth of the distance in
     /// front, which reversed depth keeps precise whatever it is.
@@ -313,11 +321,11 @@ impl OrbitCamera {
         let (pivot, rotation, distance) = self.current();
         let projection = if self.perspective {
             Projection::Perspective {
-                fov: FOV,
+                fov: self.fov,
                 near: distance * NEAR,
             }
         } else {
-            let height = 2.0 * distance * tan_half_fov();
+            let height = 2.0 * distance * tan_half(self.fov);
             Projection::Orthographic {
                 height,
                 near: -DEPTH * height,
@@ -335,7 +343,8 @@ impl OrbitCamera {
     ///
     /// - turned as it is, its yaw, pitch and roll read in the camera's turn order. At the poles,
     ///   where a yaw and a roll turn alike, the roll folds into the yaw, the turn still exact;
-    /// - with perspective if it has it, the camera's own field of view kept;
+    /// - with perspective and its field of view, within [`FOVS`], if it has them; orthographic, the
+    ///   camera's field of view kept;
     /// - as far from the pivot as an orthographic height makes it, or in perspective as far as it
     ///   was, within the distances it goes; the pivot that far in front.
     ///
@@ -343,8 +352,14 @@ impl OrbitCamera {
     pub fn adopt(&mut self, viewpoint: &Viewpoint) {
         let (yaw, pitch, roll) = viewpoint.rotation.to_euler(EulerRot::YXZ);
         let distance = match viewpoint.projection {
-            Projection::Orthographic { height, .. } => height / 2.0 / tan_half_fov(),
-            Projection::Perspective { .. } => self.current().2,
+            Projection::Orthographic { height, .. } => height / 2.0 / tan_half(self.fov),
+            Projection::Perspective { fov, .. } => {
+                if fov.is_finite() {
+                    let [least, most] = FOVS;
+                    self.fov = fov.clamp(least, most);
+                }
+                self.current().2
+            }
         };
         let [least, most] = DISTANCES;
         let mut pose = Pose {
@@ -576,9 +591,9 @@ impl OrbitCamera {
             return;
         }
         let distance = if self.perspective {
-            radius / libm::sinf(FRAMED * FOV / 2.0)
+            radius / libm::sinf(FRAMED * self.fov / 2.0)
         } else {
-            radius / FRAMED / tan_half_fov()
+            radius / FRAMED / tan_half(self.fov)
         };
         let [least, most] = DISTANCES;
         self.ease_to(Pose {
@@ -703,12 +718,13 @@ impl OrbitCamera {
 
     /// Half the height of the world the view sees at the pivot.
     fn half_height(&self) -> f32 {
-        self.pose.distance * tan_half_fov()
+        self.pose.distance * tan_half(self.fov)
     }
 }
 
-fn tan_half_fov() -> f32 {
-    libm::tanf(FOV / 2.0)
+/// The tangent of half of `fov`, which the view's half height is that many times the distance.
+fn tan_half(fov: f32) -> f32 {
+    libm::tanf(fov / 2.0)
 }
 
 /// `angle` as the same turn from -π, not included, to π.
@@ -1423,6 +1439,38 @@ mod tests {
         let mut camera = turned(true);
         camera.adopt(&game);
         assert_sees_as(&camera.viewpoint(), &game, "a game's");
+        // A game's camera of 90°, which it sees as wide as, orthographically too, and frames by.
+        let wide = Viewpoint {
+            projection: Projection::Perspective {
+                fov: FRAC_PI_2,
+                near: 0.1,
+            },
+            ..game
+        };
+        camera.adopt(&wide);
+        assert_sees_as(&camera.viewpoint(), &wide, "a wide one's");
+        camera.perspective = false;
+        let Projection::Orthographic { height, .. } = camera.viewpoint().projection else {
+            panic!("orthographic");
+        };
+        let distance = camera.current().2;
+        assert!(
+            (height - 2.0 * distance).abs() < 1e-3,
+            "{height}, {distance}"
+        );
+        // Kept within its bounds.
+        let narrow = Viewpoint {
+            projection: Projection::Perspective {
+                fov: 0.0,
+                near: 0.1,
+            },
+            ..game
+        };
+        camera.adopt(&narrow);
+        let Projection::Perspective { fov, .. } = camera.viewpoint().projection else {
+            panic!("perspective");
+        };
+        assert_eq!(fov, FOVS[0]);
     }
 
     #[test]
