@@ -401,10 +401,22 @@ fn an_entity_is_named_by_its_id_or_by_the_one_entity_with_its_name() {
     );
 }
 
+/// Held by the tests that set or read what the run waits on, which `ping` says: it's the
+/// process's, as a window's is ([`Waiting`]).
+static WAITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`WAITS`], held until dropped, though a test that held it panicked.
+fn waits() -> std::sync::MutexGuard<'static, ()> {
+    WAITS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The first request is `hello` with the token; the connection's thread answers `ping` while no
 /// frame serves.
 #[test]
 fn a_connection_says_hello_with_the_token_and_pings_without_frames() {
+    let _waits = waits();
     let (_api, session) = started("Api Hello");
     assert_eq!(session.project.as_deref(), Some(Path::new(PROJECT)));
     let wrong = Session {
@@ -734,6 +746,7 @@ fn a_client_debugs_a_script_while_the_game_waits_at_its_stop() {
         let stepped = debug(json!({"action": "step_over", "wait_ms": 10_000}));
         let none = json!({"script": "scripts/count.luau", "lines": []});
         let gone_on = debug(json!({"breakpoints": none, "action": "continue"}));
+    let _waits = waits();
         let refused = [
             json!({"action": "continue"}),
             json!({"breakpoints": {"script": "", "lines": [1]}}),
@@ -851,6 +864,7 @@ fn a_stop_no_client_asks_about_goes_on_with_its_breakpoints_cleared() {
         let after = client.call_as("debug", json!({})).expect("an answer");
         let go_on = json!({"action": "continue"});
         let refused = client.call("debug", go_on).expect_err("refused");
+    let _waits = waits();
         Unattended {
             stopped,
             pulse,
