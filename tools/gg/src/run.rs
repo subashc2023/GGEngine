@@ -156,14 +156,14 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     let (_lock, target) = lock(&run.package, run.dir())?;
     let pid = std::process::id();
     // Before the build: gg's other commands find no game while it builds.
-    let manifest = run.project.as_ref().map(|scope| scope.manifest.as_path());
+    let manifest = project_of(run);
     // As `Patches::new` builds and watches.
     let rebuilds = run.patches && run.restarts();
     let told = Told::start(
         runs::path(&target, &run.package),
         pid,
         &run.package,
-        manifest,
+        manifest.as_deref(),
         rebuilds,
         &State::new("building"),
     );
@@ -1451,6 +1451,21 @@ fn release(release: bool) -> &'static [&'static str] {
     if release { &["--release"] } else { &[] }
 }
 
+/// The manifest of the project whose game `run` runs, which its state names for gg's other
+/// commands to find: the scope's, if its game; else the one beside the package's own manifest, if
+/// that's its game's, as for `gg run showcase` from the workspace's root.
+fn project_of(run: &Run) -> Option<PathBuf> {
+    if let Some(scope) = &run.project
+        && scope.game == run.package
+    {
+        return Some(scope.manifest.clone());
+    }
+    let package = build::package(&run.package, run.dir()).ok()?;
+    let dir = package.manifest.parent()?;
+    let project = gg_api::Project::read(dir).ok()?;
+    (project.game == run.package).then(|| dir.join(gg_api::Project::FILE))
+}
+
 /// Checks that `package`, if it's `project`'s game, is the package beside the project's manifest.
 pub(crate) fn check_game(package: &str, project: Option<&Scope>) -> Result<(), Failure> {
     match project {
@@ -1540,6 +1555,31 @@ mod tests {
             embedded: false,
             args: args.iter().map(|&arg| arg.to_owned()).collect(),
         }
+    }
+
+    /// A run names the project whose game it runs, for gg's other commands run there to find:
+    /// given by package from outside, as the workspace's root, it's the one beside the package's
+    /// manifest. A package that's no project's game, as the sandbox, names none.
+    #[test]
+    fn a_run_names_its_games_project_wherever_it_starts() {
+        let showcase = Run {
+            package: "showcase".to_owned(),
+            ..run(&[], 5)
+        };
+        let manifest = project_of(&showcase).expect("the showcase's project");
+        assert!(
+            manifest.ends_with("games/showcase/project.ron"),
+            "{manifest:?}"
+        );
+        let inside = Run {
+            project: Some(Scope {
+                manifest: manifest.clone(),
+                game: "showcase".to_owned(),
+            }),
+            ..showcase
+        };
+        assert_eq!(project_of(&inside), Some(manifest));
+        assert_eq!(project_of(&run(&[], 5)), None);
     }
 
     #[test]
