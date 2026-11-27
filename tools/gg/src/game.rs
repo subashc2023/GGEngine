@@ -297,11 +297,21 @@ impl Unanswered {
     }
 
     /// Removes from `target` the calls kept for games with no session file there, which ended, but
-    /// the one at `kept`: no retry reaches them.
+    /// the one at `kept`: no retry reaches them. Session files count by name, `<app>-<pid>.json`,
+    /// read or not, as another version of gg may not read them.
     fn prune(target: &Path, kept: &Path) {
-        let live: Vec<u32> = sessions_in(target)
-            .iter()
-            .map(|(_, session)| session.pid)
+        let names = |dir: &Path| fs::read_dir(dir).into_iter().flatten().flatten();
+        let profiles = names(target).flat_map(|dir| {
+            let dir = dir.path();
+            names(&dir).map(|profile| profile.path()).chain([dir])
+        });
+        let files = profiles.flat_map(|profile| names(&Session::dir(&profile)));
+        let pid = |name: &str| {
+            let (_, pid) = name.strip_suffix(".json")?.rsplit_once('-')?;
+            pid.parse::<u32>().ok()
+        };
+        let live: Vec<u32> = files
+            .filter_map(|file| pid(file.file_name().to_str()?))
             .collect();
         for entry in fs::read_dir(target).into_iter().flatten().flatten() {
             let name = entry.file_name();
@@ -624,9 +634,12 @@ mod tests {
     #[test]
     fn keeping_a_call_removes_those_of_games_that_ended() {
         let target = std::env::temp_dir().join(format!("gg-retry-pruned-{}", std::process::id()));
-        write_session(&target.join("debug").join("sessions"), 7, None);
+        let sessions = target.join("debug").join("sessions");
+        write_session(&sessions, 7, None);
+        // A session file this gg can't read, as another version's, counts too.
+        fs::write(sessions.join("sandbox-6.json"), "{}").expect("written");
         let kept = |pid: u32| target.join(format!("gg-retry-{pid}.json"));
-        for pid in [7, 8] {
+        for pid in [6, 7, 8] {
             fs::write(kept(pid), "{}").expect("written");
         }
         let call = Unanswered {
@@ -635,9 +648,9 @@ mod tests {
             key: new_key(),
         };
         call.keep(&kept(9)).expect("kept");
-        let left = [7, 8, 9].map(|pid| kept(pid).exists());
+        let left = [6, 7, 8, 9].map(|pid| kept(pid).exists());
         let _ = fs::remove_dir_all(&target);
-        assert_eq!(left, [true, false, true]);
+        assert_eq!(left, [true, true, false, true]);
     }
 
     fn write_session(dir: &Path, pid: u32, project: Option<PathBuf>) {
