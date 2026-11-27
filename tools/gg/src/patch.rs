@@ -1,9 +1,10 @@
 //! `gg run`'s patches, as ARCHITECTURE.md's Game code describes: building the game with dx and
 //! watching its sources. A change to function bodies, functions added, removed or re-signed,
 //! `use`s, or constants only bodies use, is built into a patch the game applies through the tool
-//! API, as [`classify`] tells. Another change rebuilds, which the run restarts from a snapshot. The API's
-//! `note` has the game log failed patches and rebuilds, and patches that won't show. Without dx, or
-//! where patches can't reach the game's code, it builds with cargo and each change rebuilds.
+//! API, as [`classify`] tells. Another change rebuilds, as `gg rebuild` asks to, which the run
+//! restarts from a snapshot. The API's `note` has the game log failed patches and rebuilds, and
+//! patches that won't show. Without dx, or where patches can't reach the game's code, it builds
+//! with cargo and each change rebuilds.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -34,6 +35,9 @@ const OUTSIDE: &str = "a change outside the game's crate";
 
 const UNPATCHED: &str =
     "the run builds the game with cargo, without patches, as `patches_off` said";
+
+/// Why a rebuild `gg rebuild` asked for runs.
+const ASKED: &str = "`gg rebuild` asked";
 
 type Stamps = BTreeMap<PathBuf, Stamp>;
 
@@ -68,6 +72,11 @@ pub(crate) struct Patches {
     failed: Option<Failure>,
     /// The last patch or rebuild that succeeded, as [`State::reload`] tells it.
     reload: Option<Value>,
+    /// When the latest `gg rebuild` not yet acted on was taken (ms since the epoch), as
+    /// [`Told::asked_to_rebuild`](runs::Told::asked_to_rebuild) gives it.
+    asked: Option<u64>,
+    /// The asked rebuild that landed, not yet answered: when it was asked, and its failure.
+    answered: Option<(u64, Option<Failure>)>,
 }
 
 /// With dx, which patches build against, or with cargo, for a game patches can't reach.
@@ -194,6 +203,8 @@ impl Patches {
             libs: Vec::new(),
             failed: None,
             reload: None,
+            asked: None,
+            answered: None,
             baseline,
         }))
     }
@@ -225,9 +236,22 @@ impl Patches {
         &self.fat.exe
     }
 
-    /// A turn of the run's loop: notes a finished job, scans the sources, and looks at them once
-    /// they've been quiet for [`QUIET`] or the processes all serve. `games` is empty while it
-    /// waits for a rebuild. Returns whether a rebuild succeeded, which the run restarts from.
+    /// Notes that `gg rebuild` asked for a rebuild at `asked` (ms since the epoch), which
+    /// [`tend`](Self::tend) starts once no job is under way.
+    pub(crate) fn ask(&mut self, asked: u64) {
+        self.asked = Some(self.asked.map_or(asked, |was| was.max(asked)));
+    }
+
+    /// The asked rebuild that landed since the last call, if one did: when it was asked, and its
+    /// failure, if it failed.
+    pub(crate) fn answered(&mut self) -> Option<(u64, Option<Failure>)> {
+        self.answered.take()
+    }
+
+    /// A turn of the run's loop: notes a finished job, scans the sources, and once they've been
+    /// quiet for [`QUIET`], starts a rebuild `gg rebuild` asked for, or looks at them if they
+    /// changed or the processes all serve. `games` is empty while it waits for a rebuild. Returns
+    /// whether a rebuild succeeded, which the run restarts from.
     pub(crate) fn tend(&mut self, games: &[Process], now: Instant) -> bool {
         let rebuilt = self.job.as_ref().is_some_and(Job::done) && self.land(games);
         let stamps = self.sources.scan();
@@ -247,8 +271,12 @@ impl Patches {
         }
         let due = self.fresh || self.seen != self.looked;
         let quiet = now.duration_since(self.since) >= QUIET;
-        if due && quiet && self.job.is_none() && self.rebuilt.is_none() {
-            self.look(games);
+        if quiet && self.job.is_none() && self.rebuilt.is_none() {
+            if let Some(asked) = self.asked.take() {
+                self.rebuild_asked(asked);
+            } else if due {
+                self.look(games);
+            }
         }
         rebuilt
     }
@@ -324,6 +352,19 @@ impl Patches {
 
     fn rebuild(&mut self, file: &Path, why: &str) {
         event(&json!({"event": "rebuilding", "file": file, "why": why}));
+        self.start_rebuild(format!("a change to {}: {why}", file.display()), None);
+    }
+
+    /// Rebuilds the game, as `gg rebuild` asked at `asked`, with every edit since the last look:
+    /// the build takes the sources as they are.
+    fn rebuild_asked(&mut self, asked: u64) {
+        event(&json!({"event": "rebuilding", "file": null, "why": ASKED}));
+        (self.looked, self.fresh) = (self.seen.clone(), false);
+        self.start_rebuild(ASKED.to_owned(), Some(asked));
+    }
+
+    /// Starts a rebuild for `why`, asked by `gg rebuild` at `asked`, if it was.
+    fn start_rebuild(&mut self, why: String, asked: Option<u64>) {
         let (builder, sources) = (self.builder.clone(), self.sources.clone());
         let thread = thread::spawn(move || {
             // The sources as the build starts, but for the lock file, which the build itself writes
@@ -333,11 +374,10 @@ impl Patches {
             baseline.refresh(&sources.lock);
             Ok((fat, baseline))
         });
-        let started = Instant::now();
-        let why = format!("a change to {}: {why}", file.display());
         self.job = Some(Job::Rebuild {
-            started,
+            started: Instant::now(),
             why,
+            asked,
             thread,
         });
     }
@@ -448,8 +488,10 @@ impl Patches {
                 started,
                 thread,
                 why,
+                asked,
             }) => match thread.join().unwrap_or_else(|_| Err(panicked())) {
                 Ok((fat, baseline)) => {
+                    self.answered = asked.map(|asked| (asked, None));
                     let ms = millis(started.elapsed());
                     event(&json!({"event": "rebuilt", "exe": fat.exe, "build_ms": ms}));
                     self.reload = Some(json!({
@@ -463,6 +505,7 @@ impl Patches {
                     true
                 }
                 Err(failure) => {
+                    self.answered = asked.map(|asked| (asked, Some(failure.clone())));
                     event(&json!({"event": "rebuild_failed", "error": error(&failure)}));
                     let message = format!(
                         "A rebuild of the game failed, so it runs on as it was built, and each \
@@ -633,10 +676,12 @@ impl Watcher {
 
 /// A build or patch on its own thread.
 enum Job {
-    /// A rebuild; gives the build and its sources as they started.
+    /// A rebuild, which `gg rebuild` asked for at `asked` if it did; gives the build and its
+    /// sources as they started.
     Rebuild {
         started: Instant,
         why: String,
+        asked: Option<u64>,
         thread: JoinHandle<Result<(Fat, Baseline), Failure>>,
     },
     /// A patch of edits to `files` for processes `pids`; the other fields are [`Act::Patch`]'s.
@@ -1330,6 +1375,8 @@ mod tests {
             libs: Vec::new(),
             failed: None,
             reload: None,
+            asked: None,
+            answered: None,
             baseline,
         };
         let session = Session {
@@ -1419,6 +1466,50 @@ mod tests {
                 "{code}"
             );
         }
+        // A rebuild `gg rebuild` asks for waits for the job under way, the latest ask counting,
+        // and answers how it went, here failing.
+        let (go, going) = std::sync::mpsc::channel::<()>();
+        patches.job = Some(Job::Patch {
+            pids: vec![7],
+            files: vec![main.clone()],
+            hashes: Hashes::new(),
+            unreadable: None,
+            attach: Vec::new(),
+            thread: thread::spawn(move || {
+                let _ = going.recv();
+                Patching {
+                    libs: Vec::new(),
+                    built: Duration::ZERO,
+                    outcomes: vec![(Some(7), Outcome::Superseded)],
+                }
+            }),
+        });
+        patches.ask(5);
+        patches.ask(3);
+        let quiet = || Instant::now() + QUIET;
+        assert!(!patches.tend(&serving, quiet()));
+        assert_eq!(patches.state(&serving).phase, "patching");
+        go.send(()).expect("sent");
+        while !patches.job.as_ref().is_some_and(Job::done) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!patches.tend(&serving, quiet()));
+        let state = patches.state(&serving);
+        assert_eq!(
+            (state.phase, state.why.as_deref()),
+            ("rebuilding", Some(ASKED))
+        );
+        assert_eq!(patches.answered(), None);
+        while !patches.job.as_ref().is_some_and(Job::done) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!patches.tend(&serving, quiet()));
+        let answered = patches.answered();
+        assert!(
+            matches!(&answered, Some((5, Some(failure))) if failure.code == "gg.build"),
+            "{answered:?}"
+        );
+        assert_eq!(patches.answered(), None, "answered once");
         let _ = fs::remove_dir_all(&root);
     }
 

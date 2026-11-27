@@ -184,16 +184,17 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
   between ticks. So does an edit to a constant only function bodies use, as rustc copies its value
   into them; one a type, a static or a `const fn` uses rebuilds. A patch reaches calls made through
   `HotFn`, through which a development build calls each layer method, so it reaches the systems and
-  scripts they call; what only the game's own trait object or function pointer reaches waits for a
-  rebuild. As `HotFn` calls only methods a trait fixes, a patch may also add, remove or re-sign
-  other functions, and change `use`s whose names only bodies use. subsecond patches only the
-  binary's crate, so a game's crate is a binary with no library, and its statics start over at each
-  patch, so a game keeps its state in the world. Any other change rebuilds and restarts the game
-  from a snapshot taken just before, matching changed components by field name, a new field taking
-  its default. Such changes include a new field (even of a type declared in a function body) or
-  component, an engine edit, or an edit to `main`, `load` or `restored`, which ran before any patch
-  could. An edit inside `attach` is patched, but restarts start from snapshots, so only a fresh run
-  shows it (`gg.attach_changed`).
+  scripts they call. What only the game's own trait objects or function pointers reach, or code only
+  `main`, `load` or `restored` call, waits for a rebuild, which `gg rebuild` asks for. As `HotFn`
+  calls only methods a trait fixes, a patch may also add, remove or re-sign other functions, and
+  change `use`s whose names only bodies use. subsecond patches only the binary's crate, so a game's
+  crate is a binary with no library, and its statics start over at each patch, so a game keeps its
+  state in the world. Any other change rebuilds and restarts the game from a snapshot taken just
+  before, matching changed components by field name, a new field taking its default. Such changes
+  include a new field (even of a type declared in a function body) or component, an engine edit, or
+  an edit to `main`, `load` or `restored`, which ran before any patch could. An edit inside
+  `attach` is patched, but restarts start from snapshots, so only a fresh run shows it
+  (`gg.attach_changed`).
   Without `dx`, every change rebuilds and restarts the game.
 - **Luau, in every build, for mods and quick scripts.** Players install sandboxed mods, and quests,
   dialogue and level events reload in milliseconds. A script file declares one component, its

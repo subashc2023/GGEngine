@@ -155,10 +155,11 @@ with, and the workspace's manifest and lock file (`watching`). Then:
   `gg scene open <SCENE> --discard` reloads the open scene's entities from its file, a fresh world
   without a new run; entities the game's code made stay.
 A game waiting for a rebuild gets one at any change; a restarted one gets the edits since its build
-patched in at once. A patch never answered (`patch_unanswered`) is sent again with every edit since
-the build. The game logs failures as warnings too: `gg.patch_failed`, `gg.rebuild_failed`. Once the
-sources match the running build again after a failed rebuild, `recovered` says so, and the failure
-leaves the run's state.
+patched in at once. `gg rebuild` asks for a rebuild, as for an edit patched in to code the game
+won't run again, such as a function only `load` calls. A patch never answered (`patch_unanswered`)
+is sent again with every edit since the build. The game logs failures as warnings too:
+`gg.patch_failed`, `gg.rebuild_failed`. Once the sources match the running build again after a
+failed rebuild, `recovered` says so, and the failure leaves the run's state.
 
 Without dx, or where patches can't reach (as with `--release`), with restarts on and no
 `--no-patch`, gg builds with cargo and watches all the same (`watching`, `patches` false): every
@@ -283,6 +284,24 @@ looked at them. `files` has the last event it logged of each, the latest 20 file
 apply, a script's error. Fails with:
 - `gg.build_failed` and rustc's errors, if the edits don't build;
 - `gg.waiting`, if the game ended and waits for a change;
+- `gg.no_run`, without a `gg run`; `gg.which_run`, with several, which `--pid` tells apart;
+- `gg.timeout`.
+",
+            },
+            Help {
+                name: "rebuild",
+                usage: "rebuild [--timeout <SECONDS>]",
+                summary: "Rebuild the game under `gg run` and start it again from a snapshot",
+                details: "\
+For an edit patched in that the game won't run again: in a function only `main`, a layer's `load` or
+`restored` calls, or one the game reaches through its own trait objects or function pointers.
+`run` takes the request at once. Once no patch or build is under way, it rebuilds with every edit
+saved (`rebuilding`, why `` `gg rebuild` asked ``) and restarts the game, as an edit no patch
+carries does. Then `rebuild` waits at most `--timeout` (300 s) for the game to run the new build,
+and prints what `gg wait` does. Fails with:
+- `gg.build_failed` and rustc's errors, if the rebuild fails; the game runs on as it was;
+- `gg.no_rebuild`, if the run doesn't build the game itself: with `--no-patch`, or restarts off;
+- `gg.waiting`, if the game ended as it started again;
 - `gg.no_run`, without a `gg run`; `gg.which_run`, with several, which `--pid` tells apart;
 - `gg.timeout`.
 ",
@@ -918,6 +937,8 @@ enum Command {
     Mcp(Pick),
     /// Waits, at most the time given, until the picked `gg run` runs the saved edits' code.
     Wait(Pick, Duration),
+    /// Has the picked `gg run` rebuild the game, waiting at most the time given for it to run.
+    Rebuild(Pick, Duration),
 }
 
 fn main() -> ExitCode {
@@ -975,6 +996,10 @@ fn main() -> ExitCode {
         }),
         Command::Mcp(pick) => mcp::serve(pick).map(|()| true),
         Command::Wait(pick, timeout) => runs::wait(&pick, timeout).map(|told| {
+            print(&told.to_string());
+            true
+        }),
+        Command::Rebuild(pick, timeout) => runs::rebuild(&pick, timeout).map(|told| {
             print(&told.to_string());
             true
         }),
@@ -1279,7 +1304,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         "help" | "-h" | "--help" => help_args(&mut parsed)?,
         "run" | "check" | "ship" => build_args(name, &mut parsed)?,
         "fetch" | "new" => project_args(name, &mut parsed)?,
-        "wait" | "step" | "scene" | "snapshot" => control_args(name, &mut parsed)?,
+        "wait" | "rebuild" | "step" | "scene" | "snapshot" => control_args(name, &mut parsed)?,
         "input" | "press" | "capture" | "frames" | "look" | "overlays" | "pick" | "cast"
         | "project" | "probe" => view_args(name, &mut parsed)?,
         "sessions" | "logs" | "entities" | "assets" | "entity" | "get" => {
@@ -1426,6 +1451,11 @@ fn control_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             parsed.positional(0, 0, "wait [--timeout <SECONDS>]")?;
             let timeout = parsed.seconds("--timeout", 300)?;
             Command::Wait(parsed.pick()?, timeout)
+        }
+        "rebuild" => {
+            parsed.positional(0, 0, "rebuild [--timeout <SECONDS>]")?;
+            let timeout = parsed.seconds("--timeout", 300)?;
+            Command::Rebuild(parsed.pick()?, timeout)
         }
         "step" => {
             let ticks = parsed.positional(0, 1, "step [N]")?;
@@ -1885,7 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_takes_a_timeout_and_a_pick() {
+    fn wait_and_rebuild_take_a_timeout_and_a_pick() {
         let Ok(Command::Wait(pick, timeout)) = parsed(&["wait"]) else {
             panic!("a wait");
         };
@@ -1895,6 +1925,15 @@ mod tests {
             panic!("a wait");
         };
         assert_eq!((pick.pid, timeout), (Some(7), Duration::from_secs(5)));
+        let Ok(Command::Rebuild(pick, timeout)) = parsed(&["rebuild"]) else {
+            panic!("a rebuild");
+        };
+        assert_eq!((pick.pid, timeout), (None, Duration::from_secs(300)));
+        let Ok(Command::Rebuild(pick, timeout)) = parsed(&["--pid", "7", "rebuild", "--timeout=9"])
+        else {
+            panic!("a rebuild");
+        };
+        assert_eq!((pick.pid, timeout), (Some(7), Duration::from_secs(9)));
     }
 
     #[test]
@@ -2411,6 +2450,8 @@ mod tests {
             &["wait", "now"],
             &["wait", "--timeout", "0"],
             &["wait", "--follow"],
+            &["rebuild", "now"],
+            &["rebuild", "--timeout", "0"],
             &["run"],
             &["run", "a", "b"],
             &["run", "a", "--snapshot", "often"],

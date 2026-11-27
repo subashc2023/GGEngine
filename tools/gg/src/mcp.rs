@@ -225,6 +225,24 @@ const TOOLS: &[Tool] = &[
         required: &[],
     },
     Tool {
+        name: "rebuild",
+        description: "Call after an edit `wait` says was patched in, but that the game won't run \
+                      again: in a function only `main` or a layer's `load` or `restored` calls, or \
+                      one reached through the game's own trait objects or function pointers. Has \
+                      `gg run` rebuild the game with every edit saved, once no patch or build is \
+                      under way, and start it again from a snapshot, as an edit no patch carries \
+                      does. Then waits until the game runs the new build, and answers as `wait` \
+                      does, its `reload` the rebuild. Fails with `gg.build_failed` and rustc's \
+                      errors if it doesn't build (the game runs its old code), `gg.no_rebuild` if \
+                      the run doesn't build the game itself (`--no-patch`, or restarts off), \
+                      `gg.waiting` if the game ended as it started again, or `gg.timeout`.",
+        properties: || {
+            json!({"timeout_s": {"type": "integer", "minimum": 1, "default": 300,
+                                 "description": "How long to wait, in seconds"}})
+        },
+        required: &[],
+    },
+    Tool {
         name: "pause",
         description: "Pauses the game's simulation.",
         properties: || json!({}),
@@ -1329,7 +1347,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
             };
             probe::run(pick, at, own).map(|probe| Ran::Json(probe.to_string()))
         }
-        "wait" => {
+        "wait" | "rebuild" => {
             let timeout = match arguments.get("timeout_s") {
                 None | Some(Value::Null) => 300,
                 Some(given) => given
@@ -1341,7 +1359,11 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
                         Failure::new("gg.args", message)
                     })?,
             };
-            let told = runs::wait(pick, Duration::from_secs(timeout))?;
+            let timeout = Duration::from_secs(timeout);
+            let told = match name {
+                "wait" => runs::wait(pick, timeout)?,
+                _ => runs::rebuild(pick, timeout)?,
+            };
             Ok(Ran::Json(told.to_string()))
         }
         "logs" => {

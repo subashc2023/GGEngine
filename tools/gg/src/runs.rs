@@ -86,6 +86,12 @@ fn quit_path(told: &Path) -> PathBuf {
     told.with_extension("quit")
 }
 
+/// The file through which `gg rebuild` asks the run whose file is `told` to rebuild the game
+/// ([`rebuild`]), holding its process ID as [`quit_path`]'s does.
+fn rebuild_path(told: &Path) -> PathBuf {
+    told.with_extension("rebuild")
+}
+
 /// Milliseconds since the Unix epoch, the file's unit.
 pub(crate) fn now_ms() -> u64 {
     let since = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
@@ -106,15 +112,22 @@ pub(crate) struct Told {
 
 impl Told {
     /// Starts telling `state` at `path`, of `package`'s run in process `gg`, in the project at
-    /// `project`, if any.
+    /// `project`, if any. `rebuilds`: whether the run builds the game itself, as `gg rebuild` asks.
     pub(crate) fn start(
         path: PathBuf,
         gg: u32,
         package: &str,
         project: Option<&Path>,
+        rebuilds: bool,
         state: &State,
     ) -> Self {
-        let mut told = json!({"gg": gg, "package": package, "project": project});
+        let mut told = json!({
+            "gg": gg,
+            "package": package,
+            "project": project,
+            "rebuilds": rebuilds,
+            "rebuild": null,
+        });
         fill(&mut told, state, now_ms());
         let shared = Arc::new(Mutex::new(told));
         let ending = Arc::new(AtomicBool::new(false));
@@ -155,6 +168,28 @@ impl Told {
         }
         asked
     }
+
+    /// When `gg rebuild` asked this run to rebuild the game ([`rebuild`]), if it did: now, as the
+    /// request is taken (ms since the epoch). The request was written before, so every `gg
+    /// rebuild` that asked by then is answered by a rebuild started after.
+    pub(crate) fn asked_to_rebuild(&self) -> Option<u64> {
+        let at = rebuild_path(&self.path);
+        let asked = fs::read_to_string(&at).is_ok_and(|gg| gg.trim() == self.gg.to_string());
+        asked.then(|| {
+            let _ = fs::remove_file(&at);
+            now_ms()
+        })
+    }
+
+    /// Answers the `gg rebuild`s whose requests were taken by `asked` (ms since the epoch): with
+    /// the rebuild's failure, or `None` once it succeeded.
+    pub(crate) fn answer(&self, asked: u64, failure: Option<&Failure>) {
+        let error =
+            failure.map(|failure| json!({"code": failure.code, "message": failure.message}));
+        if let Ok(mut told) = self.shared.lock() {
+            told["rebuild"] = json!({"asked": asked, "error": error});
+        }
+    }
 }
 
 impl Drop for Told {
@@ -165,6 +200,7 @@ impl Drop for Told {
         }
         let _ = fs::remove_file(&self.path);
         let _ = fs::remove_file(quit_path(&self.path));
+        let _ = fs::remove_file(rebuild_path(&self.path));
     }
 }
 
@@ -345,31 +381,7 @@ pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
     let target = build::target_dir(pick.project.as_deref().and_then(Path::parent))?;
     let (asked, start) = (now_ms(), Instant::now());
     loop {
-        let mut runs = runs_in(&target, pick.project.as_deref());
-        if let Some(pid) = pick.pid {
-            runs.retain(|told| {
-                (told["pids"].as_array()).is_some_and(|pids| pids.contains(&json!(pid)))
-            });
-        }
-        let told = match runs.len() {
-            0 if start.elapsed() < GRACE.min(timeout) => {
-                thread::sleep(WRITE);
-                continue;
-            }
-            0 => {
-                let message = "no `gg run` runs the game, as its file in the target directory \
-                               says; `gg run` runs it, watching its sources";
-                return Err(Failure::new("gg.no_run", message));
-            }
-            1 => runs.remove(0),
-            _ => {
-                let message = format!(
-                    "{} `gg run`s run games; `--pid` chooses one by its game's process",
-                    runs.len()
-                );
-                return Err(Failure::new("gg.which_run", message));
-            }
-        };
+        let told = found(&target, pick, start, timeout)?;
         if let Some(waited) = waited(&told, asked) {
             return looked(pick, waited?, asked, start, timeout);
         }
@@ -378,6 +390,100 @@ pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
             let message = format!(
                 "the game didn't run the code of the edits saved before `wait` within {} s; the \
                  run's state is `{phase}`",
+                timeout.as_secs()
+            );
+            return Err(Failure::new("gg.timeout", message));
+        }
+        thread::sleep(WRITE);
+    }
+}
+
+/// The file of the one run in `target` of `pick`'s project and `--pid`, waiting within [`GRACE`]
+/// and `timeout` of `start` for a just-started one's.
+///
+/// # Errors
+///
+/// - `gg.no_run`: none, past the grace.
+/// - `gg.which_run`: several.
+fn found(target: &Path, pick: &Pick, start: Instant, timeout: Duration) -> Result<Value, Failure> {
+    loop {
+        let mut runs = runs_in(target, pick.project.as_deref());
+        if let Some(pid) = pick.pid {
+            runs.retain(|told| {
+                (told["pids"].as_array()).is_some_and(|pids| pids.contains(&json!(pid)))
+            });
+        }
+        match runs.len() {
+            0 if start.elapsed() < GRACE.min(timeout) => thread::sleep(WRITE),
+            0 => {
+                let message = "no `gg run` runs the game, as its file in the target directory \
+                               says; `gg run` runs it, watching its sources";
+                return Err(Failure::new("gg.no_run", message));
+            }
+            1 => return Ok(runs.remove(0)),
+            _ => {
+                let message = format!(
+                    "{} `gg run`s run games; `--pid` chooses one by its game's process",
+                    runs.len()
+                );
+                return Err(Failure::new("gg.which_run", message));
+            }
+        }
+    }
+}
+
+/// Asks the `gg run` `pick` picks to rebuild the game and start it again from a snapshot, as an
+/// edit no patch carries does, through a request beside the run's file ([`rebuild_path`]). The run
+/// takes it at once, and rebuilds once no patch or build is under way. Then waits, as [`wait`]
+/// does, until the game runs the new build; returns what `wait` does. All within `timeout`.
+///
+/// # Errors
+///
+/// - `gg.no_rebuild`: the run doesn't build the game itself, with `--no-patch` or restarts off.
+/// - `gg.build_failed`: the rebuild failed, with rustc's errors; the game runs on as it was.
+/// - `gg.timeout`: the run didn't rebuild, or the game didn't serve again, within `timeout`.
+/// - `gg.run`: the request can't be written.
+/// - As [`wait`] does: `gg.no_run`, `gg.which_run`, `gg.waiting`, `gg.cargo`.
+pub(crate) fn rebuild(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
+    let target = build::target_dir(pick.project.as_deref().and_then(Path::parent))?;
+    let start = Instant::now();
+    let told = found(&target, pick, start, timeout)?;
+    let (gg, package) = (&told["gg"], told["package"].as_str().unwrap_or_default());
+    if told["rebuilds"] != true {
+        let message = format!(
+            "the `gg run` in process {gg} doesn't build the game itself: with `--no-patch`, it \
+             restarts the game from a snapshot as you rebuild it; with restarts off (`--snapshot \
+             0`, `--record`, `--replay` or `--no-api`), it never restarts it"
+        );
+        return Err(Failure::new("gg.no_rebuild", message));
+    }
+    let request = rebuild_path(&path(&target, package));
+    // Before the request, which the run takes after: its answer's time is later.
+    let asked = now_ms();
+    fs::write(&request, gg.to_string()).map_err(|error| {
+        let message = format!(
+            "can't ask the `gg run` in process {gg} to rebuild the game, writing {}: {error}",
+            request.display()
+        );
+        Failure::new("gg.run", message)
+    })?;
+    loop {
+        let told = found(&target, pick, start, timeout)?;
+        let answer = &told["rebuild"];
+        if answer["asked"].as_u64().is_some_and(|taken| taken >= asked) {
+            if let Some(failed) = answer["error"]["message"].as_str() {
+                let message =
+                    format!("the rebuild failed, so the game runs its code as it was: {failed}");
+                return Err(Failure::new("gg.build_failed", message));
+            }
+            return wait(pick, timeout.saturating_sub(start.elapsed()));
+        }
+        if start.elapsed() >= timeout {
+            let _ = fs::remove_file(&request);
+            let phase = told["state"].as_str().unwrap_or_default();
+            let message = format!(
+                "the `gg run` in process {gg} didn't rebuild the game within {} s of being asked, \
+                 as a patch or build under way goes first; the run's state is `{phase}`",
                 timeout.as_secs()
             );
             return Err(Failure::new("gg.timeout", message));
@@ -515,6 +621,7 @@ mod tests {
             7,
             "shards",
             Some(&manifest),
+            true,
             &State::new("building"),
         );
         let mut state = State::new("running");
@@ -610,7 +717,7 @@ mod tests {
             error: Some(failed),
             ..State::new("waiting")
         };
-        let told = Told::start(at.clone(), 4242, &package, Some(&project), &waiting);
+        let told = Told::start(at.clone(), 4242, &package, Some(&project), true, &waiting);
         // Another run's request is left alone.
         fs::write(quit_path(&at), "4243").expect("written");
         let others = told.asked_to_quit();
@@ -639,6 +746,73 @@ mod tests {
             (false, false),
             "the run's file and the request are gone"
         );
+    }
+
+    /// `rebuild` asks a run that builds the game, through a request it takes as its own alone; a
+    /// failed rebuild answers with its errors, and one that succeeded waits for the game.
+    #[test]
+    fn rebuild_asks_the_run_and_waits_for_its_answer() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let target = build::target_dir(Some(here)).expect("the target directory");
+        let project = here.join(format!("rebuild-{}.ron", std::process::id()));
+        let package = format!("rebuild-{}", std::process::id());
+        let at = path(&target, &package);
+        let running = State {
+            pids: vec![4244],
+            current: Some(true),
+            ..State::new("running")
+        };
+        let ask = |timeout| {
+            let asked = rebuild(&pick(Some(project.clone())), Duration::from_secs(timeout));
+            asked.map_err(|failure| (failure.code, failure.message))
+        };
+        // A run that doesn't build the game itself.
+        let told = Told::start(at.clone(), 4242, &package, Some(&project), false, &running);
+        thread::sleep(WRITE * 2);
+        let refused = ask(1).map_err(|(code, _)| code);
+        drop(told);
+        let told = Told::start(at.clone(), 4242, &package, Some(&project), true, &running);
+        // Another run's request is left alone.
+        fs::write(rebuild_path(&at), "4243").expect("written");
+        let others = told.asked_to_rebuild();
+        // The run's side: it takes each request, failing the first rebuild and not the second.
+        let asking = Arc::new(AtomicBool::new(true));
+        let going = asking.clone();
+        let run = thread::spawn(move || {
+            let failed = Failure::new("gg.build", "error[E0308]: mismatched types");
+            let mut answers = [Some(failed), None].into_iter();
+            while going.load(Ordering::Relaxed) {
+                if let Some(taken) = told.asked_to_rebuild() {
+                    told.answer(taken, answers.next().flatten().as_ref());
+                }
+                told.tell(&running, now_ms());
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let failed = ask(5);
+        // Answered, the run serving: the wait goes on to the game, which never answers here.
+        let rebuilt = ask(2);
+        asking.store(false, Ordering::Relaxed);
+        run.join().expect("no panic");
+        let left = (at.exists(), rebuild_path(&at).exists());
+        assert_eq!(refused, Err("gg.no_rebuild".to_owned()));
+        assert_eq!(others, None, "a request for another run");
+        let Err((code, message)) = failed else {
+            panic!("a failed rebuild answers {failed:?}");
+        };
+        assert!(
+            code == "gg.build_failed" && message.contains("E0308"),
+            "{message}"
+        );
+        let Err((code, message)) = rebuilt else {
+            panic!("no game answers here, but {rebuilt:?}");
+        };
+        let past = "the game runs the code of the edits saved before `wait`";
+        assert!(
+            code == "gg.timeout" && message.starts_with(past),
+            "{message}"
+        );
+        assert_eq!(left, (false, false), "the run's file and requests are gone");
     }
 
     /// A game down says what its run does, with the build's errors.

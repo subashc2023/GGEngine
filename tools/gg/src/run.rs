@@ -153,11 +153,14 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     let pid = std::process::id();
     // Before the build: gg's other commands find no game while it builds.
     let manifest = run.project.as_ref().map(|scope| scope.manifest.as_path());
+    // As `Patches::new` builds and watches.
+    let rebuilds = run.patches && run.restarts();
     let told = Told::start(
         runs::path(&target, &run.package),
         pid,
         &run.package,
         manifest,
+        rebuilds,
         &State::new("building"),
     );
     // Before the build: the tool may end under way.
@@ -252,7 +255,8 @@ enum First {
 /// Builds `run`'s game the first time ([`Patches::new`]), returning its patches.
 ///
 /// While it watches the sources (patches and restarts on), a failed build prints `build_failed`
-/// and tells `waiting` with rustc's errors until the sources change, then builds again.
+/// and tells `waiting` with rustc's errors until the sources change or `gg rebuild` asks
+/// ([`Told::asked_to_rebuild`]), then builds again, answering the ask.
 /// [`First::Closed`] if `closed` says the tool ended meanwhile, and [`First::Quit`] if `gg quit`
 /// asked ([`Told::asked_to_quit`]).
 ///
@@ -261,12 +265,21 @@ enum First {
 /// Fails as `Patches::new` does, but not with `gg.build` while it watches.
 fn first_build(run: &Run, told: &Told, closed: Option<&AtomicBool>) -> Result<First, Failure> {
     let watches = run.patches && run.restarts();
+    let mut asked = None;
     loop {
         let failure = match Patches::new(run) {
-            Ok(patches) => return Ok(First::Built(patches.map(Box::new))),
+            Ok(patches) => {
+                if let Some(asked) = asked {
+                    told.answer(asked, None);
+                }
+                return Ok(First::Built(patches.map(Box::new)));
+            }
             Err(failure) if watches && failure.code == "gg.build" => failure,
             Err(failure) => return Err(failure),
         };
+        if let Some(asked) = asked.take() {
+            told.answer(asked, Some(&failure));
+        }
         let error = json!({"code": failure.code, "message": failure.message});
         event(&json!({"event": "build_failed", "error": error}));
         let mut watcher = Watcher::new(run)?;
@@ -284,7 +297,8 @@ fn first_build(run: &Run, told: &Told, closed: Option<&AtomicBool>) -> Result<Fi
             if told.asked_to_quit() {
                 return Ok(First::Quit);
             }
-            if watcher.changed(now) {
+            asked = told.asked_to_rebuild();
+            if asked.is_some() || watcher.changed(now) {
                 break;
             }
             told.tell(&waiting, looked);
@@ -462,10 +476,17 @@ impl Supervisor<'_> {
         let mut waits = None;
         loop {
             let (now, looked) = (Instant::now(), runs::now_ms());
-            // With patches on, the run makes the builds itself.
+            // With patches on, the run makes the builds itself, and `gg rebuild` may ask for one.
             if let Some(patches) = &mut self.patches {
+                let told = self.told.as_ref();
+                if let Some(asked) = told.and_then(Told::asked_to_rebuild) {
+                    patches.ask(asked);
+                }
                 let processes: Vec<Process> = games.iter().map(Game::process).collect();
                 rebuilt |= patches.tend(&processes, now);
+                if let (Some(told), Some((asked, failure))) = (told, patches.answered()) {
+                    told.answer(asked, failure.as_ref());
+                }
             } else if self.restarts && watch.rebuilt(stamp(&self.exe), now) {
                 event(&json!({"event": "rebuilt", "exe": self.exe}));
                 rebuilt = true;

@@ -92,7 +92,8 @@ builds compile games' shaders with it as they run; builds without `dev` use the 
 
 Run the game under `cargo gg run`, in the background. It serves the tool API and patches in edits
 as they're saved: inside function bodies, functions added, removed or re-signed, `use`s, and
-constants only bodies use. It restarts from a snapshot after other changes, crashes or hangs. A layer's
+constants only bodies use. It restarts from a snapshot after other changes, crashes or hangs. An
+edit patched into code only `main`, `load` or `restored` reach shows after `gg rebuild`. A layer's
 `attach` builds the world, and restarts skip it: an edit there shows only in a fresh run.
 `cargo gg help run` has the details. `cargo gg mcp` serves the same commands over MCP.
 While the game runs, call `target/debug/gg`, which `cargo gg run` built, or the installed `gg`:
