@@ -13,19 +13,37 @@
                 target: Some("74f6e829d918c205"),
                 yaw: 0.0,
                 pitch: -0.2,
-                sensitivity: 0.0025,
+                sensitivity: 0.0012,
                 pivot_height: 0.7,
-                distance: 4.5,
-                shoulder: 0.8,
+                distance: 7.5,
+                shoulder: 1.9,
                 aim_distance: 1.8,
                 aim_shoulder: 0.55,
                 aim: 0.0,
+                aim_rate: 7.0,
                 aiming: false,
             ),
             Transform: (
                 translation: (0.0, 3.0, 7.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "175c94b17567c602": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Pickup"),
+            Pickup: (
+                home: 1.0,
+                spin: 2.0,
+                bob: 0.15,
+                bob_rate: 3.0,
+                phase: 2.0,
+            ),
+            Tint: ((0.4, 0.9, 1.0, 1.0)),
+            Transform: (
+                translation: (0.0, 1.0, -4.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.45, 0.45, 0.45),
             ),
         ),
         "4dac5bb6c46fbfef": (
@@ -180,6 +198,40 @@
                 scale: (1.2, 1.2, 1.2),
             ),
         ),
+        "6063c44925637fd8": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Pickup"),
+            Pickup: (
+                home: 1.0,
+                spin: 2.0,
+                bob: 0.15,
+                bob_rate: 3.0,
+                phase: 0.0,
+            ),
+            Tint: ((0.4, 0.9, 1.0, 1.0)),
+            Transform: (
+                translation: (4.0, 1.0, 5.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.45, 0.45, 0.45),
+            ),
+        ),
+        "62ae7cba56183ef5": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Pickup"),
+            Pickup: (
+                home: 1.0,
+                spin: 2.0,
+                bob: 0.15,
+                bob_rate: 3.0,
+                phase: 3.0,
+            ),
+            Tint: ((0.4, 0.9, 1.0, 1.0)),
+            Transform: (
+                translation: (7.0, 1.0, -6.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.45, 0.45, 0.45),
+            ),
+        ),
         "666ae56ff916ad8d": (
             BoxCollider3D: (
                 offset: (0.0, 0.0, 0.0),
@@ -212,6 +264,7 @@
             Score: (
                 hits: 0,
                 points: 0,
+                pickups: 0,
                 last: (0.0, 0.0, 0.0),
             ),
         ),
@@ -249,11 +302,19 @@
             Name: ("Player"),
             Player: (
                 speed: 6.0,
+                aim_speed: 2.5,
                 jump_speed: 6.5,
                 turn_rate: 12.0,
                 heading: (0.0, 0.0),
                 facing: 0.0,
                 jump: false,
+                roll_speed: 14.0,
+                roll_time: 0.35,
+                roll_cooldown: 1.0,
+                dodge: false,
+                rolling: 0.0,
+                cooldown: 0.0,
+                roll_way: (0.0, 0.0),
             ),
             Transform: (
                 translation: (0.0, 1.0, 2.0),
@@ -315,6 +376,23 @@
                 scale: (60.0, 1.0, 60.0),
             ),
         ),
+        "96440820b76094f4": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Pickup"),
+            Pickup: (
+                home: 1.0,
+                spin: 2.0,
+                bob: 0.15,
+                bob_rate: 3.0,
+                phase: 4.0,
+            ),
+            Tint: ((0.4, 0.9, 1.0, 1.0)),
+            Transform: (
+                translation: (-8.0, 1.0, -2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.45, 0.45, 0.45),
+            ),
+        ),
         "9a3b6868b77a7d77": (
             ModelRoot: ("gg:sphere"),
             Name: ("Target"),
@@ -337,6 +415,7 @@
             ),
             Target: (
                 points: 2,
+                fall: 0.0,
             ),
             Tint: ((0.95, 0.8, 0.1, 1.0)),
             Transform: (
@@ -450,6 +529,7 @@
             ),
             Target: (
                 points: 1,
+                fall: 0.0,
             ),
             Tint: ((0.15, 0.35, 0.95, 1.0)),
             Transform: (
@@ -480,6 +560,7 @@
             ),
             Target: (
                 points: 2,
+                fall: 0.0,
             ),
             Tint: ((0.95, 0.8, 0.1, 1.0)),
             Transform: (
@@ -510,12 +591,30 @@
             ),
             Target: (
                 points: 1,
+                fall: 0.0,
             ),
             Tint: ((0.15, 0.35, 0.95, 1.0)),
             Transform: (
                 translation: (-3.0, 2.4, -12.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c7c128d8721e159b": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Pickup"),
+            Pickup: (
+                home: 1.0,
+                spin: 2.0,
+                bob: 0.15,
+                bob_rate: 3.0,
+                phase: 5.0,
+            ),
+            Tint: ((0.4, 0.9, 1.0, 1.0)),
+            Transform: (
+                translation: (-2.0, 1.0, 12.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.45, 0.45, 0.45),
             ),
         ),
         "d6336e59d54717b9": (
@@ -543,6 +642,23 @@
                 translation: (-6.0, 1.8, 6.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.2, 1.2, 1.2),
+            ),
+        ),
+        "d717eb9618e1dd82": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Pickup"),
+            Pickup: (
+                home: 1.0,
+                spin: 2.0,
+                bob: 0.15,
+                bob_rate: 3.0,
+                phase: 1.0,
+            ),
+            Tint: ((0.4, 0.9, 1.0, 1.0)),
+            Transform: (
+                translation: (-4.0, 1.0, 6.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.45, 0.45, 0.45),
             ),
         ),
         "dd944accc834aed8": (
@@ -675,6 +791,7 @@
             ),
             Target: (
                 points: 3,
+                fall: 0.0,
             ),
             Tint: ((0.9, 0.12, 0.1, 1.0)),
             Transform: (

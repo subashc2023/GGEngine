@@ -25,6 +25,10 @@
                 player_block: 0,
                 energy: 0,
                 enemy_hp: 0,
+                enemy_poison: 0,
+                enemy_block: 0,
+                intent: Attack,
+                outcome: Fighting,
                 turn: 0,
                 rng: (
                     state: 20260101,

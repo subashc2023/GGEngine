@@ -1,5 +1,58 @@
 (
     entities: {
+        "066ede97b531983c": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.842, 0.105),
+                intensity: 12000.0,
+                range: Some(4.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Glow"),
+            Parent: ("986e86cb0ab8ab67"),
+            ParticleEmitter: (
+                rate: 8.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    1.0,
+                    1.0,
+                ],
+                speed: [
+                    0.0,
+                    0.0,
+                ],
+                shape: Point,
+                acceleration: (0.0, 0.0, 0.0),
+                drag: 0.0,
+                size: [
+                    1.5,
+                    1.5,
+                ],
+                color: [
+                    (2.5, 2.105, 0.263, 0.13),
+                    (2.5, 2.105, 0.263, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 0.1, 0.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
         "244caf9c4dabb481": (
             BoxCollider3D: (
                 offset: (0.0, 0.0, 0.0),
@@ -81,6 +134,59 @@
                 scale: (42.0, 4.0, 1.0),
             ),
         ),
+        "3a480695e3838bab": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.094, 0.071),
+                intensity: 12000.0,
+                range: Some(4.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Glow"),
+            Parent: ("a26b7f62b1852f27"),
+            ParticleEmitter: (
+                rate: 8.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    1.0,
+                    1.0,
+                ],
+                speed: [
+                    0.0,
+                    0.0,
+                ],
+                shape: Point,
+                acceleration: (0.0, 0.0, 0.0),
+                drag: 0.0,
+                size: [
+                    1.5,
+                    1.5,
+                ],
+                color: [
+                    (2.5, 0.235, 0.176, 0.13),
+                    (2.5, 0.235, 0.176, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 0.1, 0.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
         "656abd72fb710734": (
             BoxCollider3D: (
                 offset: (0.0, 0.0, 0.0),
@@ -95,18 +201,29 @@
             ModelRoot: ("gg:cube"),
             Name: ("Target Blue"),
             RigidBody3D: (
-                body_type: Static,
+                body_type: Kinematic,
                 fixed_rotation: false,
                 continuous_collision: false,
                 velocity: (0.0, 0.0, 0.0),
                 angular_velocity: (0.0, 0.0, 0.0),
             ),
+            Slide: (
+                center: (0.0, 1.8, -18.5),
+                axis: (1.0, 0.0, 0.0),
+                range: 10.0,
+                speed: 4.0,
+                dir: -1.0,
+            ),
             Target: (
                 points: 1,
+                hits: 3,
+                health: 3,
+                flash: 0.0,
+                base: (1.0, 1.0, 1.0, 1.0),
             ),
             Tint: ((0.1, 0.25, 0.9, 1.0)),
             Transform: (
-                translation: (8.0, 0.5, -12.0),
+                translation: (7.0, 1.8, -18.5),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -187,12 +304,69 @@
             ),
             Target: (
                 points: 3,
+                hits: 3,
+                health: 3,
+                flash: 0.0,
+                base: (1.0, 1.0, 1.0, 1.0),
             ),
             Tint: ((0.1, 0.75, 0.25, 1.0)),
             Transform: (
                 translation: (0.0, 1.9, -4.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.8, 0.8, 0.8),
+            ),
+        ),
+        "768aa303afab8aad": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.842, 0.105),
+                intensity: 12000.0,
+                range: Some(4.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Glow"),
+            Parent: ("a66b0d389d95847e"),
+            ParticleEmitter: (
+                rate: 8.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    1.0,
+                    1.0,
+                ],
+                speed: [
+                    0.0,
+                    0.0,
+                ],
+                shape: Point,
+                acceleration: (0.0, 0.0, 0.0),
+                drag: 0.0,
+                size: [
+                    1.5,
+                    1.5,
+                ],
+                color: [
+                    (2.5, 2.105, 0.263, 0.13),
+                    (2.5, 2.105, 0.263, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 0.1, 0.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
             ),
         ),
         "79cb9e86830c71c2": (
@@ -249,15 +423,128 @@
                 scale: (1.0, 1.0, 1.0),
             ),
         ),
+        "8fbbc6ac5ca14c38": (
+            Light: (
+                kind: Point,
+                color: (0.111, 0.278, 1.0),
+                intensity: 12000.0,
+                range: Some(4.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Glow"),
+            Parent: ("656abd72fb710734"),
+            ParticleEmitter: (
+                rate: 8.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    1.0,
+                    1.0,
+                ],
+                speed: [
+                    0.0,
+                    0.0,
+                ],
+                shape: Point,
+                acceleration: (0.0, 0.0, 0.0),
+                drag: 0.0,
+                size: [
+                    1.5,
+                    1.5,
+                ],
+                color: [
+                    (0.278, 0.694, 2.5, 0.13),
+                    (0.278, 0.694, 2.5, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 0.1, 0.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9572adb9b7f3b936": (
+            Light: (
+                kind: Point,
+                color: (0.133, 1.0, 0.333),
+                intensity: 12000.0,
+                range: Some(4.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Glow"),
+            Parent: ("73f778aaf6fa5db8"),
+            ParticleEmitter: (
+                rate: 8.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    1.0,
+                    1.0,
+                ],
+                speed: [
+                    0.0,
+                    0.0,
+                ],
+                shape: Point,
+                acceleration: (0.0, 0.0, 0.0),
+                drag: 0.0,
+                size: [
+                    1.5,
+                    1.5,
+                ],
+                color: [
+                    (0.333, 2.5, 0.833, 0.13),
+                    (0.333, 2.5, 0.833, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 0.1, 0.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
         "986e86cb0ab8ab67": (
             ModelRoot: ("gg:sphere"),
             Name: ("Target Yellow"),
             RigidBody3D: (
-                body_type: Static,
+                body_type: Kinematic,
                 fixed_rotation: false,
                 continuous_collision: false,
                 velocity: (0.0, 0.0, 0.0),
                 angular_velocity: (0.0, 0.0, 0.0),
+            ),
+            Slide: (
+                center: (0.0, 0.6, -18.5),
+                axis: (1.0, 0.0, 0.0),
+                range: 10.0,
+                speed: 3.0,
+                dir: 1.0,
             ),
             SphereCollider3D: (
                 offset: (0.0, 0.0, 0.0),
@@ -271,10 +558,14 @@
             ),
             Target: (
                 points: 2,
+                hits: 3,
+                health: 3,
+                flash: 0.0,
+                base: (1.0, 1.0, 1.0, 1.0),
             ),
             Tint: ((0.95, 0.8, 0.1, 1.0)),
             Transform: (
-                translation: (0.0, 0.6, -16.0),
+                translation: (-9.0, 0.6, -18.5),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.2, 1.2, 1.2),
             ),
@@ -320,7 +611,7 @@
             ),
             CharacterController3D: (
                 velocity: (0.0, 0.0, 0.0),
-                gravity: 1.0,
+                gravity: 2.2,
                 max_slope: 0.7853982,
                 step_height: 0.3,
                 snap: 0.2,
@@ -328,13 +619,23 @@
             ),
             Name: ("Player"),
             Player: (
-                speed: 5.0,
-                jump_speed: 5.0,
+                speed: 8.0,
+                sprint: 1.6,
+                jump_speed: 6.5,
                 sensitivity: 0.0025,
                 eye: 0.7,
                 heading: (0.0, 0.0),
+                sprinting: false,
                 yaw: 0.0,
                 pitch: 0.0,
+                ammo: 12,
+                magazine: 12,
+                reload: 0.0,
+                reload_time: 1.0,
+                clock: 0.0,
+                running: false,
+                finished: false,
+                best: 0.0,
                 shots: 0,
                 hits: 0,
             ),
@@ -366,6 +667,10 @@
             ),
             Target: (
                 points: 1,
+                hits: 3,
+                health: 3,
+                flash: 0.0,
+                base: (1.0, 1.0, 1.0, 1.0),
             ),
             Tint: ((0.85, 0.08, 0.06, 1.0)),
             Transform: (
@@ -396,6 +701,10 @@
             ),
             Target: (
                 points: 2,
+                hits: 3,
+                health: 3,
+                flash: 0.0,
+                base: (1.0, 1.0, 1.0, 1.0),
             ),
             Tint: ((0.95, 0.8, 0.1, 1.0)),
             Transform: (
@@ -426,6 +735,10 @@
             ),
             Target: (
                 points: 1,
+                hits: 3,
+                health: 3,
+                flash: 0.0,
+                base: (1.0, 1.0, 1.0, 1.0),
             ),
             Tint: ((0.85, 0.08, 0.06, 1.0)),
             Transform: (
@@ -437,18 +750,18 @@
         "c7fde805ec99108d": (
             Light: (
                 kind: Directional,
-                color: (1.0, 1.0, 1.0),
-                intensity: 120000.0,
+                color: (1.0, 0.5, 0.22),
+                intensity: 90000.0,
                 range: None,
                 inner_cone: 0.0,
                 outer_cone: 0.7853982,
                 shadows: true,
-                shadow_distance: 60.0,
+                shadow_distance: 80.0,
             ),
             Name: ("Sun"),
             Transform: (
                 translation: (0.0, 10.0, 0.0),
-                rotation: (-0.3134759, -0.2194982, 0.0, 0.9238795),
+                rotation: (-0.034, -0.8887, -0.0668, 0.4523),
                 scale: (1.0, 1.0, 1.0),
             ),
         ),
@@ -477,6 +790,59 @@
                 translation: (20.5, 2.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 4.0, 40.0),
+            ),
+        ),
+        "d40f49acc6e806c2": (
+            Light: (
+                kind: Point,
+                color: (1.0, 0.094, 0.071),
+                intensity: 12000.0,
+                range: Some(4.0),
+                inner_cone: 0.0,
+                outer_cone: 0.7853982,
+                shadows: false,
+                shadow_distance: 100.0,
+            ),
+            Name: ("Glow"),
+            Parent: ("bd299753a7677796"),
+            ParticleEmitter: (
+                rate: 8.0,
+                burst: 0,
+                bursts: 0,
+                lifetime: [
+                    1.0,
+                    1.0,
+                ],
+                speed: [
+                    0.0,
+                    0.0,
+                ],
+                shape: Point,
+                acceleration: (0.0, 0.0, 0.0),
+                drag: 0.0,
+                size: [
+                    1.5,
+                    1.5,
+                ],
+                color: [
+                    (2.5, 0.235, 0.176, 0.13),
+                    (2.5, 0.235, 0.176, 0.0),
+                ],
+                spin: [
+                    0.0,
+                    0.0,
+                ],
+                texture: None,
+                cells: [
+                    1,
+                    1,
+                ],
+                blend: Additive,
+            ),
+            Transform: (
+                translation: (0.0, 0.1, 0.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
             ),
         ),
         "dae445508201e2bd": (
@@ -508,7 +874,7 @@
         ),
         "db5b5fab8f4d3e27": (
             Environment: (
-                exposure: 15.0,
+                exposure: 13.5,
                 adaptation: None,
                 tonemapper: PbrNeutral,
                 antialiasing: Taa,
@@ -538,7 +904,17 @@
                     radius: 0.5,
                     strength: 1.0,
                 )),
-                fog: None,
+                fog: Some((
+                    density: 0.012,
+                    falloff: 0.15,
+                    height: 0.0,
+                    start: 10.0,
+                    opacity: 0.8,
+                    color: (1.0, 0.65, 0.45),
+                    luminance: 8000.0,
+                    sun: 1.0,
+                    sharpness: 0.7,
+                )),
                 reflections: None,
                 depth_of_field: None,
                 motion_blur: None,

@@ -6,10 +6,60 @@ use gg_engine::prelude::*;
 pub(crate) const PLAYER_HP: i32 = 30;
 pub(crate) const ENERGY: i32 = 3;
 pub(crate) const ENEMY_HP: i32 = 40;
-/// What the enemy's fixed intent deals each turn.
-pub(crate) const ENEMY_ATTACK: i32 = 8;
+/// What the enemy's plain attack deals; its big hit deals twice that.
+pub(crate) const ENEMY_ATTACK: i32 = 5;
+/// The block the enemy's guard gives it until its next turn.
+pub(crate) const ENEMY_GUARD: i32 = 6;
 /// Cards drawn at the start of each turn.
-pub(crate) const HAND: usize = 5;
+pub(crate) const HAND: usize = 6;
+
+/// How a fight stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+pub(crate) enum Outcome {
+    #[default]
+    Fighting,
+    Won,
+    Lost,
+}
+
+/// What the enemy will do at the end of the turn, which the player sees to plan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+pub(crate) enum Intent {
+    #[default]
+    Attack,
+    BigHit,
+    Guard,
+}
+
+impl Intent {
+    /// Damage dealt to the player, before their block.
+    pub(crate) fn damage(self) -> i32 {
+        match self {
+            Self::Attack => ENEMY_ATTACK,
+            Self::BigHit => ENEMY_ATTACK * 2,
+            Self::Guard => 0,
+        }
+    }
+
+    /// Block the enemy gains, which holds until its next turn.
+    pub(crate) fn block(self) -> i32 {
+        match self {
+            Self::Guard => ENEMY_GUARD,
+            Self::Attack | Self::BigHit => 0,
+        }
+    }
+}
+
+impl std::fmt::Display for Intent {
+    /// The plan as the UI shows it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.damage(), self.block()) {
+            (damage, 0) if *self == Self::BigHit => write!(f, "BIG HIT FOR {damage}"),
+            (damage, 0) => write!(f, "ATTACKS FOR {damage}"),
+            (_, block) => write!(f, "BLOCKS FOR {block}"),
+        }
+    }
+}
 
 /// A kind of card. Its effect is `scripts/effects.luau`'s, indexed by its place here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
@@ -18,6 +68,7 @@ pub(crate) enum Card {
     Strike,
     Defend,
     Heavy,
+    Poison,
 }
 
 impl Card {
@@ -25,7 +76,7 @@ impl Card {
     pub(crate) fn damage(self) -> i32 {
         match self {
             Self::Strike => 6,
-            Self::Defend => 0,
+            Self::Defend | Self::Poison => 0,
             Self::Heavy => 12,
         }
     }
@@ -33,13 +84,21 @@ impl Card {
     pub(crate) fn block(self) -> i32 {
         match self {
             Self::Defend => 5,
-            Self::Strike | Self::Heavy => 0,
+            Self::Strike | Self::Heavy | Self::Poison => 0,
+        }
+    }
+
+    /// Poison put on the enemy.
+    pub(crate) fn poison(self) -> i32 {
+        match self {
+            Self::Poison => 3,
+            Self::Strike | Self::Defend | Self::Heavy => 0,
         }
     }
 
     pub(crate) fn cost(self) -> i32 {
         match self {
-            Self::Strike | Self::Defend => 1,
+            Self::Strike | Self::Defend | Self::Poison => 1,
             Self::Heavy => 2,
         }
     }
@@ -49,6 +108,7 @@ impl Card {
             Self::Strike => "STRIKE",
             Self::Defend => "DEFEND",
             Self::Heavy => "HEAVY",
+            Self::Poison => "POISON",
         }
     }
 }
@@ -57,9 +117,10 @@ impl std::fmt::Display for Card {
     /// The card's button text: name, effect and cost.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (title, cost) = (self.title(), self.cost());
-        match (self.damage(), self.block()) {
-            (damage, 0) => write!(f, "{title}\n{damage} DAMAGE\nCOST {cost}"),
-            (_, block) => write!(f, "{title}\n{block} BLOCK\nCOST {cost}"),
+        match (self.damage(), self.block(), self.poison()) {
+            (damage, 0, 0) => write!(f, "{title}\n{damage} DAMAGE\nCOST {cost}"),
+            (_, 0, poison) => write!(f, "{title}\n{poison} POISON\nCOST {cost}"),
+            (_, block, _) => write!(f, "{title}\n{block} BLOCK\nCOST {cost}"),
         }
     }
 }
@@ -71,6 +132,14 @@ pub(crate) struct Fight {
     pub(crate) player_block: i32,
     pub(crate) energy: i32,
     pub(crate) enemy_hp: i32,
+    /// Health the enemy loses at the start of its turn; it then goes down by one.
+    pub(crate) enemy_poison: i32,
+    /// Absorbs the player's damage until the enemy's next turn.
+    pub(crate) enemy_block: i32,
+    /// What the enemy does when the turn ends.
+    pub(crate) intent: Intent,
+    /// Won or lost fights stay as they are, for the player to see, until a new one starts.
+    pub(crate) outcome: Outcome,
     /// From 1 as a fight starts; 0 before it has.
     pub(crate) turn: u32,
     /// What shuffles draw from, so a run is the same from its seed.
@@ -85,7 +154,12 @@ pub(crate) struct Fight {
 }
 
 /// The cards of a new deck: ten of them.
-const DECK: [(Card, usize); 3] = [(Card::Strike, 5), (Card::Defend, 3), (Card::Heavy, 2)];
+const DECK: [(Card, usize); 4] = [
+    (Card::Strike, 3),
+    (Card::Defend, 3),
+    (Card::Heavy, 2),
+    (Card::Poison, 2),
+];
 
 impl Fight {
     /// Starts a fight: the piles rebuilt (keeping their room), the numbers full, the first hand
@@ -100,8 +174,21 @@ impl Fight {
         self.rng.shuffle(&mut self.deck);
         self.player_hp = PLAYER_HP;
         self.enemy_hp = ENEMY_HP;
+        self.enemy_poison = 0;
+        self.enemy_block = 0;
+        self.outcome = Outcome::Fighting;
+        self.plan();
         self.turn = 1;
         self.begin_turn();
+    }
+
+    /// Chooses the enemy's next move: mostly plain attacks, sometimes a big hit or a guard.
+    fn plan(&mut self) {
+        self.intent = match self.rng.below(4) {
+            0 | 1 => Intent::Attack,
+            2 => Intent::BigHit,
+            _ => Intent::Guard,
+        };
     }
 
     fn begin_turn(&mut self) {
@@ -129,42 +216,59 @@ impl Fight {
         let Some(&card) = self.hand.get(slot) else {
             return false;
         };
+        if self.outcome != Outcome::Fighting {
+            return false;
+        }
         if card.cost() > self.energy {
             return false;
         }
         self.energy -= card.cost();
         self.hand.remove(slot);
         self.discard.push(card);
-        self.enemy_hp -= card.damage();
+        let absorbed = card.damage().min(self.enemy_block);
+        self.enemy_block -= absorbed;
+        self.enemy_hp -= card.damage() - absorbed;
+        self.enemy_poison += card.poison();
         self.player_block += card.block();
         true
     }
 
     /// Ends the turn: the hand is discarded, the enemy attacks (block first), a new turn begins.
     pub(crate) fn end_turn(&mut self) {
+        if self.outcome != Outcome::Fighting {
+            return;
+        }
         self.discard.append(&mut self.hand);
-        let through = (ENEMY_ATTACK - self.player_block).max(0);
-        self.player_hp -= through;
+        // The enemy's turn begins: poison first, and a dead enemy doesn't attack.
+        self.enemy_hp -= self.enemy_poison;
+        self.enemy_poison = (self.enemy_poison - 1).max(0);
+        if self.enemy_hp > 0 {
+            self.enemy_block = self.intent.block();
+            let through = (self.intent.damage() - self.player_block).max(0);
+            self.player_hp -= through;
+            self.plan();
+        }
         self.turn += 1;
         if self.player_hp > 0 {
             self.begin_turn();
         }
     }
 
-    /// Ends the fight if either side is down: records its result for the script to log, and
-    /// restarts.
+    /// Ends the fight if either side is down: records the outcome, and its result for the script
+    /// to log. A new fight starts only with [`start`](Self::start).
     pub(crate) fn settle(&mut self) {
-        let result = if self.enemy_hp <= 0 {
+        if self.outcome != Outcome::Fighting {
+            return;
+        }
+        if self.enemy_hp <= 0 {
             self.wins += 1;
-            1
+            self.outcome = Outcome::Won;
+            self.result = 1;
         } else if self.player_hp <= 0 {
             self.losses += 1;
-            2
-        } else {
-            return;
-        };
-        self.start();
-        self.result = result;
+            self.outcome = Outcome::Lost;
+            self.result = 2;
+        }
     }
 }
 
@@ -182,10 +286,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fight_starts_with_a_hand_of_five_from_ten() {
+    fn a_fight_starts_with_a_hand_of_six_from_ten() {
         let fight = started();
         assert_eq!(fight.hand.len(), HAND);
-        assert_eq!(fight.deck.len(), 5);
+        assert_eq!(fight.deck.len(), 10 - HAND);
         assert_eq!(fight.energy, ENERGY);
     }
 
@@ -201,15 +305,62 @@ mod tests {
     }
 
     #[test]
+    fn the_enemy_does_what_it_planned() {
+        let mut fight = started();
+        fight.intent = Intent::BigHit;
+        fight.end_turn();
+        assert_eq!(fight.player_hp, PLAYER_HP - 2 * ENEMY_ATTACK);
+        fight.intent = Intent::Guard;
+        fight.end_turn();
+        assert_eq!(fight.player_hp, PLAYER_HP - 2 * ENEMY_ATTACK);
+        assert_eq!(fight.enemy_block, ENEMY_GUARD);
+    }
+
+    #[test]
+    fn enemy_block_absorbs_damage_until_its_next_turn() {
+        let mut fight = started();
+        fight.enemy_block = 4;
+        fight.hand = vec![Card::Strike, Card::Strike];
+        assert!(fight.play(0));
+        assert_eq!((fight.enemy_block, fight.enemy_hp), (0, ENEMY_HP - 2));
+        assert!(fight.play(0));
+        assert_eq!(fight.enemy_hp, ENEMY_HP - 8);
+    }
+
+    #[test]
     fn block_absorbs_the_attack_first() {
         let mut fight = started();
-        fight.player_block = 5;
+        fight.intent = Intent::Attack;
+        fight.player_block = 2;
         fight.end_turn();
-        assert_eq!(fight.player_hp, PLAYER_HP - 3);
+        assert_eq!(fight.player_hp, PLAYER_HP - (ENEMY_ATTACK - 2));
         assert_eq!(fight.player_block, 0);
+        fight.intent = Intent::Attack;
         fight.player_block = 20;
         fight.end_turn();
-        assert_eq!(fight.player_hp, PLAYER_HP - 3);
+        assert_eq!(fight.player_hp, PLAYER_HP - (ENEMY_ATTACK - 2));
+    }
+
+    #[test]
+    fn poison_hurts_the_enemy_each_turn_and_wanes() {
+        let mut fight = started();
+        fight.hand = vec![Card::Poison];
+        assert!(fight.play(0));
+        assert_eq!(fight.enemy_poison, 3);
+        fight.end_turn();
+        assert_eq!((fight.enemy_hp, fight.enemy_poison), (ENEMY_HP - 3, 2));
+        fight.end_turn();
+        assert_eq!((fight.enemy_hp, fight.enemy_poison), (ENEMY_HP - 5, 1));
+    }
+
+    #[test]
+    fn a_poisoned_enemy_that_falls_does_not_attack() {
+        let mut fight = started();
+        fight.enemy_hp = 2;
+        fight.enemy_poison = 3;
+        fight.intent = Intent::BigHit;
+        fight.end_turn();
+        assert_eq!(fight.player_hp, PLAYER_HP);
     }
 
     #[test]
@@ -235,13 +386,33 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_fight_restarts() {
+    fn a_lost_fight_waits_for_a_new_one() {
         let mut fight = started();
         fight.player_hp = 0;
         fight.settle();
+        assert_eq!((fight.losses, fight.result), (1, 2));
+        assert_eq!(fight.outcome, Outcome::Lost);
+        fight.settle();
+        assert_eq!(fight.losses, 1, "a lost fight counts once");
+        assert!(!fight.play(0), "no card plays after the fight");
+        let turn = fight.turn;
+        fight.end_turn();
+        assert_eq!(fight.turn, turn);
+        fight.start();
         assert_eq!(
-            (fight.losses, fight.result, fight.player_hp),
-            (1, 2, PLAYER_HP)
+            (fight.outcome, fight.player_hp),
+            (Outcome::Fighting, PLAYER_HP)
+        );
+    }
+
+    #[test]
+    fn a_won_fight_counts_a_win() {
+        let mut fight = started();
+        fight.enemy_hp = 0;
+        fight.settle();
+        assert_eq!(
+            (fight.wins, fight.result, fight.outcome),
+            (1, 1, Outcome::Won)
         );
     }
 }

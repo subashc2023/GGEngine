@@ -49,6 +49,43 @@ fn the_scene_loads_and_saves_as_it_is() {
     assert_eq!(saved, text);
 }
 
+/// A dodge rolls the player along its walk at `roll_speed`, and another before `roll_cooldown` is
+/// up does nothing; once it's up, one rolls again.
+#[test]
+fn a_dodge_rolls_and_waits_out_its_cooldown() {
+    let (mut cx, mut game, _) = loaded();
+    // Lands on the floor first, then walks right.
+    run(&mut cx, &mut game, 64);
+    let heading = Vec2::new(1.0, 0.0);
+    apply(cx.world_mut(), &Command::Steer { heading });
+    apply(cx.world_mut(), &Command::Dodge);
+    run(&mut cx, &mut game, 1);
+    let (entity, _) = player(cx.world());
+    let rolled = |cx: &Context| *cx.world().get::<Player>(entity).expect("a player");
+    let rolling = rolled(&cx);
+    assert!(
+        rolling.rolling > 0.0 && rolling.roll_way.x > 0.99,
+        "{:?}",
+        rolling.roll_way
+    );
+    let velocity = cx
+        .world()
+        .get::<CharacterController3D>(entity)
+        .expect("one")
+        .velocity;
+    assert!((velocity.x - rolling.roll_speed).abs() < 1e-4, "{velocity}");
+    // Past the roll, inside the cooldown: a dodge is dropped, not kept for later.
+    let ticks = |seconds: f32| (seconds / Tick::DT.as_secs_f32()).ceil() as u64;
+    run(&mut cx, &mut game, ticks(rolling.roll_time));
+    apply(cx.world_mut(), &Command::Dodge);
+    run(&mut cx, &mut game, 1);
+    assert_eq!(rolled(&cx).rolling, 0.0);
+    run(&mut cx, &mut game, ticks(rolling.roll_cooldown));
+    apply(cx.world_mut(), &Command::Dodge);
+    run(&mut cx, &mut game, 1);
+    assert!(rolled(&cx).rolling > 0.0);
+}
+
 /// Forward walks the player away from the camera, a jump lifts it, and the camera follows.
 #[test]
 fn the_player_walks_forward_jumps_and_the_camera_follows() {
@@ -124,6 +161,23 @@ fn a_shot_removes_the_target_it_hits() {
         run(&mut cx, &mut game, 1);
     }
     apply(cx.world_mut(), &Command::Fire);
+    // Knocked, not gone: it tumbles, and goes after TOPPLE seconds.
+    assert_eq!(targets(cx.world()), 5);
+    let fallen = *cx.world().get::<Target>(aimed).expect("it still tumbles");
+    assert!(fallen.fall > 0.0);
+    let body = *cx.world().get::<RigidBody3D>(aimed).expect("a body");
+    assert_eq!(body.body_type, BodyType::Dynamic);
+    // A second shot at it scores nothing more.
+    apply(cx.world_mut(), &Command::Fire);
+    assert_eq!(
+        cx.world().query::<&Score>().next().expect("a score").hits,
+        1
+    );
+    run(
+        &mut cx,
+        &mut game,
+        (TOPPLE / Tick::DT.as_secs_f32()).ceil() as u64 + 2,
+    );
     assert!(!cx.world().contains(aimed));
     assert_eq!(targets(cx.world()), 4);
     let score = *cx.world().query::<&Score>().next().expect("a score");
