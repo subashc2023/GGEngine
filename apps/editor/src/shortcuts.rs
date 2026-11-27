@@ -44,6 +44,11 @@ pub const SHORTCUTS: [Shortcut; 10] = [
     view(Key::KeyF, Does::Frame),
 ];
 
+/// The keys of the Inspector's shortcuts with the command key, by position as [`SHORTCUTS`]' are:
+/// Duplicate's D, Undo's Z, and Redo's Shift+Z and Y. The Inspector acts on them in every mode, so
+/// in Play the game doesn't get them, as it doesn't the File menu's.
+pub const INSPECTOR_KEYS: [Key; 3] = [Key::KeyD, Key::KeyZ, Key::KeyY];
+
 const fn file(key: Key, shift: bool, item: Item) -> Shortcut {
     Shortcut {
         key,

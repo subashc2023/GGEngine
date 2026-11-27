@@ -7,7 +7,7 @@ use gg_api::InputEvent;
 use gg_engine::{Event, Key, MouseButton, Scroll, Viewport};
 
 use crate::handles::Reading;
-use crate::shortcuts::{Does, SHORTCUTS, Shortcut};
+use crate::shortcuts::{Does, INSPECTOR_KEYS, SHORTCUTS, Shortcut};
 
 use super::{Game, Grab, Probing, along, picked};
 
@@ -20,8 +20,8 @@ impl Game {
     ///   editor's camera.
     /// - Otherwise the tools take it, the game gets nothing, and a press off the handles asks the
     ///   game for a pick.
-    /// - In every mode, neither gets a File menu shortcut's key, as [`shortcuts_key`] says; in
-    ///   Play, nor Shift+F1's, which frees the cursor.
+    /// - In every mode, neither gets the key of a File menu or Inspector shortcut, as
+    ///   [`shortcuts_key`] says; in Play, nor Shift+F1's, which frees the cursor.
     pub(super) fn route(
         &mut self,
         event: &Event<'_>,
@@ -126,10 +126,10 @@ impl Game {
     }
 }
 
-/// Whether `event` is a press, or a repeat, of a File menu key in [`SHORTCUTS`] (matched by
-/// position, whatever the layout calls it) with `command` held, Ctrl or Cmd on macOS, which the
-/// menu takes from egui: neither the game nor the view's tools get it. Its release does, which
-/// changes nothing without its press.
+/// Whether `event` is a press, or a repeat, with `command` held, Ctrl or Cmd on macOS, of a key
+/// the editor takes from egui (matched by position, whatever the layout calls it): a File menu key
+/// in [`SHORTCUTS`], or one of [`INSPECTOR_KEYS`]. Neither the game nor the view's tools get it.
+/// Its release does, which changes nothing without its press.
 fn shortcuts_key(event: &Event<'_>, command: bool) -> bool {
     let Event::Key {
         key, pressed: true, ..
@@ -138,7 +138,7 @@ fn shortcuts_key(event: &Event<'_>, command: bool) -> bool {
         return false;
     };
     let file = |shortcut: &Shortcut| matches!(shortcut.does, Does::File(_)) && shortcut.key == key;
-    command && SHORTCUTS.iter().any(file)
+    command && (SHORTCUTS.iter().any(file) || INSPECTOR_KEYS.contains(&key))
 }
 
 /// Whether `event` is a press, or a repeat, of F1 with `shift` held, which frees the cursor. Its

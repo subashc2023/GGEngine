@@ -1102,11 +1102,11 @@ fn the_first_frame_through_the_games_camera_turns_the_view_to_the_editors() {
     assert!(game.view.toolbar.world_camera, "the user's turn");
 }
 
-/// In Play, a press or repeat of N, O or S with the command key, a File menu shortcut, goes neither
-/// to the game nor to the view's tools. Its release does, as do other keys with it, and those keys
-/// without it.
+/// In Play, a press or repeat with the command key of N, O or S, a File menu shortcut, or of D, Z
+/// or Y, the Inspector's, goes neither to the game nor to the view's tools. Its release does, as do
+/// other keys with it, and those keys without it.
 #[test]
-fn the_file_menus_shortcuts_keys_dont_reach_the_game() {
+fn the_editors_shortcuts_keys_dont_reach_the_game() {
     let (mut game, _ends) = serving();
     let at = [300.0, 200.0];
     let mut command = reading(at);
@@ -1121,6 +1121,10 @@ fn the_file_menus_shortcuts_keys_dont_reach_the_game() {
         key(Key::KeyS, true, true),
         key(Key::KeyN, true, false),
         key(Key::KeyO, true, false),
+        key(Key::KeyD, true, false),
+        key(Key::KeyZ, true, false),
+        key(Key::KeyZ, true, true),
+        key(Key::KeyY, true, false),
     ] {
         let routed = game.route(&event, &command, Some(VIEW));
         assert_eq!(routed, ControlFlow::Continue(()), "{event:?}");
@@ -1129,12 +1133,18 @@ fn the_file_menus_shortcuts_keys_dont_reach_the_game() {
     let _ = game.route(&key(Key::KeyS, false, false), &command, Some(VIEW));
     let _ = game.route(&key(Key::KeyW, true, false), &command, Some(VIEW));
     let _ = game.route(&key(Key::KeyS, true, false), &reading(at), Some(VIEW));
+    let _ = game.route(&key(Key::KeyD, true, false), &reading(at), Some(VIEW));
     let sent = |key: &str, pressed| InputEvent::Key {
         key: key.to_owned(),
         pressed,
         repeat: false,
     };
-    let expected = [sent("KeyS", false), sent("KeyW", true), sent("KeyS", true)];
+    let expected = [
+        sent("KeyS", false),
+        sent("KeyW", true),
+        sent("KeyS", true),
+        sent("KeyD", true),
+    ];
     assert_eq!(game.input, expected);
 }
 
