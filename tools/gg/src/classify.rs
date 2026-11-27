@@ -5,17 +5,17 @@ use std::collections::BTreeMap;
 use syn::visit_mut::{self, VisitMut};
 use syn::{
     Attribute, Block, Expr, ExprInfer, File, GenericArgument, Ident, ImplItem, ImplItemConst,
-    ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod, ItemUse, Macro, Stmt, TraitItemConst,
-    TraitItemFn, Type, UseRename,
+    ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod, ItemUse, Macro, MetaList, Signature,
+    Stmt, TraitItemConst, TraitItemFn, Type, UseRename, UseTree, Visibility,
 };
 
 /// What an edit to a module is, as a patch sees it.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Edit {
-    /// Inside function bodies and constants' values, which a patch carries. `attach` if among them
-    /// is a `Layer` impl's `attach`, which builds the world only as a run starts afresh, not in one
-    /// that keeps it. `consts` names the constants whose values differ, sorted: a patch carries
-    /// them only where [`uses`] says.
+    /// Inside what a patch carries: function bodies, constants' values, `use`s, and functions
+    /// added, removed or re-signed. `attach` if among them is a `Layer` impl's `attach`, which
+    /// builds the world only as a run starts afresh, not in one that keeps it. `consts` names the
+    /// constants whose values differ, sorted: a patch carries them only where [`uses`] says.
     Bodies { attach: bool, consts: Vec<String> },
     /// Only items under `#[cfg(test)]` differ, which the game's binary doesn't hold: nothing to
     /// patch.
@@ -31,12 +31,17 @@ pub(crate) enum Edit {
 ///
 /// `Same` if the two differ only in items under `#[cfg(test)]`. Else inside function bodies if the
 /// two are the same token for token, but for non-`const` function bodies (their declared items
-/// aside), constants' values and doc comments, leaving out items under `#[cfg(test)]`.
+/// aside), constants' values, doc comments, `use`s and the functions [`free`] lets come and go,
+/// leaving out items under `#[cfg(test)]`.
 ///
 /// An edit inside code that runs as the game starts (`main`, a `Layer`'s `load` and `restored`)
 /// needs a rebuild: a patch would come after they ran. So does an edit to code only they call,
 /// which gg can't tell. An edit inside `attach` is patched and told of: no patch builds the world
 /// again.
+///
+/// A patch carries a changed `use` where function bodies alone use the names it brings in, matched
+/// as words, as [`uses`] matches constants. A `pub use` or a glob's could change names gg can't
+/// see: they rebuild.
 ///
 /// Old text that doesn't parse can't be compared with: any edit to it rebuilds.
 pub(crate) fn classify(old: &str, new: &str) -> Edit {
@@ -54,29 +59,90 @@ pub(crate) fn classify(old: &str, new: &str) -> Edit {
             return Edit::Same;
         }
     }
-    let (old_bare, old_values) = bare(old.clone(), Keep::None);
-    let (new_bare, new_values) = bare(new.clone(), Keep::None);
-    if old_bare != new_bare || old_values.len() != new_values.len() {
+    let old_bare = bare(old.clone(), Keep::None);
+    let new_bare = bare(new.clone(), Keep::None);
+    if old_bare.file != new_bare.file || old_bare.values.len() != new_bare.values.len() {
         return Edit::Rebuild("an edit outside function bodies");
     }
-    if bare(old.clone(), Keep::Startup).0 != bare(new.clone(), Keep::Startup).0 {
+    let names = match renamed(&old_bare.uses, &new_bare.uses) {
+        Ok(names) => names,
+        Err(why) => return Edit::Rebuild(why),
+    };
+    if bare(old.clone(), Keep::Startup).file != bare(new.clone(), Keep::Startup).file {
         return Edit::Rebuild(STARTS);
     }
+    let mut attach = bare(old, Keep::Attach).file != bare(new.clone(), Keep::Attach).file;
+    if !names.is_empty() {
+        match named(new, names) {
+            Ok(in_attach) => attach |= in_attach,
+            Err(why) => return Edit::Rebuild(why),
+        }
+    }
     // The trees match, so their constants come in the same order.
-    let values = old_values.into_iter().zip(new_values);
+    let values = old_bare.values.into_iter().zip(new_bare.values);
     let mut consts: Vec<String> = values
         .filter(|(old, new)| old != new)
         .map(|((name, _), _)| name)
         .collect();
     consts.sort();
     consts.dedup();
-    Edit::Bodies {
-        attach: bare(old, Keep::Attach).0 != bare(new, Keep::Attach).0,
-        consts,
+    Edit::Bodies { attach, consts }
+}
+
+/// The names `use`s bring in that differ from `old` to `new`, each with index 0 as [`Find`] takes
+/// them; or why a patch can't carry the change.
+fn renamed(old: &[Binding], new: &[Binding]) -> Result<BTreeMap<String, usize>, &'static str> {
+    // Counted, as one of two alike, in different modules or bodies, may change alone.
+    let mut counts: BTreeMap<&Binding, isize> = BTreeMap::new();
+    for binding in old {
+        *counts.entry(binding).or_default() += 1;
+    }
+    for binding in new {
+        *counts.entry(binding).or_default() -= 1;
+    }
+    let mut names = BTreeMap::new();
+    for (binding, _) in counts.into_iter().filter(|&(_, count)| count != 0) {
+        if binding.public {
+            return Err(PUBLIC_USE);
+        }
+        match &binding.name {
+            None => return Err(GLOB),
+            Some(name) if name != "_" => {
+                names.insert(name.clone(), 0);
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(names)
+}
+
+/// Whether code a patch doesn't carry uses any of `names`, which changed `use`s bring in: `Ok`
+/// with whether a `Layer` impl's `attach` does, or why a patch can't carry the change.
+fn named(mut file: File, names: BTreeMap<String, usize>) -> Result<bool, &'static str> {
+    untested(&mut file);
+    Free(Vec::new()).visit_file_mut(&mut file);
+    let mut find = Find {
+        names,
+        kind: Kind::Use,
+        place: Place::Item,
+        types: 0,
+        layer: false,
+        attach: Vec::new(),
+        found: None,
+    };
+    find.visit_file_mut(&mut file);
+    match find.found {
+        Some((_, why)) => Err(why),
+        None => Ok(!find.attach.is_empty()),
     }
 }
 
 const STARTS: &str = "an edit to code that runs as the game starts, as a patch comes after";
+const PUBLIC_USE: &str = "an edit to a `pub use`, which other modules may import through";
+const GLOB: &str = "an edit to a glob `use`, whose names gg can't tell";
+const USED_OUTSIDE: &str = "an edit to a `use` of a name used outside function bodies";
+const USED_AT_START: &str =
+    "an edit to a `use` of a name code that runs as the game starts uses, as a patch comes after";
 pub(crate) const IN_A_TYPE: &str =
     "an edit to a constant a type uses, as an array's length or a generic argument";
 pub(crate) const OUTSIDE_BODIES: &str =
@@ -129,6 +195,7 @@ pub(crate) fn uses(texts: &[&str], edited: &[String]) -> Uses {
     }
     let mut find = Find {
         names,
+        kind: Kind::Const,
         place: Place::Item,
         types: 0,
         layer: false,
@@ -195,7 +262,7 @@ fn words(expr: &mut Expr) -> Vec<String> {
         }
 
         fn visit_macro_mut(&mut self, mac: &mut Macro) {
-            self.0.extend(tokens(mac));
+            self.0.extend(tokens(&mac.tokens));
         }
     }
     let mut words = Words(Vec::new());
@@ -203,9 +270,9 @@ fn words(expr: &mut Expr) -> Vec<String> {
     words.0
 }
 
-/// The words in a macro's tokens, inside its literals too.
-fn tokens(mac: &Macro) -> Vec<String> {
-    let text = mac.tokens.to_string();
+/// The words in a macro's or an attribute's tokens, inside their literals too.
+fn tokens(tokens: &impl ToString) -> Vec<String> {
+    let text = tokens.to_string();
     let words = text.split(|c: char| !(c.is_alphanumeric() || c == '_'));
     words
         .filter(|word| !word.is_empty())
@@ -228,10 +295,20 @@ enum Place {
     Attach,
 }
 
+/// What [`Find`] looks for the uses of.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// Edited constants, whose uses in a type rebuild even in a body.
+    Const,
+    /// Names changed `use`s bring in, which a body may use anywhere.
+    Use,
+}
+
 /// Finds the first use of a name a patch can't carry, and the uses in `attach`.
 struct Find {
-    /// Each name an edited constant reaches, with that constant's index.
+    /// Each name sought, with the index of the edited constant it reaches.
     names: BTreeMap<String, usize>,
+    kind: Kind,
     place: Place,
     /// How many types the word is inside.
     types: u32,
@@ -246,15 +323,17 @@ impl Find {
         let Some(&at) = self.names.get(word) else {
             return;
         };
-        let why = match self.place {
-            _ if self.types > 0 => IN_A_TYPE,
-            Place::Item => OUTSIDE_BODIES,
-            Place::Startup => AT_START,
-            Place::Attach => {
+        let why = match (self.kind, self.place) {
+            (Kind::Const, _) if self.types > 0 => IN_A_TYPE,
+            (Kind::Const, Place::Item) => OUTSIDE_BODIES,
+            (Kind::Const, Place::Startup) => AT_START,
+            (Kind::Use, Place::Item | Place::Value) => USED_OUTSIDE,
+            (Kind::Use, Place::Startup) => USED_AT_START,
+            (_, Place::Attach) => {
                 self.attach.push(at);
                 return;
             }
-            Place::Value | Place::Body => return,
+            (_, Place::Value | Place::Body) => return,
         };
         self.found.get_or_insert((at, why));
     }
@@ -355,7 +434,15 @@ impl VisitMut for Find {
     }
 
     fn visit_macro_mut(&mut self, mac: &mut Macro) {
-        for word in tokens(mac) {
+        for word in tokens(&mac.tokens) {
+            self.word(&word);
+        }
+    }
+
+    /// An attribute's arguments, as the names a derive takes.
+    fn visit_meta_list_mut(&mut self, list: &mut MetaList) {
+        visit_mut::visit_meta_list_mut(self, list);
+        for word in tokens(&list.tokens) {
             self.word(&word);
         }
     }
@@ -380,10 +467,10 @@ enum Keep {
     Attach,
 }
 
-/// `file` without doc comments (`#[doc]` attributes), `#[cfg(test)]` items, constants' values and
-/// non-`const` function bodies, but for the items declared in them and the bodies `keep` keeps;
-/// and each constant's name and value, in the order the tree holds them.
-fn bare(mut file: File, keep: Keep) -> (File, Vec<(String, Expr)>) {
+/// `file` without doc comments (`#[doc]` attributes), `#[cfg(test)]` items, `use`s, the functions
+/// [`free`] lets come and go, constants' values and non-`const` function bodies, but for the items
+/// declared in them and the bodies `keep` keeps.
+fn bare(mut file: File, keep: Keep) -> Bared {
     untested(&mut file);
     let mut bare = Bare {
         keep,
@@ -391,7 +478,179 @@ fn bare(mut file: File, keep: Keep) -> (File, Vec<(String, Expr)>) {
         values: Vec::new(),
     };
     bare.visit_file_mut(&mut file);
-    (file, bare.values)
+    let mut free = Free(Vec::new());
+    free.visit_file_mut(&mut file);
+    Bared {
+        file,
+        values: bare.values,
+        uses: free.0,
+    }
+}
+
+/// A module as [`bare`] leaves it.
+struct Bared {
+    file: File,
+    /// Each constant's name and value, in the order the tree holds them.
+    values: Vec<(String, Expr)>,
+    /// What its `use`s bring in.
+    uses: Vec<Binding>,
+}
+
+/// A name a `use` brings in.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Binding {
+    /// Whether it's more than private, so other modules may import through it.
+    public: bool,
+    /// `None` for a glob's; `_` for a trait's brought in for its methods alone.
+    name: Option<String>,
+    path: String,
+}
+
+/// Collects into `into` what `item` brings in.
+fn bindings(item: &ItemUse, into: &mut Vec<Binding>) {
+    fn walk(tree: &UseTree, path: String, public: bool, into: &mut Vec<Binding>) {
+        let mut bind = |name: Option<String>, path: String| {
+            into.push(Binding { public, name, path });
+        };
+        match tree {
+            UseTree::Path(step) => {
+                walk(&step.tree, format!("{path}{}::", step.ident), public, into)
+            }
+            UseTree::Name(leaf) if leaf.ident == "self" => {
+                let parent = path.trim_end_matches("::").rsplit("::").next();
+                bind(parent.map(str::to_owned), format!("{path}self"));
+            }
+            UseTree::Name(leaf) => bind(
+                Some(leaf.ident.to_string()),
+                format!("{path}{}", leaf.ident),
+            ),
+            UseTree::Rename(leaf) => {
+                bind(
+                    Some(leaf.rename.to_string()),
+                    format!("{path}{}", leaf.ident),
+                );
+            }
+            UseTree::Glob(_) => bind(None, path),
+            UseTree::Group(group) => {
+                for tree in &group.items {
+                    walk(tree, path.clone(), public, into);
+                }
+            }
+        }
+    }
+    let public = !matches!(item.vis, Visibility::Inherited);
+    let root = if item.leading_colon.is_some() {
+        "::"
+    } else {
+        ""
+    };
+    walk(&item.tree, root.to_owned(), public, into);
+}
+
+/// Takes `use`s out of a tree, collecting what they bring in, and the functions [`free`] lets come
+/// and go, with the inherent impls they leave empty.
+struct Free(Vec<Binding>);
+
+impl Free {
+    /// Whether `item` stays in the tree.
+    fn stays(&mut self, item: &mut Item) -> bool {
+        match item {
+            Item::Use(item) => {
+                bindings(item, &mut self.0);
+                false
+            }
+            Item::Fn(item) => !free(&item.attrs, &item.sig, &mut item.block),
+            Item::Impl(item) => {
+                !(item.trait_.is_none() && item.items.is_empty() && plain(&item.attrs))
+            }
+            _ => true,
+        }
+    }
+}
+
+impl VisitMut for Free {
+    fn visit_file_mut(&mut self, file: &mut File) {
+        visit_mut::visit_file_mut(self, file);
+        file.items.retain_mut(|item| self.stays(item));
+    }
+
+    fn visit_item_mod_mut(&mut self, item: &mut ItemMod) {
+        visit_mut::visit_item_mod_mut(self, item);
+        if let Some((_, items)) = &mut item.content {
+            items.retain_mut(|item| self.stays(item));
+        }
+    }
+
+    fn visit_block_mut(&mut self, block: &mut Block) {
+        visit_mut::visit_block_mut(self, block);
+        block.stmts.retain_mut(|stmt| match stmt {
+            Stmt::Item(item) => self.stays(item),
+            _ => true,
+        });
+    }
+
+    fn visit_item_impl_mut(&mut self, item: &mut ItemImpl) {
+        visit_mut::visit_item_impl_mut(self, item);
+        if item.trait_.is_none() && plain(&item.attrs) {
+            item.items.retain_mut(|item| match item {
+                ImplItem::Fn(item) => !free(&item.attrs, &item.sig, &mut item.block),
+                _ => true,
+            });
+        }
+    }
+}
+
+/// Whether a patch may add, remove or re-sign the function, free or an inherent impl's. A patch
+/// recompiles all its callers in the game's crate. `HotFn`, the one way into patched code, calls
+/// only `Layer` methods, whose trait fixes them. Not if it's:
+/// - a `const fn`, which the build may evaluate into a type or a static;
+/// - `main`, or of another ABI, which code outside the crate calls;
+/// - given an attribute that may add code or change its symbol, as a macro's or `#[no_mangle]`;
+/// - declaring items, as the running game may hold values of a type among them.
+fn free(attrs: &[Attribute], sig: &Signature, block: &mut Block) -> bool {
+    sig.constness.is_none()
+        && sig.abi.is_none()
+        && sig.ident != "main"
+        && plain(attrs)
+        && !declares(block)
+}
+
+/// Whether `attrs` only document, configure, hint or lint.
+fn plain(attrs: &[Attribute]) -> bool {
+    const PLAIN: [&str; 12] = [
+        "allow",
+        "cfg",
+        "cold",
+        "deny",
+        "deprecated",
+        "doc",
+        "expect",
+        "forbid",
+        "inline",
+        "must_use",
+        "track_caller",
+        "warn",
+    ];
+    attrs.iter().all(|attr| {
+        let path = attr.path();
+        let first = path.segments.first().map(|first| first.ident.to_string());
+        let tool =
+            path.segments.len() > 1 && matches!(first.as_deref(), Some("clippy" | "rustfmt"));
+        tool || PLAIN.iter().any(|name| path.is_ident(name))
+    })
+}
+
+/// Whether `block` declares an item, however deep, but for test code.
+fn declares(block: &mut Block) -> bool {
+    struct Declares(bool);
+    impl VisitMut for Declares {
+        fn visit_item_mut(&mut self, item: &mut Item) {
+            self.0 |= !tested(item);
+        }
+    }
+    let mut declares = Declares(false);
+    declares.visit_block_mut(block);
+    declares.0
 }
 
 /// Empties function bodies (free, methods, default methods) but for `const fn`s' (the build may
@@ -969,31 +1228,149 @@ impl Ship {{
     }
 
     #[test]
-    fn edits_outside_function_bodies_need_a_rebuild() {
+    fn functions_and_uses_patch_as_they_come_go_and_change() {
         for (from, to) in [
-            ("    x: f32,", "    x: f32,\n    y: f32,"),
+            // A function re-signed, made public, added or removed.
             (
                 "fn steer(ship: &mut Ship, by: f32)",
                 "fn steer(ship: &mut Ship, by: f64)",
             ),
-            ("    3\n", "    4\n"),
+            ("fn steer(", "pub(crate) fn steer("),
             (
                 "impl Turn for Ship {}",
-                "impl Turn for Ship {}\n\nfn dock() {}",
+                "impl Turn for Ship {}\n\nfn dock(ship: &mut Ship) -> Duration {\n    \
+                 ship.x = 0.0;\n    Duration::ZERO\n}",
             ),
-            ("static SPEED: f32 = 1.0;", "static SPEED: f32 = 2.0;"),
+            (
+                "fn steer(ship: &mut Ship, by: f32) {\n    // Right is positive.\n    \
+                 ship.x += by * SPEED;\n}\n",
+                "",
+            ),
+            // Methods: given hints, added, and in an impl of their own.
+            (
+                "    fn stop(&mut self) {",
+                "    #[inline]\n    #[allow(dead_code)]\n    fn stop(&mut self) {",
+            ),
+            (
+                "    fn stop(&mut self) {",
+                "    fn dock(&mut self) {}\n\n    fn stop(&mut self) {",
+            ),
+            (
+                "impl Turn for Ship {}",
+                "impl Turn for Ship {}\n\nimpl Ship {\n    fn dock(&self) {}\n}",
+            ),
+            // One declared in a body.
+            (
+                "    count(&Burst { count: 3 })",
+                "    fn twice(n: u32) -> u32 {\n        n * 2\n    }\n    \
+                 twice(count(&Burst { count: 3 }))",
+            ),
+            // A `use` added, removed, in a body, and of a trait for its methods.
             (
                 "use std::time::Duration;",
                 "use std::time::{Duration, Instant};",
             ),
+            ("use std::time::Duration;\n", ""),
             (
-                "    fn stop(&mut self) {",
-                "    #[inline]\n    fn stop(&mut self) {",
+                "self.x += 1.0;",
+                "use std::f32::consts::PI;\n        self.x += PI;",
             ),
+            (
+                "use std::time::Duration;",
+                "use std::time::Duration;\nuse std::fmt::Write as _;",
+            ),
+        ] {
+            let edit = classify(MODULE, &edited(from, to));
+            assert_eq!(edit, bodies(false), "{from} -> {to}");
+        }
+        // A function added with the `use` its signature needs.
+        let since = edited(
+            "use std::time::Duration;",
+            "use std::time::{Duration, Instant};\n\nfn since(at: Instant) -> Duration {\n    \
+             at.elapsed()\n}",
+        );
+        assert_eq!(classify(MODULE, &since), bodies(false));
+    }
+
+    #[test]
+    fn a_changed_use_rebuilds_where_code_a_patch_doesnt_carry_uses_its_names() {
+        // Each module's `use` changes from `gg` to `other`.
+        let changed = |module: &str| classify(module, &module.replace("gg::", "other::"));
+        for (module, why) in [
+            // In a type, a derive, a `Layer` method's signature and a constant's value.
+            ("use gg::Wait;\n\nstruct Ship(Wait);\n", USED_OUTSIDE),
+            (
+                "use gg::Component;\n\n#[derive(Component)]\nstruct Ship;\n",
+                USED_OUTSIDE,
+            ),
+            (
+                "use gg::Context;\n\nimpl Layer for Game {\n    fn tick(&mut self, cx: &mut \
+                 Context) {}\n}\n",
+                USED_OUTSIDE,
+            ),
+            (
+                "use gg::LANES;\n\nconst ROAD: usize = LANES * 2;\n",
+                USED_OUTSIDE,
+            ),
+            // In code run as the game starts.
+            (
+                "use gg::App;\n\nfn main() {\n    App::new().run();\n}\n",
+                USED_AT_START,
+            ),
+            // One other modules may import through, or a glob's, whose names gg can't tell.
+            ("pub use gg::Wait;\n", PUBLIC_USE),
+            ("pub(crate) use gg::Wait;\n", PUBLIC_USE),
+            ("use gg::*;\n", GLOB),
+        ] {
+            assert_eq!(changed(module), Edit::Rebuild(why), "{module}");
+        }
+        // One of two alike, removed alone.
+        let twice = "use gg::Wait;\n\nstruct Ship(Wait);\n\nfn wait() {\n    use gg::Wait;\n}\n";
+        let once = twice.replacen("use gg::Wait;\n", "", 1);
+        assert_eq!(classify(twice, &once), Edit::Rebuild(USED_OUTSIDE));
+        // Function bodies alone, types in them and functions' signatures among them; `attach`, told
+        // of.
+        let aim =
+            "use gg::Vec2;\n\nfn aim() -> Vec2 {\n    let at: Vec2 = Vec2::ZERO;\n    at\n}\n";
+        assert_eq!(changed(aim), bodies(false));
+        let attach = "use gg::spawn;\n\nimpl Layer for Game {\n    fn attach(&mut self) {\n        spawn();\n    \
+             }\n}\n";
+        assert_eq!(changed(attach), bodies(true));
+    }
+
+    #[test]
+    fn edits_outside_function_bodies_need_a_rebuild() {
+        for (from, to) in [
+            ("    x: f32,", "    x: f32,\n    y: f32,"),
+            ("    3\n", "    4\n"),
+            ("static SPEED: f32 = 1.0;", "static SPEED: f32 = 2.0;"),
             // A type declared in a body: the running game may hold its values.
             (
                 "        count: u32,",
                 "        count: u32,\n        size: f32,",
+            ),
+            // Functions a patch can't add, remove or re-sign: `const`, of another ABI, given an
+            // attribute that may add code or change a symbol, or declaring a type.
+            ("fn steer(", "const fn steer("),
+            ("fn steer(", "extern \"C\" fn steer("),
+            ("fn steer(", "#[no_mangle]\nfn steer("),
+            (
+                "impl Turn for Ship {}",
+                "impl Turn for Ship {}\n\n#[system]\nfn dock() {}",
+            ),
+            (
+                "impl Turn for Ship {}",
+                "impl Turn for Ship {}\n\nfn dock() {\n    struct Bay;\n}",
+            ),
+            ("impl Ship {", "#[methods]\nimpl Ship {"),
+            // A method added to an impl of a trait, a `Layer`'s too.
+            (
+                "impl Turn for Ship {}",
+                "impl Turn for Ship {\n    fn turn(&mut self) {}\n}",
+            ),
+            (
+                "    fn tick(&mut self",
+                "    fn detach(&mut self, cx: &mut Context) {}\n\n    fn tick(&mut self",
             ),
         ] {
             let edit = classify(MODULE, &edited(from, to));

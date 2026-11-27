@@ -137,15 +137,20 @@ build links against (`pruned`). It watches PACKAGE's modules, the workspace's pa
 with, and the workspace's manifest and lock file (`watching`). Then:
 - an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
   between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
+- so is a function added, removed or re-signed, free or an inherent impl's: not a `const fn`,
+  `main`, one of another ABI, one given an attribute that may add code (a macro's, `#[no_mangle]`)
+  or one declaring items;
+- so is a changed `use` whose names only function bodies use, but for a `pub use` or a glob's;
 - so is an edit to a `const`'s value that only function bodies use, rustc copying it into them.
   Values the code already put in components keep the old one;
 - any other change rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
-  `rebuild_failed`): any outside function bodies, as a new item (a type, `const`, `fn` or `use`) or
-  a changed signature; a change to a type, even one declared in a body; one to code run as the game
-  started (`main`, a layer's `load` and `restored`); an edit to a `const` a type, a static, a
-  `const fn` or that code uses; and any change after a failed rebuild;
-- an edit inside a layer's `attach`, or to a `const` it uses, patches (`patched` names the edited
-  module in `attach`), the game warning `gg.attach_changed`. It shows only in a run started
+  `rebuild_failed`): any outside function bodies, as a new type, `const`, field or trait impl's
+  method; a change to a type, even one declared in a body; one to code run as the game started
+  (`main`, a layer's `load` and `restored`); an edit to a `const` a type, a static, a `const fn` or
+  that code uses, or to a `use` of a name used outside function bodies or by that code; and any
+  change after a failed rebuild;
+- an edit inside a layer's `attach`, or to a `const` or `use` it uses, patches (`patched` names the
+  edited module in `attach`), the game warning `gg.attach_changed`. It shows only in a run started
   afresh, as restarts keep the world.
   `gg scene open <SCENE> --discard` reloads the open scene's entities from its file, a fresh world
   without a new run; entities the game's code made stay.

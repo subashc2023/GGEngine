@@ -1,9 +1,9 @@
 //! `gg run`'s patches, as ARCHITECTURE.md's Game code describes: building the game with dx and
-//! watching its sources. A change to function bodies, or to constants only they use, is built into
-//! a patch the game applies through the tool API. Another change rebuilds, which the run restarts
-//! from a snapshot. The API's `note` has the game log failed patches and rebuilds, and patches that
-//! won't show. Without dx, or where patches can't reach the game's code, it builds with cargo and
-//! each change rebuilds.
+//! watching its sources. A change to function bodies, functions added, removed or re-signed,
+//! `use`s, or constants only bodies use, is built into a patch the game applies through the tool
+//! API, as [`classify`] tells. Another change rebuilds, which the run restarts from a snapshot. The API's
+//! `note` has the game log failed patches and rebuilds, and patches that won't show. Without dx, or
+//! where patches can't reach the game's code, it builds with cargo and each change rebuilds.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -1130,8 +1130,14 @@ mod tests {
         assert!(matches!(now(), Diff::Rebuild(file, OUTSIDE) if file == lib));
         write("engine/src/lib.rs", "pub fn tick() {}\n");
         assert!(matches!(now(), Diff::Bodies(..)));
-        // An edit outside function bodies, and a module added.
+        // A function re-signed patches; an edit outside function bodies, or a module added,
+        // rebuilds.
         write("game/src/main.rs", &game.replace("u32", "u128"));
+        assert!(matches!(now(), Diff::Bodies(_, None, _)));
+        write(
+            "game/src/main.rs",
+            &game.replace("fn run(", "struct Ship;\n\nfn run("),
+        );
         let outside = "an edit outside function bodies";
         assert!(matches!(now(), Diff::Rebuild(file, why) if file == main && why == outside));
         write("game/src/main.rs", game);
@@ -1246,7 +1252,7 @@ mod tests {
         };
         let ship = root.join("game/src/ship.rs");
         assert_ne!(hashes[&ship], baseline.modules[&ship]);
-        write("game/src/ship.rs", "pub fn sail(by: u32) {}\n");
+        write("game/src/ship.rs", "pub struct Sail;\n\npub fn sail() {}\n");
         assert!(matches!(now(), Diff::Rebuild(file, _) if file == ship));
         let _ = fs::remove_dir_all(&root);
     }
