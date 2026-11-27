@@ -184,8 +184,9 @@ pub(crate) fn debug(api: &Option<Api>, cx: &mut Context) {
 /// As a frame starts, before its ticks, in a development build: takes the asset database
 /// (`Context::take_assets`) and the assets read again (`Context::take_reloaded`), applies the
 /// scene files ([`scene_files::look`]) and scripts (`luau::look`) saved since, places the scripts'
-/// breakpoints again if they changed, and answers the waiting requests ([`Api::serve`]). Returns
-/// whether one asked the run to end.
+/// breakpoints again if they changed, and answers the waiting requests ([`Api::serve`]). The run's
+/// first frame answers none: they wait for the second, after the layers' first update and UI
+/// ([`Api::serve_first`]). Returns whether one asked the run to end.
 ///
 /// [`scene_files::look`]: crate::scene_files
 pub(crate) fn serve(
@@ -207,6 +208,10 @@ pub(crate) fn serve(
     }
     #[cfg(feature = "dev")]
     if let Some(api) = api {
+        if !api.framed() {
+            api.serve_first(cx);
+            return false;
+        }
         return api.serve(cx, stack, stepper);
     }
     let _ = (api, cx, stack, stepper);

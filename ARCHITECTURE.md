@@ -254,7 +254,8 @@ server](crates/gg-engine/src/api/server.rs) how a game answers.
   answers, so a client that sends too fast is held back by TCP, not buffered by the game. It answers
   `ping`, `logs`, `note` and `debug` itself, so a tool tells a hung game from a busy or paused one.
   The main loop answers the rest as a frame starts, before its ticks, only those that came before
-  it, so clients can't stall it.
+  it, so clients can't stall it. The run's first frame answers none, so a read straight after a
+  restart shows what the layers' first update made of the restored world.
 - **Play and stop.** Stopped (`stop`, or `--stopped`), no tick runs: the world is the world as
   edited, which only authors' edits, scene files' saves and the open scene's New and Open change.
   `play` runs a copy, holding the world as edited, its scene files and authors' logs aside until

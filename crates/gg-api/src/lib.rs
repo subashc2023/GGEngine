@@ -289,7 +289,8 @@
 //! # Threads
 //!
 //! The main thread answers all but `hello`, `ping`, `logs`, `note` and `debug` as a frame starts,
-//! those that came before it, the rest as the next starts. While the window is minimized and no
+//! those that came before it, the rest as the next starts. The run's first frame answers none: they
+//! wait for the second, after the layers' first update and UI. While the window is minimized and no
 //! frames run, it answers between frames, but `step`, `capture`, `frames`, `pick`, `images`, and
 //! an `input` or `press` that runs ticks, which need frames, fail with `api.paused`. While a file
 //! dialog or Windows' window menu holds the main thread, or a script has stopped, they wait.

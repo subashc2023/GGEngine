@@ -483,6 +483,20 @@ impl Api {
         quit
     }
 
+    /// Whether a frame has started since the run did.
+    pub(crate) fn framed(&self) -> bool {
+        self.shared.frames.load(Ordering::Relaxed) > 0
+    }
+
+    /// As the run's first frame starts, before any layer's update or UI: counts the frame and
+    /// answers nothing, as a read then would show the run before them. A restored world's HUD would
+    /// show its file's texts, and `status` no view. Requests wait for the next frame's
+    /// [`serve`](Self::serve).
+    pub(crate) fn serve_first(&mut self, cx: &Context) {
+        self.shared.frames.fetch_add(1, Ordering::Relaxed);
+        self.follow_player(cx.player());
+    }
+
     /// Like [`serve`](Self::serve), between frames while a minimized window pauses them, counting
     /// no frame. `capture`, `frames`, `pick`, `images`, `step` and a held `input` need frames and
     /// fail with `api.paused`.

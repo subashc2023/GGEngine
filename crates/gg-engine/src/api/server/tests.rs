@@ -1473,6 +1473,56 @@ fn a_snapshot_that_quits_is_written_first_and_nothing_after_it_applies() {
     assert_eq!(restored.ran(), 0, "no tick ran");
 }
 
+/// The run's first frame, before any layer's update, answers nothing, though `ping` counts it. A
+/// request that came as the run started is answered as the second starts, with what the first
+/// update made: a restarted game's HUD as its restored world has it, not as its file does.
+#[test]
+fn the_runs_first_frame_answers_nothing_and_the_second_reads_its_update() {
+    let (api, session) = started("Api First Frame");
+    let mut api = Some(api);
+    let (passed, wakes) = mpsc::channel();
+    crate::api::set_waker(&mut api, move || {
+        let _ = passed.send(());
+    });
+    let (mut cx, mut stack, mut stepper) =
+        (Context::seeded(22), Stack::default(), Stepper::default());
+    let (mut stream, mut answers) = said_hello(&session);
+    let mut ask = |request: Value| {
+        let line = format!("{request}\n");
+        stream.write_all(line.as_bytes()).expect("written");
+    };
+    ask(json!({"id": 1, "method": "status"}));
+    wakes.recv_timeout(DEADLINE).expect("passed on");
+    assert!(!crate::api::serve(
+        &mut api,
+        &mut cx,
+        &mut stack,
+        &mut stepper
+    ));
+    ask(json!({"id": 2, "method": "ping"}));
+    let mut answer = || {
+        let line = gg_api::read_line(&mut answers).expect("an answer");
+        serde_json::from_str::<Value>(&line.expect("a line")).expect("JSON")
+    };
+    let pulse = answer();
+    assert_eq!(
+        (&pulse["id"], &pulse["result"]["frames"]),
+        (&json!(2), &json!(1))
+    );
+    // As the first frame's update would.
+    cx.world_mut().spawn(Transform::IDENTITY);
+    assert!(!crate::api::serve(
+        &mut api,
+        &mut cx,
+        &mut stack,
+        &mut stepper
+    ));
+    let status = answer();
+    assert_eq!(status["id"], 1, "the status asked before the first frame");
+    assert_eq!(status["result"]["entities"], 1, "{status}");
+    assert_eq!(status["result"]["frames"], 2);
+}
+
 /// What [`stop_brings_back_the_world_as_edited_that_play_copied`]'s client gets.
 struct Stopped {
     stopped: Status,
