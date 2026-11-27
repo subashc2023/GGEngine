@@ -216,8 +216,9 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
 - **Scripts are debugged where they run**, through the tool API's `debug`, with Luau's own hooks:
   breakpoints, a pause, steps. A stop holds the main thread inside the tick, so the frames and the
   main thread's requests wait while the connections' threads answer the debugger; `ping` says so,
-  and `gg run` neither takes the game for hung nor snapshots it. A stop changes nothing in the
-  world: a recording replays across one, and a lockstep peer waits as for a slow one.
+  and `gg run` neither takes the game for hung nor snapshots it. A stop no `debug` asks about for
+  two minutes goes on, every breakpoint cleared, as its client may have ended. A stop changes
+  nothing in the world: a recording replays across one, and a lockstep peer waits as for a slow one.
 - **Mods are scripts a player installs**, as Luau source beside a manifest, `mod.ron`. Each runs in
   a VM of its own, kept to the capabilities it asks for, which the game must grant, a memory limit,
   an interrupt budget per tick and a print rate; one refused warns, and the game runs without it.

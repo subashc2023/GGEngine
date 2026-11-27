@@ -914,7 +914,8 @@ const TOOLS: &[Tool] = &[
                       each function's script, line, locals and upvalues), the pause or step \
                       `asked`, the `breakpoints` and the `scripts`. A stopped script waits inside \
                       its tick, and the game with it, the tools but `debug`, `logs` and `sessions` \
-                      waiting too, until `debug` has it go on.",
+                      waiting too, until `debug` has it go on. A stop no `debug` asks about for 2 \
+                      minutes goes on, every breakpoint cleared (`script.unattended`).",
         properties: || {
             json!({
                 "breakpoints": {

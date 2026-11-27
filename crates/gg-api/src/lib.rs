@@ -2458,6 +2458,9 @@ pub enum NoteLevel {
 /// The breakpoints to set in a script, in place of its own; an `action`; and `wait_ms`, how long to
 /// wait for a script to stop if none has, in milliseconds, 0 by default and at most 10,000. `{}`
 /// answers the debugger as it is.
+///
+/// A stop no `debug` asks about for 2 minutes goes on, every breakpoint cleared, as its client may
+/// have ended: the game warns `script.unattended`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Debug {

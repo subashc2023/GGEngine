@@ -837,7 +837,9 @@ upvalues; the pause or step under way; the breakpoints; and the scripts.
   into, over, out             From a stop, step
   --wait <SECONDS>            Wait up to SECONDS, at most 10, for a script to stop, if none has
 A stopped script waits inside its tick, and the game with it. The commands but `debug`, `logs` and
-`sessions` wait too, until `debug` has it go on. `gg run` doesn't take it for hung.
+`sessions` wait too, until `debug` has it go on. `gg run` doesn't take it for hung. A stop no
+`debug` asks about for 2 minutes goes on, every breakpoint cleared, as its client may have ended
+(`script.unattended`): ask `debug` meanwhile to keep it.
 ",
             },
             Help {

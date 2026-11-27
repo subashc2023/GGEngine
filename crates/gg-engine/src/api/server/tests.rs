@@ -720,23 +720,7 @@ struct Debugged {
 fn a_client_debugs_a_script_while_the_game_waits_at_its_stop() {
     let (mut api, session) = started("Api Debug");
     let dir = Scratch::new("api-debug");
-    fs::create_dir_all(dir.0.join("scripts")).expect("a directory");
-    let path = dir.0.join("scripts/count.luau");
-    let script = "local Count = gg.declare(\"Count\", { n = 0 })\n\
-            function Count.tick(entity, dt)\n\
-                local n = entity[Count.n]\n\
-                n = n + 1\n\
-                entity[Count.n] = n\n\
-            end\n\
-            return Count\n";
-    fs::write(&path, script).expect("written");
-    let mut cx = Context::seeded(1).root(&dir.0);
-    cx.hosts.debug(api.debugger());
-    let mut host = crate::Scripts::new().expect("Luau starts");
-    host.load(&mut cx, &path).expect("the script loads");
-    let world = cx.world_mut();
-    let counted = world.spawn(());
-    world.add_default(counted, "Count").expect("added");
+    let (mut cx, mut host) = counting(&api, &dir);
     let pinging = session.clone();
     let client = move |mut client: Client| {
         let mut debug = |params: Value| -> gg_api::Debugging {
@@ -811,6 +795,94 @@ fn a_client_debugs_a_script_while_the_game_waits_at_its_stop() {
             "api.bad_params",
             "api.bad_params",
         ]
+    );
+}
+
+/// A context rooted in `dir` whose host runs `scripts/count.luau` for an entity, counting at line
+/// 4 each tick, its stops `api`'s debugger's.
+fn counting(api: &Api, dir: &Scratch) -> (Context, crate::Scripts) {
+    fs::create_dir_all(dir.0.join("scripts")).expect("a directory");
+    let path = dir.0.join("scripts/count.luau");
+    let script = "local Count = gg.declare(\"Count\", { n = 0 })\n\
+            function Count.tick(entity, dt)\n\
+                local n = entity[Count.n]\n\
+                n = n + 1\n\
+                entity[Count.n] = n\n\
+            end\n\
+            return Count\n";
+    fs::write(&path, script).expect("written");
+    let mut cx = Context::seeded(1).root(&dir.0);
+    cx.hosts.debug(api.debugger());
+    let mut host = crate::Scripts::new().expect("Luau starts");
+    host.load(&mut cx, &path).expect("the script loads");
+    let world = cx.world_mut();
+    let counted = world.spawn(());
+    world.add_default(counted, "Count").expect("added");
+    (cx, host)
+}
+
+/// What [`a_stop_no_client_asks_about_goes_on_with_its_breakpoints_cleared`]'s client gets.
+struct Unattended {
+    stopped: gg_api::Debugging,
+    pulse: Pulse,
+    later: Pulse,
+    after: gg_api::Debugging,
+    refused: gg_api::Failure,
+}
+
+/// A client sets a breakpoint, sees the game stop there, and asks nothing more, as one that ended:
+/// once the lease passes, the script goes on and every breakpoint is cleared. `ping` stops saying
+/// it waits, frames count on, and a continue says why nothing has stopped.
+#[test]
+fn a_stop_no_client_asks_about_goes_on_with_its_breakpoints_cleared() {
+    let (mut api, session) = started("Api Unattended");
+    api.debugger().lease(Duration::from_millis(300));
+    let dir = Scratch::new("api-unattended");
+    let (mut cx, mut host) = counting(&api, &dir);
+    let pinging = session.clone();
+    let client = move |mut client: Client| {
+        let lines = json!({"script": "scripts/count.luau", "lines": [4]});
+        let asked = json!({"breakpoints": lines, "wait_ms": 10_000});
+        let stopped = client.call_as("debug", asked).expect("an answer");
+        let mut pinged = Client::connect(&pinging, "pinger", DEADLINE).expect("it connects");
+        let pulse: Pulse = pinged.call_as("ping", ()).expect("a pulse");
+        std::thread::sleep(Duration::from_millis(1_000));
+        let later = pinged.call_as("ping", ()).expect("a pulse");
+        let after = client.call_as("debug", json!({})).expect("an answer");
+        let go_on = json!({"action": "continue"});
+        let refused = client.call("debug", go_on).expect_err("refused");
+        Unattended {
+            stopped,
+            pulse,
+            later,
+            after,
+            refused,
+        }
+    };
+    let got = serving(
+        &mut api,
+        &mut cx,
+        &mut Stack::default(),
+        &mut Stepper::default(),
+        session,
+        client,
+        |_, cx, _| {
+            cx.hosts.place();
+            host.run(cx.world_mut());
+        },
+    );
+    let stop = got.stopped.stopped.expect("stopped");
+    assert_eq!((stop.number, stop.frames[0].line), (1, 4));
+    assert_eq!(got.pulse.waiting.as_deref(), Some("breakpoint"));
+    assert_eq!(got.later.waiting, None);
+    assert!(got.later.frames > got.pulse.frames, "frames count on");
+    assert_eq!((got.after.stopped, got.after.stops), (None, 1));
+    assert!(got.after.breakpoints.is_empty());
+    assert_eq!(got.refused.code, "script.not_stopped");
+    assert!(
+        got.refused.message.contains("no `debug` asked"),
+        "{}",
+        got.refused.message
     );
 }
 

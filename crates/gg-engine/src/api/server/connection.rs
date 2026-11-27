@@ -499,7 +499,8 @@ pub(super) fn note(params: &Value, client: &str) -> Result<String, Failure> {
 
 /// Answers `debug` (see gg-api's docs) from `shared`'s debugger, on the connection's thread, so it
 /// answers while a stopped script holds the main thread; a wait holds it. Breakpoints and a pause
-/// wake the main loop, which places them, or steps to the pause, as a frame starts.
+/// wake the main loop, which places them, or steps to the pause, as a frame starts. Each `debug`
+/// keeps a stop waiting a while longer, as [`Debugger::heard`](crate::luau::Debugger::heard) says.
 ///
 /// Fails with:
 ///
@@ -529,6 +530,7 @@ fn debug(params: &Value, shared: &Shared) -> Result<String, Failure> {
         }
     }
     let debugger = &shared.debugger;
+    debugger.heard();
     let wake = breakpoints.is_some() || action == Some(gg_api::DebugAction::Pause);
     if let Some(gg_api::Breakpoints { script, lines }) = breakpoints {
         debugger.set(script, lines);

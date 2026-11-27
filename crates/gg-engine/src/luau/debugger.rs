@@ -13,7 +13,7 @@ use gg_api::{Breakpoint, DebugAction, Debugging, StackFrame, Stop, StopReason, V
 use gg_core::{Error, Result};
 use mlua::{Function, Lua};
 use serde_json::Value as Json;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::hooks::{self, Frame, Seen};
 use crate::{Entity, World};
@@ -24,6 +24,10 @@ use crate::{Entity, World};
 const LOOK: Duration = Duration::from_millis(15);
 #[cfg(target_os = "windows")]
 const PUMPED: usize = 64;
+
+/// How long a stop waits with no `debug` asked before it goes on, the breakpoints cleared: the
+/// client that stopped it may have ended. The editor's debugger asks four times a second.
+const LEASE: Duration = Duration::from_secs(120);
 
 /// The debugger of a run's scripts: the context gives it to each host, and the tool API's
 /// connection threads ask it (gg-api's `debug`).
@@ -51,6 +55,12 @@ struct State {
     asked: Option<DebugAction>,
     /// What the stop does next, once a client has said.
     go: Option<DebugAction>,
+    /// When a client last asked `debug`, if one has.
+    heard: Option<Instant>,
+    /// Whether the last stop went on unattended, as [`LEASE`] says.
+    lapsed: bool,
+    /// [`LEASE`], or a test's.
+    lease: Option<Duration>,
 }
 
 /// What a stop does next.
@@ -59,6 +69,8 @@ enum At {
     Place,
     /// Goes on, as `debug`'s action says.
     Go(DebugAction),
+    /// Goes on with the breakpoints cleared, no client having asked for [`LEASE`].
+    Lapsed,
 }
 
 impl Debugger {
@@ -92,10 +104,21 @@ impl Debugger {
             return Ok(());
         }
         if state.stop.is_none() {
+            let lapsed = if state.lapsed {
+                let lease = state.lease.unwrap_or(LEASE).as_secs();
+                format!(
+                    "; the last stop went on after {lease} s with no `debug` asked, its \
+                     breakpoints cleared"
+                )
+            } else {
+                String::new()
+            };
             return Err(Error::new(
                 "script.not_stopped",
-                "no script has stopped, so there's nothing to go on from: a breakpoint or a pause \
-                 stops one",
+                format!(
+                    "no script has stopped, so there's nothing to go on from: a breakpoint or a \
+                     pause stops one{lapsed}"
+                ),
             ));
         }
         state.stop = None;
@@ -105,7 +128,19 @@ impl Debugger {
         Ok(())
     }
 
+    /// Notes that a client asked `debug`, which keeps a stop waiting for [`LEASE`] from then.
+    pub(crate) fn heard(&self) {
+        self.lock().heard = Some(Instant::now());
+    }
+
+    /// Has stops wait `lease` in place of [`LEASE`].
+    #[cfg(test)]
+    pub(crate) fn lease(&self, lease: Duration) {
+        self.lock().lease = Some(lease);
+    }
+
     /// The debugger's state once a script has stopped or `wait` has passed, whichever is first.
+    /// The client is [`heard`](Self::heard) as it's answered.
     pub(crate) fn answer(&self, wait: Duration) -> Debugging {
         let until = Instant::now() + wait;
         let mut state = self.lock();
@@ -117,6 +152,7 @@ impl Debugger {
             let (waited, _) = (self.changed.wait_timeout(state, left)).expect("never poisoned");
             state = waited;
         }
+        state.heard = Some(Instant::now());
         let breakpoints = state.breakpoints.iter().flat_map(|(script, lines)| {
             lines.iter().map(|&(line, placed)| Breakpoint {
                 script: script.clone(),
@@ -179,7 +215,8 @@ impl Debugger {
 
     /// Stops a script at `frames` for `why`: answers the requests waiting for a stop, then waits
     /// for a client to say what to do next, placing the breakpoints again through `place` as they
-    /// change meanwhile. Returns that action.
+    /// change meanwhile. Returns that action, or a continue once no client has asked `debug` for
+    /// [`LEASE`], the breakpoints and any pause cleared (`script.unattended`).
     fn stop(&self, why: StopReason, frames: Vec<StackFrame>, place: impl Fn()) -> DebugAction {
         let (script, line) = (frames.first()).map_or((String::new(), 0), |frame| {
             (frame.script.clone(), frame.line)
@@ -200,6 +237,7 @@ impl Debugger {
             });
             state.asked = None;
             state.go = None;
+            state.lapsed = false;
             self.pausing.store(false, Ordering::Relaxed);
             self.stopped.store(true, Ordering::Relaxed);
             self.changed.notify_all();
@@ -211,23 +249,37 @@ impl Debugger {
             "Script stopped at {script}:{line}, for {why_named}; the game waits until a client has \
              it go on"
         );
-        let mut placed = self.revision();
+        let (mut placed, since) = (self.revision(), Instant::now());
         let go = loop {
-            match self.wait(placed) {
+            match self.wait(placed, since) {
                 At::Place => {
                     placed = self.revision();
                     place();
                 }
                 At::Go(go) => break go,
+                At::Lapsed => {
+                    place();
+                    let lease = self.lock().lease.unwrap_or(LEASE).as_secs();
+                    warn!(
+                        code = "script.unattended",
+                        script,
+                        line,
+                        "No client asked `debug` for {lease} s while a script waited at \
+                         {script}:{line}, so it goes on, every breakpoint cleared: the client that \
+                         stopped it may have ended"
+                    );
+                    break DebugAction::Continue;
+                }
             }
         };
         debug!(script, line, "Script went on");
         go
     }
 
-    /// Waits for what a stop does next: placing the breakpoints again once their revision isn't
-    /// `placed`, or going on once a client has said.
-    fn wait(&self, placed: u64) -> At {
+    /// Waits for what a stop that started at `since` does next: placing the breakpoints again once
+    /// their revision isn't `placed`, going on once a client has said, or, once no client has asked
+    /// `debug` for [`LEASE`] since then, clearing the breakpoints and going on.
+    fn wait(&self, placed: u64, since: Instant) -> At {
         let mut state = self.lock();
         loop {
             if let Some(go) = state.go.take() {
@@ -235,6 +287,17 @@ impl Debugger {
             }
             if self.revision() != placed {
                 return At::Place;
+            }
+            let heard = state.heard.map_or(since, |heard| heard.max(since));
+            if heard.elapsed() >= state.lease.unwrap_or(LEASE) {
+                state.stop = None;
+                state.asked = None;
+                state.lapsed = true;
+                state.breakpoints.clear();
+                self.pausing.store(false, Ordering::Relaxed);
+                self.revision.fetch_add(1, Ordering::Relaxed);
+                self.changed.notify_all();
+                return At::Lapsed;
             }
             let (waited, _) = (self.changed.wait_timeout(state, LOOK)).expect("never poisoned");
             state = waited;
