@@ -257,15 +257,21 @@ pub(crate) fn is_relative(path: &str) -> bool {
 }
 
 /// Whether Windows takes `part` for a device, whatever its case and extension: `CON`, `PRN`, `AUX`,
-/// `NUL`, `COM1` to `COM9` and `LPT1` to `LPT9`, before a `.` or spaces, as `nul.txt` or `aux .png`.
+/// `NUL`, `CONIN$`, `CONOUT$`, and `COM` and `LPT` with a digit 1 to 9 or a superscript ¹, ² or ³,
+/// before a `.` or spaces, as `nul.txt` or `aux .png`.
 fn is_device(part: &str) -> bool {
     let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
     let stem = stem.to_ascii_uppercase();
-    match stem.as_bytes() {
-        b"CON" | b"PRN" | b"AUX" | b"NUL" => true,
-        [b'C', b'O', b'M', digit] | [b'L', b'P', b'T', digit] => (b'1'..=b'9').contains(digit),
-        _ => false,
-    }
+    const NUMBERS: [&str; 12] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"];
+    let number = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"));
+    let numbered = number.is_some_and(|number| NUMBERS.contains(&number));
+    numbered
+        || matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        )
 }
 
 /// Whether `address` is a relay's `host:port`: the host letters, digits, `.` and `-`, a name or an
@@ -520,6 +526,10 @@ mod tests {
             "Aux .png",
             "com1",
             "LPT9.tar.gz",
+            "COM\u{b9}",
+            "lpt\u{b3}.png",
+            "conin$",
+            "CONOUT$.log",
         ] {
             assert!(!is_relative(path), "{path:?}");
         }
