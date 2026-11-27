@@ -1,9 +1,9 @@
-//! `gg run`'s patches, as ARCHITECTURE.md's Game code describes: building the game with dx,
-//! watching its sources, and on a change building a patch of an edit inside function bodies for the
-//! game to apply through the tool API, or rebuilding, which the run restarts from a snapshot. The
-//! API's `note` has the game log failed patches and rebuilds, and patches that won't show. Without
-//! dx, or where patches can't reach the game's code, it builds with cargo and each change
-//! rebuilds.
+//! `gg run`'s patches, as ARCHITECTURE.md's Game code describes: building the game with dx and
+//! watching its sources. A change to function bodies, or to constants only they use, is built into
+//! a patch the game applies through the tool API. Another change rebuilds, which the run restarts
+//! from a snapshot. The API's `note` has the game log failed patches and rebuilds, and patches that
+//! won't show. Without dx, or where patches can't reach the game's code, it builds with cargo and
+//! each change rebuilds.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -17,7 +17,7 @@ use gg_api::{Client, Failure, Note, NoteLevel, Patch, Patched, Session, UNBUILT}
 use serde_json::{Value, json};
 
 use crate::build::{self, Package, fit};
-use crate::classify::{self, Edit};
+use crate::classify::{self, Edit, Uses};
 use crate::dx::{self, Dx, Fat};
 use crate::run::{self, Run, Stamp, event, millis};
 use crate::runs::{self, State};
@@ -527,11 +527,11 @@ impl Patches {
                             }));
                             if !attach.is_empty() {
                                 let message = format!(
-                                    "A patch changed a layer's `attach` in {}, which builds the \
-                                     world as a run starts afresh; this run keeps its world, as \
-                                     its restarts start from snapshots, so a run started afresh, \
-                                     as stopping `gg run` and starting it again starts one, shows \
-                                     the change",
+                                    "A patch's edits to {} change a layer's `attach`, which \
+                                     builds the world as a run starts afresh; this run keeps its \
+                                     world, as its restarts start from snapshots, so a run started \
+                                     afresh, as stopping `gg run` and starting it again starts \
+                                     one, shows the change",
                                     listed(&attach)
                                 );
                                 let fields = json!({"files": attach});
@@ -681,7 +681,8 @@ enum Diff {
     /// In what a patch can't carry: a change to a file, for a reason.
     Rebuild(PathBuf, &'static str),
     /// In function bodies of modules, if at all: each module's hash, the module gg can't read, if
-    /// any, and the modules whose layers' `attach` differs from the build's, by path.
+    /// any, and the modules whose edits change a layer's `attach` from the build's, in it or
+    /// through a constant it uses, by path.
     Bodies(Hashes, Option<PathBuf>, Vec<PathBuf>),
 }
 
@@ -750,7 +751,9 @@ fn changed(from: &Hashes, to: &Hashes) -> Vec<PathBuf> {
 
 /// How the sources, with `stamps`, differ from the build's, `baseline`. A file added or removed,
 /// or a change outside function bodies of modules, as [`classify::classify`] tells, needs a
-/// rebuild, the first by path being the one given. A new stamp with the same content is no change.
+/// rebuild, the first by path being the one given. So does an edit to a constant used outside
+/// function bodies of the modules, as [`classify::uses`] tells, given with the constant's module.
+/// A new stamp with the same content is no change.
 fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
     let added = (stamps.keys()).filter(|path| !baseline.files.contains_key(*path));
     let removed = (baseline.files.keys()).filter(|path| !stamps.contains_key(*path));
@@ -763,6 +766,8 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
         return Diff::Rebuild(file.clone(), why);
     }
     let (mut hashes, mut unreadable, mut attach) = (Hashes::new(), None, Vec::new());
+    // The constants whose values differ, by name, with their modules; the edited modules' texts.
+    let (mut consts, mut texts) = (Vec::new(), BTreeMap::new());
     for (path, stamp) in stamps {
         let known = &baseline.files[path];
         let module = sources.module(path);
@@ -773,25 +778,54 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
             };
             hash = hash_of(&content);
             if hash != known.hash {
+                let text = String::from_utf8_lossy(&content).into_owned();
                 // Only the game's modules have their text kept.
                 let edit = match &known.text {
                     _ if module && tests_only(path, baseline) => Edit::Same,
-                    Some(old) => classify::classify(old, &String::from_utf8_lossy(&content)),
+                    Some(old) => classify::classify(old, &text),
                     None if module => Edit::Rebuild("an edit to a module that isn't UTF-8"),
                     None => Edit::Rebuild(OUTSIDE),
                 };
                 match edit {
                     // The build's own code is what the game runs: keep its hash.
                     Edit::Same => hash = known.hash,
-                    Edit::Bodies { attach: false } => {}
-                    Edit::Bodies { attach: true } => attach.push(path.clone()),
+                    Edit::Bodies {
+                        attach: told,
+                        consts: edited,
+                    } => {
+                        if told {
+                            attach.push(path.clone());
+                        }
+                        consts.extend(edited.into_iter().map(|name| (name, path.clone())));
+                    }
                     Edit::Unreadable => unreadable = Some(path.clone()),
                     Edit::Rebuild(why) => return Diff::Rebuild(path.clone(), why),
                 }
+                texts.insert(path.clone(), text);
             }
         }
         if module {
             hashes.insert(path.clone(), hash);
+        }
+    }
+    if !consts.is_empty() {
+        // The game's modules as they are now, but for those built only for tests.
+        let modules = hashes.keys().filter(|path| !tests_only(path, baseline));
+        let now = modules.filter_map(|path| match texts.get(path) {
+            Some(text) => Some(text.as_str()),
+            None => baseline.files[path].text.as_deref(),
+        });
+        let names: Vec<String> = consts.iter().map(|(name, _)| name.clone()).collect();
+        match classify::uses(&now.collect::<Vec<_>>(), &names) {
+            Uses::Rebuild(at, why) => return Diff::Rebuild(consts[at].1.clone(), why),
+            Uses::Bodies(used) => {
+                for at in used {
+                    let module = &consts[at].1;
+                    if !attach.contains(module) {
+                        attach.push(module.clone());
+                    }
+                }
+            }
         }
     }
     Diff::Bodies(hashes, unreadable, attach)
@@ -1104,6 +1138,55 @@ mod tests {
         write("game/src/extra.rs", "");
         let added = "a module added or removed";
         assert!(matches!(now(), Diff::Rebuild(_, why) if why == added));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An edit to a constant patches where other modules' function bodies alone use it, telling of
+    /// a layer's `attach` by the constant's module; a use elsewhere rebuilds, naming that module.
+    #[test]
+    fn edits_to_constants_patch_where_function_bodies_alone_use_them() {
+        let root = std::env::temp_dir().join(format!("gg-consts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().expect("a directory")).expect("a directory");
+            fs::write(path, text).expect("written");
+        };
+        let consts = "pub const SPEED: f32 = 2.0;\npub const LANES: usize = 3;\n\
+                      pub const START: f32 = 1.0;\n";
+        let game = "mod consts;\n\nuse consts::*;\n\nstruct Road([f32; LANES]);\n\n\
+                    fn steer(x: &mut f32) {\n    *x += SPEED;\n}\n\n\
+                    impl Layer for Game {\n    fn attach(&mut self) {\n        spawn(START);\n    \
+                    }\n}\n";
+        write("Cargo.toml", "[workspace]");
+        write("Cargo.lock", "version = 4");
+        write("game/Cargo.toml", "[package]");
+        write("game/src/main.rs", game);
+        write("game/src/consts.rs", consts);
+        let files = ["Cargo.toml", "Cargo.lock", "game/Cargo.toml"];
+        let sources = Sources {
+            modules: root.join("game/src"),
+            game: root.join("game"),
+            dirs: Vec::new(),
+            files: files.iter().map(|file| root.join(file)).collect(),
+            lock: root.join("Cargo.lock"),
+        };
+        let baseline = Baseline::new(&sources);
+        let path = root.join("game/src/consts.rs");
+        let now = || diff(&sources, &baseline, &sources.scan());
+        // Each edit here changes the file's length, as one within the clock's resolution of the
+        // last may leave its time.
+        write("game/src/consts.rs", &consts.replace("2.0", "3.75"));
+        let Diff::Bodies(hashes, None, attach) = now() else {
+            panic!("bodies");
+        };
+        assert_ne!(hashes[&path], baseline.modules[&path]);
+        assert!(attach.is_empty());
+        write("game/src/consts.rs", &consts.replace("1.0", "-1.5"));
+        assert!(matches!(now(), Diff::Bodies(_, None, attach) if attach == [path.clone()]));
+        write("game/src/consts.rs", &consts.replace("3;", "4;"));
+        let typed = classify::IN_A_TYPE;
+        assert!(matches!(now(), Diff::Rebuild(file, why) if file == path && why == typed));
         let _ = fs::remove_dir_all(&root);
     }
 

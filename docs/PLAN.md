@@ -82,7 +82,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Steps while minimized (`api.paused`); requests, and the compositor, answered while a dialog or a script's stop holds the main thread | A tool needs them |
 | `gg fetch` of archives, and a scene's load of an unfetched file saying `gg fetch` fetches it | A project fetches an archive, or someone is lost |
 | Cleaning up old JSON logs and a killed run's patch libraries | They pile up |
-| `gg run` patching edits to constants, and restarting on crashes from data and on manifest edits | Agents tune constants live, or data crashes a game |
+| `gg run` restarting on crashes from data and on manifest edits | Data crashes a game |
 | `gg run --peers 2` passing a game's flags such as `--paused`, which `engine.args` refuses now; the peers' windows placed apart; a restart keeping the overlays' bar open and the Inspector's pick | Someone runs peers paused, or a restart loses their place |
 | `gg run --peers 2` windows apart, through a relay or embedded; an app's name and run defaults in a manifest, the sandbox's too | Someone needs them |
 | `gg input` clicks that leave the OS cursor ungrabbed | An agent plays a game through it while someone works at the desk |
