@@ -134,8 +134,12 @@ patch reaches (`patches_off` says why). gg builds with `dx build --fat-binary`, 
 and, while compiling, the crates done of dx's count, every 5 s at most (`building`). One such build
 runs at a time in a target directory, as two of dx's links at once can fail: the others are
 `queued`. After each, it removes dx's archives of libraries, about 1 GB each, that no package's last
-build links against (`pruned`). It watches PACKAGE's modules, the workspace's packages it builds
-with, and the workspace's manifest and lock file (`watching`). Then:
+build links against (`pruned`). It watches PACKAGE's modules, the workspace's manifest and lock
+file, and the workspace's packages it builds with (`watching`). Once a build ends, it watches what
+the build read instead of those packages, as cargo's dep-info file beside the executable lists it
+(`watching` again, with `dep_info`): each path package's compiled modules, what they embed
+(`include_str!`), and what build scripts watch. So an edit to a package's docs, or to a module
+built only for its tests, rebuilds nothing. Then:
 - an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
   between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
 - so is a function added, removed or re-signed, free or an inherent impl's: not a `const fn`,

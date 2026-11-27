@@ -10,10 +10,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::iter;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use std::{iter, mem};
 
 use gg_api::{Client, Failure, Note, NoteLevel, Patch, Patched, Session, UNBUILT};
 use serde_json::{Value, json};
@@ -33,7 +33,7 @@ const QUIET: Duration = Duration::from_millis(200);
 /// minutes. A hung process is ended, closing the connection.
 const CONNECT: Duration = Duration::from_secs(10);
 
-const OUTSIDE: &str = "a change outside the game's crate";
+const OUTSIDE: &str = "a change outside the game's modules";
 
 const UNPATCHED: &str =
     "the run builds the game with cargo, without patches, as `patches_off` said";
@@ -184,7 +184,8 @@ impl Patches {
         };
         let sources = Sources::new(&package);
         let patches = matches!(builder, Builder::Dx(_));
-        event(&json!({"event": "watching", "paths": sources.paths(), "patches": patches}));
+        let paths = sources.paths(None);
+        event(&json!({"event": "watching", "paths": paths, "patches": patches}));
         let mut baseline = Baseline::new(&sources);
         let fat = builder.build().map_err(|failure| {
             let message = match &builder {
@@ -198,6 +199,16 @@ impl Patches {
             Failure::new(failure.code, message)
         })?;
         baseline.refresh(&sources.lock);
+        baseline.narrow(&sources, &fat.exe);
+        if let Some(inputs) = &baseline.inputs {
+            event(&json!({
+                "event": "watching",
+                "paths": sources.paths(Some(inputs)),
+                "read": inputs.files.len(),
+                "dep_info": inputs.from,
+                "patches": patches,
+            }));
+        }
         let seen = baseline.stamps();
         Ok(Some(Self {
             builder,
@@ -275,7 +286,7 @@ impl Patches {
     /// whether a rebuild succeeded, which the run restarts from.
     pub(crate) fn tend(&mut self, games: &[Process], now: Instant) -> bool {
         let rebuilt = self.job.as_ref().is_some_and(Job::done) && self.land(games);
-        let stamps = self.sources.scan();
+        let stamps = self.sources.scan(self.baseline.inputs.as_ref());
         if stamps != self.seen {
             (self.seen, self.since) = (stamps, now);
         }
@@ -417,6 +428,7 @@ impl Patches {
             let mut baseline = Baseline::new(&sources);
             let fat = builder.build()?;
             baseline.refresh(&sources.lock);
+            baseline.narrow(&sources, &fat.exe);
             Ok((fat, baseline))
         });
         self.job = Some(Job::Rebuild {
@@ -445,8 +457,9 @@ impl Patches {
             return self.rebuild(&file, UNPATCHED);
         };
         let (dx, fat) = (dx.clone(), self.fat.clone());
-        let (sources, looked, checked) = (
+        let (sources, inputs, looked, checked) = (
             self.sources.clone(),
+            self.baseline.inputs.clone(),
             self.looked.clone(),
             unreadable.is_none(),
         );
@@ -472,7 +485,9 @@ impl Patches {
             let outcomes = match failed {
                 Some(failure) => vec![(None, Outcome::Failed(failure))],
                 // dx built what the files held as it read them: a later save may differ.
-                None if sources.scan() != looked => vec![(None, Outcome::Superseded)],
+                None if sources.scan(inputs.as_ref()) != looked => {
+                    vec![(None, Outcome::Superseded)]
+                }
                 None if !checked => vec![(None, Outcome::Unreadable)],
                 None => {
                     let applying = tables.into_iter().map(|(pid, session, table)| {
@@ -694,7 +709,7 @@ impl Watcher {
     /// workspace has no such package.
     pub(crate) fn new(run: &Run) -> Result<Self, Failure> {
         let sources = Sources::new(&build::package(&run.package, run.dir())?);
-        let seen = sources.scan();
+        let seen = sources.scan(None);
         Ok(Self {
             sources,
             seen,
@@ -706,7 +721,7 @@ impl Watcher {
     /// Scans at `now`; returns whether they changed since watching began and have since been quiet
     /// for [`QUIET`].
     pub(crate) fn changed(&mut self, now: Instant) -> bool {
-        let stamps = self.sources.scan();
+        let stamps = self.sources.scan(None);
         if stamps != self.seen {
             (self.seen, self.since, self.changed) = (stamps, now, true);
         }
@@ -976,8 +991,9 @@ fn tests_only(path: &Path, baseline: &Baseline) -> bool {
 
 /// What patches watch, as cargo says of the game's package: its modules (the `.rs` files under its
 /// binary's root module's directory, which a patch may carry edits of) and what rebuilds it: the
-/// directories of the workspace packages it depends on, the workspace's manifest and lock file,
-/// and the game's manifest and build script. [`walk`] says what's skipped.
+/// workspace's manifest and lock file, the game's manifest and build script, and what the last
+/// build read, as its [`Inputs`] list, or before that, the directories of the workspace packages
+/// it depends on. [`walk`] says what's skipped.
 #[derive(Clone)]
 struct Sources {
     modules: PathBuf,
@@ -987,6 +1003,8 @@ struct Sources {
     files: Vec<PathBuf>,
     /// The workspace's lock file, among `files`.
     lock: PathBuf,
+    /// The directory cargo builds into, whose files builds write rather than read.
+    target: PathBuf,
 }
 
 impl Sources {
@@ -1007,13 +1025,14 @@ impl Sources {
             dirs: package.deps.clone(),
             files,
             lock,
+            target: package.target.clone(),
         }
     }
 
-    fn paths(&self) -> Vec<&Path> {
-        let paths = iter::once(&self.modules)
-            .chain(&self.dirs)
-            .chain(&self.files);
+    /// The directories and files watched, with `inputs`, but for the files those list.
+    fn paths<'a>(&'a self, inputs: Option<&'a Inputs>) -> Vec<&'a Path> {
+        let dirs = inputs.map_or(&self.dirs, |inputs| &inputs.dirs);
+        let paths = iter::once(&self.modules).chain(dirs).chain(&self.files);
         paths.map(PathBuf::as_path).collect()
     }
 
@@ -1023,7 +1042,8 @@ impl Sources {
             && !self.files.iter().any(|file| file == path)
     }
 
-    fn scan(&self) -> Stamps {
+    /// The stamps of the files watched: with `inputs`, those of the build that listed them.
+    fn scan(&self, inputs: Option<&Inputs>) -> Stamps {
         let mut stamps = Stamps::new();
         let root = self.modules == self.game;
         walk(
@@ -1032,16 +1052,75 @@ impl Sources {
             &|path: &Path| self.module(path),
             &mut stamps,
         );
-        for dir in &self.dirs {
-            walk(dir, true, &|_: &Path| true, &mut stamps);
+        // A package's directory leaves out what no build reads; a directory a build script watches
+        // is read whole, as cargo does.
+        let dirs = inputs.map_or(&self.dirs, |inputs| &inputs.dirs);
+        for dir in dirs {
+            walk(dir, inputs.is_none(), &|_: &Path| true, &mut stamps);
         }
-        for file in &self.files {
+        let listed = inputs.map_or(&[][..], |inputs| &inputs.files);
+        for file in self.files.iter().chain(listed) {
             if let Ok(metadata) = fs::metadata(file) {
                 stamps.insert(file.clone(), run::stamped(metadata));
             }
         }
         stamps
     }
+}
+
+/// What a build read, as cargo's dep-info beside its executable lists it: the files rustc read for
+/// each path package the game builds with, its modules and what they embed (`include_str!`), and
+/// what their build scripts watch. So an edit to a package's docs, or to a module built only for
+/// its tests, isn't watched. Left out: what builds wrote, under the target directory, and the
+/// `src` directories the game's build script watches whole for its source digest
+/// (`gg_api::build`), which names the build alone.
+#[derive(Clone, Debug, PartialEq)]
+struct Inputs {
+    /// The dep-info file.
+    from: PathBuf,
+    files: Vec<PathBuf>,
+    /// Those a build script watches.
+    dirs: Vec<PathBuf>,
+}
+
+impl Inputs {
+    /// What the build of the executable at `exe` read; `None` if its dep-info can't be read.
+    fn read(exe: &Path, sources: &Sources) -> Option<Self> {
+        let from = exe.with_extension("d");
+        let paths = dep_info(&fs::read_to_string(&from).ok()?)?;
+        let (mut files, mut dirs) = (Vec::new(), Vec::new());
+        for path in paths {
+            if path.starts_with(&sources.target) {
+                continue;
+            }
+            if !path.is_dir() {
+                files.push(path);
+            } else if !(path.ends_with("src") && path.with_file_name("Cargo.toml").is_file()) {
+                dirs.push(path);
+            }
+        }
+        Some(Self { from, files, dirs })
+    }
+}
+
+/// The paths a dep-info file's first rule depends on, as cargo writes it: `target: path path…`,
+/// a space in a path escaped by a backslash. `None` if it has no rule, or a path is relative, as
+/// cargo's `build.dep-info-basedir` makes them.
+fn dep_info(text: &str) -> Option<Vec<PathBuf>> {
+    let line = text.lines().next()?;
+    let (_, deps) = line.split_once(": ")?;
+    let mut paths = Vec::new();
+    let mut path = String::new();
+    let mut chars = deps.chars().peekable();
+    while let Some(char) = chars.next() {
+        match char {
+            '\\' if chars.peek() == Some(&' ') => path.push(chars.next()?),
+            ' ' => paths.extend((!path.is_empty()).then(|| PathBuf::from(mem::take(&mut path)))),
+            _ => path.push(char),
+        }
+    }
+    paths.extend((!path.is_empty()).then(|| PathBuf::from(path)));
+    paths.iter().all(|path| path.is_absolute()).then_some(paths)
 }
 
 /// Adds the stamp of each file under `dir` that `keep` keeps, skipping hidden entries (an editor's
@@ -1075,6 +1154,8 @@ struct Baseline {
     /// The prints of the functions of the game's modules, but for those built only for tests;
     /// `None` if gg can't read one.
     prints: Option<Prints>,
+    /// What the build read, once it [narrowed](Self::narrow) `files` to them.
+    inputs: Option<Inputs>,
 }
 
 struct Known {
@@ -1084,9 +1165,10 @@ struct Known {
 }
 
 impl Baseline {
+    /// Takes every file a build might read, before it says what it read.
     fn new(sources: &Sources) -> Self {
         let (mut files, mut modules) = (BTreeMap::new(), Hashes::new());
-        for (path, stamp) in sources.scan() {
+        for (path, stamp) in sources.scan(None) {
             let content = fs::read(&path).unwrap_or_default();
             let hash = hash_of(&content);
             let mut text = None;
@@ -1100,6 +1182,7 @@ impl Baseline {
             files,
             modules,
             prints: None,
+            inputs: None,
         };
         let modules: Vec<(&Path, Option<&str>)> = (baseline.modules.keys())
             .filter(|path| !tests_only(path, &baseline))
@@ -1107,6 +1190,32 @@ impl Baseline {
             .collect();
         baseline.prints = read_prints(&modules);
         baseline
+    }
+
+    /// Narrows the files to what the build of the executable at `exe` read, as its [`Inputs`] list
+    /// them; a file newly watched is taken as it is now. Keeps them all if the dep-info can't be
+    /// read. A module added since the build's start, or a file watched still but removed, stays so,
+    /// which rebuilds.
+    fn narrow(&mut self, sources: &Sources, exe: &Path) {
+        let Some(inputs) = Inputs::read(exe, sources) else {
+            return;
+        };
+        let stamps = sources.scan(Some(&inputs));
+        let watched = |path: &Path| {
+            stamps.contains_key(path)
+                || sources.module(path)
+                || (sources.files.iter().chain(&inputs.files)).any(|file| file == path)
+                || inputs.dirs.iter().any(|dir| path.starts_with(dir))
+        };
+        self.files.retain(|path, _| watched(path));
+        for (path, stamp) in stamps {
+            if !sources.module(&path) && !self.files.contains_key(&path) {
+                let hash = hash_of(&fs::read(&path).unwrap_or_default());
+                let text = None;
+                self.files.insert(path, Known { stamp, hash, text });
+            }
+        }
+        self.inputs = Some(inputs);
     }
 
     /// Takes the non-module file at `path` as the build wrote it.
@@ -1202,6 +1311,140 @@ fn listed(files: &[PathBuf]) -> String {
 mod tests {
     use super::*;
 
+    /// A dep-info file's rule as cargo writes it: `target` depends on `deps`.
+    fn rule(target: &Path, deps: &[PathBuf]) -> String {
+        let escaped = |path: &Path| path.display().to_string().replace(' ', "\\ ");
+        let deps: Vec<String> = deps.iter().map(|dep| escaped(dep)).collect();
+        format!("{}: {}\n", escaped(target), deps.join(" "))
+    }
+
+    #[test]
+    fn a_dep_info_file_gives_the_paths_its_first_rule_depends_on() {
+        let root = std::env::temp_dir().join("gg dep info");
+        let (exe, main, spaced) = (
+            root.join("target/game"),
+            root.join("src/main.rs"),
+            root.join("my levels/one level.txt"),
+        );
+        let deps = vec![main, spaced];
+        let text = rule(&exe, &deps) + &rule(&exe.with_extension("pdb"), &deps[..1]);
+        assert_eq!(dep_info(&text), Some(deps));
+        let relative = format!("{}: src/main.rs\n", exe.display());
+        assert_eq!(dep_info(&relative), None, "a relative path");
+        assert_eq!(dep_info("no rule\n"), None);
+        assert_eq!(dep_info(""), None);
+    }
+
+    /// Once a build says what it read, its docs, a module built only for its tests, and what builds
+    /// write aren't watched; what it embeds, a directory its build script watches, and a file
+    /// outside the packages' directories are.
+    #[test]
+    fn a_build_watches_what_its_dep_info_says_it_read() {
+        let root = std::env::temp_dir().join(format!("gg-inputs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().expect("a directory")).expect("a directory");
+            fs::write(path, text).expect("written");
+        };
+        let game = "fn main() {\n    run();\n}\n\nfn run() {\n    \
+                    show(include_str!(\"level.txt\"));\n}\n";
+        let tested = "pub fn tick() {}\n\n#[cfg(test)]\nmod tests;\n";
+        for (path, text) in [
+            ("Cargo.toml", "[workspace]"),
+            ("Cargo.lock", "version = 4"),
+            ("rust-toolchain.toml", "[toolchain]"),
+            ("game/Cargo.toml", "[package]"),
+            ("game/src/main.rs", game),
+            ("game/src/level.txt", "a level"),
+            ("engine/Cargo.toml", "[package]"),
+            ("engine/AGENTS.md", "How to work here."),
+            ("engine/src/lib.rs", tested),
+            ("engine/src/tests.rs", "#[test]\nfn ticks() {}\n"),
+            ("engine/shaders/sprite.slang", "a shader"),
+            ("target/debug/build/engine/out/sprite.spv", "SPIR-V"),
+            ("target/debug/game", "built"),
+        ] {
+            write(path, text);
+        }
+        let files = ["Cargo.toml", "Cargo.lock", "game/Cargo.toml"];
+        let sources = Sources {
+            modules: root.join("game/src"),
+            game: root.join("game"),
+            dirs: vec![root.join("engine")],
+            files: files.iter().map(|file| root.join(file)).collect(),
+            lock: root.join("Cargo.lock"),
+            target: root.join("target"),
+        };
+        let mut baseline = Baseline::new(&sources);
+        let exe = root.join("target/debug/game");
+        baseline.narrow(&sources, &exe);
+        assert_eq!(baseline.inputs, None, "no dep-info: all watched still");
+        let listed = [
+            "Cargo.lock",
+            "Cargo.toml",
+            "rust-toolchain.toml",
+            "engine/Cargo.toml",
+            "engine/shaders",
+            "engine/src",
+            "engine/src/lib.rs",
+            "game/Cargo.toml",
+            "game/src",
+            "game/src/level.txt",
+            "game/src/main.rs",
+            "target/debug/build/engine/out/sprite.spv",
+        ];
+        let listed: Vec<PathBuf> = listed.iter().map(|path| root.join(path)).collect();
+        fs::write(exe.with_extension("d"), rule(&exe, &listed)).expect("written");
+        baseline.narrow(&sources, &exe);
+        let inputs = baseline.inputs.clone().expect("inputs");
+        assert_eq!(
+            inputs.dirs,
+            [root.join("engine/shaders")],
+            "the digest's `src` left out"
+        );
+        assert!(
+            !inputs
+                .files
+                .iter()
+                .any(|file| file.starts_with(&sources.target))
+        );
+
+        let now = || diff(&sources, &baseline, &sources.scan(Some(&inputs)));
+        assert!(matches!(now(), Diff::Bodies(hashes, None, _) if hashes == baseline.modules));
+        // Not read: docs, a module built for tests alone, what a build wrote. A walk of the
+        // engine's directory would have rebuilt for the first two.
+        write("engine/AGENTS.md", "How to work here, and why.");
+        write("engine/src/tests.rs", "#[test]\nfn ticks_twice() {}\n");
+        write("target/debug/build/engine/out/sprite.spv", "SPIR-V, again");
+        assert!(matches!(now(), Diff::Bodies(hashes, None, _) if hashes == baseline.modules));
+        // Read: each rebuilds, until undone.
+        for (path, edited, was) in [
+            ("game/src/level.txt", "a longer level", "a level"),
+            (
+                "rust-toolchain.toml",
+                "[toolchain]\nchannel = \"1.99\"",
+                "[toolchain]",
+            ),
+            ("engine/src/lib.rs", "pub fn tock() {}\n", tested),
+            ("engine/shaders/sprite.slang", "another shader", "a shader"),
+        ] {
+            write(path, edited);
+            let file = root.join(path);
+            assert!(
+                matches!(now(), Diff::Rebuild(at, why) if at == file && why == OUTSIDE),
+                "{path}"
+            );
+            write(path, was);
+            assert!(matches!(now(), Diff::Bodies(..)), "{path} undone");
+        }
+        // A file added to a directory a build script watches.
+        write("engine/shaders/line.slang", "a line");
+        let added = root.join("engine/shaders/line.slang");
+        assert!(matches!(now(), Diff::Rebuild(at, _) if at == added));
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn edits_inside_function_bodies_of_the_games_modules_patch_and_other_changes_rebuild() {
         let root = std::env::temp_dir().join(format!("gg-sources-{}", std::process::id()));
@@ -1231,6 +1474,7 @@ mod tests {
             dirs: vec![root.join("engine")],
             files: files.iter().map(|file| root.join(file)).collect(),
             lock: root.join("Cargo.lock"),
+            target: root.join("target"),
         };
         let baseline = Baseline::new(&sources);
         let (main, lib) = (
@@ -1243,7 +1487,7 @@ mod tests {
                 .modules
                 .contains_key(&root.join("game/src/tests/helper.rs"))
         );
-        let now = || diff(&sources, &baseline, &sources.scan());
+        let now = || diff(&sources, &baseline, &sources.scan(None));
         // Not watched: assets, a package's tests, an editor's lock and backup.
         write("game/assets/logo.png", "another logo");
         write("engine/tests/ticks.rs", "#[test]\nfn ticks_twice() {}\n");
@@ -1335,10 +1579,11 @@ mod tests {
             dirs: Vec::new(),
             files: files.iter().map(|file| root.join(file)).collect(),
             lock: root.join("Cargo.lock"),
+            target: root.join("target"),
         };
         let baseline = Baseline::new(&sources);
         let path = root.join("game/src/consts.rs");
-        let now = || diff(&sources, &baseline, &sources.scan());
+        let now = || diff(&sources, &baseline, &sources.scan(None));
         // Each edit here changes the file's length, as one within the clock's resolution of the
         // last may leave its time.
         write("game/src/consts.rs", &consts.replace("2.0", "3.75"));
@@ -1394,9 +1639,10 @@ mod tests {
             dirs: Vec::new(),
             files: files.iter().map(|file| root.join(file)).collect(),
             lock: root.join("Cargo.lock"),
+            target: root.join("target"),
         };
         let baseline = Baseline::new(&sources);
-        let now = || diff(&sources, &baseline, &sources.scan());
+        let now = || diff(&sources, &baseline, &sources.scan(None));
         let unchanged = |diff: Diff| {
             let Diff::Bodies(hashes, None, _) = diff else {
                 return false;
@@ -1444,10 +1690,11 @@ mod tests {
             dirs: Vec::new(),
             files: Vec::new(),
             lock: root.join("Cargo.lock"),
+            target: root.join("target"),
         };
         let start = Instant::now();
         let mut watcher = Watcher {
-            seen: sources.scan(),
+            seen: sources.scan(None),
             sources,
             since: start,
             changed: false,
@@ -1478,6 +1725,7 @@ mod tests {
             dirs: Vec::new(),
             files: Vec::new(),
             lock: root.join("Cargo.lock"),
+            target: root.join("target"),
         };
         let baseline = Baseline::new(&sources);
         let seen = baseline.stamps();
@@ -1553,7 +1801,7 @@ mod tests {
         );
         // An edit a patch would carry rebuilds a cargo-built game, which here fails.
         fs::write(&main, "fn main() {}\n\nfn run() {\n    step(22);\n}\n").expect("written");
-        patches.seen = patches.sources.scan();
+        patches.seen = patches.sources.scan(None);
         patches.look(&serving);
         let state = patches.state(&serving);
         let why = state.why.unwrap_or_default();

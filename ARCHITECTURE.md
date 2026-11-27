@@ -197,7 +197,8 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
   edit. An edit to code only `attach` reaches is patched, but restarts start from snapshots, so it
   shows once `gg rebuild --fresh` starts the game afresh. `gg run` compares that code with the
   build that built the world, so the game warns of each edit once (`gg.attach_changed`).
-  Without `dx`, every change rebuilds and restarts the game.
+  Without `dx`, every change rebuilds and restarts the game. `gg run` watches what each build read,
+  as cargo's dep-info lists it.
 - **Luau, in every build, for mods and quick scripts.** Players install sandboxed mods, and quests,
   dialogue and level events reload in milliseconds. A script file declares one component, its
   fields and a tick per entity, as a native `Script` does; adding the component attaches the script.
