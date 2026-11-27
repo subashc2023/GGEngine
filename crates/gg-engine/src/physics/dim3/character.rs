@@ -226,6 +226,10 @@ impl Physics3D {
                 (character.entity, other, hit.hit.witness1, hit.hit.normal1)
             });
             self.touched.extend(touched);
+            #[cfg(feature = "dev")]
+            if let Some((other, at, normal)) = ground(&self.rapier, character) {
+                self.touched.push((character.entity, other, at, normal));
+            }
         }
         self.release_moving();
     }
@@ -491,6 +495,45 @@ pub(super) type Moving = (RigidBodyHandle, Vector, Vector);
 /// The velocity-driven kinematic body that `shape`, at `at`, stands on, if any: what a cast of the
 /// shape straight down meets within `gap`, the controller's gap from the ground, plus its ground
 /// prediction.
+/// What a grounded `character` stands on, within its controller's reach for the ground: the
+/// entity, where it touches and the normal there, in the world's space. A character standing still
+/// moves by nothing, so hits nothing: the tool API's `touching` and the Contacts overlay take it
+/// from here.
+#[cfg(feature = "dev")]
+fn ground(rapier: &Rapier, character: &Character) -> Option<(Option<Entity>, Vector, Vector)> {
+    if !character.controller.grounded {
+        return None;
+    }
+    let Rapier {
+        bodies,
+        colliders,
+        broad_phase,
+        narrow_phase,
+        ..
+    } = rapier;
+    let collider = colliders.get(character.collider)?;
+    let on_body = collider.position_wrt_parent().copied();
+    let at = *bodies.get(character.body)?.position() * on_body.unwrap_or(Pose::IDENTITY);
+    let shape = collider.shared_shape();
+    let met = groups(character.capsule.membership, character.capsule.filter);
+    let filter = QueryFilter::new()
+        .exclude_rigid_body(character.body)
+        .exclude_sensors()
+        .groups(met);
+    let queries =
+        broad_phase.as_query_pipeline(narrow_phase.query_dispatcher(), bodies, colliders, filter);
+    // The controller's gap from the ground, a hundredth of the height, and its reach past it.
+    let gap = 0.01 * shape.compute_local_aabb().extents().y;
+    let down = ShapeCastOptions {
+        max_time_of_impact: gap + 0.05,
+        target_distance: 0.0,
+        stop_at_penetration: false,
+        compute_impact_geometry_on_penetration: true,
+    };
+    let (under, hit) = queries.cast_shape(&at, -Vector::Y, &**shape, down)?;
+    Some((super::body_entity(rapier, under), hit.witness1, hit.normal1))
+}
+
 fn platform(
     queries: &QueryPipeline<'_>,
     shape: &dyn Shape,
@@ -684,6 +727,24 @@ pub(super) mod tests {
             let changed = table.changed(id.expect("registered")).expect("a column");
             assert!(changed.row(row) < tick, "{} {tick}", changed.row(row));
         }
+    }
+
+    /// A character standing still on the floor touches it, as the tool API's `touching` tells,
+    /// and the floor it, though it moves by nothing and so hits nothing; one in the air, nothing.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_character_standing_still_touches_its_ground() {
+        let mut world = World::default();
+        let ground = floor(&mut world);
+        let stander = character(&mut world, Vec3::new(0.0, ON_FLOOR, 0.0));
+        let flier = character(&mut world, Vec3::new(4.0, 6.0, 0.0));
+        step(&mut world, 4);
+        assert!(controller(&world, stander).grounded);
+        assert_eq!(controller(&world, stander).velocity, Vec3::ZERO);
+        let touching = |entity| crate::physics::touching(&world, entity);
+        assert_eq!(touching(stander), [(ground, false)]);
+        assert!(touching(ground).contains(&(stander, false)));
+        assert_eq!(touching(flier), []);
     }
 
     /// A character walking into a wall at a slant slides along it by the part of its velocity
