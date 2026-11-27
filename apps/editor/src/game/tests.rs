@@ -94,6 +94,7 @@ fn status(stopped: bool, paused: bool) -> Result<Value, Failure> {
         cells: None,
         cursor_grabbed: false,
         files_looked: None,
+        held: Vec::new(),
     };
     Ok(json!(status))
 }
@@ -114,6 +115,7 @@ fn scene_status(scene: Option<&str>, unsaved: bool) -> Result<Value, Failure> {
         cells: None,
         cursor_grabbed: false,
         files_looked: None,
+        held: Vec::new(),
     };
     Ok(json!(status))
 }

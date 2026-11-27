@@ -527,13 +527,13 @@ impl State {
 
     /// Whether `at` is over something a pointer works on: a shown button or widget, disabled or
     /// not, or a list, within its clip; or anywhere while options are open. Panels, texts and
-    /// images aren't, so a HUD doesn't take the game's clicks.
+    /// images aren't, so a HUD doesn't take the game's clicks. A panel over one doesn't lift the
+    /// pointer off it: it keeps the pointer from the layers below as well as from the one it covers.
     pub(super) fn pointer_over(&self, at: Vec2) -> bool {
         self.options_open()
-            || self.list_at(at).is_some()
             || (0..self.nodes.len()).any(|i| {
-                self.nodes[i].kind.focuses()
-                    && self.shows(i)
+                (self.nodes[i].kind.focuses() || self.nodes[i].kind == Kind::List)
+                    && self.laid.shown[i]
                     && self.laid.rects[i].contains(at)
                     && self.laid.within(i, at)
             })
@@ -561,19 +561,76 @@ impl State {
         }
     }
 
+    /// The focusable node under `at` that the pointer reaches: the last drawn of those whose
+    /// clipped rectangle holds it, none under a panel drawn after it ([`Self::covers`]).
     fn widget_at(&self, at: Vec2) -> Option<usize> {
-        (0..self.nodes.len()).rev().find(|&i| {
-            self.focusable(i) && self.laid.rects[i].contains(at) && self.laid.within(i, at)
-        })
+        self.reached(at, |i| self.focusable(i))
+    }
+
+    /// The shown button or widget under `at`, enabled or not, that the pointer reaches. For
+    /// [`GameUi::hovered`].
+    pub(super) fn pointed_at(&self, at: Vec2) -> Option<usize> {
+        self.reached(at, |i| self.nodes[i].kind.focuses() && self.laid.shown[i])
     }
 
     fn list_at(&self, at: Vec2) -> Option<usize> {
-        (0..self.nodes.len()).rev().find(|&i| {
-            self.nodes[i].kind == Kind::List
-                && self.laid.shown[i]
+        self.reached(at, |i| {
+            self.nodes[i].kind == Kind::List && self.laid.shown[i]
+        })
+    }
+
+    /// The last drawn node `wanted` accepts whose rectangle, within its clip, holds `at`, unless a
+    /// panel drawn after it covers `at` first. One pass from the last node back: a panel found
+    /// covers every node before it.
+    fn reached(&self, at: Vec2, wanted: impl Fn(usize) -> bool) -> Option<usize> {
+        // The last covering panel drawn so far: one past a node's subtree covers it, one within
+        // doesn't, as a list's panel rows don't cover the list they scroll in.
+        let mut last: Option<usize> = None;
+        for i in (0..self.nodes.len()).rev() {
+            let covered = last.is_some_and(|panel| panel >= self.nodes[i].end as usize);
+            if self.nodes[i].kind == Kind::Panel {
+                if last.is_none() && self.covers(i, at) {
+                    last = Some(i);
+                }
+            } else if !covered
+                && wanted(i)
                 && self.laid.rects[i].contains(at)
                 && self.laid.within(i, at)
-        })
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Whether panel `i` is shown and holds `at`, within its clip.
+    fn covers(&self, i: usize, at: Vec2) -> bool {
+        self.laid.shown[i] && self.laid.rects[i].contains(at) && self.laid.within(i, at)
+    }
+
+    /// Whether a panel drawn after node `i`, past its subtree, wholly covers what shows of it, so a
+    /// key or pad move skips it. Ceiling: a UI of thousands of nodes moving the focus, a pass for
+    /// each node.
+    fn covered(&self, i: usize) -> bool {
+        let seen = |node: usize| {
+            let rect = self.laid.rects[node];
+            self.laid.clips[node].map_or(rect, |clip| rect.within(clip))
+        };
+        let node = seen(i);
+        let end = node.at + node.size;
+        node.size.cmpgt(Vec2::ZERO).all()
+            && (self.nodes[i].end as usize..self.nodes.len()).any(|j| {
+                let panel = seen(j);
+                self.nodes[j].kind == Kind::Panel
+                    && self.laid.shown[j]
+                    && panel.at.cmple(node.at).all()
+                    && end.cmple(panel.at + panel.size).all()
+            })
+    }
+
+    /// Whether a key or pad move may focus node `i`: focusable and not wholly covered.
+    fn reachable(&self, i: usize) -> bool {
+        self.focusable(i) && !self.covered(i)
     }
 
     /// Scrolls list `i` down `by` units, within its range. If it moved, it's laid out again at the
@@ -636,8 +693,8 @@ impl State {
     /// Focuses the node its file's `focus` names if focusable, else the first that is. For a step
     /// or press with none focused.
     fn focus_first(&mut self) -> Option<UiEvent> {
-        let first = self.file_focus.filter(|&i| self.focusable(i));
-        let first = first.or_else(|| (0..self.nodes.len()).find(|&i| self.focusable(i)));
+        let first = self.file_focus.filter(|&i| self.reachable(i));
+        let first = first.or_else(|| (0..self.nodes.len()).find(|&i| self.reachable(i)));
         self.focus_to(first?)
     }
 
@@ -657,7 +714,7 @@ impl State {
         };
         let here = self.laid.rects[from];
         let mut nearest: Option<(usize, (bool, f32))> = None;
-        for i in (0..self.nodes.len()).filter(|&i| i != from && self.focusable(i)) {
+        for i in (0..self.nodes.len()).filter(|&i| i != from && self.reachable(i)) {
             let there = self.laid.rects[i];
             let off = there.middle() - here.middle();
             let along = off.dot(way);
@@ -683,14 +740,14 @@ impl State {
     fn tab(&mut self, back: bool) -> Option<UiEvent> {
         let count = self.nodes.len();
         let next = match self.focused() {
-            None if back => (0..count).rev().find(|&i| self.focusable(i)),
-            None => (0..count).find(|&i| self.focusable(i)),
+            None if back => (0..count).rev().find(|&i| self.reachable(i)),
+            None => (0..count).find(|&i| self.reachable(i)),
             Some(at) => (1..=count)
                 .map(|by| match back {
                     true => (at + count - by) % count,
                     false => (at + by) % count,
                 })
-                .find(|&i| self.focusable(i)),
+                .find(|&i| self.reachable(i)),
         };
         match next {
             Some(next) if self.focus != Some(next) => self.focus_to(next),

@@ -23,7 +23,7 @@ use crate::classify::{self, Edit, Uses};
 use crate::dx::{self, Dx, Fat};
 use crate::reach::{self, Code, Prints};
 use crate::run::{self, Run, Stamp, event, millis};
-use crate::runs::{self, Asked, State};
+use crate::runs::{self, Asked, MOST_KEPT, State};
 
 /// How long the sources must stay the same before a change is acted on: saves come in bursts.
 const QUIET: Duration = Duration::from_millis(200);
@@ -79,6 +79,9 @@ pub(crate) struct Patches {
     failed: Option<Failure>,
     /// The last patch or rebuild that succeeded, as [`State::reload`] tells it.
     reload: Option<Value>,
+    /// The latest [`MOST_KEPT`] outcomes of patches and rebuilds, failed ones too, oldest first, as
+    /// [`State::reloads`] tells them.
+    reloads: Vec<Value>,
     /// The `gg rebuild`s not yet acted on, as one, as
     /// [`Told::asked_to_rebuild`](runs::Told::asked_to_rebuild) gives them.
     asked: Option<Asked>,
@@ -227,6 +230,7 @@ impl Patches {
             libs: Vec::new(),
             failed: None,
             reload: None,
+            reloads: Vec::new(),
             asked: None,
             answered: None,
             world: None,
@@ -242,6 +246,7 @@ impl Patches {
         state.pids = games.iter().map(|game| game.pid).collect();
         state.error.clone_from(&self.failed);
         state.reload.clone_from(&self.reload);
+        state.reloads.clone_from(&self.reloads);
         state.phase = match &self.job {
             Some(Job::Rebuild { why, .. }) => {
                 state.why = Some(why.clone());
@@ -260,6 +265,34 @@ impl Patches {
 
     pub(crate) fn exe(&self) -> &Path {
         &self.fat.exe
+    }
+
+    /// How long the build of [`exe`](Self::exe) waited for dx's lock.
+    pub(crate) fn queued(&self) -> Duration {
+        self.fat.queued
+    }
+
+    /// Notes an outcome, `at` now, for `wait` to list.
+    fn outcome(&mut self, mut outcome: Value) {
+        outcome["at"] = json!(runs::now_ms());
+        if self.reloads.len() == MOST_KEPT {
+            self.reloads.remove(0);
+        }
+        self.reloads.push(outcome);
+    }
+
+    /// Notes that the game's processes, which started from the rebuild before the newest, ended to
+    /// restart from the newest, having warned as `events` say: `wait` lists them with the rebuild
+    /// that started them, as the restart that follows hides them.
+    pub(crate) fn warned(&mut self, events: &[Box<serde_json::value::RawValue>]) {
+        let (warnings, _) = runs::about_warnings(events, runs::MOST_WARNINGS);
+        let rebuilds = self.reloads.iter_mut().rev();
+        let mut rebuilds = rebuilds.filter(|outcome| outcome["event"] == "rebuilt");
+        if let Some(older) = rebuilds.nth(1)
+            && !warnings.is_empty()
+        {
+            older["warnings"] = Value::Array(warnings);
+        }
     }
 
     /// Notes that `gg rebuild` asked for a rebuild, which [`tend`](Self::tend) starts once no job
@@ -553,14 +586,14 @@ impl Patches {
             }) => match thread.join().unwrap_or_else(|_| Err(panicked())) {
                 Ok((fat, baseline)) => {
                     self.answered = asked.map(|asked| (asked, None));
-                    let ms = millis(started.elapsed());
-                    event(&json!({"event": "rebuilt", "exe": fat.exe, "build_ms": ms}));
-                    self.reload = Some(json!({
-                        "event": "rebuilt",
-                        "why": why,
-                        "build_ms": ms,
-                        "at": runs::now_ms(),
-                    }));
+                    // The wait for dx's lock isn't the build's time.
+                    let queued = fat.queued;
+                    let ms = millis(started.elapsed().saturating_sub(queued));
+                    let rebuilt = json!({"event": "rebuilt", "exe": fat.exe, "build_ms": ms});
+                    event(&run::with_queued(rebuilt, queued));
+                    let rebuilt = json!({"event": "rebuilt", "why": why, "build_ms": ms});
+                    self.outcome(run::with_queued(rebuilt, queued));
+                    self.reload = self.reloads.last().cloned();
                     let fresh = asked.is_some_and(|asked| asked.fresh);
                     self.rebuilt = Some((fat, baseline, fresh));
                     self.failed = None;
@@ -569,6 +602,11 @@ impl Patches {
                 Err(failure) => {
                     self.answered = asked.map(|asked| (asked, Some(failure.clone())));
                     event(&json!({"event": "rebuild_failed", "error": error(&failure)}));
+                    self.outcome(json!({
+                        "event": "rebuild_failed",
+                        "why": why,
+                        "error": error(&failure),
+                    }));
                     let message = format!(
                         "A rebuild of the game failed, so it runs on as it was built, and each \
                              change rebuilds it until one succeeds: {}",
@@ -607,6 +645,8 @@ impl Patches {
                     Vec::new()
                 };
                 let attach_files = modules(&attach);
+                // One outcome per patch, however many processes applied it.
+                let mut told = false;
                 for (pid, outcome) in patching.outcomes {
                     let to = serving(pid);
                     // A failure to build is every process's: a lone game's ID.
@@ -627,13 +667,15 @@ impl Patches {
                                 "apply_ms": apply_ms,
                                 "ticks": patched.ticks,
                             }));
-                            self.reload = Some(json!({
-                                "event": "patched",
-                                "files": files,
-                                "build_ms": build_ms,
-                                "apply_ms": apply_ms,
-                                "at": runs::now_ms(),
-                            }));
+                            if !mem::replace(&mut told, true) {
+                                self.outcome(json!({
+                                    "event": "patched",
+                                    "files": files,
+                                    "build_ms": build_ms,
+                                    "apply_ms": apply_ms,
+                                }));
+                                self.reload = self.reloads.last().cloned();
+                            }
                             tell_attach(to, &attach);
                         }
                         Outcome::Failed(failure)
@@ -668,6 +710,11 @@ impl Patches {
                             event(&json!({
                                 "event": "patch_failed",
                                 "pid": pid,
+                                "files": files,
+                                "error": error(&failure),
+                            }));
+                            self.outcome(json!({
+                                "event": "patch_failed",
                                 "files": files,
                                 "error": error(&failure),
                             }));
@@ -1751,6 +1798,7 @@ mod tests {
             libs: Vec::new(),
             failed: None,
             reload: None,
+            reloads: Vec::new(),
             asked: None,
             answered: None,
             world: None,
@@ -1844,6 +1892,31 @@ mod tests {
                 "{code}"
             );
         }
+        // Failures are outcomes too, listed in order.
+        let events: Vec<_> = patches
+            .reloads
+            .iter()
+            .map(|outcome| outcome["event"].clone())
+            .collect();
+        assert_eq!(events, ["rebuild_failed", "patch_failed"]);
+        // The warnings of the game that ends as a rebuild restarts it go with the rebuild before the
+        // newest, the one that started it.
+        patches.outcome(json!({"event": "rebuilt", "build_ms": 5}));
+        patches.outcome(json!({"event": "rebuilt", "build_ms": 6}));
+        let line = json!({"level": "WARN", "code": "snapshot.changed", "message": "lives added"});
+        let line = serde_json::value::RawValue::from_string(line.to_string()).expect("a line");
+        patches.warned(&[line]);
+        let kept: Vec<_> = patches
+            .reloads
+            .iter()
+            .map(|outcome| outcome.get("warnings"))
+            .collect();
+        assert_eq!(kept[..2], [None, None]);
+        assert_eq!(
+            kept[2],
+            Some(&json!([{"code": "snapshot.changed", "message": "lives added"}]))
+        );
+        assert_eq!(kept[3], None);
         // A rebuild `gg rebuild` asks for waits for the job under way, the asks made meanwhile
         // one, afresh as one was, and answers how it went, here failing.
         let (go, going) = std::sync::mpsc::channel::<()>();

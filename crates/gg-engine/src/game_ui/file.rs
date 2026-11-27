@@ -592,6 +592,7 @@ fn build(kind: Kind, fields: Fields) -> std::result::Result<Built, (&'static str
         accent,
         clips: clip.unwrap_or(kind == Kind::List),
         scroll: 0.0,
+        offset: Vec2::ZERO,
     };
     let children = children.unwrap_or_default();
     Ok(Built {

@@ -422,6 +422,7 @@ impl Uis {
                     disabled: node.disabled,
                     focused: state.focused() == Some(i),
                     pressed: state.look(i) == PRESSED,
+                    offset: node.offset.to_array().map(finite),
                 }
             });
             gg_api::ListedUi {

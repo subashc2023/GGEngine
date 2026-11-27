@@ -55,7 +55,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gg_core::{Error, Result};
 use tracing::{info, warn};
@@ -412,6 +412,9 @@ pub(crate) struct Snapshot {
     pub(crate) paused: bool,
     /// The world as edited, if taken while a copy of it played.
     pub(crate) held: Option<Held>,
+    /// The type changes `snapshot.changed` warned of, so that the world as edited, restored after
+    /// the world with the same types, warns only of its own.
+    warned: Mutex<Vec<String>>,
 }
 
 /// The world as edited a snapshot holds: ticks, hash, scene files as last applied, open scene (if
@@ -657,6 +660,7 @@ impl Snapshot {
             paused,
             held,
             text,
+            warned: Mutex::default(),
         })
     }
 
@@ -806,7 +810,12 @@ impl Snapshot {
             let message = format!("{path}: {error:#}");
             Error::new(error.code(), message)
         })?;
+        let mut warned = self.warned.lock().expect("no thread panics holding it");
         for (change, count) in changes.iter() {
+            let change = change.to_string();
+            if warned.contains(&change) {
+                continue;
+            }
             warn!(
                 code = "snapshot.changed",
                 path = %path,
@@ -814,7 +823,9 @@ impl Snapshot {
                 "The {what} is restored otherwise than it was saved, to match its types as they \
                  are: {change}"
             );
+            warned.push(change);
         }
+        drop(warned);
         let restored = restored.expect("hashed once loaded");
         if changes.is_empty() && restored != hash {
             warn!(
@@ -1074,9 +1085,10 @@ mod tests {
     }
 
     /// A snapshot taken while a copy of the world as edited played holds that world too, which
-    /// comes back at its ticks with its scene files. A stopped one says so and holds the run's
-    /// world alone; one playing from its start says neither. A stopped snapshot holding a world as
-    /// edited, or with a broken `stopped` or `edited` line, is refused.
+    /// comes back at its ticks with its scene files, a type change both worlds share warning once.
+    /// A stopped one says so and holds the run's world alone; one playing from its start says
+    /// neither. A stopped snapshot holding a world as edited, or with a broken `stopped` or `edited`
+    /// line, is refused.
     #[test]
     fn a_snapshot_keeps_what_its_run_was_doing() {
         let mut edited = Context::seeded(1);
@@ -1122,6 +1134,17 @@ mod tests {
         snapshot.restore_held(kept.world_mut()).expect("restored");
         assert_eq!(running.world().hash(), copy.hash());
         assert_eq!(kept.world().hash(), edited.world().hash());
+        // Saved before a rebuild added a field to both worlds' sprites.
+        let older = held_text.replace("(\"texture\", None), ", "");
+        assert_ne!(older, held_text);
+        let snapshot = Snapshot::parse(older, "older".to_owned(), "Tested").expect("read");
+        let logged = crate::testing::logged();
+        let [mut running, mut kept] = [5, 6].map(Context::seeded);
+        (snapshot.restore(running.world_mut(), &["Tester"])).expect("restored");
+        snapshot.restore_held(kept.world_mut()).expect("restored");
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        let changed = codes.iter().filter(|&code| code == "snapshot.changed");
+        assert_eq!(changed.count(), 1, "{codes:?}");
         let none = Open::default();
         let stopped_text = write(&copy, &[], &none, &Run::Stopped, "Tested", &[], 0);
         let stopped_text = stopped_text.expect("written");

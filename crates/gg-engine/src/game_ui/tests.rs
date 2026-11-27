@@ -1470,3 +1470,398 @@ fn keys_and_text_are_taken_while_a_text_field_has_the_focus() {
         "a pad's button"
     );
 }
+
+/// Three cards in a row, 200 by 100 with 20 between, the middle one at x 860 to 1060 and y 490 to
+/// 590 in a view 1,920 across; a list of two buttons at the top left, 150 high, reaching 200.
+const CARDS: &str = r#"(
+    nodes: [
+        Row(
+            name: "hand",
+            gap: 20.0,
+            children: [
+                Button(name: "c0", width: Fixed(200.0), height: Fixed(100.0)),
+                Button(name: "c1", width: Fixed(200.0), height: Fixed(100.0)),
+                Button(name: "c2", width: Fixed(200.0), height: Fixed(100.0)),
+            ],
+        ),
+        List(
+            name: "shelf",
+            anchor: (Start, Start),
+            width: Fixed(300.0),
+            height: Fixed(150.0),
+            children: [
+                Button(name: "s0", width: Fixed(300.0), height: Fixed(100.0)),
+                Button(name: "s1", width: Fixed(300.0), height: Fixed(100.0)),
+            ],
+        ),
+    ],
+)"#;
+
+/// A backing panel, then two buttons in a row: `a` at x 750 to 950, `b` at 970 to 1170, y 490 to
+/// 590; then a veil over the left 1,070 units of the view, which holds `again`, at x 435 to 635.
+/// The veil covers `a` wholly and `b` in part.
+const COVER: &str = r#"(
+    focus: "again",
+    nodes: [
+        Panel(name: "backing", width: Fixed(1000.0), height: Fixed(400.0)),
+        Row(
+            name: "hand",
+            gap: 20.0,
+            children: [
+                Button(name: "a", width: Fixed(200.0), height: Fixed(100.0)),
+                Button(name: "b", width: Fixed(200.0), height: Fixed(100.0)),
+            ],
+        ),
+        Panel(
+            name: "veil",
+            anchor: (Start, Center),
+            width: Fixed(1070.0),
+            height: Fill(1.0),
+            children: [Button(name: "again", width: Fixed(200.0), height: Fixed(60.0))],
+        ),
+    ],
+)"#;
+
+/// What a click on `name` at `along` its width does: its press and its release.
+fn clicked(state: &mut State, name: &str, along: f32) -> [Option<UiEvent>; 2] {
+    let at = on(state, name, along);
+    let input = Input::default();
+    [true, false].map(|down| state.send(&click(down), at, &input))
+}
+
+/// A panel drawn over a button takes the pointer there: the cursor focuses nothing and a click
+/// presses nothing under it, though the veil's own button and the part of a button it leaves bare
+/// work. Panels drawn before a button, as its backing, don't block it. A text doesn't cover. A
+/// hidden panel covers nothing.
+#[test]
+fn a_panel_drawn_over_a_button_takes_the_pointer_there() {
+    let mut state = laid(COVER, 1920.0);
+    state.drawn = Some(0);
+    let input = Input::default();
+    let moved = Event::CursorMoved { x: 0.0, y: 0.0 };
+    assert_eq!(
+        state.send(&moved, on(&state, "a", 0.5), &input),
+        None,
+        "no focus by the cursor"
+    );
+    assert_eq!(state.focus, state.named("again"));
+    assert_eq!(clicked(&mut state, "a", 0.5), [None, None], "covered whole");
+    assert_eq!(
+        clicked(&mut state, "b", 0.2),
+        [None, None],
+        "covered in part"
+    );
+    assert_eq!(state.hovered, None);
+    let pressed = |name: &str| Some(UiEvent::Pressed(name.into()));
+    let focused = |name: &str| Some(UiEvent::Focused(name.into()));
+    assert_eq!(
+        clicked(&mut state, "b", 0.9),
+        [focused("b"), pressed("b")],
+        "bare, though the backing is drawn before it"
+    );
+    assert_eq!(
+        clicked(&mut state, "again", 0.5),
+        [focused("again"), pressed("again")],
+        "the veil's own"
+    );
+
+    // Taken from the layers below as a click on a button is, where a button is covered; not over
+    // a veil with nothing under it.
+    let covered = on(&state, "a", 0.5).expect("a point");
+    assert!(state.pointer_over(covered));
+    assert!(state.takes(&click(true), Some(covered), 0));
+    assert!(!state.pointer_over(Vec2::new(500.0, 100.0)), "a veil alone");
+
+    // A text, drawn after a button, covers nothing.
+    let mut texts = laid(
+        r#"(nodes: [
+            Button(name: "a", width: Fixed(200.0), height: Fixed(100.0)),
+            Text(name: "label", text: "x", width: Fixed(600.0), height: Fixed(600.0)),
+        ])"#,
+        1920.0,
+    );
+    let pressed_a = clicked(&mut texts, "a", 0.5);
+    assert_eq!(pressed_a, [focused("a"), pressed("a")]);
+
+    let veil = state.named("veil").expect("a node");
+    state.nodes[veil].visible = false;
+    state.lay_out_again(1920.0);
+    assert_eq!(
+        clicked(&mut state, "a", 0.5),
+        [focused("a"), pressed("a")],
+        "the veil hidden"
+    );
+}
+
+/// A list's own panels don't cover it: the wheel over a panel row scrolls the list.
+#[test]
+fn a_list_of_panels_scrolls_by_the_wheel_over_them() {
+    let mut state = laid(
+        r#"(nodes: [
+            List(
+                name: "rows",
+                width: Fixed(300.0),
+                height: Fixed(200.0),
+                children: [
+                    Panel(name: "row_0", width: Fixed(300.0), height: Fixed(150.0)),
+                    Panel(name: "row_1", width: Fixed(300.0), height: Fixed(150.0)),
+                ],
+            ),
+        ])"#,
+        1920.0,
+    );
+    let input = Input::default();
+    let over = on(&state, "row_0", 0.5);
+    let wheel = Event::Scroll(crate::Scroll::Lines { x: 0.0, y: -1.0 });
+    state.send(&wheel, over, &input);
+    state.lay_out_again(1920.0);
+    let rows = state.named("rows").expect("a node");
+    assert!(state.nodes[rows].scroll > 0.0, "scrolled over a row");
+}
+
+/// A panel covering a node wholly takes it out of the focus's moves by key or pad, Tab and the
+/// file's focus; one covering it in part leaves it in. The focus the node already has stays.
+#[test]
+fn focus_moves_skip_a_button_a_panel_wholly_covers() {
+    let mut state = laid(COVER, 1920.0);
+    let input = Input::default();
+    let focused = |name: &str| Some(UiEvent::Focused(name.into()));
+    let key = |state: &mut State, key: Key, input: &Input| state.send(&press(key), None, input);
+    assert_eq!(key(&mut state, Key::Tab, &input), focused("b"), "past a");
+    assert_eq!(key(&mut state, Key::Tab, &input), focused("again"));
+    let mut shifted = Input::default();
+    shifted.record(&press(Key::ShiftLeft));
+    assert_eq!(key(&mut state, Key::Tab, &shifted), focused("b"));
+    assert_eq!(
+        key(&mut state, Key::ArrowLeft, &input),
+        focused("again"),
+        "a is nearer, and covered"
+    );
+    assert_eq!(key(&mut state, Key::ArrowRight, &input), focused("b"));
+    assert_eq!(
+        state.send(&pad(PadButton::DPadLeft), None, &input),
+        focused("again")
+    );
+
+    // With none focused, the file's focus if it's reachable, else the first that is.
+    state.focus = None;
+    assert_eq!(key(&mut state, Key::ArrowDown, &input), focused("again"));
+    let edited = COVER.replace("focus: \"again\"", "focus: \"a\"");
+    let mut state = laid(&edited, 1920.0);
+    state.focus = None;
+    assert_eq!(key(&mut state, Key::ArrowDown, &input), focused("b"));
+
+    let a = state.named("a").expect("a node");
+    state.focus = Some(a);
+    assert_eq!(state.focused(), Some(a), "the focus it has stays");
+
+    let veil = state.named("veil").expect("a node");
+    state.nodes[veil].visible = false;
+    state.lay_out_again(1920.0);
+    assert_eq!(key(&mut state, Key::Tab, &input), focused("b"));
+    assert_eq!(key(&mut state, Key::Tab, &input), focused("a"), "round");
+}
+
+/// Writes `files` (name and text) to a scratch directory and gives a context with the first added
+/// as UI `name`, its view 1,280 by 720 from (100, 50) so the cursor's pixels are in a scale
+/// of two thirds.
+fn viewed(scratch: &str, name: &str, text: &str) -> (Context, GameUi) {
+    let scratch = crate::dirs::tests::Scratch::new(scratch);
+    std::fs::create_dir_all(&scratch.0).expect("a directory");
+    let path = scratch.0.join(format!("{name}.ui"));
+    std::fs::write(&path, text).expect("a UI");
+    let mut cx = Context::seeded(0).root(scratch.0.clone());
+    let ui = cx.add_ui(name, &path).expect("added");
+    let view = Viewport {
+        origin: [100, 50],
+        size: [1280, 720],
+    };
+    cx.extract(&mut crate::render_thread::Extracted::default(), view);
+    (cx, ui)
+}
+
+/// Moves the cursor to canvas point `(x, y)` of the view [`viewed`] makes.
+fn point_at(cx: &mut Context, x: f64, y: f64) {
+    let event = Event::CursorMoved {
+        x: 100.0 + x * 2.0 / 3.0,
+        y: 50.0 + y * 2.0 / 3.0,
+    };
+    cx.record_input(&event);
+}
+
+/// `hovered` names the button or widget under the cursor now, disabled or not, not what a panel
+/// covers, and nothing once the cursor is off all of them, outside the view or gone, where
+/// `focused` stays on the last the cursor came over.
+#[test]
+fn hovered_goes_with_the_cursor() {
+    let (mut cx, ui) = viewed("ui-hovered", "cover", COVER);
+    let hovered = |cx: &mut Context| ui.hovered(cx).map(|name| name.to_string());
+    assert_eq!(hovered(&mut cx), None, "no cursor yet");
+    point_at(&mut cx, 1150.0, 540.0);
+    assert_eq!(hovered(&mut cx).as_deref(), Some("b"));
+    point_at(&mut cx, 1010.0, 540.0);
+    assert_eq!(hovered(&mut cx), None, "under the veil");
+    point_at(&mut cx, 850.0, 540.0);
+    assert_eq!(hovered(&mut cx), None, "under the veil");
+    point_at(&mut cx, 535.0, 540.0);
+    assert_eq!(hovered(&mut cx).as_deref(), Some("again"));
+    point_at(&mut cx, 1150.0, 540.0);
+    ui.set_disabled(&mut cx, "b", true).expect("disabled");
+    assert_eq!(hovered(&mut cx).as_deref(), Some("b"), "disabled too");
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("again"));
+    point_at(&mut cx, 1500.0, 100.0);
+    assert_eq!(hovered(&mut cx), None, "over nothing");
+    assert_eq!(ui.focused(&mut cx).as_deref(), Some("again"), "focus stays");
+    point_at(&mut cx, 1150.0, 540.0);
+    cx.record_input(&Event::CursorLeft);
+    assert_eq!(hovered(&mut cx), None, "the cursor left");
+    cx.record_input(&Event::CursorMoved { x: 20.0, y: 20.0 });
+    assert_eq!(hovered(&mut cx), None, "outside the view");
+    // Hidden, a button is hovered no more.
+    point_at(&mut cx, 1150.0, 540.0);
+    ui.set_visible(&mut cx, "hand", false).expect("hidden");
+    assert_eq!(hovered(&mut cx), None);
+}
+
+/// Settles `state`'s layout for a view 1,920 across if it isn't already.
+fn settled(state: &mut State) {
+    FONTS.with_borrow_mut(|fonts| state.lay_out(fonts, Vec2::new(1920.0, 1080.0)));
+}
+
+/// An offset moves a node and its subtree where they draw and where the pointer finds them, and
+/// no other node or layout; offsets add down the tree; a list's clip moves with it; an offset
+/// takes no new layout; code refuses a name no node has and an offset that isn't finite; and a
+/// reload keeps it.
+#[test]
+fn an_offset_moves_where_a_node_draws_and_is_found_and_nothing_else() {
+    let (mut cx, ui) = viewed("ui-offset", "cards", CARDS);
+    let state = cx.ui_parts().uis.state(ui);
+    settled(state);
+    let before: Vec<_> = ["hand", "c0", "c1", "c2", "shelf", "s0", "s1"]
+        .map(|name| rect(state, name))
+        .into();
+    assert_eq!(rect(state, "c1"), [860.0, 490.0, 200.0, 100.0]);
+
+    ui.set_offset(&mut cx, "c1", Vec2::new(0.0, -40.0))
+        .expect("set");
+    let state = cx.ui_parts().uis.state(ui);
+    assert_eq!(state.laid_for, Some(Vec2::new(1920.0, 1080.0)), "no layout");
+    settled(state);
+    let after: Vec<_> = ["hand", "c0", "c1", "c2", "shelf", "s0", "s1"]
+        .map(|name| rect(state, name))
+        .into();
+    for (i, name) in ["hand", "c0", "c1", "c2", "shelf", "s0", "s1"]
+        .iter()
+        .enumerate()
+    {
+        if *name == "c1" {
+            assert_eq!(after[i], [860.0, 450.0, 200.0, 100.0], "lifted");
+        } else {
+            assert_eq!(after[i], before[i], "{name} stays");
+        }
+    }
+    // The pointer finds c1 where it draws: its old bottom strip is bare; its new top is c1.
+    let (middle, strip, top) = (
+        Vec2::new(960.0, 500.0),
+        Vec2::new(960.0, 580.0),
+        Vec2::new(960.0, 455.0),
+    );
+    assert_eq!(state.pointed_at(middle), state.named("c1"));
+    assert_eq!(state.pointed_at(strip), None);
+    assert_eq!(state.pointed_at(top), state.named("c1"));
+    assert_eq!(
+        state.pointed_at(Vec2::new(740.0, 540.0)),
+        state.named("c0"),
+        "its neighbors stay"
+    );
+
+    // The row's offset moves the cards with it, over the lift: they add.
+    ui.set_offset(&mut cx, "hand", Vec2::new(10.0, 100.0))
+        .expect("set");
+    let state = cx.ui_parts().uis.state(ui);
+    settled(state);
+    assert_eq!(rect(state, "hand")[..2], [640.0 + 10.0, 490.0 + 100.0]);
+    assert_eq!(rect(state, "c0")[..2], [650.0, 590.0]);
+    assert_eq!(rect(state, "c1")[..2], [870.0, 550.0]);
+    ui.set_offset(&mut cx, "hand", Vec2::ZERO).expect("set");
+    let state = cx.ui_parts().uis.state(ui);
+    settled(state);
+    assert_eq!(rect(state, "c0"), before[1], "put back");
+
+    // A list's clip moves with it: s1 reaches past the list's 150 high, and shows to there.
+    let state = cx.ui_parts().uis.state(ui);
+    assert_eq!(state.pointed_at(Vec2::new(150.0, 130.0)), state.named("s1"));
+    assert_eq!(state.pointed_at(Vec2::new(150.0, 170.0)), None, "clipped");
+    ui.set_offset(&mut cx, "shelf", Vec2::new(500.0, 20.0))
+        .expect("set");
+    let state = cx.ui_parts().uis.state(ui);
+    settled(state);
+    assert_eq!(state.pointed_at(Vec2::new(150.0, 130.0)), None, "moved");
+    assert_eq!(state.pointed_at(Vec2::new(650.0, 40.0)), state.named("s0"));
+    assert_eq!(state.pointed_at(Vec2::new(650.0, 150.0)), state.named("s1"));
+    assert_eq!(state.pointed_at(Vec2::new(650.0, 190.0)), None, "clipped");
+
+    for (name, offset, code) in [
+        ("nobody", Vec2::ZERO, "ui.no_node"),
+        ("c0", Vec2::new(f32::NAN, 0.0), "ui.bad_value"),
+        ("c0", Vec2::new(0.0, f32::INFINITY), "ui.bad_value"),
+    ] {
+        let error = ui.set_offset(&mut cx, name, offset).expect_err("refused");
+        assert_eq!(error.code(), code, "{name}: {error:#}");
+    }
+
+    // Kept by name through a reload, with nodes added.
+    let edited = CARDS.replace("name: \"c0\"", "name: \"c9\"");
+    let document = parse(&edited).unwrap_or_else(|error| panic!("{error:#}"));
+    cx.ui_parts().uis.reload(0, document);
+    let state = cx.ui_parts().uis.state(ui);
+    settled(state);
+    assert_eq!(rect(state, "c1")[..2], [860.0, 450.0], "kept");
+    assert_eq!(
+        rect(state, "c9")[..2],
+        [640.0, 490.0],
+        "a renamed node's not"
+    );
+    assert_eq!(rect(state, "s0")[..2], [500.0, 20.0]);
+}
+
+/// The tool API lists a node's own offset where it isn't zero, beside its rectangle as moved.
+#[cfg(feature = "dev")]
+#[test]
+fn the_tool_api_lists_a_nodes_offset_when_it_has_one() {
+    let mut uis = Uis::default();
+    let file = uis.add_file(
+        "5f3c9a1e07b2d846".into(),
+        "ui/cards.ui".into(),
+        parse(CARDS).unwrap(),
+        None,
+    );
+    let ui = uis.add(file, "cards");
+    let state = uis.state(ui);
+    let hand = state.named("hand").expect("a node");
+    state.nodes[hand].offset = Vec2::new(0.0, -30.0);
+    state.unsettled = true;
+    let mut fonts = Fonts::new(&mut Textures::default());
+    let view = Viewport {
+        origin: [0, 0],
+        size: [1920, 1080],
+    };
+    let listed = uis.listed(&mut fonts, Some(view));
+    let nodes = &listed.uis[0].nodes;
+    let node = |name: &str| {
+        let found = nodes.iter().find(|node| node.name.as_deref() == Some(name));
+        found.unwrap_or_else(|| panic!("a node `{name}`"))
+    };
+    assert_eq!(node("hand").offset, [0.0, -30.0]);
+    assert_eq!(node("c1").offset, [0.0, 0.0], "its own, not its parent's");
+    assert_eq!(node("c1").rect, [860.0, 460.0, 200.0, 100.0], "moved");
+    let json = serde_json::to_value(&listed).expect("JSON");
+    assert_eq!(
+        json["uis"][0]["nodes"][0]["offset"],
+        serde_json::json!([0.0, -30.0])
+    );
+    assert!(
+        json["uis"][0]["nodes"][1].get("offset").is_none(),
+        "left out"
+    );
+}

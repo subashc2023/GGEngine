@@ -138,6 +138,7 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 |---|---|---|
 | A restore whose only change is reordered enum variants warns `snapshot.hash`, though every value came back: snapshots name variants, the hash digests places | Write a digest of each type's fields and variants; check the hash only where all match | The warning misleads someone |
 | A restore retakes a texture's or model's removal where its notes line up, and can't tell a layer's add from text's load of the same file: a rebuilt layer adding it draws its stand-in, unwarned | Note text's loads apart from layers' adds | A game removes text-loaded assets and is rebuilt to add them |
+| A rebuild whose `load` adds an asset ahead of those it added before, as a new UI's font, leaves out every `MeshDraw` it restores (`snapshot.changed`): their entities draw nothing until `gg rebuild --fresh`. A draw holds assets by index | Restore draws by their assets' names, as PLAN's `MeshDraw` row says | Agents add assets to a running game's `load` |
 
 ## Networking
 
@@ -315,6 +316,7 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 | Defect | Fix | Worth it when |
 |---|---|---|
 | A game built before `hello` named its clients refuses every newer `gg` with `api.unauthorized`, blaming the token | Say `hello` again without the name when refused | Someone keeps such an old game running |
+| Under `gg run --peers 2`, a rebuild keeps both games' warnings as one tally, so `gg wait` counts a warning both logged twice | Keep each peer's warnings apart, by its pid | Agents read peers' warnings counts |
 | `gg run` takes a package's `src` that a build script watches for the source digest's, watching only the files rustc read there: a build script generating code from other files in `src` isn't followed | Read each build script's own `rerun-if-changed` from its output | A package generates code from files in its `src` |
 | An edit reached only through a game's own trait object, or a function pointer taken as it runs, is patched but changes nothing until `gg rebuild`: `gg run` doesn't tell. So is one to code that `main`, `load` or `restored` reach only by what names can't follow: a trait impl's method (`Game::default` calling `Game::new`), a type alias, or a name others share (`x.new()`) | Resolve calls and dispatch to their items, as rust-analyzer does | Agents edit such code and miss `gg rebuild` |
 | `gg run` reads every module of the game at each look at a change, to follow calls: 8 to 25 ms for the workspace's games in a debug build | Keep each module's reading, reading edited ones alone | A game's modules take long to read at each save |

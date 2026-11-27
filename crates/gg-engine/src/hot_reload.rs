@@ -21,6 +21,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -335,7 +336,18 @@ pub(crate) struct HotReload {
     messages: Option<Sender<Message>>,
     reloaded: Receiver<Reloaded>,
     followed: Vec<Followed>,
+    /// The thread's [`Seen`].
+    seen: Arc<Seen>,
+    /// What [`taken_up_to`](Self::taken_up_to) last noted.
+    looked_at: Option<SystemTime>,
 }
+
+/// When the look began, in ms since the Unix epoch, before which the thread has sent every file's
+/// change: 0 before a look. A change reads on the look after the one that sees it, so it's the
+/// look before the one that ended last. Stored after what that look sent, so a reader who then
+/// takes all that came back has it.
+#[derive(Default)]
+struct Seen(AtomicU64);
 
 /// An asset whose file is under the asset root, which [`HotReload::follow`] follows.
 struct Followed {
@@ -355,10 +367,12 @@ impl HotReload {
     pub(crate) fn start() -> Result<Self> {
         let (messages, to_watch) = mpsc::channel();
         let (back, reloaded) = mpsc::channel();
+        let seen = Arc::new(Seen::default());
+        let sees = Arc::clone(&seen);
         thread::Builder::new()
             // Within the 15 bytes Linux keeps of a thread's name.
             .name("gg-watch".to_owned())
-            .spawn(move || watch(&to_watch, &back))
+            .spawn(move || watch(&to_watch, &back, &sees))
             .map_err(|error| {
                 let message = "can't start the thread that watches assets' files";
                 Error::new("engine.hot_reload", message).with_source(error)
@@ -368,7 +382,30 @@ impl HotReload {
             messages: Some(messages),
             reloaded,
             followed: Vec::new(),
+            seen,
+            looked_at: None,
         })
+    }
+
+    /// When the thread's look began before which it has sent back every watched file's change, as
+    /// [`Seen`] says; `None` before its second look. Read before taking what came back
+    /// ([`take`](Self::take)), and noted once all is taken ([`taken_up_to`](Self::taken_up_to)).
+    pub(crate) fn seen(&self) -> Option<SystemTime> {
+        let ms = self.seen.0.load(Ordering::Acquire);
+        (ms > 0).then(|| SystemTime::UNIX_EPOCH + Duration::from_millis(ms))
+    }
+
+    /// Notes that what came back by `seen` (from [`seen`](Self::seen)) is in place.
+    pub(crate) fn taken_up_to(&mut self, seen: Option<SystemTime>) {
+        if seen.is_some() {
+            self.looked_at = seen;
+        }
+    }
+
+    /// When the thread began a look before which each watched file's change is in place, or warned
+    /// why not, as the tool API's `files_looked` says; `None` until one is.
+    pub(crate) fn looked_at(&self) -> Option<SystemTime> {
+        self.looked_at
     }
 
     /// Sends the thread the shaders added since the last call. Allocates nothing once all are sent.
@@ -481,10 +518,12 @@ impl Drop for HotReload {
     }
 }
 
-/// The thread: looks at each asset's files every [`LOOK`] and sends `back` what rereads.
-fn watch(messages: &Receiver<Message>, back: &Sender<Reloaded>) {
+/// The thread: looks at each asset's files every [`LOOK`], sends `back` what rereads, and notes in
+/// `seen` when the look before the last began.
+fn watch(messages: &Receiver<Message>, back: &Sender<Reloaded>, seen: &Seen) {
     // `None` where an asset is unwatched, until the look ends.
     let mut watched: Vec<Option<(Source, Files)>> = Vec::new();
+    let mut before: Option<SystemTime> = None;
     loop {
         match messages.recv_timeout(LOOK) {
             Ok(message) => {
@@ -494,9 +533,16 @@ fn watch(messages: &Receiver<Message>, back: &Sender<Reloaded>) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
+        let began = SystemTime::now();
         if !look(messages, &mut watched, back) {
             return;
         }
+        let since = before.and_then(|before| before.duration_since(SystemTime::UNIX_EPOCH).ok());
+        if let Some(since) = since {
+            let ms = u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
+            seen.0.store(ms, Ordering::Release);
+        }
+        before = Some(began);
     }
 }
 
@@ -1092,7 +1138,9 @@ mod tests {
         let warnings = Targets::new().with_target("gg_engine::hot_reload", Level::WARN);
         let subscriber = tracing_subscriber::registry().with(Codes(codes).with_filter(warnings));
         let thread = thread::spawn(move || {
-            tracing::subscriber::with_default(subscriber, || watch(&to_watch, &back));
+            tracing::subscriber::with_default(subscriber, || {
+                watch(&to_watch, &back, &Seen::default());
+            });
         });
         for source in sources {
             messages.send(Message::Watch(source)).expect("the thread");

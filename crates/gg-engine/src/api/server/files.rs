@@ -192,9 +192,9 @@ pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[Stri
     }
 }
 
-/// Writes `shot` as an 8-bit RGB PNG at `path`, whole or not at all, making the `captures`
-/// directory if needed. The pixels are sRGB, as a PNG without a chunk saying otherwise is taken to
-/// be. Alpha is dropped: the view shows opaque.
+/// Writes `shot` as an 8-bit RGB PNG at `path`, quickly compressed, whole or not at all, making the
+/// `captures` directory if needed. The pixels are sRGB, as a PNG without a chunk saying otherwise
+/// is taken to be. Alpha is dropped: the view shows opaque.
 ///
 /// Fails with `api.capture_file`.
 fn write_png(path: &Path, shot: &Shot, named: bool) -> Result<()> {
@@ -211,6 +211,8 @@ fn write_png(path: &Path, shot: &Shot, named: bool) -> Result<()> {
     let mut encoder = png::Encoder::new(&mut data, width, height);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
+    // A 1280 by 720 view in 0.05 s rather than 0.17, its file some 30% larger: agents ask often.
+    encoder.set_compression(png::Compression::Fast);
     let encoded = encoder.write_header().and_then(|mut writer| {
         writer.write_image_data(&rgb)?;
         writer.finish()

@@ -38,6 +38,8 @@ pub(crate) struct Dx {
 pub(crate) struct Fat {
     pub(crate) exe: PathBuf,
     client: String,
+    /// How long the build waited for the lock of dx's builds ([`Dx::hold`]): not part of its time.
+    pub(crate) queued: Duration,
 }
 
 impl Fat {
@@ -46,6 +48,7 @@ impl Fat {
         Self {
             exe,
             client: String::new(),
+            queued: Duration::ZERO,
         }
     }
 }
@@ -72,7 +75,7 @@ impl Dx {
     ///
     /// [`hold`]: Self::hold
     pub(crate) fn build(&self) -> Result<Fat, Failure> {
-        let _held = self.hold()?;
+        let (_held, queued) = self.hold()?;
         let started = SystemTime::now();
         // dx makes it too, but says less if it can't.
         let _ = fs::create_dir_all(&self.cache);
@@ -104,7 +107,7 @@ impl Dx {
                         &json!({"event": "pruned", "archives": archives, "bytes": bytes, "why": why}),
                     );
                 }
-                return Ok(fat);
+                return Ok(Fat { queued, ..fat });
             }
             Ok(_) => "isn't an executable".to_owned(),
             Err(error) => format!("can't be read: {error}"),
@@ -139,8 +142,10 @@ impl Dx {
     /// named by a hash of their names, sizes and times. Games of the same dependencies share it,
     /// and one's link while another's writes it fails: `Failed to write executable`.
     ///
+    /// Returns the file with how long it waited for the lock, zero if it was free.
+    ///
     /// Fails with `gg.build` if the file can't be opened or locked.
-    fn hold(&self) -> Result<File, Failure> {
+    fn hold(&self) -> Result<(File, Duration), Failure> {
         let failed = |error: io::Error| {
             let message = format!("can't lock {}: {error}", self.lock.display());
             Failure::new("gg.build", message)
@@ -155,15 +160,16 @@ impl Dx {
             .open(&self.lock)
             .map_err(failed)?;
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok((file, Duration::ZERO)),
             Err(TryLockError::WouldBlock) => {}
             Err(TryLockError::Error(error)) => return Err(failed(error)),
         }
         let why = "another `gg run` builds with dx in this target directory, and two of dx's links \
                    at once can fail";
         event(&json!({"event": "building", "stage": "queued", "why": why}));
+        let queued = Instant::now();
         file.lock().map_err(failed)?;
-        Ok(file)
+        Ok((file, queued.elapsed()))
     }
 
     /// Removes the archives in `dir`, beside the executable, that no package's last build linked
@@ -433,6 +439,7 @@ fn record(line: &str) -> Record {
         return Record::Built(Fat {
             exe,
             client: client.to_string(),
+            queued: Duration::ZERO,
         });
     }
     // Its `artifacts` hold the environment again: dropped.
@@ -810,20 +817,25 @@ mod tests {
             lock: target.join("gg").join("dx.lock"),
         };
         let (rts, fps) = (dx("rts"), dx("fps"));
-        let held = rts.hold().expect("the lock");
+        let (held, free) = rts.hold().expect("the lock");
         let (sent, got) = std::sync::mpsc::channel();
         let waiting = thread::spawn(move || {
             let held = fps.hold();
             let _ = sent.send(());
-            held.is_ok()
+            held.ok().map(|(_, queued)| queued)
         });
         let blocked = got.recv_timeout(Duration::from_millis(300)).is_err();
         drop(held);
         let took = got.recv_timeout(Duration::from_secs(5)).is_ok();
-        let fps_held = waiting.join().expect("no panic");
+        let queued = waiting.join().expect("no panic");
         let _ = fs::remove_dir_all(&target);
         assert!(blocked, "the second waits while the first holds it");
-        assert!(took && fps_held, "then takes it");
+        assert!(took, "then takes it");
+        assert_eq!(free, Duration::ZERO, "a free lock queues no time");
+        assert!(
+            queued.is_some_and(|queued| queued >= Duration::from_millis(250)),
+            "the wait is the queue's: {queued:?}"
+        );
     }
 
     /// A build keeps the archive it linked against and another package's record, removing the

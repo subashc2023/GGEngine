@@ -33,6 +33,10 @@ pub(super) const CAPTURE_WAIT: Duration = Duration::from_secs(10);
 /// gg's 30 s for an answer. Then it fails, saying how many each took.
 pub(super) const TRACE_WAIT: Duration = Duration::from_secs(25);
 
+/// How long a `capture` waits before the game warns what for (`api.capture_waiting`), past
+/// [`CAPTURE_WAIT`] and inside gg's 30 s for an answer: a client that gives up sees why in the log.
+const CAPTURE_STUCK: Duration = Duration::from_secs(15);
+
 /// A `pick` awaiting its answer. `within` is [`gg_api::Pick::within`]; `ticket` comes once the
 /// asking frame gives it; `named` answers the entity's name, for a connection granted `read` of
 /// `Name`.
@@ -195,6 +199,7 @@ impl Api {
             publish.started = cx.dev.started;
         }
         let back = (frame.captured.take()).map(|shot| shot.map(Arc::new));
+        let came_back = back.is_some();
         let streaming = frame.loading > 0 || !frame.streaming.is_empty();
         self.film_back(back.as_ref(), streaming, frame.viewpoint);
         // Paths traced short of their samples.
@@ -309,6 +314,7 @@ impl Api {
         if !self.riding.is_empty() {
             self.riding_ticks = ticks;
         }
+        self.warn_stuck(came_back, streaming, tracing.is_some());
         let filming = self.film_hands(streaming, ticks);
         frame.capture = !self.riding.is_empty() || filming;
         if let Some(images) = frame.images.take() {
@@ -321,6 +327,40 @@ impl Api {
         }
         self.images_riding.append(&mut self.images_asked);
         frame.list_images = !self.images_riding.is_empty();
+    }
+
+    /// Warns once (`api.capture_waiting`) as the oldest `capture` waiting passes [`CAPTURE_STUCK`],
+    /// saying what the frame just back showed of why, so a client whose call timed out finds it
+    /// in the log. Warns again only after none waits.
+    fn warn_stuck(&mut self, came_back: bool, streaming: bool, tracing: bool) {
+        let waiting = self.riding.iter().chain(&self.asked);
+        let Some(since) = waiting.map(|capturing| capturing.since).min() else {
+            self.capture_warned = false;
+            return;
+        };
+        let waited = since.elapsed();
+        if self.capture_warned || waited < CAPTURE_STUCK {
+            return;
+        }
+        self.capture_warned = true;
+        let why = if self.riding.is_empty() {
+            "no frame of its kind has been handed off to read its view"
+        } else if !came_back {
+            "the frame just back didn't render or read its view"
+        } else if tracing {
+            "the view's paths traced are short of their samples"
+        } else if streaming {
+            "textures or meshes are still on their way"
+        } else {
+            "it rides the next frame handed off"
+        };
+        warn!(
+            code = "api.capture_waiting",
+            riding = self.riding.len(),
+            asked = self.asked.len(),
+            "A `capture` has waited {} s for the view: {why}",
+            waited.as_secs()
+        );
     }
 
     /// Keeps a frame back (`back`, its view if read) as the first film's next frame, cropped to its

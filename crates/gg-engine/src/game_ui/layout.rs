@@ -70,9 +70,15 @@ pub(crate) fn children(nodes: &[Node], parent: usize) -> impl Iterator<Item = us
 #[derive(Default)]
 pub(crate) struct Laid {
     pub(crate) fit: Vec<Vec2>,
+    /// Where each node draws and is found: its place in the layout moved by its offset and each
+    /// offset above it ([`settle`](Self::settle)).
     pub(crate) rects: Vec<Rect>,
     pub(crate) shown: Vec<bool>,
     pub(crate) clips: Vec<Option<Rect>>,
+    /// Each node's place in the layout, before offsets.
+    base: Vec<Rect>,
+    /// Each node's offset and those above it, as [`settle`](Self::settle) summed them.
+    shift: Vec<Vec2>,
     /// Which fills a row or column holds at their fit while sharing out its room.
     held: Vec<bool>,
     /// How far a row's, column's or list's children reach along it, gaps and margins included;
@@ -81,6 +87,39 @@ pub(crate) struct Laid {
 }
 
 impl Laid {
+    /// Moves each node from its place in the layout by its offset and those above it, and finds
+    /// what clips each from the rectangles so moved: a clipping node's offset moves its clip, not
+    /// the clips of nodes beside it. Allocates nothing once the buffers have grown.
+    pub(crate) fn settle(&mut self, nodes: &[Node]) {
+        self.shift.clear();
+        self.shift.resize(nodes.len(), Vec2::ZERO);
+        for (i, node) in nodes.iter().enumerate() {
+            let above = node
+                .parent
+                .map_or(Vec2::ZERO, |parent| self.shift[parent as usize]);
+            self.shift[i] = above + node.offset;
+            self.rects[i] = Rect {
+                at: self.base[i].at + self.shift[i],
+                size: self.base[i].size,
+            };
+        }
+        for (i, node) in nodes.iter().enumerate() {
+            if !self.shown[i] {
+                continue;
+            }
+            let clip = match node.clips {
+                true => {
+                    let room = self.rects[i].inside(node.padding);
+                    Some(self.clips[i].map_or(room, |clip| room.within(clip)))
+                }
+                false => self.clips[i],
+            };
+            for child in children(nodes, i) {
+                self.clips[child] = clip;
+            }
+        }
+    }
+
     /// Whether `point` is within what clips node `i`.
     pub(crate) fn within(&self, i: usize, point: Vec2) -> bool {
         self.clips[i].is_none_or(|clip| clip.contains(point))
@@ -118,7 +157,7 @@ impl Laid {
 /// fits none of them, so it takes the room it's given however much it holds.
 ///
 /// Each node draws within the rectangle less its padding of each clipping list and container
-/// above it.
+/// above it ([`Laid::settle`] finds them, with the offsets).
 pub(crate) fn lay_out(nodes: &[Node], fonts: &mut Fonts, view: Vec2, laid: &mut Laid) {
     let count = nodes.len();
     laid.fit.clear();
@@ -180,17 +219,8 @@ pub(crate) fn lay_out(nodes: &[Node], fonts: &mut Fonts, view: Vec2, laid: &mut 
             | Kind::Dropdown
             | Kind::Field => {}
         }
-        let clip = match nodes[i].clips {
-            true => {
-                let room = laid.rects[i].inside(nodes[i].padding);
-                Some(laid.clips[i].map_or(room, |clip| room.within(clip)))
-            }
-            false => laid.clips[i],
-        };
-        for child in children(nodes, i) {
-            laid.clips[child] = clip;
-        }
     }
+    laid.base.clone_from(&laid.rects);
 }
 
 /// The size node `i` fits to, its children's already in `fits` ([`lay_out`]).

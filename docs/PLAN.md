@@ -46,6 +46,10 @@ Each phase's milestones, and what each deferred, are in git history.
 - **Games played by their controls**: `gg actions` listing each action's bindings and what it does,
   and the controls read apart from actions; `gg input` setting actions by name, pads, and aims at
   points; then four games played to their goals by agents, and their controls said (2026-11-26)
+- **Change by asking, tried**: six games grown by five requests each, by agents under `gg run`; a
+  running game playing a copy of its world as edited, which edits pass through to; `gg wait`
+  listing every outcome since the last, rebuilds' warnings and UI files' reloads; held input shown;
+  UI panels that cover, hover and offsets; captures 40 times faster in debug builds (2026-11-27)
 
 ## Open
 
@@ -123,7 +127,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Depth modes: draws that ignore it, skyboxes that test it, decals, alpha-cut sprites that write it | Each with its first user |
 | Lines with joins, circles by screen size; outlines of hidden parts, of hovers, of several entities, by jump flooding | Each with its first user |
 | Games' shaders: the view's size without parameters, GPU-table parameters past 64 bytes, data textures, wave ops, a fog module | A shader needs one |
-| `MeshDraw`'s mesh and shader by name: saved, hashed, set and restored as `Sprite.texture` is | A game builds its draws from data |
+| `MeshDraw`'s mesh and shader by name: saved, hashed, set and restored as `Sprite.texture` is | A game builds its draws from data, or rebuilds that add assets lose draws (DEFECTS' Snapshots) |
 | Hot reload of the engine's own shaders | Work on them wants it |
 | `VK_KHR_pipeline_binary` (ash 0.38 lacks it); the pipeline cache saved as it fills, and pruned | ash gains it, crash restarts slow, or it grows |
 | Requiring Slang 2026.11 (SDK 1.4.363), dropping `decorate_non_uniform`; dev builds run away from their build's slangc | When required, or builds move |
@@ -273,6 +277,11 @@ Defects are in [DEFECTS.md](DEFECTS.md).
   of entities a tick, which every peer simulates. Recommendation: no cap for a game's own scripts,
   as Rust has none; for mods, a few hundred a tick beside their interrupt budget, failing as it
   does. Decide before mods that spawn ship.
+- Whether a client can edit the playing copy alone, as a test does: under `gg run`, a `gg set` of
+  a fight's health to reach its end screen passes through to the world as edited, and a later
+  `gg scene save` writes it. One trial agent hand-edited its scene file to keep such edits out.
+  Recommendation: `gg set --play` and `apply`'s `play: true`, applying to the copy alone, as ticks
+  do, and refused while stopped. Decide before agents test through edits often.
 - Which game Phase 21's match is played on, now that the 3D demo, whose menu hosted and joined, is
   deleted: Shards by its flags (`--relay`, the host printing its code), or Shards given a Host and
   Join menu. Recommendation: Shards by flags, as the match measures the network, which a menu

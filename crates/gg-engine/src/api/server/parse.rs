@@ -184,9 +184,20 @@ pub(super) struct Hold {
 /// A release of each key and button `events` press and leave down, and a return to rest of each
 /// stick and trigger they leave away from it, in the order pressed: none for a click's.
 pub(super) fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
-    let mut down: Vec<InputEvent> = Vec::new();
+    let mut down = Vec::new();
+    hold(&mut down, events);
+    down
+}
+
+/// Notes in `down`, as [`releases`] gives them, what `events` press or move and leave so, and
+/// takes out what they let go of. Returns the presses of a key or button that `down` held
+/// already, which change nothing: a second press of an action, say, with no release between.
+pub(super) fn hold(down: &mut Vec<InputEvent>, events: &[InputEvent]) -> Vec<InputEvent> {
+    let mut already = Vec::new();
     for given in events {
         let (release, pressed) = match *given {
+            // A repeat is a held key's own.
+            InputEvent::Key { repeat: true, .. } => continue,
             InputEvent::Key {
                 ref key, pressed, ..
             } => {
@@ -239,12 +250,44 @@ pub(super) fn releases(events: &[InputEvent]) -> Vec<InputEvent> {
             }
             _ => continue,
         };
+        let moved = matches!(
+            given,
+            InputEvent::PadStick { .. } | InputEvent::PadTrigger { .. }
+        );
+        if pressed && down.contains(&release) {
+            if !moved {
+                already.push(release);
+            }
+            continue;
+        }
         down.retain(|held| *held != release);
         if pressed {
             down.push(release);
         }
     }
-    down
+    already
+}
+
+/// What [`releases`] gives `release` the release of, as `held` and `already_down` name it: a key
+/// by its code, as `KeyR`; `mouse left`; `pad 0 south`; `pad 0 left stick`; `pad 0 right trigger`.
+pub(super) fn held_name(release: &InputEvent) -> String {
+    // As the API spells it: `south`, or `{"other":9}` for a button known by its number alone.
+    fn named(value: &impl serde::Serialize) -> String {
+        let value = serde_json::to_value(value).unwrap_or_default();
+        value
+            .as_str()
+            .map_or_else(|| value.to_string(), str::to_owned)
+    }
+    match release {
+        InputEvent::Key { key, .. } => key.clone(),
+        InputEvent::Button { button, .. } => format!("mouse {}", named(button)),
+        InputEvent::PadButton { pad, button, .. } => format!("pad {pad} {}", named(button)),
+        InputEvent::PadStick { pad, stick, .. } => format!("pad {pad} {} stick", named(stick)),
+        InputEvent::PadTrigger { pad, trigger, .. } => {
+            format!("pad {pad} {} trigger", named(trigger))
+        }
+        other => format!("{other:?}"),
+    }
 }
 
 /// The main loop's call for `request`.

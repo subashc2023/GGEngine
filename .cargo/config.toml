@@ -92,6 +92,25 @@ opt-level = 3
 [profile.dev.package.unicode-properties]
 opt-level = 3
 
+# Debug builds write each capture the tool API asks for as a PNG, and read PNG textures as a layer
+# adds them. Unoptimized, a 1280 by 720 capture took 2.0 s to compress; optimized, 0.17 s.
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.zlib-rs]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.adler2]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+
 # Debug builds' windowed frames allocate nothing on macOS without objc2's checks: each message's
 # signature, parsed into vectors and checked against its class's. winit's objc2, 0.5, has no
 # feature to turn them off.

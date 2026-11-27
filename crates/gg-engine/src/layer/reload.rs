@@ -22,19 +22,30 @@ use crate::model;
 use crate::{Prefab, gltf};
 
 impl Context {
+    /// When the thread that rereads the layers' assets began a look before which each watched
+    /// file's change is in place, or warned why not ([`HotReload::looked_at`]); `None` in a run
+    /// without the thread, or before such a look.
+    #[cfg(feature = "dev")]
+    pub(crate) fn assets_looked(&self) -> Option<SystemTime> {
+        self.dev.hot_reload.as_ref().and_then(HotReload::looked_at)
+    }
+
     /// As a frame starts, sends the reload thread the shaders added since, and puts each asset it
     /// read again in place of the one loaded, under the same handle
     /// ([`reload_texture`](Self::reload_texture), [`reload_model`](Self::reload_model),
     /// [`reload_font`](Self::reload_font)). The next frame handed off draws it; a sound's next
     /// play plays it (`Sound reloaded`); music's next play crossfades to it (`Music reloaded`).
     /// `recorded` says whether a recording follows the run. It allocates nothing once the shaders
-    /// are sent, unless something came back.
+    /// are sent, unless something came back. Then notes when the thread began the look whose
+    /// rereads are all in place ([`assets_looked`](Self::assets_looked)).
     #[cfg(feature = "dev")]
     pub(crate) fn take_reloaded(&mut self, recorded: bool) {
         let Some(hot_reload) = &mut self.dev.hot_reload else {
             return;
         };
         hot_reload.watch_shaders(&self.shaders);
+        // Before taking, so all its look sent back is taken.
+        let seen = hot_reload.seen();
         while let Some(reloaded) = self.dev.hot_reload.as_ref().and_then(HotReload::take) {
             match reloaded {
                 Reloaded::Shader(compiled) => {
@@ -75,6 +86,9 @@ impl Context {
                     info!(music = &*named, frames, "Music reloaded");
                 }
             }
+        }
+        if let Some(hot_reload) = &mut self.dev.hot_reload {
+            hot_reload.taken_up_to(seen);
         }
     }
 
@@ -319,7 +333,11 @@ impl Context {
             edited.world.refit_prefab(refits);
         }
         self.add_assets(|assets| assets.set_prefab_text(prefab, text));
-        info!(prefab = &*named, "Prefab reloaded");
+        info!(
+            code = "prefab.reloaded",
+            prefab = &*named,
+            "Prefab reloaded"
+        );
     }
 
     /// Puts `document`, UI file `file` read again from `path`, in place of what it held, every UI
@@ -342,7 +360,11 @@ impl Context {
             return;
         }
         self.uis.reload(file, document);
-        info!(ui = self.uis.path(file), "UI reloaded");
+        info!(
+            code = "ui.reloaded",
+            ui = self.uis.path(file),
+            "UI reloaded"
+        );
     }
 
     /// Like [`watch_texture`](Self::watch_texture), for UI file `file`.

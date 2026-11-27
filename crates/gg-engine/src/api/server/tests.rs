@@ -2742,7 +2742,8 @@ fn frames_fail_at_a_frame_back_without_its_view() {
 }
 
 /// A client's input reaches the layers as the window's would, in order, with the cursor over the
-/// view taken to window pixels.
+/// view taken to window pixels. Each answer, and the status, says what the client's inputs hold
+/// down; a press of what's down already is named, as it changes nothing.
 #[test]
 fn input_reaches_the_layers_as_the_windows_would() {
     let (mut api, session) = started("Api Input");
@@ -2762,9 +2763,18 @@ fn input_reaches_the_layers_as_the_windows_would() {
             {"button": {"button": "left", "pressed": true}},
             {"cursor": [3, 4.5]},
         ]});
-        client.call("input", events).expect("the input");
+        let first: gg_api::Handed = client.call_as("input", events).expect("the input");
+        let again = json!({"events": [
+            {"key": {"key": "KeyS", "pressed": true}},
+            {"key": {"key": "KeyW", "pressed": true}},
+            {"key": {"key": "KeyW", "pressed": true, "repeat": true}},
+            {"key": {"key": "KeyS", "pressed": false}},
+        ]});
+        let again: gg_api::Handed = client.call_as("input", again).expect("the input");
+        let status: Status = client.call_as("status", ()).expect("a status");
+        (first, again, status.held)
     };
-    serving(
+    let (first, again, held) = serving(
         &mut api,
         &mut cx,
         &mut Stack::default(),
@@ -2773,12 +2783,50 @@ fn input_reaches_the_layers_as_the_windows_would() {
         client,
         |_, _, _| {},
     );
+    assert_eq!(first.held, ["KeyW", "MetaLeft", "mouse left"]);
+    assert!(first.already_down.is_empty());
+    assert_eq!(again.held, first.held);
+    assert_eq!(again.already_down, ["KeyW"], "a repeat isn't a press");
+    assert_eq!(held, again.held);
     let input = cx.input();
     assert!(input.key_down(Key::KeyW));
     assert!(!input.key_down(Key::KeyA), "released after its press");
     assert!(input.key_down(Key::SuperLeft), "by its W3C name");
     assert!(input.button_down(MouseButton::Left));
     assert_eq!(input.cursor(), Some([13.0, 24.5]));
+}
+
+/// A focus loss lets go of every key and button a client's input held, as the layers' input does,
+/// so the next press is one.
+#[test]
+fn a_focus_loss_lets_go_of_what_input_held() {
+    let (mut api, session) = started("Api Input Focus");
+    let mut cx = Context::seeded(5);
+    let mut stepper = Stepper::default();
+    let client = |mut client: Client| {
+        let mut input = |events: Value| -> gg_api::Handed {
+            client
+                .call_as("input", json!({"events": events}))
+                .expect("the input")
+        };
+        let pressed = input(json!([{"key": {"key": "KeyW", "pressed": true}}]));
+        let lost = input(json!([{"focused": false}]));
+        let again = input(json!([{"key": {"key": "KeyW", "pressed": true}}]));
+        (pressed, lost, again)
+    };
+    let (pressed, lost, again) = serving(
+        &mut api,
+        &mut cx,
+        &mut Stack::default(),
+        &mut stepper,
+        session,
+        client,
+        |_, _, _| {},
+    );
+    assert_eq!(pressed.held, ["KeyW"]);
+    assert_eq!(lost, gg_api::Handed::default());
+    assert_eq!(again.held, ["KeyW"]);
+    assert!(again.already_down.is_empty(), "a press again");
 }
 
 /// A held `input` lets go of what it pressed and left down after exactly its ticks, though each
@@ -2844,6 +2892,7 @@ fn a_held_input_lets_go_after_exactly_its_ticks() {
         held.iter().map(|&(_, count)| count).collect::<Vec<_>>(),
         [4, 2]
     );
+    assert!(running.held.is_empty(), "let go of: {:?}", running.held);
     assert_eq!((running.ticks, running.paused), (held[0].0 + 4, false));
     assert_eq!((paused.ticks, paused.paused), (held[1].0 + 2, true));
     assert_eq!((clicked.ticks, clicked.paused), (paused.ticks + 3, true));

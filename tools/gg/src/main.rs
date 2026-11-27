@@ -136,9 +136,10 @@ off with `--no-patch`, `--release`, restarts off, or a library beside PACKAGE's 
 patch reaches (`patches_off` says why). gg builds with `dx build --fat-binary`, printing each stage
 and, while compiling, the crates done of dx's count, every 5 s at most (`building`). One such build
 runs at a time in a target directory, as two of dx's links at once can fail: the others are
-`queued`. After each, it removes dx's archives of libraries, about 1 GB each, that no package's last
-build links against (`pruned`). It watches PACKAGE's modules, the workspace's manifest and lock
-file, and the workspace's packages it builds with (`watching`). Once a build ends, it watches what
+`queued`, and their `build_ms` leaves that wait out, `queued_ms` beside it. After each, it removes
+dx's archives of libraries, about 1 GB each, that no package's last build links against
+(`pruned`). It watches PACKAGE's modules, the workspace's manifest and lock file, and the
+workspace's packages it builds with (`watching`). Once a build ends, it watches what
 the build read instead of those packages, as cargo's dep-info file beside the executable lists it
 (`watching` again, with `dep_info`): each path package's compiled modules, what they embed
 (`include_str!`), and what build scripts watch. So an edit to a package's docs, or to a module
@@ -169,11 +170,13 @@ built only for its tests, rebuilds nothing. Then:
 `Game::new` and `Self::new` name the method, `x.fire()` any method `fire`. A trait impl's method,
 but for a layer's, and a function nothing names count as run as the game runs, where patches reach.
 A game waiting for a rebuild gets one at any change; a restarted one gets the edits since its build
-patched in at once. `gg rebuild` asks for a rebuild, as for an edit patched in to code the game
-reaches only through its own trait objects or function pointers. A patch never answered
-(`patch_unanswered`) is sent again with every edit since the build. The game logs failures as
-warnings too: `gg.patch_failed`, `gg.rebuild_failed`. Once the sources match the running build again
-after a failed rebuild, `recovered` says so, and the failure leaves the run's state.
+patched in at once. A layer's own methods (`update`, `tick`, `event`, `ui`, `commands`...) patch, as
+the engine calls each through the patch table. `gg rebuild` asks for a rebuild, as for an edit
+patched in to code the game reaches only through `dyn` objects or function pointers of its own that
+it keeps. A patch never answered (`patch_unanswered`) is sent again with every edit since the build.
+The game logs failures as warnings too: `gg.patch_failed`, `gg.rebuild_failed`. Once the sources
+match the running build again after a failed rebuild, `recovered` says so, and the failure leaves
+the run's state.
 
 Without dx, or where patches can't reach (as with `--release`), with restarts on and no
 `--no-patch`, gg builds with cargo and watches all the same (`watching`, `patches` false): every
@@ -279,26 +282,32 @@ package in the engine's lock, as `--package NAME` would name both.
 - `edited`: whether authors edited it since it was saved or opened, which ticks never set.
 - `cells`: in a world of cells, how many are in, and how many out keep what they held.
 - `cursor_grabbed`: whether the game wants the cursor grabbed, so it looks about by `motion`.
+- `held`: what `input` holds down, as `KeyR` or `mouse left`, until an event lets go of it.
 ",
             },
             Help {
                 name: "wait",
                 usage: "wait [--timeout <SECONDS>]",
-                summary: "Wait until the game under `gg run` runs every edit saved before: code, scenes and scripts",
+                summary: "Wait until the game under `gg run` runs every edit saved before",
                 details: "\
 Waits at most `--timeout` (300 s) for code edits to be patched in or rebuilt, and for the game to
-look at its scene and script files since, then prints what `run` is doing. Its `reload` is the last
-patch or rebuild, with `at` (ms since the epoch, as `updated`):
+look at its scene, script, UI, prefab and other asset files since, then prints what `run` is
+doing. `reloads` lists every outcome the run had since the last `wait` or `rebuild` answered,
+oldest first, at most 10 and `reloads_more` before them: save twice, wait once, and it shows both;
+save, wait, save, wait, and the second shows the second. `reload` is the latest patch or rebuild.
+Each has `at` (ms since the epoch, as `updated`):
 - {\"event\":\"patched\",\"files\":[...],\"build_ms\":..,\"apply_ms\":..,\"at\":..}, the game's state
   untouched;
-- {\"event\":\"rebuilt\",\"why\":..,\"build_ms\":..,\"at\":..}, the game started again from a snapshot.
-The game applies scene and script files itself, as they're saved; `files_looked` is when it last
-looked at them. `files` has the last event it logged of each, the latest 20 files', with its
-`timestamp`: a scene's `scene.applied`, a script's `Script reloaded`, a warning why one didn't
-apply, a script's error. After a rebuild, `warnings` lists the warnings and errors the restarted
-game logged, as a restore's `snapshot.changed` or `gg.attach_changed`: each with its `code` and
-`message`, and a `count` if it repeats, at most 20, `warnings_more` more; none after a patch. Fails
-with:
+- {\"event\":\"rebuilt\",\"why\":..,\"build_ms\":..,\"at\":..}, the game started again from a snapshot;
+- {\"event\":\"patch_failed\" or \"rebuild_failed\",\"error\":{..},\"at\":..}, a build that failed.
+A rebuild's `build_ms` leaves out the time it waited for another game's build, `queued_ms` if it
+waited. The game applies those files itself, as they're saved; `files_looked` is when it last
+looked at them all. `files` has the last event it logged of each file, the latest 20 files', with
+its `timestamp`: a scene's `scene.applied`, a script's `Script reloaded`, a UI's `ui.reloaded`, a
+prefab's `prefab.reloaded`, a warning why one didn't apply, a script's error.
+`warnings` lists the warnings and errors the restarted games logged after each rebuild listed, as a
+restore's `snapshot.changed` or `gg.attach_changed`: each with its `code` and `message`, and a
+`count` if it repeats, at most 20, `warnings_more` more; none for patches alone. Fails with:
 - `gg.build_failed` and rustc's errors, if the edits don't build;
 - `gg.waiting`, if the game ended and waits for a change;
 - `gg.no_run`, without a `gg run`; `gg.which_run`, with several, which `--pid` tells apart;
@@ -310,12 +319,14 @@ with:
                 usage: "rebuild [--fresh] [--timeout <SECONDS>]",
                 summary: "Rebuild the game under `gg run` and start it again from a snapshot",
                 details: "\
-For an edit patched in that the game won't run again, as in a function it reaches only through its
-own trait objects or function pointers. `run` rebuilds by itself for code only `main`, a layer's
-`load` or `restored` reach. `run` takes the request at once. Once no patch or build is under way,
-it rebuilds with every edit saved (`rebuilding`, why `` `gg rebuild` asked ``) and restarts the
-game, as an edit no patch carries does. Then `rebuild` waits at most `--timeout` (300 s) for the
-game to run the new build, and prints what `gg wait` does.
+For an edit patched in that the game won't run again, as in a function it reaches only through `dyn`
+objects or function pointers of its own that it keeps. A layer's own methods (`update`, `tick`,
+`event`, `ui`, `commands`...) patch: the engine calls each through the patch table. `run` rebuilds
+by itself for code only `main`, a layer's `load` or `restored` reach. `run` takes the request at
+once. Once no patch or build is under way, it rebuilds with every edit saved (`rebuilding`,
+why `` `gg rebuild` asked ``) and restarts the game, as an edit no patch carries does. Then
+`rebuild` waits at most `--timeout` (300 s) for the game to run the new build, and prints what
+`gg wait` does.
 
 `--fresh` starts the game afresh instead, its layers' `attach` building the world again: for an
 edit in `attach` (`gg.attach_changed`). The world's state, and the edits made to it, are lost.
@@ -588,9 +599,12 @@ EVENTS is a JSON array of the API's input events, handed over in order as a fram
   names the actions for a name no layer binds, and nothing is handed.
 
 A key or button stays down, and a stick or trigger away from rest, until an event lets go of it.
-Without `--hold` or a wait, `input` prints `{}` at once, and paused, no tick sees the events before
-a `step`. With a wait, frames run no tick past it, and paused, it steps its ticks; it prints the
-status once the last event is handed.
+A press of what's down already changes nothing: a layer sees a press only after a release. Without
+`--hold` or a wait, `input` prints at once what the tool's inputs hold down, `held` (`KeyR`,
+`mouse left`, `pad 0 south`...), and `already_down`, the presses that changed nothing; `{}` when
+neither has any. Paused, no tick sees the events before a `step`. With a wait, frames run no tick
+past it, and paused, it steps its ticks; it prints the status once the last event is handed, which
+lists `held` too, as `gg status` does.
 
 `--hold N` lets go of what the events press and leave down exactly N ticks (64 a second) after the
 last event, then prints the status, as `step` does. Events that leave nothing down, such as a

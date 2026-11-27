@@ -29,19 +29,27 @@ const GRACE: Duration = Duration::from_secs(5);
 const MOST_FILE_EVENTS: usize = 20;
 
 /// The most warnings `wait` lists after a rebuild.
-const MOST_WARNINGS: usize = 20;
+pub(crate) const MOST_WARNINGS: usize = 20;
+
+/// How many patch and rebuild outcomes the run keeps for `wait` to list.
+pub(crate) const MOST_KEPT: usize = 20;
+
+/// The most outcomes `wait` lists, the latest.
+const MOST_RELOADS: usize = 10;
 
 /// How many of the game's latest events at `info` or above `wait` reads for those about files.
 const FILE_EVENTS_READ: usize = 1_000;
 
 /// The fields of an event about a file that `wait` lists, of those it has.
-const FILE_FIELDS: [&str; 7] = [
+const FILE_FIELDS: [&str; 9] = [
     "timestamp",
     "level",
     "code",
     "message",
     "path",
     "script",
+    "ui",
+    "prefab",
     "operations",
 ];
 
@@ -64,6 +72,10 @@ pub(crate) struct State {
     /// (ms since the epoch): `patched` with its `files`, `build_ms` and `apply_ms`, or `rebuilt`
     /// with its `why` and `build_ms`. A rebuild's game then starts again from a snapshot.
     pub(crate) reload: Option<Value>,
+    /// The latest [`MOST_KEPT`] outcomes, oldest first: [`reload`](Self::reload)'s kind, and
+    /// `patch_failed` and `rebuild_failed` with their `error`, each with `at`. A rebuild's has
+    /// `warnings` once its processes ended, restarting for the next.
+    pub(crate) reloads: Vec<Value>,
 }
 
 impl State {
@@ -75,6 +87,7 @@ impl State {
             current: None,
             error: None,
             reload: None,
+            reloads: Vec::new(),
         }
     }
 }
@@ -112,6 +125,33 @@ impl Asked {
             fresh: self.fresh || other.fresh,
         }
     }
+}
+
+/// The file in which `wait` keeps when it last answered the run whose file is `told`: `at`, the
+/// latest outcome it listed, and the run's process ID `gg`, so a file left over never reaches a
+/// later run. Each `gg wait` is a process of its own, and `gg mcp`'s may outlive none of the
+/// game's runs, so what was answered can't live in a `wait`. The run's own file is rewritten from
+/// the run's memory every [`WRITE`], so a `wait` can't add to it. This one, beside it as the
+/// requests are, is the run's too: it goes as the run ends.
+fn answered_path(told: &Path) -> PathBuf {
+    told.with_extension("answered")
+}
+
+/// The `at` of the latest outcome `wait` listed of run `gg`, in the file at `told`; 0 if none.
+fn answered(told: &Path, gg: u64) -> u64 {
+    let read = fs::read_to_string(answered_path(told));
+    let read = read
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    read.filter(|read| read["gg"].as_u64() == Some(gg))
+        .and_then(|read| read["at"].as_u64())
+        .unwrap_or(0)
+}
+
+/// Records that `wait` listed run `gg`'s outcomes up to `until`. A write that fails lists them
+/// again next time.
+fn answer(told: &Path, gg: u64, until: u64) {
+    write(&answered_path(told), &json!({"gg": gg, "at": until}));
 }
 
 /// Milliseconds since the Unix epoch, the file's unit.
@@ -230,6 +270,7 @@ impl Drop for Told {
         let _ = fs::remove_file(quit_path(&self.path));
         let _ = fs::remove_file(rebuild_path(&self.path, false));
         let _ = fs::remove_file(rebuild_path(&self.path, true));
+        let _ = fs::remove_file(answered_path(&self.path));
     }
 }
 
@@ -243,6 +284,7 @@ fn fill(told: &mut Value, state: &State, looked: u64) {
     told["error"] = error.unwrap_or(Value::Null);
     told["looked"] = json!(looked);
     told["reload"] = state.reload.clone().unwrap_or(Value::Null);
+    told["reloads"] = json!(state.reloads);
 }
 
 /// Writes `told` through a file beside `path` renamed over it, so that a reader never reads half.
@@ -391,8 +433,9 @@ fn down_as(told: &Value) -> Failure {
 }
 
 /// Waits, for at most `timeout`, until `pick`'s game runs every edit to the watched sources saved
-/// before this call, and has looked at the scene and script files it watches since; returns the
-/// run's file, with `files_looked` and `files` ([`looked`]). The code holds once the run has
+/// before this call, and has looked at the scene and script files it watches since, and reloaded
+/// the UI and prefab files saved just before; returns the run's file, with `files_looked`, `files`
+/// and the outcomes since the last answer, `reloads` ([`looked`]). The code holds once the run has
 /// looked at the sources since and the processes serve, patched or rebuilt; with none watched,
 /// once the game serves.
 ///
@@ -412,7 +455,7 @@ pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
     loop {
         let told = found(&target, pick, start, timeout)?;
         if let Some(waited) = waited(&told, asked) {
-            return looked(pick, waited?, asked, start, timeout);
+            return looked(pick, &target, waited?, asked, start, timeout);
         }
         if start.elapsed() >= timeout {
             let phase = told["state"].as_str().unwrap_or_default();
@@ -523,18 +566,25 @@ pub(crate) fn rebuild(pick: &Pick, timeout: Duration, fresh: bool) -> Result<Val
     }
 }
 
-/// Waits, within `timeout` of `start`, until `pick`'s game has looked at its scene and script
-/// files since `asked` (ms since the epoch), each saved before then applied or refused. Returns
-/// `told` with `files_looked`, when it last looked; after a rebuild, `warnings` and
-/// `warnings_more` ([`about_warnings`]), what the restarted game warned of; and `files`, the last
-/// event it logged of each file ([`about_files`]) among its latest [`FILE_EVENTS_READ`]: not the
-/// events since the wait
-/// began, since a look every 200 ms often applies a save before `gg` starts. A game that watches
-/// none, or hasn't looked yet, as one just started, has nothing to wait for.
+/// Waits, within `timeout` of `start`, until `pick`'s game has looked at its scene, script and
+/// asset files since `asked` (ms since the epoch), each saved before then applied or refused.
+/// Returns `told` with:
+///
+/// - `files_looked`, when it last looked.
+/// - `reloads`, every outcome the run had since the last `wait` answered, oldest first, at most
+///   [`MOST_RELOADS`] and `reloads_more` before them ([`listed`]); `reload` stays the latest.
+/// - `warnings` and `warnings_more` ([`about_warnings`]), what the games restarted by those rebuilds
+///   warned of.
+/// - `files`, the last event it logged of each scene, script, UI and prefab file
+///   ([`about_files`]) among its latest [`FILE_EVENTS_READ`]: not the events since the wait began,
+///   since a look every 200 ms often applies a save before `gg` starts.
+///
+/// A game that watches none, or hasn't looked yet, as one just started, has nothing to wait for.
 ///
 /// Fails with `gg.timeout` if it hasn't looked within `timeout`, as while its frames pause.
 fn looked(
     pick: &Pick,
+    target: &Path,
     mut told: Value,
     asked: u64,
     start: Instant,
@@ -551,7 +601,7 @@ fn looked(
         if start.elapsed() >= timeout {
             let message = format!(
                 "the game runs the code of the edits saved before `wait`, but didn't look at its \
-                 scene and script files within {} s, as while its frames pause",
+                 scene, script and asset files within {} s, as while its frames pause",
                 timeout.as_secs()
             );
             return Err(Failure::new("gg.timeout", message));
@@ -564,10 +614,19 @@ fn looked(
         json!({"level": "info", "last": FILE_EVENTS_READ}),
     );
     told["files"] = Value::Array(about_files(&events));
-    if told["reload"]["event"] == "rebuilt" {
-        // All the game's events since it started, which the rebuild's restart did.
+    let gg = told["gg"].as_u64().unwrap_or(0);
+    let at = path(target, told["package"].as_str().unwrap_or_default());
+    let shown = listed(&mut told, answered(&at, gg));
+    if let Some(until) = shown.until {
+        answer(&at, gg, until);
+    }
+    if shown.rebuilt {
+        let mut tally = shown.warnings;
+        // The game runs since the latest rebuild, which the listed always hold, being the latest
+        // outcomes: all its events since it started are that rebuild's.
         let events = read_events(&mut client, json!({"level": "warn"}));
-        let (warnings, more) = about_warnings(&events, MOST_WARNINGS);
+        tally_events(&mut tally, &events);
+        let (warnings, more) = told_warnings(tally, MOST_WARNINGS);
         if !warnings.is_empty() {
             told["warnings"] = Value::Array(warnings);
         }
@@ -578,9 +637,61 @@ fn looked(
     Ok(told)
 }
 
+/// What [`listed`] found in the outcomes it listed.
+#[derive(Debug, Default, PartialEq)]
+struct Listed {
+    /// The latest outcome's `at`: where the next `wait` goes on from.
+    until: Option<u64>,
+    /// Whether it listed a rebuild.
+    rebuilt: bool,
+    /// The warnings the listed rebuilds kept, as a tally ([`tally_events`]).
+    warnings: Vec<(Value, Value, u64)>,
+}
+
+/// Sets `told["reloads"]` to the outcomes after `answered` (ms since the epoch), oldest first, the
+/// latest [`MOST_RELOADS`], with `reloads_more` for those before; takes the warnings off the
+/// rebuilds listed, which are told as `warnings`.
+fn listed(told: &mut Value, answered: u64) -> Listed {
+    let all = told["reloads"].as_array().cloned().unwrap_or_default();
+    let at = |outcome: &Value| outcome["at"].as_u64().unwrap_or(0);
+    let mut new: Vec<Value> = all
+        .into_iter()
+        .filter(|outcome| at(outcome) > answered)
+        .collect();
+    let more = new.len().saturating_sub(MOST_RELOADS);
+    new.drain(..more);
+    let mut found = Listed {
+        until: new.last().map(at),
+        ..Listed::default()
+    };
+    for outcome in &mut new {
+        if outcome["event"] != "rebuilt" {
+            continue;
+        }
+        found.rebuilt = true;
+        let kept = outcome
+            .as_object_mut()
+            .and_then(|outcome| outcome.remove("warnings"));
+        for warning in kept.iter().filter_map(Value::as_array).flatten() {
+            let count = warning["count"].as_u64().unwrap_or(1);
+            tally_add(
+                &mut found.warnings,
+                warning["code"].clone(),
+                warning["message"].clone(),
+                count,
+            );
+        }
+    }
+    told["reloads"] = Value::Array(new);
+    if more > 0 {
+        told["reloads_more"] = json!(more);
+    }
+    found
+}
+
 /// The events the game's `logs` method answers to `params`, read on to the end a few times at most:
 /// a read stops at half a line's bytes.
-fn read_events(
+pub(crate) fn read_events(
     client: &mut gg_api::Client,
     mut params: Value,
 ) -> Vec<Box<serde_json::value::RawValue>> {
@@ -602,26 +713,45 @@ fn read_events(
 /// The warnings and errors among `events`, each with its `code` and `message`, and a `count` where
 /// the same code and message came more than once, in the order first seen: at most `most`, and how
 /// many more there were.
-fn about_warnings(events: &[Box<serde_json::value::RawValue>], most: usize) -> (Vec<Value>, usize) {
+pub(crate) fn about_warnings(
+    events: &[Box<serde_json::value::RawValue>],
+    most: usize,
+) -> (Vec<Value>, usize) {
+    let mut listed = Vec::new();
+    tally_events(&mut listed, events);
+    told_warnings(listed, most)
+}
+
+/// A tally of warnings: code, message and how many came.
+type Tally = Vec<(Value, Value, u64)>;
+
+/// Adds the warnings and errors among `events` to `listed`.
+fn tally_events(listed: &mut Tally, events: &[Box<serde_json::value::RawValue>]) {
     let events = events.iter();
     let events = events.filter_map(|event| serde_json::from_str::<Value>(event.get()).ok());
-    let mut listed: Vec<(Value, Value, u64)> = Vec::new();
     for event in events {
         let severe = event["level"].as_str().is_some_and(|level| {
             level.eq_ignore_ascii_case("warn") || level.eq_ignore_ascii_case("error")
         });
-        if !severe {
-            continue;
-        }
-        let (code, message) = (event["code"].clone(), event["message"].clone());
-        match listed
-            .iter_mut()
-            .find(|(c, m, _)| *c == code && *m == message)
-        {
-            Some((.., count)) => *count += 1,
-            None => listed.push((code, message, 1)),
+        if severe {
+            tally_add(listed, event["code"].clone(), event["message"].clone(), 1);
         }
     }
+}
+
+/// Adds `count` of the warning with `code` and `message` to `listed`, as a new one if it has none.
+fn tally_add(listed: &mut Tally, code: Value, message: Value, count: u64) {
+    match listed
+        .iter_mut()
+        .find(|(c, m, _)| *c == code && *m == message)
+    {
+        Some((.., counted)) => *counted += count,
+        None => listed.push((code, message, count)),
+    }
+}
+
+/// `listed` as JSON: at most `most` warnings, and how many more there were.
+fn told_warnings(mut listed: Tally, most: usize) -> (Vec<Value>, usize) {
     let more = listed.len().saturating_sub(most);
     listed.truncate(most);
     let told = listed.into_iter().map(|(code, message, count)| {
@@ -634,18 +764,26 @@ fn about_warnings(events: &[Box<serde_json::value::RawValue>], most: usize) -> (
     (told.collect(), more)
 }
 
-/// The last of `events` about each scene and script file, by its `script` or a scene event's
-/// `path`, in the order of those last events: at most [`MOST_FILE_EVENTS`] files', the latest,
+/// The last of `events` about each scene, script, UI and prefab file, by its `script`, a scene
+/// event's `path`, or the `ui` or `prefab` of `ui.reloaded` and `prefab.reloaded` and of a
+/// warning, in the order of those last events: at most [`MOST_FILE_EVENTS`] files', the latest,
 /// each with [`FILE_FIELDS`].
 fn about_files(events: &[Box<serde_json::value::RawValue>]) -> Vec<Value> {
     let events = events.iter();
     let events = events.filter_map(|event| serde_json::from_str::<Value>(event.get()).ok());
     let mut listed: Vec<(String, Value)> = Vec::new();
     for event in events {
-        let scene = (event["code"].as_str()).is_some_and(|code| code.starts_with("scene."));
-        let file = match (event["script"].as_str(), event["path"].as_str()) {
-            (Some(script), _) => script,
-            (None, Some(path)) if scene => path,
+        let code = event["code"].as_str().unwrap_or_default();
+        let scene = code.starts_with("scene.");
+        let reloaded = matches!(code, "ui.reloaded" | "prefab.reloaded");
+        let severe = event["level"].as_str().is_some_and(|level| {
+            level.eq_ignore_ascii_case("warn") || level.eq_ignore_ascii_case("error")
+        });
+        let asset = event["ui"].as_str().or_else(|| event["prefab"].as_str());
+        let file = match (event["script"].as_str(), event["path"].as_str(), asset) {
+            (Some(script), ..) => script,
+            (None, Some(path), _) if scene => path,
+            (None, _, Some(asset)) if reloaded || severe => asset,
             _ => continue,
         };
         let file = file.to_owned();
@@ -823,6 +961,132 @@ mod tests {
         let listed = about_files(&events);
         let latest: Vec<Value> = (0..MOST_FILE_EVENTS).map(reload).collect();
         assert_eq!(listed, latest, "the latest files'");
+    }
+
+    /// Save twice, wait once: both outcomes; save, wait, save, wait: the second alone. The cursor
+    /// is the run's file's, and a run's later file doesn't take an earlier one's.
+    #[test]
+    fn a_wait_lists_the_outcomes_since_the_last_answer() {
+        let dir = std::env::temp_dir().join(format!("gg-answered-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a directory");
+        let at = path(&dir, "shards");
+        let patched = |at: u64| json!({"event": "patched", "files": ["src/main.rs"], "at": at});
+        let rebuilt = json!({"event": "rebuilt", "why": "a field", "build_ms": 900, "at": 200});
+        let failed = json!({"event": "patch_failed", "error": {"code": "gg.build"}, "at": 300});
+        // What the run has told so far, and what each wait answers with.
+        let mut told = json!({"gg": 7, "reloads": [rebuilt, patched(250)]});
+        let wait = |told: &Value| {
+            let mut told = told.clone();
+            let shown = listed(&mut told, answered(&at, 7));
+            if let Some(until) = shown.until {
+                answer(&at, 7, until);
+            }
+            let events = told["reloads"].as_array().expect("reloads").iter();
+            let events = events.map(|outcome| outcome["event"].as_str().unwrap().to_owned());
+            (
+                events.collect::<Vec<_>>(),
+                told.get("reloads_more").cloned(),
+                shown,
+            )
+        };
+        let (both, ..) = wait(&told);
+        assert_eq!(both, ["rebuilt", "patched"], "oldest first");
+        let (none, _, shown) = wait(&told);
+        assert!(none.is_empty() && shown.until.is_none(), "answered once");
+        told["reloads"].as_array_mut().unwrap().push(failed);
+        let (second, ..) = wait(&told);
+        assert_eq!(second, ["patch_failed"], "the second alone");
+        // Another run's answer isn't this run's.
+        assert_eq!(answered(&at, 8), 0);
+        assert_eq!(answered(&at, 7), 300);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// At most ten are listed, the latest, with how many came before; a rebuild's kept warnings
+    /// join the tally.
+    #[test]
+    fn a_wait_lists_ten_and_tallies_the_warnings_of_every_rebuild() {
+        let warning = |message: &str| json!({"code": "snapshot.changed", "message": message});
+        let mut once = warning("lives added");
+        once["count"] = json!(2);
+        let outcomes: Vec<Value> = (1..=12)
+            .map(|at| json!({"event": "patched", "files": ["a.rs"], "at": at}))
+            .collect();
+        let mut told = json!({"reloads": outcomes});
+        let shown = listed(&mut told, 0);
+        let kept = told["reloads"].as_array().unwrap();
+        assert_eq!((kept.len(), &told["reloads_more"]), (10, &json!(2)));
+        assert_eq!((kept[0]["at"].clone(), shown.until), (json!(3), Some(12)));
+        assert!(!shown.rebuilt);
+        let mut told = json!({"reloads": [
+            {"event": "rebuilt", "at": 10, "warnings": [once, warning("score added")]},
+            {"event": "rebuilt", "at": 20},
+        ]});
+        let shown = listed(&mut told, 0);
+        assert!(shown.rebuilt);
+        assert!(
+            told["reloads"][0].get("warnings").is_none(),
+            "told apart, as `warnings`"
+        );
+        let mut tally = shown.warnings;
+        let line = |message: &str| {
+            let line = json!({"level": "WARN", "code": "snapshot.changed", "message": message});
+            serde_json::value::RawValue::from_string(line.to_string()).expect("a line")
+        };
+        tally_events(&mut tally, &[line("lives added")]);
+        let (told, more) = told_warnings(tally, MOST_WARNINGS);
+        assert_eq!(more, 0);
+        assert_eq!(
+            told,
+            [
+                json!({"code": "snapshot.changed", "message": "lives added", "count": 3}),
+                warning("score added"),
+            ]
+        );
+        // The later rebuild alone, since the answer.
+        let mut told = json!({"reloads": [
+            {"event": "rebuilt", "at": 10},
+            {"event": "rebuilt", "at": 20},
+        ]});
+        let shown = listed(&mut told, 10);
+        assert!(shown.rebuilt && shown.until == Some(20));
+        let mut told = json!({"reloads": [
+            {"event": "rebuilt", "at": 10},
+            {"event": "rebuilt", "at": 20},
+        ]});
+        let shown = listed(&mut told, 20);
+        assert!(!shown.rebuilt && shown.until.is_none());
+    }
+
+    /// A wait lists UI and prefab files as it does scenes and scripts.
+    #[test]
+    fn a_wait_lists_ui_and_prefab_files() {
+        let line = |event: Value| serde_json::value::to_raw_value(&event).expect("JSON");
+        let events = vec![
+            line(
+                json!({"timestamp": "t", "level": "INFO", "code": "ui.reloaded",
+                        "ui": "ui/hud.ui", "message": "UI reloaded", "target": "gg_engine"}),
+            ),
+            line(
+                json!({"level": "INFO", "code": "prefab.reloaded", "prefab": "prefabs/ship.prefab",
+                        "message": "Prefab reloaded"}),
+            ),
+            line(
+                json!({"level": "WARN", "code": "ui.parse", "ui": "ui/hud.ui",
+                        "message": "expected a node"}),
+            ),
+            line(json!({"level": "INFO", "prefab": "prefabs/other.prefab", "message": "Loaded"})),
+        ];
+        assert_eq!(
+            about_files(&events),
+            [
+                json!({"level": "INFO", "code": "prefab.reloaded", "message": "Prefab reloaded",
+                       "prefab": "prefabs/ship.prefab"}),
+                json!({"level": "WARN", "code": "ui.parse", "message": "expected a node",
+                       "ui": "ui/hud.ui"}),
+            ]
+        );
     }
 
     /// `quit` ends a run that waits without a game, through a request it takes as its own alone;

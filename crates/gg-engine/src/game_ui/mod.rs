@@ -26,11 +26,27 @@
 //! clipped where a list or clipping container says. The engine lays it out again when its tree,
 //! texts or the view's size change.
 //!
+//! # Paint order and covering
+//!
+//! Nodes draw in file order, each over the ones before it (a node's children over it, a list's
+//! scroll bar over its children). A shown panel covers what drew before it: the pointer, as the
+//! cursor's hover, clicks and focus, doesn't reach a button or widget under it, and a key or pad
+//! move of the focus skips one it wholly covers. A panel drawn before a button, as its background
+//! or an earlier sibling, covers nothing of it. Texts and images don't cover.
+//!
+//! # Hover and offsets
+//!
+//! [`GameUi::hovered`] names the button or widget under the cursor now, where
+//! [`GameUi::focused`] keeps the last the cursor was over. [`GameUi::set_offset`] moves a node and
+//! its subtree from where layout put them, as a lifted card or a shaken enemy: they draw and are
+//! found there, and nothing else moves.
+//!
 //! # State
 //!
 //! The focus, widgets' values and what code set of nodes are the run's, not the world's: each
 //! lockstep peer has its own, and none is hashed, snapshot or recorded. In development builds the
-//! file is read again as it changes; each node keeps, by name, what code and input set of it.
+//! file is read again as it changes; each node keeps, by name, what code and input set of it,
+//! offsets included.
 
 mod draw;
 mod file;
@@ -151,6 +167,10 @@ pub(crate) struct Node {
     /// How far a list's children are scrolled up, in canvas units. The run's: kept by name when
     /// the file is read again.
     pub(crate) scroll: f32,
+    /// Where it and its subtree draw and are found, past where layout put them, in canvas units
+    /// (+Y down). Set by code only, so a file's nodes have none; kept by name when the file is read
+    /// again.
+    pub(crate) offset: Vec2,
 }
 
 impl Node {
@@ -321,6 +341,7 @@ struct Set {
     visible: bool,
     disabled: bool,
     value: bool,
+    offset: bool,
 }
 
 /// The focused text field's caret and the other end of its selection, as byte offsets at
@@ -360,6 +381,9 @@ struct State {
     /// The view's size in canvas units at the last layout. `None` once its tree, texts, a list's
     /// scroll, or a font or texture it names, changed or reloaded since.
     laid_for: Option<Vec2>,
+    /// Whether the nodes' offsets or layout changed since [`Laid::settle`] put the rectangles
+    /// where they draw.
+    unsettled: bool,
     /// The focused node, and the one its file names.
     focus: Option<usize>,
     file_focus: Option<usize>,
@@ -388,6 +412,7 @@ impl State {
             set: vec![Set::default(); document.nodes.len()],
             laid: Laid::default(),
             laid_for: None,
+            unsettled: true,
             focus: document.focus.map(|focus| focus as usize),
             file_focus: document.focus.map(|focus| focus as usize),
             pressed: None,
@@ -440,6 +465,10 @@ impl State {
             if had.value {
                 kept.value = widgets::keep_value(&mut node.widget, &old.widget);
             }
+            if had.offset {
+                node.offset = old.offset;
+                kept.offset = true;
+            }
             if node.kind == Kind::List && old.kind == Kind::List {
                 node.scroll = old.scroll;
             }
@@ -457,6 +486,7 @@ impl State {
         self.hovered = None;
         self.open = None;
         self.laid_for = None;
+        self.unsettled = true;
         self.reset_caret();
     }
 
@@ -490,18 +520,24 @@ impl State {
     /// already. Each shown list's scroll is kept within what it can scroll; a hidden list keeps its
     /// scroll for when it shows again.
     fn lay_out(&mut self, fonts: &mut Fonts, view: Vec2) {
-        if self.laid_for == Some(view) {
-            return;
-        }
-        let _zone = gg_core::zone!("lay out a UI");
-        layout::lay_out(&self.nodes, fonts, view, &mut self.laid);
-        for i in 0..self.nodes.len() {
-            if self.nodes[i].kind == Kind::List && self.laid.shown[i] {
-                let most = self.laid.most_scroll(&self.nodes, i);
-                self.nodes[i].scroll = self.nodes[i].scroll.min(most);
+        if self.laid_for != Some(view) {
+            let _zone = gg_core::zone!("lay out a UI");
+            layout::lay_out(&self.nodes, fonts, view, &mut self.laid);
+            for i in 0..self.nodes.len() {
+                if self.nodes[i].kind == Kind::List && self.laid.shown[i] {
+                    let most = self.laid.most_scroll(&self.nodes, i);
+                    self.nodes[i].scroll = self.nodes[i].scroll.min(most);
+                }
             }
+            self.laid_for = Some(view);
+            self.unsettled = true;
         }
-        self.laid_for = Some(view);
+        // An offset moves what draws and is found, not the layout, so a layer may set one each
+        // frame without laying out again.
+        if self.unsettled {
+            self.laid.settle(&self.nodes);
+            self.unsettled = false;
+        }
     }
 
     /// Whether node `i` shows: it and each node above it visible.
@@ -602,6 +638,8 @@ impl GameUi {
     ///   first.
     /// - A hidden node, one under a hidden node, or a disabled one takes no focus or press; what a
     ///   list or clipping container hides takes no click.
+    /// - What a panel drawn after it covers takes no cursor focus or click, nor a wheel turn. A key
+    ///   or pad move skips a node a panel wholly covers.
     /// - Enter, Space and a pad's South press the focused button (shown pressed until released),
     ///   or focus one if none is. A click presses a button on release over the one it went down
     ///   on.
@@ -663,8 +701,9 @@ impl GameUi {
     ///
     /// `false` while the UI takes no input ([`set_input`](Self::set_input)), didn't draw in the
     /// last frame, or the cursor is outside the view. A panel, text or image isn't pointed at, so
-    /// a HUD of them doesn't take the game's clicks. The UI is laid out for the view as the last
-    /// frame handed it off.
+    /// a HUD of them doesn't take the game's clicks; but a panel over a button, widget or list
+    /// still has the pointer there, so a click on the one it covers isn't one on the world behind.
+    /// The UI is laid out for the view as the last frame handed it off.
     pub fn pointer_over(self, cx: &mut Context) -> bool {
         let Parts {
             uis,
@@ -691,7 +730,8 @@ impl GameUi {
     ///
     /// Each top node is placed from the point of the view its anchor names (the middle by
     /// default), so a resize keeps it there in the frame it comes in. Nodes under it draw in order
-    /// over what's before, within what clips them, a button or widget in the look its state shows.
+    /// over what's before, within what clips them, a button or widget in the look its state shows,
+    /// each moved by its [offset](Self::set_offset).
     /// An open drop-down's options draw over it all. The UI is of no entity, so a pick where it's
     /// on top finds none.
     pub fn draw(self, cx: &mut Context) {
@@ -804,6 +844,56 @@ impl GameUi {
         let found = state.settable(name, "disabling", Kind::focuses)?;
         state.nodes[found].disabled = disabled;
         state.set[found].disabled = true;
+        Ok(())
+    }
+
+    /// The name of the button or widget under the cursor now, enabled or not; `None` while the
+    /// cursor is over none, or outside the view. Unlike [`focused`](Self::focused), which stays
+    /// where the cursor was, it goes with the cursor.
+    ///
+    /// A shown node a panel drawn after it covers isn't under the cursor, and what a list or
+    /// clipping container hides isn't either. The cursor is where the last event left it, and the
+    /// node where its [offset](Self::set_offset) puts it, so lifting a node by its hover moves the
+    /// ground it's hovered on. A UI that takes no input ([`set_input`](Self::set_input)) still
+    /// answers. The UI is laid out for the view as the last frame handed it off.
+    pub fn hovered(self, cx: &mut Context) -> Option<Arc<str>> {
+        let Parts {
+            uis,
+            fonts,
+            view,
+            input,
+            ..
+        } = cx.ui_parts();
+        let state = uis.state(self);
+        let at = cursor_on(view, input.cursor())?;
+        state.lay_out(fonts, units(view));
+        state.pointed_at(at).map(|hovered| state.name_of(hovered))
+    }
+
+    /// Moves the node named `name` and its subtree `offset` canvas units from where layout put
+    /// them (+X right, +Y down), from now on, kept when the file is read again. They draw there
+    /// and the pointer finds them there; a clipping node's clip moves with it. Nothing else
+    /// moves and nothing is laid out again, so a layer may set it each frame. Offsets add down the
+    /// tree. Zero puts the node back.
+    ///
+    /// A node lifted by its hover moves out from under the cursor where it no longer reaches it:
+    /// a game keeps its hit area apart from what it moves.
+    ///
+    /// Fails with `ui.no_node` for a name no node has, and `ui.bad_value` for an offset that isn't
+    /// finite.
+    pub fn set_offset(self, cx: &mut Context, name: &str, offset: Vec2) -> Result<()> {
+        let state = cx.ui_parts().uis.state(self);
+        let found = state.settable(name, "offset", |_| true)?;
+        if !offset.is_finite() {
+            let ui = &state.name;
+            let message = format!("node `{name}` of UI `{ui}` can't take the offset {offset}");
+            return Err(Error::new("ui.bad_value", message));
+        }
+        if state.nodes[found].offset != offset {
+            state.nodes[found].offset = offset;
+            state.unsettled = true;
+        }
+        state.set[found].offset = true;
         Ok(())
     }
 

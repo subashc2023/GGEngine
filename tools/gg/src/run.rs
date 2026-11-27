@@ -137,6 +137,15 @@ pub(crate) fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// `event` with `queued_ms` if the build it tells of waited `queued` for dx's lock; its `build_ms`
+/// leaves that wait out.
+pub(crate) fn with_queued(mut event: Value, queued: Duration) -> Value {
+    if !queued.is_zero() {
+        event["queued_ms"] = json!(millis(queued));
+    }
+    event
+}
+
 /// Builds `run`'s package ([`Patches::new`]), prints `built` with the time, and supervises a copy
 /// of its executable, so the original can be rebuilt meanwhile, until the game exits cleanly.
 /// Returns whether it did, printing a line per event.
@@ -195,8 +204,15 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
         Some(patches) => patches.exe().to_owned(),
         None => build::build(&run.package, release(run.release), run.dir())?.exe,
     };
-    let build_ms = millis(building.elapsed());
-    event(&json!({"event": "built", "exe": exe, "build_ms": build_ms}));
+    // The wait for dx's lock isn't the build's time.
+    let queued = patches
+        .as_ref()
+        .map_or(Duration::ZERO, |patches| patches.queued());
+    let build_ms = millis(building.elapsed().saturating_sub(queued));
+    event(&with_queued(
+        json!({"event": "built", "exe": exe, "build_ms": build_ms}),
+        queued,
+    ));
     let dir = exe.parent().unwrap_or(Path::new(".")).to_owned();
     // A directory of its own, which the game's pruning of `snapshots` leaves alone.
     let snapshots = dir.join("snapshots").join("gg");
@@ -561,6 +577,9 @@ impl Supervisor<'_> {
                 pids: games.iter().map(|game| game.pid).collect(),
                 ..State::new(stopping)
             });
+            if matches!(happened, Happened::Rebuilt { .. }) {
+                self.keep_warnings(&games);
+            }
             for (peer, game) in games.iter_mut().enumerate() {
                 if all || peer != ended {
                     self.stop(peer, game, snapshot)?;
@@ -636,6 +655,20 @@ impl Supervisor<'_> {
             (_, why) => why.clone(),
         };
         told.tell(&State { why, ..state }, looked);
+    }
+
+    /// Has [`Patches::warned`] keep what `games` warned of, which their restart on a rebuild hides.
+    fn keep_warnings(&mut self, games: &[Game]) {
+        let Some(patches) = &mut self.patches else {
+            return;
+        };
+        let mut events = Vec::new();
+        for session in games.iter().filter_map(|game| game.session.as_ref()) {
+            if let Ok(mut client) = Client::connect(session, "gg", PULSE) {
+                events.extend(runs::read_events(&mut client, json!({"level": "warn"})));
+            }
+        }
+        patches.warned(&events);
     }
 
     /// Whether `gg quit` asked the run to end ([`Told::asked_to_quit`]) as it waits for a rebuild,

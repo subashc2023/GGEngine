@@ -481,11 +481,11 @@ impl World {
                             Some((_, state)) if opaque => column
                                 .push_opaque(state)
                                 .map_err(|error| format!("{error:#}")),
-                            Some(_) => {
-                                Err("what's opaque comes back only into a run whose layers \
-                                            added the same assets in the same order"
-                                    .to_owned())
-                            }
+                            // Its indices would name other assets, or misread its bytes.
+                            Some(_) => Err("the layers added other assets than the snapshot's \
+                                            run did, or in another order, so its entities draw \
+                                            nothing until `gg rebuild --fresh` makes them again"
+                                .to_owned()),
                             None => Err("it's opaque, and keeps nothing".to_owned()),
                         }
                     } else {
@@ -1232,7 +1232,7 @@ mod tests {
         assert!(
             changes
                 .iter()
-                .any(|(change, _)| change.starts_with("`Kept`: what's opaque"))
+                .any(|(change, _)| change.starts_with("`Kept`: the layers added other assets"))
         );
     }
 

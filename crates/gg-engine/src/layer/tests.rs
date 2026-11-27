@@ -2036,8 +2036,9 @@ fn a_scene_names_a_model_by_its_id_whose_nodes_reload_as_it_changes() {
 
 /// A scene naming a prefab by ID loads it and the textures its text names; its instance spawns the
 /// prefab's entities. Edited, the prefab reloads and the instance takes what changed except its own
-/// changes, unless the run is recorded (kept, warning). A run following another stands in for one
-/// it can't load: instances are their roots alone.
+/// changes, by the time the thread's look since the save is taken, unless the run is recorded
+/// (kept, warning). A run following another stands in for one it can't load: instances are their
+/// roots alone.
 #[cfg(feature = "dev")]
 #[test]
 fn a_scene_names_a_prefab_by_its_id_whose_instances_reload_as_it_changes() {
@@ -2119,8 +2120,12 @@ fn a_scene_names_a_prefab_by_its_id_whose_instances_reload_as_it_changes() {
     };
     let path = root.join("assets/lamp.prefab");
     std::fs::write(&path, text_of(3.0, "post")).expect("an edit");
+    let saved = std::time::SystemTime::now();
+    // Once the thread's look since the save is taken, the edit is in place: `files_looked`.
+    let looked = |cx: &Context| cx.assets_looked().is_some_and(|at| at >= saved);
+    until(&mut cx, false, &looked, "it looks since the save");
     let grown = |cx: &Context| scale(cx) == Vec3::new(3.0, 3.0, 1.0);
-    until(&mut cx, false, &grown, "the instance takes it");
+    assert!(grown(&cx), "the instance takes it");
     assert_eq!(
         name(&cx),
         Some(Name("mine".to_owned())),

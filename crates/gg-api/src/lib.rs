@@ -39,7 +39,7 @@
 //! | `capture` | [`Capture`] | [`Captured`] | `view` |
 //! | `frames` | [`Frames`] | [`Framed`] | `view`, `files` |
 //! | `view` | [`View`] | `{}` | `view` |
-//! | `input` | [`Input`] | `{}` | `input` |
+//! | `input` | [`Input`] | [`Handed`] | `input` |
 //! | `press` | [`Press`] | [`Pressed`] | `input` |
 //! | `actions` | - | [`ActionList`] | `input` |
 //! | `look` | [`Look`] | [`Looked`] | `view` |
@@ -676,12 +676,32 @@ pub struct Status {
     /// cursor, report what layers want. False from an engine older than it.
     #[serde(default)]
     pub cursor_grabbed: bool,
-    /// When the game last looked at the scene and script files it watches, in ms since the Unix
-    /// epoch, as `gg run`'s file gives times. Each saved before then has applied, or warned why
-    /// not; a lockstep host's applies at a tick it offers. `None` before a look, in a game that
-    /// watches none, and from an engine older than it.
+    /// When the game last looked at the scene, script and asset files it watches (UI files,
+    /// prefabs, textures, models...), in ms since the Unix epoch, as `gg run`'s file gives times.
+    /// Each saved before then has applied, or warned why not; a lockstep host's applies at a tick
+    /// it offers. `None` before a look, in a game that watches none, and from an engine older than
+    /// it.
     #[serde(default)]
     pub files_looked: Option<u64>,
+    /// What the API's `input`s hold down, as [`Handed::held`] names it. Left out when nothing is,
+    /// and from an engine older than it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<String>,
+}
+
+/// What `input` without a wait or `hold` answers: what the API's inputs hold down once its events
+/// are handed. Each list is left out when empty, so nothing held answers `{}`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Handed {
+    /// Each key, button, stick and trigger the API's `input`s pressed or moved and left so, in
+    /// the order pressed: a key by its `code`, as `KeyR`; `mouse left`; `pad 0 south`;
+    /// `pad 0 left stick`; `pad 0 right trigger`. An action's press is its binding's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<String>,
+    /// The events' presses of what was down already, named alike, which changed nothing: a layer
+    /// sees no press without a release before it, as `{"action":{"name":"Jump","value":0}}` gives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub already_down: Vec<String>,
 }
 
 /// How many of a world's cells are in, and how many out keep what they held.
@@ -907,8 +927,9 @@ pub struct Input {
     /// The engine releases them as the frame after the last of those ticks starts, then answers
     /// with the [`Status`], as `step` does; until then, frames run no tick past it. The next tick
     /// to run sees the release. Events that leave nothing down, such as a click's, just run the
-    /// ticks. Paused, the hold steps its ticks. Without it or a wait, `input` answers `{}` at once,
-    /// before a tick sees the events. Without it, keys stay down until an event releases them.
+    /// ticks. Paused, the hold steps its ticks. Without it or a wait, `input` answers [`Handed`] at
+    /// once, before a tick sees the events. Without it, keys stay down until an event releases
+    /// them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<u64>,
 }
@@ -2082,7 +2103,9 @@ pub struct ListedUi {
 /// - `text`, what a text, a button or a toggle says, what's typed in a text field, or a drop-down's
 ///   choice; `value`, what a slider, a toggle or a drop-down holds;
 /// - for a button or a widget, whether it's `disabled`, `focused`, or held `pressed`, a drop-down
-///   while its options are open.
+///   while its options are open;
+/// - its `offset`, `[x, y]` in canvas units, when code moved it and what's under it from where
+///   layout put them, as `rect` and `pixels` show them; left out while zero.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiNode {
     pub name: Option<String>,
@@ -2101,10 +2124,16 @@ pub struct UiNode {
     pub focused: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub pressed: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset: [f32; 2],
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero(offset: &[f32; 2]) -> bool {
+    *offset == [0.0; 2]
 }
 
 /// A UI node's kind, as its file names it.

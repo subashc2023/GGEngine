@@ -84,11 +84,13 @@ struct Holding {
 }
 
 impl Holding {
-    /// Lets go of what `handed` left down, if it lets go.
-    fn let_go(&self, cx: &mut Context, stack: &mut Stack) {
+    /// Lets go of what `handed` left down, if it lets go, noting it in `down` (the API's
+    /// [`down`](Api::down)).
+    fn let_go(&self, cx: &mut Context, stack: &mut Stack, down: &mut Vec<InputEvent>) {
         if self.lets_go {
             let releases = parse::releases(&self.handed);
             hand(cx, stack, &releases, &mut Vec::new()).expect("a release aims at nothing");
+            parse::hold(down, &releases);
         }
     }
 }
@@ -171,6 +173,10 @@ pub(crate) struct Api {
     /// Held `input`s waiting to let go as the simulation reaches their ticks; frames run no tick
     /// past the soonest.
     holds: Vec<Holding>,
+    /// What the API's `input`s hold down, as [`parse::releases`] gives it: each key, button, stick
+    /// or trigger their events pressed or moved and left so, in the order pressed. A press of a key
+    /// already down changes nothing, which `input` says, as a client may take one for a press.
+    down: Vec<InputEvent>,
     /// `assets` waiting for the asset root's watcher thread to have looked since each came.
     listing: Vec<Listing>,
     /// `capture`s waiting for a frame handed off of their kind, bare or not, in order of arrival.
@@ -179,6 +185,8 @@ pub(crate) struct Api {
     /// after `riding_ticks` ticks, until a frame that rendered brings its view back.
     riding: Vec<Capturing>,
     riding_ticks: u64,
+    /// Whether `api.capture_waiting` warned of the captures waiting now.
+    capture_warned: bool,
     /// `frames` in order of arrival: the first captures, the rest wait. `film_frame`: the frame
     /// being made is the first's, drawn from its viewpoint if it gives them. `film_viewpoint`: the
     /// last frame drew from a film's viewpoint, not the look's.
@@ -359,10 +367,12 @@ impl Api {
             shared,
             steps: Vec::new(),
             holds: Vec::new(),
+            down: Vec::new(),
             listing: Vec::new(),
             asked: Vec::new(),
             riding: Vec::new(),
             riding_ticks: 0,
+            capture_warned: false,
             films: Vec::new(),
             film_frame: false,
             film_viewpoint: false,
@@ -545,8 +555,11 @@ impl Api {
             .extract_if(.., |holding| holding.until <= stepper.ticks);
         for mut holding in due.collect::<Vec<_>>() {
             let (_, run) = holding.runs.pop_front().expect("a holding waits for a run");
-            if let Err(failure) = hand(cx, stack, &run, &mut holding.handed) {
-                holding.let_go(cx, stack);
+            let before = holding.handed.len();
+            let handed = hand(cx, stack, &run, &mut holding.handed);
+            parse::hold(&mut self.down, &holding.handed[before..]);
+            if let Err(failure) = handed {
+                holding.let_go(cx, stack, &mut self.down);
                 holding.reply.send(Err(failure));
                 continue;
             }
@@ -554,7 +567,7 @@ impl Api {
                 self.hold_for(stepper, holding, ticks);
                 continue;
             }
-            holding.let_go(cx, stack);
+            holding.let_go(cx, stack, &mut self.down);
             match holding.pressed {
                 Some(pressed) => holding.reply.result(&gg_api::Pressed {
                     ticks: stepper.ticks,
@@ -730,13 +743,16 @@ impl Api {
                     pressed: None,
                     reply,
                 };
-                match hand(cx, stack, &events, &mut holding.handed) {
+                self.down.retain(|release| still_down(cx, release));
+                let handed = hand(cx, stack, &events, &mut holding.handed);
+                parse::hold(&mut self.down, &holding.handed);
+                match handed {
                     Ok(()) => {
                         let ticks = holding.runs.front().expect("a hold has runs").0;
                         self.hold_for(stepper, holding, ticks);
                     }
                     Err(failure) => {
-                        holding.let_go(cx, stack);
+                        holding.let_go(cx, stack, &mut self.down);
                         holding.reply.send(Err(failure));
                     }
                 }
@@ -883,9 +899,19 @@ impl Api {
                 }
             },
             Call::Input(events, None) => {
-                let checked = actions::check(stack, &events);
-                match checked.and_then(|()| hand(cx, stack, &events, &mut Vec::new())) {
-                    Ok(()) => reply.send(Ok("{}".to_owned())),
+                if let Err(failure) = actions::check(stack, &events) {
+                    reply.send(Err(failure));
+                    return;
+                }
+                let mut handed = Vec::new();
+                self.down.retain(|release| still_down(cx, release));
+                let given = hand(cx, stack, &events, &mut handed);
+                let already = parse::hold(&mut self.down, &handed);
+                match given {
+                    Ok(()) => reply.result(&gg_api::Handed {
+                        held: self.held(cx),
+                        already_down: already.iter().map(parse::held_name).collect(),
+                    }),
                     Err(failure) => reply.send(Err(failure)),
                 }
             }
@@ -1180,7 +1206,7 @@ impl Api {
             waiting.send(Err(Failure::new("api.stopped", message)));
         }
         for holding in mem::take(&mut self.holds) {
-            holding.let_go(cx, stack);
+            holding.let_go(cx, stack, &mut self.down);
             holding
                 .reply
                 .send(Err(Failure::new("api.stopped", message)));
@@ -1288,7 +1314,15 @@ impl Api {
             cells: (cx.world().cell_counts()).map(|(cells_in, kept)| CellCounts { cells_in, kept }),
             cursor_grabbed: cx.cursor_grabbed(),
             files_looked: files_looked(cx),
+            held: self.held(cx),
         }
+    }
+
+    /// What the API's `input`s hold down, named as `held` answers it ([`parse::held_name`]), but
+    /// what the layers' input no longer holds ([`still_down`]).
+    fn held(&self, cx: &Context) -> Vec<String> {
+        let held = self.down.iter().filter(|release| still_down(cx, release));
+        held.map(parse::held_name).collect()
     }
 
     /// Whether the simulation is paused or stopped and nothing asks for frames: no ticks to step,
@@ -1337,20 +1371,32 @@ impl Drop for Api {
     }
 }
 
-/// `error` as the API answers it.
-/// When the game last looked at every scene and script file it watches, as [`Status`] gives it:
-/// the older look of the two kinds, of those that have looked.
+/// When the game last looked at every scene, script and asset file it watches, as [`Status`] gives
+/// it: the oldest look of the three kinds, of those that have looked.
 fn files_looked(cx: &Context) -> Option<u64> {
     let looks = cx
         .scenes
         .looked_at
         .into_iter()
-        .chain(cx.dev.scripts.looked_at());
+        .chain(cx.dev.scripts.looked_at())
+        .chain(cx.assets_looked());
     let since = |at: std::time::SystemTime| at.duration_since(std::time::UNIX_EPOCH).ok();
     let ms = |since: Duration| u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
     looks.min().and_then(since).map(ms)
 }
 
+/// Whether the layers' input holds down the key or button `release` lets go of: a focus loss lets
+/// go of them all, as may a window's own release. Sticks and triggers, which it doesn't keep, are.
+fn still_down(cx: &Context, release: &InputEvent) -> bool {
+    let input = cx.input();
+    match view::input_event(release, [0, 0]) {
+        Some(crate::Event::Key { key, .. }) => input.key_down(key),
+        Some(crate::Event::MouseButton { button, .. }) => input.button_down(button),
+        _ => true,
+    }
+}
+
+/// `error` as the API answers it.
 fn failure(error: &Error) -> Failure {
     Failure::new(error.code(), format!("{error:#}"))
 }

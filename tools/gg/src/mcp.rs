@@ -197,27 +197,33 @@ const TOOLS: &[Tool] = &[
                       scene's file (`scene`); `unsaved`, whether the scene differs from its file, \
                       as a playing game's ticks make it; `edited`, whether authors edited it since \
                       it was saved or opened, which ticks don't; in a world of cells, `cells`: how \
-                      many are in, and how many out keep what they held; and `cursor_grabbed`, \
+                      many are in, and how many out keep what they held; `cursor_grabbed`, \
                       whether the game wants the cursor grabbed, so it looks about by `motion` \
-                      events, not `cursor` moves.",
+                      events, not `cursor` moves; and `held`, what your `input` holds down until \
+                      an event lets go of it.",
         properties: || json!({}),
         required: &[],
     },
     Tool {
         name: "wait",
-        description: "Call after editing the game's code, scenes or scripts, before checking \
+        description: "Call after editing the game's code, scenes, scripts, UIs or prefabs, before checking \
                       what the edit does: waits until the game under `gg run` runs the code of \
                       every edit saved before the call, patched, or rebuilt and restarted, and has \
-                      looked at its scene and script files since, and answers what the run is \
-                      doing. Its `reload` is the last patch (`patched`, with its `files`, \
-                      `build_ms` and `apply_ms`) or rebuild (`rebuilt`, with its `why` and \
-                      `build_ms`), with `at`, ms since the epoch, as `updated`. `files_looked` is \
-                      when the game last looked at its scene and script files, and `files` the \
-                      last event it logged of each, the latest 20 files', with its `timestamp`: \
-                      `scene.applied`, `Script reloaded`, a warning why one didn't apply, a \
-                      script's error. After a rebuild, `warnings` lists the warnings the \
-                      restarted game logged (`code`, `message`, `count` if repeated, at most 20, \
-                      `warnings_more` more), \
+                      looked at its scene, script, UI and prefab files since, and answers what the run is \
+                      doing. Its `reloads` lists every outcome the run had since the last `wait` or \
+                      `rebuild` answered, oldest first, at most 10 (`reloads_more` before them): \
+                      save twice, wait once, and it shows both. Each is a patch (`patched`, with its `files`, \
+                      `build_ms` and `apply_ms`), a rebuild (`rebuilt`, with its `why` and \
+                      `build_ms`, which leaves out `queued_ms`, the time it waited for another \
+                      game's build), or a failed one (`patch_failed`, `rebuild_failed`, with its \
+                      `error`), with `at`, ms since the epoch; `reload` is the latest patch or \
+                      rebuild. `files_looked` is when the game last looked at its scene, script \
+                      and asset files, and `files` the last event it logged of each scene, script, \
+                      UI and prefab file, the latest 20 files', with its `timestamp`: \
+                      `scene.applied`, `Script reloaded`, `ui.reloaded`, `prefab.reloaded`, a \
+                      warning why one didn't apply, a script's error. `warnings` lists the \
+                      warnings the restarted games logged after each rebuild listed (`code`, \
+                      `message`, `count` if repeated, at most 20, `warnings_more` more), \
                       as a restore's `snapshot.changed`: read them. Fails with \
                       `gg.build_failed` and rustc's errors if the edits don't build (the game runs \
                       its old code), `gg.waiting` if the game ended and waits for a change, or \
@@ -243,9 +249,11 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "rebuild",
         description: "Call after an edit `wait` says was patched in, but that the game won't run \
-                      again, as in a function reached only through the game's own trait objects \
-                      or function pointers (`gg run` rebuilds by itself for code only `main` or a \
-                      layer's `load` or `restored` reaches). Has \
+                      again, as in a function reached only through `dyn` objects or function \
+                      pointers of the game's own that it keeps. A layer's own methods (`update`, \
+                      `tick`, `event`, `ui`, `commands`...) patch: the engine calls each through \
+                      the patch table. `gg run` rebuilds by itself for code only `main` or a \
+                      layer's `load` or `restored` reaches. Has \
                       `gg run` rebuild the game with every edit saved, once no patch or build is \
                       under way, and start it again from a snapshot, as an edit no patch carries \
                       does. Then waits until the game runs the new build, and answers as `wait` \
@@ -649,8 +657,10 @@ const TOOLS: &[Tool] = &[
                       button you press, and bring sticks and triggers back to rest: the game \
                       holds them until then, or give `hold`. Set the game's actions by name, as \
                       `actions` lists them, with `action` events. \
-                      Without `hold` or a `wait`, it answers `{}` before a tick sees the events; \
-                      paused, none does until a `step`.",
+                      A press of what's down already changes nothing. Without `hold` or a \
+                      `wait`, it answers before a tick sees the events, with what your inputs \
+                      hold down (`held`) and the presses that changed nothing (`already_down`); \
+                      paused, no tick sees them until a `step`.",
         properties: || {
             json!({
                 "events": input(),
