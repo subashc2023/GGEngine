@@ -6,7 +6,7 @@ use syn::visit_mut::{self, VisitMut};
 use syn::{
     Attribute, Block, Expr, ExprInfer, File, GenericArgument, Ident, ImplItem, ImplItemConst,
     ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod, ItemUse, Macro, MetaList, Signature,
-    Stmt, TraitItemConst, TraitItemFn, Type, UseRename, UseTree, Visibility,
+    Stmt, StmtMacro, TraitItemConst, TraitItemFn, Type, UseRename, UseTree, Visibility,
 };
 
 /// What an edit to a module is, as a patch sees it.
@@ -30,9 +30,9 @@ pub(crate) enum Edit {
 /// What the edit from `old`, a module's text as of the game's build, to `new` is.
 ///
 /// `Same` if the two differ only in items under `#[cfg(test)]`. Else inside function bodies if the
-/// two are the same token for token, but for non-`const` function bodies (their declared items
-/// aside), constants' values, doc comments, `use`s and the functions [`free`] lets come and go,
-/// leaving out items under `#[cfg(test)]`.
+/// two are the same token for token, but for non-`const` function bodies (their declared items,
+/// and macros that may declare some, aside), constants' values, doc comments, `use`s and the
+/// functions [`free`] lets come and go, leaving out items under `#[cfg(test)]`.
 ///
 /// An edit inside code that runs as the game starts (`main`, a `Layer`'s `load` and `restored`)
 /// needs a rebuild: a patch would come after they ran. [`reach`](crate::reach) finds code only
@@ -60,8 +60,16 @@ pub(crate) fn classify(old: &str, new: &str) -> Edit {
     }
     let old_bare = bare(old.clone(), Keep::None);
     let new_bare = bare(new.clone(), Keep::None);
-    if old_bare.file != new_bare.file || old_bare.values.len() != new_bare.values.len() {
+    if old_bare.values.len() != new_bare.values.len() {
         return Edit::Rebuild("an edit outside function bodies");
+    }
+    if old_bare.file != new_bare.file {
+        let macros = without_macros(old_bare.file) == without_macros(new_bare.file);
+        return Edit::Rebuild(if macros {
+            DECLARING
+        } else {
+            "an edit outside function bodies"
+        });
     }
     let names = match renamed(&old_bare.uses, &new_bare.uses) {
         Ok(names) => names,
@@ -146,6 +154,12 @@ pub(crate) const OUTSIDE_BODIES: &str =
 pub(crate) const AT_START: &str =
     "an edit to a constant code that runs as the game starts uses, as a patch comes after";
 pub(crate) const UNREAD: &str = "an edit to a constant beside a module gg can't read";
+pub(crate) const DECLARING: &str =
+    "an edit to a macro in a function body that may declare items, as `thread_local!` does";
+pub(crate) const USED_DECLARING: &str =
+    "an edit to a constant a macro in a function body uses, which may declare items with it";
+const USE_DECLARING: &str =
+    "an edit to a `use` of a name a macro in a function body uses, which may declare items with it";
 
 /// Where an edit to the constants `edited`, by name, reaches in the game's modules, `texts`.
 ///
@@ -281,6 +295,8 @@ enum Place {
     Body,
     /// `main`'s body, or a `Layer` impl's `load` or `restored`.
     Startup,
+    /// A macro in a non-`const` function's body that may declare items ([`may_declare`]).
+    Declaring,
 }
 
 /// What [`Find`] looks for the uses of.
@@ -316,6 +332,8 @@ impl Find {
             (Kind::Const, Place::Startup) => AT_START,
             (Kind::Use, Place::Item | Place::Value) => USED_OUTSIDE,
             (Kind::Use, Place::Startup) => USED_AT_START,
+            (Kind::Const, Place::Declaring) => USED_DECLARING,
+            (Kind::Use, Place::Declaring) => USE_DECLARING,
             (_, Place::Value | Place::Body) => return,
         };
         self.found.get_or_insert((at, why));
@@ -418,6 +436,18 @@ impl VisitMut for Find {
     fn visit_macro_mut(&mut self, mac: &mut Macro) {
         for word in tokens(&mac.tokens) {
             self.word(&word);
+        }
+    }
+
+    /// A macro in a body that may declare items, as `thread_local!`, uses a constant as an item
+    /// would.
+    fn visit_stmt_macro_mut(&mut self, stmt: &mut StmtMacro) {
+        if self.place == Place::Body && may_declare(&stmt.mac) {
+            self.within(Place::Declaring, |find| {
+                visit_mut::visit_stmt_macro_mut(find, stmt);
+            });
+        } else {
+            visit_mut::visit_stmt_macro_mut(self, stmt);
         }
     }
 
@@ -589,7 +619,8 @@ impl VisitMut for Free {
 /// - a `const fn`, which the build may evaluate into a type or a static;
 /// - `main`, or of another ABI, which code outside the crate calls;
 /// - given an attribute that may add code or change its symbol, as a macro's or `#[no_mangle]`;
-/// - declaring items, as the running game may hold values of a type among them.
+/// - declaring items, or holding a macro that may, as the running game may hold values of a type
+///   among them.
 fn free(attrs: &[Attribute], sig: &Signature, block: &mut Block) -> bool {
     sig.constness.is_none()
         && sig.abi.is_none()
@@ -623,12 +654,17 @@ pub(crate) fn plain(attrs: &[Attribute]) -> bool {
     })
 }
 
-/// Whether `block` declares an item, however deep, but for test code.
+/// Whether `block` declares an item, however deep, or holds a macro that may ([`may_declare`]),
+/// but for test code.
 fn declares(block: &mut Block) -> bool {
     struct Declares(bool);
     impl VisitMut for Declares {
         fn visit_item_mut(&mut self, item: &mut Item) {
             self.0 |= !tested(item);
+        }
+
+        fn visit_stmt_macro_mut(&mut self, stmt: &mut StmtMacro) {
+            self.0 |= may_declare(&stmt.mac) && !cfg_test(&stmt.attrs);
         }
     }
     let mut declares = Declares(false);
@@ -638,9 +674,9 @@ fn declares(block: &mut Block) -> bool {
 
 /// Empties function bodies (free, methods, default methods) but for `const fn`s' (the build may
 /// evaluate them into a type or a static) and those `keep` keeps. Keeps items declared in a body,
-/// however deep: the running game may hold values of a type among them. Drops doc comments. Items
-/// a macro declares in a body (`thread_local!`) go with it. Takes out constants' values, which
-/// [`uses`] judges.
+/// however deep: the running game may hold values of a type among them, and the macros there that
+/// may declare some, as `thread_local!` ([`may_declare`]). Drops doc comments. Takes out constants'
+/// values, which [`uses`] judges.
 struct Bare {
     keep: Keep,
     /// Whether the impl being visited is one of `Layer`.
@@ -807,18 +843,90 @@ pub(crate) fn declares_test(parent: &str, name: &str) -> bool {
 fn keep_items(block: &mut Block) {
     let mut items = Items(Vec::new());
     items.visit_block_mut(block);
-    block.stmts = items.0.into_iter().map(Stmt::Item).collect();
+    block.stmts = items.0;
 }
 
-/// Collects the items a block declares, each whole.
-struct Items(Vec<Item>);
+/// Collects the items a block declares, each whole, however deep, and the macros in statement
+/// position that may declare some ([`may_declare`]).
+struct Items(Vec<Stmt>);
 
 impl VisitMut for Items {
     fn visit_item_mut(&mut self, item: &mut Item) {
         if !tested(item) {
-            self.0.push(item.clone());
+            self.0.push(Stmt::Item(item.clone()));
         }
     }
+
+    fn visit_stmt_macro_mut(&mut self, stmt: &mut StmtMacro) {
+        if may_declare(&stmt.mac) && !cfg_test(&stmt.attrs) {
+            self.0.push(Stmt::Macro(stmt.clone()));
+        }
+        visit_mut::visit_stmt_macro_mut(self, stmt);
+    }
+}
+
+/// The macros known to declare no item in statement position, by their path's last name: std's
+/// that print, format, assert or panic, tracing's and log's, and gg-core's `zone!`.
+const DECLARE_NOTHING: [&str; 36] = [
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "write",
+    "writeln",
+    "format",
+    "format_args",
+    "panic",
+    "todo",
+    "unimplemented",
+    "unreachable",
+    "dbg",
+    "vec",
+    "matches",
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "error",
+    "event",
+    "span",
+    "trace_span",
+    "debug_span",
+    "info_span",
+    "warn_span",
+    "error_span",
+    "zone",
+    "bail",
+    "ensure",
+];
+
+/// Whether the macro `mac`, in statement position in a function body, may declare items, as
+/// `thread_local!` and `bitflags!` do: any but those [`DECLARE_NOTHING`] names. Code may hold
+/// values of such an item, or its state, which a patch would leave as the build made them.
+fn may_declare(mac: &Macro) -> bool {
+    let last = mac.path.segments.last();
+    !last.is_some_and(|last| DECLARE_NOTHING.iter().any(|name| last.ident == name))
+}
+
+/// `file` without the macros [`keep_items`] kept in its bodies, those that may declare items.
+fn without_macros(mut file: File) -> File {
+    struct Drop;
+    impl VisitMut for Drop {
+        fn visit_block_mut(&mut self, block: &mut Block) {
+            block
+                .stmts
+                .retain(|stmt| !matches!(stmt, Stmt::Macro(stmt) if may_declare(&stmt.mac)));
+            visit_mut::visit_block_mut(self, block);
+        }
+    }
+    Drop.visit_file_mut(&mut file);
+    file
 }
 
 #[cfg(test)]
@@ -1043,6 +1151,11 @@ fn steer() -> f32 {
             (
                 "fn steer() {\n    static TOP: f32 = SPEED;\n}\n",
                 OUTSIDE_BODIES,
+            ),
+            // In a body, in a macro that may declare items with it.
+            (
+                "fn steer() {\n    thread_local! {\n        static TOP: f32 = SPEED;\n    }\n}\n",
+                USED_DECLARING,
             ),
             // In code run as the game starts.
             ("fn main() {\n    run(SPEED);\n}\n", AT_START),
@@ -1343,6 +1456,41 @@ impl Ship {{
             let outside = Edit::Rebuild("an edit outside function bodies");
             assert_eq!(edit, outside, "{from} -> {to}");
         }
+    }
+
+    /// A macro in a function body that may declare items, as `thread_local!`, `bitflags!` or a
+    /// game's own, is compared: an edit to it, or its coming, rebuilds. One known to declare
+    /// nothing, as tracing's `info!`, patches, and so does one under `#[cfg(test)]`.
+    #[test]
+    fn edits_to_a_macro_that_may_declare_items_in_a_body_need_a_rebuild() {
+        let module = "fn steer(ship: &mut Ship) {\n    thread_local! {\n        static TURNS: u32 = \
+                      1;\n    }\n    tracing::info!(\"steering\");\n    ship.x += 1.0;\n}\n";
+        let declaring = || Edit::Rebuild(DECLARING);
+        let added = |text: &str| module.replace("    ship.x", &format!("    {text}\n    ship.x"));
+        for (to, edit) in [
+            (
+                module.replace("TURNS: u32 = 1", "TURNS: u32 = 2"),
+                declaring(),
+            ),
+            (
+                added("bitflags! { struct Lanes: u8 { const LEFT = 1; } }"),
+                declaring(),
+            ),
+            (added("lanes!(ship);"), declaring()),
+            (
+                module.replace("\"steering\"", "\"steering left\""),
+                bodies(),
+            ),
+            (added("#[cfg(test)]\n    lanes!(ship);"), bodies()),
+        ] {
+            assert_eq!(classify(module, &to), edit, "{to}");
+        }
+        // An edit to a macro known to declare nothing, in a `const fn`'s body, which rebuilds as
+        // any edit there does.
+        let lanes = "const fn lanes() -> u32 {\n    3\n}\n";
+        let checked = "const fn lanes() -> u32 {\n    assert!(true);\n    3\n}\n";
+        let outside = Edit::Rebuild("an edit outside function bodies");
+        assert_eq!(classify(lanes, checked), outside);
     }
 
     #[test]

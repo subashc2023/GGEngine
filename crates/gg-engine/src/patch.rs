@@ -46,9 +46,9 @@ pub(crate) fn apply(table: JumpTable, ticks: u64) -> Result<()> {
         // that process as it trusts the user, since a made-up table could corrupt memory.
         // `gg run` asks only with a patch `dx tools hotpatch` built against this process's
         // executable and the `main` address the session file gives, from edits inside function
-        // bodies alone (but for items declared in them), so its code lays out each type as this
-        // process does. It applies on the main thread between ticks, the only caller of `HotFn`,
-        // so no call reads the jump table as it changes.
+        // bodies alone (but for items, and macros that may declare some, in them), so its code
+        // lays out each type as this process does. It applies on the main thread between ticks,
+        // the only caller of `HotFn`, so no call reads the jump table as it changes.
         unsafe { subsecond::apply_patch(table) }
     };
     // subsecond panics, after loading the library and before taking its table, on a library that

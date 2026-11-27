@@ -144,13 +144,15 @@ built only for its tests, rebuilds nothing. Then:
   between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
 - so is a function added, removed or re-signed, free or an inherent impl's: not a `const fn`,
   `main`, one of another ABI, one given an attribute that may add code (a macro's, `#[no_mangle]`)
-  or one declaring items;
+  or one declaring items, or holding a macro that may;
 - so is a changed `use` whose names only function bodies use, but for a `pub use` or a glob's;
 - so is an edit to a `const`'s value that only function bodies use, rustc copying it into them.
   Values the code already put in components keep the old one;
 - any other change rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
   `rebuild_failed`): any outside function bodies, as a new type, `const`, field or trait impl's
-  method; a change to a type, even one declared in a body; one to code run as the game started:
+  method; a change to a type, even one declared in a body; one to a macro in a body that may
+  declare items, any but those known not to, as `println!` and tracing's; one to code run as the
+  game started:
   `main`, a layer's `load` and `restored`, and the functions only they reach; an edit to a `const` a
   type, a static, a `const fn` or that code uses, or to a `use` of a name used outside function
   bodies or by that code; and any change after a failed rebuild;
