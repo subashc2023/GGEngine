@@ -51,6 +51,8 @@ pub(super) struct Linked {
     pub(super) along: Option<Vec<Placed>>,
     /// The game a remote Inspector shows from its next pass; `Some(None)` leaves it.
     pub(super) reach: Option<Option<gg_api::Session>>,
+    /// Why it shows no game, as it leaves it, if the caller said ([`InspectorLink::unreachable`]).
+    pub(super) why: Option<String>,
     /// The entity the panels asked to frame since a layer last took it.
     pub(super) frame: Option<EntityId>,
     /// Whether a layer has taken the panels' frames, so they offer to frame.
@@ -185,7 +187,15 @@ impl InspectorLink {
     /// Its pick and open rows stay, since entity IDs outlive a game's restarts; what it knew of the
     /// game goes. Another Inspector ignores it.
     pub fn reach(&self, session: Option<gg_api::Session>) {
-        self.0.borrow_mut().reach = Some(session);
+        let mut linked = self.0.borrow_mut();
+        (linked.reach, linked.why) = (Some(session), None);
+    }
+
+    /// Like [`reach`](Self::reach) with no game, the panels saying `why` where its world would
+    /// show, such as that no project is open, rather than that they wait for a game.
+    pub fn unreachable(&self, why: &str) {
+        let mut linked = self.0.borrow_mut();
+        (linked.reach, linked.why) = (Some(None), Some(why.to_owned()));
     }
 
     /// Ends the link's gesture, as the end of a drag does: the next set begins another edit.

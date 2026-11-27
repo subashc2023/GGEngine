@@ -320,6 +320,9 @@ mod imp {
             let reach = inspector.link.borrow_mut().reach.take();
             if let Some(session) = reach {
                 self.reach(session);
+                if let Some(why) = inspector.link.borrow_mut().why.take() {
+                    self.state = Some(why);
+                }
             }
             if inspector.picked != self.wanted {
                 self.picked = None;
@@ -1433,6 +1436,21 @@ mod imp {
                 types: 0,
             };
             Ok(serde_json::to_string(&list).expect("a list serializes"))
+        }
+
+        /// Left without a game for a reason the caller gives, the panels say it, until a game is
+        /// reached or left without one.
+        #[test]
+        fn the_panels_say_why_no_game_shows_where_told() {
+            let mut inspector = Inspector::remote("test");
+            let mut remote = inspector.remote.take().expect("remote");
+            assert_eq!(remote.waiting(), Some(NOT_SERVING));
+            inspector.link().unreachable("No project is open");
+            remote.update(&mut inspector);
+            assert_eq!(remote.waiting(), Some("No project is open"));
+            inspector.link().reach(None);
+            remote.update(&mut inspector);
+            assert_eq!(remote.waiting(), Some(NOT_SERVING));
         }
 
         /// A list read in pages is whole once it has the page's count; an entity on two pages (one

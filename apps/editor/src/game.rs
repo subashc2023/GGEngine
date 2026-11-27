@@ -198,6 +198,10 @@ pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>, release: boo
 /// The client the editor is to the game, the author of its edits.
 const CLIENT: &str = "editor";
 
+/// What the Entities and Inspector panels say while no project is open, in place of waiting for
+/// its game.
+const NO_PROJECT: &str = "No project is open: the hub opens one";
+
 /// The editor's layer: the project's `gg run`, its connection to the game, and everything the
 /// panels, title bar and File menu show of both.
 struct Game {
@@ -416,11 +420,10 @@ impl Layer for Game {
                 self.hub.save(cx);
                 self.start();
             }
-            None => {
-                if let Some(latest) = self.hub.skip_to() {
-                    self.switch(cx, latest);
-                }
-            }
+            None => match self.hub.skip_to() {
+                Some(latest) => self.switch(cx, latest),
+                None => self.view.link.unreachable(NO_PROJECT),
+            },
         }
     }
 
