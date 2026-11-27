@@ -13,10 +13,10 @@ use syn::{
 #[derive(Debug, PartialEq)]
 pub(crate) enum Edit {
     /// Inside what a patch carries: function bodies, constants' values, `use`s, and functions
-    /// added, removed or re-signed. `attach` if among them is a `Layer` impl's `attach`, which
-    /// builds the world only as a run starts afresh, not in one that keeps it. `consts` names the
-    /// constants whose values differ, sorted: a patch carries them only where [`uses`] says.
-    Bodies { attach: bool, consts: Vec<String> },
+    /// added, removed or re-signed. `consts` names the constants whose values differ, sorted: a
+    /// patch carries them only where [`uses`] says. Code only startup or `attach` reaches is
+    /// [`reach`](crate::reach)'s to judge.
+    Bodies { consts: Vec<String> },
     /// Only items under `#[cfg(test)]` differ, which the game's binary doesn't hold: nothing to
     /// patch.
     Same,
@@ -35,9 +35,8 @@ pub(crate) enum Edit {
 /// leaving out items under `#[cfg(test)]`.
 ///
 /// An edit inside code that runs as the game starts (`main`, a `Layer`'s `load` and `restored`)
-/// needs a rebuild: a patch would come after they ran. So does an edit to code only they call,
-/// which gg can't tell. An edit inside `attach` is patched and told of: no patch builds the world
-/// again.
+/// needs a rebuild: a patch would come after they ran. [`reach`](crate::reach) finds code only
+/// they reach, across modules, and code only `attach` reaches.
 ///
 /// A patch carries a changed `use` where function bodies alone use the names it brings in, matched
 /// as words, as [`uses`] matches constants. A `pub use` or a glob's could change names gg can't
@@ -71,12 +70,10 @@ pub(crate) fn classify(old: &str, new: &str) -> Edit {
     if bare(old.clone(), Keep::Startup).file != bare(new.clone(), Keep::Startup).file {
         return Edit::Rebuild(STARTS);
     }
-    let mut attach = bare(old, Keep::Attach).file != bare(new.clone(), Keep::Attach).file;
-    if !names.is_empty() {
-        match named(new, names) {
-            Ok(in_attach) => attach |= in_attach,
-            Err(why) => return Edit::Rebuild(why),
-        }
+    if !names.is_empty()
+        && let Err(why) = named(new, names)
+    {
+        return Edit::Rebuild(why);
     }
     // The trees match, so their constants come in the same order.
     let values = old_bare.values.into_iter().zip(new_bare.values);
@@ -86,7 +83,7 @@ pub(crate) fn classify(old: &str, new: &str) -> Edit {
         .collect();
     consts.sort();
     consts.dedup();
-    Edit::Bodies { attach, consts }
+    Edit::Bodies { consts }
 }
 
 /// The names `use`s bring in that differ from `old` to `new`, each with index 0 as [`Find`] takes
@@ -116,9 +113,9 @@ fn renamed(old: &[Binding], new: &[Binding]) -> Result<BTreeMap<String, usize>, 
     Ok(names)
 }
 
-/// Whether code a patch doesn't carry uses any of `names`, which changed `use`s bring in: `Ok`
-/// with whether a `Layer` impl's `attach` does, or why a patch can't carry the change.
-fn named(mut file: File, names: BTreeMap<String, usize>) -> Result<bool, &'static str> {
+/// Whether code a patch doesn't carry uses any of `names`, which changed `use`s bring in: why a
+/// patch can't carry the change, if so.
+fn named(mut file: File, names: BTreeMap<String, usize>) -> Result<(), &'static str> {
     untested(&mut file);
     Free(Vec::new()).visit_file_mut(&mut file);
     let mut find = Find {
@@ -127,13 +124,12 @@ fn named(mut file: File, names: BTreeMap<String, usize>) -> Result<bool, &'stati
         place: Place::Item,
         types: 0,
         layer: false,
-        attach: Vec::new(),
         found: None,
     };
     find.visit_file_mut(&mut file);
     match find.found {
         Some((_, why)) => Err(why),
-        None => Ok(!find.attach.is_empty()),
+        None => Ok(()),
     }
 }
 
@@ -199,7 +195,6 @@ pub(crate) fn uses(texts: &[&str], edited: &[String]) -> Uses {
         place: Place::Item,
         types: 0,
         layer: false,
-        attach: Vec::new(),
         found: None,
     };
     for file in &mut files {
@@ -207,20 +202,15 @@ pub(crate) fn uses(texts: &[&str], edited: &[String]) -> Uses {
     }
     match find.found {
         Some((at, why)) => Uses::Rebuild(at, why),
-        None => {
-            find.attach.sort_unstable();
-            find.attach.dedup();
-            Uses::Bodies(find.attach)
-        }
+        None => Uses::Bodies,
     }
 }
 
 /// Where edited constants are used, as [`uses`] tells.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Uses {
-    /// In function bodies alone, which a patch carries: the edited constants, by index, that a
-    /// `Layer` impl's `attach` uses.
-    Bodies(Vec<usize>),
+    /// In function bodies alone, which a patch carries.
+    Bodies,
     /// Where a patch can't carry the edited constant, by index, for the reason.
     Rebuild(usize, &'static str),
 }
@@ -254,7 +244,7 @@ impl VisitMut for Links {
 }
 
 /// The words in `expr`: its identifiers and its macros' tokens'.
-fn words(expr: &mut Expr) -> Vec<String> {
+pub(crate) fn words(expr: &mut Expr) -> Vec<String> {
     struct Words(Vec<String>);
     impl VisitMut for Words {
         fn visit_ident_mut(&mut self, ident: &mut Ident) {
@@ -271,7 +261,7 @@ fn words(expr: &mut Expr) -> Vec<String> {
 }
 
 /// The words in a macro's or an attribute's tokens, inside their literals too.
-fn tokens(tokens: &impl ToString) -> Vec<String> {
+pub(crate) fn tokens(tokens: &impl ToString) -> Vec<String> {
     let text = tokens.to_string();
     let words = text.split(|c: char| !(c.is_alphanumeric() || c == '_'));
     words
@@ -291,8 +281,6 @@ enum Place {
     Body,
     /// `main`'s body, or a `Layer` impl's `load` or `restored`.
     Startup,
-    /// A `Layer` impl's `attach`.
-    Attach,
 }
 
 /// What [`Find`] looks for the uses of.
@@ -304,7 +292,7 @@ enum Kind {
     Use,
 }
 
-/// Finds the first use of a name a patch can't carry, and the uses in `attach`.
+/// Finds the first use of a name a patch can't carry.
 struct Find {
     /// Each name sought, with the index of the edited constant it reaches.
     names: BTreeMap<String, usize>,
@@ -314,7 +302,6 @@ struct Find {
     types: u32,
     /// Whether the impl being visited is one of `Layer`.
     layer: bool,
-    attach: Vec<usize>,
     found: Option<(usize, &'static str)>,
 }
 
@@ -329,10 +316,6 @@ impl Find {
             (Kind::Const, Place::Startup) => AT_START,
             (Kind::Use, Place::Item | Place::Value) => USED_OUTSIDE,
             (Kind::Use, Place::Startup) => USED_AT_START,
-            (_, Place::Attach) => {
-                self.attach.push(at);
-                return;
-            }
             (_, Place::Value | Place::Body) => return,
         };
         self.found.get_or_insert((at, why));
@@ -400,7 +383,6 @@ impl VisitMut for Find {
         let place = match () {
             _ if item.sig.constness.is_some() => Place::Item,
             _ if self.layer && (name == "load" || name == "restored") => Place::Startup,
-            _ if self.layer && name == "attach" => Place::Attach,
             _ => Place::Body,
         };
         self.within(place, |find| find.visit_block_mut(&mut item.block));
@@ -450,11 +432,13 @@ impl VisitMut for Find {
 
 /// Whether `item` is an impl of `Layer`.
 fn layer(item: &ItemImpl) -> bool {
-    item.trait_.as_ref().is_some_and(|(path, _)| {
-        path.segments
-            .last()
-            .is_some_and(|last| last.ident == "Layer")
-    })
+    trait_name(item).is_some_and(|name| name == "Layer")
+}
+
+/// The last name of the trait `item` implements, if it implements one.
+pub(crate) fn trait_name(item: &ItemImpl) -> Option<&Ident> {
+    let (path, _) = item.trait_.as_ref()?;
+    path.segments.last().map(|last| &last.ident)
 }
 
 /// The bodies [`bare`] keeps, beside those of `const fn`s.
@@ -463,8 +447,6 @@ enum Keep {
     None,
     /// `main`, and a `Layer` impl's `load` and `restored`.
     Startup,
-    /// A `Layer` impl's `attach`.
-    Attach,
 }
 
 /// `file` without doc comments (`#[doc]` attributes), `#[cfg(test)]` items, `use`s, the functions
@@ -498,16 +480,17 @@ struct Bared {
 
 /// A name a `use` brings in.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Binding {
+pub(crate) struct Binding {
     /// Whether it's more than private, so other modules may import through it.
     public: bool,
     /// `None` for a glob's; `_` for a trait's brought in for its methods alone.
-    name: Option<String>,
-    path: String,
+    pub(crate) name: Option<String>,
+    /// What it names, as `std::time::Duration`; a glob's ends in `::`.
+    pub(crate) path: String,
 }
 
 /// Collects into `into` what `item` brings in.
-fn bindings(item: &ItemUse, into: &mut Vec<Binding>) {
+pub(crate) fn bindings(item: &ItemUse, into: &mut Vec<Binding>) {
     fn walk(tree: &UseTree, path: String, public: bool, into: &mut Vec<Binding>) {
         let mut bind = |name: Option<String>, path: String| {
             into.push(Binding { public, name, path });
@@ -616,7 +599,7 @@ fn free(attrs: &[Attribute], sig: &Signature, block: &mut Block) -> bool {
 }
 
 /// Whether `attrs` only document, configure, hint or lint.
-fn plain(attrs: &[Attribute]) -> bool {
+pub(crate) fn plain(attrs: &[Attribute]) -> bool {
     const PLAIN: [&str; 12] = [
         "allow",
         "cfg",
@@ -714,12 +697,8 @@ impl VisitMut for Bare {
 
     fn visit_impl_item_fn_mut(&mut self, item: &mut ImplItemFn) {
         let name = &item.sig.ident;
-        let kept = self.layer
-            && match self.keep {
-                Keep::None => false,
-                Keep::Startup => name == "load" || name == "restored",
-                Keep::Attach => name == "attach",
-            };
+        let kept =
+            self.layer && self.keep == Keep::Startup && (name == "load" || name == "restored");
         if item.sig.constness.is_none() && !kept {
             keep_items(&mut item.block);
         }
@@ -738,7 +717,7 @@ impl VisitMut for Bare {
 
 /// Takes the items under `#[cfg(test)]` out of `file`, however deep in modules and impls (not in
 /// function bodies, which [`Items`] sees to).
-fn untested(file: &mut File) {
+pub(crate) fn untested(file: &mut File) {
     Untested.visit_file_mut(file);
 }
 
@@ -931,11 +910,8 @@ fn main() {
     }
 
     /// An edit inside function bodies, but for constants.
-    fn bodies(attach: bool) -> Edit {
-        Edit::Bodies {
-            attach,
-            consts: Vec::new(),
-        }
+    fn bodies() -> Edit {
+        Edit::Bodies { consts: Vec::new() }
     }
 
     /// Constants: free, an impl's, a trait's default, one declared in a body, and one an array's
@@ -974,17 +950,13 @@ fn steer() -> f32 {
             assert_eq!(CONSTS.matches(from).count(), 1, "{from}");
             let edit = classify(CONSTS, &CONSTS.replace(from, to));
             let consts = consts.iter().map(|name| name.to_string()).collect();
-            let named = Edit::Bodies {
-                attach: false,
-                consts,
-            };
+            let named = Edit::Bodies { consts };
             assert_eq!(edit, named, "{from} -> {to}");
         }
         // Two at once, beside an edit inside a function body, sorted.
         let both = CONSTS.replace("2.0", "1.0").replace("0.1", "0.3");
         let both = both.replace("DRAG * SPEED", "DRAG * SPEED * 2.0");
         let named = Edit::Bodies {
-            attach: false,
             consts: vec!["DRAG".into(), "SPEED".into()],
         };
         assert_eq!(classify(CONSTS, &both), named);
@@ -1007,7 +979,6 @@ fn steer() -> f32 {
         let main = "fn main() {\n    const TITLE: &str = \"Ships\";\n    run(TITLE);\n}\n";
         let edit = classify(main, &main.replace("Ships", "Boats"));
         let titled = Edit::Bodies {
-            attach: false,
             consts: vec!["TITLE".into()],
         };
         assert_eq!(edit, titled);
@@ -1036,17 +1007,13 @@ fn steer() -> f32 {
              struct Lanes([f32; SPEED as usize]);\n}\n",
         ];
         for module in patchable {
-            assert_eq!(
-                uses(&[USED, module], &speed),
-                Uses::Bodies(Vec::new()),
-                "{module}"
-            );
+            assert_eq!(uses(&[USED, module], &speed), Uses::Bodies, "{module}");
         }
-        // A layer's `attach`, told of by the edited constant's index.
+        // A layer's `attach`, which [`reach`](crate::reach) tells of.
         let attach = "impl Layer for Game {\n    fn attach(&mut self) {\n        spawn(HALF);\n    \
                       }\n}\n";
         let both = ["LANES".to_string(), "SPEED".to_string()];
-        assert_eq!(uses(&[USED, attach], &both), Uses::Bodies(vec![1]));
+        assert_eq!(uses(&[USED, attach], &both), Uses::Bodies);
         for (module, why) in [
             // In a type, outside function bodies or in one.
             (
@@ -1125,20 +1092,20 @@ fn steer() -> f32 {
             ),
         ] {
             let edit = classify(MODULE, &edited(from, to));
-            assert_eq!(edit, bodies(false), "{from} -> {to}");
+            assert_eq!(edit, bodies(), "{from} -> {to}");
         }
     }
 
-    /// An edit inside a `Layer`'s `attach` is patched and told of, beside other edits too. One to
-    /// another impl's method of that name isn't told of.
+    /// An edit inside a `Layer`'s `attach` is patched, beside other edits too, as is one to another
+    /// impl's method of that name. [`reach`](crate::reach) tells of the first.
     #[test]
-    fn edits_inside_a_layers_attach_are_patched_and_told_of() {
+    fn edits_inside_a_layers_attach_are_patched() {
         let attached = edited("Ship { x: 0.0 }", "Ship { x: 5.0 }");
-        assert_eq!(classify(MODULE, &attached), bodies(true));
+        assert_eq!(classify(MODULE, &attached), bodies());
         let beside = attached.replace("self.x += 1.0;", "self.x += 2.0;");
-        assert_eq!(classify(MODULE, &beside), bodies(true));
+        assert_eq!(classify(MODULE, &beside), bodies());
         let other = classify(MODULE, &edited("self.x = 1.0;", "self.x = 4.0;"));
-        assert_eq!(other, bodies(false));
+        assert_eq!(other, bodies());
     }
 
     /// Items under `#[cfg(test)]`, a module of tests and a declaration of one apart aren't in the
@@ -1203,7 +1170,7 @@ impl Ship {{
         // Beside an edit inside a function body, it's that edit alone.
         let beside = tested.replace("assert_eq!(1, 1);", "assert_eq!(3, 3);");
         let beside = beside.replace("self.x += 1.0;", "self.x += 2.0;");
-        assert_eq!(classify(&tested, &beside), bodies(false));
+        assert_eq!(classify(&tested, &beside), bodies());
         // Not under `#[cfg(test)]`, a module of that name is the game's.
         let plain = MODULE.replace(
             "fn main()",
@@ -1281,7 +1248,7 @@ impl Ship {{
             ),
         ] {
             let edit = classify(MODULE, &edited(from, to));
-            assert_eq!(edit, bodies(false), "{from} -> {to}");
+            assert_eq!(edit, bodies(), "{from} -> {to}");
         }
         // A function added with the `use` its signature needs.
         let since = edited(
@@ -1289,7 +1256,7 @@ impl Ship {{
             "use std::time::{Duration, Instant};\n\nfn since(at: Instant) -> Duration {\n    \
              at.elapsed()\n}",
         );
-        assert_eq!(classify(MODULE, &since), bodies(false));
+        assert_eq!(classify(MODULE, &since), bodies());
     }
 
     #[test]
@@ -1328,14 +1295,13 @@ impl Ship {{
         let twice = "use gg::Wait;\n\nstruct Ship(Wait);\n\nfn wait() {\n    use gg::Wait;\n}\n";
         let once = twice.replacen("use gg::Wait;\n", "", 1);
         assert_eq!(classify(twice, &once), Edit::Rebuild(USED_OUTSIDE));
-        // Function bodies alone, types in them and functions' signatures among them; `attach`, told
-        // of.
+        // Function bodies alone, types in them and functions' signatures among them; `attach` too.
         let aim =
             "use gg::Vec2;\n\nfn aim() -> Vec2 {\n    let at: Vec2 = Vec2::ZERO;\n    at\n}\n";
-        assert_eq!(changed(aim), bodies(false));
+        assert_eq!(changed(aim), bodies());
         let attach = "use gg::spawn;\n\nimpl Layer for Game {\n    fn attach(&mut self) {\n        spawn();\n    \
              }\n}\n";
-        assert_eq!(changed(attach), bodies(true));
+        assert_eq!(changed(attach), bodies());
     }
 
     #[test]

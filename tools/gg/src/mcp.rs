@@ -227,8 +227,9 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "rebuild",
         description: "Call after an edit `wait` says was patched in, but that the game won't run \
-                      again: in a function only `main` or a layer's `load` or `restored` calls, or \
-                      one reached through the game's own trait objects or function pointers. Has \
+                      again, as in a function reached only through the game's own trait objects \
+                      or function pointers (`gg run` rebuilds by itself for code only `main` or a \
+                      layer's `load` or `restored` reaches). Has \
                       `gg run` rebuild the game with every edit saved, once no patch or build is \
                       under way, and start it again from a snapshot, as an edit no patch carries \
                       does. Then waits until the game runs the new build, and answers as `wait` \

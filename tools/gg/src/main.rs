@@ -14,6 +14,7 @@ mod mcp;
 mod new;
 mod patch;
 mod probe;
+mod reach;
 mod run;
 mod runs;
 mod settings;
@@ -145,21 +146,25 @@ with, and the workspace's manifest and lock file (`watching`). Then:
   Values the code already put in components keep the old one;
 - any other change rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
   `rebuild_failed`): any outside function bodies, as a new type, `const`, field or trait impl's
-  method; a change to a type, even one declared in a body; one to code run as the game started
-  (`main`, a layer's `load` and `restored`); an edit to a `const` a type, a static, a `const fn` or
-  that code uses, or to a `use` of a name used outside function bodies or by that code; and any
-  change after a failed rebuild;
-- an edit inside a layer's `attach`, or to a `const` or `use` it uses, patches (`patched` names the
-  edited module in `attach`), the game warning `gg.attach_changed`. Restarts keep the world, so it
-  shows once `gg rebuild --fresh` starts the game afresh.
+  method; a change to a type, even one declared in a body; one to code run as the game started:
+  `main`, a layer's `load` and `restored`, and the functions only they reach; an edit to a `const` a
+  type, a static, a `const fn` or that code uses, or to a `use` of a name used outside function
+  bodies or by that code; and any change after a failed rebuild;
+- an edit to a layer's `attach`, or to a function only it reaches, or to a `const` or `use` they
+  use, patches. The game warns `gg.attach_changed` once for each, against the build that built the
+  world, after a rebuild too; `patched` names their modules in `attach`. Restarts keep the world, so
+  it shows once `gg rebuild --fresh` starts the game afresh.
   `gg scene open <SCENE> --discard` reloads the open scene's entities from its file, a fresh world
   without a new run; entities the game's code made stay.
+`run` follows calls by name across PACKAGE's modules, as a function taken as a value counts:
+`Game::new` and `Self::new` name the method, `x.fire()` any method `fire`. A trait impl's method,
+but for a layer's, and a function nothing names count as run as the game runs, where patches reach.
 A game waiting for a rebuild gets one at any change; a restarted one gets the edits since its build
 patched in at once. `gg rebuild` asks for a rebuild, as for an edit patched in to code the game
-won't run again, such as a function only `load` calls. A patch never answered (`patch_unanswered`)
-is sent again with every edit since the build. The game logs failures as warnings too:
-`gg.patch_failed`, `gg.rebuild_failed`. Once the sources match the running build again after a
-failed rebuild, `recovered` says so, and the failure leaves the run's state.
+reaches only through its own trait objects or function pointers. A patch never answered
+(`patch_unanswered`) is sent again with every edit since the build. The game logs failures as
+warnings too: `gg.patch_failed`, `gg.rebuild_failed`. Once the sources match the running build again
+after a failed rebuild, `recovered` says so, and the failure leaves the run's state.
 
 Without dx, or where patches can't reach (as with `--release`), with restarts on and no
 `--no-patch`, gg builds with cargo and watches all the same (`watching`, `patches` false): every
@@ -293,12 +298,12 @@ apply, a script's error. Fails with:
                 usage: "rebuild [--fresh] [--timeout <SECONDS>]",
                 summary: "Rebuild the game under `gg run` and start it again from a snapshot",
                 details: "\
-For an edit patched in that the game won't run again: in a function only `main`, a layer's `load` or
-`restored` calls, or one the game reaches through its own trait objects or function pointers.
-`run` takes the request at once. Once no patch or build is under way, it rebuilds with every edit
-saved (`rebuilding`, why `` `gg rebuild` asked ``) and restarts the game, as an edit no patch
-carries does. Then `rebuild` waits at most `--timeout` (300 s) for the game to run the new build,
-and prints what `gg wait` does.
+For an edit patched in that the game won't run again, as in a function it reaches only through its
+own trait objects or function pointers. `run` rebuilds by itself for code only `main`, a layer's
+`load` or `restored` reach. `run` takes the request at once. Once no patch or build is under way,
+it rebuilds with every edit saved (`rebuilding`, why `` `gg rebuild` asked ``) and restarts the
+game, as an edit no patch carries does. Then `rebuild` waits at most `--timeout` (300 s) for the
+game to run the new build, and prints what `gg wait` does.
 
 `--fresh` starts the game afresh instead, its layers' `attach` building the world again: for an
 edit in `attach` (`gg.attach_changed`). The world's state, and the edits made to it, are lost.

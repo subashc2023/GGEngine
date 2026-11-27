@@ -635,7 +635,8 @@ impl Supervisor<'_> {
     /// Starts each peer from its snapshot in `froms`, or afresh. Copies the executable if it may
     /// have been rebuilt (without patches, always).
     fn start(&mut self, froms: Vec<Option<Snapshotted>>) -> Result<Vec<Game>, Failure> {
-        let built = self.patches.as_mut().is_none_or(Patches::starting);
+        let afresh = froms.iter().all(Option::is_none);
+        let built = (self.patches.as_mut()).is_none_or(|patches| patches.starting(afresh));
         let froms = froms.into_iter().enumerate();
         froms
             .map(|(peer, from)| self.start_peer(peer, from, built))
