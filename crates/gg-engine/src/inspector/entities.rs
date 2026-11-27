@@ -664,10 +664,17 @@ fn locate(row: usize, spans: &[(usize, usize)]) -> Place {
 }
 
 /// What `id`'s row says: its name alone, leaving the ID and components to the Inspector; with no
-/// name or an empty one, "Entity", faintly.
+/// name or an empty one, "Entity", faintly. Line breaks show as spaces, as `show_rows` takes each
+/// row for a line.
 pub(super) fn row_label(world: &dyn Inspected, id: EntityId) -> egui::WidgetText {
     match world.name(id).filter(|name| !name.trim().is_empty()) {
+        Some(name) if name.contains(['\n', '\r']) => one_line(&name).into(),
         Some(name) => name.into(),
         None => egui::RichText::new("Entity").weak().into(),
     }
+}
+
+/// `text` on one line: each line break, `\r\n` too, a space.
+fn one_line(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\n', '\r'], " ")
 }

@@ -410,6 +410,23 @@ fn row_text(world: &World, entity: Entity) -> String {
     row_label(world, id(world, entity)).text().to_owned()
 }
 
+/// A name with line breaks shows on one line in its row, as the rows' heights take each for one;
+/// its `Name` keeps them.
+#[test]
+fn a_row_shows_a_name_with_line_breaks_on_one_line() {
+    let mut world = World::default();
+    let names = [
+        ("two\nlines", "two lines"),
+        ("a\r\nb\rc", "a b c"),
+        ("one", "one"),
+    ];
+    for (name, shown) in names {
+        let entity = world.spawn(called(name));
+        assert_eq!(row_text(&world, entity), shown);
+        assert_eq!(world.name(entity), Some(name));
+    }
+}
+
 /// Names in a field and in an option: a one-field tuple struct shows alone and sets at its path
 /// or whole. An enum variant's field keeps its label.
 #[derive(Clone, Component)]

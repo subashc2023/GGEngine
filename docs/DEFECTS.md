@@ -272,7 +272,6 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 |---|---|---|
 | An entity flipped by its own negative scale shows its handles by its rotation alone, so a flipped sprite's X arrow points away from its +X | Turn the handles by the signs of its own scale too | A game flips sprites by scale, and the handles confuse |
 | Under a parent scaled unevenly, a turned entity's handles show the nearest square axes, so drags follow the cursor only roughly | Elliptical rings, and Scale along the drawn axis | Someone edits under such a parent |
-| An Entities row whose name has a line break is that many lines tall, but `show_rows` skips rows as one line each | Show line breaks as spaces | More entities than the panel shows, or names from players |
 | The Inspector sets a rotation, or a vector in an option or variant, whole as last read: turning one angle of a spinner holds the others, and an undo takes back the spin too | Set only the part that changed | Someone edits a moving rotation |
 | Undo, redo and revert show the old value until the tick, or in the editor until the game answers and is read again (~50 ms); refusals and the Edit menu's names come then too. A set draws ahead | Draw undo, redo and revert ahead as a set is | It shows |
 | The editor learns another client played, stopped or paused from a `status` polled every quarter second: the title bar lags, and input sent to a just-stopped game applies at the next Play | Carry the run's state in each shared frame | Agents play and stop games the user plays in the editor |
