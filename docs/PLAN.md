@@ -255,7 +255,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Handles: snap steps of one's own, drag readouts, trackball turns, picking through overlaps | Someone misses one |
 | Dock: splits and tab drags in torn-off windows, minimum widths, top panels hidden, Alt keys, macOS's menu bar, Wayland, deferred viewports | A tool needs it |
 | Inspector: list elements, drag speeds, picked entity fields, multi-edit, component search, script hints; Entities' icons and instance marks | Edits need it |
-| Scenes from the editor: opened from Assets, renamed, deleted; Play's edits kept; Play and Stop recorded or in lockstep | Someone works on scenes there |
+| Scenes from the editor: opened from Assets, renamed, deleted; Play and Stop recorded or in lockstep | Someone works on scenes there |
 | More drops from Assets: textures onto space or rows, fonts as text, from a torn-off panel | Someone lays out 2D so |
 | The embedded game: its view shared without CPU copies (0.35 ms each way at 1080p), Logs filtered, `logs` saying what dropped | Past 1080p, or busy logs |
 | The hub making a project from another template than `gg new`'s | A second kind of game to start from |

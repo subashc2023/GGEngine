@@ -73,15 +73,17 @@
 //!
 //!   `stop` freezes the world as edited (frames run no ticks; only edits, scene files' saves and
 //!   `scene`'s `open` and `new` change it) until `play`, which plays a copy in its place, from its
-//!   ticks. Stopping the copy restores the world as edited at its ticks, with its scene files as
-//!   last applied (a save since applies) and the authors' edits, which `undo` steps back through
-//!   again. The copy's edits and entities go and the IDs it drew are drawn again: no ID learned
-//!   while it played holds across a `stop`.
+//!   ticks. Authors' edits and scene files' saves while the copy plays apply to both worlds, the
+//!   copy's IDs with them; its ticks change the copy alone. Stopping the copy restores the world as
+//!   edited at its ticks, with those edits, its scene files as last applied, and the authors' logs,
+//!   which `undo` steps back through again. What the copy's ticks made goes and the IDs they drew
+//!   are drawn again. The world as edited refuses edits of what those ticks made, and takes no edit
+//!   once they change scene; the game warns `play.not_kept` for each.
 //!
-//!   A game playing from its start, which no `play` started, has no world as edited: `stop` stops
-//!   it where it is, and that world is the world as edited from then on. Its ticks change the world
-//!   `unsaved` compares, so `unsaved` is true once physics moves a body; [`Status::edited`] is
-//!   never set by ticks.
+//!   A project's game that can stop starts playing a copy of the world its layers attached. Any
+//!   other plays from its start, with no world as edited: `stop` stops it where it is, and that
+//!   world is the world as edited from then on. Its ticks change the world `unsaved` compares, so
+//!   `unsaved` is true once physics moves a body; [`Status::edited`] is never set by ticks.
 //!
 //!   `stop` fails waiting `step`s with `api.stopped`, and itself with `api.no_stop` in a recorded
 //!   run or a lockstep peer, which play from start to end.
@@ -101,7 +103,8 @@
 //!   to its cell as the scene's does.
 //!
 //!   Each acts on the world as edited: `save` writes it while a copy plays; `open` and `new` stop
-//!   the copy first, and can't be undone: every author's edits start afresh, as after a restore.
+//!   the copy first and play a copy of what they leave, and can't be undone: every author's edits
+//!   start afresh, as after a restore.
 //!
 //!   `path` is absolute or from the asset root ([`Status::scene`]), in a project scene folder,
 //!   ending `.ron`. Fails with:
@@ -254,10 +257,10 @@
 //!   entity's ID is the one the instance rooted at the entity mixes to the entity's ID, so linking,
 //!   which `undo` unlinks, changes no entity's ID nor anything a scene saves but the link. The
 //!   prefab root's `Transform` is the identity, the instance's own being the entity's. `undo`
-//!   leaves the file. Fails, writing nothing, with:
+//!   leaves the file. While a copy plays, it saves the entities as the world as edited has them,
+//!   where it has the entity, and the link passes through to it. Fails, writing nothing, with:
 //!   - `engine.no_root`: no asset root;
-//!   - `api.no_scene`: a game run from its package or networked, as `scene`'s `save` does, and
-//!     while a copy of the world as edited plays (`stop` takes its entities away);
+//!   - `api.no_scene`: a game run from its package or networked, as `scene`'s `save` does;
 //!   - `ecs.no_entity`: an ID or name no living entity has; `ecs.ambiguous_name`: a name several
 //!     have;
 //!   - `ecs.prefab_entity`: an entity an instance's prefab gives; `scene.prefab_variant`: an
@@ -652,15 +655,15 @@ pub struct Status {
     pub scene: Option<String>,
     /// Whether the open scene, in the world as edited, differs from its file as `save` would write
     /// it, or, untitled, holds entities. False from an engine older than `scene`. For a game
-    /// playing from its start, see `stop`.
+    /// playing from its start, without a copy, see `stop`.
     #[serde(default)]
     pub unsaved: bool,
     /// Whether an author's edit (`apply`, `append`, `amend`, `undo` or `redo`, from a client or the
     /// Inspector) has applied to the world as edited since the open scene was last saved, opened or
     /// made new, or its own file's save applied. Ticks, scripts' reloads and other scene files'
-    /// saves don't set it. A playing copy's edit goes with the copy at `stop`; a snapshot keeps it,
-    /// as across `gg run`'s restarts. An undo back to the saved state leaves it true. False from an
-    /// engine older than it.
+    /// saves don't set it. A playing copy's edit passes through to the world as edited, setting it
+    /// there; a snapshot keeps it, as across `gg run`'s restarts. An undo back to the saved state
+    /// leaves it true. False from an engine older than it.
     #[serde(default)]
     pub edited: bool,
     /// In a world of cells (`Cells` cuts it into scene files that come in around its viewers and go

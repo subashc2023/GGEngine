@@ -12,6 +12,8 @@ mod reload;
 mod run;
 mod sound;
 mod stack;
+#[cfg(feature = "dev")]
+mod through;
 mod window;
 mod world;
 
@@ -691,6 +693,9 @@ pub(crate) struct Edited {
     pub(crate) cached: Vec<SceneFile>,
     pub(crate) open: scene_files::Open,
     pub(crate) authors: Authors,
+    /// Whether the copy is of the world the layers' `attach` built, played as the run started:
+    /// its first tick applies what they queued there, which a snapshot before it would miss.
+    pub(crate) attached: bool,
 }
 
 #[cfg(test)]

@@ -287,8 +287,8 @@ fn scene_applied_names_the_first_entities_left_out_and_counts_the_rest() {
     assert!(!told.contains("0000000000000006"), "{told}");
 }
 
-/// A scene file saved while a copy plays applies to the copy, and after `stop` to the world as
-/// edited too (which holds the file as last applied there), as the file's own edit.
+/// A scene file saved while a copy plays applies to the copy and to the world as edited, each as
+/// the file's own edit; the next look after `stop` applies nothing more.
 #[test]
 fn a_scene_file_saved_while_a_copy_plays_applies_to_both_worlds() {
     let dir = Scratch::new("scene-files-play");
@@ -316,16 +316,221 @@ fn a_scene_file_saved_while_a_copy_plays_applies_to_both_worlds() {
     let at = |cx: &Context| *cx.world().get::<Transform>(roots[0]).expect("one");
     assert_eq!(at(&cx), moved, "the copy");
     assert_eq!(stack.stop(&mut cx), Some(0));
-    assert_eq!(
-        at(&cx),
-        Transform::IDENTITY,
-        "the world as edited, as it was"
-    );
+    assert_eq!(at(&cx), moved, "the world as edited");
     look(&mut cx, &mut stack);
     assert_eq!(at(&cx), moved, "the world as edited");
     let logs = cx.authors.logs(cx.world());
-    let authors: Vec<&str> = logs.map(|(author, _)| author).collect();
-    assert_eq!(authors, ["scenes/level.ron"]);
+    let edits: Vec<(&str, usize)> = logs
+        .map(|(author, log)| (author, log.edits().len()))
+        .collect();
+    assert_eq!(edits, [("scenes/level.ron", 1)], "applied once");
+}
+
+/// While a copy plays, a client's edits pass through to the world as edited, as the copy's log
+/// applied them, so a create there takes the ID the copy drew, and a save writes them but not
+/// what the copy's ticks did. An undo or redo passes where both logs would step the same edit:
+/// one the world as edited refused, of an entity the copy alone has, isn't undone there.
+#[test]
+fn a_clients_edits_while_a_copy_plays_pass_through_to_the_world_as_edited() {
+    let dir = Scratch::new("scene-files-through");
+    let (_, ids) = project(&dir.0, 1);
+    let id = ids[0];
+    let mut cx = started(&dir.0);
+    let mut stack = Stack::default();
+    look_now(&mut cx, &mut stack);
+    stack.play(&mut cx, 0);
+    fn edited(cx: &Context) -> &World {
+        &cx.dev.edited.as_ref().expect("a copy plays").world
+    }
+    apply(&mut cx, &mut stack, "gg", vec![set_x(id, 2.0)]);
+    assert_eq!((x(cx.world(), id), x(edited(&cx), id)), (2.0, 2.0));
+    // As the copy's ticks might.
+    let ticks = |operations| Edit::Apply {
+        author: "ticks".to_owned(),
+        operations,
+    };
+    cx.apply_edit(ticks(vec![set_x(id, 9.0)])).expect("set");
+    assert_eq!(x(edited(&cx), id), 2.0, "the copy's alone");
+    let made = apply(&mut cx, &mut stack, "gg", vec![create()]);
+    let [made] = made[..] else {
+        panic!("one made: {made:?}");
+    };
+    assert!(edited(&cx).entity(made).is_some(), "under the copy's ID");
+    open_scene::save(&mut cx, None).expect("saved");
+    let text = fs::read_to_string(dir.0.join("scenes/main.ron")).expect("read");
+    let mut saved = World::seeded(3);
+    saved.register::<Transform>().expect("registered");
+    saved.load_scene(&text).expect("it loads");
+    assert_eq!(
+        x(&saved, id),
+        2.0,
+        "the world as edited, without the ticks'"
+    );
+    assert!(saved.entity(made).is_some(), "the scene owns what it made");
+    let undo = || Edit::Undo {
+        author: "gg".to_owned(),
+    };
+    let redo = || Edit::Redo {
+        author: "gg".to_owned(),
+    };
+    client(&mut cx, &mut stack, undo());
+    assert!(cx.world().entity(made).is_none() && edited(&cx).entity(made).is_none());
+    client(&mut cx, &mut stack, redo());
+    assert!(cx.world().entity(made).is_some() && edited(&cx).entity(made).is_some());
+    let theirs = EntityId::new(0xc0de).expect("not zero");
+    let create = Operation::Create {
+        entity: Some(theirs),
+        parent: None,
+        components: vec![("Transform".into(), Transform::IDENTITY.to_value())],
+    };
+    cx.apply_edit(ticks(vec![create])).expect("made");
+    apply(&mut cx, &mut stack, "gg", vec![set_x(theirs, 5.0)]);
+    assert!(edited(&cx).entity(theirs).is_none());
+    client(&mut cx, &mut stack, undo());
+    assert_eq!(x(cx.world(), theirs), 0.0, "undone in the copy");
+    assert!(
+        edited(&cx).entity(made).is_some(),
+        "another edit, not undone there"
+    );
+    client(&mut cx, &mut stack, undo());
+    assert!(cx.world().entity(made).is_none() && edited(&cx).entity(made).is_none());
+    assert_eq!(stack.stop(&mut cx), Some(0));
+    assert_eq!(x(cx.world(), id), 2.0);
+    assert!(cx.world().entity(made).is_none() && cx.world().entity(theirs).is_none());
+}
+
+/// The world as edited that `play` held aside.
+fn held(cx: &Context) -> &World {
+    &cx.dev.edited.as_ref().expect("a copy plays").world
+}
+
+/// A context of a project of one entity, its copy playing; and that entity's ID.
+fn playing(dir: &Scratch) -> (Context, Stack, EntityId) {
+    let (_, ids) = project(&dir.0, 1);
+    let mut cx = started(&dir.0);
+    let mut stack = Stack::default();
+    look_now(&mut cx, &mut stack);
+    stack.play(&mut cx, 0);
+    (cx, stack, ids[0])
+}
+
+/// Refuses `edit` in the copy, as `stack` offers it; returns the code.
+fn refused(cx: &mut Context, stack: &mut Stack, edit: Edit) -> String {
+    match stack.offer(cx, edit) {
+        Offered::Now(Err(error)) => error.code().to_owned(),
+        Offered::Now(Ok(done)) => panic!("refused, not {done:?}"),
+        Offered::Later(_) => panic!("applied now, outside a lockstep session"),
+    }
+}
+
+/// An edit the copy refuses, but an amend, ends its author's gesture in the world as edited too:
+/// the next amend starts an edit of its own in both, so an undo takes back the same in both.
+#[test]
+fn a_refused_edit_ends_a_gesture_in_both_worlds() {
+    let dir = Scratch::new("scene-files-through-gesture");
+    let (mut cx, mut stack, id) = playing(&dir);
+    let amend = |x| Edit::Amend {
+        author: "gg".to_owned(),
+        gesture: 1,
+        operations: vec![set_x(id, x)],
+    };
+    client(&mut cx, &mut stack, amend(1.0));
+    let gone = EntityId::new(0xdead).expect("not zero");
+    let set_gone = Edit::Apply {
+        author: "gg".to_owned(),
+        operations: vec![set_x(gone, 2.0)],
+    };
+    assert_eq!(refused(&mut cx, &mut stack, set_gone), "ecs.no_entity");
+    client(&mut cx, &mut stack, amend(3.0));
+    let undo = Edit::Undo {
+        author: "gg".to_owned(),
+    };
+    client(&mut cx, &mut stack, undo);
+    assert_eq!((x(cx.world(), id), x(held(&cx), id)), (1.0, 1.0));
+}
+
+/// An append the copy refuses rolls back and drops the edit it adds to; the world as edited undoes
+/// that edit.
+#[test]
+fn a_refused_append_drops_its_edit_in_both_worlds() {
+    let dir = Scratch::new("scene-files-through-append");
+    let (mut cx, mut stack, _) = playing(&dir);
+    let made = apply(&mut cx, &mut stack, "gg", vec![create()]);
+    let [made] = made[..] else {
+        panic!("one made: {made:?}");
+    };
+    let gone = EntityId::new(0xdead).expect("not zero");
+    let append = Edit::Append {
+        author: "gg".to_owned(),
+        operations: vec![set_x(gone, 2.0)],
+    };
+    assert_eq!(refused(&mut cx, &mut stack, append), "ecs.no_entity");
+    assert!(cx.world().entity(made).is_none(), "rolled back in the copy");
+    assert!(
+        held(&cx).entity(made).is_none(),
+        "undone in the world as edited"
+    );
+}
+
+/// Once the copy's ticks change scene, no edit passes through, nor an undo the copy refuses for the
+/// change (`ops.scene_changed`), which keeps its edit.
+#[test]
+fn a_copy_that_changed_scene_passes_no_edit_through() {
+    let dir = Scratch::new("scene-files-through-changed");
+    let (mut cx, mut stack, id) = playing(&dir);
+    apply(&mut cx, &mut stack, "gg", vec![set_x(id, 2.0)]);
+    // As the copy's ticks might, for their next level: here the same file again.
+    let text = fs::read_to_string(dir.0.join("scenes/main.ron")).expect("read");
+    let world = cx.world_mut();
+    world
+        .change_entities("scenes/main.ron", &text)
+        .expect("changed");
+    apply(&mut cx, &mut stack, "gg", vec![set_x(id, 5.0)]);
+    assert_eq!((x(cx.world(), id), x(held(&cx), id)), (5.0, 2.0));
+    let undo = || Edit::Undo {
+        author: "gg".to_owned(),
+    };
+    client(&mut cx, &mut stack, undo());
+    assert_eq!((x(cx.world(), id), x(held(&cx), id)), (0.0, 2.0));
+    let code = refused(&mut cx, &mut stack, undo());
+    assert_eq!(code, "ops.scene_changed");
+    assert_eq!(x(held(&cx), id), 2.0, "not undone there");
+}
+
+/// A prefab saved while a copy plays holds its entities as the world as edited has them, not as
+/// the copy's ticks left them, and its link passes through to that world.
+#[test]
+fn a_prefab_saved_while_a_copy_plays_holds_the_world_as_edited() {
+    let dir = Scratch::new("scene-files-through-prefab");
+    let (mut cx, mut stack, id) = playing(&dir);
+    let child = Operation::Create {
+        entity: None,
+        parent: Some(id),
+        components: vec![("Transform".into(), Transform::IDENTITY.to_value())],
+    };
+    let made = apply(&mut cx, &mut stack, "gg", vec![child]);
+    let [child] = made[..] else {
+        panic!("one made: {made:?}");
+    };
+    apply(&mut cx, &mut stack, "gg", vec![set_x(child, 2.0)]);
+    // As the copy's ticks might.
+    let ticks = Edit::Apply {
+        author: "ticks".to_owned(),
+        operations: vec![set_x(child, 9.0)],
+    };
+    cx.apply_edit(ticks).expect("set");
+    let saved = cx.save_prefab(id, None).expect("saved");
+    let text = fs::read_to_string(dir.0.join(&saved.path)).expect("written");
+    assert!(text.contains("2.0") && !text.contains("9.0"), "{text}");
+    let link = Operation::Link {
+        entity: id,
+        prefab: saved.prefab,
+    };
+    apply(&mut cx, &mut stack, "gg", vec![link]);
+    for world in [cx.world(), held(&cx)] {
+        let root = world.entity(id).expect("alive");
+        assert!(world.get::<crate::PrefabRoot>(root).is_some(), "linked");
+    }
 }
 
 /// In a lockstep session, whose saves apply at a tick to come, a file put back before its save
@@ -612,8 +817,9 @@ fn a_save_is_refused_what_would_lose_an_edit_and_saves_as_another_file() {
     assert_eq!(untitled.code(), "scene.untitled", "{untitled}");
 }
 
-/// While a copy plays, a save writes the world as edited, held aside, and the copy's scene files
-/// follow; neither world applies it, then or once `stop` brings the world as edited back.
+/// While a copy plays, a save writes the world as edited, held aside, which a client's edits pass
+/// through to and the copy's ticks don't; the copy's scene files follow. Neither world applies it,
+/// then or once `stop` brings the world as edited back.
 #[test]
 fn a_save_while_a_copy_plays_writes_the_world_as_edited() {
     let dir = Scratch::new("open-scene-save-playing");
@@ -624,18 +830,24 @@ fn a_save_while_a_copy_plays_writes_the_world_as_edited() {
     apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 3.0)]);
     stack.play(&mut cx, 0);
     apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 7.0)]);
+    // As the copy's ticks might.
+    let ticks = Edit::Apply {
+        author: "ticks".to_owned(),
+        operations: vec![set_x(ids[0], 9.0)],
+    };
+    cx.apply_edit(ticks).expect("set");
     open_scene::save(&mut cx, None).expect("saved");
     let text = crate::ecs::read_scene(&dir.0.join("scenes").join("main.ron")).expect("read");
     let mut loaded = World::seeded(5);
     loaded.register::<Transform>().expect("registered");
     loaded.load_scene(&text).expect("loaded");
-    assert_eq!(x(&loaded, ids[0]), 3.0, "the world as edited's");
+    assert_eq!(x(&loaded, ids[0]), 7.0, "the world as edited's");
     assert_eq!(cx.scenes.files[0].text, text, "the copy's file follows");
     look_now(&mut cx, &mut stack);
-    assert_eq!(x(cx.world(), ids[0]), 7.0, "the copy, as it was");
+    assert_eq!(x(cx.world(), ids[0]), 9.0, "the copy, as it was");
     assert_eq!(stack.stop(&mut cx), Some(0));
     look_now(&mut cx, &mut stack);
-    assert_eq!(x(cx.world(), ids[0]), 3.0);
+    assert_eq!(x(cx.world(), ids[0]), 7.0);
     assert_eq!(authors(&cx), ["agent"], "no edit of the file's");
 }
 
@@ -888,9 +1100,9 @@ fn a_path_names_a_scene_file_in_the_projects_scenes_folders() {
     assert_eq!(none.map(|error| error.code()), Some("engine.no_project"));
 }
 
-/// A playing copy has a copy of the open scene; what clients make into it goes with it at
-/// `stop`. A snapshot keeps the open scene of the run's world and the held edited world; one
-/// written before open scenes existed opens the start scene's file.
+/// A playing copy has a copy of the open scene; what clients make into it passes through to the
+/// world as edited's. A snapshot keeps the open scene of the run's world and the held edited
+/// world; one written before open scenes existed opens the start scene's file.
 #[test]
 fn the_open_scene_lasts_across_play_stop_and_a_snapshots_restore() {
     let dir = Scratch::new("open-scene-kept");
@@ -921,7 +1133,7 @@ fn the_open_scene_lasts_across_play_stop_and_a_snapshots_restore() {
     };
     let text = snapshot::write(&of, &run, "Tested", &[], 3).expect("written");
     assert_eq!(stack.stop(&mut cx), Some(0));
-    assert_eq!(cx.scenes.open, edited);
+    assert_eq!(cx.scenes.open, played, "what the copy made passed through");
     let restore = |text: &str| {
         let mut restored = Context::seeded(6)
             .project(&dir.0)
@@ -989,9 +1201,8 @@ fn unsaved_compares_canonically_and_is_kept_until_the_world_as_edited_changes() 
     );
 }
 /// A tick's change makes the open scene unsaved but not edited; an author's apply makes it
-/// edited. A script reload, a renewal, another scene file's save, and a play and its stop leave
-/// it as found, the copy's edits going with it. A save, the open scene's file applying, and New
-/// clear it.
+/// edited, a copy's passing through. A script reload, a renewal, another scene file's save, and a
+/// play and its stop leave it as found. A save, the open scene's file applying, and New clear it.
 #[test]
 fn edited_is_set_by_authors_edits_alone_and_cleared_by_saves() {
     let dir = Scratch::new("open-scene-edited");
@@ -1045,14 +1256,14 @@ fn edited_is_set_by_authors_edits_alone_and_cleared_by_saves() {
     assert!(!cx.scenes.open.edited, "a save clears it");
     stack.play(&mut cx, 1);
     apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 7.0)]);
+    let edited = cx.dev.edited.as_ref();
     assert!(
-        cx.dev
-            .edited
-            .as_ref()
-            .is_some_and(|edited| !edited.open.edited)
+        edited.is_some_and(|edited| edited.open.edited),
+        "passed through"
     );
     stack.stop(&mut cx);
-    assert!(!cx.scenes.open.edited, "the copy's edit went with it");
+    assert!(cx.scenes.open.edited, "the copy's edit passed through");
+    open_scene::save(&mut cx, None).expect("saved");
     apply(&mut cx, &mut stack, "agent", vec![set_x(ids[0], 6.0)]);
     assert!(cx.scenes.open.edited);
     let text = cx.scenes.files[0].text.clone();
@@ -1307,7 +1518,7 @@ fn new_and_open_from_a_world_leave_none_of_its_cells() {
 
 /// A saved cell file applies to its cell in like the open scene's file: an edit of its own, which
 /// an undo takes back, a root it adds streaming. A cell file made since brings its cell in. One
-/// saved while a copy plays applies to the edited world after `stop`.
+/// saved while a copy plays applies to the world as edited too.
 #[test]
 fn a_cell_s_file_saved_applies_to_its_cell_in() {
     let dir = Scratch::new("open-scene-world-watch");
@@ -1346,11 +1557,7 @@ fn a_cell_s_file_saved_applies_to_its_cell_in() {
     look_now(&mut cx, &mut stack);
     assert_eq!(x(cx.world(), id_of(1)), 18.0, "the copy");
     assert_eq!(stack.stop(&mut cx), Some(0));
-    assert_eq!(
-        x(cx.world(), id_of(1)),
-        15.0,
-        "the world as edited, as it was"
-    );
+    assert_eq!(x(cx.world(), id_of(1)), 18.0, "the world as edited");
     look_now(&mut cx, &mut stack);
     assert_eq!(x(cx.world(), id_of(1)), 18.0, "the world as edited");
 }

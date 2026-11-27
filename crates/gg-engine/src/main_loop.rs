@@ -314,6 +314,8 @@ pub(crate) fn run_server(app: &mut App, args: &Args, snapshot: Option<Snapshot>)
 /// attach, stopped or playing as the snapshot's run was ([`Stack::restore`], given whether a tool
 /// API `serves` the run), and paused if it was (development builds only). Without one, it starts
 /// from the attached world, stopped if `stopped` (`--stopped`) and paused if `paused` (`--paused`).
+/// A project's game the API serves, which can stop, plays a copy of that world, held aside as the
+/// world as edited ([`Stack::play`]).
 ///
 /// A development build first scans the assets under the app's root, before the layers load
 /// (`Context::start_assets`), and has a thread watch them if the API serves the run. Then, unless
@@ -361,6 +363,13 @@ pub(crate) fn start(
         }
         None => {
             stack.attach(cx)?;
+            // A project's game plays a copy of the world as it attached, so a scene save writes
+            // what edits and scene files made of it, not what its ticks did.
+            #[cfg(feature = "dev")]
+            if serves && !stopped && cx.start.is_some() && stack.refuses_stop().is_none() {
+                stack.play(cx, stepper.ticks);
+                cx.dev.edited.as_mut().expect("a copy plays").attached = true;
+            }
             (stopped, paused)
         }
     };

@@ -550,11 +550,36 @@ impl Context {
             }
             edit => {
                 let done = self.authors.edit(&mut self.world, edit)?;
-                // Of the world in the context's place: a copy's goes with it at `stop`.
+                // Of the world in the context's place; a copy's edits pass through to the world as
+                // edited, setting it there too.
                 self.scenes.open.edited = true;
                 Ok(done)
             }
         }
+    }
+
+    /// Runs `f` with the world as edited, which a playing copy holds aside ([`Stack::play`]), in
+    /// the copy's place: that world, its authors' edits, its scene files and its open scene. What
+    /// `f` logs goes unlogged: the copy logged it already, and the caller warns of what differs.
+    /// `None`, running nothing, while no copy plays.
+    #[cfg(feature = "dev")]
+    pub(crate) fn in_edited<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        let mut edited = self.dev.edited.take()?;
+        self.trade(&mut edited);
+        let quiet = tracing::Dispatch::none();
+        let done = tracing::dispatcher::with_default(&quiet, || f(self));
+        self.trade(&mut edited);
+        self.dev.edited = Some(edited);
+        Some(done)
+    }
+
+    #[cfg(feature = "dev")]
+    fn trade(&mut self, edited: &mut super::Edited) {
+        std::mem::swap(&mut self.world, &mut edited.world);
+        std::mem::swap(&mut self.authors, &mut edited.authors);
+        std::mem::swap(&mut self.scenes.files, &mut edited.scenes);
+        std::mem::swap(&mut self.scenes.cached, &mut edited.cached);
+        std::mem::swap(&mut self.scenes.open, &mut edited.open);
     }
 }
 

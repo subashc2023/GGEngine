@@ -55,11 +55,12 @@ its tool API: read its world, step and capture it, and edit it. Entities are nam
 16 hex digits, which `entities` lists with their names and components; `entity` shows one's \
 components' values. An edit, `apply` or `set`, applies between ticks, paused or not, and `undo` \
 takes back your last; a scene file saved while the game runs is an edit too, its author the file's \
-path, which `undo` with that author takes back. While the game plays a copy of its world as \
-edited, as after the editor's Play, an edit goes with the copy at `stop`; a scene file's save \
-lasts. `edits` lists each author's edits. `scene` saves the open scene, the scene file `status` \
-names, whose `unsaved` says whether it differs from the file, and `edited` whether you or another \
-author edited it since, as play changes it too, writing its entities, never those \
+path, which `undo` with that author takes back. A project's game under `gg run` plays a copy of \
+its world as edited, as the editor's Play does: edits and scene files' saves apply to both, its \
+ticks to the copy alone, and `stop` brings the world as edited back. `edits` lists each author's \
+edits. `scene` saves the open scene, the scene file `status` names, from the world as edited, so \
+not what play did; `unsaved` says whether it differs from the file, and `edited` whether you or \
+another author edited it since. It writes its entities, never those \
 the game's code made; or opens another scene file in its place, or empties it, neither of which \
 can be undone. `look` sets parts of the view's look, its viewpoint, an outline round entities, a \
 grid, whether colliders' outlines show, and `show`, which part of the lit shading or which image \
@@ -274,8 +275,9 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "play",
-        description: "Plays a copy of the game's world as edited in its place, until `stop`; a \
-                      game already playing, as a plain `gg run` starts, is left as it is.",
+        description: "Plays a copy of the game's world as edited in its place, until `stop`: \
+                      edits apply to both, its ticks to the copy alone. A game already playing, \
+                      as a project's game under `gg run` starts, is left as it is.",
         properties: || json!({}),
         required: &[],
     },
@@ -283,9 +285,9 @@ const TOOLS: &[Tool] = &[
         name: "stop",
         description: "Stops the game: no tick runs, and its world is the world as edited, which \
                       only edits, scene saves and `scene`'s `open` and `new` change. Stopping a \
-                      playing copy brings the world as edited back: what the copy did goes, its \
-                      edits and the IDs learned meanwhile among it. Recorded runs and lockstep \
-                      peers refuse it.",
+                      playing copy brings the world as edited back, with the edits made \
+                      meanwhile: what the copy's ticks did goes, and the IDs of what they made. \
+                      Recorded runs and lockstep peers refuse it.",
         properties: || json!({}),
         required: &[],
     },

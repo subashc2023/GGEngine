@@ -105,14 +105,15 @@ pub(crate) struct Saved {
 impl crate::Context {
     /// Saves the entity `id` and its descendants as a new prefab, as [`World::save_prefab`] writes
     /// it; linking the entity to it with [`Operation::Link`](crate::ecs::Operation::Link) makes it
-    /// an instance under its subtree's IDs. The file is new, written whole or not at all, over
-    /// nothing. It goes at `path` (absolute or from the asset root, in a folder the asset scan
-    /// reaches, ending in `.prefab`), or else in `prefabs/` under the root (made if missing),
-    /// named after the entity's [`Name`](crate::Name) in at most [`STEM`] lowercase letters,
-    /// digits and `_`, or `prefab` without one, with `-2`, `-3`… while that file or its ID file
-    /// exists. Writes the ID file beside it, takes it into the asset database, and adds the prefab
-    /// by its ID: always a new one, whatever a file there gave before. If the ID file can't be
-    /// written, warns `asset.unwritten` and names the prefab by its path.
+    /// an instance under its subtree's IDs. While a copy plays, it saves them as the world as
+    /// edited has them, where it has `id`, as a scene save would. The file is new, written whole
+    /// or not at all, over nothing. It goes at `path` (absolute or from the asset root, in a
+    /// folder the asset scan reaches, ending in `.prefab`), or else in `prefabs/` under the root
+    /// (made if missing), named after the entity's [`Name`](crate::Name) in at most [`STEM`]
+    /// lowercase letters, digits and `_`, or `prefab` without one, with `-2`, `-3`… while that file
+    /// or its ID file exists. Writes the ID file beside it, takes it into the asset database, and
+    /// adds the prefab by its ID: always a new one, whatever a file there gave before. If the ID
+    /// file can't be written, warns `asset.unwritten` and names the prefab by its path.
     ///
     /// Fails, writing nothing, with:
     /// - `engine.no_root` in a game that names no asset root.
@@ -134,7 +135,11 @@ impl crate::Context {
                            to save a prefab under";
             return Err(Error::new("engine.no_root", message));
         };
-        let world = self.world();
+        // While a copy plays, the world as edited, as a scene save writes it, where it has the
+        // entity; else the copy, whose ticks made it.
+        let edited = self.dev.edited.as_ref().map(|edited| &edited.world);
+        let world = edited.filter(|world| world.entity(id).is_some());
+        let world = world.unwrap_or(self.world());
         let entity = world
             .entity(id)
             .ok_or_else(|| Error::new("ecs.no_entity", format!("no living entity has ID {id}")))?;

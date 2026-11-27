@@ -382,8 +382,13 @@ impl Stack {
                  it away: edit the server's world",
             ))),
             Some(Session::Server(_)) | None => {
+                let through = super::through::Through::before(cx, &edit);
                 let apply = |cx: &mut Context, edit| self.edit(cx, edit);
-                Offered::Now(scene_files::client_edit(cx, edit, apply))
+                let done = scene_files::client_edit(cx, edit, apply);
+                if let Some(through) = through {
+                    through.pass(cx, &done);
+                }
+                Offered::Now(done)
             }
         }
     }
@@ -414,7 +419,8 @@ impl Stack {
             }
             _ => {
                 let edit = &mut |cx: &mut Context, edit| self.edit(cx, edit);
-                let _ = crate::scene_files::apply_save(cx, edit, &author, text);
+                let took = crate::scene_files::apply_save(cx, edit, &author, text.clone());
+                crate::scene_files::pass_save(cx, &author, text, took.is_ok());
             }
         }
     }
@@ -550,6 +556,7 @@ impl Stack {
                     cached: cx.scenes.cached.clone(),
                     open,
                     authors: Authors::default(),
+                    attached: false,
                 });
             }
             return Ok((ticks, snapshot.stopped));
@@ -592,7 +599,9 @@ impl Stack {
     }
 
     /// Plays a copy of `cx`'s world, the world as edited, at `ticks`, in its place: the tool API's
-    /// `play` of a stopped run. The world as edited is held aside until [`stop`](Self::stop),
+    /// `play` of a stopped run, and a project's game's start. Authors' edits pass through to the
+    /// world as edited ([`Through`](super::through::Through)), which is held aside until
+    /// [`stop`](Self::stop),
     /// with its ticks, scene files, open scene and the authors' edits; the copy starts their logs
     /// afresh and its open scene as a copy. The layers are told nothing: what they hold of the
     /// world holds of the copy, which goes on exactly as the world would.
@@ -609,6 +618,7 @@ impl Stack {
             cached: cx.scenes.cached.clone(),
             open: cx.scenes.open.clone(),
             authors: mem::take(&mut cx.authors),
+            attached: false,
         });
         info!(ticks, entities, "Playing a copy of the world as edited");
     }

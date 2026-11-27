@@ -96,7 +96,9 @@ constants only bodies use. It restarts from a snapshot after other changes, cras
 after edits to code only `main`, `load` or `restored` reach. One reached only through the game's
 own trait objects or function pointers shows after `gg rebuild`. A layer's `attach` builds the
 world, and restarts skip it: an edit to code only it reaches shows after `gg rebuild --fresh`,
-which starts the game afresh.
+which starts the game afresh. The game plays a copy of the world as edited: `gg set`, `gg apply`
+and scene files' saves change both, so `gg scene save` writes them but not what play did, and
+`gg stop` then `gg play` start play over from them.
 `cargo gg help run` has the details. `cargo gg mcp` serves the same commands over MCP.
 While the game runs, call `target/debug/gg`, which `cargo gg run` built, or the installed `gg`:
 `cargo gg` waits on the build's lock while `gg run` rebuilds the game.

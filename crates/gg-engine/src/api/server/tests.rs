@@ -1731,6 +1731,7 @@ struct Stopped {
     refused: String,
     edited: Hash,
     played: Status,
+    copied: Snapshotted,
     ticking: Status,
     failed: String,
     back: Status,
@@ -1740,9 +1741,10 @@ struct Stopped {
 }
 
 /// `stop` halts ticks (paused or not), refuses `step` and allows a snapshot. `play` runs a copy of
-/// the world as edited; its edits go at the next `stop`, which fails waiting `step`s, leaves the
-/// game paused and restores the world as edited (same ticks, hash and edits, which `undo` takes
-/// back). Every answer says whether the game is stopped.
+/// the world as edited, which a snapshot may take before its first tick and a client's edits pass
+/// through to; the next `stop` fails waiting
+/// `step`s, leaves the game paused and restores the world as edited (same ticks, with both edits,
+/// which `undo` takes back). Every answer says whether the game is stopped.
 #[test]
 fn stop_brings_back_the_world_as_edited_that_play_copied() {
     let (mut api, session) = started("Api Play And Stop");
@@ -1756,6 +1758,7 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
     fs::create_dir_all(&dir.0).expect("a directory");
     let path = dir.0.join("stopped.snapshot");
     let (asked, other) = (path.clone(), session.clone());
+    let copy = dir.0.join("copy.snapshot");
     let client = move |mut client: Client| {
         let set = |x: i32| {
             let path = "translation.x";
@@ -1778,7 +1781,12 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
         let refused = step.expect_err("refused").code;
         client.call_as::<Applied>("apply", set(1)).expect("set");
         let edited = client.call_as("hash", ()).expect("a hash");
+        // Played paused: a copy of a world whose layers' queues `stop` emptied.
+        client.call_as::<Status>("pause", ()).expect("paused");
         let played: Status = client.call_as("play", ()).expect("played");
+        let copied = (client.call_as("snapshot", json!({ "path": copy })))
+            .expect("a snapshot before the copy's first tick");
+        client.call_as::<Status>("resume", ()).expect("resumed");
         let ticking = loop {
             let status = status(&mut client).expect("a status");
             if status.ticks > played.ticks {
@@ -1803,6 +1811,7 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
             refused,
             edited,
             played,
+            copied,
             ticking,
             failed: stepping.join().expect("the step didn't panic"),
             back,
@@ -1829,19 +1838,22 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
     let snapshot = crate::snapshot::Snapshot::read(&path, "Api Play And Stop");
     assert!(snapshot.expect("read").stopped, "it says it's stopped");
     assert!(!got.played.stopped && !got.ticking.stopped);
+    assert_eq!(got.copied.ticks, got.played.ticks);
     assert_eq!(got.failed, "api.stopped");
     assert!(got.back.stopped && got.back.paused);
     assert_eq!(got.back.ticks, got.played.ticks, "the world as edited's");
-    assert_eq!(got.hash, got.edited);
+    assert_ne!(got.hash, got.edited, "the copy's edit passed through");
     let [authored] = &got.history.authors[..] else {
         panic!("one author: {:?}", got.history);
     };
-    assert_eq!(authored.done.len(), 1, "the edit before `play` alone");
-    assert!(got.undone.is_some());
     assert_eq!(
-        cx.world().get::<Transform>(hero),
-        Some(&Transform::IDENTITY)
+        authored.done.len(),
+        2,
+        "the edit before `play`, and the copy's"
     );
+    assert!(got.undone.is_some());
+    let x = cx.world().get::<Transform>(hero).map(|at| at.translation.x);
+    assert_eq!(x, Some(1.0), "the copy's edit undone");
     assert!(cx.dev.edited.is_none());
 }
 
@@ -1942,6 +1954,44 @@ fn a_client_saves_opens_and_empties_the_open_scene() {
     assert_eq!((named(&emptied), emptied.entities), ((None, false), 0));
     assert_eq!(refused, ["scene.untitled", "scene.bad_path", "scene.file"]);
     assert!(scenes_dir.join("copy.ron").is_file());
+}
+
+/// `scene`'s `new` while a copy plays stops it, empties the scene and plays a copy of that, the
+/// run's ticks going on.
+#[test]
+fn a_scene_emptied_while_a_copy_plays_keeps_the_runs_ticks() {
+    let (mut api, session) = started("Api Scene Playing");
+    let dir = Scratch::new("api-scene-playing");
+    scenes::project(&dir.0, 1);
+    let mut cx = scenes::started(&dir.0);
+    let mut stack = Stack::default();
+    stack.play(&mut cx, 0);
+    let client = move |mut client: Client| {
+        let ticked = loop {
+            let status: Status = client.call_as("status", ()).expect("a status");
+            if status.ticks > 0 {
+                break status;
+            }
+        };
+        let new = json!({"action": "new", "discard": true});
+        let emptied: Status = client.call_as("scene", new).expect("emptied");
+        (ticked, emptied)
+    };
+    let (ticked, emptied) = serving(
+        &mut api,
+        &mut cx,
+        &mut stack,
+        &mut Stepper::default(),
+        session,
+        client,
+        |_, _, _| {},
+    );
+    assert!(
+        emptied.ticks >= ticked.ticks,
+        "{emptied:?} after {ticked:?}"
+    );
+    assert!(!emptied.stopped && emptied.entities == 0);
+    assert!(cx.dev.edited.is_some(), "a copy of the empty scene plays");
 }
 
 /// `cells` reads a world's cells: those whose files the folder holds, those in, their streamed
@@ -2248,23 +2298,6 @@ fn a_client_saves_an_entity_as_a_prefab_linked_in_its_place() {
     let text = fs::read_to_string(&file).expect("written");
     assert!(text.contains("translation: (0.0, 0.0, 0.0)"), "{text}");
     assert!(text.contains("Name: (\"bulb\")"), "{text}");
-}
-
-/// No prefab is saved while a copy plays: `stop` would remove its entities with their link. Nothing
-/// is written.
-#[test]
-fn a_prefab_isnt_saved_while_a_copy_plays() {
-    let dir = Scratch::new("api-prefab-playing");
-    scenes::project(&dir.0, 0);
-    let main = "(entities: {\"0000000000000a01\": (Name: (\"Lamp\"))})\n";
-    scenes::save(&dir.0.join("scenes").join("main.ron"), main, 0);
-    let mut cx = scenes::started(&dir.0);
-    let stack = Stack::default();
-    stack.play(&mut cx, 0);
-    let id = "0000000000000a01".parse().expect("an ID");
-    let refused = save_prefab(&mut cx, &stack, id, None).err();
-    assert_eq!(refused.expect("refused").code(), "api.no_scene");
-    assert!(!dir.0.join("prefabs").exists(), "nothing written");
 }
 
 /// A client lists the assets under the root: a page of a kind or all, each with its ID (written

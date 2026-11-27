@@ -296,6 +296,8 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 | What a layer queues as it attaches applies at the first Play alone: Stop empties queues and snapshots hold none, so a second Play of the sandbox has no swarm | Hold queues with the world as edited, restoring them at Stop, and snapshot them | A project's game queues as it attaches |
 | A game's own Inspector edits at its ticks: while stopped, its edits wait for Play, whose first tick drops them | Apply them between ticks through the context's authors | Someone edits a stopped windowed game through its own panels |
 | What a game's own Inspector creates or duplicates isn't the open scene's: a save leaves it out, and the scene doesn't count as unsaved | Apply its edits through the authors, as the row above says | Someone builds a scene through those panels |
+| While a copy plays, as under `gg run`, a game's own Inspector edits the copy alone: `stop` drops its edits and a scene save leaves them out | Apply its edits through the authors and `Through`, as the rows above say | Someone tunes a playing game through its own panels |
+| Once a playing copy's ticks change scene, edits don't pass through to the world as edited (`play.not_kept`), whose entities are another scene's | Apply edits of the new scene's entities to its file's text, or open that scene first | Agents tune a game's later levels while it plays |
 | An append not right after its edit (only hand-written recordings or peers give one) rolls back that edit's sets whole when refused, over later ticks; a refused rollback leaves it applied (`ops.kept`) | Refuse an append unless its author applied just before | Inputs come from outside the engine |
 | The open scene keeps the IDs of its gone entities, for undos, until New or Open, and snapshots keep them though a restored run can't bring them back | Drop them on restore, and as the log releases | A session deletes thousands of a scene's entities |
 | In a SyncTest run, the Inspector copies its whole log at each tick with commands, and again for the rerun | Share entries between the log and its copies | A SyncTest or rollback run is edited at length |
@@ -305,6 +307,7 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 | A scene file's edit that links an instance again, or to another prefab, deletes its own entities holding IDs the link takes, and what's under them | Move what's under them to their parent first, as a refit does | Someone reverts an unlink in git |
 | `set_field` and operations store a dead entity handle without complaint | Refuse dead handles; map handles to IDs to replay a log into another world | Edits are sent to another world, as a server's or a peer's |
 | The operation log keeps a session's entries, a delete's components and slots among them, until cleared | Bound it | A session's memory shows it |
+| A playing copy's logs start afresh: after `stop` and `play`, or a scene's open, `undo` reaches no edit made before. Under `gg run` a game plays a copy from its start | Let the copy's undo step on into the world as edited's log, applying each step to both | Agents stop and play often and miss their undo |
 
 ## Tools
 

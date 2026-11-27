@@ -355,6 +355,44 @@ mod watch {
         applied.map(|()| Done::Applied(Vec::new()))
     }
 
+    /// While a copy plays, applies the save of `author`'s scene file, now `text`, to the world as
+    /// edited too ([`Context::in_edited`]), as [`apply_save`] does, the file then read there as in
+    /// the copy: `stop` keeps it, and a scene save writes it. Warns `play.not_kept` where that
+    /// world refuses a save the copy `took`. A file the copy's layers loaded since `play` isn't
+    /// that world's.
+    pub(crate) fn pass_save(cx: &mut Context, author: &str, text: String, took: bool) {
+        if cx.dev.edited.is_none() {
+            return;
+        }
+        let scenes = &cx.scenes;
+        let mut files = scenes.files.iter().chain(&scenes.cached);
+        let read = files.find(|file| file.author == author);
+        let read = read.map(|file| (file.stamp, file.read.clone()));
+        let refused = cx.in_edited(|cx| {
+            let scenes = &mut cx.scenes;
+            let files = scenes.files.iter_mut().chain(&mut scenes.cached);
+            if let Some((stamp, read)) = &read {
+                for file in files.filter(|file| file.author == author) {
+                    file.stamp = *stamp;
+                    file.read.clone_from(read);
+                }
+            }
+            let edit = &mut |cx: &mut Context, edit| cx.apply_edit(edit);
+            apply_save(cx, edit, author, text).err()
+        });
+        match refused.flatten() {
+            Some(error) if took && error.code() != "scene.not_watched" => warn!(
+                code = "play.not_kept",
+                author,
+                refused = error.code(),
+                "the world as edited refuses the save of {author} the playing copy took, so a stop \
+                 brings that world back without it, and a scene save is refused until the file \
+                 applies there: {error:#}"
+            ),
+            _ => {}
+        }
+    }
+
     /// Applies the edit from `file`'s text to `text`, its text now, through `edit`, as [`look`]
     /// says. For a cell's file, `cell`, each text's roots are given `Streamed` first. For the open
     /// scene's file, the scene owns from then on the entities the edit takes out of the text,
@@ -514,7 +552,7 @@ mod watch {
 }
 
 #[cfg(feature = "dev")]
-pub(crate) use watch::{apply_save, look};
+pub(crate) use watch::{apply_save, look, pass_save};
 
 #[cfg(feature = "dev")]
 mod open_scene {

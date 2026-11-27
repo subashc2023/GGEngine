@@ -2390,6 +2390,7 @@ fn a_prefab_change_one_world_refuses_changes_neither() {
         cached: Vec::new(),
         open: scene_files::Open::default(),
         authors: Authors::default(),
+        attached: false,
     });
     cx.world_mut().register::<Lit>().expect("describes itself");
     let lit = text.replace(

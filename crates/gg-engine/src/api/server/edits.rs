@@ -83,8 +83,10 @@ pub(super) fn answer_done(reply: Reply, offer: &Offer, ticks: u64, done: Result<
 /// Fails like `Context::save_prefab`, and with `api.no_scene`:
 ///
 /// - in a game run from its package, which reads no file under its root;
-/// - in a networked game, whose files would part from its peers', like `scene`'s `save`;
-/// - while a copy of the world as edited plays: `stop` would take the saved, linked entities away.
+/// - in a networked game, whose files would part from its peers', like `scene`'s `save`.
+///
+/// While a copy plays, the link passes through to the world as edited, which the prefab is saved
+/// from where it has `id`.
 pub(super) fn save_prefab(
     cx: &mut Context,
     stack: &Stack,
@@ -95,11 +97,6 @@ pub(super) fn save_prefab(
         Some("it runs from its package, which holds no files under its root to write")
     } else if stack.is_peer() {
         Some("the run is networked, and its prefabs would part from the session's others'")
-    } else if cx.dev.edited.is_some() {
-        Some(
-            "a copy of the world as edited plays, whose entities `stop` takes away, the link \
-             with them: stop it first",
-        )
     } else {
         None
     };

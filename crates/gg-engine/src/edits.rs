@@ -147,6 +147,15 @@ impl Authors {
         }
     }
 
+    /// Ends `author`'s gesture, as any edit of theirs but an amend does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn seal(&mut self, author: &str) {
+        if let Some(author) = self.logs.iter_mut().find(|a| a.name == author) {
+            author.log.seal();
+            author.gesture = None;
+        }
+    }
+
     #[cfg(feature = "dev")]
     /// Each author's log, in first-edit order: none for a world that replaced the edited one.
     pub(crate) fn logs(&self, world: &World) -> impl Iterator<Item = (&str, &Log)> {
@@ -206,7 +215,7 @@ fn made(log: &Log) -> Vec<EntityId> {
 
 impl Edit {
     /// Its author's name: empty for a renewal, which no author makes.
-    fn author(&self) -> &str {
+    pub(crate) fn author(&self) -> &str {
         match self {
             Self::Apply { author, .. }
             | Self::Append { author, .. }

@@ -118,7 +118,8 @@ breakpoint, in a file dialog or in the window menu. A game that ends before its 
 waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`). So does a
 rebuild `gg rebuild --fresh` asks for. `snapshot_failed` says why one fails; a game that hasn't
 ticked since it started refuses one, and the next is asked for quietly. Pauses and stops last
-across restarts. Only the world, its entities' components, survives; a layer's own fields and
+across restarts, as does the world as edited a project's game plays a copy of (`gg help play`).
+Only the world, its entities' components, survives; a layer's own fields and
 statics start over, and what `input` held down is up. A value the code put in a component, as a
 shot's speed in its velocity, keeps the old constant's. A field a rebuild adds takes its default,
 the game warning `snapshot.changed`. A layer's `load` makes its assets; its `attach`, which a
@@ -338,7 +339,12 @@ Peers start afresh together. Fails with:
                 name: "play",
                 usage: "play",
                 summary: "Play a copy of its world as edited, in its place, until `stop`",
-                details: "A game already playing is left as it is.\n",
+                details: "\
+A game already playing is left as it is. A project's game under `gg run` starts playing a copy of
+the world its layers' `attach` built. Edits and scene files' saves while a copy plays apply to both
+worlds; its ticks change the copy alone. The copy's edits start afresh: `undo` reaches none made
+before the `play`.
+",
             },
             Help {
                 name: "stop",
@@ -346,8 +352,8 @@ Peers start afresh together. Fails with:
                 summary: "Stop it: no tick runs, and its world is the world as edited",
                 details: "\
 Only edits, scene files' saves, `scene open` and `scene new` change the world as edited. While a copy
-plays, `stop` brings the world as edited back; what the copy did, its edits among them, goes.
-Recorded runs and lockstep peers refuse it.
+plays, `stop` brings the world as edited back, with the edits made meanwhile; what the copy's ticks
+did goes. `play` then plays it again from there. Recorded runs and lockstep peers refuse it.
 ",
             },
             Help {
@@ -364,10 +370,11 @@ Recorded runs and lockstep peers refuse it.
                 details: "  open <PATH>  Open the scene file at PATH, in one of the project's scenes folders: its
                entities in place of the open scene's, the game's own kept
   save [PATH]  Save the open scene's entities, never those the game's code made, to its file, or to
-               PATH, its file from then on
+               PATH, its file from then on: as edited, not as a playing copy's ticks left them
   new          Delete the open scene's entities, leaving it untitled
 `open` and `new` are refused while the scene has unsaved edits (`scene.unsaved`), unless
-`--discard`. They start every author's edits afresh.
+`--discard`. They start every author's edits afresh. A game playing a copy plays one of the new
+scene.
 ",
             },
             Help {
@@ -777,8 +784,9 @@ Prints the ticks and the IDs its creates and duplicates spawned. A kinematic pla
                 details: "\
 Writes the prefab and its ID file at PATH, in a folder under the asset root that its scan reaches,
 or in `prefabs` named after the entity, writing over nothing; and links ENTITY to it as one edit,
-which `undo` unlinks, leaving the file. Its entities keep their IDs. Refused while a copy plays.
-Prints the prefab's path and name. ENTITY is an ID or a name, as `entity` takes it.
+which `undo` unlinks, leaving the file. Its entities keep their IDs. While a copy plays, it saves
+them as the world as edited has them. Prints the prefab's path and name. ENTITY is an ID or a
+name, as `entity` takes it.
 ",
             },
             Help {

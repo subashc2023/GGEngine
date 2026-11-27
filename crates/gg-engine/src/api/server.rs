@@ -1014,12 +1014,15 @@ impl Api {
     ) -> bool {
         let mut quit = false;
         match call {
-            // A run stopped, or playing a copy, is snapshotted before its first tick too, so a
-            // restart keeps the world as edited; what the layers queued as they attached goes,
-            // as at a `stop` that brings that world back. So is one restored from a snapshot
-            // (its layers attached nothing), which may not tick for a while if restored paused.
+            // A run stopped is snapshotted before its first tick too, so a restart keeps the world
+            // as edited; what the layers queued as they attached goes, as at a `stop` that brings
+            // that world back. So is one restored from a snapshot (its layers attached nothing),
+            // which may not tick for a while if restored paused. One playing the world its layers
+            // attached, or a copy of it, waits for its first tick, which applies what they queued.
             Call::Snapshot { .. }
-                if stepper.fresh() && !stepper.stopped() && cx.dev.edited.is_none() =>
+                if stepper.fresh()
+                    && !stepper.stopped()
+                    && (cx.dev.edited.as_ref()).is_none_or(|edited| edited.attached) =>
             {
                 let message = "the simulation hasn't ticked since the run started, and a \
                                snapshot before then would miss what the layers queued for its \
@@ -1188,8 +1191,9 @@ impl Api {
     /// Does to the open scene what `scene` asks, as gg-api's docs say, in a project's game, with
     /// its path resolved ([`scene_files::resolve`]): saves the world as edited
     /// ([`scene_files::save`]); or, once [`scene_files::check_open`] or
-    /// [`scene_files::check_unsaved`] passes, stops a copy that plays, as `stop` does, then opens a
-    /// scene file ([`scene_files::open`]) or empties the scene ([`scene_files::new`]).
+    /// [`scene_files::check_unsaved`] passes, stops a copy that plays, as `stop` does, opens a
+    /// scene file ([`scene_files::open`]) or empties the scene ([`scene_files::new`]), and plays a
+    /// copy of what that leaves.
     ///
     /// # Errors
     ///
@@ -1244,13 +1248,21 @@ impl Api {
                 None
             }
         };
-        if cx.dev.edited.is_some() {
+        let playing = cx.dev.edited.is_some();
+        if playing {
             self.stop(cx, stack, stepper);
         }
-        match opening {
+        let done = match opening {
             Some(opening) => scene_files::open(cx, stack, opening),
             None => scene_files::new(cx, stack),
+        };
+        if playing {
+            // The run's ticks go on, as with no copy playing.
+            stepper.jump_to(ticks);
+            stack.play(cx, ticks);
+            stepper.play();
         }
+        done
     }
 
     /// The game as the answering frame starts, with the open scene of the world as edited and

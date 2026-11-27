@@ -260,8 +260,13 @@ server](crates/gg-engine/src/api/server.rs) how a game answers.
 - **Play and stop.** Stopped (`stop`, or `--stopped`), no tick runs: the world is the world as
   edited, which only authors' edits, scene files' saves and the open scene's New and Open change.
   `play` runs a copy, holding the world as edited, its scene files and authors' logs aside until
-  `stop`, so two plays of one world, given the same inputs, go alike. Paused frames draw the world
-  as the last tick left it, so a capture shows what a query reads. Recorded runs and lockstep peers
+  `stop`, so two plays of one world, given the same inputs, go alike. A project's game that can
+  stop starts so, playing a copy of the world its layers attached, so a scene save writes what
+  authors made, not what play did. Authors' edits and scene files' saves pass through to the world
+  as edited, by ID, as the copy's log applied them; an undo passes only where both logs would step
+  the same edit. The world as edited refuses edits of what the copy's ticks made, and takes none
+  once they change scene (`play.not_kept`). Paused frames draw the world as the last tick left it,
+  so a capture shows what a query reads. Recorded runs and lockstep peers
   refuse `stop` (`api.no_stop`): it replaces the world and takes ticks back, which neither a replay
   nor the other peer could follow.
 - **The view** is shared through memory the client makes, a triple buffer neither end waits on, not
