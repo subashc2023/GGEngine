@@ -224,7 +224,6 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 | A rename in case alone, which Windows and macOS allow, keeps the ID only for the run (`asset.meta_case`); then the asset goes without until the ID file is renamed | Rename the ID file with its asset | Someone renames assets in case alone |
 | The tool API's `assets` lists a model renamed since a layer added it as not loaded: a model's ID names its images alone | Track loaded models by ID too | A tool acts on whether a model is loaded |
 | Two runs writing ID files (the editor's game and an agent's) can each write one for a renamed asset in overlapping scans: two ID files hold the ID (`asset.duplicate_id`) | After linking, list the folder again and remove ours if another holds the ID | Several such runs are common |
-| On Windows, a fetch list's or manifest's path ending in `.` or a space names another file (`x.` is `x`) | Have gg-api's `is_relative` refuse such parts and device names (`CON`) | Fetch lists or manifests come from outside the repository |
 | A model's JSON is parsed whole before `MAX_MEMORY` counts anything, at ~64 times its text: 100 MB of empty nodes takes ~6 GB, and a 4 GiB one aborts | Count objects, arrays and strings in a pass before parsing | Models come from untrusted sources, as mods |
 | While a shader fails, the watcher looks at its files' folders but not subfolders: a broken include in a subfolder, fixed, waits for another change | Watch the includes the compiler named | Shaders include from subfolders |
 

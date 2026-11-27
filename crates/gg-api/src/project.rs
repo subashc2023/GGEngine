@@ -241,17 +241,31 @@ fn relative(field: &str, path: &str) -> Result<(), Failure> {
 /// Whether `path` is inside a directory, relative to it: its parts named, neither `.` nor `..`, `/`
 /// between them, each one [`Component::Normal`] as the OS reads it. It has no `\`, `:` or control
 /// character on any OS, as Windows reads `\` as a separator and `:` as a drive's, so that a path
-/// written on one OS, as a fetch list on Linux, stays inside on every other.
+/// written on one OS, as a fetch list on Linux, stays inside on every other. No part ends in `.`
+/// or a space, or is a device's name (`CON`, `nul.txt`), which name another file on Windows.
 pub(crate) fn is_relative(path: &str) -> bool {
     let named = |part: &str| {
         let mut components = Path::new(part).components();
         matches!(
             (components.next(), components.next()),
             (Some(Component::Normal(_)), None)
-        )
+        ) && !part.ends_with(['.', ' '])
+            && !is_device(part)
     };
     let refused = |c: char| c.is_control() || c == '\\' || c == ':';
     !path.contains(refused) && path.split('/').all(named)
+}
+
+/// Whether Windows takes `part` for a device, whatever its case and extension: `CON`, `PRN`, `AUX`,
+/// `NUL`, `COM1` to `COM9` and `LPT1` to `LPT9`, before a `.` or spaces, as `nul.txt` or `aux .png`.
+fn is_device(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
+    let stem = stem.to_ascii_uppercase();
+    match stem.as_bytes() {
+        b"CON" | b"PRN" | b"AUX" | b"NUL" => true,
+        [b'C', b'O', b'M', digit] | [b'L', b'P', b'T', digit] => (b'1'..=b'9').contains(digit),
+        _ => false,
+    }
 }
 
 /// Whether `address` is a relay's `host:port`: the host letters, digits, `.` and `-`, a name or an
@@ -467,13 +481,18 @@ mod tests {
     }
 
     /// Each part must be one named part on every OS, wherever its manifest or fetch list was
-    /// written: no `\`, a drive, NUL or another control character. `under` keeps it inside.
+    /// written: no `\`, a drive, NUL or another control character, no trailing `.` or space, and
+    /// no device's name, which Windows reads as another file. `under` keeps it inside.
     #[test]
     fn a_relative_path_stays_inside_its_directory_on_every_os() {
         for path in [
             "models",
             "models/sponza/textures/a b.png",
             "games/x-y_z/scene.ron",
+            ".gitignore",
+            "console/cone.d/com10.png",
+            "lpt0.txt",
+            "nulls.ron",
         ] {
             assert!(is_relative(path), "{path:?}");
             let dir = Path::new("project");
@@ -494,6 +513,13 @@ mod tests {
             "a\0b",
             "a\u{1b}b",
             "a/b\n",
+            "x.",
+            "models/x /a.png",
+            "CON",
+            "a/nul.txt",
+            "Aux .png",
+            "com1",
+            "LPT9.tar.gz",
         ] {
             assert!(!is_relative(path), "{path:?}");
         }
