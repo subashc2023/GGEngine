@@ -843,6 +843,20 @@ impl ApplicationHandler for Handler<'_> {
                 }
             );
         }
+        // A press while an egui menu is open closes it, and is the menu's alone: egui doesn't
+        // count one outside its areas as its own.
+        #[cfg(feature = "dev")]
+        {
+            consumed |= self.egui_runs
+                && matches!(
+                    event,
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        ..
+                    }
+                )
+                && egui::Popup::is_any_open(&self.egui);
+        }
         // In a dockspace, the view decides what reaches the layers, among what egui keeps.
         #[cfg(feature = "dev")]
         let kept = consumed && self.view_input.is_none();

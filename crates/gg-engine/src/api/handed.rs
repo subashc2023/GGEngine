@@ -22,6 +22,7 @@ impl Handed {
     /// it. Returns whether egui keeps it from the layers:
     ///
     /// - a press or a scroll over one of egui's areas but the background, or while egui drags;
+    /// - a press while an egui menu is open, which it closes;
     /// - a key's press or text while an egui widget has the keys.
     ///
     /// Releases and cursor moves reach the layers either way, as a window's do.
@@ -59,7 +60,11 @@ impl Handed {
                     pressed,
                     modifiers: self.modifiers,
                 };
-                (event, pressed && over(self.cursor))
+                // A press while a menu is open closes it, as a window's does.
+                (
+                    event,
+                    pressed && (over(self.cursor) || egui::Popup::is_any_open(egui)),
+                )
             }
             InputEvent::Scroll(scroll) => {
                 // Both say which way the content moves as winit does.
@@ -214,5 +219,43 @@ mod tests {
             "a click off egui's areas reaches the layers"
         );
         assert!(!pass(&egui, &mut handed));
+    }
+
+    /// A frame of `egui` with a menu at its top left, and the input `handed` gave it.
+    fn menu_pass(egui: &egui::Context, handed: &mut Handed) {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        handed.take(egui, &mut input);
+        let mut output = egui.run_ui(input, |root| {
+            egui::Area::new(egui::Id::unique("bar"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(root, |ui| ui.menu_button("Menu", |ui| ui.label("An item")));
+        });
+        output.textures_delta.clear();
+    }
+
+    /// A click off egui's areas while its menu is open closes the menu, and is egui's alone; the
+    /// next reaches the layers.
+    #[test]
+    fn a_handed_click_that_closes_a_menu_is_kept_from_the_layers() {
+        let egui = egui::Context::default();
+        let mut handed = Handed::default();
+        menu_pass(&egui, &mut handed);
+        menu_pass(&egui, &mut handed);
+        let opening = click([10.0, 8.0]).map(|event| handed.hand(&event, [0, 0]));
+        assert_eq!(opening, [false, true, false]);
+        menu_pass(&egui, &mut handed);
+        assert!(egui::Popup::is_any_open(&egui), "the menu opened");
+        let closing = click([300.0, 200.0]).map(|event| handed.hand(&event, [0, 0]));
+        assert_eq!(closing, [false, true, false], "the press is the menu's");
+        menu_pass(&egui, &mut handed);
+        assert!(!egui::Popup::is_any_open(&egui), "the menu closed");
+        let after = click([300.0, 200.0]).map(|event| handed.hand(&event, [0, 0]));
+        assert_eq!(after, [false; 3], "a click reaches the layers again");
     }
 }

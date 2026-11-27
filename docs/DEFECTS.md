@@ -114,7 +114,6 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 | Defect | Fix | Worth it when |
 |---|---|---|
 | A frame reads input about a frame before it renders (a refresh under `--vsync`), and draws the world up to a tick behind the simulation | Start a frame once the render thread has its image; extrapolate from the latest ticks | A game's input latency needs it |
-| A click that closes a menu also reaches what's under it, the game's view included | Keep a press from the layers while an egui menu is open | It surprises someone |
 | In games, a press within egui's 5-point interact radius of an edge widget (a splitter, a title bar button) reaches the layers too | Count as egui's a press its widgets sense | A press at the view's edge surprises someone |
 | A modifier pressed while egui or another window had the keys counts only from its next press or repeat | Give the layers a press of each held modifier as they gain the keys | Someone holds one first |
 | Layers below one that handles a stick's move off rest keep its last value, so rolling a stick right to up in a menu leaves the game going right | Pass the stick's return below, as a release passes | A game's menus take a stick |

@@ -8,7 +8,8 @@ use crate::{Event, MouseButton};
 
 /// What of the main window's input reaches the layers in a dockspace:
 ///
-/// - Mouse presses and the wheel over the view, and the drags those start.
+/// - Mouse presses and the wheel over the view, and the drags those start, but a press that closes
+///   an egui menu.
 /// - Keys, as [`keys`](Self::keys) says.
 /// - Modifier presses anywhere while no egui widget has focus, so a modifier pressed over a panel
 ///   and held onto the view counts there.
@@ -82,6 +83,10 @@ impl ViewInput {
             }
         };
         match *event {
+            // A press while an egui menu is open closes it, and is the menu's alone.
+            Event::MouseButton { pressed: true, .. } if egui::Popup::is_any_open(egui) => {
+                Reach::Nothing
+            }
             Event::MouseButton {
                 button,
                 pressed: true,
@@ -285,6 +290,43 @@ mod tests {
         assert_eq!(
             input.route(&egui, &key(true), true, Under::View, true),
             Reach::Nothing
+        );
+    }
+
+    /// A press while an egui menu is open closes it and is the menu's, over the view too; its
+    /// release reaches the layers, as any does. Once the menu is closed, a press reaches them.
+    #[test]
+    fn a_press_that_closes_a_menu_reaches_no_layer() {
+        let egui = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 200.0));
+        let input = RawInput {
+            screen_rect: Some(screen),
+            ..RawInput::default()
+        };
+        let mut output = egui.run_ui(input, |ui| {
+            let (id, ctx) = (Id::unique("menu"), ui.ctx().clone());
+            let popup = egui::Popup::new(id, ctx, pos2(10.0, 10.0), ui.layer_id());
+            let open = Some(egui::SetOpenCommand::Bool(true));
+            popup.open_memory(open).show(|ui| ui.label("An item"));
+        });
+        output.textures_delta.clear();
+        assert!(egui::Popup::is_any_open(&egui));
+        let mut input = ViewInput::new();
+        let (press, release) = (
+            button(MouseButton::Left, true),
+            button(MouseButton::Left, false),
+        );
+        assert_eq!(
+            input.route(&egui, &press, false, Under::View, true),
+            Reach::Nothing
+        );
+        assert_eq!(
+            input.route(&egui, &release, false, Under::View, true),
+            Reach::Event
+        );
+        assert_eq!(
+            input.route(&context(false), &press, false, Under::View, true),
+            Reach::Event
         );
     }
 
