@@ -1,0 +1,67 @@
+(
+    nodes: [
+        Panel(
+            name: "scoreboard",
+            anchor: (Start, Start),
+            margin: (32.0, 32.0),
+            color: (0.0, 0.0, 0.0, 0.5),
+            radius: 14.0,
+            padding: (24.0, 16.0),
+            children: [
+                Column(
+                    gap: 6.0,
+                    align: (Start, Start),
+                    children: [
+                        Text(
+                            name: "wave",
+                            text: "WAVE 1",
+                            size: 40.0,
+                        ),
+                        Text(
+                            name: "score",
+                            text: "SCORE 0",
+                            size: 32.0,
+                            color: (0.95, 0.85, 0.4, 1.0),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Panel(
+            name: "lives",
+            anchor: (End, Start),
+            margin: (32.0, 32.0),
+            color: (0.0, 0.0, 0.0, 0.5),
+            radius: 14.0,
+            padding: (24.0, 20.0),
+            children: [
+                Row(
+                    gap: 12.0,
+                    children: [
+                        Panel(
+                            name: "life1",
+                            width: Fixed(40.0),
+                            height: Fixed(40.0),
+                            color: (0.3, 1.0, 0.45, 1.0),
+                            radius: 10.0,
+                        ),
+                        Panel(
+                            name: "life2",
+                            width: Fixed(40.0),
+                            height: Fixed(40.0),
+                            color: (0.3, 1.0, 0.45, 1.0),
+                            radius: 10.0,
+                        ),
+                        Panel(
+                            name: "life3",
+                            width: Fixed(40.0),
+                            height: Fixed(40.0),
+                            color: (0.3, 1.0, 0.45, 1.0),
+                            radius: 10.0,
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)

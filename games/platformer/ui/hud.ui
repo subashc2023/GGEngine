@@ -1,0 +1,20 @@
+(
+    nodes: [
+        Panel(
+            name: "coins_panel",
+            anchor: (Start, Start),
+            margin: (32.0, 32.0),
+            color: (0.0, 0.0, 0.0, 0.5),
+            radius: 14.0,
+            padding: (24.0, 16.0),
+            children: [
+                Text(
+                    name: "coins",
+                    text: "COINS 0",
+                    size: 40.0,
+                    color: (1.0, 0.85, 0.2, 1.0),
+                ),
+            ],
+        ),
+    ],
+)

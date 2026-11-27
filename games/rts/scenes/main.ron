@@ -23,14 +23,27 @@
             ),
         ),
         "0c8d2dca1087d971": (
+            Attack: (
+                range: 6.0,
+                damage: 10.0,
+                cooldown: 32,
+                wait: 0,
+            ),
+            Health: (
+                current: 100.0,
+                max: 100.0,
+            ),
             Name: ("Unit 5"),
+            Route: (
+                points: [],
+            ),
             Transform: (
                 translation: (-4.5, 0.0, 5.5),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             Unit: (
-                speed: 6.0,
+                speed: 10.0,
                 radius: 0.5,
                 selected: false,
                 moving: false,
@@ -61,14 +74,27 @@
             ),
         ),
         "118294e54c8a2c3c": (
+            Attack: (
+                range: 6.0,
+                damage: 10.0,
+                cooldown: 32,
+                wait: 0,
+            ),
+            Health: (
+                current: 100.0,
+                max: 100.0,
+            ),
             Name: ("Unit 2"),
+            Route: (
+                points: [],
+            ),
             Transform: (
                 translation: (-1.5, 0.0, 3.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             Unit: (
-                speed: 6.0,
+                speed: 10.0,
                 radius: 0.5,
                 selected: false,
                 moving: false,
@@ -175,20 +201,33 @@
                 pan: (0.0, 0.0),
             ),
             Transform: (
-                translation: (0.0, 19.5219721, 13.9603941),
-                rotation: (-0.4573384, -0.0, -0.0, 0.8892927),
+                translation: (0.0, 19.52197265625, 13.960393905639648),
+                rotation: (-0.45733845, 0.0, 0.0, 0.8892927),
                 scale: (1.0, 1.0, 1.0),
             ),
         ),
         "566bb317039d588b": (
+            Attack: (
+                range: 6.0,
+                damage: 10.0,
+                cooldown: 32,
+                wait: 0,
+            ),
+            Health: (
+                current: 100.0,
+                max: 100.0,
+            ),
             Name: ("Unit 7"),
+            Route: (
+                points: [],
+            ),
             Transform: (
                 translation: (1.5, 0.0, 5.5),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             Unit: (
-                speed: 6.0,
+                speed: 10.0,
                 radius: 0.5,
                 selected: false,
                 moving: false,
@@ -208,14 +247,27 @@
             ),
         ),
         "94928b7da1cb53d3": (
+            Attack: (
+                range: 6.0,
+                damage: 10.0,
+                cooldown: 32,
+                wait: 0,
+            ),
+            Health: (
+                current: 100.0,
+                max: 100.0,
+            ),
             Name: ("Unit 6"),
+            Route: (
+                points: [],
+            ),
             Transform: (
                 translation: (-1.5, 0.0, 5.5),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             Unit: (
-                speed: 6.0,
+                speed: 10.0,
                 radius: 0.5,
                 selected: false,
                 moving: false,
@@ -224,14 +276,27 @@
             ),
         ),
         "97e6ed38095c507e": (
+            Attack: (
+                range: 6.0,
+                damage: 10.0,
+                cooldown: 32,
+                wait: 0,
+            ),
+            Health: (
+                current: 100.0,
+                max: 100.0,
+            ),
             Name: ("Unit 3"),
+            Route: (
+                points: [],
+            ),
             Transform: (
                 translation: (1.5, 0.0, 3.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             Unit: (
-                speed: 6.0,
+                speed: 10.0,
                 radius: 0.5,
                 selected: false,
                 moving: false,
@@ -284,14 +349,27 @@
             ),
         ),
         "a2c62f0f7429e706": (
+            Attack: (
+                range: 6.0,
+                damage: 10.0,
+                cooldown: 32,
+                wait: 0,
+            ),
+            Health: (
+                current: 100.0,
+                max: 100.0,
+            ),
             Name: ("Unit 8"),
+            Route: (
+                points: [],
+            ),
             Transform: (
                 translation: (4.5, 0.0, 5.5),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             Unit: (
-                speed: 6.0,
+                speed: 10.0,
                 radius: 0.5,
                 selected: false,
                 moving: false,
@@ -311,14 +389,27 @@
             ),
         ),
         "c83c28a752d102cc": (
+            Attack: (
+                range: 6.0,
+                damage: 10.0,
+                cooldown: 32,
+                wait: 0,
+            ),
+            Health: (
+                current: 100.0,
+                max: 100.0,
+            ),
             Name: ("Unit 4"),
+            Route: (
+                points: [],
+            ),
             Transform: (
                 translation: (4.5, 0.0, 3.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             Unit: (
-                speed: 6.0,
+                speed: 10.0,
                 radius: 0.5,
                 selected: false,
                 moving: false,
@@ -371,19 +462,128 @@
             Name: ("Environment"),
         ),
         "dcbd11ac41ddba32": (
+            Attack: (
+                range: 6.0,
+                damage: 10.0,
+                cooldown: 32,
+                wait: 0,
+            ),
+            Health: (
+                current: 100.0,
+                max: 100.0,
+            ),
             Name: ("Unit 1"),
+            Route: (
+                points: [],
+            ),
             Transform: (
                 translation: (-4.5, 0.0, 3.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             Unit: (
-                speed: 6.0,
+                speed: 10.0,
                 radius: 0.5,
                 selected: false,
                 moving: false,
                 target: (-4.5, 3.0),
                 stalled: 0,
+            ),
+        ),
+        "e1111aaaa2222bb1": (
+            Enemy: (),
+            Health: (
+                current: 60.0,
+                max: 60.0,
+            ),
+            Name: ("Enemy 1"),
+            Transform: (
+                translation: (-9.0, 0.0, -22.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e1111aaaa2222bb2": (
+            Enemy: (),
+            Health: (
+                current: 60.0,
+                max: 60.0,
+            ),
+            Name: ("Enemy 2"),
+            Transform: (
+                translation: (-3.0, 0.0, -23.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e1111aaaa2222bb3": (
+            Enemy: (),
+            Health: (
+                current: 60.0,
+                max: 60.0,
+            ),
+            Name: ("Enemy 3"),
+            Transform: (
+                translation: (3.0, 0.0, -22.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e1111aaaa2222bb4": (
+            Enemy: (),
+            Health: (
+                current: 60.0,
+                max: 60.0,
+            ),
+            Name: ("Enemy 4"),
+            Transform: (
+                translation: (9.0, 0.0, -23.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e3333cccc4444dd1": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Enemy Shape"),
+            Parent: ("e1111aaaa2222bb1"),
+            Tint: ((0.9, 0.12, 0.1, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "e3333cccc4444dd2": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Enemy Shape"),
+            Parent: ("e1111aaaa2222bb2"),
+            Tint: ((0.9, 0.12, 0.1, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "e3333cccc4444dd3": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Enemy Shape"),
+            Parent: ("e1111aaaa2222bb3"),
+            Tint: ((0.9, 0.12, 0.1, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
+            ),
+        ),
+        "e3333cccc4444dd4": (
+            ModelRoot: ("gg:cube"),
+            Name: ("Enemy Shape"),
+            Parent: ("e1111aaaa2222bb4"),
+            Tint: ((0.9, 0.12, 0.1, 1.0)),
+            Transform: (
+                translation: (0.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 1.0, 0.8),
             ),
         ),
         "e951556a08dc01a8": (
