@@ -39,6 +39,7 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 | Frames redo work: an atmosphere's tables each frame (~36 µs on an RTX 4090), bloom's first downsample reading texels 13 times (~24 of 57 µs), interleaved mirrored layer draws a run each | Tables as inputs change; taps in workgroup memory; mirrored draws sorted together | A profile shows them |
 | A development run draws its opaque vertices twice, depth for AO and then shading, as it has no visibility buffer | Draw over that depth, testing for equality, with vertices placed alike | Its frames lose much to it |
 | A build without `dev` still makes the UI pass's pipeline at start, though it's handed no UI | Make it only when a UI is drawn | A shipped game's start waits on it |
+| `ticks.rs`'s count on four threads can catch the ticks' thread sleeping in the job system for the first time, which boxes std's pthread condvar on macOS: one allocation, once in about ten gate runs on an M3 Pro under load. Its warm-up's sleep doesn't always take | Check the thread slept before counting, and sleep it again if not | It fails CI |
 
 ## Rendering
 
