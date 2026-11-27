@@ -43,6 +43,9 @@ and the APIs still change.
 - For edits that patch into a running game: `dx`, dioxus-cli at the release of the workspace's
   `subsecond` (`cargo install dioxus-cli --version 0.7.2 --locked`). Without it, `cargo gg run`
   rebuilds and restarts the game for every edit.
+- On macOS, for quick restarts: your terminal, or the app running your agent, under System
+  Settings › Privacy & Security › Developer Tools. Otherwise macOS scans each new build as it
+  first launches: about 3 s a restart for a game's 200 MB debug executable.
 - For `cargo gg ship`: cargo-about 0.9.2.
 
 ## Quick start

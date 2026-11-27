@@ -28,6 +28,9 @@ const GRACE: Duration = Duration::from_secs(5);
 /// The most files `wait` lists the game's last event of, the latest.
 const MOST_FILE_EVENTS: usize = 20;
 
+/// The most warnings `wait` lists after a rebuild.
+const MOST_WARNINGS: usize = 20;
+
 /// How many of the game's latest events at `info` or above `wait` reads for those about files.
 const FILE_EVENTS_READ: usize = 1_000;
 
@@ -522,8 +525,10 @@ pub(crate) fn rebuild(pick: &Pick, timeout: Duration, fresh: bool) -> Result<Val
 
 /// Waits, within `timeout` of `start`, until `pick`'s game has looked at its scene and script
 /// files since `asked` (ms since the epoch), each saved before then applied or refused. Returns
-/// `told` with `files_looked`, when it last looked, and `files`, the last event it logged of each
-/// file ([`about_files`]) among its latest [`FILE_EVENTS_READ`]: not the events since the wait
+/// `told` with `files_looked`, when it last looked; after a rebuild, `warnings` and
+/// `warnings_more` ([`about_warnings`]), what the restarted game warned of; and `files`, the last
+/// event it logged of each file ([`about_files`]) among its latest [`FILE_EVENTS_READ`]: not the
+/// events since the wait
 /// began, since a look every 200 ms often applies a save before `gg` starts. A game that watches
 /// none, or hasn't looked yet, as one just started, has nothing to wait for.
 ///
@@ -554,8 +559,32 @@ fn looked(
         thread::sleep(WRITE);
     };
     told["files_looked"] = json!(looked);
-    // A read stops at half a line's bytes: read on to the end, a few times at most.
-    let mut params = json!({"level": "info", "last": FILE_EVENTS_READ});
+    let events = read_events(
+        &mut client,
+        json!({"level": "info", "last": FILE_EVENTS_READ}),
+    );
+    told["files"] = Value::Array(about_files(&events));
+    if told["reload"]["event"] == "rebuilt" {
+        // All the game's events since it started, which the rebuild's restart did.
+        let events = read_events(&mut client, json!({"level": "warn"}));
+        let (warnings, more) = about_warnings(&events, MOST_WARNINGS);
+        if !warnings.is_empty() {
+            told["warnings"] = Value::Array(warnings);
+        }
+        if more > 0 {
+            told["warnings_more"] = json!(more);
+        }
+    }
+    Ok(told)
+}
+
+/// The events the game's `logs` method answers to `params`, read on to the end a few times at most:
+/// a read stops at half a line's bytes.
+fn read_events(
+    client: &mut gg_api::Client,
+    mut params: Value,
+) -> Vec<Box<serde_json::value::RawValue>> {
+    let level = params["level"].clone();
     let mut events = Vec::new();
     for _ in 0..8 {
         let Ok(read) = client.call_as::<LogEvents>("logs", params) else {
@@ -565,10 +594,44 @@ fn looked(
         if read.next >= read.end {
             break;
         }
-        params = json!({"level": "info", "from": read.next, "run": read.run});
+        params = json!({"level": level, "from": read.next, "run": read.run});
     }
-    told["files"] = Value::Array(about_files(&events));
-    Ok(told)
+    events
+}
+
+/// The warnings and errors among `events`, each with its `code` and `message`, and a `count` where
+/// the same code and message came more than once, in the order first seen: at most `most`, and how
+/// many more there were.
+fn about_warnings(events: &[Box<serde_json::value::RawValue>], most: usize) -> (Vec<Value>, usize) {
+    let events = events.iter();
+    let events = events.filter_map(|event| serde_json::from_str::<Value>(event.get()).ok());
+    let mut listed: Vec<(Value, Value, u64)> = Vec::new();
+    for event in events {
+        let severe = event["level"].as_str().is_some_and(|level| {
+            level.eq_ignore_ascii_case("warn") || level.eq_ignore_ascii_case("error")
+        });
+        if !severe {
+            continue;
+        }
+        let (code, message) = (event["code"].clone(), event["message"].clone());
+        match listed
+            .iter_mut()
+            .find(|(c, m, _)| *c == code && *m == message)
+        {
+            Some((.., count)) => *count += 1,
+            None => listed.push((code, message, 1)),
+        }
+    }
+    let more = listed.len().saturating_sub(most);
+    listed.truncate(most);
+    let told = listed.into_iter().map(|(code, message, count)| {
+        let mut told = json!({"code": code, "message": message});
+        if count > 1 {
+            told["count"] = json!(count);
+        }
+        told
+    });
+    (told.collect(), more)
 }
 
 /// The last of `events` about each scene and script file, by its `script` or a scene event's
@@ -633,6 +696,39 @@ mod tests {
             grant: None,
             project,
         }
+    }
+
+    /// Warnings and errors alone are listed, a repeat as a count, at most so many.
+    #[test]
+    fn warnings_repeat_as_a_count_and_stop_at_the_most() {
+        let line = |level: &str, code: &str, message: &str| {
+            let line = json!({"level": level, "code": code, "message": message}).to_string();
+            serde_json::value::RawValue::from_string(line).expect("a line")
+        };
+        let events = vec![
+            line("WARN", "snapshot.changed", "lives added"),
+            line("INFO", "scene.applied", "applied"),
+            line("WARN", "gg.attach_changed", "attach"),
+            line("WARN", "snapshot.changed", "lives added"),
+            line("ERROR", "asset.missing", "a.png"),
+            line("WARN", "snapshot.changed", "lives added"),
+            line("WARN", "snapshot.changed", "score added"),
+        ];
+        let (told, more) = about_warnings(&events, 3);
+        let codes: Vec<_> = told
+            .iter()
+            .map(|told| told["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            codes,
+            ["snapshot.changed", "gg.attach_changed", "asset.missing"]
+        );
+        assert_eq!(
+            (told[0]["count"].clone(), told[1].get("count")),
+            (json!(3), None)
+        );
+        assert_eq!(more, 1);
+        assert_eq!(about_warnings(&events[1..2], 3), (Vec::new(), 0));
     }
 
     /// A run's file follows its state, goes as the run ends; a stale one isn't read.

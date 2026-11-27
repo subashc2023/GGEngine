@@ -107,7 +107,8 @@ ends when gg does, however gg ends. A second `run` of PACKAGE is refused (`gg.ru
   -- <ARGS>             A headless game given `--real-time` ticks in real time, to be watched
 
 Events, a JSON line each (the game's and cargo's output go to stderr): `started`, `serving` (the
-tool API), and as it ends `exited`, `crashed` or `hung`, with the errors its log holds. `hung` gives
+tool API, with the `ms` since its launch; on macOS, a `hint` once if that was slow), and as it ends
+`exited`, `crashed` or `hung`, with the errors its log holds. `hung` gives
 the file its threads' stacks were sampled into before it was ended, as `stacks`: by `sample` on
 macOS, `gdb` on Linux if it's installed and may attach; `null` where neither could.
 
@@ -294,7 +295,10 @@ patch or rebuild, with `at` (ms since the epoch, as `updated`):
 The game applies scene and script files itself, as they're saved; `files_looked` is when it last
 looked at them. `files` has the last event it logged of each, the latest 20 files', with its
 `timestamp`: a scene's `scene.applied`, a script's `Script reloaded`, a warning why one didn't
-apply, a script's error. Fails with:
+apply, a script's error. After a rebuild, `warnings` lists the warnings and errors the restarted
+game logged, as a restore's `snapshot.changed` or `gg.attach_changed`: each with its `code` and
+`message`, and a `count` if it repeats, at most 20, `warnings_more` more; none after a patch. Fails
+with:
 - `gg.build_failed` and rustc's errors, if the edits don't build;
 - `gg.waiting`, if the game ended and waits for a change;
 - `gg.no_run`, without a `gg run`; `gg.which_run`, with several, which `--pid` tells apart;

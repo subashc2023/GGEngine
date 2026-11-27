@@ -17,8 +17,8 @@ pub(crate) enum Edit {
     /// patch carries them only where [`uses`] says. Code only startup or `attach` reaches is
     /// [`reach`](crate::reach)'s to judge.
     Bodies { consts: Vec<String> },
-    /// Only items under `#[cfg(test)]` differ, which the game's binary doesn't hold: nothing to
-    /// patch.
+    /// Only doc comments or items under `#[cfg(test)]` differ, which make no code the game's binary
+    /// holds: nothing to patch.
     Same,
     /// The new text doesn't parse. A patch's build shows what rustc makes of it; if it builds,
     /// rustc read what gg can't, so the game is rebuilt.
@@ -29,10 +29,11 @@ pub(crate) enum Edit {
 
 /// What the edit from `old`, a module's text as of the game's build, to `new` is.
 ///
-/// `Same` if the two differ only in items under `#[cfg(test)]`. Else inside function bodies if the
-/// two are the same token for token, but for non-`const` function bodies (their declared items,
-/// and macros that may declare some, aside), constants' values, doc comments, `use`s and the
-/// functions [`free`] lets come and go, leaving out items under `#[cfg(test)]`.
+/// `Same` if the two differ only in doc comments (`///`, `//!`, `#[doc]`) and items under
+/// `#[cfg(test)]`. Else inside function bodies if the two are the same token for token, but for
+/// non-`const` function bodies (their declared items, and macros that may declare some, aside),
+/// constants' values, doc comments, `use`s and the functions [`free`] lets come and go, leaving out
+/// items under `#[cfg(test)]`.
 ///
 /// An edit inside code that runs as the game starts (`main`, a `Layer`'s `load` and `restored`)
 /// needs a rebuild: a patch would come after they ran. [`reach`](crate::reach) finds code only
@@ -52,8 +53,10 @@ pub(crate) fn classify(old: &str, new: &str) -> Edit {
     };
     if old != new {
         let (mut old_bare, mut new_bare) = (old.clone(), new.clone());
-        untested(&mut old_bare);
-        untested(&mut new_bare);
+        for file in [&mut old_bare, &mut new_bare] {
+            untested(file);
+            Undocumented.visit_file_mut(file);
+        }
         if old_bare == new_bare {
             return Edit::Same;
         }
@@ -751,6 +754,15 @@ impl VisitMut for Bare {
     }
 }
 
+/// Takes every `doc` attribute out of the file, its items and what they hold.
+struct Undocumented;
+
+impl VisitMut for Undocumented {
+    fn visit_attributes_mut(&mut self, attrs: &mut Vec<Attribute>) {
+        attrs.retain(|attr| !attr.path().is_ident("doc"));
+    }
+}
+
 /// Takes the items under `#[cfg(test)]` out of `file`, however deep in modules and impls (not in
 /// function bodies, which [`Items`] sees to).
 pub(crate) fn untested(file: &mut File) {
@@ -1192,12 +1204,7 @@ fn steer() -> f32 {
             ("self.x += 1.0;", "self.x += 2.0;"),
             ("burst.count\n", "burst.count * 2\n"),
             ("self.x = 2.0;", "self.x = 3.0;"),
-            // Doc comments, comments and whitespace.
-            (
-                "/// Where it is.",
-                "/// Where it is, in meters.\n/// Right is positive.",
-            ),
-            ("//! The game.", "//! The game, a ship."),
+            // Comments and whitespace.
             ("// Right is positive.", "// Left is negative."),
             (
                 "fn steer(ship: &mut Ship, by: f32) {",
@@ -1291,6 +1298,30 @@ impl Ship {{
         );
         let outside = Edit::Rebuild("an edit outside function bodies");
         assert_eq!(classify(MODULE, &plain), outside);
+    }
+
+    /// Doc comments make no code: an edit to them alone is no change.
+    #[test]
+    fn edits_to_doc_comments_are_no_change() {
+        let docs = MODULE.replace(
+            "fn launch()",
+            "/// Launches.\n#[doc = \"Old.\"]\nfn launch()",
+        );
+        for (from, to) in [
+            ("//! The game.", "//! The game, a ship.\n//! More."),
+            ("/// Launches.", "/// Launches a ship."),
+            ("#[doc = \"Old.\"]", "#[doc = \"New.\"]"),
+            ("/// Launches.\n", ""),
+            ("/// Where it is.", "/// Where it is, in meters."),
+        ] {
+            assert_eq!(docs.matches(from).count(), 1, "{from}");
+            let edited = docs.replace(from, to);
+            assert_eq!(classify(&docs, &edited), Edit::Same, "{from} -> {to}");
+        }
+        let body = docs
+            .replace("/// Launches.", "/// Steered.")
+            .replace("self.x += 1.0;", "self.x += 2.0;");
+        assert_eq!(classify(&docs, &body), bodies());
     }
 
     #[test]

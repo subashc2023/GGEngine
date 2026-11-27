@@ -118,6 +118,16 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// Windows holds a file briefly after the process that ran or loaded it ends.
 const COPYING: Duration = Duration::from_secs(5);
 
+/// How long a game may take from its launch to serving, in ms, before `serving` says why on macOS.
+/// A game serves within ~40 ms of `main`; macOS scans a new executable before `main`, about 3 s
+/// for a 200 MB debug build, unless the launching app is one of its Developer Tools.
+const SCANNED: u64 = 1500;
+
+const SCAN_HINT: &str = "the game took this long to launch, as macOS scans each new build as it \
+                         first launches: about 3 s a restart. Adding the terminal, or the app \
+                         running gg, under System Settings › Privacy & Security › Developer Tools \
+                         skips it";
+
 /// Prints `event`, a line of JSON.
 pub(crate) fn event(event: &Value) {
     crate::print(&event.to_string());
@@ -225,6 +235,7 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
         serves: run.serves(),
         restarts,
         served: false,
+        scan_told: false,
         failed: None,
         patches: patches.map(|patches| *patches),
         closed,
@@ -435,6 +446,8 @@ struct Supervisor<'a> {
     restarts: bool,
     /// Whether a process of the game has served the API.
     served: bool,
+    /// Whether a `serving` event has said why its launch was slow ([`SCANNED`]).
+    scan_told: bool,
     /// The code of the last snapshot failure printed, until one succeeds.
     failed: Option<String>,
     patches: Option<Patches>,
@@ -461,6 +474,7 @@ struct Game {
     session: Option<Session>,
     client: Option<Client>,
     frames: u64,
+    launched: Instant,
     moved: Instant,
     pinged: Instant,
     /// What frames had paused for at the last ping answered.
@@ -694,6 +708,7 @@ impl Supervisor<'_> {
             session: None,
             client: None,
             frames: 0,
+            launched: now,
             moved: now,
             pinged: now,
             waiting: None,
@@ -726,7 +741,8 @@ impl Supervisor<'_> {
             let mut found = Session::list(&Session::dir(&self.dir)).into_iter();
             let found = found.find(|(_, session)| session.pid == pid);
             if let Some((file, session)) = found {
-                event(&json!({
+                let ms = millis(game.launched.elapsed());
+                let mut serving = json!({
                     "event": "serving",
                     "pid": pid,
                     "app": session.app,
@@ -734,7 +750,13 @@ impl Supervisor<'_> {
                     "session": file,
                     "project": session.project,
                     "log": session.log,
-                }));
+                    "ms": ms,
+                });
+                if cfg!(target_os = "macos") && ms >= SCANNED && !self.scan_told {
+                    self.scan_told = true;
+                    serving["hint"] = json!(SCAN_HINT);
+                }
+                event(&serving);
                 game::warn_protocol(&file, &session);
                 game.session = Some(session);
                 self.served = true;
@@ -1711,6 +1733,7 @@ mod tests {
             session: None,
             client: None,
             frames: 0,
+            launched: now,
             moved: now,
             pinged: now,
             waiting: None,
@@ -2033,6 +2056,7 @@ mod tests {
             session: Some(session),
             client: None,
             frames: 3,
+            launched: now,
             moved: now,
             pinged: now,
             waiting: None,
@@ -2055,6 +2079,7 @@ mod tests {
             serves: true,
             restarts: true,
             served: true,
+            scan_told: false,
             failed: None,
             patches: None,
             closed: None,

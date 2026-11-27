@@ -215,7 +215,10 @@ const TOOLS: &[Tool] = &[
                       when the game last looked at its scene and script files, and `files` the \
                       last event it logged of each, the latest 20 files', with its `timestamp`: \
                       `scene.applied`, `Script reloaded`, a warning why one didn't apply, a \
-                      script's error. Fails with \
+                      script's error. After a rebuild, `warnings` lists the warnings the \
+                      restarted game logged (`code`, `message`, `count` if repeated, at most 20, \
+                      `warnings_more` more), \
+                      as a restore's `snapshot.changed`: read them. Fails with \
                       `gg.build_failed` and rustc's errors if the edits don't build (the game runs \
                       its old code), `gg.waiting` if the game ended and waits for a change, or \
                       `gg.timeout`.",

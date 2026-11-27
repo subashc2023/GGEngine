@@ -137,7 +137,9 @@ impl Game {
         bound.expect("the bindings are pairs of axes, of other sources");
         // What `gg actions` says each does, so an agent plays without reading this code. Name what
         // the value moves, its units, and the fields that set them or that it changes;
-        // `describe_control` lists the mouse's look, clicks and wheel the same way.
+        // `describe_control` lists the mouse's look, clicks and wheel the same way. This runs as
+        // the game starts, so an edit to a constant it reads rebuilds the game rather than patching
+        // it: numbers to tune live best in components, which `gg set` changes as the game runs.
         let steer = "Moves the player: [x, y], right and up; 1 is `Player.speed` units a second";
         actions.describe(Act::Steer, steer);
         Self {

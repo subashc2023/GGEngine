@@ -309,10 +309,10 @@ pub use script::{Script, run_scripts};
 pub use shape::Shape;
 pub use sky::{Atmosphere, Sky};
 use snapshot::Snapshot;
+pub use tint::Tint;
 /// Logging, as the engine logs: to the run's JSON log, which `gg logs` reads, and to its console.
 /// Log with fields. A warning or error has a stable code: `warn!(code = "game.no_spawn", %name,
 /// "no spawn point")`. Info and above reach the log without `RUST_LOG`.
-pub use tint::Tint;
 pub use tracing;
 pub use transform::Transform;
 
@@ -322,10 +322,10 @@ pub mod prelude {
     pub use crate::tracing::{debug, error, info, warn};
     pub use crate::{
         Actions, Align, App, Binding, Blend, Bus, Camera, Cast, Change, Commands, Component,
-        Context, Control, Controls, Entity, Error, Event, Font, Key, Layer, Mesh, MouseButton,
-        PadButton, Place, Projection, Reflect, Rng, Scripts, Shader, Shape, Sound, Source, Sprite,
-        Stick, TextStyle, Tick, Tint, Toward, Transform, World, step_animation, step_navigation,
-        step_physics,
+        Context, Control, Controls, Entity, Error, Event, Font, GameUi, Key, Layer, Mesh,
+        MouseButton, PadButton, Place, Projection, Reflect, Rng, Scripts, Shader, Shape, Sound,
+        Source, Sprite, Stick, TextStyle, Tick, Tint, Toward, Transform, World, step_animation,
+        step_navigation, step_physics,
     };
 }
 
