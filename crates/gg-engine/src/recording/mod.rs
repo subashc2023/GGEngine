@@ -57,7 +57,7 @@ use tracing::{error, info, warn};
 use crate::args::Dump;
 use crate::assets::Counts;
 use crate::cells::Cell;
-use crate::ecs::WorldHash;
+use crate::ecs::{MAX_DEPTH, WorldHash};
 use crate::edits::Edit;
 use crate::layer::Commands;
 use crate::luau::ModText;
@@ -178,9 +178,9 @@ impl Recorder {
     }
 
     /// Writes `commands`, the queue of layer `layer` (from the bottom) of type `name`, before its
-    /// tick applies them, entities by ID in `world`. Stops the recording before a command the
-    /// queue's [`check`](Commands::check) says a replay would refuse, such as one holding
-    /// something opaque.
+    /// tick applies them, entities by ID in `world`. Stops the recording before a command a replay
+    /// would refuse: one nested deeper than [`MAX_DEPTH`] levels, or one the queue's
+    /// [`check`](Commands::check) refuses, such as one holding something opaque.
     pub(crate) fn queued(
         &mut self,
         layer: usize,
@@ -190,7 +190,18 @@ impl Recorder {
     ) {
         self.names(world);
         for i in 0..commands.len() {
+            if self.failed.is_some() {
+                return;
+            }
             let value = commands.value(i);
+            if text::deeper_than(&value, MAX_DEPTH) {
+                let message = format!(
+                    "layer {layer}, {name}, queued a command nested deeper than the {MAX_DEPTH} \
+                     levels a replay reads; the recording ends before it"
+                );
+                self.failed = Some(Error::new("record.bad_command", message));
+                return;
+            }
             self.line.clear();
             write!(self.line, "> {layer} ").expect("a string takes any text");
             let start = self.line.len();
@@ -1787,6 +1798,80 @@ mod tests {
         assert!(last.starts_with("attach "), "{text}");
         let replayed = replay_all(placed(), &text).map(|(ticks, _)| ticks);
         assert_eq!(replayed.map_err(|(_, error)| error.code()), Ok(0), "{text}");
+    }
+
+    /// A queue of commands, each a value as many levels deep as it says: variants in variants, as
+    /// code can make and a replay reads to [`MAX_DEPTH`] levels.
+    #[derive(Default)]
+    struct Nested(Vec<u32>);
+
+    impl Commands for Nested {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn value(&self, i: usize) -> crate::reflect::Value {
+            use crate::reflect::{Ident, Value};
+            let mut value = Value::UInt(1);
+            for _ in 1..self.0[i] {
+                let field = (Ident::Borrowed("0"), value);
+                value = Value::Variant(Ident::Borrowed("Deeper"), vec![field]);
+            }
+            value
+        }
+
+        fn push(&mut self, _: &crate::reflect::Value) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear(&mut self) {
+            self.0.clear();
+        }
+    }
+
+    struct Nester(Nested);
+
+    impl Layer for Nester {
+        fn attach(&mut self, _: &mut Context) {
+            self.0.0.extend([MAX_DEPTH, MAX_DEPTH + 1, 1]);
+        }
+
+        fn tick(&mut self, _: &mut World, _: Tick) {
+            self.0.clear();
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.0)
+        }
+    }
+
+    /// A command nested deeper than a replay reads stops the recording before it, naming the layer;
+    /// the one as deep as it reads, before it, is written.
+    #[test]
+    fn a_command_nested_deeper_than_a_replay_reads_stops_the_recording() {
+        let mut app = App::new("Nested").layer(Nester(Nested::default()));
+        let thread = std::thread::current().id();
+        let dir = Scratch::new(&format!("recording-nested-{thread:?}"));
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let path = dir.0.join("nested.recording");
+        app.stack
+            .record(Recorder::create(&path, app.name).expect("created"));
+        let mut cx = Context::new(None);
+        app.stack.attach(&mut cx).expect("loaded");
+        app.stack.tick(&mut cx, Tick { number: 0 });
+        app.stack.detach(&mut cx);
+        let error = app.stack.recorded().expect_err("stopped");
+        assert_eq!(error.code(), "record.bad_command", "{error}");
+        let message = error.to_string();
+        assert!(message.contains("layer 0, Nester,"), "{message}");
+        let text = std::fs::read_to_string(&path).expect("written");
+        let commands: Vec<_> = text.lines().filter(|line| line.starts_with("> ")).collect();
+        assert_eq!(commands.len(), 1, "{text}");
+        let deepest = text::Text::parse(&commands[0][4..], 5).expect("it reads");
+        let deepest = deepest.value(&World::default());
+        assert!(!text::deeper_than(&deepest, MAX_DEPTH));
+        let deeper = Nested(vec![MAX_DEPTH + 1]).value(0);
+        assert!(text::deeper_than(&deeper, MAX_DEPTH));
     }
 
     /// A recording that can't be created (a missing directory) fails naming its file.

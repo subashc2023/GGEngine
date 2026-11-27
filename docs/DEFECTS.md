@@ -123,7 +123,6 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 | Defect | Fix | Worth it when |
 |---|---|---|
 | A run that goes on after `Context::load_scene_file` refused a scene for a missing texture replays otherwise (`replay.diverged`): the replay's stand-in loads it | Record the names that failed and refuse them in the replay | A game goes on after a scene fails to load |
-| A command nested deeper than the 64 levels a replay reads is recorded, so the replay refuses the whole recording (`replay.syntax`) | Count levels while recording, ending with `record.bad_command` | A command nests that deep, or the tool API takes outside values |
 | A build without `dev` refuses a replay or a lockstep peer whose Inspector queued commands (`replay.bad_command`): its `Inspector` takes none | Apply the Inspector's edits without its UI in such builds | A shipped recording, or peers across builds, holds them |
 
 ## Reflection

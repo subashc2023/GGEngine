@@ -18,6 +18,22 @@ use crate::luau::ModText;
 use crate::reflect::{Ident, Value};
 use crate::{Entity, EntityId, World};
 
+/// Whether `value` nests more than `levels` levels, looking no deeper. A struct, variant, list or
+/// option is a level above what it holds; anything else is one level.
+pub(crate) fn deeper_than(value: &Value, levels: u32) -> bool {
+    let Some(below) = levels.checked_sub(1) else {
+        return true;
+    };
+    match value {
+        Value::Option(Some(held)) => deeper_than(held, below),
+        Value::List(elements) => elements.iter().any(|element| deeper_than(element, below)),
+        Value::Struct(fields) | Value::Variant(_, fields) => {
+            fields.iter().any(|(_, field)| deeper_than(field, below))
+        }
+        _ => false,
+    }
+}
+
 /// Writes `value` on one line, each part tagged by kind: `Variant("Swarm", [("0",
 /// UInt(10000))])`.
 ///
