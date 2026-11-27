@@ -124,7 +124,8 @@ Only the world, its entities' components, survives; a layer's own fields and
 statics start over, and what `input` held down is up. A value the code put in a component, as a
 shot's speed in its velocity, keeps the old constant's. A field a rebuild adds takes its default,
 the game warning `snapshot.changed`. A layer's `load` makes its assets; its `attach`, which a
-restart skips, builds the world.
+restart skips, builds the world. A rebuilt `load` that adds assets ahead of its others leaves out
+the draws code made of its meshes, warning `snapshot.changed`; models' nodes draw as before.
 
 `run` ends as the game comes to its own end (its window closes, `quit` asks or its frames run out),
 whatever its status; as a game that never served the API ends; and, with restarts off

@@ -826,6 +826,14 @@ impl Snapshot {
             warned.push(change);
         }
         drop(warned);
+        if changes.redrawn() > 0 {
+            info!(
+                path = %path,
+                nodes = changes.redrawn(),
+                "The {what}'s model nodes take their models' draws again, as the layers added \
+                 other assets than the snapshot's run did"
+            );
+        }
         let restored = restored.expect("hashed once loaded");
         if changes.is_empty() && restored != hash {
             warn!(
@@ -1364,6 +1372,62 @@ mod tests {
             assert!(world.get::<MeshDraw>(node).is_some(), "drawing");
         }
         assert_eq!(world.hash(), saved.world().hash());
+    }
+
+    /// A model's nodes draw after a restore into a run whose layers added a mesh first, as a
+    /// rebuild whose `load` adds one does: they take their parts' draws in that run, unwarned. A
+    /// draw code made of its own mesh is left out, which `snapshot.changed` warns of.
+    #[test]
+    fn nodes_draw_again_where_other_assets_were_added_and_code_s_draws_are_warned_of() {
+        let tri = |cx: &mut Context| {
+            let tri = cx.add_mesh("tri", &[[0.0f32; 3]; 3], &[0, 1, 2]);
+            tri.expect("a mesh")
+        };
+        let mut saved = Context::seeded(3);
+        let own = tri(&mut saved);
+        saved.load_named([Asset::Model("gg:cube")], false);
+        let cube = saved.world().assets().model("gg:cube").expect("loaded");
+        let root = cube.spawn(saved.world_mut(), Transform::IDENTITY);
+        let snapshot = |saved: &Context| {
+            let none = Open::default();
+            let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+            Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested").expect("read")
+        };
+        let nodes_only = snapshot(&saved);
+        let draw = MeshDraw::from_parts(own.index(), 0, false, false, &[]).expect("a draw");
+        let drawn = saved.world_mut().spawn((Transform::IDENTITY, draw));
+        let with_code = snapshot(&saved);
+
+        for (snapshot, warned) in [(nodes_only, 0), (with_code, 1)] {
+            let mut restored = Context::seeded(4);
+            let first = restored.add_mesh("first", &[[0.0f32; 2]; 3], &[0, 1, 2]);
+            first.expect("a mesh");
+            tri(&mut restored);
+            restored.load_restored(snapshot.added());
+            let logged = crate::testing::logged();
+            (snapshot.restore(restored.world_mut(), &[])).expect("restored");
+            let codes: Vec<String> = logged.codes.try_iter().collect();
+            let changed = codes.iter().filter(|&code| code == "snapshot.changed");
+            assert_eq!(changed.count(), warned, "{codes:?}");
+            assert!(
+                !codes.iter().any(|code| code == "snapshot.hash"),
+                "{codes:?}"
+            );
+            let world = restored.world_mut();
+            let anew = cube.spawn(world, Transform::IDENTITY);
+            let node_draw = |world: &World, root| {
+                let node = world.children(root).expect("alive").next().expect("a node");
+                world.get::<MeshDraw>(node).copied()
+            };
+            let theirs = node_draw(world, anew).expect("drawing");
+            assert_eq!(node_draw(world, root), Some(theirs), "this run's draw");
+            assert_ne!(
+                Some(theirs),
+                node_draw(saved.world(), root),
+                "indices shifted"
+            );
+            assert_eq!(world.get::<MeshDraw>(drawn), None);
+        }
     }
 
     /// What's opaque comes back though the snapshot's run drew a circle between two loads, which

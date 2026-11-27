@@ -128,7 +128,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Depth modes: draws that ignore it, skyboxes that test it, decals, alpha-cut sprites that write it | Each with its first user |
 | Lines with joins, circles by screen size; outlines of hidden parts, of hovers, of several entities, by jump flooding | Each with its first user |
 | Games' shaders: the view's size without parameters, GPU-table parameters past 64 bytes, data textures, wave ops, a fog module | A shader needs one |
-| `MeshDraw`'s mesh and shader by name: saved, hashed, set and restored as `Sprite.texture` is | A game builds its draws from data, or rebuilds that add assets lose draws (DEFECTS' Snapshots) |
+| `MeshDraw`'s mesh and shader by name: saved, hashed, set and restored as `Sprite.texture` is | A game builds its draws from data, or rebuilds that add assets lose draws code made (DEFECTS' Snapshots) |
 | Hot reload of the engine's own shaders | Work on them wants it |
 | `VK_KHR_pipeline_binary` (ash 0.38 lacks it); the pipeline cache saved as it fills, and pruned | ash gains it, crash restarts slow, or it grows |
 | Requiring Slang 2026.11 (SDK 1.4.363), dropping `decorate_non_uniform`; dev builds run away from their build's slangc | When required, or builds move |

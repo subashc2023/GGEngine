@@ -39,22 +39,33 @@ use crate::reflect::{Field, Ident, Meta as Hints, Shape, Type, Value};
 /// What a load changed to match the types as they are: each change once, with its count, for
 /// warnings about what a restart gave up.
 #[derive(Debug, Default)]
-pub(crate) struct Changes(BTreeMap<String, u64>);
+pub(crate) struct Changes {
+    noted: BTreeMap<String, u64>,
+    /// Models' nodes whose draws named other assets, given their parts' draws again. They draw as
+    /// before, so they aren't warned of, but where the world holds them can differ.
+    redrawn: u64,
+}
 
 impl Changes {
     pub(crate) fn note(&mut self, change: String) {
-        *self.0.entry(change).or_default() += 1;
+        *self.noted.entry(change).or_default() += 1;
     }
 
+    /// Whether the load changed nothing, so the world hashes as it was saved.
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.noted.is_empty() && self.redrawn == 0
     }
 
-    /// Each change with its count, in text order.
+    /// Each change to warn of with its count, in text order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, u64)> {
-        self.0
+        self.noted
             .iter()
             .map(|(change, &count)| (change.as_str(), count))
+    }
+
+    /// How many models' nodes took their parts' draws again.
+    pub(crate) fn redrawn(&self) -> u64 {
+        self.redrawn
     }
 }
 
@@ -245,7 +256,8 @@ impl World {
     ///   goes on without it.
     ///
     /// A component opaque as a whole is left out too, unless `opaque` says the process's layers
-    /// added the same assets in the same order, so its state names them. A resource is made by the
+    /// added the same assets in the same order, so its state names them. Models' nodes then take
+    /// their parts' draws again, unwarned ([`Changes::redrawn`]). A resource is made by the
     /// [`Saved`](super::Saved) type of its name, and left out if there's none. A held resource
     /// whose type the file lacks stays as the layers made it.
     ///
@@ -448,6 +460,8 @@ impl World {
         // Each table in place, empty ones too, so tables made later (of rows that lost a component)
         // come after.
         let mut changes = Changes::default();
+        // Opaque state left out as its indices would name other assets, or misread its bytes.
+        let mut unnamed: Vec<(Entity, ComponentId, &str)> = Vec::new();
         let mut mapped = Vec::with_capacity(tables.len());
         for table in &tables {
             let ids: Vec<Option<ComponentId>> = (table.types.iter())
@@ -481,11 +495,10 @@ impl World {
                             Some((_, state)) if opaque => column
                                 .push_opaque(state)
                                 .map_err(|error| format!("{error:#}")),
-                            // Its indices would name other assets, or misread its bytes.
-                            Some(_) => Err("the layers added other assets than the snapshot's \
-                                            run did, or in another order, so its entities draw \
-                                            nothing until `gg rebuild --fresh` makes them again"
-                                .to_owned()),
+                            Some(_) => {
+                                unnamed.push((entity, id, name));
+                                continue;
+                            }
                             None => Err("it's opaque, and keeps nothing".to_owned()),
                         }
                     } else {
@@ -576,9 +589,20 @@ impl World {
         }
         world.resources.keep(std::mem::take(&mut self.resources));
         // Models' nodes as kept, code's changes included, but not their draws: a run of other
-        // assets leaves those out, like other opaque state.
+        // assets leaves those out, like other opaque state, and they take their parts' again.
         if !opaque {
             world.redraw_nodes();
+        }
+        for (entity, id, name) in unnamed {
+            if world.has(entity, id) {
+                changes.redrawn += 1;
+            } else {
+                changes.note(format!(
+                    "`{name}`: the layers added other assets than the snapshot's run did, or in \
+                     another order, so it's left out: its entities lack it until code adds it \
+                     again, as `gg rebuild --fresh` does"
+                ));
+            }
         }
         *self = world;
         Ok(changes)
