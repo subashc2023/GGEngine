@@ -285,6 +285,8 @@ impl Render for Renderer {
             size,
             bytes: frame.pixels_new.then_some(&frame.pixel_bytes[..]),
         });
+        #[cfg(feature = "dev")]
+        let uploading = frame.uploads.uploads_assets();
         let data = RenderData {
             clear_color: frame.clear_color,
             tonemapper: frame.tonemapper,
@@ -330,6 +332,10 @@ impl Render for Renderer {
             pixels_per_point: frame.pixels_per_point,
         };
         let mut windows: Vec<_> = frame.windows.iter_mut().map(Drawn::ui).collect();
+        // New assets' uploads and their streaming take a development build seconds, as a large
+        // model's first frame does: `ping` says it's loading, not hung.
+        #[cfg(feature = "dev")]
+        let _loading = (uploading || !self.streaming().is_empty()).then(crate::api::loading);
         let presented = Renderer::render(self, data, ui, &mut windows);
         let rendered = matches!(presented, Ok(true));
         // Until a frame renders them, into a view with an area, the pixels stay new.

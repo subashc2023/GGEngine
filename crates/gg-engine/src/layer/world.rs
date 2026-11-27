@@ -72,6 +72,9 @@ impl Context {
     /// Outside the layers' attach and detach, as [`world_mut`](Self::world_mut) does.
     pub fn load_scene_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<Entity>> {
         let started = Instant::now();
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let path = path.as_ref();
         let text = crate::ecs::read_scene_from(path, &self.files)?;
         let mut loaded = self.world_mut().load_scene(&text);

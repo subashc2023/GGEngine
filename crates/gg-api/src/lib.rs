@@ -598,8 +598,9 @@ pub struct Welcome {
 ///
 /// `frames` stops counting if the main thread hangs. `waiting`: `minimized`, while the main window
 /// has no area; `dialog`, while a file dialog is open; `menu`, while Windows' window menu is;
-/// `breakpoint`, while a script has stopped (`debug`), which comes first as it holds the main
-/// thread whatever else frames wait for.
+/// `loading`, while it loads a scene file or assets, or uploads new ones to the GPU, if nothing
+/// else holds; `breakpoint`, while a script has stopped (`debug`), which comes
+/// first as it holds the main thread whatever else frames wait for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pulse {
     pub frames: u64,

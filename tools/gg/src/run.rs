@@ -87,8 +87,12 @@ pub(crate) struct Check {
 }
 
 /// How long a game has to run its first frame, unless it waits for the user, before it's hung: a
-/// debug build loading much takes a while.
+/// debug build loading much takes a while. A load later, which `ping` says is `loading`, gets as
+/// long.
 const STARTUP: Duration = Duration::from_secs(120);
+
+/// What `ping` says while the game loads a scene file, a scene's assets or a model.
+const LOADING: &str = "loading";
 
 const PING: Duration = Duration::from_secs(1);
 
@@ -461,6 +465,8 @@ struct Game {
     pinged: Instant,
     /// What frames had paused for at the last ping answered.
     waiting: Option<String>,
+    /// When it was first seen loading, while it is ([`going_on`]).
+    loading: Option<Instant>,
     /// When it was last asked for a snapshot, or its first frame was seen: the first snapshot
     /// comes an interval of running after the start, so a game that soon ends the same way
     /// doesn't restart from a snapshot of that end.
@@ -691,6 +697,7 @@ impl Supervisor<'_> {
             moved: now,
             pinged: now,
             waiting: None,
+            loading: None,
             snapped: now,
             snapshotted: false,
             snapshotting: None,
@@ -739,7 +746,8 @@ impl Supervisor<'_> {
         if self.restarts
             && game.frames > 0
             && game.snapshotting.is_none()
-            && game.waiting.is_none()
+            // A load's snapshot waits for it: a game streaming as it plays may load often.
+            && (game.waiting.as_deref()).is_none_or(|waiting| waiting == LOADING)
             && game.snapped.elapsed() >= self.run.snapshot
         {
             game.snapped = Instant::now();
@@ -752,7 +760,8 @@ impl Supervisor<'_> {
         game.pinged = Instant::now();
         // A ping that fails counts as frames that stopped.
         if let Some(pulse) = ping(&mut game.client, session) {
-            if pulse.frames != game.frames || pulse.waiting.is_some() {
+            let most = self.run.hang.map_or(STARTUP, |hang| STARTUP.max(hang));
+            if going_on(&pulse, game.frames, &mut game.loading, most, Instant::now()) {
                 if game.frames == 0 {
                     game.snapped = Instant::now();
                 }
@@ -765,7 +774,7 @@ impl Supervisor<'_> {
         let Some(hang) = self.run.hang else {
             return Ok(None);
         };
-        let limit = if game.frames == 0 { STARTUP } else { hang };
+        let limit = hang_limit(game.frames, hang);
         if game.moved.elapsed() <= limit {
             return Ok(None);
         }
@@ -1278,6 +1287,31 @@ fn holding(client: &mut Option<Client>, session: &Session) -> Option<String> {
         .then_some(waiting)
 }
 
+/// Whether `pulse`, answered at `now`, shows a game that had run `frames` frames going on: running
+/// more, waiting for the user, or loading for at most `most` since `loading`, when it was first
+/// seen loading, which this keeps. A load isn't the user's doing: one that outlasts `most` is
+/// stopped frames, and so a hang once they outlast [`hang_limit`]. Each pulse while it loads
+/// counts as a move, so the frame that follows has the whole limit.
+fn going_on(
+    pulse: &Pulse,
+    frames: u64,
+    loading: &mut Option<Instant>,
+    most: Duration,
+    now: Instant,
+) -> bool {
+    let loads = pulse.waiting.as_deref() == Some(LOADING);
+    *loading = loads.then(|| loading.unwrap_or(now));
+    let waits = pulse.waiting.is_some() && !loads;
+    let within = loading.is_some_and(|since| now.duration_since(since) <= most);
+    pulse.frames != frames || waits || within
+}
+
+/// How long frames may stop before a game is hung, given `hang`: [`STARTUP`], if longer, before its
+/// first frame (`frames` 0).
+fn hang_limit(frames: u64, hang: Duration) -> Duration {
+    if frames == 0 { STARTUP.max(hang) } else { hang }
+}
+
 /// The game's pulse through `client`, reconnected once it breaks; `None` if no answer in time.
 fn ping(client: &mut Option<Client>, session: &Session) -> Option<Pulse> {
     if client.is_none() {
@@ -1526,6 +1560,48 @@ mod tests {
         assert_ne!(session_code(), session_code());
     }
 
+    /// A game goes on while its frames count or it waits for the user, and while it loads, until
+    /// the load outlasts its most: then its stopped frames count toward a hang. A pulse after a
+    /// load, frames not yet counted on, finds it went on a moment ago. Before its first frame it
+    /// has [`STARTUP`], or `--hang`'s if longer.
+    #[test]
+    fn a_game_goes_on_while_it_loads_for_as_long_as_a_start() {
+        let pulse = |frames, waiting: Option<&str>| Pulse {
+            frames,
+            waiting: waiting.map(str::to_owned),
+        };
+        let (start, most) = (Instant::now(), STARTUP);
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut loading = None;
+        let mut going = |frames, waiting, seconds| {
+            going_on(&pulse(frames, waiting), 10, &mut loading, most, at(seconds))
+        };
+        assert!(going(11, None, 0));
+        assert!(!going(10, None, 1));
+        assert!(going(10, Some("dialog"), 2));
+        assert!(going(10, Some("breakpoint"), 3));
+        assert!(going(10, Some(LOADING), 4));
+        assert!(going(10, Some(LOADING), 4 + 120));
+        assert!(
+            !going(10, Some(LOADING), 4 + 121),
+            "the load outlasted its most"
+        );
+        assert!(!going(10, None, 130));
+        assert!(going(10, Some(LOADING), 131), "a new load");
+        assert!(
+            !going(10, None, 132),
+            "the frame after it hasn't counted yet"
+        );
+        assert_eq!(loading, None);
+        let hang = Duration::from_secs(10);
+        assert_eq!(hang_limit(10, hang), hang);
+        assert_eq!(hang_limit(0, hang), STARTUP);
+        assert_eq!(
+            hang_limit(0, Duration::from_secs(300)),
+            Duration::from_secs(300)
+        );
+    }
+
     #[test]
     fn restarts_are_off_for_runs_without_snapshots_or_the_api_or_that_record() {
         assert!(run(&["--vsync", "--recorded"], 5).restarts());
@@ -1598,6 +1674,7 @@ mod tests {
             moved: now,
             pinged: now,
             waiting: None,
+            loading: None,
             snapped: now,
             snapshotted: false,
             snapshotting: None,
@@ -1919,6 +1996,7 @@ mod tests {
             moved: now,
             pinged: now,
             waiting: None,
+            loading: None,
             snapped: now,
             snapshotted: false,
             snapshotting: Some(thread::spawn(move || Ok(taken))),

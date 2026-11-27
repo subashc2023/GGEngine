@@ -429,15 +429,31 @@ fn a_connection_says_hello_with_the_token_and_pings_without_frames() {
     let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
     assert_eq!(client.welcome().app, "Api Hello");
     let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
-    let still = Pulse {
-        frames: 0,
-        waiting: None,
-    };
-    assert_eq!(pulse, still);
+    // Another test's load may say `loading`: loads are the process's.
+    assert_eq!(pulse.frames, 0);
+    assert_ne!(pulse.waiting.as_deref(), Some("menu"));
     let waiting = super::super::waiting(Waiting::Menu);
     let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
     assert_eq!(pulse.waiting.as_deref(), Some("menu"));
     drop(waiting);
+}
+
+/// `ping` says `loading` while a load is under way, on any thread, as the render thread's uploads
+/// are; a wait that's the user's doing comes first.
+#[test]
+fn ping_says_loading_while_a_load_is_under_way() {
+    let _waits = waits();
+    let (_api, session) = started("Api Loading");
+    let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
+    let loads = std::thread::spawn(super::super::loading)
+        .join()
+        .expect("a load");
+    let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
+    assert_eq!(pulse.waiting.as_deref(), Some("loading"));
+    let menu = super::super::waiting(Waiting::Menu);
+    let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
+    assert_eq!(pulse.waiting.as_deref(), Some("menu"));
+    drop((menu, loads));
 }
 
 /// `hello` grants a connection its capabilities: its thread refuses requests beyond them with
@@ -730,6 +746,7 @@ struct Debugged {
 /// main thread waits in the tick), steps a line, clears it and resumes. Wrong requests get a code.
 #[test]
 fn a_client_debugs_a_script_while_the_game_waits_at_its_stop() {
+    let _waits = waits();
     let (mut api, session) = started("Api Debug");
     let dir = Scratch::new("api-debug");
     let (mut cx, mut host) = counting(&api, &dir);
@@ -746,7 +763,6 @@ fn a_client_debugs_a_script_while_the_game_waits_at_its_stop() {
         let stepped = debug(json!({"action": "step_over", "wait_ms": 10_000}));
         let none = json!({"script": "scripts/count.luau", "lines": []});
         let gone_on = debug(json!({"breakpoints": none, "action": "continue"}));
-    let _waits = waits();
         let refused = [
             json!({"action": "continue"}),
             json!({"breakpoints": {"script": "", "lines": [1]}}),
@@ -848,6 +864,7 @@ struct Unattended {
 /// it waits, frames count on, and a continue says why nothing has stopped.
 #[test]
 fn a_stop_no_client_asks_about_goes_on_with_its_breakpoints_cleared() {
+    let _waits = waits();
     let (mut api, session) = started("Api Unattended");
     api.debugger().lease(Duration::from_millis(300));
     let dir = Scratch::new("api-unattended");
@@ -864,7 +881,6 @@ fn a_stop_no_client_asks_about_goes_on_with_its_breakpoints_cleared() {
         let after = client.call_as("debug", json!({})).expect("an answer");
         let go_on = json!({"action": "continue"});
         let refused = client.call("debug", go_on).expect_err("refused");
-    let _waits = waits();
         Unattended {
             stopped,
             pulse,
@@ -888,7 +904,8 @@ fn a_stop_no_client_asks_about_goes_on_with_its_breakpoints_cleared() {
     let stop = got.stopped.stopped.expect("stopped");
     assert_eq!((stop.number, stop.frames[0].line), (1, 4));
     assert_eq!(got.pulse.waiting.as_deref(), Some("breakpoint"));
-    assert_eq!(got.later.waiting, None);
+    // Another test's load may say `loading`: loads are the process's.
+    assert_ne!(got.later.waiting.as_deref(), Some("breakpoint"));
     assert!(got.later.frames > got.pulse.frames, "frames count on");
     assert_eq!((got.after.stopped, got.after.stops), (None, 1));
     assert!(got.after.breakpoints.is_empty());

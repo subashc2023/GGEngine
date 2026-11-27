@@ -408,6 +408,36 @@ impl Waiting {
     }
 }
 
+/// How many loads are under way, on any thread: `ping` says `loading` while no [`Waiting`] holds.
+#[cfg(feature = "dev")]
+static LOADS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Says the game loads until the result drops: a scene file or an asset a layer adds, a scene's
+/// assets, or the render thread's uploads of new ones, which a development build can take seconds
+/// over. `ping` says `loading`, and `gg run` gives the game longer before it has hung.
+#[cfg(feature = "dev")]
+pub(crate) fn loading() -> Loads {
+    LOADS.fetch_add(1, Ordering::Relaxed);
+    Loads(())
+}
+
+/// Whether a load is under way ([`loading`]).
+#[cfg(feature = "dev")]
+pub(crate) fn loads() -> bool {
+    LOADS.load(Ordering::Relaxed) > 0
+}
+
+/// [`loading`]'s guard.
+#[cfg(feature = "dev")]
+pub(crate) struct Loads(());
+
+#[cfg(feature = "dev")]
+impl Drop for Loads {
+    fn drop(&mut self) {
+        LOADS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Says frames have paused for `waiting` until the result drops, which restores the previous value.
 pub(crate) fn waiting(waiting: Waiting) -> Waited {
     Waited(WAITING.swap(waiting as u8, Ordering::Relaxed))

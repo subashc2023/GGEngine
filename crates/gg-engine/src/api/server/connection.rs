@@ -235,9 +235,10 @@ fn connection(
             // minimized, when it otherwise answers between frames.
             let stopped = shared.debugger.stopped().then_some("breakpoint");
             let waiting = || Waiting::now().map(Waiting::name);
+            let loading = || super::super::loads().then_some("loading");
             let pulse = Pulse {
                 frames: shared.frames.load(Ordering::Relaxed),
-                waiting: stopped.or_else(waiting).map(str::to_owned),
+                waiting: stopped.or_else(waiting).or_else(loading).map(str::to_owned),
             };
             reply.result(&pulse);
             continue;

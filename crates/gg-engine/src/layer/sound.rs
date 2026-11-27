@@ -34,6 +34,9 @@ impl Context {
     /// 16 MiB, doesn't decode, or decodes past 2²⁴ frames (some 6 minutes at 48 kHz), refused as
     /// it passes. Longer audio is music, which [`add_music`](Self::add_music) streams.
     pub fn add_sound(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Sound> {
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let path = path.as_ref();
         let file = self.files.file_of(path);
         if let Some(&sound) = file.as_ref().and_then(|file| self.loaded.sounds.get(file)) {
@@ -86,6 +89,9 @@ impl Context {
     /// and length and holds a frame whose first packet decodes. Later packets decode as it plays:
     /// a failure there warns `audio.music_failed` and stops it.
     pub fn add_music(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Music> {
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let path = path.as_ref();
         let file = self.files.file_of(path);
         if let Some(&music) = file.as_ref().and_then(|file| self.loaded.music.get(file)) {

@@ -94,7 +94,8 @@ ends when gg does, however gg ends. A second `run` of PACKAGE is refused (`gg.ru
   --release             Optimized, which no patch reaches
   --no-patch            No patches, no watching: a rebuild of the executable restarts it (`rebuilt`)
   --hang <SECONDS>      Frames stopped this long (10), while the game waits for nothing the user
-                        does, are a hang: gg ends it. The first frame gets 120 s. 0: never hung
+                        does, are a hang: gg ends it. The first frame, and a load of a scene or
+                        assets (`ping` says `loading`), get 120 s, or SECONDS if longer. 0: never
   --snapshot <SECONDS>  Snapshot the world this often (5) from the first frame. 0: no restarts
   --peers 2             A lockstep host (`--host`) and joiner (`--join`) from one build, at a free
                         loopback port, with a `--code` gg makes; each `started` names its `player`.

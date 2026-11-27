@@ -316,6 +316,9 @@ impl Context {
         text: &str,
         stand_in: bool,
     ) -> Result<Vec<String>> {
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let mut missing = Vec::new();
         // Again while a prefab loads, whose text may name more; each pass loads one more at least.
         loop {

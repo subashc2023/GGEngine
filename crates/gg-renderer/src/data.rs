@@ -96,6 +96,11 @@ impl Uploads {
         self.materials.append(&mut materials.changes);
     }
 
+    /// Whether it adds or changes meshes or textures, whose uploads a frame writes before drawing.
+    pub fn uploads_assets(&self) -> bool {
+        !self.meshes.is_empty() || !self.textures.is_empty()
+    }
+
     /// Takes what's changed in `scene` since last taken, after what it holds. A frame writes it to
     /// the GPU before drawing the scene, so one that doesn't render leaves it for the next.
     pub fn take_scene(&mut self, scene: &mut Scene) {

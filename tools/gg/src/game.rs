@@ -309,8 +309,8 @@ pub(crate) fn joined(answers: &[Box<RawValue>]) -> String {
 }
 
 /// `failure`, `method`'s, with what the game waits for (its `ping` says, on a new connection) if
-/// it's `api.timeout` and a stopped script, file dialog or window menu holds the main thread,
-/// not a hang; else as it is.
+/// it's `api.timeout` and a stopped script, file dialog, window menu or load holds the main
+/// thread, not a hang; else as it is.
 pub(crate) fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
     if failure.code != "api.timeout" {
         return failure;
@@ -323,6 +323,10 @@ pub(crate) fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
         }
         Some("dialog") => "it waits for a file dialog to close",
         Some("menu") => "it waits for its window menu to close",
+        Some("loading") => {
+            "it's loading a scene, a model or other assets, which a development build may take \
+             seconds over; `gg wait` waits for it"
+        }
         _ => return failure,
     };
     let message = format!(

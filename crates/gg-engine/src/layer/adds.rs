@@ -133,6 +133,9 @@ impl Context {
     /// - `renderer.too_many_textures` past the 61,440 a renderer holds, the engine's white one
     ///   among them.
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
         let file = self.files.file_of(path);
@@ -338,6 +341,9 @@ impl Context {
     /// - `renderer.too_many_textures` if the renderer hasn't room for its images.
     pub fn add_model(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Model> {
         let zone = gg_core::zone!();
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let path = path.as_ref();
         zone.text(path.display());
         let named = assets::name_of(self.root.as_deref(), path);
@@ -619,6 +625,9 @@ impl Context {
     ///   don't fit a field of 8,192 texels square, alone or together.
     /// - `renderer.too_many_textures` if the renderer hasn't room for its field.
     pub fn add_font(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Font> {
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
         let file = self.files.file_of(path);
@@ -684,6 +693,9 @@ impl Context {
     /// Fails with `engine.bad_prefab` if the file can't be read, isn't a regular file, is over
     /// 16 MiB, isn't UTF-8, or isn't a scene's RON as far as its syntax and entity IDs go.
     pub fn add_prefab(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Prefab> {
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
         let file = self.files.file_of(path);
@@ -753,6 +765,9 @@ impl Context {
     /// - `renderer.too_many_textures` if the renderer hasn't room for the texture rounded corners
     ///   are cut from, which the first UI adds.
     pub fn add_ui(&mut self, name: &str, path: impl AsRef<Path>) -> Result<GameUi> {
+        // `ping` says so, so `gg run` gives the load longer than a hang.
+        #[cfg(feature = "dev")]
+        let _loading = crate::api::loading();
         let path = path.as_ref();
         let path = match path.to_str().filter(|given| assets::is_id(given)) {
             Some(id) => {
