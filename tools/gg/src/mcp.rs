@@ -235,10 +235,15 @@ const TOOLS: &[Tool] = &[
                       does, its `reload` the rebuild. Fails with `gg.build_failed` and rustc's \
                       errors if it doesn't build (the game runs its old code), `gg.no_rebuild` if \
                       the run doesn't build the game itself (`--no-patch`, or restarts off), \
-                      `gg.waiting` if the game ended as it started again, or `gg.timeout`.",
+                      `gg.waiting` if the game ended as it started again, or `gg.timeout`. With \
+                      `fresh`, the game starts afresh instead, its layers' `attach` building the \
+                      world again: for an edit in `attach` (`gg.attach_changed`). The world's \
+                      state is lost.",
         properties: || {
             json!({"timeout_s": {"type": "integer", "minimum": 1, "default": 300,
-                                 "description": "How long to wait, in seconds"}})
+                                 "description": "How long to wait, in seconds"},
+                   "fresh": {"type": "boolean", "default": false,
+                             "description": "Start the game afresh, not from a snapshot"}})
         },
         required: &[],
     },
@@ -1362,7 +1367,17 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
             let timeout = Duration::from_secs(timeout);
             let told = match name {
                 "wait" => runs::wait(pick, timeout)?,
-                _ => runs::rebuild(pick, timeout)?,
+                _ => {
+                    let fresh = match arguments.get("fresh") {
+                        None | Some(Value::Null) => false,
+                        Some(Value::Bool(fresh)) => *fresh,
+                        Some(given) => {
+                            let message = format!("`fresh` is true or false, not {given}");
+                            return Err(Failure::new("gg.args", message));
+                        }
+                    };
+                    runs::rebuild(pick, timeout, fresh)?
+                }
             };
             Ok(Ran::Json(told.to_string()))
         }

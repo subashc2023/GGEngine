@@ -193,8 +193,8 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
   before, matching changed components by field name, a new field taking its default. Such changes
   include a new field (even of a type declared in a function body) or component, an engine edit, or
   an edit to `main`, `load` or `restored`, which ran before any patch could. An edit inside
-  `attach` is patched, but restarts start from snapshots, so only a fresh run shows it
-  (`gg.attach_changed`).
+  `attach` is patched, but restarts start from snapshots, so it shows once `gg rebuild --fresh`
+  starts the game afresh (`gg.attach_changed`).
   Without `dx`, every change rebuilds and restarts the game.
 - **Luau, in every build, for mods and quick scripts.** Players install sandboxed mods, and quests,
   dialogue and level events reload in milliseconds. A script file declares one component, its

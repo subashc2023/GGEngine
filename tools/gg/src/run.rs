@@ -17,7 +17,7 @@ use gg_api::{Client, Failure, Pulse, Session, Snapshot, Snapshotted};
 use serde_json::{Value, json};
 
 use crate::patch::{Patches, Process, Watcher};
-use crate::runs::{self, State, Told};
+use crate::runs::{self, Asked, State, Told};
 use crate::{Scope, build, game, settings};
 
 /// What `gg run` runs. `hang`: how long frames may stop before the game has hung, `None` for as
@@ -269,8 +269,15 @@ fn first_build(run: &Run, told: &Told, closed: Option<&AtomicBool>) -> Result<Fi
     loop {
         let failure = match Patches::new(run) {
             Ok(patches) => {
+                // The game's first start is afresh, as `gg rebuild --fresh` asks.
                 if let Some(asked) = asked {
-                    told.answer(asked, None);
+                    told.answer(
+                        Asked {
+                            fresh: true,
+                            ..asked
+                        },
+                        None,
+                    );
                 }
                 return Ok(First::Built(patches.map(Box::new)));
             }
@@ -510,17 +517,22 @@ impl Supervisor<'_> {
                 event(&json!({"event": "closed", "why": CLOSED}));
                 happened = Some((0, Happened::Closed));
             } else if happened.is_none() && rebuilt {
-                happened = Some((0, Happened::Rebuilt));
+                let fresh = self
+                    .patches
+                    .as_ref()
+                    .is_some_and(|patches| patches.afresh());
+                happened = Some((0, Happened::Rebuilt { fresh }));
             }
             let Some((ended, happened)) = happened else {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             };
             // The rest stop, snapshotted first so they restart with the one that ended; on
-            // `Closed` all stop, unsnapshotted.
-            let all = matches!(happened, Happened::Rebuilt | Happened::Closed);
-            let snapshot = !matches!(happened, Happened::Closed);
-            let stopping = if matches!(happened, Happened::Rebuilt) {
+            // `Closed` all stop, unsnapshotted, as they do to start afresh.
+            let all = matches!(happened, Happened::Rebuilt { .. } | Happened::Closed);
+            let afresh = matches!(happened, Happened::Rebuilt { fresh: true });
+            let snapshot = !afresh && !matches!(happened, Happened::Closed);
+            let stopping = if matches!(happened, Happened::Rebuilt { .. }) {
                 "restarting"
             } else {
                 "stopping"
@@ -537,6 +549,13 @@ impl Supervisor<'_> {
             games.clear();
             match next(happened, self.peers[ended].latest.as_ref(), self.restarts) {
                 Next::Start(from) => {
+                    if afresh {
+                        // So a later restart can't take the old world back.
+                        for them in &mut self.peers {
+                            them.latest = None;
+                            let _ = fs::remove_file(&them.snapshot);
+                        }
+                    }
                     let froms = (self.peers.iter().enumerate()).map(|(peer, them)| {
                         if peer == ended {
                             from.clone()
@@ -968,8 +987,9 @@ enum Happened {
     },
     /// It refused the snapshot it started from.
     Refused,
-    /// Its executable was rebuilt, and its process, if any, stopped.
-    Rebuilt,
+    /// Its executable was rebuilt, and its process, if any, stopped; `fresh` if
+    /// `gg rebuild --fresh` asked to start it afresh, so it stopped unsnapshotted.
+    Rebuilt { fresh: bool },
     /// gg's stdin closed (the embedding tool ended), and its processes stopped.
     Closed,
 }
@@ -995,7 +1015,8 @@ enum Next {
 ///   past the start). Else it would likely end the same way, so it waits for a rebuild.
 /// - A game none of whose processes has served the API can't be snapshotted, nor told from one
 ///   that never will (given an argument it doesn't take, which no rebuild changes): the run ends.
-/// - A rebuild restarts from the latest snapshot, the one taken as it stopped if that succeeded.
+/// - A rebuild restarts from the latest snapshot, the one taken as it stopped if that succeeded;
+///   one `gg rebuild --fresh` asked for starts afresh.
 /// - A refused snapshot starts afresh.
 fn next(happened: Happened, latest: Option<&Snapshotted>, restarts: bool) -> Next {
     match happened {
@@ -1008,7 +1029,8 @@ fn next(happened: Happened, latest: Option<&Snapshotted>, restarts: bool) -> Nex
             Next::Wait("restored from a snapshot, it ended before taking another")
         }
         Happened::Failed { .. } => Next::Wait("it ended before its first snapshot"),
-        Happened::Rebuilt => Next::Start(latest.cloned()),
+        Happened::Rebuilt { fresh: true } => Next::Start(None),
+        Happened::Rebuilt { fresh: false } => Next::Start(latest.cloned()),
         Happened::Refused => Next::Start(None),
     }
 }
@@ -2000,9 +2022,11 @@ mod tests {
         }
         // The tool an embedded run is for ending ends it cleanly.
         assert_eq!(next(Happened::Closed, Some(&latest), true), Next::End(true));
-        // A rebuild starts from the latest, or afresh if none; a refusal, afresh.
-        assert_eq!(next(Happened::Rebuilt, Some(&latest), true), from_latest);
-        assert_eq!(next(Happened::Rebuilt, None, true), Next::Start(None));
+        // A rebuild starts from the latest, or afresh if none or asked to; a refusal, afresh.
+        let rebuilt = |fresh| Happened::Rebuilt { fresh };
+        assert_eq!(next(rebuilt(false), Some(&latest), true), from_latest);
+        assert_eq!(next(rebuilt(false), None, true), Next::Start(None));
+        assert_eq!(next(rebuilt(true), Some(&latest), true), Next::Start(None));
         assert_eq!(
             next(Happened::Refused, Some(&latest), true),
             Next::Start(None)

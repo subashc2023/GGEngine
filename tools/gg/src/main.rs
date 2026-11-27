@@ -113,14 +113,14 @@ Restarts, from the last snapshot: after a crash or a hang; after a rebuild (`reb
 snapshot taken in the same request as the quit, so no edit is lost between them; and at once
 (`killed`, with what it waits for) for a game waiting where it can't answer: at a script's
 breakpoint, in a file dialog or in the window menu. A game that ends before its first snapshot
-waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`).
-`snapshot_failed` says why one fails; a game that hasn't ticked since it started refuses one, and
-the next is asked for quietly. Pauses and stops last across restarts. Only the world, its entities'
-components, survives; a layer's own fields and statics start over, and what `input` held down is
-up. A value the code put in a component, as a shot's speed in its velocity, keeps the old
-constant's. A field a rebuild adds takes its
-default, the game warning `snapshot.changed`. A layer's `load` makes its assets; its `attach`, which
-a restart skips, builds the world.
+waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`). So does a
+rebuild `gg rebuild --fresh` asks for. `snapshot_failed` says why one fails; a game that hasn't
+ticked since it started refuses one, and the next is asked for quietly. Pauses and stops last
+across restarts. Only the world, its entities' components, survives; a layer's own fields and
+statics start over, and what `input` held down is up. A value the code put in a component, as a
+shot's speed in its velocity, keeps the old constant's. A field a rebuild adds takes its default,
+the game warning `snapshot.changed`. A layer's `load` makes its assets; its `attach`, which a
+restart skips, builds the world.
 
 `run` ends as the game comes to its own end (its window closes, `quit` asks or its frames run out),
 whatever its status; as a game that never served the API ends; and, with restarts off
@@ -150,8 +150,8 @@ with, and the workspace's manifest and lock file (`watching`). Then:
   that code uses, or to a `use` of a name used outside function bodies or by that code; and any
   change after a failed rebuild;
 - an edit inside a layer's `attach`, or to a `const` or `use` it uses, patches (`patched` names the
-  edited module in `attach`), the game warning `gg.attach_changed`. It shows only in a run started
-  afresh, as restarts keep the world.
+  edited module in `attach`), the game warning `gg.attach_changed`. Restarts keep the world, so it
+  shows once `gg rebuild --fresh` starts the game afresh.
   `gg scene open <SCENE> --discard` reloads the open scene's entities from its file, a fresh world
   without a new run; entities the game's code made stay.
 A game waiting for a rebuild gets one at any change; a restarted one gets the edits since its build
@@ -290,7 +290,7 @@ apply, a script's error. Fails with:
             },
             Help {
                 name: "rebuild",
-                usage: "rebuild [--timeout <SECONDS>]",
+                usage: "rebuild [--fresh] [--timeout <SECONDS>]",
                 summary: "Rebuild the game under `gg run` and start it again from a snapshot",
                 details: "\
 For an edit patched in that the game won't run again: in a function only `main`, a layer's `load` or
@@ -298,7 +298,11 @@ For an edit patched in that the game won't run again: in a function only `main`,
 `run` takes the request at once. Once no patch or build is under way, it rebuilds with every edit
 saved (`rebuilding`, why `` `gg rebuild` asked ``) and restarts the game, as an edit no patch
 carries does. Then `rebuild` waits at most `--timeout` (300 s) for the game to run the new build,
-and prints what `gg wait` does. Fails with:
+and prints what `gg wait` does.
+
+`--fresh` starts the game afresh instead, its layers' `attach` building the world again: for an
+edit in `attach` (`gg.attach_changed`). The world's state, and the edits made to it, are lost.
+Peers start afresh together. Fails with:
 - `gg.build_failed` and rustc's errors, if the rebuild fails; the game runs on as it was;
 - `gg.no_rebuild`, if the run doesn't build the game itself: with `--no-patch`, or restarts off;
 - `gg.waiting`, if the game ended as it started again;
@@ -937,8 +941,9 @@ enum Command {
     Mcp(Pick),
     /// Waits, at most the time given, until the picked `gg run` runs the saved edits' code.
     Wait(Pick, Duration),
-    /// Has the picked `gg run` rebuild the game, waiting at most the time given for it to run.
-    Rebuild(Pick, Duration),
+    /// Has the picked `gg run` rebuild the game, waiting at most the time given for it to run;
+    /// started afresh if `true`.
+    Rebuild(Pick, Duration, bool),
 }
 
 fn main() -> ExitCode {
@@ -999,10 +1004,12 @@ fn main() -> ExitCode {
             print(&told.to_string());
             true
         }),
-        Command::Rebuild(pick, timeout) => runs::rebuild(&pick, timeout).map(|told| {
-            print(&told.to_string());
-            true
-        }),
+        Command::Rebuild(pick, timeout, fresh) => {
+            runs::rebuild(&pick, timeout, fresh).map(|told| {
+                print(&told.to_string());
+                true
+            })
+        }
     };
     match done {
         Ok(true) => ExitCode::SUCCESS,
@@ -1453,9 +1460,10 @@ fn control_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             Command::Wait(parsed.pick()?, timeout)
         }
         "rebuild" => {
-            parsed.positional(0, 0, "rebuild [--timeout <SECONDS>]")?;
+            parsed.positional(0, 0, "rebuild [--fresh] [--timeout <SECONDS>]")?;
             let timeout = parsed.seconds("--timeout", 300)?;
-            Command::Rebuild(parsed.pick()?, timeout)
+            let fresh = parsed.switch("--fresh");
+            Command::Rebuild(parsed.pick()?, timeout, fresh)
         }
         "step" => {
             let ticks = parsed.positional(0, 1, "step [N]")?;
@@ -1925,15 +1933,21 @@ mod tests {
             panic!("a wait");
         };
         assert_eq!((pick.pid, timeout), (Some(7), Duration::from_secs(5)));
-        let Ok(Command::Rebuild(pick, timeout)) = parsed(&["rebuild"]) else {
+        let Ok(Command::Rebuild(pick, timeout, fresh)) = parsed(&["rebuild"]) else {
             panic!("a rebuild");
         };
-        assert_eq!((pick.pid, timeout), (None, Duration::from_secs(300)));
-        let Ok(Command::Rebuild(pick, timeout)) = parsed(&["--pid", "7", "rebuild", "--timeout=9"])
-        else {
+        assert_eq!(
+            (pick.pid, timeout, fresh),
+            (None, Duration::from_secs(300), false)
+        );
+        let given = parsed(&["--pid", "7", "rebuild", "--fresh", "--timeout=9"]);
+        let Ok(Command::Rebuild(pick, timeout, fresh)) = given else {
             panic!("a rebuild");
         };
-        assert_eq!((pick.pid, timeout), (Some(7), Duration::from_secs(9)));
+        assert_eq!(
+            (pick.pid, timeout, fresh),
+            (Some(7), Duration::from_secs(9), true)
+        );
     }
 
     #[test]
@@ -2452,6 +2466,7 @@ mod tests {
             &["wait", "--follow"],
             &["rebuild", "now"],
             &["rebuild", "--timeout", "0"],
+            &["rebuild", "--fresh=yes"],
             &["run"],
             &["run", "a", "b"],
             &["run", "a", "--snapshot", "often"],

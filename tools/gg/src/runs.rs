@@ -87,9 +87,28 @@ fn quit_path(told: &Path) -> PathBuf {
 }
 
 /// The file through which `gg rebuild` asks the run whose file is `told` to rebuild the game
-/// ([`rebuild`]), holding its process ID as [`quit_path`]'s does.
-fn rebuild_path(told: &Path) -> PathBuf {
-    told.with_extension("rebuild")
+/// ([`rebuild`]), holding its process ID as [`quit_path`]'s does; `fresh`, to start it afresh too.
+/// Two files, so neither request overwrites the other.
+fn rebuild_path(told: &Path, fresh: bool) -> PathBuf {
+    told.with_extension(if fresh { "fresh" } else { "rebuild" })
+}
+
+/// A `gg rebuild` the run took: when (ms since the epoch), and whether it asked to start the game
+/// afresh. Requests taken together are one: the latest time, afresh if any asked to be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Asked {
+    pub(crate) at: u64,
+    pub(crate) fresh: bool,
+}
+
+impl Asked {
+    /// This and `other`, as one request.
+    pub(crate) fn and(self, other: Asked) -> Asked {
+        Asked {
+            at: self.at.max(other.at),
+            fresh: self.fresh || other.fresh,
+        }
+    }
 }
 
 /// Milliseconds since the Unix epoch, the file's unit.
@@ -170,24 +189,30 @@ impl Told {
     }
 
     /// When `gg rebuild` asked this run to rebuild the game ([`rebuild`]), if it did: now, as the
-    /// request is taken (ms since the epoch). The request was written before, so every `gg
-    /// rebuild` that asked by then is answered by a rebuild started after.
-    pub(crate) fn asked_to_rebuild(&self) -> Option<u64> {
-        let at = rebuild_path(&self.path);
-        let asked = fs::read_to_string(&at).is_ok_and(|gg| gg.trim() == self.gg.to_string());
-        asked.then(|| {
-            let _ = fs::remove_file(&at);
-            now_ms()
+    /// requests are taken (ms since the epoch), afresh if one asked. Each was written before, so
+    /// every `gg rebuild` that asked by then is answered by a rebuild started after.
+    pub(crate) fn asked_to_rebuild(&self) -> Option<Asked> {
+        let [rebuild, fresh] = [false, true].map(|fresh| {
+            let at = rebuild_path(&self.path, fresh);
+            let asked = fs::read_to_string(&at).is_ok_and(|gg| gg.trim() == self.gg.to_string());
+            if asked {
+                let _ = fs::remove_file(&at);
+            }
+            asked
+        });
+        (rebuild || fresh).then(|| Asked {
+            at: now_ms(),
+            fresh,
         })
     }
 
-    /// Answers the `gg rebuild`s whose requests were taken by `asked` (ms since the epoch): with
-    /// the rebuild's failure, or `None` once it succeeded.
-    pub(crate) fn answer(&self, asked: u64, failure: Option<&Failure>) {
+    /// Answers the `gg rebuild`s whose requests were taken by `asked`: with the rebuild's failure,
+    /// or `None` once it succeeded. One that asked to start afresh waits for an answer that did.
+    pub(crate) fn answer(&self, asked: Asked, failure: Option<&Failure>) {
         let error =
             failure.map(|failure| json!({"code": failure.code, "message": failure.message}));
         if let Ok(mut told) = self.shared.lock() {
-            told["rebuild"] = json!({"asked": asked, "error": error});
+            told["rebuild"] = json!({"asked": asked.at, "fresh": asked.fresh, "error": error});
         }
     }
 }
@@ -200,7 +225,8 @@ impl Drop for Told {
         }
         let _ = fs::remove_file(&self.path);
         let _ = fs::remove_file(quit_path(&self.path));
-        let _ = fs::remove_file(rebuild_path(&self.path));
+        let _ = fs::remove_file(rebuild_path(&self.path, false));
+        let _ = fs::remove_file(rebuild_path(&self.path, true));
     }
 }
 
@@ -433,7 +459,8 @@ fn found(target: &Path, pick: &Pick, start: Instant, timeout: Duration) -> Resul
 }
 
 /// Asks the `gg run` `pick` picks to rebuild the game and start it again from a snapshot, as an
-/// edit no patch carries does, through a request beside the run's file ([`rebuild_path`]). The run
+/// edit no patch carries does, through a request beside the run's file ([`rebuild_path`]). With
+/// `fresh`, the game starts afresh instead, its layers' `attach` building the world again. The run
 /// takes it at once, and rebuilds once no patch or build is under way. Then waits, as [`wait`]
 /// does, until the game runs the new build; returns what `wait` does. All within `timeout`.
 ///
@@ -444,7 +471,7 @@ fn found(target: &Path, pick: &Pick, start: Instant, timeout: Duration) -> Resul
 /// - `gg.timeout`: the run didn't rebuild, or the game didn't serve again, within `timeout`.
 /// - `gg.run`: the request can't be written.
 /// - As [`wait`] does: `gg.no_run`, `gg.which_run`, `gg.waiting`, `gg.cargo`.
-pub(crate) fn rebuild(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
+pub(crate) fn rebuild(pick: &Pick, timeout: Duration, fresh: bool) -> Result<Value, Failure> {
     let target = build::target_dir(pick.project.as_deref().and_then(Path::parent))?;
     let start = Instant::now();
     let told = found(&target, pick, start, timeout)?;
@@ -457,7 +484,7 @@ pub(crate) fn rebuild(pick: &Pick, timeout: Duration) -> Result<Value, Failure> 
         );
         return Err(Failure::new("gg.no_rebuild", message));
     }
-    let request = rebuild_path(&path(&target, package));
+    let request = rebuild_path(&path(&target, package), fresh);
     // Before the request, which the run takes after: its answer's time is later.
     let asked = now_ms();
     fs::write(&request, gg.to_string()).map_err(|error| {
@@ -470,7 +497,8 @@ pub(crate) fn rebuild(pick: &Pick, timeout: Duration) -> Result<Value, Failure> 
     loop {
         let told = found(&target, pick, start, timeout)?;
         let answer = &told["rebuild"];
-        if answer["asked"].as_u64().is_some_and(|taken| taken >= asked) {
+        let taken = answer["asked"].as_u64().is_some_and(|taken| taken >= asked);
+        if taken && (!fresh || answer["fresh"] == true) {
             if let Some(failed) = answer["error"]["message"].as_str() {
                 let message =
                     format!("the rebuild failed, so the game runs its code as it was: {failed}");
@@ -762,41 +790,70 @@ mod tests {
             current: Some(true),
             ..State::new("running")
         };
-        let ask = |timeout| {
-            let asked = rebuild(&pick(Some(project.clone())), Duration::from_secs(timeout));
+        let ask = |timeout, fresh| {
+            let pick = pick(Some(project.clone()));
+            let asked = rebuild(&pick, Duration::from_secs(timeout), fresh);
             asked.map_err(|failure| (failure.code, failure.message))
         };
         // A run that doesn't build the game itself.
         let told = Told::start(at.clone(), 4242, &package, Some(&project), false, &running);
         thread::sleep(WRITE * 2);
-        let refused = ask(1).map_err(|(code, _)| code);
+        let refused = ask(1, false).map_err(|(code, _)| code);
         drop(told);
         let told = Told::start(at.clone(), 4242, &package, Some(&project), true, &running);
         // Another run's request is left alone.
-        fs::write(rebuild_path(&at), "4243").expect("written");
+        fs::write(rebuild_path(&at, false), "4243").expect("written");
         let others = told.asked_to_rebuild();
+        let _ = fs::remove_file(rebuild_path(&at, false));
+        // Both kinds at once are one request, afresh.
+        for fresh in [false, true] {
+            fs::write(rebuild_path(&at, fresh), "4242").expect("written");
+        }
+        let both = told.asked_to_rebuild().map(|asked| asked.fresh);
         // The run's side: it takes each request, failing the first rebuild and not the second.
+        // Asked afresh, a rebuild under way that wasn't lands first, failing.
         let asking = Arc::new(AtomicBool::new(true));
         let going = asking.clone();
         let run = thread::spawn(move || {
-            let failed = Failure::new("gg.build", "error[E0308]: mismatched types");
-            let mut answers = [Some(failed), None].into_iter();
+            let failed = || Some(Failure::new("gg.build", "error[E0308]: mismatched types"));
+            let mut answers = [failed(), None].into_iter();
+            let mut taken = Vec::new();
             while going.load(Ordering::Relaxed) {
-                if let Some(taken) = told.asked_to_rebuild() {
-                    told.answer(taken, answers.next().flatten().as_ref());
+                if let Some(asked) = told.asked_to_rebuild() {
+                    if asked.fresh {
+                        let under_way = Asked {
+                            fresh: false,
+                            ..asked
+                        };
+                        told.answer(under_way, failed().as_ref());
+                        thread::sleep(WRITE * 3);
+                        told.answer(asked, None);
+                    } else {
+                        told.answer(asked, answers.next().flatten().as_ref());
+                    }
+                    taken.push(asked.fresh);
                 }
                 told.tell(&running, now_ms());
                 thread::sleep(Duration::from_millis(50));
             }
+            taken
         });
-        let failed = ask(5);
+        let failed = ask(5, false);
         // Answered, the run serving: the wait goes on to the game, which never answers here.
-        let rebuilt = ask(2);
+        let rebuilt = ask(2, false);
+        let fresh = ask(3, true);
         asking.store(false, Ordering::Relaxed);
-        run.join().expect("no panic");
-        let left = (at.exists(), rebuild_path(&at).exists());
+        let taken = run.join().expect("no panic");
+        let left = [
+            at.clone(),
+            rebuild_path(&at, false),
+            rebuild_path(&at, true),
+        ]
+        .map(|at| at.exists());
         assert_eq!(refused, Err("gg.no_rebuild".to_owned()));
         assert_eq!(others, None, "a request for another run");
+        assert_eq!(both, Some(true));
+        assert_eq!(taken, [false, false, true]);
         let Err((code, message)) = failed else {
             panic!("a failed rebuild answers {failed:?}");
         };
@@ -804,15 +861,17 @@ mod tests {
             code == "gg.build_failed" && message.contains("E0308"),
             "{message}"
         );
-        let Err((code, message)) = rebuilt else {
-            panic!("no game answers here, but {rebuilt:?}");
-        };
         let past = "the game runs the code of the edits saved before `wait`";
-        assert!(
-            code == "gg.timeout" && message.starts_with(past),
-            "{message}"
-        );
-        assert_eq!(left, (false, false), "the run's file and requests are gone");
+        for rebuilt in [rebuilt, fresh] {
+            let Err((code, message)) = rebuilt else {
+                panic!("no game answers here, but {rebuilt:?}");
+            };
+            assert!(
+                code == "gg.timeout" && message.starts_with(past),
+                "{message}"
+            );
+        }
+        assert_eq!(left, [false; 3], "the run's file and requests are gone");
     }
 
     /// A game down says what its run does, with the build's errors.

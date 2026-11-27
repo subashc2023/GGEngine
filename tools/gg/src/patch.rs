@@ -21,7 +21,7 @@ use crate::build::{self, Package, fit};
 use crate::classify::{self, Edit, Uses};
 use crate::dx::{self, Dx, Fat};
 use crate::run::{self, Run, Stamp, event, millis};
-use crate::runs::{self, State};
+use crate::runs::{self, Asked, State};
 
 /// How long the sources must stay the same before a change is acted on: saves come in bursts.
 const QUIET: Duration = Duration::from_millis(200);
@@ -39,6 +39,9 @@ const UNPATCHED: &str =
 /// Why a rebuild `gg rebuild` asked for runs.
 const ASKED: &str = "`gg rebuild` asked";
 
+/// Why a rebuild `gg rebuild --fresh` asked for runs.
+const ASKED_FRESH: &str = "`gg rebuild --fresh` asked";
+
 type Stamps = BTreeMap<PathBuf, Stamp>;
 
 type Hashes = BTreeMap<PathBuf, u64>;
@@ -49,7 +52,9 @@ pub(crate) struct Patches {
     sources: Sources,
     fat: Fat,
     baseline: Baseline,
-    rebuilt: Option<(Fat, Baseline)>,
+    /// The rebuild that succeeded, until the game starts on it: its build, its sources, and whether
+    /// `gg rebuild --fresh` asked for it, so the game starts afresh.
+    rebuilt: Option<(Fat, Baseline, bool)>,
     /// Whether a rebuild failed since the game's build, which may have left its packages'
     /// libraries, which patches build with, unlike the build's: until one succeeds, a change
     /// rebuilds.
@@ -72,11 +77,11 @@ pub(crate) struct Patches {
     failed: Option<Failure>,
     /// The last patch or rebuild that succeeded, as [`State::reload`] tells it.
     reload: Option<Value>,
-    /// When the latest `gg rebuild` not yet acted on was taken (ms since the epoch), as
-    /// [`Told::asked_to_rebuild`](runs::Told::asked_to_rebuild) gives it.
-    asked: Option<u64>,
-    /// The asked rebuild that landed, not yet answered: when it was asked, and its failure.
-    answered: Option<(u64, Option<Failure>)>,
+    /// The `gg rebuild`s not yet acted on, as one, as
+    /// [`Told::asked_to_rebuild`](runs::Told::asked_to_rebuild) gives them.
+    asked: Option<Asked>,
+    /// The asked rebuild that landed, not yet answered, and its failure.
+    answered: Option<(Asked, Option<Failure>)>,
 }
 
 /// With dx, which patches build against, or with cargo, for a game patches can't reach.
@@ -236,16 +241,22 @@ impl Patches {
         &self.fat.exe
     }
 
-    /// Notes that `gg rebuild` asked for a rebuild at `asked` (ms since the epoch), which
-    /// [`tend`](Self::tend) starts once no job is under way.
-    pub(crate) fn ask(&mut self, asked: u64) {
-        self.asked = Some(self.asked.map_or(asked, |was| was.max(asked)));
+    /// Notes that `gg rebuild` asked for a rebuild, which [`tend`](Self::tend) starts once no job
+    /// is under way.
+    pub(crate) fn ask(&mut self, asked: Asked) {
+        self.asked = Some(self.asked.map_or(asked, |was| was.and(asked)));
     }
 
-    /// The asked rebuild that landed since the last call, if one did: when it was asked, and its
-    /// failure, if it failed.
-    pub(crate) fn answered(&mut self) -> Option<(u64, Option<Failure>)> {
+    /// The asked rebuild that landed since the last call, if one did, and its failure, if it
+    /// failed.
+    pub(crate) fn answered(&mut self) -> Option<(Asked, Option<Failure>)> {
         self.answered.take()
+    }
+
+    /// Whether the rebuild that succeeded, which the game hasn't started on yet, was asked to start
+    /// it afresh.
+    pub(crate) fn afresh(&self) -> bool {
+        self.rebuilt.as_ref().is_some_and(|(_, _, fresh)| *fresh)
     }
 
     /// A turn of the run's loop: notes a finished job, scans the sources, and once they've been
@@ -287,7 +298,7 @@ impl Patches {
     /// under way may be writing the executable.
     pub(crate) fn starting(&mut self) -> bool {
         let mut built = !std::mem::replace(&mut self.started, true);
-        if let Some((fat, baseline)) = self.rebuilt.take() {
+        if let Some((fat, baseline, _)) = self.rebuilt.take() {
             (self.fat, self.baseline) = (fat, baseline);
             self.stale = false;
             built = true;
@@ -355,16 +366,17 @@ impl Patches {
         self.start_rebuild(format!("a change to {}: {why}", file.display()), None);
     }
 
-    /// Rebuilds the game, as `gg rebuild` asked at `asked`, with every edit since the last look:
-    /// the build takes the sources as they are.
-    fn rebuild_asked(&mut self, asked: u64) {
-        event(&json!({"event": "rebuilding", "file": null, "why": ASKED}));
+    /// Rebuilds the game, as `gg rebuild` asked, with every edit since the last look: the build
+    /// takes the sources as they are.
+    fn rebuild_asked(&mut self, asked: Asked) {
+        let why = if asked.fresh { ASKED_FRESH } else { ASKED };
+        event(&json!({"event": "rebuilding", "file": null, "why": why}));
         (self.looked, self.fresh) = (self.seen.clone(), false);
-        self.start_rebuild(ASKED.to_owned(), Some(asked));
+        self.start_rebuild(why.to_owned(), Some(asked));
     }
 
-    /// Starts a rebuild for `why`, asked by `gg rebuild` at `asked`, if it was.
-    fn start_rebuild(&mut self, why: String, asked: Option<u64>) {
+    /// Starts a rebuild for `why`, as `gg rebuild` asked, if it did.
+    fn start_rebuild(&mut self, why: String, asked: Option<Asked>) {
         let (builder, sources) = (self.builder.clone(), self.sources.clone());
         let thread = thread::spawn(move || {
             // The sources as the build starts, but for the lock file, which the build itself writes
@@ -500,7 +512,8 @@ impl Patches {
                         "build_ms": ms,
                         "at": runs::now_ms(),
                     }));
-                    self.rebuilt = Some((fat, baseline));
+                    let fresh = asked.is_some_and(|asked| asked.fresh);
+                    self.rebuilt = Some((fat, baseline, fresh));
                     self.failed = None;
                     true
                 }
@@ -571,10 +584,10 @@ impl Patches {
                             if !attach.is_empty() {
                                 let message = format!(
                                     "A patch's edits to {} change a layer's `attach`, which \
-                                     builds the world as a run starts afresh; this run keeps its \
-                                     world, as its restarts start from snapshots, so a run started \
-                                     afresh, as stopping `gg run` and starting it again starts \
-                                     one, shows the change",
+                                     builds the world as the game starts afresh; this run keeps \
+                                     its world, as its restarts start from snapshots, so \
+                                     `gg rebuild --fresh`, which starts the game afresh, shows the \
+                                     change",
                                     listed(&attach)
                                 );
                                 let fields = json!({"files": attach});
@@ -676,12 +689,12 @@ impl Watcher {
 
 /// A build or patch on its own thread.
 enum Job {
-    /// A rebuild, which `gg rebuild` asked for at `asked` if it did; gives the build and its
-    /// sources as they started.
+    /// A rebuild, which `gg rebuild` asked for if `asked`; gives the build and its sources as they
+    /// started.
     Rebuild {
         started: Instant,
         why: String,
-        asked: Option<u64>,
+        asked: Option<Asked>,
         thread: JoinHandle<Result<(Fat, Baseline), Failure>>,
     },
     /// A patch of edits to `files` for processes `pids`; the other fields are [`Act::Patch`]'s.
@@ -1466,8 +1479,8 @@ mod tests {
                 "{code}"
             );
         }
-        // A rebuild `gg rebuild` asks for waits for the job under way, the latest ask counting,
-        // and answers how it went, here failing.
+        // A rebuild `gg rebuild` asks for waits for the job under way, the asks made meanwhile
+        // one, afresh as one was, and answers how it went, here failing.
         let (go, going) = std::sync::mpsc::channel::<()>();
         patches.job = Some(Job::Patch {
             pids: vec![7],
@@ -1484,8 +1497,11 @@ mod tests {
                 }
             }),
         });
-        patches.ask(5);
-        patches.ask(3);
+        patches.ask(Asked {
+            at: 5,
+            fresh: false,
+        });
+        patches.ask(Asked { at: 3, fresh: true });
         let quiet = || Instant::now() + QUIET;
         assert!(!patches.tend(&serving, quiet()));
         assert_eq!(patches.state(&serving).phase, "patching");
@@ -1497,7 +1513,7 @@ mod tests {
         let state = patches.state(&serving);
         assert_eq!(
             (state.phase, state.why.as_deref()),
-            ("rebuilding", Some(ASKED))
+            ("rebuilding", Some(ASKED_FRESH))
         );
         assert_eq!(patches.answered(), None);
         while !patches.job.as_ref().is_some_and(Job::done) {
@@ -1505,11 +1521,12 @@ mod tests {
         }
         assert!(!patches.tend(&serving, quiet()));
         let answered = patches.answered();
-        assert!(
-            matches!(&answered, Some((5, Some(failure))) if failure.code == "gg.build"),
-            "{answered:?}"
-        );
+        let answered = (answered.as_ref())
+            .map(|(asked, failed)| (*asked, failed.as_ref().map(|failed| failed.code.as_str())));
+        let one = Asked { at: 5, fresh: true };
+        assert_eq!(answered, Some((one, Some("gg.build"))));
         assert_eq!(patches.answered(), None, "answered once");
+        assert!(!patches.afresh(), "nothing to start afresh on");
         let _ = fs::remove_dir_all(&root);
     }
 
