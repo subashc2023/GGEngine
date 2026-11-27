@@ -285,10 +285,37 @@ impl Unanswered {
         Ok(target.join(format!("gg-retry-{pid}.json")))
     }
 
+    /// Keeps it at `path`, removing beside it those of games that ended.
     fn keep(&self, path: &Path) -> Result<(), Failure> {
         let kept = json!({"method": self.method, "params": self.params, "key": self.key});
         let written = fs::write(path, kept.to_string());
-        written.map_err(|error| Failure::new("gg.retry", error.to_string()))
+        written.map_err(|error| Failure::new("gg.retry", error.to_string()))?;
+        if let Some(target) = path.parent() {
+            Self::prune(target, path);
+        }
+        Ok(())
+    }
+
+    /// Removes from `target` the calls kept for games with no session file there, which ended, but
+    /// the one at `kept`: no retry reaches them.
+    fn prune(target: &Path, kept: &Path) {
+        let live: Vec<u32> = sessions_in(target)
+            .iter()
+            .map(|(_, session)| session.pid)
+            .collect();
+        for entry in fs::read_dir(target).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let name = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("gg-retry-"));
+            let pid = name.and_then(|name| name.strip_suffix(".json"));
+            let ended = pid
+                .and_then(|pid| pid.parse().ok())
+                .is_some_and(|pid| !live.contains(&pid));
+            if ended && entry.path() != kept {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 
     /// The call kept at `path`, if one is, whole.
@@ -323,6 +350,9 @@ pub(crate) fn retry(pick: &Pick) -> Result<Box<RawValue>, Failure> {
         return Err(Failure::new("gg.no_keys", message));
     }
     let path = Unanswered::path(pick, pid)?;
+    if let Some(target) = path.parent() {
+        Unanswered::prune(target, &path);
+    }
     let Some(kept) = Unanswered::read(&path) else {
         let message = format!("no call that changes {app}, process {pid}, went unanswered");
         return Err(Failure::new("gg.no_retry", message));
@@ -587,6 +617,27 @@ mod tests {
         let [one, other] = [1, 2].map(|pid| Unanswered::path(&pick, pid).expect("a path"));
         assert_ne!(one, other);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Keeping a call removes those kept for games that ended, whose session files are gone, but
+    /// not a running game's.
+    #[test]
+    fn keeping_a_call_removes_those_of_games_that_ended() {
+        let target = std::env::temp_dir().join(format!("gg-retry-pruned-{}", std::process::id()));
+        write_session(&target.join("debug").join("sessions"), 7, None);
+        let kept = |pid: u32| target.join(format!("gg-retry-{pid}.json"));
+        for pid in [7, 8] {
+            fs::write(kept(pid), "{}").expect("written");
+        }
+        let call = Unanswered {
+            method: "step".to_owned(),
+            params: Value::Null,
+            key: new_key(),
+        };
+        call.keep(&kept(9)).expect("kept");
+        let left = [7, 8, 9].map(|pid| kept(pid).exists());
+        let _ = fs::remove_dir_all(&target);
+        assert_eq!(left, [true, false, true]);
     }
 
     fn write_session(dir: &Path, pid: u32, project: Option<PathBuf>) {
