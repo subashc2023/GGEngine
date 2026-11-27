@@ -226,8 +226,11 @@ impl Physics3D {
                 (character.entity, other, hit.hit.witness1, hit.hit.normal1)
             });
             self.touched.extend(touched);
+            // Unless its move hit it already.
             #[cfg(feature = "dev")]
-            if let Some((other, at, normal)) = ground(&self.rapier, character) {
+            if let Some((other, at, normal)) = ground(&self.rapier, character)
+                && !(self.touched.iter()).any(|t| t.0 == character.entity && t.1 == other)
+            {
                 self.touched.push((character.entity, other, at, normal));
             }
         }
@@ -492,9 +495,6 @@ fn move_character(
 /// A velocity-driven kinematic body: handle, linear and angular velocity.
 pub(super) type Moving = (RigidBodyHandle, Vector, Vector);
 
-/// The velocity-driven kinematic body that `shape`, at `at`, stands on, if any: what a cast of the
-/// shape straight down meets within `gap`, the controller's gap from the ground, plus its ground
-/// prediction.
 /// What a grounded `character` stands on, within its controller's reach for the ground: the
 /// entity, where it touches and the normal there, in the world's space. A character standing still
 /// moves by nothing, so hits nothing: the tool API's `touching` and the Contacts overlay take it
@@ -509,17 +509,28 @@ fn ground(rapier: &Rapier, character: &Character) -> Option<(Option<Entity>, Vec
         colliders,
         broad_phase,
         narrow_phase,
+        impulse_joints,
         ..
     } = rapier;
     let collider = colliders.get(character.collider)?;
     let on_body = collider.position_wrt_parent().copied();
-    let at = *bodies.get(character.body)?.position() * on_body.unwrap_or(Pose::IDENTITY);
+    // Where its move put it, which the step goes to.
+    let own = character.body;
+    let at = *bodies.get(own)?.next_position() * on_body.unwrap_or(Pose::IDENTITY);
     let shape = collider.shared_shape();
     let met = groups(character.capsule.membership, character.capsule.filter);
+    // As its move leaves out what a joint keeps it from colliding with.
+    let apart = |_: ColliderHandle, other: &Collider| {
+        let joined = other
+            .parent()
+            .map(|other| impulse_joints.joints_between(own, other));
+        !joined.is_some_and(|mut joints| joints.any(|(_, joint)| !joint.data.contacts_enabled))
+    };
     let filter = QueryFilter::new()
-        .exclude_rigid_body(character.body)
+        .exclude_rigid_body(own)
         .exclude_sensors()
-        .groups(met);
+        .groups(met)
+        .predicate(&apart);
     let queries =
         broad_phase.as_query_pipeline(narrow_phase.query_dispatcher(), bodies, colliders, filter);
     // The controller's gap from the ground, a hundredth of the height, and its reach past it.
@@ -534,6 +545,9 @@ fn ground(rapier: &Rapier, character: &Character) -> Option<(Option<Entity>, Vec
     Some((super::body_entity(rapier, under), hit.witness1, hit.normal1))
 }
 
+/// The velocity-driven kinematic body that `shape`, at `at`, stands on, if any: what a cast of the
+/// shape straight down meets within `gap`, the controller's gap from the ground, plus its ground
+/// prediction.
 fn platform(
     queries: &QueryPipeline<'_>,
     shape: &dyn Shape,
