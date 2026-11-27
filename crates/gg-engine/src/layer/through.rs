@@ -1,5 +1,6 @@
 //! Authors' edits passing through a playing copy to the world as edited ([`Stack::play`]), so
-//! `stop` keeps them and a scene save writes them, while what the copy's ticks did goes.
+//! `stop` keeps them and a scene save writes them, while what the copy's ticks did goes. An edit
+//! of the copy alone (the API's `play`) passes nothing, nor does undoing or redoing it.
 
 use gg_core::Result;
 use tracing::warn;
@@ -17,11 +18,17 @@ pub(crate) struct Through {
     /// For an undo or redo, the operations of the edit the author's log in the copy would step;
     /// for an append, those of its last edit, which the append adds to.
     next: Option<Vec<Operation>>,
+    /// How many edits the author's log in the copy had done: the place there of the edit an
+    /// apply logs or a redo steps, and one past that of the edit an undo steps.
+    done: usize,
+    /// Whether the edit changes the copy alone.
+    play: bool,
 }
 
 impl Through {
-    /// `None` while no copy plays, and for an edit no author makes.
-    pub(crate) fn before(cx: &Context, edit: &Edit) -> Option<Self> {
+    /// `None` while no copy plays, and for an edit no author makes. `play` marks an edit of the
+    /// copy alone.
+    pub(crate) fn before(cx: &Context, edit: &Edit, play: bool) -> Option<Self> {
         cx.dev.edited.as_ref()?;
         let log = log_of(cx, edit.author());
         let next = match edit {
@@ -33,6 +40,8 @@ impl Through {
         Some(Self {
             edit: edit.clone(),
             next: next.map(<[Operation]>::to_vec),
+            done: log.map_or(0, |log| log.edits().len()),
+            play,
         })
     }
 
@@ -47,16 +56,43 @@ impl Through {
     ///   the copy took.
     ///
     /// Nothing passes once the copy's ticks have changed scene, as the worlds' entities are then
-    /// different scenes'.
+    /// different scenes'. Nothing passes for an edit of the copy alone, or for an undo or redo of
+    /// one, which the copy's log has at the place `Edited::played` keeps.
     pub(crate) fn pass(self, cx: &mut Context, done: &Result<Done>) {
         let took = done.is_ok();
         let undo = matches!(self.edit, Edit::Undo { .. });
         let changes = cx.world().scene_changes();
+        let author = self.edit.author();
+        let (now, held) = log_of(cx, author).map_or((0, 0), |log| {
+            (log.edits().len(), log.edits().len() + log.undone().len())
+        });
         let edited = cx.dev.edited.as_mut().expect("a copy plays");
         // Any edit but an amend ends its author's gesture in the copy, refused or not
         // (`Authors::edit`), so it ends in the world as edited too, passed or not.
         if !matches!(self.edit, Edit::Amend { .. }) {
-            edited.authors.seal(self.edit.author());
+            edited.authors.seal(author);
+        }
+        // An entry's place in its log stays as it's undone and redone. A new entry takes the
+        // place of those undone, which it drops; a refused step may drop one.
+        let played = &mut edited.played;
+        let stepped = match self.edit {
+            Edit::Undo { .. } => self.done.checked_sub(1),
+            Edit::Redo { .. } => Some(self.done),
+            _ => {
+                if now > self.done {
+                    played.retain(|(by, at)| by != author || *at < self.done);
+                    if self.play {
+                        played.push((author.to_owned(), self.done));
+                    }
+                }
+                None
+            }
+        };
+        let alone =
+            stepped.is_some_and(|at| played.iter().any(|(by, on)| by == author && *on == at));
+        played.retain(|(by, at)| by != author || *at < held);
+        if self.play || alone {
+            return;
         }
         if edited.world.scene_changes() != changes {
             if matches!(done, Ok(Done::Applied(_) | Done::Stepped(Some(_)))) {

@@ -1729,22 +1729,26 @@ struct Stopped {
     still: Status,
     snapshot: Snapshotted,
     refused: String,
+    refused_alone: String,
     edited: Hash,
     played: Status,
     copied: Snapshotted,
     ticking: Status,
     failed: String,
+    gestured: String,
     back: Status,
+    back_x: Value,
     hash: Hash,
     history: History,
     undone: Option<gg_api::Edit>,
 }
 
-/// `stop` halts ticks (paused or not), refuses `step` and allows a snapshot. `play` runs a copy of
-/// the world as edited, which a snapshot may take before its first tick and a client's edits pass
-/// through to; the next `stop` fails waiting
-/// `step`s, leaves the game paused and restores the world as edited (same ticks, with both edits,
-/// which `undo` takes back). Every answer says whether the game is stopped.
+/// `stop` halts ticks (paused or not), refuses `step` and an edit of the copy alone, and allows a
+/// snapshot. `play` runs a copy of the world as edited, which a snapshot may take before its first
+/// tick and a client's edits pass through to, but those of the copy alone (`play`, which takes no
+/// gesture); the next `stop` fails waiting `step`s, leaves the game paused and restores the world
+/// as edited (same ticks, with both edits passed, which `undo` takes back). Every answer says
+/// whether the game is stopped.
 #[test]
 fn stop_brings_back_the_world_as_edited_that_play_copied() {
     let (mut api, session) = started("Api Play And Stop");
@@ -1779,6 +1783,12 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
             .expect("a snapshot before any tick");
         let step = client.call("step", json!({"ticks": 1}));
         let refused = step.expect_err("refused").code;
+        let alone = |x: i32| {
+            let mut alone = set(x);
+            alone["play"] = json!(true);
+            alone
+        };
+        let refused_alone = client.call("apply", alone(1)).expect_err("refused").code;
         client.call_as::<Applied>("apply", set(1)).expect("set");
         let edited = client.call_as("hash", ()).expect("a hash");
         // Played paused: a copy of a world whose layers' queues `stop` emptied.
@@ -1796,6 +1806,12 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
         client
             .call_as::<Applied>("apply", set(2))
             .expect("set in the copy");
+        client
+            .call_as::<Applied>("apply", alone(5))
+            .expect("set in the copy alone");
+        let mut gestured = alone(6);
+        gestured["gesture"] = json!(7);
+        let gestured = client.call("apply", gestured).expect_err("refused").code;
         // Another client's step, waiting for its ticks, which pauses the game.
         let stepping = thread::spawn(move || {
             let mut them = Client::connect(&other, "other", DEADLINE).expect("it connects");
@@ -1809,12 +1825,19 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
             still,
             snapshot,
             refused,
+            refused_alone,
             edited,
             played,
             copied,
             ticking,
             failed: stepping.join().expect("the step didn't panic"),
+            gestured,
             back,
+            back_x: (client.call_as(
+                "get",
+                json!({"id": hero_id, "component": "Transform", "path": "translation.x"}),
+            ))
+            .expect("got"),
             hash: client.call_as("hash", ()).expect("a hash"),
             history: client.call_as("edits", ()).expect("the edits"),
             undone: client.call_as("undo", ()).expect("undone"),
@@ -1835,6 +1858,9 @@ fn stop_brings_back_the_world_as_edited_that_play_copied() {
         (got.snapshot.ticks, got.refused.as_str()),
         (0, "api.stopped")
     );
+    assert_eq!(got.refused_alone, "api.stopped");
+    assert_eq!(got.gestured, "api.bad_params");
+    assert_eq!(got.back_x, json!(2.0), "without the copy's own edit");
     let snapshot = crate::snapshot::Snapshot::read(&path, "Api Play And Stop");
     assert!(snapshot.expect("read").stopped, "it says it's stopped");
     assert!(!got.played.stopped && !got.ticking.stopped);

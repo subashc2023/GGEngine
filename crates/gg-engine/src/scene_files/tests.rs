@@ -81,7 +81,7 @@ fn set_x(id: EntityId, x: f32) -> Operation {
 
 /// Applies `edit`, a client's, now through `stack`, as the tool API does; returns what it did.
 fn client(cx: &mut Context, stack: &mut Stack, edit: Edit) -> Done {
-    match stack.offer(cx, edit) {
+    match stack.offer(cx, edit, false) {
         Offered::Now(done) => done.unwrap_or_else(|error| panic!("{error:#}")),
         Offered::Later(_) => panic!("applied now, outside a lockstep session"),
     }
@@ -414,9 +414,72 @@ fn playing(dir: &Scratch) -> (Context, Stack, EntityId) {
     (cx, stack, ids[0])
 }
 
+/// An edit of the copy alone (the API's `play`) stays out of the world as edited, and so does
+/// undoing or redoing it, unwarned, even where the world as edited's last edit has the same
+/// operations. The client's other edits pass through as before, one taking the place of an edit
+/// of the copy alone that it drops included.
+#[test]
+fn an_edit_of_the_copy_alone_stays_out_of_the_world_as_edited() {
+    let logged = crate::testing::logged();
+    let dir = Scratch::new("scene-files-play-alone");
+    let (mut cx, mut stack, id) = playing(&dir);
+    let play = |cx: &mut Context, stack: &mut Stack, x: f32| {
+        let edit = Edit::Apply {
+            author: "gg".to_owned(),
+            operations: vec![set_x(id, x)],
+        };
+        match stack.offer(cx, edit, true) {
+            Offered::Now(done) => done.unwrap_or_else(|error| panic!("{error:#}")),
+            Offered::Later(_) => panic!("applied now, outside a lockstep session"),
+        };
+    };
+    let step = |cx: &mut Context, stack: &mut Stack, undo: bool| {
+        let author = "gg".to_owned();
+        let edit = if undo {
+            Edit::Undo { author }
+        } else {
+            Edit::Redo { author }
+        };
+        client(cx, stack, edit);
+        (x(cx.world(), id), x(held(cx), id))
+    };
+    let both = |cx: &Context| (x(cx.world(), id), x(held(cx), id));
+    apply(&mut cx, &mut stack, "gg", vec![set_x(id, 2.0)]);
+    play(&mut cx, &mut stack, 7.0);
+    assert_eq!(both(&cx), (7.0, 2.0));
+    // The world as edited's last edit's operations.
+    play(&mut cx, &mut stack, 2.0);
+    assert_eq!(step(&mut cx, &mut stack, true), (7.0, 2.0));
+    assert_eq!(step(&mut cx, &mut stack, true), (2.0, 2.0));
+    assert_eq!(step(&mut cx, &mut stack, false), (7.0, 2.0));
+    open_scene::save(&mut cx, None).expect("saved");
+    let text = fs::read_to_string(dir.0.join("scenes/main.ron")).expect("read");
+    let mut saved = World::seeded(3);
+    saved.register::<Transform>().expect("registered");
+    saved.load_scene(&text).expect("it loads");
+    assert_eq!(
+        x(&saved, id),
+        2.0,
+        "the world as edited, without the copy's own"
+    );
+    // In the place of the undone edit of the copy alone.
+    apply(&mut cx, &mut stack, "gg", vec![set_x(id, 5.0)]);
+    assert_eq!(both(&cx), (5.0, 5.0));
+    assert_eq!(step(&mut cx, &mut stack, true), (7.0, 2.0));
+    assert_eq!(step(&mut cx, &mut stack, true), (2.0, 2.0));
+    assert_eq!(step(&mut cx, &mut stack, true), (0.0, 0.0));
+    let codes: Vec<String> = logged.codes.try_iter().collect();
+    assert!(
+        !codes.iter().any(|code| code == "play.not_kept"),
+        "{codes:?}"
+    );
+    assert_eq!(stack.stop(&mut cx), Some(0));
+    assert_eq!(x(cx.world(), id), 0.0);
+}
+
 /// Refuses `edit` in the copy, as `stack` offers it; returns the code.
 fn refused(cx: &mut Context, stack: &mut Stack, edit: Edit) -> String {
-    match stack.offer(cx, edit) {
+    match stack.offer(cx, edit, false) {
         Offered::Now(Err(error)) => error.code().to_owned(),
         Offered::Now(Ok(done)) => panic!("refused, not {done:?}"),
         Offered::Later(_) => panic!("applied now, outside a lockstep session"),

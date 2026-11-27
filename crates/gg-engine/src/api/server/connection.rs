@@ -458,7 +458,7 @@ pub(super) fn needs(call: &Call) -> Vec<Capability> {
         .flatten()
         .collect(),
         Call::Patch(_) => vec![Patch],
-        Call::Apply(operations, _) => operations
+        Call::Apply(operations, ..) => operations
             .iter()
             .map(|operation| match operation {
                 gg_api::Operation::Add { component, .. }

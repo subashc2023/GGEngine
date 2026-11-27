@@ -265,10 +265,12 @@ server](crates/gg-engine/src/api/server.rs) how a game answers.
   authors made, not what play did. Authors' edits and scene files' saves pass through to the world
   as edited, by ID, as the copy's log applied them; an undo passes only where both logs would step
   the same edit. The world as edited refuses edits of what the copy's ticks made, and takes none
-  once they change scene (`play.not_kept`). Paused frames draw the world as the last tick left it,
-  so a capture shows what a query reads. Recorded runs and lockstep peers
-  refuse `stop` (`api.no_stop`): it replaces the world and takes ticks back, which neither a replay
-  nor the other peer could follow.
+  once they change scene (`play.not_kept`). An edit `play` marks (`gg set --play`) changes the copy
+  alone, as ticks do, so a test's setup stays out of the scene file; the copy's log marks its place
+  so its undo passes nothing either. It's refused while stopped, as no copy plays. Paused frames
+  draw the world as the last tick left it, so a capture shows what a query reads. Recorded runs and
+  lockstep peers refuse `stop` (`api.no_stop`): it replaces the world and takes ticks back, which
+  neither a replay nor the other peer could follow.
 - **The view** is shared through memory the client makes, a triple buffer neither end waits on, not
   through the game's window: only Windows and X11 let a process embed another's window, which it
   can't draw over. An embedded run (`--embedded`) renders at the client's size, a frame once the

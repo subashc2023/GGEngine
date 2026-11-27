@@ -357,8 +357,8 @@ Peers start afresh together. Fails with:
                 details: "\
 A game already playing is left as it is. A project's game under `gg run` starts playing a copy of
 the world its layers' `attach` built. Edits and scene files' saves while a copy plays apply to both
-worlds; its ticks change the copy alone. The copy's edits start afresh: `undo` reaches none made
-before the `play`.
+worlds; its ticks change the copy alone, as do `set --play` and `apply --play`. The copy's edits
+start afresh: `undo` reaches none made before the `play`.
 ",
             },
             Help {
@@ -770,7 +770,7 @@ button or widget by name with `press`; type into a text field pressed so with `i
             },
             Help {
                 name: "apply",
-                usage: "apply <OPERATIONS>",
+                usage: "apply [--play] <OPERATIONS>",
                 summary: "Apply operations as one edit, all or none, which `undo` takes back",
                 details: "\
 OPERATIONS is a JSON array of the API's operations, applied between ticks, in order. Each `id` and
@@ -793,6 +793,11 @@ Prints the ticks and the IDs its creates and duplicates spawned. A kinematic pla
     \"Transform\":{\"translation\":[5,1,0],\"scale\":[3,0.5,1]},
     \"RigidBody2D\":{\"body_type\":\"Kinematic\"},\"BoxCollider2D\":{}}}}]'
 `gg scene save` then writes the world to its scene file.
+
+While a project's game plays a copy of its world as edited, an edit passes through to that world
+(`gg help play`). `--play` changes the copy alone, as its ticks do, for a test's setup: `stop`
+drops it and a scene save leaves it out, and `undo` and `redo` step it in the copy alone. Where no
+copy plays, it's any edit. Fails with `api.stopped` while the game is stopped.
 ",
             },
             Help {
@@ -809,14 +814,17 @@ name, as `entity` takes it.
             },
             Help {
                 name: "set",
-                usage: "set <ENTITY> <COMPONENT>[.<PATH>] <VALUE>",
+                usage: "set [--play] <ENTITY> <COMPONENT>[.<PATH>] <VALUE>",
                 summary: "Set a component's field, or the whole component, as one edit",
                 details: "\
 PATH is a field, such as `translation.x`; without one, VALUE is the whole component. It follows its
 component's type and `.`, as `get` takes it, or comes as an argument of its own, empty for the
 whole. VALUE is JSON, or else a string, shaped as `entity` shows values. ENTITY is an ID or a name.
+`--play` changes the playing copy alone, as `apply`'s does: a test's setup, kept out of the world as
+edited and its scene file.
   gg set Player Player.speed 9
   gg set Player Transform translation '[0, 2, 0]'
+  gg set --play Fight Fight.player_hp 0
 ",
             },
             Help {
@@ -1886,6 +1894,15 @@ fn read_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     Ok(command)
 }
 
+/// `apply`'s `params`, with `play` if `--play` asks for an edit of the playing copy alone. Without
+/// it, `play` is left out, which an older game's API refuses.
+fn alone(parsed: &mut Parsed, mut params: Value) -> Value {
+    if parsed.switch("--play") {
+        params["play"] = json!(true);
+    }
+    params
+}
+
 fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
     let command = match name {
         "apply" => {
@@ -1895,7 +1912,8 @@ fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             if !operations.is_array() {
                 return Err(bad("OPERATIONS is a JSON array of operations".to_owned()));
             }
-            call(parsed, "apply", json!({"operations": operations}))?
+            let params = alone(parsed, json!({"operations": operations}));
+            call(parsed, "apply", params)?
         }
         "save-prefab" => {
             let given = parsed.positional(1, 2, "save-prefab <ENTITY> [PATH]")?;
@@ -1916,7 +1934,8 @@ fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             };
             let value = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
             let set = json!({"id": given[0], "component": given[1], "path": path, "value": value});
-            call(parsed, "apply", json!({"operations": [{"set": set}]}))?
+            let params = alone(parsed, json!({"operations": [{"set": set}]}));
+            call(parsed, "apply", params)?
         }
         method @ ("undo" | "redo" | "edits") => {
             parsed.positional(0, 0, &format!("{method} [--author <NAME>]"))?;
@@ -2152,6 +2171,21 @@ mod tests {
             let set = &params["operations"][0]["set"];
             assert_eq!((method.as_str(), &set["path"]), ("apply", &json!(path)));
             assert_eq!(set["value"], value, "{given:?}");
+            assert!(
+                params.get("play").is_none(),
+                "left out, which older games refuse"
+            );
+        }
+        // An edit of the playing copy alone, by either command.
+        let play = [
+            &["set", "--play", "Fight", "Fight.player_hp", "0"][..],
+            &["apply", "--play", "[]"][..],
+        ];
+        for given in play {
+            let Ok(Command::Call { method, params, .. }) = parsed(given) else {
+                panic!("a call");
+            };
+            assert_eq!((method.as_str(), &params["play"]), ("apply", &json!(true)));
         }
         let Ok(Command::Call { method, params, .. }) =
             parsed(&["press", "end_turn", "--ui", "fight", "--ticks", "2"])

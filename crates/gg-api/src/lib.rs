@@ -2373,12 +2373,21 @@ pub enum Operation {
 /// client's edits are those of every connection of its name, so a gesture's number must be unique
 /// across them, as one counted from a random start is. With a gesture an apply is only sets, each
 /// of one component's field, no two of one entity, or it's refused with `api.bad_params`.
+///
+/// `play` changes the copy a project's game plays alone, as its ticks do, so a test's setup
+/// stays out of the world as edited: `stop` drops it, and a scene save leaves it out.
+/// - Undoing or redoing it steps the copy alone too.
+/// - Where no copy plays, as in a game that isn't a project's, it's any edit.
+/// - It's refused while the game is stopped (`api.stopped`), as no copy plays.
+/// - It's refused with a gesture (`api.bad_params`).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Apply {
     pub operations: Vec<Operation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gesture: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub play: bool,
 }
 
 /// What `apply` answers: the ticks run as the edit applied, the next the first after it, and the

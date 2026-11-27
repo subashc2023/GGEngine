@@ -873,7 +873,7 @@ const TOOLS: &[Tool] = &[
                                 field of an instance's entity back to its prefab's. Values are \
                                 JSON as `entity` shows them; a struct missing fields takes \
                                 their defaults",
-            }})
+            }, "play": play()})
         },
         required: &["operations"],
     },
@@ -909,6 +909,7 @@ const TOOLS: &[Tool] = &[
                 "component": {"type": "string"},
                 "path": {"type": "string", "default": ""},
                 "value": {"description": "As `entity` shows values"},
+                "play": play(),
             })
         },
         required: &["id", "component", "value"],
@@ -1027,6 +1028,18 @@ fn entity() -> Value {
 
 fn id() -> Value {
     json!({"type": "string", "description": "An entity's ID, 16 hex digits"})
+}
+
+fn play() -> Value {
+    json!({
+        "type": "boolean",
+        "default": false,
+        "description": "Whether the edit changes the copy a project's game plays alone, as its \
+                        ticks do: a test's setup, which `stop` drops and a scene save leaves out; \
+                        `undo` and `redo` step it in the copy alone. Without it, an edit passes \
+                        through to the world as edited. Refused while the game is stopped \
+                        (`api.stopped`); any edit where no copy plays",
+    })
 }
 
 fn author() -> Value {
@@ -1337,7 +1350,13 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         }
         "set" => {
             arguments.entry("path").or_insert_with(|| json!(""));
-            call("apply", json!({"operations": [{"set": arguments}]}))
+            let play = arguments.remove("play");
+            let mut params = json!({"operations": [{"set": arguments}]});
+            // Left out unless true, as an older game's API refuses it.
+            if let Some(play @ Value::Bool(true)) = play {
+                params["play"] = play;
+            }
+            call("apply", params)
         }
         "capture" => {
             let inline = match arguments.remove("inline") {

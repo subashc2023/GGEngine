@@ -1132,7 +1132,12 @@ impl Api {
                     answer_done(reply, &Offer::Patch, stepper.ticks, done);
                 }
             },
-            Call::Apply(given, gesture) => {
+            Call::Apply(_, _, true) if stepper.stopped() => {
+                let message = "the game is stopped, and its world is the world as edited: no copy \
+                               plays for an edit to change alone until the `play` method";
+                reply.send(Err(Failure::new("api.stopped", message)));
+            }
+            Call::Apply(given, gesture, play) => {
                 // Assets its values name are loaded first, as a scene's are.
                 let named = assets_named(cx.world(), &given);
                 cx.load_named(named, false);
@@ -1147,7 +1152,7 @@ impl Api {
                             },
                             None => Edit::Apply { author, operations },
                         };
-                        let offered = stack.offer(cx, edit);
+                        let offered = stack.offer(cx, edit, play);
                         self.answer_offered(reply, offered, Offer::Apply, stepper.ticks);
                     }
                     Err(failure) => reply.send(Err(failure)),
@@ -1168,7 +1173,7 @@ impl Api {
                         author: client.to_string(),
                         operations: vec![link],
                     };
-                    let offered = stack.offer(cx, edit);
+                    let offered = stack.offer(cx, edit, false);
                     let path = saved.path;
                     let offer = Offer::Prefab { path, name };
                     self.answer_offered(reply, offered, offer, stepper.ticks);
@@ -1186,7 +1191,7 @@ impl Api {
                         author: author.clone(),
                     }
                 };
-                let offered = stack.offer(cx, edit);
+                let offered = stack.offer(cx, edit, false);
                 self.answer_offered(reply, offered, Offer::Step { author }, stepper.ticks);
             }
             _ => unreachable!("`answer` passes the edits alone"),

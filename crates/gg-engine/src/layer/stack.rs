@@ -371,9 +371,10 @@ impl Stack {
 
     /// Like [`edit`](Self::edit), but in a lockstep session it's offered for a tick both peers
     /// apply it before, returning the ticket. A server's client refuses it (`net.no_edit`): the
-    /// server's next state would undo it.
+    /// server's next state would undo it. An edit `play` marks changes a playing copy alone, as
+    /// [`Through`](super::through::Through) says; where none plays, it's any edit.
     #[cfg(feature = "dev")]
-    pub(crate) fn offer(&mut self, cx: &mut Context, edit: Edit) -> Offered {
+    pub(crate) fn offer(&mut self, cx: &mut Context, edit: Edit, play: bool) -> Offered {
         match &mut self.net {
             Some(Session::Peer(net)) => Offered::Later(net.offer(edit)),
             Some(Session::Client(_)) => Offered::Now(Err(Error::new(
@@ -382,7 +383,7 @@ impl Stack {
                  it away: edit the server's world",
             ))),
             Some(Session::Server(_)) | None => {
-                let through = super::through::Through::before(cx, &edit);
+                let through = super::through::Through::before(cx, &edit, play);
                 let apply = |cx: &mut Context, edit| self.edit(cx, edit);
                 let done = scene_files::client_edit(cx, edit, apply);
                 if let Some(through) = through {
@@ -557,6 +558,7 @@ impl Stack {
                     open,
                     authors: Authors::default(),
                     attached: false,
+                    played: Vec::new(),
                 });
             }
             return Ok((ticks, snapshot.stopped));
@@ -619,6 +621,7 @@ impl Stack {
             open: cx.scenes.open.clone(),
             authors: mem::take(&mut cx.authors),
             attached: false,
+            played: Vec::new(),
         });
         info!(ticks, entities, "Playing a copy of the world as edited");
     }

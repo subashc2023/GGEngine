@@ -148,8 +148,9 @@ pub(super) enum Call {
         quit: bool,
     },
     Patch(JumpTable),
-    /// An edit's operations, and its gesture if it sets one field.
-    Apply(Vec<gg_api::Operation>, Option<u64>),
+    /// An edit's operations, its gesture if it sets one field, and whether it changes the playing
+    /// copy alone (`play`).
+    Apply(Vec<gg_api::Operation>, Option<u64>, bool),
     /// The entity to save as a prefab and link, and the prefab's path (a checked `.prefab`).
     SavePrefab {
         id: Subject,
@@ -344,7 +345,13 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
             let Apply {
                 mut operations,
                 gesture,
+                play,
             } = take(method, params)?;
+            if play && gesture.is_some() {
+                let what = "takes no gesture with `play`: a gesture's sets join the client's \
+                            last edit, which may be one of the world as edited";
+                return Err(bad_params(method, what));
+            }
             for operation in &mut operations {
                 if let gg_api::Operation::Set {
                     component, path, ..
@@ -377,7 +384,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
                             gesture's";
                 return Err(bad_params(method, what));
             }
-            Call::Apply(operations, gesture)
+            Call::Apply(operations, gesture, play)
         }
         "save_prefab" => {
             let SavePrefab { id, path } = take(method, params)?;

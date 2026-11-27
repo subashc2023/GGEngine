@@ -1064,6 +1064,7 @@ mod imp {
                 let apply = gg_api::Apply {
                     operations,
                     gesture,
+                    play: false,
                 };
                 let params = serde_json::to_value(apply).expect("an apply serializes");
                 Some(("apply".to_owned(), params))

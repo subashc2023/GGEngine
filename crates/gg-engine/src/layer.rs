@@ -696,6 +696,10 @@ pub(crate) struct Edited {
     /// Whether the copy is of the world the layers' `attach` built, played as the run started:
     /// its first tick applies what they queued there, which a snapshot before it would miss.
     pub(crate) attached: bool,
+    /// The edits authors made of the copy alone (the API's `play`), each by its author and its
+    /// place in the author's log in the copy, counted from the first done: undoing or redoing one
+    /// passes nothing through ([`Through`](through::Through)).
+    pub(crate) played: Vec<(String, usize)>,
 }
 
 #[cfg(test)]

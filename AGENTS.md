@@ -98,7 +98,8 @@ own trait objects or function pointers shows after `gg rebuild`. A layer's `atta
 world, and restarts skip it: an edit to code only it reaches shows after `gg rebuild --fresh`,
 which starts the game afresh. The game plays a copy of the world as edited: `gg set`, `gg apply`
 and scene files' saves change both, so `gg scene save` writes them but not what play did, and
-`gg stop` then `gg play` start play over from them.
+`gg stop` then `gg play` start play over from them. `--play` on `gg set` or `gg apply` changes the
+copy alone, for a test's setup, such as a health of 0 to see an end screen.
 `cargo gg help run` has the details. `cargo gg mcp` serves the same commands over MCP.
 While the game runs, call `target/debug/gg`, which `cargo gg run` built, or the installed `gg`:
 `cargo gg` waits on the build's lock while `gg run` rebuilds the game.
