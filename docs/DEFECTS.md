@@ -129,7 +129,6 @@ fix, and when the fix is worth it. Work not built yet is in [PLAN.md](PLAN.md)'s
 
 | Defect | Fix | Worth it when |
 |---|---|---|
-| A bound starting with `0` (`min = 0.5`) on an array field (`[f32; 3]`) fails clippy's `zero_prefixed_literal`: the derive's check places the type's tokens at the bound | Place only the check's own tokens there | A game bounds an array field so |
 | A list's `#[reflect(opaque)]` state is kept by its ends when its length changes and by place otherwise: swaps trade state, and `[a, b, c]` to `[a, c2]` gives b's to c2, silently (`kept_from`) | Callers that edit by element pass its index | Tools reorder or edit lists of opaque state |
 
 ## Snapshots

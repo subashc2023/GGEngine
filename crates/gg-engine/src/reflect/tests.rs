@@ -894,6 +894,8 @@ enum Shade {
         rings: u8,
     },
     Dome(#[reflect(min = 0.5)] f32),
+    /// Bounds on an array, starting with 0: no literal of its type is placed at them.
+    Ribs(#[reflect(min = 0.25, max = 9)] [f32; 3]),
 }
 
 /// - A struct's default is its fields': the hint's, else the type's under its bounds.
