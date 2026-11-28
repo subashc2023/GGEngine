@@ -8,7 +8,7 @@
 //! and rebuilds, and edits to code only `attach` reaches, which won't show. Without dx, or where
 //! patches can't reach the game's code, it builds with cargo and each change rebuilds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -1279,9 +1279,12 @@ fn changed(from: &Hashes, to: &Hashes) -> Vec<PathBuf> {
 ///   [`classify::uses`] tells, given with the constant's module, and one that changes a function
 ///   only the game's start reaches.
 /// - A new stamp with the same content is no change, nor is an edit, since the text a patch left in
-///   a module (`ran`), of doc comments or tests alone.
+///   a module (`ran`), of doc comments or tests alone, nor a module added that no module declares
+///   ([`undeclared`]).
 fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> Diff {
-    let added = (stamps.keys()).filter(|path| !baseline.files.contains_key(*path));
+    let undeclared = undeclared(sources, baseline, stamps);
+    let added = (stamps.keys())
+        .filter(|path| !baseline.files.contains_key(*path) && !undeclared.contains(*path));
     let removed = (baseline.files.keys()).filter(|path| !stamps.contains_key(*path));
     // The first edit a patch carries only with a restart in place, and why.
     let mut restart: Option<(PathBuf, String)> = None;
@@ -1297,6 +1300,9 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> D
     for (path, stamp) in stamps {
         let module = sources.module(path);
         let Some(known) = baseline.files.get(path) else {
+            if undeclared.contains(path) {
+                continue;
+            }
             // A module added, which only a restart in place carries.
             let Ok(content) = fs::read(path) else {
                 return Diff::Rebuild(path.clone(), "a file gg can't read".to_owned());
@@ -1399,6 +1405,70 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> D
         Some((file, why)) => Diff::Restart(file, why, hashes, unreadable, prints, texts),
         None => Diff::Bodies(hashes, unreadable, prints, texts),
     }
+}
+
+/// The game's modules added since `baseline` that no module declares: a module's file saved before
+/// the `mod` line that makes it one isn't the crate's yet, and the save with that line restarts the
+/// game in place. Nothing counts as undeclared where a module can't be read.
+fn undeclared(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> BTreeSet<PathBuf> {
+    let added: Vec<&PathBuf> = (stamps.keys())
+        .filter(|path| sources.module(path) && !baseline.files.contains_key(*path))
+        .collect();
+    if added.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut texts = Vec::new();
+    for path in stamps.keys().filter(|path| sources.module(path)) {
+        match fs::read_to_string(path) {
+            Ok(text) => texts.push(text),
+            Err(_) => return BTreeSet::new(),
+        }
+    }
+    (added.into_iter())
+        .filter(|path| !declared(path, &sources.modules, &texts))
+        .cloned()
+        .collect()
+}
+
+/// Whether some module, of `texts`, may declare `path`, a module's file under `modules`: one has
+/// `mod` and its name as words, or its file's name, as `#[path]` or `include!` give it. It may
+/// match a comment or the wrong parent: a restart for nothing, where missing a declaration would
+/// leave a module out. The crate's roots and binaries, which cargo finds itself, always count.
+fn declared(path: &Path, modules: &Path, texts: &[String]) -> bool {
+    let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    let parent = path.parent();
+    if (parent == Some(modules) && matches!(file, "main.rs" | "lib.rs"))
+        || path.starts_with(modules.join("bin"))
+    {
+        return true;
+    }
+    let (name, named) = if file == "mod.rs" {
+        let name = parent
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str());
+        (name, name.map(|name| format!("{name}/mod.rs")))
+    } else {
+        (file.strip_suffix(".rs"), Some(file.to_owned()))
+    };
+    let (Some(name), Some(named)) = (name, named) else {
+        return true;
+    };
+    (texts.iter()).any(|text| text.contains(&named) || declares(text, name))
+}
+
+/// Whether `text` has the word `mod`, then `name` as a word, raw or not.
+fn declares(text: &str, name: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices("mod").any(|(at, _)| {
+        let rest = &text[at + 3..];
+        let after = rest.trim_start();
+        let tail = after.strip_prefix("r#").unwrap_or(after).strip_prefix(name);
+        text[..at].chars().next_back().is_none_or(|c| !word(c))
+            && after.len() < rest.len()
+            && tail.is_some_and(|tail| !tail.starts_with(word))
+    })
 }
 
 /// How `files`, a patch's modules, run once it's applied: those whose hash after it, in `hashes`,
@@ -2087,16 +2157,54 @@ mod tests {
             matches!(now(), Diff::Rebuild(_, why) if why == main_only),
             "first"
         );
+        // A module's file saved before its `mod` line is no change; the line restarts the game.
         write("game/src/main.rs", game);
-        write("game/src/extra.rs", "");
-        let added = "a module added or removed";
+        write("game/src/extra.rs", "pub fn more() {}\n");
         let extra = root.join("game/src/extra.rs");
+        let Diff::Bodies(hashes, None, _, texts) = now() else {
+            panic!("bodies");
+        };
+        assert!(changed(&baseline.modules, &hashes).is_empty());
+        assert!(!texts.contains_key(&extra));
+        write("game/src/main.rs", &format!("mod extra;\n\n{game}"));
+        let added = "a module added or removed";
         let Diff::Restart(_, why, hashes, ..) = now() else {
             panic!("a restart");
         };
         assert_eq!(why, added);
         assert!(hashes.contains_key(&extra));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A module's file counts as declared by `mod` and its name, raw or not, or by its file's name;
+    /// a name that merely starts the same doesn't.
+    #[test]
+    fn a_module_is_declared_by_its_mod_line_or_its_file_name() {
+        let src = Path::new("/game/src");
+        let texts = |text: &str| vec![text.to_owned()];
+        let wasps = src.join("wasps.rs");
+        assert!(declared(&wasps, src, &texts("mod wasps;")));
+        assert!(declared(
+            &wasps,
+            src,
+            &texts("pub(crate) mod\n    r#wasps ;")
+        ));
+        assert!(declared(
+            &wasps,
+            src,
+            &texts("#[path = \"enemy/wasps.rs\"]\nmod enemy;")
+        ));
+        assert!(!declared(
+            &wasps,
+            src,
+            &texts("mod wasps_old; // model wasps")
+        ));
+        assert!(!declared(&wasps, src, &texts("fn main() {}")));
+        let nested = src.join("enemies/mod.rs");
+        assert!(declared(&nested, src, &texts("mod enemies {}")));
+        assert!(!declared(&nested, src, &texts("mod wasps;")));
+        assert!(declared(&src.join("main.rs"), src, &[]));
+        assert!(declared(&src.join("bin/tool.rs"), src, &[]));
     }
 
     /// After a restart in place, edits are compared with the sources it built: an edit inside a
@@ -2127,6 +2235,7 @@ mod tests {
         let baseline = Baseline::new(&sources);
         let main = root.join("game/src/main.rs");
         let fielded = game.replace("lives: u32,", "lives: u32,\n    score: u32,");
+        let fielded = format!("mod extra;\n\n{fielded}");
         write("game/src/main.rs", &fielded);
         write("game/src/extra.rs", "pub fn more() {}\n");
         let stamps = sources.scan(None);

@@ -54,7 +54,9 @@ Each phase's milestones, and what each deferred, are in git history.
   edits of tests and doc comments alone patching nothing after a patch too (2026-11-27)
 - **Restarts in place**: an edit to a game's types, fields, components or modules, or to what only
   its start reaches, patched in as the game restarts inside its process from a snapshot, about 2 s
-  from save where a rebuild took 5 to 9; games name their app's function (`App::hot`) (2026-11-27)
+  from save where a rebuild took 5 to 9; games name their app's function (`App::hot`); then a game
+  of its own grown by five requests in one process, 10 of 14 code saves restarting in place and 4
+  patching, none rebuilding (2026-11-27)
 
 ## Open
 

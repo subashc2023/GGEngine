@@ -120,13 +120,15 @@ const COPYING: Duration = Duration::from_secs(5);
 
 /// How long a game may take from its launch to serving, in ms, before `serving` says why on macOS.
 /// A game serves within ~40 ms of `main`; macOS scans a new executable before `main`, about 3 s
-/// for a 200 MB debug build, unless the launching app is one of its Developer Tools.
+/// for a 200 MB debug build, unless the launching app is one of its Developer Tools. Gatekeeper
+/// also scans the bundle `dx` builds patches in as the first loads, 2.4 s for a new game on an M3
+/// Pro, and the provenance it records spares the rest.
 const SCANNED: u64 = 1500;
 
 const SCAN_HINT: &str = "the game took this long to launch, as macOS scans each new build as it \
-                         first launches: about 3 s a restart. Adding the terminal, or the app \
-                         running gg, under System Settings › Privacy & Security › Developer Tools \
-                         skips it";
+                         first launches: about 3 s a restart, and 2.4 s more for a new game's \
+                         first patch. Adding the terminal, or the app running gg, under System \
+                         Settings › Privacy & Security › Developer Tools skips it";
 
 /// Prints `event`, a line of JSON.
 pub(crate) fn event(event: &Value) {

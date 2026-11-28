@@ -45,7 +45,8 @@ and the APIs still change.
   rebuilds and restarts the game for every edit.
 - On macOS, for quick restarts: your terminal, or the app running your agent, under System
   Settings › Privacy & Security › Developer Tools. Otherwise macOS scans each new build as it
-  first launches: about 3 s a restart for a game's 200 MB debug executable.
+  first launches: about 3 s a restart for a game's 200 MB debug executable, and 2.4 s more for a
+  new game's first patch.
 - For `cargo gg ship`: cargo-about 0.9.2.
 
 ## Quick start

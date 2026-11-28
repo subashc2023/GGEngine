@@ -189,7 +189,7 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
   change `use`s whose names only bodies use. `gg run` follows calls by name across the game's
   modules to tell where an edit's code runs from.
 - **Other edits to the game's crate restart it in place**, if its app names the function that
-  builds it (`App::hot`): a type, a field or a component changed or added, a module added or
+  builds it (`App::hot`): a type, a field or a component changed or added, a module declared or
   removed, a constant a type uses, or code only `load`, `restored` or that function reach. A patch
   carries them all. subsecond's one rule is that no value old code laid out reaches new code, and a
   type keeps its `TypeId` as its fields change, so nothing would catch a breach. So the game first

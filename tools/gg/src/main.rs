@@ -147,7 +147,8 @@ the build read instead of those packages, as cargo's dep-info file beside the ex
 (`watching` again, with `dep_info`): each path package's compiled modules, what they embed
 (`include_str!`), and what build scripts watch. So an edit to a package's docs, or to a module
 built only for its tests, rebuilds nothing. Nor does one to a module's doc comments or
-`#[cfg(test)]` items alone, since the build or a patch. Then:
+`#[cfg(test)]` items alone, since the build or a patch, nor a module's file saved before a `mod`
+line declares it. Then:
 - an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
   between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
 - so is a function added, removed or re-signed, free or an inherent impl's: not a `const fn`,
@@ -808,7 +809,8 @@ shows it, a field left out taking its default; `types` describes each type's fie
 - {\"unlink\":{\"id\":ENTITY}} unlinks a prefab's instance into entities of its own;
 - {\"revert\":{\"id\":ENTITY,\"component\":C,\"path\":P}} sets a field of an instance's entity back
   to its prefab's.
-Prints the ticks and the IDs its creates and duplicates spawned. A kinematic platform:
+Prints the ticks, the IDs its creates and duplicates spawned and, without `--play`, a `note` that
+the world as edited keeps the edit. A kinematic platform:
   gg apply '[{\"create\":{\"components\":{\"Name\":\"Lift\",
     \"Transform\":{\"translation\":[5,1,0],\"scale\":[3,0.5,1]},
     \"RigidBody2D\":{\"body_type\":\"Kinematic\"},\"BoxCollider2D\":{}}}}]'
@@ -841,7 +843,7 @@ PATH is a field, such as `translation.x`; without one, VALUE is the whole compon
 component's type and `.`, as `get` takes it, or comes as an argument of its own, empty for the
 whole. VALUE is JSON, or else a string, shaped as `entity` shows values. ENTITY is an ID or a name.
 `--play` changes the playing copy alone, as `apply`'s does: a test's setup, kept out of the world as
-edited and its scene file.
+edited and its scene file. Without it, the answer's `note` says the world as edited keeps the edit.
   gg set Player Player.speed 9
   gg set Player Transform translation '[0, 2, 0]'
   gg set --play Fight Fight.player_hp 0
@@ -1006,6 +1008,8 @@ enum Command {
         pick: Pick,
         method: String,
         params: Value,
+        /// A field `note` the answer gains, as an edit's kept in the world as edited ([`KEPT`]).
+        note: Option<&'static str>,
     },
     /// Captures of several shows of one world: `params` are `capture`'s but `show`.
     Capture {
@@ -1066,8 +1070,9 @@ fn main() -> ExitCode {
             pick,
             method,
             params,
+            note,
         } => game::call(&pick, &method, params).map(|result| {
-            print(result.get());
+            print(&noted(result.get(), note));
             true
         }),
         Command::Capture {
@@ -1429,7 +1434,36 @@ fn call(parsed: &mut Parsed, method: &str, params: Value) -> Result<Command, Fai
         pick: parsed.pick()?,
         method: method.to_owned(),
         params,
+        note: None,
     })
+}
+
+/// The note on the answer of `set` or `apply` without `--play`, as an agent may set a value for a
+/// test's setup and forget that a later scene save writes it.
+const KEPT: &str = "the world as edited keeps this edit, and `gg scene save` writes it; `--play` \
+                    changes the playing copy alone, as for a test's setup";
+
+/// `answer`, a JSON object, with `note` as its field `note`, if any.
+fn noted(answer: &str, note: Option<&str>) -> String {
+    match (note, serde_json::from_str::<Value>(answer)) {
+        (Some(note), Ok(Value::Object(mut fields))) => {
+            fields.insert("note".to_owned(), json!(note));
+            Value::Object(fields).to_string()
+        }
+        _ => answer.to_owned(),
+    }
+}
+
+/// An `apply` of `params`, noted [`KEPT`] unless it changes the playing copy alone.
+fn edit(parsed: &mut Parsed, params: Value) -> Result<Command, Failure> {
+    let kept = params.get("play").is_none();
+    let mut command = call(parsed, "apply", params)?;
+    if let Command::Call { note, .. } = &mut command
+        && kept
+    {
+        *note = Some(KEPT);
+    }
+    Ok(command)
 }
 
 fn help_args(parsed: &mut Parsed) -> Result<Command, Failure> {
@@ -1933,7 +1967,7 @@ fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
                 return Err(bad("OPERATIONS is a JSON array of operations".to_owned()));
             }
             let params = alone(parsed, json!({"operations": operations}));
-            call(parsed, "apply", params)?
+            edit(parsed, params)?
         }
         "save-prefab" => {
             let given = parsed.positional(1, 2, "save-prefab <ENTITY> [PATH]")?;
@@ -1955,7 +1989,7 @@ fn edit_args(name: &str, parsed: &mut Parsed) -> Result<Command, Failure> {
             let value = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
             let set = json!({"id": given[0], "component": given[1], "path": path, "value": value});
             let params = alone(parsed, json!({"operations": [{"set": set}]}));
-            call(parsed, "apply", params)?
+            edit(parsed, params)?
         }
         method @ ("undo" | "redo" | "edits") => {
             parsed.positional(0, 0, &format!("{method} [--author <NAME>]"))?;
@@ -2135,6 +2169,7 @@ mod tests {
             pick,
             method,
             params,
+            ..
         }) = parsed(&[
             "get",
             "00000000000000ff",
@@ -2185,7 +2220,13 @@ mod tests {
                 json!(9),
             ),
         ] {
-            let Ok(Command::Call { method, params, .. }) = parsed(given) else {
+            let Ok(Command::Call {
+                method,
+                params,
+                note,
+                ..
+            }) = parsed(given)
+            else {
                 panic!("a call");
             };
             let set = &params["operations"][0]["set"];
@@ -2195,6 +2236,7 @@ mod tests {
                 params.get("play").is_none(),
                 "left out, which older games refuse"
             );
+            assert_eq!(note, Some(KEPT), "noted as kept");
         }
         // An edit of the playing copy alone, by either command.
         let play = [
@@ -2202,11 +2244,24 @@ mod tests {
             &["apply", "--play", "[]"][..],
         ];
         for given in play {
-            let Ok(Command::Call { method, params, .. }) = parsed(given) else {
+            let Ok(Command::Call {
+                method,
+                params,
+                note,
+                ..
+            }) = parsed(given)
+            else {
                 panic!("a call");
             };
             assert_eq!((method.as_str(), &params["play"]), ("apply", &json!(true)));
+            assert_eq!(note, None, "not kept");
         }
+        // The note joins an answer's fields; an answer not an object stays as it is.
+        let answer: Value =
+            serde_json::from_str(&noted(r#"{"ticks":3}"#, Some(KEPT))).expect("JSON");
+        assert_eq!(answer, json!({"ticks": 3, "note": KEPT}));
+        assert_eq!(noted("null", Some(KEPT)), "null");
+        assert_eq!(noted(r#"{"ticks":3}"#, None), r#"{"ticks":3}"#);
         let Ok(Command::Call { method, params, .. }) =
             parsed(&["press", "end_turn", "--ui", "fight", "--ticks", "2"])
         else {
@@ -2222,6 +2277,7 @@ mod tests {
             pick,
             method,
             params,
+            ..
         }) = parsed(&["--pid", "7", "--timeout=5", "step", "2", "--app", "Sandbox"])
         else {
             panic!("a call");
