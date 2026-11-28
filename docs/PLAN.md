@@ -46,11 +46,12 @@ Each phase's milestones, and what each deferred, are in git history.
 - **Games played by their controls**: `gg actions` listing each action's bindings and what it does,
   and the controls read apart from actions; `gg input` setting actions by name, pads, and aims at
   points; then four games played to their goals by agents, and their controls said (2026-11-26)
-- **Change by asking, tried**: six games grown by five requests each, by agents under `gg run`; a
-  running game playing a copy of its world as edited, which edits pass through to, but those of the
-  copy alone (`gg set --play`); `gg wait` listing every outcome since the last, rebuilds' warnings
-  and UI files' reloads; held input shown; UI panels that cover, hover and offsets; captures 40
-  times faster in debug builds (2026-11-27)
+- **Change by asking, tried**: six games grown by five requests each, by agents under `gg run`,
+  then a game of its own made by `gg new` outside the workspace; a running game playing a copy of
+  its world as edited, which edits pass through to, but those of the copy alone (`gg set --play`);
+  `gg wait` listing every outcome since the last, rebuilds' warnings and UI files' reloads; held
+  input shown; UI panels that cover, hover and offsets; captures 40 times faster in debug builds;
+  edits of tests and doc comments alone patching nothing after a patch too (2026-11-27)
 
 ## Open
 
@@ -126,6 +127,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | Several views (split screen, the editor's beside the game's), a camera's own aspect, glTF's `zfar` | A game or the editor draws several |
 | Picks: the world point under the cursor, more than 64 a frame, answers a frame sooner | Placing at the cursor, many touches, or hover latency |
 | Depth modes: draws that ignore it, skyboxes that test it, decals, alpha-cut sprites that write it | Each with its first user |
+| Hiding an entity's draws while it stays: games set a sprite's or circle's alpha to 0 | A game hides a model, or many draws at once |
 | Lines with joins, circles by screen size; outlines of hidden parts, of hovers, of several entities, by jump flooding | Each with its first user |
 | Games' shaders: the view's size without parameters, GPU-table parameters past 64 bytes, data textures, wave ops, a fog module | A shader needs one |
 | `MeshDraw`'s mesh and shader by name: saved, hashed, set and restored as `Sprite.texture` is | A game builds its draws from data, or rebuilds that add assets lose draws code made (DEFECTS' Snapshots) |

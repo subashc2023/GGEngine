@@ -48,6 +48,13 @@ type Stamps = BTreeMap<PathBuf, Stamp>;
 
 type Hashes = BTreeMap<PathBuf, u64>;
 
+/// Modules' texts, by path.
+type Texts = BTreeMap<PathBuf, String>;
+
+/// The modules patches changed, each with its hash and text as the processes run them: an edit
+/// since, of doc comments or tests alone, changes nothing they run.
+type Ran = BTreeMap<PathBuf, (u64, String)>;
+
 /// A run's patches: its builds, the sources it watches, and what the game's processes run.
 pub(crate) struct Patches {
     builder: Builder,
@@ -66,6 +73,7 @@ pub(crate) struct Patches {
     /// hashes as of the code they run: the build's plus the patches they applied, all alike.
     processes: Vec<u32>,
     applied: Hashes,
+    ran: Ran,
     /// Whether to look at the sources once quiet, changed or not: a process starts serving, or the
     /// run starts waiting for a rebuild.
     fresh: bool,
@@ -222,6 +230,7 @@ impl Patches {
             started: false,
             processes: Vec::new(),
             applied: baseline.modules.clone(),
+            ran: Ran::new(),
             fresh: false,
             looked: seen.clone(),
             seen,
@@ -360,6 +369,7 @@ impl Patches {
         }
         self.processes.clear();
         self.applied = self.baseline.modules.clone();
+        self.ran.clear();
         if afresh {
             self.world = self.baseline.prints.clone();
             self.told.clear();
@@ -398,12 +408,12 @@ impl Patches {
     fn look(&mut self, games: &[Process]) {
         self.looked = self.seen.clone();
         self.fresh = false;
-        let diff = diff(&self.sources, &self.baseline, &self.seen);
+        let diff = diff(&self.sources, &self.baseline, &self.seen, &self.ran);
         let patches = matches!(self.builder, Builder::Dx(_));
-        // The prints of the sources as they are.
-        let prints = match &diff {
-            Diff::Bodies(_, _, prints) => prints.clone(),
-            Diff::Rebuild(..) => None,
+        // The prints and edited modules' texts of the sources as they are.
+        let (prints, texts) = match &diff {
+            Diff::Bodies(_, _, prints, texts) => (prints.clone(), texts.clone()),
+            Diff::Rebuild(..) => (None, Texts::new()),
         };
         match act(diff, games, &self.applied, self.stale, patches) {
             Act::Nothing => {
@@ -424,7 +434,8 @@ impl Patches {
                 let serving = games
                     .iter()
                     .filter_map(|game| Some((game.pid, game.session?.clone())));
-                self.patch(serving.collect(), files, hashes, unreadable, prints);
+                let ran = ran_after(&files, &hashes, &texts);
+                self.patch(serving.collect(), files, hashes, unreadable, prints, ran);
             }
         }
     }
@@ -475,8 +486,9 @@ impl Patches {
     /// On its own thread, builds a patch of edits to `files` for each of `processes` (ID and
     /// session), against its `main`, and has them apply it at once; a lockstep joiner waits for its
     /// own at the tick its host's applies before. Afterwards the modules' hashes are `hashes`, and
-    /// their functions' prints `prints`. A patch whose sources changed as it built is dropped; with
-    /// `unreadable`, one that builds isn't applied.
+    /// their functions' prints `prints`, and the modules it changed run as `ran` says. A patch
+    /// whose sources changed as it built is dropped; with `unreadable`, one that builds isn't
+    /// applied.
     fn patch(
         &mut self,
         processes: Vec<(u32, Session)>,
@@ -484,6 +496,7 @@ impl Patches {
         hashes: Hashes,
         unreadable: Option<PathBuf>,
         prints: Option<Prints>,
+        ran: Ran,
     ) {
         let Builder::Dx(dx) = &self.builder else {
             let file = files.first().cloned().unwrap_or_default();
@@ -561,6 +574,7 @@ impl Patches {
             hashes,
             unreadable,
             prints,
+            ran,
             thread,
         });
     }
@@ -625,6 +639,7 @@ impl Patches {
                 hashes,
                 unreadable,
                 prints,
+                ran,
                 thread,
             }) => {
                 let patching = thread.join().unwrap_or_else(|_| Patching {
@@ -639,6 +654,10 @@ impl Patches {
                         .all(|(_, outcome)| matches!(outcome, Outcome::Applied(..)));
                 let attach = if all && current {
                     self.applied = hashes;
+                    for file in &files {
+                        self.ran.remove(file);
+                    }
+                    self.ran.extend(ran);
                     self.failed = None;
                     self.attached(prints.as_ref())
                 } else {
@@ -687,6 +706,7 @@ impl Patches {
                             // restarts.
                             if current {
                                 self.applied.clear();
+                                self.ran.clear();
                                 self.fresh = true;
                             }
                             let message = format!(
@@ -787,13 +807,15 @@ enum Job {
         thread: JoinHandle<Result<(Fat, Baseline), Failure>>,
     },
     /// A patch of edits to `files` for processes `pids`; `files`, `hashes` and `unreadable` are
-    /// [`Act::Patch`]'s, and `prints` the functions' prints after it.
+    /// [`Act::Patch`]'s, `prints` the functions' prints after it, and `ran` how `files` run after
+    /// it ([`ran_after`]).
     Patch {
         pids: Vec<u32>,
         files: Vec<PathBuf>,
         hashes: Hashes,
         unreadable: Option<PathBuf>,
         prints: Option<Prints>,
+        ran: Ran,
         thread: JoinHandle<Patching>,
     },
 }
@@ -829,8 +851,9 @@ enum Diff {
     /// In what a patch can't carry: a change to a file, for a reason.
     Rebuild(PathBuf, String),
     /// In function bodies of modules, if at all: each module's hash, the module gg can't read, if
-    /// any, and the functions' prints, unless a module doesn't parse.
-    Bodies(Hashes, Option<PathBuf>, Option<Prints>),
+    /// any, the functions' prints, unless a module doesn't parse, and the texts of the modules
+    /// that differ from the build's.
+    Bodies(Hashes, Option<PathBuf>, Option<Prints>, Texts),
 }
 
 #[derive(Debug, PartialEq)]
@@ -856,7 +879,7 @@ enum Act {
 fn act(diff: Diff, games: &[Process], applied: &Hashes, stale: bool, patches: bool) -> Act {
     let (hashes, unreadable) = match diff {
         Diff::Rebuild(file, why) => return Act::Rebuild(file, why),
-        Diff::Bodies(hashes, unreadable, _) => (hashes, unreadable),
+        Diff::Bodies(hashes, unreadable, ..) => (hashes, unreadable),
     };
     let rebuild = |file: &PathBuf, why: &str| Act::Rebuild(file.clone(), why.to_owned());
     let sessions: Option<Vec<&Session>> = games.iter().map(|game| game.session).collect();
@@ -899,8 +922,9 @@ fn changed(from: &Hashes, to: &Hashes) -> Vec<PathBuf> {
 /// function bodies of the modules, as [`classify::uses`] tells, given with the constant's module.
 /// So does one that changes a function only startup reaches, as [`reach`] tells, given with that
 /// function's module if it changed, else with the edited constant's. A new stamp with the same
-/// content is no change.
-fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
+/// content is no change, nor is an edit, since the text a patch left in a module (`ran`), of doc
+/// comments or tests alone.
+fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> Diff {
     let added = (stamps.keys()).filter(|path| !baseline.files.contains_key(*path));
     let removed = (baseline.files.keys()).filter(|path| !stamps.contains_key(*path));
     if let Some(file) = added.chain(removed).next() {
@@ -937,6 +961,12 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
                     Edit::Same => hash = known.hash,
                     Edit::Bodies { consts: edited } => {
                         consts.extend(edited.into_iter().map(|name| (name, path.clone())));
+                        // The processes run what a patch left: keep its hash.
+                        if let Some((patched, old)) = ran.get(path)
+                            && classify::classify(old, &text) == Edit::Same
+                        {
+                            hash = *patched;
+                        }
                     }
                     Edit::Unreadable => unreadable = Some(path.clone()),
                     Edit::Rebuild(why) => return Diff::Rebuild(path.clone(), why.to_owned()),
@@ -986,7 +1016,18 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
         );
         return Diff::Rebuild(file, why);
     }
-    Diff::Bodies(hashes, unreadable, prints)
+    Diff::Bodies(hashes, unreadable, prints, texts)
+}
+
+/// How `files`, a patch's modules, run once it's applied: those whose hash after it, in `hashes`,
+/// is their text's, in `texts`, run that text. The others run what the build or an earlier patch
+/// left, whose own text gg compares edits with.
+fn ran_after(files: &[PathBuf], hashes: &Hashes, texts: &Texts) -> Ran {
+    let ran = files.iter().filter_map(|file| {
+        let (hash, text) = (*hashes.get(file)?, texts.get(file)?);
+        (hash == hash_of(text.as_bytes())).then(|| (file.clone(), (hash, text.clone())))
+    });
+    ran.collect()
 }
 
 /// The prints of the game's `modules`, each its path and text; `None` if one has no text, not
@@ -1457,14 +1498,21 @@ mod tests {
                 .any(|file| file.starts_with(&sources.target))
         );
 
-        let now = || diff(&sources, &baseline, &sources.scan(Some(&inputs)));
-        assert!(matches!(now(), Diff::Bodies(hashes, None, _) if hashes == baseline.modules));
+        let now = || {
+            diff(
+                &sources,
+                &baseline,
+                &sources.scan(Some(&inputs)),
+                &Ran::new(),
+            )
+        };
+        assert!(matches!(now(), Diff::Bodies(hashes, None, _, _) if hashes == baseline.modules));
         // Not read: docs, a module built for tests alone, what a build wrote. A walk of the
         // engine's directory would have rebuilt for the first two.
         write("engine/AGENTS.md", "How to work here, and why.");
         write("engine/src/tests.rs", "#[test]\nfn ticks_twice() {}\n");
         write("target/debug/build/engine/out/sprite.spv", "SPIR-V, again");
-        assert!(matches!(now(), Diff::Bodies(hashes, None, _) if hashes == baseline.modules));
+        assert!(matches!(now(), Diff::Bodies(hashes, None, _, _) if hashes == baseline.modules));
         // Read: each rebuilds, until undone.
         for (path, edited, was) in [
             ("game/src/level.txt", "a longer level", "a level"),
@@ -1534,13 +1582,13 @@ mod tests {
                 .modules
                 .contains_key(&root.join("game/src/tests/helper.rs"))
         );
-        let now = || diff(&sources, &baseline, &sources.scan(None));
+        let now = || diff(&sources, &baseline, &sources.scan(None), &Ran::new());
         // Not watched: assets, a package's tests, an editor's lock and backup.
         write("game/assets/logo.png", "another logo");
         write("engine/tests/ticks.rs", "#[test]\nfn ticks_twice() {}\n");
         write("game/src/.#main.rs", "user@host.1234");
         write("engine/src/lib.rs~", "pub fn tick() {}\n");
-        let Diff::Bodies(hashes, None, prints) = now() else {
+        let Diff::Bodies(hashes, None, prints, _) = now() else {
             panic!("bodies");
         };
         assert_eq!(hashes, baseline.modules);
@@ -1548,17 +1596,38 @@ mod tests {
         // An edit in a function body the running game reaches; each edit here changes the file's
         // length, as one within the clock's resolution of the last may leave its time.
         write("game/src/main.rs", &game.replace("step(1)", "step(22)"));
-        let Diff::Bodies(hashes, None, Some(_)) = now() else {
+        let Diff::Bodies(hashes, None, Some(_), _) = now() else {
             panic!("bodies");
         };
         assert_ne!(hashes[&main], baseline.modules[&main]);
+        // Once a patch carried it, an edit of tests and doc comments alone keeps the patch's hash,
+        // and one in a body doesn't.
+        let Diff::Bodies(patched, None, _, texts) = now() else {
+            panic!("bodies");
+        };
+        let ran = ran_after(std::slice::from_ref(&main), &patched, &texts);
+        assert!(ran.contains_key(&main));
+        let since = || diff(&sources, &baseline, &sources.scan(None), &ran);
+        let stepped = game.replace("step(1)", "step(22)");
+        let tested = format!("{stepped}\n/// A probe.\n#[cfg(test)]\nfn probe() {{}}\n");
+        write("game/src/main.rs", &tested);
+        let Diff::Bodies(hashes, None, _, _) = since() else {
+            panic!("bodies");
+        };
+        assert_eq!(hashes[&main], patched[&main]);
+        assert_ne!(hashes[&main], baseline.modules[&main]);
+        write("game/src/main.rs", &game.replace("step(1)", "step(333)"));
+        let Diff::Bodies(hashes, None, _, _) = since() else {
+            panic!("bodies");
+        };
+        assert_ne!(hashes[&main], patched[&main]);
         // One in a layer's `attach`, which only a start afresh runs: told of against the world.
         let attached = game.replace("step(1)", "step(22)");
         write(
             "game/src/main.rs",
             &attached.replace("spawn(1)", "spawn(333)"),
         );
-        let Diff::Bodies(_, None, Some(prints)) = now() else {
+        let Diff::Bodies(_, None, Some(prints), _) = now() else {
             panic!("bodies");
         };
         let world = baseline.prints.as_ref().expect("prints");
@@ -1567,7 +1636,7 @@ mod tests {
         assert_eq!(told, ["<Game as Layer>::attach"]);
         // Text that doesn't parse.
         write("game/src/main.rs", &game.replace("step(1)", "step(1"));
-        assert!(matches!(now(), Diff::Bodies(_, Some(file), _) if file == main));
+        assert!(matches!(now(), Diff::Bodies(_, Some(file), _, _) if file == main));
         // A change outside the game's crate outweighs it, until undone.
         write("engine/src/lib.rs", "pub fn tick() {}\npub fn tock() {}\n");
         assert!(matches!(now(), Diff::Rebuild(file, why) if file == lib && why == OUTSIDE));
@@ -1576,7 +1645,7 @@ mod tests {
         // A function re-signed patches; an edit outside function bodies, or a module added,
         // rebuilds.
         write("game/src/main.rs", &game.replace("u32", "u128"));
-        assert!(matches!(now(), Diff::Bodies(_, None, _)));
+        assert!(matches!(now(), Diff::Bodies(_, None, _, _)));
         // One in code only `main` reaches rebuilds, naming the function.
         write("game/src/main.rs", &game.replace("show(1)", "show(4444)"));
         let starts = "an edit changing `title`, which only code that runs as the game starts \
@@ -1630,17 +1699,17 @@ mod tests {
         };
         let baseline = Baseline::new(&sources);
         let path = root.join("game/src/consts.rs");
-        let now = || diff(&sources, &baseline, &sources.scan(None));
+        let now = || diff(&sources, &baseline, &sources.scan(None), &Ran::new());
         // Each edit here changes the file's length, as one within the clock's resolution of the
         // last may leave its time.
         write("game/src/consts.rs", &consts.replace("2.0", "3.75"));
-        let Diff::Bodies(hashes, None, Some(_)) = now() else {
+        let Diff::Bodies(hashes, None, Some(_), _) = now() else {
             panic!("bodies");
         };
         assert_ne!(hashes[&path], baseline.modules[&path]);
         // One `attach` uses, told of against the world.
         write("game/src/consts.rs", &consts.replace("1.0", "-1.5"));
-        let Diff::Bodies(_, None, Some(prints)) = now() else {
+        let Diff::Bodies(_, None, Some(prints), _) = now() else {
             panic!("bodies");
         };
         let world = baseline.prints.as_ref().expect("prints");
@@ -1689,9 +1758,9 @@ mod tests {
             target: root.join("target"),
         };
         let baseline = Baseline::new(&sources);
-        let now = || diff(&sources, &baseline, &sources.scan(None));
+        let now = || diff(&sources, &baseline, &sources.scan(None), &Ran::new());
         let unchanged = |diff: Diff| {
-            let Diff::Bodies(hashes, None, _) = diff else {
+            let Diff::Bodies(hashes, None, _, _) = diff else {
                 return false;
             };
             hashes == baseline.modules
@@ -1713,7 +1782,7 @@ mod tests {
         );
         // A module the game builds is its own.
         write("game/src/ship.rs", "pub fn sail() { go(); }\n");
-        let Diff::Bodies(hashes, None, _) = now() else {
+        let Diff::Bodies(hashes, None, _, _) = now() else {
             panic!("bodies");
         };
         let ship = root.join("game/src/ship.rs");
@@ -1790,6 +1859,7 @@ mod tests {
             started: true,
             processes: vec![7],
             applied: baseline.modules.clone(),
+            ran: Ran::new(),
             fresh: false,
             looked: seen.clone(),
             seen,
@@ -1873,6 +1943,7 @@ mod tests {
                 hashes: Hashes::new(),
                 unreadable: None,
                 prints: None,
+                ran: Ran::new(),
                 thread: thread::spawn(move || Patching {
                     libs: Vec::new(),
                     built: Duration::ZERO,
@@ -1926,6 +1997,7 @@ mod tests {
             hashes: Hashes::new(),
             unreadable: None,
             prints: None,
+            ran: Ran::new(),
             thread: thread::spawn(move || {
                 let _ = going.recv();
                 Patching {
@@ -1995,7 +2067,7 @@ mod tests {
             pid: 7,
             session: None,
         }];
-        let bodies = || Diff::Bodies(edited.clone(), None, None);
+        let bodies = || Diff::Bodies(edited.clone(), None, None, Texts::new());
         // A change a patch can't carry rebuilds, whatever the process is doing.
         let lock = PathBuf::from("Cargo.lock");
         for games in [vec![], starting.clone(), serving(&patchable)] {
@@ -2026,7 +2098,7 @@ mod tests {
         let acted = act(bodies(), &peers, &built, false, true);
         assert!(matches!(acted, Act::Rebuild(..)), "{acted:?}");
         // What gg can't read goes with the patch.
-        let unreadable = Diff::Bodies(edited.clone(), Some(main[0].clone()), None);
+        let unreadable = Diff::Bodies(edited.clone(), Some(main[0].clone()), None, Texts::new());
         let acted = act(unreadable, &serving(&patchable), &built, false, true);
         let carried = Act::Patch(main.clone(), edited.clone(), Some(main[0].clone()));
         assert_eq!(acted, carried);
@@ -2038,7 +2110,13 @@ mod tests {
         // A game waiting for a rebuild gets one at a change since what it ran, an edit or one
         // undone after a patch, but not for sources as it had them.
         for (now, ran) in [(&edited, &built), (&built, &edited)] {
-            let waiting = act(Diff::Bodies(now.clone(), None, None), &[], ran, false, true);
+            let waiting = act(
+                Diff::Bodies(now.clone(), None, None, Texts::new()),
+                &[],
+                ran,
+                false,
+                true,
+            );
             assert!(matches!(waiting, Act::Rebuild(..)), "{waiting:?}");
         }
         assert_eq!(act(bodies(), &[], &edited, false, true), Act::Nothing);

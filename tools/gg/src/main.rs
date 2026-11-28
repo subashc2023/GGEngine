@@ -144,7 +144,8 @@ workspace's packages it builds with (`watching`). Once a build ends, it watches 
 the build read instead of those packages, as cargo's dep-info file beside the executable lists it
 (`watching` again, with `dep_info`): each path package's compiled modules, what they embed
 (`include_str!`), and what build scripts watch. So an edit to a package's docs, or to a module
-built only for its tests, rebuilds nothing. Then:
+built only for its tests, rebuilds nothing. Nor does one to a module's doc comments or
+`#[cfg(test)]` items alone, since the build or a patch. Then:
 - an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
   between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
 - so is a function added, removed or re-signed, free or an inherent impl's: not a `const fn`,

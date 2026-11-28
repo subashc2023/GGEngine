@@ -321,11 +321,11 @@ pub mod prelude {
     pub use crate::math::{Mat4, Quat, Vec2, Vec3, Vec4};
     pub use crate::tracing::{debug, error, info, warn};
     pub use crate::{
-        Actions, Align, App, Binding, Blend, Bus, Camera, Cast, Change, Commands, Component,
-        Context, Control, Controls, Entity, Error, Event, Font, GameUi, Key, Layer, Mesh,
-        MouseButton, PadButton, Place, Projection, Reflect, Rng, Scripts, Shader, Shape, Sound,
-        Source, Sprite, Stick, TextStyle, Tick, Tint, Toward, Transform, World, step_animation,
-        step_navigation, step_physics,
+        Actions, Align, App, Binding, Blend, Bus, Camera, Cast, Change, Circle, Commands,
+        Component, Context, Control, Controls, Entity, Error, Event, Font, GameUi, Key, Layer,
+        Mesh, MouseButton, Name, PadButton, Place, Projection, Reflect, Rng, Scripts, Shader,
+        Shape, Sound, Source, Sprite, Stick, TextStyle, Tick, Tint, Toward, Transform, World,
+        step_animation, step_navigation, step_physics,
     };
 }
 

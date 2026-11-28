@@ -269,11 +269,17 @@ it; `ARCHITECTURE.md`, its design, and what keeps a simulation the same on every
 gg-engine's root, `crates/gg-engine/src/lib.rs`, what games use; and `docs/LUAU.md`, what scripts
 can use.
 
+The engine's games, in its `games/`, show how. `topdown`, a 2D game in one file, binds actions,
+spawns and removes entities, and draws a HUD from a UI file. It also draws random numbers from the
+world, adds a debug overlay of its own, and tests seeded ticks. `fps` and `tps` are 3D, `cards` a
+game of UI, and `showcase/scenes` holds a scene per feature.
+
 `gg`, the engine's command-line tool, runs here as in the engine's workspace: `gg run` runs the game
 supervised, reloading it as it's edited; `gg check` runs it headless; `gg ship` lays it out as it
 ships, in `target/ship`, once cargo-about 0.9.2 is installed and the game's manifest names its
-license, which its notices list; `gg help` says the rest. Install `gg` from the engine the game
-builds against:
+license, which its notices list; `gg help` says the rest. The engine's docs write `cargo gg`, its
+alias in the engine's workspace: here, run `gg`. Install it from the engine the game builds
+against:
 
 ```sh
 {install}
