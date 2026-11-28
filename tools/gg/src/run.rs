@@ -96,6 +96,10 @@ const LOADING: &str = "loading";
 
 const PING: Duration = Duration::from_secs(1);
 
+/// How long a turn of the supervising loop waits: a save is seen, and a patch's end acted on,
+/// within it.
+const TURN: Duration = Duration::from_millis(25);
+
 /// A ping's answer comes from the connection's own thread.
 const PULSE: Duration = Duration::from_secs(5);
 
@@ -577,7 +581,7 @@ impl Supervisor<'_> {
                 happened = Some((0, Happened::Rebuilt { fresh }));
             }
             let Some((ended, happened)) = happened else {
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(TURN);
                 continue;
             };
             // A restart in place that failed ends the game, its world in the snapshot.

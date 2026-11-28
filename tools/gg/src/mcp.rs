@@ -213,10 +213,12 @@ const TOOLS: &[Tool] = &[
                       doing. Its `reloads` lists every outcome the run had since the last `wait` or \
                       `rebuild` answered, oldest first, at most 10 (`reloads_more` before them): \
                       save twice, wait once, and it shows both. Each is a patch (`patched`, with its `files`, \
-                      `build_ms` and `apply_ms`), a rebuild (`rebuilt`, with its `why` and \
+                      `build_ms`, `apply_ms` and `saved_ms`, from the newest file's save), a restart \
+                      in place (`restarted`, with its `files`, `why`, `build_ms`, `restart_ms` and \
+                      `saved_ms`), a rebuild (`rebuilt`, with its `why` and \
                       `build_ms`, which leaves out `queued_ms`, the time it waited for another \
-                      game's build), or a failed one (`patch_failed`, `rebuild_failed`, with its \
-                      `error`), with `at`, ms since the epoch; `reload` is the latest patch or \
+                      game's build), or a failed one (`patch_failed`, `restart_failed`, \
+                      `rebuild_failed`, with its `error`), with `at`, ms since the epoch; `reload` is the latest patch or \
                       rebuild. `files_looked` is when the game last looked at its scene, script \
                       and asset files, and `files` the last event it logged of each scene, script, \
                       UI and prefab file, the latest 20 files', with its `timestamp`: \

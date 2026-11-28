@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 gg-api.workspace = true
+object.workspace = true
 serde_json.workspace = true
 # Tells an edit inside function bodies, which a patch carries, from one that needs a rebuild, by
 # comparing syntax trees, which `extra-traits` gives `PartialEq`.

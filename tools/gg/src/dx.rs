@@ -1,5 +1,6 @@
 //! Dioxus's `dx`, for `gg run`'s patches: checking its release, building the game to take patches,
-//! printing progress, building patches, and mending their thunks on Windows on x86-64.
+//! printing progress, building patches, and mending their thunks on Windows on x86-64. On macOS,
+//! gg builds patches itself ([`hotpatch`]).
 
 use std::collections::HashSet;
 use std::fs::{self, File, TryLockError};
@@ -7,6 +8,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -14,6 +16,7 @@ use gg_api::Failure;
 use serde_json::{Value, json};
 
 use crate::build::{self, Package};
+use crate::hotpatch::{self, Failed, Symbols};
 use crate::run::{event, millis};
 
 /// The most often a build prints crate progress; a new stage prints at once.
@@ -32,14 +35,17 @@ pub(crate) struct Dx {
 
 /// A build patches are built against: its executable, and `BuildsFinished`'s `client` as JSON,
 /// which `dx tools hotpatch` reads. It holds the build's environment, which may hold secrets (API
-/// keys): kept in memory, given to dx alone, never printed, logged or written; no `Debug`. dx also
-/// writes it into its session cache; [`Dx::build`] removes that.
+/// keys): kept in memory, given to dx, rustc and the linker alone, never printed, logged or
+/// written; no `Debug`. dx also writes it into its session cache; [`Dx::build`] removes that.
 #[derive(Clone)]
 pub(crate) struct Fat {
     pub(crate) exe: PathBuf,
     client: String,
     /// How long the build waited for the lock of dx's builds ([`Dx::hold`]): not part of its time.
     pub(crate) queued: Duration,
+    /// The executable's symbols for gg's own patches, read once: on a thread as the build lands,
+    /// or by the first patch, which waits for that thread if it's reading.
+    symbols: Arc<OnceLock<Result<Symbols, String>>>,
 }
 
 impl Fat {
@@ -49,8 +55,19 @@ impl Fat {
             exe,
             client: String::new(),
             queued: Duration::ZERO,
+            symbols: Arc::default(),
         }
     }
+
+    fn symbols(&self) -> &Result<Symbols, String> {
+        self.symbols.get_or_init(|| Symbols::read(&self.exe))
+    }
+}
+
+/// Whether gg builds patches itself, not `dx tools hotpatch`: on macOS, unless `GG_DX_PATCHES` is
+/// `1`, to compare or to fall back.
+fn own_patches() -> bool {
+    cfg!(target_os = "macos") && std::env::var_os("GG_DX_PATCHES").is_none_or(|dx| dx != "1")
 }
 
 impl Dx {
@@ -106,6 +123,10 @@ impl Dx {
                     event(
                         &json!({"event": "pruned", "archives": archives, "bytes": bytes, "why": why}),
                     );
+                }
+                if own_patches() {
+                    let fat = fat.clone();
+                    thread::spawn(move || fat.symbols().is_ok());
                 }
                 return Ok(Fat { queued, ..fat });
             }
@@ -226,6 +247,9 @@ impl Dx {
     /// Fails with `gg.build` if dx can't run, the patch doesn't build, or its thunks can't be
     /// mended.
     pub(crate) fn hotpatch(&self, fat: &Fat, aslr_reference: u64) -> Result<Value, Failure> {
+        if own_patches() {
+            return self.own_hotpatch(fat, aslr_reference);
+        }
         let decimal = aslr_reference.to_string();
         let args = ["tools", "hotpatch", "--aslr-reference", &decimal];
         let mut command = self.command(&args);
@@ -255,6 +279,40 @@ impl Dx {
             })?;
         }
         Ok(table)
+    }
+
+    /// Builds a patch as [`hotpatch`](Self::hotpatch) does, but in gg ([`hotpatch::hotpatch`]).
+    ///
+    /// Fails with `gg.build` if the executable's symbols can't be read or the patch doesn't build.
+    fn own_hotpatch(&self, fat: &Fat, aslr_reference: u64) -> Result<Value, Failure> {
+        let (package, bin) = (&self.package, &self.bin);
+        let symbols = fat.symbols().as_ref().map_err(|error| {
+            Failure::new(
+                "gg.build",
+                format!("can't build a patch of {package}: {error}"),
+            )
+        })?;
+        let link_args = self.cache.join("link_args.txt");
+        let build = hotpatch::Build {
+            client: &fat.client,
+            exe: &fat.exe,
+            symbols,
+            root: &self.root,
+            link_args: &link_args,
+        };
+        hotpatch::hotpatch(&build, aslr_reference).map_err(|failed| {
+            let what = format!("rustc's build of a patch of -p {package} --bin {bin}");
+            let message = match failed {
+                Failed::Rustc(status, errors) if errors.is_empty() => {
+                    format!("{what} failed ({status}), saying no more")
+                }
+                Failed::Rustc(_, errors) => {
+                    format!("{what} failed:\n\n{}", build::listed_errors(&errors))
+                }
+                Failed::Other(why) => format!("a patch of -p {package} --bin {bin}: {why}"),
+            };
+            Failure::new("gg.build", message)
+        })
     }
 
     /// dx with `args`, run from the workspace's root, stdout piped: a JSON line per thing it says.
@@ -440,6 +498,7 @@ fn record(line: &str) -> Record {
             exe,
             client: client.to_string(),
             queued: Duration::ZERO,
+            symbols: Arc::default(),
         });
     }
     // Its `artifacts` hold the environment again: dropped.

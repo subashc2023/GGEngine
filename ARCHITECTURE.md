@@ -214,6 +214,11 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
   starts the game afresh. `gg run` compares that code with the build that built the world, so the
   game warns of each edit once (`gg.attach_changed`). Without `dx`, every change rebuilds and
   restarts the game. `gg run` watches what each build read, as cargo's dep-info lists it.
+- **gg builds patches itself on macOS.** It runs rustc as the build recorded, with gg as the
+  linker to take the link's arguments, then links the patch and makes subsecond's jump table.
+  It reads the executable's symbols once a build, where `dx tools hotpatch` pays about 0.35 s a
+  patch to start, load cargo's metadata and read them again. Linux and Windows still run dx:
+  CI builds no patches, so a port there would go unchecked.
 - **Luau, in every build, for mods and quick scripts.** Players install sandboxed mods, and quests,
   dialogue and level events reload in milliseconds. A script file declares one component, its
   fields and a tick per entity, as a native `Script` does; adding the component attaches the script.

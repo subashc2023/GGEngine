@@ -57,6 +57,9 @@ Each phase's milestones, and what each deferred, are in git history.
   from save where a rebuild took 5 to 9; games name their app's function (`App::hot`); then a game
   of its own grown by five requests in one process, 10 of 14 code saves restarting in place and 4
   patching, none rebuilding (2026-11-27)
+- **Saves answered in about 1 s**: gg's own waits cut from about 0.6 s to 0.2, and on macOS gg
+  building patches itself, reading the executable's symbols once a build; a body edit answers in
+  0.7 to 0.8 s and a restart in place in 1.0 to 1.1, where both took 1.6 to 2.0 (2026-11-27)
 
 ## Open
 
@@ -98,7 +101,7 @@ Defects are in [DEFECTS.md](DEFECTS.md).
 | `gg run --peers 2` windows apart, through a relay or embedded; an app's name and run defaults in a manifest, the sandbox's too | Someone needs them |
 | `gg input` clicks that leave the OS cursor ungrabbed | An agent plays a game through it while someone works at the desk |
 | Restarts in place for peers and for `gg rebuild --fresh`; one keeping the device, pipelines and textures | Peers or fresh starts are edited often, or a restart's 130 ms grows |
-| gg building patches itself rather than `dx tools hotpatch`, which reads the whole executable's symbols for each, up to half a patch's time | A patch's 1 to 2 s matters |
+| gg building patches itself on Linux and Windows too, saving the 0.35 s `dx tools hotpatch` adds to each | Someone works there to check it, as CI builds no patches |
 | Through the API: `cast` of a shape | An agent needs one |
 
 ### Shipping and CI

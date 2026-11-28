@@ -1262,6 +1262,7 @@ name = "gg"
 version = "0.1.0"
 dependencies = [
  "gg-api",
+ "object",
  "serde_json",
  "syn 3.0.9",
  "toml_edit",
@@ -2698,6 +2699,18 @@ dependencies = [
  "objc2 0.5.3",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "object"
+version = "0.37.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "memchr",
 ]
 
 [[package]]

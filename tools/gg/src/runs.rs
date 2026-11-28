@@ -1,11 +1,10 @@
 //! What a `gg run` tells of itself: a file in the target directory, beside its lock, rewritten
-//! every [`WRITE`] and removed as the run ends. Other commands and `gg mcp`'s tools read it while
+//! as what it tells changes and every [`WRITE`], and removed as the run ends. Other commands and `gg mcp`'s tools read it while
 //! no game answers, to tell a rebuild under way from one that failed; `wait` waits on it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -15,8 +14,12 @@ use serde_json::{Value, json};
 use crate::build;
 use crate::game::{self, Pick};
 
-/// How often the file is written, and `wait` reads it.
+/// How often the file is written when what it tells hasn't changed, for its `updated`.
 const WRITE: Duration = Duration::from_millis(200);
+
+/// How often `wait` reads the file, and asks the game whether it looked at its files: the run
+/// writes an outcome at once.
+const READ: Duration = Duration::from_millis(25);
 
 /// A file unwritten for this long is a killed run's.
 const STALE: Duration = Duration::from_secs(5);
@@ -69,9 +72,10 @@ pub(crate) struct State {
     /// The last build's or patch's failure, until one succeeds or an edit undoes it.
     pub(crate) error: Option<Failure>,
     /// The last patch or rebuild that succeeded, as its event told it, with `at`, when it landed
-    /// (ms since the epoch): `patched` with its `files`, `build_ms` and `apply_ms`; `restarted`,
-    /// restarted in place, with its `files`, `why`, `build_ms`, `restart_ms` and the game's
-    /// `warnings` as it restored its world; or `rebuilt` with its `why` and `build_ms`. A
+    /// (ms since the epoch): `patched` with its `files`, `build_ms`, `apply_ms` and `saved_ms`
+    /// (from the newest file's save); `restarted`, restarted in place, with its `files`, `why`,
+    /// `build_ms`, `restart_ms`, `saved_ms` and the game's `warnings` as it restored its world; or
+    /// `rebuilt` with its `why` and `build_ms`. A
     /// rebuild's game then starts again from a snapshot.
     pub(crate) reload: Option<Value>,
     /// The latest [`MOST_KEPT`] outcomes, oldest first: [`reload`](Self::reload)'s kind, and
@@ -133,7 +137,7 @@ impl Asked {
 /// latest outcome it listed, and the run's process ID `gg`, so a file left over never reaches a
 /// later run. Each `gg wait` is a process of its own, and `gg mcp`'s may outlive none of the
 /// game's runs, so what was answered can't live in a `wait`. The run's own file is rewritten from
-/// the run's memory every [`WRITE`], so a `wait` can't add to it. This one, beside it as the
+/// the run's memory, so a `wait` can't add to it. This one, beside it as the
 /// requests are, is the run's too: it goes as the run ends.
 fn answered_path(told: &Path) -> PathBuf {
     told.with_extension("answered")
@@ -164,14 +168,21 @@ pub(crate) fn now_ms() -> u64 {
     })
 }
 
-/// A run's file, written by a thread on each [`tell`](Self::tell) and every [`WRITE`]; removed on
-/// drop.
+/// A run's file, written by a thread as a [`tell`](Self::tell) changes what it says, and every
+/// [`WRITE`]; removed on drop.
 pub(crate) struct Told {
     path: PathBuf,
     gg: u32,
     shared: Arc<Mutex<Value>>,
-    ending: Arc<AtomicBool>,
+    wake: Arc<(Mutex<Wake>, Condvar)>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// What wakes a [`Told`]'s writer before its next [`WRITE`].
+#[derive(Default)]
+struct Wake {
+    changed: bool,
+    ending: bool,
 }
 
 impl Told {
@@ -194,31 +205,53 @@ impl Told {
         });
         fill(&mut told, state, now_ms());
         let shared = Arc::new(Mutex::new(told));
-        let ending = Arc::new(AtomicBool::new(false));
-        let (writing, ended, at) = (shared.clone(), ending.clone(), path.clone());
+        let wake = Arc::new((Mutex::new(Wake::default()), Condvar::new()));
+        let (writing, waking, at) = (shared.clone(), wake.clone(), path.clone());
         let thread = thread::spawn(move || {
-            while !ended.load(Ordering::Relaxed) {
+            let (lock, woken) = &*waking;
+            loop {
                 let told = writing.lock().map(|told| told.clone());
                 if let Ok(mut told) = told {
                     told["updated"] = json!(now_ms());
                     write(&at, &told);
                 }
-                thread::sleep(WRITE);
+                let Ok(wake) = lock.lock() else {
+                    return;
+                };
+                let waited =
+                    woken.wait_timeout_while(wake, WRITE, |wake| !wake.changed && !wake.ending);
+                let Ok((mut wake, _)) = waited else {
+                    return;
+                };
+                if wake.ending {
+                    return;
+                }
+                wake.changed = false;
             }
         });
         Self {
             path,
             gg,
             shared,
-            ending,
+            wake,
             thread: Some(thread),
         }
     }
 
     /// Tells `state`, as of the look at the sources at `looked` (ms since the epoch).
     pub(crate) fn tell(&self, state: &State, looked: u64) {
-        if let Ok(mut told) = self.shared.lock() {
-            fill(&mut told, state, looked);
+        let changed = (self.shared.lock()).is_ok_and(|mut told| fill(&mut told, state, looked));
+        if changed {
+            self.wake(|wake| wake.changed = true);
+        }
+    }
+
+    /// Wakes the writer, as `how` says why.
+    fn wake(&self, how: impl FnOnce(&mut Wake)) {
+        let (lock, woken) = &*self.wake;
+        if let Ok(mut wake) = lock.lock() {
+            how(&mut wake);
+            woken.notify_one();
         }
     }
 
@@ -259,12 +292,13 @@ impl Told {
         if let Ok(mut told) = self.shared.lock() {
             told["rebuild"] = json!({"asked": asked.at, "fresh": asked.fresh, "error": error});
         }
+        self.wake(|wake| wake.changed = true);
     }
 }
 
 impl Drop for Told {
     fn drop(&mut self) {
-        self.ending.store(true, Ordering::Relaxed);
+        self.wake(|wake| wake.ending = true);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -276,17 +310,29 @@ impl Drop for Told {
     }
 }
 
-fn fill(told: &mut Value, state: &State, looked: u64) {
+/// Fills `told` with `state`, as of the look at `looked`; returns whether it changed more than
+/// `looked`, which each turn of the run's loop moves on.
+fn fill(told: &mut Value, state: &State, looked: u64) -> bool {
     let error = (state.error.as_ref())
         .map(|failure| json!({"code": failure.code, "message": failure.message}));
-    told["state"] = json!(state.phase);
-    told["why"] = json!(state.why);
-    told["pids"] = json!(state.pids);
-    told["current"] = json!(state.current);
-    told["error"] = error.unwrap_or(Value::Null);
+    let fields = [
+        ("state", json!(state.phase)),
+        ("why", json!(state.why)),
+        ("pids", json!(state.pids)),
+        ("current", json!(state.current)),
+        ("error", error.unwrap_or(Value::Null)),
+        ("reload", state.reload.clone().unwrap_or(Value::Null)),
+        ("reloads", json!(state.reloads)),
+    ];
+    let mut changed = false;
+    for (key, value) in fields {
+        if told[key] != value {
+            told[key] = value;
+            changed = true;
+        }
+    }
     told["looked"] = json!(looked);
-    told["reload"] = state.reload.clone().unwrap_or(Value::Null);
-    told["reloads"] = json!(state.reloads);
+    changed
 }
 
 /// Writes `told` through a file beside `path` renamed over it, so that a reader never reads half.
@@ -468,7 +514,7 @@ pub(crate) fn wait(pick: &Pick, timeout: Duration) -> Result<Value, Failure> {
             );
             return Err(Failure::new("gg.timeout", message));
         }
-        thread::sleep(WRITE);
+        thread::sleep(READ);
     }
 }
 
@@ -488,7 +534,7 @@ fn found(target: &Path, pick: &Pick, start: Instant, timeout: Duration) -> Resul
             });
         }
         match runs.len() {
-            0 if start.elapsed() < GRACE.min(timeout) => thread::sleep(WRITE),
+            0 if start.elapsed() < GRACE.min(timeout) => thread::sleep(READ),
             0 => {
                 let message = "no `gg run` runs the game, as its file in the target directory \
                                says; `gg run` runs it, watching its sources";
@@ -564,7 +610,7 @@ pub(crate) fn rebuild(pick: &Pick, timeout: Duration, fresh: bool) -> Result<Val
             );
             return Err(Failure::new("gg.timeout", message));
         }
-        thread::sleep(WRITE);
+        thread::sleep(READ);
     }
 }
 
@@ -608,7 +654,7 @@ fn looked(
             );
             return Err(Failure::new("gg.timeout", message));
         }
-        thread::sleep(WRITE);
+        thread::sleep(READ);
     };
     told["files_looked"] = json!(looked);
     let events = read_events(
@@ -827,7 +873,25 @@ fn waited(told: &Value, asked: u64) -> Option<Result<Value, Failure>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+
+    /// A turn's look alone doesn't write the file at once; what else it tells does.
+    #[test]
+    fn a_look_alone_is_no_change_to_write() {
+        let mut told = json!({"gg": 1});
+        assert!(fill(&mut told, &State::new("running"), 1));
+        assert!(!fill(&mut told, &State::new("running"), 2));
+        assert_eq!(told["looked"], 2);
+        let patched = State {
+            reloads: vec![json!({"event": "patched", "at": 3})],
+            ..State::new("running")
+        };
+        assert!(fill(&mut told, &patched, 3));
+        assert!(!fill(&mut told, &patched, 4));
+        assert!(fill(&mut told, &State::new("changed"), 5));
+    }
 
     fn pick(project: Option<PathBuf>) -> Pick {
         Pick {

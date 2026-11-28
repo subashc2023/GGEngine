@@ -117,6 +117,15 @@ mlua = { version = "=0.12.2", features = ["luau", "luau-vector4"] }
 mlua-sys = { version = "=0.13.0", default-features = false }
 luau0-src = { version = "=0.22.0", default-features = false }
 nu-ansi-term = "0.50.3"
+# Reads a game's executable and objects and writes a patch's stub, for gg's own patches on macOS:
+# Mach-O alone, unaligned for the symbol tables of executables read whole. dx's release.
+object = { version = "0.37.3", default-features = false, features = [
+    "macho",
+    "read_core",
+    "std",
+    "unaligned",
+    "write_std",
+] }
 # PNGs, as textures and models' images may be, decoded as development runs add them.
 png = "0.18.1"
 proc-macro2 = "1.0.107"

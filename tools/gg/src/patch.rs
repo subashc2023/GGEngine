@@ -29,8 +29,13 @@ use crate::reach::{self, Code, Prints};
 use crate::run::{self, Run, Stamp, event, millis};
 use crate::runs::{self, Asked, MOST_KEPT, State};
 
-/// How long the sources must stay the same before a change is acted on: saves come in bursts.
-const QUIET: Duration = Duration::from_millis(200);
+/// How long the sources must stay the same before a change is acted on: an editor's save may
+/// write twice (a file, then its rename). A later save while the patch builds supersedes it.
+const QUIET: Duration = Duration::from_millis(50);
+
+/// How often the files outside the game's modules are scanned, rather than each turn of the run's
+/// loop: their edits rebuild, which takes seconds.
+const REST: Duration = Duration::from_millis(100);
 
 /// How long connecting to the game for a patch may take. Its answer is awaited as long as the
 /// process lives: a file dialog or the window menu may hold the main thread, which applies it, for
@@ -97,6 +102,9 @@ pub(crate) struct Patches {
     seen: Stamps,
     since: Instant,
     looked: Stamps,
+    /// The stamps of the files watched outside the game's modules, as scanned at `rested`.
+    rest: Stamps,
+    rested: Option<Instant>,
     job: Option<Job>,
     libs: Vec<PathBuf>,
     /// The failure of the last rebuild or patch, until one succeeds or a look at the sources finds
@@ -252,6 +260,8 @@ impl Patches {
             looked: seen.clone(),
             seen,
             since: Instant::now(),
+            rest: Stamps::new(),
+            rested: None,
             job: None,
             libs: Vec::new(),
             failed: None,
@@ -301,6 +311,18 @@ impl Patches {
         self.fat.queued
     }
 
+    /// How long ago the newest of `files` was saved, as the look that patched them stamped it: the
+    /// wait from a save to the game running it. `None` if none of them is left.
+    fn saved_ms(&self, files: &[PathBuf]) -> Option<u64> {
+        let stamps = files
+            .iter()
+            .filter_map(|file| self.looked.get(file)?.as_ref());
+        let newest = stamps.map(|(at, _)| *at).max()?;
+        Some(millis(
+            SystemTime::now().duration_since(newest).unwrap_or_default(),
+        ))
+    }
+
     /// Notes an outcome, `at` now, for `wait` to list.
     fn outcome(&mut self, mut outcome: Value) {
         outcome["at"] = json!(runs::now_ms());
@@ -348,7 +370,15 @@ impl Patches {
     /// whether a rebuild succeeded, which the run restarts from.
     pub(crate) fn tend(&mut self, games: &[Process], now: Instant) -> bool {
         let rebuilt = self.job.as_ref().is_some_and(Job::done) && self.land(games);
-        let stamps = self.sources.scan(self.baseline.inputs.as_ref());
+        let modules = self.sources.scan_modules();
+        if self.rested.is_none_or(|at| now.duration_since(at) >= REST) {
+            let mut rest = self.sources.scan_rest(self.baseline.inputs.as_ref());
+            // A module the build read is watched as a module alone.
+            rest.retain(|path, _| !modules.contains_key(path));
+            (self.rest, self.rested) = (rest, Some(now));
+        }
+        let mut stamps = self.rest.clone();
+        stamps.extend(modules);
         if stamps != self.seen {
             (self.seen, self.since) = (stamps, now);
         }
@@ -385,6 +415,8 @@ impl Patches {
         if let Some((fat, baseline, _)) = self.rebuilt.take() {
             (self.fat, self.baseline) = (fat, baseline);
             self.stale = false;
+            // The build may have read other files.
+            self.rested = None;
             built = true;
         }
         self.processes.clear();
@@ -842,6 +874,7 @@ impl Patches {
                     match outcome {
                         Outcome::Applied(patched, applied, _) => {
                             let (build_ms, apply_ms) = (millis(patching.built), millis(applied));
+                            let saved_ms = self.saved_ms(&files);
                             event(&json!({
                                 "event": "patched",
                                 "pid": pid,
@@ -849,6 +882,7 @@ impl Patches {
                                 "attach": attach_files,
                                 "build_ms": build_ms,
                                 "apply_ms": apply_ms,
+                                "saved_ms": saved_ms,
                                 "ticks": patched.ticks,
                             }));
                             if !mem::replace(&mut told, true) {
@@ -857,6 +891,7 @@ impl Patches {
                                     "files": files,
                                     "build_ms": build_ms,
                                     "apply_ms": apply_ms,
+                                    "saved_ms": saved_ms,
                                 }));
                                 self.reload = self.reloads.last().cloned();
                             }
@@ -964,6 +999,7 @@ impl Patches {
                     Vec::new()
                 };
                 let (build_ms, restart_ms) = (millis(built), millis(applied));
+                let saved_ms = self.saved_ms(files);
                 let stages = patched.restarted.as_ref().map(|stages| json!(stages));
                 event(&json!({
                     "event": "restarted",
@@ -973,6 +1009,7 @@ impl Patches {
                     "attach": modules(&attach),
                     "build_ms": build_ms,
                     "restart_ms": restart_ms,
+                    "saved_ms": saved_ms,
                     "stages": stages,
                     "ticks": patched.ticks,
                 }));
@@ -983,6 +1020,7 @@ impl Patches {
                     "why": restart.why,
                     "build_ms": build_ms,
                     "restart_ms": restart_ms,
+                    "saved_ms": saved_ms,
                 });
                 if !warnings.is_empty() {
                     outcome["warnings"] = Value::Array(warnings);
@@ -1584,6 +1622,13 @@ impl Sources {
 
     /// The stamps of the files watched: with `inputs`, those of the build that listed them.
     fn scan(&self, inputs: Option<&Inputs>) -> Stamps {
+        let mut stamps = self.scan_rest(inputs);
+        stamps.extend(self.scan_modules());
+        stamps
+    }
+
+    /// The stamps of the game's modules, which patches carry the edits of.
+    fn scan_modules(&self) -> Stamps {
         let mut stamps = Stamps::new();
         let root = self.modules == self.game;
         walk(
@@ -1592,6 +1637,13 @@ impl Sources {
             &|path: &Path| self.module(path),
             &mut stamps,
         );
+        stamps
+    }
+
+    /// The stamps of the other files watched, as [`scan`](Self::scan) says; the modules the build
+    /// read among them.
+    fn scan_rest(&self, inputs: Option<&Inputs>) -> Stamps {
+        let mut stamps = Stamps::new();
         // A package's directory leaves out what no build reads; a directory a build script watches
         // is read whole, as cargo does.
         let dirs = inputs.map_or(&self.dirs, |inputs| &inputs.dirs);
@@ -2434,6 +2486,105 @@ mod tests {
         assert_eq!([unchanged, saving, saved], [false, false, true]);
     }
 
+    /// The patches of a game cargo builds, in `root`, whose process 7 runs the build of `sources`
+    /// as they are. Where cargo can't run: a rebuild fails at once.
+    fn cargo_patches(root: &Path, sources: Sources) -> Patches {
+        let baseline = Baseline::new(&sources);
+        let seen = baseline.stamps();
+        Patches {
+            builder: Builder::Cargo {
+                package: "game".to_owned(),
+                release: false,
+                dir: Some(root.join("nowhere")),
+            },
+            sources,
+            fat: Fat::unpatchable(root.join("gg-game")),
+            rebuilt: None,
+            stale: false,
+            started: true,
+            processes: vec![7],
+            applied: baseline.modules.clone(),
+            ran: Ran::new(),
+            fresh: false,
+            looked: seen.clone(),
+            seen,
+            since: Instant::now(),
+            rest: Stamps::new(),
+            rested: None,
+            job: None,
+            libs: Vec::new(),
+            failed: None,
+            reload: None,
+            reloads: Vec::new(),
+            asked: None,
+            answered: None,
+            world: None,
+            told: BTreeMap::new(),
+            baseline,
+            layout: None,
+            snapshot: None,
+            taken: None,
+        }
+    }
+
+    /// Each turn scans the game's modules, and the other files watched every [`REST`]: a module's
+    /// save is seen at once, a manifest's within it. `saved_ms` counts from the newest save of an
+    /// outcome's files, as the look stamped them.
+    #[test]
+    fn modules_are_scanned_each_turn_and_the_rest_less_often() {
+        let root = std::env::temp_dir().join(format!("gg-turns-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("game/src")).expect("a directory");
+        let (main, manifest) = (root.join("game/src/main.rs"), root.join("game/Cargo.toml"));
+        fs::write(&main, "fn main() {}\n").expect("written");
+        fs::write(&manifest, "[package]\n").expect("written");
+        let sources = Sources {
+            modules: root.join("game/src"),
+            game: root.join("game"),
+            dirs: Vec::new(),
+            files: vec![manifest.clone()],
+            lock: root.join("Cargo.lock"),
+            target: root.join("target"),
+        };
+        let keys = |stamps: Stamps| stamps.into_keys().collect::<Vec<_>>();
+        assert_eq!(keys(sources.scan_modules()), std::slice::from_ref(&main));
+        assert_eq!(
+            keys(sources.scan_rest(None)),
+            std::slice::from_ref(&manifest)
+        );
+        assert_eq!(keys(sources.scan(None)), [manifest.clone(), main.clone()]);
+        let mut patches = cargo_patches(&root, sources);
+        patches.seen = patches.sources.scan(None);
+        patches.looked = patches.seen.clone();
+        let start = Instant::now();
+        // Each turn's change is too fresh to look at: the stamps alone move.
+        patches.tend(&[], start);
+        let was = patches.seen.clone();
+        fs::write(&main, "fn main() { run(); }\n").expect("written");
+        fs::write(&manifest, "[package]\nname = \"game\"\n").expect("written");
+        patches.tend(&[], start + REST / 4);
+        let module_seen = patches.seen[&main] != was[&main];
+        let manifest_early = patches.seen[&manifest] != was[&manifest];
+        patches.tend(&[], start + REST);
+        let manifest_seen = patches.seen[&manifest] != was[&manifest];
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            [module_seen, manifest_early, manifest_seen],
+            [true, false, true]
+        );
+        assert!(patches.job.is_none());
+        let ago = Duration::from_millis(1500);
+        patches
+            .looked
+            .insert(main.clone(), Some((SystemTime::now() - ago, 1)));
+        let saved = patches.saved_ms(&[main, root.join("game/src/gone.rs")]);
+        assert!(
+            saved.is_some_and(|ms| (1500..11_500).contains(&ms)),
+            "{saved:?}"
+        );
+        assert_eq!(patches.saved_ms(&[root.join("game/src/gone.rs")]), None);
+    }
+
     /// The run's state: waiting without processes, starting until each serves, then running
     /// current; changed once the sources change; not current after a failure, until a look finds
     /// the processes run what the sources hold; and, built with cargo, rebuilding at an edit a
@@ -2453,41 +2604,7 @@ mod tests {
             lock: root.join("Cargo.lock"),
             target: root.join("target"),
         };
-        let baseline = Baseline::new(&sources);
-        let seen = baseline.stamps();
-        let mut patches = Patches {
-            // Where cargo can't run: the rebuild fails at once.
-            builder: Builder::Cargo {
-                package: "game".to_owned(),
-                release: false,
-                dir: Some(root.join("nowhere")),
-            },
-            sources,
-            fat: Fat::unpatchable(root.join("gg-game")),
-            rebuilt: None,
-            stale: false,
-            started: true,
-            processes: vec![7],
-            applied: baseline.modules.clone(),
-            ran: Ran::new(),
-            fresh: false,
-            looked: seen.clone(),
-            seen,
-            since: Instant::now(),
-            job: None,
-            libs: Vec::new(),
-            failed: None,
-            reload: None,
-            reloads: Vec::new(),
-            asked: None,
-            answered: None,
-            world: None,
-            told: BTreeMap::new(),
-            baseline,
-            layout: None,
-            snapshot: None,
-            taken: None,
-        };
+        let mut patches = cargo_patches(&root, sources);
         let session = Session {
             app: "Game".to_owned(),
             pid: 7,

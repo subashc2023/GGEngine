@@ -10,6 +10,7 @@ mod classify;
 mod dx;
 mod fetch;
 mod game;
+mod hotpatch;
 mod mcp;
 mod new;
 mod patch;
@@ -149,8 +150,11 @@ the build read instead of those packages, as cargo's dep-info file beside the ex
 built only for its tests, rebuilds nothing. Nor does one to a module's doc comments or
 `#[cfg(test)]` items alone, since the build or a patch, nor a module's file saved before a `mod`
 line declares it. Then:
-- an edit inside function bodies of PACKAGE's modules is a patch (`dx tools hotpatch`), applied
-  between ticks: `patched`, or `patch_failed` with rustc's errors, the game running on;
+- an edit inside function bodies of PACKAGE's modules is a patch, applied between ticks: `patched`
+  with `build_ms`, `apply_ms` and `saved_ms` (from the save), or `patch_failed` with rustc's
+  errors, the game running on. On macOS gg builds patches itself, from what the build recorded,
+  reading the executable's symbols once a build; elsewhere, or with `GG_DX_PATCHES=1`, `dx tools
+  hotpatch` builds each;
 - so is a function added, removed or re-signed, free or an inherent impl's: not a `const fn`,
   `main`, one of another ABI, one given an attribute that may add code (a macro's, `#[no_mangle]`)
   or one declaring items, or holding a macro that may;
@@ -166,11 +170,12 @@ line declares it. Then:
   a `const` a type, a `const fn` or that code uses, or to a `use` of a name used outside function
   bodies or by that code. The game snapshots its world, ends its layers, applies the patch, builds
   itself again with it and restores the snapshot, keeping its process, window and connections:
-  `restarted` gives `build_ms`, `restart_ms` and the game's stages. From then on, edits are compared
-  with what that restart built, until a new process runs the build again; once a restart added a
-  layer type the build lacks, each edit restarts in place, as no patch reaches its methods. A
-  restart that fails after the layers ended ends the game, which then rebuilds from that snapshot,
-  as does a crash or hang after a restart in place, since its build lays out its types as before;
+  `restarted` gives `build_ms`, `restart_ms`, `saved_ms` and the game's stages. From then on,
+  edits are compared with what that restart built, until a new process runs the build again; once
+  a restart added a layer type the build lacks, each edit restarts in place, as no patch reaches
+  its methods. A restart that fails after the layers ended ends the game, which then rebuilds from
+  that snapshot, as does a crash or hang after a restart in place, since its build lays out its
+  types as before;
 - the rest rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
   `rebuild_failed`): an edit to `main` or the functions only it reaches; to a file outside
   PACKAGE's modules; any change a restart in place carries, for a game that can't take one (it
@@ -312,10 +317,10 @@ doing. `reloads` lists every outcome the run had since the last `wait` or `rebui
 oldest first, at most 10 and `reloads_more` before them: save twice, wait once, and it shows both;
 save, wait, save, wait, and the second shows the second. `reload` is the latest patch or rebuild.
 Each has `at` (ms since the epoch, as `updated`):
-- {\"event\":\"patched\",\"files\":[...],\"build_ms\":..,\"apply_ms\":..,\"at\":..}, the game's state
-  untouched;
-- {\"event\":\"restarted\",\"files\":[...],\"why\":..,\"build_ms\":..,\"restart_ms\":..,\"at\":..}, the
-  game restarted in place from a snapshot with the patch;
+- {\"event\":\"patched\",\"files\":[...],\"build_ms\":..,\"apply_ms\":..,\"saved_ms\":..,\"at\":..},
+  the game's state untouched;
+- {\"event\":\"restarted\",\"files\":[...],\"why\":..,\"build_ms\":..,\"restart_ms\":..,\"saved_ms\":..,
+  \"at\":..}, the game restarted in place from a snapshot with the patch;
 - {\"event\":\"rebuilt\",\"why\":..,\"build_ms\":..,\"at\":..}, the game started again from a snapshot;
 - {\"event\":\"patch_failed\", \"restart_failed\" or \"rebuild_failed\",\"error\":{..},\"at\":..}, a build
   that failed, or a restart in place, which rebuilds.
@@ -1034,6 +1039,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Run as rustc's linker for a patch, gg does nothing else.
+    if let Some(linked) = hotpatch::link() {
+        return linked;
+    }
     let args: Result<Vec<String>, _> = std::env::args_os()
         .skip(1)
         .map(|arg| arg.into_string())
