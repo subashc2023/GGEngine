@@ -169,12 +169,18 @@ impl Through {
         let applied = |cx: &mut Context, edit| cx.apply_edit(edit);
         let refused = cx.in_edited(|cx| scene_files::client_edit(cx, edit, applied).err());
         if let Some(Some(error)) = refused {
+            // Entities code spawned as the copy played, such as a round's, are the copy's alone.
+            let why = if error.code() == "ecs.no_entity" {
+                ", as the entity is the playing copy's alone, such as one its code spawned"
+            } else {
+                ""
+            };
             warn!(
                 code = "play.not_kept",
                 author,
                 refused = error.code(),
-                "the world as edited refuses an edit of {author}'s the playing copy took, so a \
-                 stop brings that world back without it, and a scene save leaves it out: \
+                "the playing copy took an edit of {author}'s that the world as edited refuses{why}: \
+                 a stop brings that world back without it, and a scene save leaves it out. \
                  {error:#}"
             );
         }

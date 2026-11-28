@@ -732,11 +732,28 @@ impl Snapshot {
             .map(String::as_str)
             .eq(layers.iter().copied())
         {
+            // A layer the snapshot lacks, as one an edit added, picks up without attaching.
+            let added: Vec<_> = (layers.iter())
+                .filter(|layer| !self.layers.iter().any(|had| had == *layer))
+                .collect();
+            let (layer, picks, its) = match added.len() {
+                1 => ("Layer", "picks", "its"),
+                _ => ("Layers", "pick", "their"),
+            };
+            let unattached = if added.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ". {layer} {} {picks} up from it without attaching: what {its} `attach` \
+                     builds shows after a fresh start, such as `gg rebuild --fresh`'s",
+                    crate::reflect::list(added)
+                )
+            };
             warn!(
                 code = "snapshot.other_layers",
                 path = %path,
                 "The snapshot is of layers `{}`, from the bottom up, but the app's are `{}`: its \
-                 world is restored all the same",
+                 world is restored all the same{unattached}",
                 self.layers.join(" "),
                 layers.join(" ")
             );

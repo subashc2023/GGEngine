@@ -256,20 +256,7 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
         return Err(Error::new("api.too_deep", message));
     }
     let types = names.types();
-    let wrong = |expected: &str| {
-        let found = match json {
-            JsonValue::Null => "null",
-            JsonValue::Bool(_) => "a boolean",
-            JsonValue::Number(_) => "a number",
-            JsonValue::String(_) => "a string",
-            JsonValue::Array(_) => "an array",
-            JsonValue::Object(_) => "an object",
-        };
-        Error::new(
-            "reflect.wrong_kind",
-            format!("expected {expected}, got {found}"),
-        )
-    };
+    let wrong = |expected: &str| wrong_kind(expected, json);
     let float = |json: &JsonValue| match json {
         JsonValue::Number(n) => n.as_f64().ok_or_else(|| wrong("a number")),
         JsonValue::String(text) => match text.as_str() {
@@ -358,17 +345,11 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
         },
         Type::Opaque => opaque(json, &wrong)?,
         &Type::Named(index) => match &types.info(index).shape {
-            Shape::Struct { fields, .. } => match json {
-                JsonValue::Object(given) => {
+            Shape::Struct { fields, .. } => match (json, newtype(fields)) {
+                (JsonValue::Object(given), _) if whole(given, fields) => {
                     Value::Struct(object_fields(given, fields, names, depth)?)
                 }
-                // A newtype's one field, bare, as `"Name": "Hero"`.
-                json if matches!(&fields[..], [field] if field.name.as_ref() == "0") => {
-                    let (name, ty) = (&fields[0].name, &fields[0].ty);
-                    let value = read_at(json, ty, names, depth + 1)
-                        .map_err(|error| reflect::within(error, name))?;
-                    Value::Struct(vec![(name.clone(), value)])
-                }
+                (json, Some(field)) => Value::Struct(vec![bare(json, field, names, depth)?]),
                 _ => return Err(wrong("an object of the struct's fields")),
             },
             Shape::Enum(variants) => {
@@ -382,7 +363,7 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
                     _ => {
                         return Err(wrong(
                             "a variant's name, or an object of one key, a variant's name, whose \
-                             value is an object of its fields",
+                             value is an object of its fields, or a one-field variant's value",
                         ));
                     }
                 };
@@ -390,14 +371,18 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
                     let given: Vec<_> = variant_names().collect();
                     return Err(reflect::no_variant(name, &given));
                 };
-                let fields = match given {
-                    None => object_fields(&Map::new(), &variant.fields, names, depth)?,
-                    Some(JsonValue::Object(given)) => {
+                let fields = match (given, newtype(&variant.fields)) {
+                    (None, _) => object_fields(&Map::new(), &variant.fields, names, depth)?,
+                    (Some(JsonValue::Object(given)), _) if whole(given, &variant.fields) => {
                         object_fields(given, &variant.fields, names, depth)
                             .map_err(|error| reflect::within(error, name))?
                     }
-                    Some(_) => {
-                        let error = wrong("an object of the variant's fields");
+                    (Some(given), Some(field)) => vec![
+                        bare(given, field, names, depth)
+                            .map_err(|error| reflect::within(error, name))?,
+                    ],
+                    (Some(given), None) => {
+                        let error = wrong_kind("an object of the variant's fields", given);
                         return Err(reflect::within(error, name));
                     }
                 };
@@ -406,6 +391,44 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
             Shape::Opaque => opaque(json, &wrong)?,
         },
     })
+}
+
+/// Fails with `reflect.wrong_kind`: `expected`, but `json` is another kind.
+fn wrong_kind(expected: &str, json: &JsonValue) -> Error {
+    let found = match json {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "a boolean",
+        JsonValue::Number(_) => "a number",
+        JsonValue::String(_) => "a string",
+        JsonValue::Array(_) => "an array",
+        JsonValue::Object(_) => "an object",
+    };
+    Error::new(
+        "reflect.wrong_kind",
+        format!("expected {expected}, got {found}"),
+    )
+}
+
+/// The one field of a newtype, a tuple struct or variant of one field, which also takes the
+/// field's value bare: `"Name": "Hero"` for `{"0": "Hero"}`.
+fn newtype(fields: &[Field]) -> Option<&Field> {
+    match fields {
+        [field] if field.name.as_ref() == "0" => Some(field),
+        _ => None,
+    }
+}
+
+/// Whether `given` is an object of `fields`, not a newtype's value bare: always but for a newtype,
+/// whose value is an object unless it's empty or has the key `0`.
+fn whole(given: &Map<String, JsonValue>, fields: &[Field]) -> bool {
+    newtype(fields).is_none() || given.is_empty() || given.contains_key("0")
+}
+
+/// Newtype `field` and its value, `json` bare, read a level below `depth`.
+fn bare(json: &JsonValue, field: &Field, names: &dyn Names, depth: u32) -> Result<(Ident, Value)> {
+    let value = read_at(json, &field.ty, names, depth + 1)
+        .map_err(|error| reflect::within(error, &field.name))?;
+    Ok((field.name.clone(), value))
 }
 
 /// `items`, each read as a `ty` a level below `depth`.
@@ -995,6 +1018,29 @@ mod tests {
         assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
         let error = read_json(&world, &sprite, "7").expect_err("not a newtype");
         assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
+        // A variant of one field likewise: an object bare is the field's value's fields.
+        world.register::<crate::Environment>().expect("registered");
+        let sky = Type::Named(world.types().find("Sky").expect("registered"));
+        let bare = read_json(&world, &sky, r#"{"Atmosphere": {"mie": 0.5}}"#).expect("bare");
+        let whole = r#"{"Atmosphere": {"0": {"mie": 0.5}}}"#;
+        assert_eq!(read_json(&world, &sky, whole).expect("whole"), bare);
+        let Value::Variant(variant, fields) = &bare else {
+            panic!("{bare:?}");
+        };
+        assert_eq!(
+            (variant.as_ref(), fields[0].0.as_ref()),
+            ("Atmosphere", "0")
+        );
+        let typo = r#"{"Atmosphere": {"altitud": 1}}"#;
+        let error = read_json(&world, &sky, typo).expect_err("no such field");
+        assert_eq!(error.code(), "reflect.no_field", "{error}");
+        assert!(!error.to_string().contains("are `0`"), "{error}");
+        // A variant of named fields takes an object alone, and says what it got.
+        let error = read_json(&world, &ty, r#"{"form": {"Box": 7}}"#).expect_err("a number");
+        assert!(error.to_string().contains("got a number"), "{error}");
+        let circle = read_json(&world, &ty, r#"{"form": {"Circle": 7}}"#).expect("bare");
+        let whole = read_json(&world, &ty, r#"{"form": {"Circle": {"0": 7}}}"#).expect("whole");
+        assert_eq!(circle, whole);
     }
 
     /// A whole number reads as an `Int` for a signed field, a `UInt` for an unsigned one, except

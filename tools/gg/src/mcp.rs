@@ -221,7 +221,8 @@ const TOOLS: &[Tool] = &[
                       `rebuild_failed`, with its `error`), with `at`, ms since the epoch; `reload` is the latest patch or \
                       rebuild. `files_looked` is when the game last looked at its scene, script \
                       and asset files, and `files` the last event it logged of each scene, script, \
-                      UI and prefab file, the latest 20 files', with its `timestamp`: \
+                      UI and prefab file since the last `wait` answered, at most 20 files', with \
+                      its `timestamp`: \
                       `scene.applied`, `Script reloaded`, `ui.reloaded`, `prefab.reloaded`, a \
                       warning why one didn't apply, a script's error. `warnings` lists the \
                       warnings the restarted games logged after each rebuild listed (`code`, \

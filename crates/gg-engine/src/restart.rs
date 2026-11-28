@@ -43,6 +43,8 @@ pub(crate) struct Stages {
     teardown_ms: u64,
     apply_ms: u64,
     build_ms: u64,
+    /// Where the patch's library loaded, as [`gg_api::Restarted::loaded`] says.
+    loaded: Option<u64>,
 }
 
 impl Stages {
@@ -54,6 +56,7 @@ impl Stages {
             apply_ms: self.apply_ms,
             build_ms: self.build_ms,
             restore_ms,
+            loaded: self.loaded,
         }
     }
 }
@@ -82,7 +85,7 @@ impl Restart {
         let _zone = gg_core::zone!();
         let failed = |error: Error| Error::new("api.restart_failed", ENDED).with_source(error);
         let started = Instant::now();
-        patch::apply(self.table, ticks, true).map_err(failed)?;
+        let loaded = patch::apply(self.table, ticks, true).map_err(failed)?;
         let apply_ms = millis(started);
         let started = Instant::now();
         let hot = app
@@ -111,6 +114,7 @@ impl Restart {
                 teardown_ms,
                 apply_ms,
                 build_ms,
+                loaded,
             },
         })
     }

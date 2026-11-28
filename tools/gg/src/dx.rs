@@ -16,7 +16,7 @@ use gg_api::Failure;
 use serde_json::{Value, json};
 
 use crate::build::{self, Package};
-use crate::hotpatch::{self, Failed, Symbols};
+use crate::hotpatch::{self, Failed, Restart, Symbols};
 use crate::run::{event, millis};
 
 /// The most often a build prints crate progress; a new stage prints at once.
@@ -65,8 +65,9 @@ impl Fat {
 }
 
 /// Whether gg builds patches itself, not `dx tools hotpatch`: on macOS, unless `GG_DX_PATCHES` is
-/// `1`, to compare or to fall back.
-fn own_patches() -> bool {
+/// `1`, to compare or to fall back. Only gg's own patches map a restart in place's functions by
+/// name, which reaches a layer type that restart added ([`Restart`]).
+pub(crate) fn own_patches() -> bool {
     cfg!(target_os = "macos") && std::env::var_os("GG_DX_PATCHES").is_none_or(|dx| dx != "1")
 }
 
@@ -242,13 +243,19 @@ impl Dx {
 
     /// Builds a patch of the modules as they are now, for a process of build `fat` whose `main` is
     /// at `aslr_reference`; returns dx's jump table, thunks mended as [`keep_rax`] says. A patch
-    /// carries every edit since the build.
+    /// carries every edit since the build. gg's own patches also map `restart`'s functions, the
+    /// last restart in place's, if given; dx's can't.
     ///
     /// Fails with `gg.build` if dx can't run, the patch doesn't build, or its thunks can't be
     /// mended.
-    pub(crate) fn hotpatch(&self, fat: &Fat, aslr_reference: u64) -> Result<Value, Failure> {
+    pub(crate) fn hotpatch(
+        &self,
+        fat: &Fat,
+        aslr_reference: u64,
+        restart: Option<&Restart>,
+    ) -> Result<Value, Failure> {
         if own_patches() {
-            return self.own_hotpatch(fat, aslr_reference);
+            return self.own_hotpatch(fat, aslr_reference, restart);
         }
         let decimal = aslr_reference.to_string();
         let args = ["tools", "hotpatch", "--aslr-reference", &decimal];
@@ -284,7 +291,12 @@ impl Dx {
     /// Builds a patch as [`hotpatch`](Self::hotpatch) does, but in gg ([`hotpatch::hotpatch`]).
     ///
     /// Fails with `gg.build` if the executable's symbols can't be read or the patch doesn't build.
-    fn own_hotpatch(&self, fat: &Fat, aslr_reference: u64) -> Result<Value, Failure> {
+    fn own_hotpatch(
+        &self,
+        fat: &Fat,
+        aslr_reference: u64,
+        restart: Option<&Restart>,
+    ) -> Result<Value, Failure> {
         let (package, bin) = (&self.package, &self.bin);
         let symbols = fat.symbols().as_ref().map_err(|error| {
             Failure::new(
@@ -297,6 +309,7 @@ impl Dx {
             client: &fat.client,
             exe: &fat.exe,
             symbols,
+            restart,
             root: &self.root,
             link_args: &link_args,
         };

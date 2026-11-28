@@ -171,11 +171,12 @@ line declares it. Then:
   bodies or by that code. The game snapshots its world, ends its layers, applies the patch, builds
   itself again with it and restores the snapshot, keeping its process, window and connections:
   `restarted` gives `build_ms`, `restart_ms`, `saved_ms` and the game's stages. From then on,
-  edits are compared with what that restart built, until a new process runs the build again; once
-  a restart added a layer type the build lacks, each edit restarts in place, as no patch reaches
-  its methods. A restart that fails after the layers ended ends the game, which then rebuilds from
-  that snapshot, as does a crash or hang after a restart in place, since its build lays out its
-  types as before;
+  edits are compared with what that restart built, until a new process runs the build again. A
+  layer type a restart added, which the build lacks, takes patches on macOS, which map the
+  restart's functions by name. Elsewhere, or with `GG_DX_PATCHES=1`, dx builds the patches, which
+  can't: each edit restarts in place. A restart that fails after the layers ended ends the game,
+  which then rebuilds from that snapshot, as does a crash or hang after a restart in place, since
+  its build lays out its types as before;
 - the rest rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
   `rebuild_failed`): an edit to `main` or the functions only it reaches; to a file outside
   PACKAGE's modules; any change a restart in place carries, for a game that can't take one (it
@@ -326,9 +327,10 @@ Each has `at` (ms since the epoch, as `updated`):
   that failed, or a restart in place, which rebuilds.
 A rebuild's `build_ms` leaves out the time it waited for another game's build, `queued_ms` if it
 waited. The game applies those files itself, as they're saved; `files_looked` is when it last
-looked at them all. `files` has the last event it logged of each file, the latest 20 files', with
-its `timestamp`: a scene's `scene.applied`, a script's `Script reloaded`, a UI's `ui.reloaded`, a
-prefab's `prefab.reloaded`, a warning why one didn't apply, a script's error.
+looked at them all. `files` has the last event it logged of each file since the last `wait`
+answered, at most 20 files', with its `timestamp`: a scene's `scene.applied`, a script's `Script
+reloaded`, a UI's `ui.reloaded`, a prefab's `prefab.reloaded`, a warning why one didn't apply, a
+script's error. The first `wait` of a run lists the latest 20.
 `warnings` lists the warnings and errors the restarted games logged after each rebuild or restart in
 place listed, as a restore's `snapshot.changed` or `gg.attach_changed`: each with its `code` and
 `message`, and a `count` if it repeats, at most 20, `warnings_more` more; none for patches alone.

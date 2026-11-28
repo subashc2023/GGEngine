@@ -5,13 +5,15 @@
 
 //! `gg run`'s patches built in process on macOS, as `dx tools hotpatch` builds them, without its
 //! fixed cost of about 0.35 s a patch: rustc compiles the game's crate as the build recorded it,
-//! with gg as its linker ([`link`]), and gg links the patch and makes dx's jump table.
+//! with gg as its linker ([`link`]), and gg links the patch and makes dx's jump table. After a
+//! restart in place, the table also maps that restart's patch's functions by name ([`Restart`]).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use object::write::{MachOBuildVersion, StandardSection, Symbol as Written, SymbolSection};
@@ -90,6 +92,54 @@ impl Symbols {
     }
 }
 
+/// The patch library of the last restart in place, as the process loaded it. The layers that
+/// restart built call `HotFn` with its functions' addresses, which the executable lacks for a
+/// layer type the restart added. So each later patch maps them too, by name ([`jump_table`]).
+#[derive(Clone)]
+pub(crate) struct Restart {
+    lib: PathBuf,
+    /// How far the process loaded `lib` from its link's addresses, modulo 2^64
+    /// (`gg_api::Restarted::loaded`).
+    loaded: u64,
+    /// `lib`'s functions by name, at their link's addresses: read by the first patch that needs
+    /// them, then kept.
+    functions: Arc<OnceLock<Result<HashMap<String, u64>, String>>>,
+}
+
+impl Restart {
+    /// The restart whose patch is `lib`, which the process loaded `loaded` from its link's
+    /// addresses.
+    pub(crate) fn new(lib: PathBuf, loaded: u64) -> Self {
+        Self {
+            lib,
+            loaded,
+            functions: Arc::default(),
+        }
+    }
+
+    fn functions(&self) -> Result<&HashMap<String, u64>, String> {
+        let read = self.functions.get_or_init(|| {
+            let lib = &self.lib;
+            let bytes =
+                fs::read(lib).map_err(|error| format!("can't read {}: {error}", lib.display()))?;
+            functions(&bytes)
+                .map_err(|error| format!("can't read the symbols of {}: {error}", lib.display()))
+        });
+        read.as_ref().map_err(|error| {
+            format!("can't map the functions of the last restart in place's patch: {error}")
+        })
+    }
+}
+
+/// The functions object file `bytes` defines, by name, at their addresses in it.
+fn functions(bytes: &[u8]) -> object::Result<HashMap<String, u64>> {
+    let file = object::File::parse(bytes)?;
+    let functions = (file.symbols())
+        .filter(|symbol| symbol.kind() == SymbolKind::Text && symbol.is_definition())
+        .filter_map(|symbol| Some((symbol.name().ok()?.to_owned(), symbol.address())));
+    Ok(functions.collect())
+}
+
 /// Why a patch didn't build.
 pub(crate) enum Failed {
     /// rustc failed, with its errors, plain, each once.
@@ -111,6 +161,8 @@ pub(crate) struct Build<'a> {
     pub(crate) client: &'a str,
     pub(crate) exe: &'a Path,
     pub(crate) symbols: &'a Symbols,
+    /// The last restart in place, while the process runs the layers it built.
+    pub(crate) restart: Option<&'a Restart>,
     /// The workspace's root, where cargo ran rustc.
     pub(crate) root: &'a Path,
     /// Where rustc's link arguments are written: a file gg alone writes and reads.
@@ -125,6 +177,7 @@ pub(crate) struct Build<'a> {
 /// - The build's record doesn't read.
 /// - rustc fails, or doesn't run the linker.
 /// - The stub, the link or the jump table fails.
+/// - The last restart in place's patch can't be read.
 pub(crate) fn hotpatch(build: &Build, aslr_reference: u64) -> Result<Value, Failed> {
     let started = SystemTime::now();
     let client: Value = serde_json::from_str(build.client)
@@ -234,7 +287,11 @@ pub(crate) fn hotpatch(build: &Build, aslr_reference: u64) -> Result<Value, Fail
         )));
     }
     let bytes = fs::read(&lib).map_err(|error| format!("can't read {}: {error}", lib.display()))?;
-    Ok(jump_table(&bytes, &lib, build.symbols)?)
+    let restart = (build.restart)
+        .map(|restart| Ok::<_, String>((restart.functions()?, restart.loaded)))
+        .transpose()?;
+    let table = jump_table(&bytes, &lib, build.symbols, restart, aslr_reference)?;
+    Ok(table)
 }
 
 /// The strings of JSON array `value`; none if it isn't one.
@@ -444,13 +501,24 @@ fn thin_link_args(linked: &[String]) -> Vec<String> {
     args
 }
 
-/// Patch `bytes`'s jump table, at path `lib`: each of the executable's addresses to the patch's
-/// of the same name, as dx's `create_native_jump_table` makes it.
+/// Patch `bytes`'s jump table, at path `lib`, for a process whose `main` is at `aslr_reference`:
+/// each of the executable's addresses to the patch's of the same name, as dx's
+/// `create_native_jump_table` makes it.
+///
+/// With `restart`, the last restart in place's functions by name and how far the process loaded
+/// its patch, it maps where the process has those too. subsecond adds the executable's slide to
+/// every key, so they go in less it. A key the executable gives stays.
 ///
 /// # Errors
 ///
 /// - The patch doesn't read, or it or the executable has no `_main`.
-fn jump_table(bytes: &[u8], lib: &Path, symbols: &Symbols) -> Result<Value, String> {
+fn jump_table(
+    bytes: &[u8],
+    lib: &Path,
+    symbols: &Symbols,
+    restart: Option<(&HashMap<String, u64>, u64)>,
+    aslr_reference: u64,
+) -> Result<Value, String> {
     let file = object::File::parse(bytes)
         .map_err(|error| format!("can't read patch {}: {error}", lib.display()))?;
     let patched = file.symbol_map();
@@ -470,6 +538,16 @@ fn jump_table(bytes: &[u8], lib: &Path, symbols: &Symbols) -> Result<Value, Stri
         .table
         .get(MAIN)
         .ok_or("the build has no `_main` symbol")?;
+    if let Some((functions, loaded)) = restart {
+        let slide = aslr_reference.wrapping_sub(base.address);
+        let moved = loaded.wrapping_sub(slide);
+        for (name, address) in &patched {
+            if let Some(old) = functions.get(*name) {
+                let key = old.wrapping_add(moved).to_string();
+                map.entry(key).or_insert_with(|| json!(address));
+            }
+        }
+    }
     Ok(json!({
         "lib": lib,
         "map": map,
@@ -809,7 +887,8 @@ mod tests {
             SymbolSection::Section(text),
         ));
         let lib = Path::new("/t/libgg-hive-patch-1.dylib");
-        let table = jump_table(&obj.write().expect("written"), lib, &symbols()).expect("a table");
+        let written = obj.write().expect("written");
+        let table = jump_table(&written, lib, &symbols(), None, 0).expect("a table");
         assert_eq!(table["lib"], "/t/libgg-hive-patch-1.dylib");
         assert_eq!(table["aslr_reference"], 0x1_0000_1000u64);
         assert_eq!(table["new_base_address"], 16);
@@ -820,7 +899,49 @@ mod tests {
         assert_eq!(map[&0x1_0000_2000u64.to_string()], 48);
         let mut no_main = symbols();
         no_main.table.remove("_main");
-        assert!(jump_table(&obj.write().expect("written"), lib, &no_main).is_err());
+        assert!(jump_table(&written, lib, &no_main, None, 0).is_err());
+    }
+
+    /// A library defining `_main`, `_grow` and `_hatch` in code from `base` on, `_POLLEN` in data.
+    fn library(base: u64) -> Vec<u8> {
+        let mut obj = macho();
+        let text = obj.section_id(StandardSection::Text);
+        let data = obj.section_id(StandardSection::Data);
+        obj.append_section_data(text, &[0; 256], 4);
+        obj.append_section_data(data, &[0; 16], 8);
+        for (name, at) in [("main", 0), ("grow", 16), ("hatch", 32)] {
+            let section = SymbolSection::Section(text);
+            obj.add_symbol(symbol(name, base + at, SymbolKind::Text, section));
+        }
+        let pollen = symbol("POLLEN", 0, SymbolKind::Data, SymbolSection::Section(data));
+        obj.add_symbol(pollen);
+        obj.write().expect("written")
+    }
+
+    /// After a restart in place, a patch maps the restart's functions by name, `_hatch` (a layer's
+    /// the executable lacks) too, at where the process has them less the executable's slide. Its
+    /// data doesn't map, and the executable's keys stay.
+    #[test]
+    fn a_patch_maps_the_last_restarts_functions_by_name() {
+        let restarted = functions(&library(0x40)).expect("read");
+        assert_eq!(restarted.len(), 3);
+        assert_eq!((restarted["_main"], restarted["_hatch"]), (0x40, 0x60));
+        assert!(!restarted.contains_key("_POLLEN"));
+        let lib = Path::new("/t/libgg-hive-patch-2.dylib");
+        // The executable slid by 0x4000; the restart's library loaded at 0x3_0000_0000.
+        let (slide, loaded) = (0x4000, 0x3_0000_0000);
+        let reference = 0x1_0000_1000 + slide;
+        let restart = Some((&restarted, loaded));
+        let table =
+            jump_table(&library(0x80), lib, &symbols(), restart, reference).expect("a table");
+        let map = table["map"].as_object().expect("a map");
+        let key = |at: u64| (at + loaded - slide).to_string();
+        assert_eq!(map[&key(0x60)], 0xa0);
+        assert_eq!(map[&key(0x50)], 0x90);
+        assert_eq!(map[&key(0x40)], 0x80);
+        assert_eq!(map[&0x1_0000_2000u64.to_string()], 0x90);
+        // `_main`, `_grow` and `_POLLEN` from the executable; the restart's three functions.
+        assert_eq!(map.len(), 6);
     }
 
     #[test]

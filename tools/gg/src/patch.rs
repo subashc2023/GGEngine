@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 use crate::build::{self, Package, fit};
 use crate::classify::{self, Edit, Uses};
 use crate::dx::{self, Dx, Fat};
+use crate::hotpatch::Restart;
 use crate::reach::{self, Code, Prints};
 use crate::run::{self, Run, Stamp, event, millis};
 use crate::runs::{self, Asked, MOST_KEPT, State};
@@ -78,6 +79,10 @@ pub(crate) struct Patches {
     /// being compared with them; `None` while the processes run the build's layouts. Patches stay
     /// against the build, carrying every edit since.
     layout: Option<Baseline>,
+    /// The last restart in place's patch, whose functions gg's own patches map by name while the
+    /// process runs the layers it built ([`Restart`]). `None` while `layout` is, under dx, or from
+    /// an engine that doesn't say where it loaded the patch.
+    restart: Option<Restart>,
     /// Where a restart in place writes its snapshot: the one the run restarts the game from, set by
     /// [`restart_into`](Self::restart_into); `None` keeps the game from restarting in place.
     snapshot: Option<PathBuf>,
@@ -273,6 +278,7 @@ impl Patches {
             told: BTreeMap::new(),
             baseline,
             layout: None,
+            restart: None,
             snapshot: None,
             taken: None,
         }))
@@ -422,6 +428,7 @@ impl Patches {
         self.processes.clear();
         // A new process runs the build's layouts.
         self.layout = None;
+        self.restart = None;
         self.applied = self.baseline.modules.clone();
         self.ran.clear();
         if afresh {
@@ -464,7 +471,12 @@ impl Patches {
         self.fresh = false;
         let running = self.layout.as_ref().unwrap_or(&self.baseline);
         let diff = diff(&self.sources, running, &self.seen, &self.ran);
-        let diff = self.past_new_layers(diff);
+        let new = (self.layout.as_ref()).and_then(|layout| {
+            let built = self.baseline.prints.as_ref()?;
+            Some(layout.prints.as_ref()?.new_layers(built))
+        });
+        let mapped = self.restart.is_some();
+        let diff = past_new_layers(diff, &new.unwrap_or_default(), &self.applied, mapped);
         let patches = matches!(self.builder, Builder::Dx(_));
         // The prints and edited modules' texts of the sources as they are.
         let (prints, texts) = match &diff {
@@ -577,35 +589,6 @@ impl Patches {
         true
     }
 
-    /// `diff`, but an edit a patch would carry restarts the game in place once a restart in place
-    /// gave it a layer type the build lacks. That type's methods run the restart's code, which a
-    /// later patch reaches only through functions the build has (the engine's `patch::compose`),
-    /// so a patch would change nothing they run.
-    fn past_new_layers(&self, diff: Diff) -> Diff {
-        let Diff::Bodies(hashes, unreadable, prints, texts) = diff else {
-            return diff;
-        };
-        let new = (self.layout.as_ref()).and_then(|layout| {
-            Some(
-                layout
-                    .prints
-                    .as_ref()?
-                    .new_layers(self.baseline.prints.as_ref()?),
-            )
-        });
-        let file = changed(&self.applied, &hashes).into_iter().next();
-        match (new.unwrap_or_default().first(), file) {
-            (Some((_, layer)), Some(file)) => {
-                let why = format!(
-                    "an edit since a restart in place added layer `{layer}`, whose methods only \
-                     another restart in place reaches"
-                );
-                Diff::Restart(file, why, hashes, unreadable, prints, texts)
-            }
-            _ => Diff::Bodies(hashes, unreadable, prints, texts),
-        }
-    }
-
     /// The code only `attach` reaches that differs, as of `prints`, from what built the world, and
     /// that the game wasn't told of; it's told of from then on.
     fn attached(&mut self, prints: Option<&Prints>) -> Vec<Code> {
@@ -680,13 +663,14 @@ impl Patches {
         );
         let pids = processes.iter().map(|(pid, _)| *pid).collect();
         let snapshot = restart.as_ref().and(self.snapshot.clone());
+        let restarted = self.restart.clone();
         let thread = thread::spawn(move || {
             let start = Instant::now();
             let mut tables = Vec::new();
             let mut libs = Vec::new();
             let mut failed = None;
             for (pid, session) in processes {
-                let table = dx.hotpatch(&fat, session.aslr_reference);
+                let table = dx.hotpatch(&fat, session.aslr_reference, restarted.as_ref());
                 let lib = table.as_ref().ok().and_then(|table| table["lib"].as_str());
                 libs.extend(lib.map(PathBuf::from));
                 match table {
@@ -820,12 +804,20 @@ impl Patches {
                     built: Duration::ZERO,
                     outcomes: vec![(None, Outcome::Failed(panicked()))],
                 });
+                // A restart in place is a lone process's: one library.
+                let lib = patching.libs.first().cloned();
                 self.libs.extend(patching.libs);
                 let current = self.processes == pids;
                 for (pid, outcome) in patching.outcomes {
                     let (prints, to) = (prints.as_ref(), serving(pid));
                     let built = patching.built;
-                    self.restarted(pid, outcome, current, &files, prints, &restart, built, to);
+                    let restarted = Restarted {
+                        restart: &restart,
+                        files: &files,
+                        lib: lib.clone(),
+                        built,
+                    };
+                    self.restarted(pid, outcome, current, prints, restarted, to);
                 }
                 false
             }
@@ -962,27 +954,31 @@ impl Patches {
 }
 
 impl Patches {
-    /// Notes how the restart in place `restart` went for process `pid` (`None` for a failure to
-    /// build it), its patch of `files` having built in `built`, with the functions' prints
-    /// `prints` after it; `current` if the processes are still those it was for, `to` the serving
-    /// sessions it was for, which log what it told.
+    /// Notes how the restart in place `restarted` went for process `pid` (`None` for a failure to
+    /// build it), its patch built, with the functions' prints `prints` after it;
+    /// `current` if the processes are still those it was for, `to` the serving sessions it was
+    /// for, which log what it told.
     ///
     /// Restarted, the process runs the sources the patch built, which edits are compared with from
-    /// then on, and its snapshot is the run's newest ([`taken`](Self::taken)). A failure to build
+    /// then on, and its snapshot is the run's newest ([`taken`](Self::taken)). gg's own patches map
+    /// its patch's functions from then on, if the game said where it loaded it. A failure to build
     /// leaves the game as it was, as a patch's does. The game's refusal or failure rebuilds it
     /// instead, restoring the snapshot if the restart ended it.
-    #[expect(clippy::too_many_arguments)]
     fn restarted(
         &mut self,
         pid: Option<u32>,
         outcome: Outcome,
         current: bool,
-        files: &[PathBuf],
         prints: Option<&Prints>,
-        restart: &Restarting,
-        built: Duration,
+        restarted: Restarted,
         to: Vec<Session>,
     ) {
+        let Restarted {
+            restart,
+            files,
+            lib,
+            built,
+        } = restarted;
         let shown = match (pid, &self.processes[..]) {
             (Some(pid), _) | (None, &[pid]) => json!(pid),
             (None, pids) => json!(pids),
@@ -991,6 +987,10 @@ impl Patches {
             Outcome::Applied(patched, applied, warned) => {
                 let attach = if current {
                     self.layout = Some(restart.layout.clone());
+                    let loaded = patched.restarted.as_ref().and_then(|stages| stages.loaded);
+                    self.restart = (lib.zip(loaded))
+                        .filter(|_| dx::own_patches())
+                        .map(|(lib, loaded)| Restart::new(lib, loaded));
                     self.applied = restart.layout.modules.clone();
                     self.ran.clear();
                     self.failed = None;
@@ -1151,6 +1151,15 @@ struct Restarting {
     since: SystemTime,
 }
 
+/// A restart in place that built: what it was for, the files its patch carried, its library, and
+/// how long it built.
+struct Restarted<'a> {
+    restart: &'a Restarting,
+    files: &'a [PathBuf],
+    lib: Option<PathBuf>,
+    built: Duration,
+}
+
 impl Job {
     fn done(&self) -> bool {
         match self {
@@ -1207,6 +1216,28 @@ enum Act {
     /// A patch and a restart in place, for a change to a module and why; then as `Patch`.
     Restart(PathBuf, String, Vec<PathBuf>, Hashes, Option<PathBuf>),
     Rebuild(PathBuf, String),
+}
+
+/// `diff`, but an edit a patch would carry restarts the game in place once a restart in place gave
+/// it a layer type the build lacks, one of `new`, unless gg's patches map the restart's functions
+/// (`mapped`). That type's methods run the restart's code. dx's patches reach it only through
+/// functions the build has (the engine's `patch::compose`), so they'd change nothing it runs.
+/// `applied` are the modules' hashes as of the code the processes run.
+fn past_new_layers(diff: Diff, new: &[(PathBuf, String)], applied: &Hashes, mapped: bool) -> Diff {
+    let Diff::Bodies(hashes, unreadable, prints, texts) = diff else {
+        return diff;
+    };
+    let file = changed(applied, &hashes).into_iter().next();
+    match (new.first(), file) {
+        (Some((_, layer)), Some(file)) if !mapped => {
+            let why = format!(
+                "an edit since a restart in place added layer `{layer}`, whose methods only \
+                 another restart in place reaches, as dx builds the patches"
+            );
+            Diff::Restart(file, why, hashes, unreadable, prints, texts)
+        }
+        _ => Diff::Bodies(hashes, unreadable, prints, texts),
+    }
 }
 
 /// What the sources, as `diff` says, call for, given the processes (none while the game waits for
@@ -2325,6 +2356,29 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Once a restart in place added a layer type the build lacks, a body edit patches where gg's
+    /// own patches map the restart's functions, and restarts in place again under dx's. With no
+    /// new layer, or no edit, the diff stays.
+    #[test]
+    fn a_new_layer_takes_patches_only_where_they_map_the_restarts_functions() {
+        let main = PathBuf::from("/g/src/main.rs");
+        let applied = Hashes::from([(main.clone(), 1)]);
+        let edited = || Diff::Bodies(Hashes::from([(main.clone(), 2)]), None, None, Texts::new());
+        let new = [(main.clone(), "Hatchery".to_owned())];
+        let Diff::Restart(file, why, ..) = past_new_layers(edited(), &new, &applied, false) else {
+            panic!("a restart under dx");
+        };
+        assert_eq!(file, main);
+        assert!(why.contains("`Hatchery`"), "{why}");
+        let mapped = past_new_layers(edited(), &new, &applied, true);
+        assert!(matches!(mapped, Diff::Bodies(..)), "gg's own patches");
+        let plain = past_new_layers(edited(), &[], &applied, false);
+        assert!(matches!(plain, Diff::Bodies(..)), "no new layer");
+        let same = Diff::Bodies(applied.clone(), None, None, Texts::new());
+        let same = past_new_layers(same, &new, &applied, false);
+        assert!(matches!(same, Diff::Bodies(..)), "no edit");
+    }
+
     /// An edit to a constant patches where other modules' function bodies alone use it, as a
     /// layer's `attach`, which it tells of. A use in a type restarts the game in place, and one in a
     /// function only `main` reaches rebuilds, each naming the constant's module.
@@ -2522,6 +2576,7 @@ mod tests {
             told: BTreeMap::new(),
             baseline,
             layout: None,
+            restart: None,
             snapshot: None,
             taken: None,
         }

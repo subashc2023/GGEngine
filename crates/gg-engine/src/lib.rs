@@ -325,7 +325,7 @@ pub use transform::Transform;
 
 /// What most games name, for `use gg_engine::prelude::*;`.
 pub mod prelude {
-    pub use crate::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+    pub use crate::math::{Mat4, Quat, Vec2, Vec2Swizzles, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
     pub use crate::tracing::{debug, error, info, warn};
     pub use crate::{
         Actions, Align, App, Binding, Blend, Bus, Camera, Cast, Change, Circle, Commands,

@@ -274,8 +274,11 @@ can use.
 
 The engine's games, in its `games/`, show how. `topdown`, a 2D game in one file, binds actions,
 spawns and removes entities, and draws a HUD from a UI file. It also draws random numbers from the
-world, adds a debug overlay of its own, and tests seeded ticks. `fps` and `tps` are 3D, `cards` a
-game of UI, and `showcase/scenes` holds a scene per feature.
+world, adds a debug overlay of its own, and tests seeded ticks. `tps`, a 3D game in one file, walks
+a capsule by a character controller, steps physics at each tick (`step_physics`), follows it with a
+camera and lights its world; `fps` is 3D too. Scenes name the engine's shapes as models, such as
+`ModelRoot("gg:cube")`, and code spawns a model by `Model::spawn`. `cards` is a game of UI, and
+`showcase/scenes` holds a scene per feature.
 
 `gg`, the engine's command-line tool, runs here as in the engine's workspace: `gg run` runs the game
 supervised, reloading it as it's edited; `gg check` runs it headless; `gg ship` lays it out as it

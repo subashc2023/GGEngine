@@ -345,9 +345,10 @@
 //! model, a font or a prefab by name or by a path to its file, which the game loads from under its
 //! asset root if it hasn't, a model's image with its model; an entity by a living one's ID, or
 //! `null` for none; and a struct or a variant's fields missing a field, which takes its default, as
-//! in a scene. A tuple struct of one field also takes that field's value bare, as `"Name": "Hero"`
-//! for `{"0": "Hero"}`, but for an object. What's opaque is kept as it is, or made as the type's own
-//! is, as an `(opaque)` that a create or an add gives says.
+//! in a scene. A tuple struct or variant of one field also takes that field's value bare, as
+//! `"Name": "Hero"` for `{"0": "Hero"}`: an object given for one is its field's value, unless it's
+//! empty or has the key `0`. What's opaque is kept as it is, or made as the type's own is, as an
+//! `(opaque)` that a create or an add gives says.
 
 pub mod asset;
 pub mod build;
@@ -2321,6 +2322,12 @@ pub struct Restarted {
     pub build_ms: u64,
     /// Starting a renderer, loading the layers and restoring the snapshot.
     pub restore_ms: u64,
+    /// How far the process loaded the patch's library from the addresses its link gave, modulo
+    /// 2^64: added to an address in the library's symbols, it gives the process's. The layers the
+    /// restart built call `HotFn` with those, which `gg run` maps in later patches by symbol name.
+    /// `None` from an engine older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded: Option<u64>,
 }
 
 /// An authoring change to the world, as `apply` takes it.

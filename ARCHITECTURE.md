@@ -199,11 +199,12 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
   holds its own copies of the crate's statics, which start over. That takes a patch's build and a
   tenth of a second, where a rebuild takes seconds and macOS scans each new executable. Patches
   stay against the build, carrying every edit since. Each also maps where the last restart in
-  place's patch put each function, which the layers that patch built call. So a layer type that
-  restart added, which the build lacks, takes later edits only by restarting in place again.
-  `gg run` compares later edits with the sources that restart built. A new process runs the
-  build's layouts again, so after a crash or a hang the game is rebuilt before its snapshot
-  restores.
+  place's patch put each function, which the layers that patch built call. The engine maps those
+  the build has. gg's own patches on macOS map the rest by name, as a layer type that restart
+  added, from where the game says it loaded that patch. dx's can't, so on Linux and Windows such a
+  layer takes later edits only by restarting in place again. `gg run` compares later edits with
+  the sources that restart built. A new process runs the build's layouts again, so after a crash
+  or a hang the game is rebuilt before its snapshot restores.
 - **The rest rebuilds** and restarts the game from a snapshot taken just before: an edit to code
   only `main` reaches, which runs once a process; to a file outside the game's crate, as an engine
   edit or a manifest; and any change to a game that names no app function or runs as peers. A
@@ -217,7 +218,8 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
 - **gg builds patches itself on macOS.** It runs rustc as the build recorded, with gg as the
   linker to take the link's arguments, then links the patch and makes subsecond's jump table.
   It reads the executable's symbols once a build, where `dx tools hotpatch` pays about 0.35 s a
-  patch to start, load cargo's metadata and read them again. Linux and Windows still run dx:
+  patch to start, load cargo's metadata and read them again. It reads the last restart in place's
+  patch's symbols once too, to map its functions. Linux and Windows still run dx:
   CI builds no patches, so a port there would go unchecked.
 - **Luau, in every build, for mods and quick scripts.** Players install sandboxed mods, and quests,
   dialogue and level events reload in milliseconds. A script file declares one component, its

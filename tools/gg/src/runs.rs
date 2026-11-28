@@ -143,21 +143,27 @@ fn answered_path(told: &Path) -> PathBuf {
     told.with_extension("answered")
 }
 
-/// The `at` of the latest outcome `wait` listed of run `gg`, in the file at `told`; 0 if none.
-fn answered(told: &Path, gg: u64) -> u64 {
+/// What `wait` last answered of run `gg`, in the file at `told`: the `at` of the latest outcome it
+/// listed, 0 if none, and where its read of the game's log ended, as `logs` takes it (`run` and
+/// `from`), if it read one.
+fn answered(told: &Path, gg: u64) -> (u64, Option<Value>) {
     let read = fs::read_to_string(answered_path(told));
     let read = read
         .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    read.filter(|read| read["gg"].as_u64() == Some(gg))
-        .and_then(|read| read["at"].as_u64())
-        .unwrap_or(0)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(|read| read["gg"].as_u64() == Some(gg));
+    let at = read.as_ref().and_then(|read| read["at"].as_u64());
+    let logs = read.and_then(|read| read.get("logs").filter(|logs| logs.is_object()).cloned());
+    (at.unwrap_or(0), logs)
 }
 
-/// Records that `wait` listed run `gg`'s outcomes up to `until`. A write that fails lists them
-/// again next time.
-fn answer(told: &Path, gg: u64, until: u64) {
-    write(&answered_path(told), &json!({"gg": gg, "at": until}));
+/// Records that `wait` listed run `gg`'s outcomes up to `until`, and read the game's log up to
+/// `logs`. A write that fails lists them again next time.
+fn answer(told: &Path, gg: u64, until: u64, logs: Option<&Value>) {
+    write(
+        &answered_path(told),
+        &json!({"gg": gg, "at": until, "logs": logs}),
+    );
 }
 
 /// Milliseconds since the Unix epoch, the file's unit.
@@ -623,9 +629,9 @@ pub(crate) fn rebuild(pick: &Pick, timeout: Duration, fresh: bool) -> Result<Val
 ///   [`MOST_RELOADS`] and `reloads_more` before them ([`listed`]); `reload` stays the latest.
 /// - `warnings` and `warnings_more` ([`about_warnings`]), what the games restarted by those rebuilds
 ///   warned of.
-/// - `files`, the last event it logged of each scene, script, UI and prefab file
-///   ([`about_files`]) among its latest [`FILE_EVENTS_READ`]: not the events since the wait began,
-///   since a look every 200 ms often applies a save before `gg` starts.
+/// - `files`, the last event it logged of each scene, script, UI and prefab file ([`about_files`])
+///   since the last `wait` answered, or among its latest [`FILE_EVENTS_READ`] before one: so a save
+///   the game applied before this wait began is listed, but not again in the next.
 ///
 /// A game that watches none, or hasn't looked yet, as one just started, has nothing to wait for.
 ///
@@ -657,17 +663,18 @@ fn looked(
         thread::sleep(READ);
     };
     told["files_looked"] = json!(looked);
-    let events = read_events(
-        &mut client,
-        json!({"level": "info", "last": FILE_EVENTS_READ}),
-    );
-    told["files"] = Value::Array(about_files(&events));
     let gg = told["gg"].as_u64().unwrap_or(0);
     let at = path(target, told["package"].as_str().unwrap_or_default());
-    let shown = listed(&mut told, answered(&at, gg));
-    if let Some(until) = shown.until {
-        answer(&at, gg, until);
-    }
+    let (until, logs) = answered(&at, gg);
+    let params = match &logs {
+        Some(logs) => json!({"level": "info", "from": logs["from"], "run": logs["run"]}),
+        None => json!({"level": "info", "last": FILE_EVENTS_READ}),
+    };
+    let (events, read) = read_events_on(&mut client, params);
+    told["files"] = Value::Array(about_files(&events));
+    let shown = listed(&mut told, until);
+    let logs = read.as_ref().or(logs.as_ref());
+    answer(&at, gg, shown.until.unwrap_or(until), logs);
     let mut tally = shown.warnings;
     if shown.rebuilt {
         // The game runs since the latest rebuild, which the listed always hold, being the latest
@@ -743,21 +750,31 @@ fn listed(told: &mut Value, answered: u64) -> Listed {
 /// a read stops at half a line's bytes.
 pub(crate) fn read_events(
     client: &mut gg_api::Client,
-    mut params: Value,
+    params: Value,
 ) -> Vec<Box<serde_json::value::RawValue>> {
+    read_events_on(client, params).0
+}
+
+/// [`read_events`], and where a read goes on from after them, as `logs` takes it (`run` and
+/// `from`); `None` if the game didn't answer.
+fn read_events_on(
+    client: &mut gg_api::Client,
+    mut params: Value,
+) -> (Vec<Box<serde_json::value::RawValue>>, Option<Value>) {
     let level = params["level"].clone();
-    let mut events = Vec::new();
+    let (mut events, mut on) = (Vec::new(), None);
     for _ in 0..8 {
         let Ok(read) = client.call_as::<LogEvents>("logs", params) else {
             break;
         };
         events.extend(read.events);
+        on = Some(json!({"run": read.run, "from": read.next}));
         if read.next >= read.end {
             break;
         }
         params = json!({"level": level, "from": read.next, "run": read.run});
     }
-    events
+    (events, on)
 }
 
 /// The warnings and errors among `events`, each with its `code` and `message`, and a `count` where
@@ -1046,10 +1063,9 @@ mod tests {
         let mut told = json!({"gg": 7, "reloads": [rebuilt, patched(250)]});
         let wait = |told: &Value| {
             let mut told = told.clone();
-            let shown = listed(&mut told, answered(&at, 7));
-            if let Some(until) = shown.until {
-                answer(&at, 7, until);
-            }
+            let (until, logs) = answered(&at, 7);
+            let shown = listed(&mut told, until);
+            answer(&at, 7, shown.until.unwrap_or(until), logs.as_ref());
             let events = told["reloads"].as_array().expect("reloads").iter();
             let events = events.map(|outcome| outcome["event"].as_str().unwrap().to_owned());
             (
@@ -1066,8 +1082,13 @@ mod tests {
         let (second, ..) = wait(&told);
         assert_eq!(second, ["patch_failed"], "the second alone");
         // Another run's answer isn't this run's.
-        assert_eq!(answered(&at, 8), 0);
-        assert_eq!(answered(&at, 7), 300);
+        assert_eq!(answered(&at, 8), (0, None));
+        assert_eq!(answered(&at, 7), (300, None));
+        // Where the game's log was read to, for the next wait to list file events since.
+        let logs = json!({"run": 5, "from": 42});
+        answer(&at, 7, 300, Some(&logs));
+        assert_eq!(answered(&at, 7), (300, Some(logs)));
+        assert_eq!(answered(&at, 8), (0, None));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -1,7 +1,9 @@
-//! Code patches, built by `dx tools hotpatch` and delivered by the tool API's `patch`. This module
-//! finds the game's `main` (what a patch is built against) and applies patches, which needs unsafe.
+//! Code patches, built by `dx tools hotpatch` or `gg run` itself and delivered by the tool API's
+//! `patch`. This module finds the game's `main` (what a patch is built against) and applies patches,
+//! which needs unsafe.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -13,6 +15,10 @@ use tracing::info;
 /// as this process loaded them; empty before one. Its layers' code calls `HotFn` with the patch's
 /// addresses, which later patches map too ([`compose`]). A restart in place drops what the one
 /// before built, so only the last one's matter.
+///
+/// A function the executable lacks, as a layer type the restart added has, isn't here. `gg run`'s
+/// own patches map those by symbol name, from where the restart's library loaded
+/// ([`gg_api::Restarted::loaded`]); `dx tools hotpatch`'s can't, so `gg run` restarts again.
 static RESTARTED: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
 
 /// Where the game's `main` is in its process: what `dx tools hotpatch` builds a patch against. 0
@@ -35,14 +41,14 @@ pub(crate) fn aslr_reference() -> u64 {
 /// Applies the patch `table` names at simulation tick `ticks`. Calls through subsecond's `HotFn`
 /// from then on (such as the stack's calls of layer methods) run the patch's code, from the
 /// executable's code and from that of the last restart in place's patch ([`compose`]). `restarts`
-/// for the patch of a restart in place, whose own addresses later patches then map. Logs
-/// `Code patched` with the library.
+/// for the patch of a restart in place, whose own addresses later patches then map. Returns how far
+/// the library loaded from its link's addresses ([`loaded`]). Logs `Code patched` with the library.
 ///
 /// Fails with `api.patch`, changing nothing, if:
 /// - the process refuses the table, per [`refusal`];
 /// - the patch's library doesn't load;
 /// - it isn't a patch of this build (one exporting no `main`; subsecond panics on it).
-pub(crate) fn apply(mut table: JumpTable, ticks: u64, restarts: bool) -> Result<()> {
+pub(crate) fn apply(mut table: JumpTable, ticks: u64, restarts: bool) -> Result<Option<u64>> {
     let _zone = gg_core::zone!();
     if let Some(refused) = refusal(aslr_reference(), &table) {
         return Err(refused);
@@ -57,13 +63,17 @@ pub(crate) fn apply(mut table: JumpTable, ticks: u64, restarts: bool) -> Result<
     if let Some(restarted) = &*restarted {
         compose(&mut table, restarted, slide);
     }
+    // An entry as the table maps it, its key moved as subsecond moves it, to see how far it moves
+    // the values.
+    let probe = (table.map.iter().next()).map(|(key, value)| (key.wrapping_add(slide), *value));
     let apply = move || {
         // SAFETY: only a process that can read the session file's token can ask for a patch, and
         // only the game's user can: `dirs::write_private` writes the file mode 0600 on Unix, with
         // a DACL allowing its owner alone on Windows, before it holds the token. The API trusts
         // that process as it trusts the user, since a made-up table could corrupt memory.
-        // `gg run` asks only with a patch `dx tools hotpatch` built against this process's
-        // executable and the `main` address the session file gives. No value laid out by code
+        // `gg run` asks only with a patch `dx tools hotpatch` or gg built against this process's
+        // executable and the `main` address the session file gives, gg's mapping too the last
+        // restart's functions where this process said it loaded them. No value laid out by code
         // other than the patch's reaches its code: a patch whose types are laid out unlike the
         // code the process runs comes with a restart in place, which ends the layers and drops
         // all the run held before this applies, and builds anew with the patch's code
@@ -89,16 +99,24 @@ pub(crate) fn apply(mut table: JumpTable, ticks: u64, restarts: bool) -> Result<
             return Err(Error::new("api.patch", message));
         }
     }
+    // SAFETY: read on the main thread, the only one that applies patches, just after this one
+    // committed its table, which subsecond leaks, so the reference stays valid.
+    let map = unsafe { subsecond::get_jump_table() }.map(|table| &table.map);
     if restarts {
-        // SAFETY: read on the main thread, the only one that applies patches, just after this one
-        // committed its table, which subsecond leaks, so the reference stays valid.
-        let table = unsafe { subsecond::get_jump_table() };
-        let map = table.map(|table| &table.map);
         let placed = keys.iter().filter_map(|key| Some((*key, *map?.get(key)?)));
         *restarted = Some(placed.collect());
     }
+    let loaded = map.and_then(|map| loaded(probe?, map));
     info!(library = %library.display(), ticks, restarts, "Code patched");
-    Ok(())
+    Ok(loaded)
+}
+
+/// How far subsecond moved the values of a table, as the process loaded its library: what it maps
+/// `probe`'s key to in `map`, as committed, less `probe`'s value before, modulo 2^64. `None` if
+/// `map` lacks the key.
+fn loaded<S: BuildHasher>(probe: (u64, u64), map: &HashMap<u64, u64, S>) -> Option<u64> {
+    let (key, value) = probe;
+    Some(map.get(&key)?.wrapping_sub(value))
 }
 
 /// Adds to `table`'s map, before subsecond moves it by `slide`, the addresses the last restart in
@@ -212,5 +230,22 @@ mod tests {
         kept.map.insert(0x9_0000 - slide, 1);
         compose(&mut kept, &restarted, slide);
         assert_eq!(kept.map.get(&(0x9_0000 - slide)), Some(&1));
+    }
+
+    /// Where a library loaded is how far its committed table's values moved, modulo 2^64, as a
+    /// library may load below its link's addresses.
+    #[test]
+    fn where_the_library_loaded_is_how_far_its_values_moved() {
+        let committed = HashMap::from([(0x1_0000_1010, 0x2_0000_4010)]);
+        assert_eq!(
+            loaded((0x1_0000_1010, 0x4010), &committed),
+            Some(0x2_0000_0000)
+        );
+        let below = HashMap::from([(0x10, 0x5)]);
+        assert_eq!(
+            loaded((0x10, 0x15), &below).map(|loaded| 0x15_u64.wrapping_add(loaded)),
+            Some(0x5)
+        );
+        assert_eq!(loaded((0x20, 0x15), &below), None);
     }
 }

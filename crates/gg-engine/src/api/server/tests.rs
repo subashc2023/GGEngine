@@ -2621,6 +2621,7 @@ fn a_restart_in_place_snapshots_first_and_is_refused_unless_the_game_can() {
                     apply_ms: 2,
                     build_ms: 3,
                     restore_ms: 4,
+                    loaded: Some(0x4000),
                 };
                 api.restarted(Ok(restarted), stepper.ticks);
             }
