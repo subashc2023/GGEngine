@@ -26,11 +26,13 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, with the engine's debug overlays: what `main` runs, and what its recordings replay.
+/// The game, with the engine's debug overlays: what `main` runs, what its recordings replay, and
+/// what a restart in place builds again (`App::hot`).
 fn app() -> App {
     let app = App::new("topdown")
         .project(env!("CARGO_MANIFEST_DIR"))
-        .source(env!("GG_SOURCE"));
+        .source(env!("GG_SOURCE"))
+        .hot(app);
     app.layer(Game::new()).debug_overlays()
 }
 
@@ -242,8 +244,8 @@ impl Game {
         let stick = "Aims the player along the right stick's [x, y], right and up, once the stick \
                      is pushed past 0.3; a weaker push keeps the aim";
         actions.describe(Act::AimStick, stick);
-        // No numbers: a constant `new` reads rebuilds the game when it's edited, which a value
-        // being tuned shouldn't.
+        // No numbers: a constant `new` reads restarts the game in place when it's edited, which a
+        // value being tuned shouldn't.
         let shoot = "Held, fires shots along the aim, every `SHOT_EVERY` ticks, at `SHOT_SPEED` \
                      units a second. A shot takes a hit off the `Enemy` it hits, flashes and \
                      pushes it, and vanishes";

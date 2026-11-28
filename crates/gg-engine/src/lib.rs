@@ -39,7 +39,8 @@
 //! Performance panels, and a game's [`DebugOverlays`].
 //!
 //! A game in one file, a square turning before a camera. [`prelude`] names what most games use;
-//! `cargo gg new` makes a game like it, its world in a scene file.
+//! `cargo gg new` makes a game like it, its world in a scene file. `app` builds the game, and names
+//! itself so `gg run` can restart the game in place with an edit to its types ([`App::hot`]).
 //!
 //! ```no_run
 //! use std::process::ExitCode;
@@ -49,7 +50,11 @@
 //! use gg_engine::prelude::*;
 //!
 //! fn main() -> ExitCode {
-//!     gg_engine::run(App::new("Hello").layer(Hello).debug_overlays())
+//!     gg_engine::run(app())
+//! }
+//!
+//! fn app() -> App {
+//!     App::new("Hello").hot(app).layer(Hello).debug_overlays()
 //! }
 //!
 //! struct Hello;
@@ -186,6 +191,8 @@ pub mod recording;
 pub mod reflect;
 mod render_thread;
 mod renderer_components;
+#[cfg(feature = "dev")]
+mod restart;
 mod rng;
 mod scene_change;
 mod scene_files;
@@ -379,6 +386,9 @@ pub struct App {
     own_sessions: layer::OwnSessions,
     /// Set by [`embeds_game`](Self::embeds_game).
     embeds_game: bool,
+    /// The function that builds the app, which a restart in place calls again: [`hot`](Self::hot).
+    #[cfg(feature = "dev")]
+    hot: Option<fn() -> App>,
 }
 
 impl App {
@@ -408,6 +418,40 @@ impl App {
             started: None,
             own_sessions: layer::OwnSessions::default(),
             embeds_game: false,
+            #[cfg(feature = "dev")]
+            hot: None,
+        }
+    }
+
+    /// Names `app`, the function that builds this app, so a development build under `gg run` can
+    /// restart in place: an edit to the game's own crate that changes a type, a field or what only
+    /// startup reaches then applies as a patch, and the game builds itself again with it, keeping
+    /// its process, window and world. `main` runs what `app` returns, as ever:
+    ///
+    /// ```no_run
+    /// use gg_engine::App;
+    ///
+    /// fn app() -> App {
+    ///     App::new("Game").hot(app)
+    /// }
+    ///
+    /// fn main() -> std::process::ExitCode {
+    ///     gg_engine::run(app())
+    /// }
+    /// ```
+    ///
+    /// The restart takes the layers of the app `app` builds, and what the run's flags set: layers
+    /// `main` adds to it go. It's refused for an app whose name, seed, project, root, window size,
+    /// title bar, view panel or docking differ from this one's: the game rebuilds instead. Threads
+    /// the layers start themselves run their old code until they end. A build without `dev`
+    /// ignores it.
+    #[must_use]
+    pub fn hot(self, app: fn() -> App) -> Self {
+        let _ = app;
+        Self {
+            #[cfg(feature = "dev")]
+            hot: Some(app),
+            ..self
         }
     }
 
@@ -723,6 +767,63 @@ impl App {
     }
 }
 
+impl App {
+    /// Whether the run can restart in place ([`hot`](Self::hot)): a development build's app that
+    /// names its function, run alone, neither recorded, sync-tested nor embedded, whose state those
+    /// would hold across the restart.
+    fn restarts_in_place(&self, args: &args::Args) -> bool {
+        #[cfg(feature = "dev")]
+        return self.hot.is_some()
+            && !args.embedded
+            && !args.sync_test
+            && args.record.is_none()
+            && args.net.is_none();
+        #[cfg(not(feature = "dev"))]
+        {
+            let _ = args;
+            false
+        }
+    }
+
+    /// Takes the layers of `new`, the app [`hot`](Self::hot)'s function built again with a patch's
+    /// code, in place of this app's, which have dropped. What the run's flags set stays, as do the
+    /// files it reads.
+    ///
+    /// Fails with `api.restart`, taking nothing, if `new` differs from this app in what the run
+    /// started with: its name, seed, project, asset root, window size, title bar, view panel or
+    /// docking.
+    #[cfg(feature = "dev")]
+    pub(crate) fn take_layers(&mut self, new: App) -> Result<()> {
+        // A package's asset root replaces the app's.
+        let packaged = self.files.packaged().is_some();
+        let differs = [
+            ("name", self.name != new.name),
+            ("seed", self.seed != new.seed),
+            ("project", self.project_dir != new.project_dir),
+            ("asset root", !packaged && self.root != new.root),
+            ("window size", self.window_size != new.window_size),
+            ("title bar", self.custom_title_bar != new.custom_title_bar),
+            ("view panel", self.view_panel != new.view_panel),
+            ("docking", self.docked != new.docked),
+        ];
+        let differs: Vec<&str> = (differs.iter())
+            .filter(|(_, differs)| *differs)
+            .map(|(what, _)| *what)
+            .collect();
+        if !differs.is_empty() {
+            let message = format!(
+                "the app the patch builds differs in what the run started with, its {}, which a \
+                 restart in place keeps",
+                differs.join(", ")
+            );
+            return Err(Error::new("api.restart", message));
+        }
+        self.stack.take_layers(new.stack);
+        self.own_sessions.layers = self.stack.names().to_vec();
+        Ok(())
+    }
+}
+
 /// Runs `app` until its window closes or `--frames` runs out, or replays a recording
 /// (`--replay`). Parses the flags every app shares (`--help`) and starts logging.
 ///
@@ -875,7 +976,7 @@ fn run_args(
         });
         let api = match api::start(
             app.name,
-            app.stack.names(),
+            app.restarts_in_place(&args),
             log.as_deref(),
             player,
             app.manifest().map(|manifest| manifest.path.as_path()),

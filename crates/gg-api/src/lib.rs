@@ -244,7 +244,12 @@
 //!   its process. `api.bad_params` if the table's library, `lib`, isn't an absolute path.
 //!   `api.patch` if the build can't take patches ([`Session::aslr_reference`]), the table's
 //!   reference is past where `main` is (it isn't for this process), the library doesn't load, or it
-//!   isn't a patch of the build, as one exporting no `main` isn't.
+//!   isn't a patch of the build, as one exporting no `main` isn't. With `restart`, the game
+//!   restarts in place with the patch ([`Patch::restart`]), keeping its process, window and
+//!   connections. `api.restart`, changing nothing, if it can't: it doesn't name the function that
+//!   builds it, or it's recorded, sync-tested, networked or embedded. Once its layers have ended,
+//!   a failure ends the game, answering `api.restart_failed`; the snapshot holds its world. Requests
+//!   waiting on frames or input as it restarts are answered `api.restarted`.
 //! - `apply`: applies an edit, [`Operation`]s that undo and redo together, as the frame starts,
 //!   between ticks. All or none: it fails with the code of the first refused, such as
 //!   `ecs.no_entity`, which names it.
@@ -432,6 +437,10 @@ pub struct Session {
     /// The [`PROTOCOL`] the game's engine was built with; `None` from an engine older than it.
     #[serde(default)]
     pub protocol: Option<u32>,
+    /// Whether the game names the function that builds it (`App::hot`), so a `patch` can restart
+    /// it in place ([`Patch::restart`]). False from an engine older than it.
+    #[serde(default)]
+    pub hot: bool,
 }
 
 impl Session {
@@ -2280,6 +2289,13 @@ pub struct Snapshotted {
 #[serde(deny_unknown_fields)]
 pub struct Patch {
     pub table: Value,
+    /// Where to write a snapshot, if the game is to restart in place with the patch: for a patch
+    /// whose types are laid out unlike the code the game runs. The game snapshots its world here
+    /// with the code it runs, ends its layers, applies the patch, builds itself again with the
+    /// patch's code (`App::hot`), and restores the snapshot. Only for a game whose session says it
+    /// can ([`Session::hot`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<PathBuf>,
 }
 
 /// What `patch` answers: the ticks run as the patch applied; the next is the first to run the
@@ -2287,6 +2303,24 @@ pub struct Patch {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Patched {
     pub ticks: u64,
+    /// How the restart in place went, for a patch that asked for one ([`Patch::restart`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted: Option<Restarted>,
+}
+
+/// How long each stage of a restart in place took, in milliseconds ([`Patch::restart`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restarted {
+    /// Writing the snapshot, with the code the game ran.
+    pub snapshot_ms: u64,
+    /// Ending the layers and dropping the world, the renderer and what else the run held.
+    pub teardown_ms: u64,
+    /// Loading the patch's library.
+    pub apply_ms: u64,
+    /// Building the game again with the patch's code.
+    pub build_ms: u64,
+    /// Starting a renderer, loading the layers and restoring the snapshot.
+    pub restore_ms: u64,
 }
 
 /// An authoring change to the world, as `apply` takes it.
@@ -2902,6 +2936,7 @@ mod tests {
             player: None,
             project: Some(PathBuf::from("games/shards/project.ron")),
             protocol: Some(PROTOCOL),
+            hot: false,
         };
         for pid in [2, 1] {
             let text = serde_json::to_string(&session(pid)).unwrap();
@@ -3681,6 +3716,7 @@ mod tests {
             player: None,
             project: None,
             protocol: Some(PROTOCOL),
+            hot: false,
         }
     }
 

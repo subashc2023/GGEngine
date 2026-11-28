@@ -115,17 +115,19 @@ macOS, `gdb` on Linux if it's installed and may attach; `null` where neither cou
 Restarts, from the last snapshot: after a crash or a hang; after a rebuild (`rebuilt`), from a
 snapshot taken in the same request as the quit, so no edit is lost between them; and at once
 (`killed`, with what it waits for) for a game waiting where it can't answer: at a script's
-breakpoint, in a file dialog or in the window menu. A game that ends before its first snapshot
-waits for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`). So does a
+breakpoint, in a file dialog or in the window menu. A game that ends before its first snapshot waits
+for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`). So does a
 rebuild `gg rebuild --fresh` asks for. `snapshot_failed` says why one fails; a game that hasn't
-ticked since it started refuses one, and the next is asked for quietly. Pauses and stops last
-across restarts, as does the world as edited a project's game plays a copy of (`gg help play`).
-Only the world, its entities' components, survives; a layer's own fields and
-statics start over, and what `input` held down is up. A value the code put in a component, as a
-shot's speed in its velocity, keeps the old constant's. A field a rebuild adds takes its default,
-the game warning `snapshot.changed`. A layer's `load` makes its assets; its `attach`, which a
-restart skips, builds the world. A rebuilt `load` that adds assets ahead of its others leaves out
-the draws code made of its meshes, warning `snapshot.changed`; models' nodes draw as before.
+ticked since it started refuses one, and the next is asked for quietly. Pauses and stops last across
+restarts, as does the world as edited a project's game plays a copy of (`gg help play`). Only the
+world, its entities' components, survives, a restart in place's too; a layer's own fields and
+statics start over, and what `input` held down is up. Threads a layer started itself run their old
+code through a restart in place until they end. A value the code put in a component, as a shot's
+speed in its velocity, keeps the old constant's. A field a rebuild or restart in place adds takes
+its default, the game warning `snapshot.changed`. A layer's `load` makes its assets; its `attach`,
+which a restart skips, builds the world. A rebuilt `load` that adds assets ahead of its others
+leaves out the draws code made of its meshes, warning `snapshot.changed`; models' nodes draw as
+before.
 
 `run` ends as the game comes to its own end (its window closes, `quit` asks or its frames run out),
 whatever its status; as a game that never served the API ends; and, with restarts off
@@ -154,14 +156,25 @@ built only for its tests, rebuilds nothing. Nor does one to a module's doc comme
 - so is a changed `use` whose names only function bodies use, but for a `pub use` or a glob's;
 - so is an edit to a `const`'s value that only function bodies use, rustc copying it into them.
   Values the code already put in components keep the old one;
-- any other change rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
-  `rebuild_failed`): any outside function bodies, as a new type, `const`, field or trait impl's
-  method; a change to a type, even one declared in a body; one to a macro in a body that may
-  declare items, any but those known not to, as `println!` and tracing's; one to code run as the
-  game started:
-  `main`, a layer's `load` and `restored`, and the functions only they reach; an edit to a `const` a
-  type, a static, a `const fn` or that code uses, or to a `use` of a name used outside function
-  bodies or by that code; and any change after a failed rebuild;
+- any other change to PACKAGE's modules is a patch with which the game restarts in place, if its
+  app names its function (`App::hot`) and it runs alone (`restarted`, or `restart_failed`): any
+  change outside function bodies, as a new type, `const`, field, module or trait impl's method; a
+  change to a type, even one declared in a body; one to a macro in a body that may declare items,
+  any but those known not to, as `println!` and tracing's; one to code run as the game started (a
+  layer's `load` and `restored`, the app's function, and the functions only they reach); an edit to
+  a `const` a type, a `const fn` or that code uses, or to a `use` of a name used outside function
+  bodies or by that code. The game snapshots its world, ends its layers, applies the patch, builds
+  itself again with it and restores the snapshot, keeping its process, window and connections:
+  `restarted` gives `build_ms`, `restart_ms` and the game's stages. From then on, edits are compared
+  with what that restart built, until a new process runs the build again; once a restart added a
+  layer type the build lacks, each edit restarts in place, as no patch reaches its methods. A
+  restart that fails after the layers ended ends the game, which then rebuilds from that snapshot,
+  as does a crash or hang after a restart in place, since its build lays out its types as before;
+- the rest rebuilds with dx (`rebuilding`, with the file and why, then `rebuilt` or
+  `rebuild_failed`): an edit to `main` or the functions only it reaches; to a file outside
+  PACKAGE's modules; any change a restart in place carries, for a game that can't take one (it
+  names no app function, or runs as peers) or that refused one; and any change after a failed
+  rebuild;
 - an edit to a layer's `attach`, or to a function only it reaches, or to a `const` or `use` they
   use, patches. The game warns `gg.attach_changed` once for each, against the build that built the
   world, after a rebuild too; `patched` names their modules in `attach`. Restarts keep the world, so
@@ -300,16 +313,20 @@ save, wait, save, wait, and the second shows the second. `reload` is the latest 
 Each has `at` (ms since the epoch, as `updated`):
 - {\"event\":\"patched\",\"files\":[...],\"build_ms\":..,\"apply_ms\":..,\"at\":..}, the game's state
   untouched;
+- {\"event\":\"restarted\",\"files\":[...],\"why\":..,\"build_ms\":..,\"restart_ms\":..,\"at\":..}, the
+  game restarted in place from a snapshot with the patch;
 - {\"event\":\"rebuilt\",\"why\":..,\"build_ms\":..,\"at\":..}, the game started again from a snapshot;
-- {\"event\":\"patch_failed\" or \"rebuild_failed\",\"error\":{..},\"at\":..}, a build that failed.
+- {\"event\":\"patch_failed\", \"restart_failed\" or \"rebuild_failed\",\"error\":{..},\"at\":..}, a build
+  that failed, or a restart in place, which rebuilds.
 A rebuild's `build_ms` leaves out the time it waited for another game's build, `queued_ms` if it
 waited. The game applies those files itself, as they're saved; `files_looked` is when it last
 looked at them all. `files` has the last event it logged of each file, the latest 20 files', with
 its `timestamp`: a scene's `scene.applied`, a script's `Script reloaded`, a UI's `ui.reloaded`, a
 prefab's `prefab.reloaded`, a warning why one didn't apply, a script's error.
-`warnings` lists the warnings and errors the restarted games logged after each rebuild listed, as a
-restore's `snapshot.changed` or `gg.attach_changed`: each with its `code` and `message`, and a
-`count` if it repeats, at most 20, `warnings_more` more; none for patches alone. Fails with:
+`warnings` lists the warnings and errors the restarted games logged after each rebuild or restart in
+place listed, as a restore's `snapshot.changed` or `gg.attach_changed`: each with its `code` and
+`message`, and a `count` if it repeats, at most 20, `warnings_more` more; none for patches alone.
+Fails with:
 - `gg.build_failed` and rustc's errors, if the edits don't build;
 - `gg.waiting`, if the game ended and waits for a change;
 - `gg.no_run`, without a `gg run`; `gg.which_run`, with several, which `--pid` tells apart;
@@ -323,8 +340,9 @@ restore's `snapshot.changed` or `gg.attach_changed`: each with its `code` and `m
                 details: "\
 For an edit patched in that the game won't run again, as in a function it reaches only through `dyn`
 objects or function pointers of its own that it keeps. A layer's own methods (`update`, `tick`,
-`event`, `ui`, `commands`...) patch: the engine calls each through the patch table. `run` rebuilds
-by itself for code only `main`, a layer's `load` or `restored` reach. `run` takes the request at
+`event`, `ui`, `commands`...) patch: the engine calls each through the patch table. `run` restarts
+the game in place by itself for code only a layer's `load` or `restored` reach, and rebuilds for
+code only `main` reaches. `run` takes the request at
 once. Once no patch or build is under way, it rebuilds with every edit saved (`rebuilding`,
 why `` `gg rebuild` asked ``) and restarts the game, as an edit no patch carries does. Then
 `rebuild` waits at most `--timeout` (300 s) for the game to run the new build, and prints what

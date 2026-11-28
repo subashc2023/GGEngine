@@ -150,15 +150,15 @@ impl Shown {
 
 /// Starts serving the tool API for `app`, or returns `None` if `serve` is false or `dev` is off.
 ///
-/// `layers` are bottom up. `log` is the JSON log's path, if any; its last events are in gg-core's
-/// `log::EVENTS`. `player` is the peer's number in a lockstep session. `project` is the project
-/// manifest's path.
+/// `hot` if the run can restart in place ([`gg_api::Session::hot`]). `log` is the JSON log's path,
+/// if any; its last events are in gg-core's `log::EVENTS`. `player` is the peer's number in a
+/// lockstep session. `project` is the project manifest's path.
 ///
 /// Fails with `api.start` if it can't start, as when its port can't be bound or its session file
 /// written. The run goes on without it, warning so, but an embedded run ends.
 pub(crate) fn start(
     app: &str,
-    layers: &[&str],
+    hot: bool,
     log: Option<&Path>,
     player: Option<u8>,
     project: Option<&Path>,
@@ -166,9 +166,9 @@ pub(crate) fn start(
 ) -> gg_core::Result<Option<Api>> {
     #[cfg(feature = "dev")]
     if serve {
-        return Api::start(app, layers, log, &gg_core::log::EVENTS, player, project).map(Some);
+        return Api::start(app, hot, log, &gg_core::log::EVENTS, player, project).map(Some);
     }
-    let _ = (app, layers, log, player, project, serve);
+    let _ = (app, hot, log, player, project, serve);
     Ok(None)
 }
 
@@ -216,6 +216,26 @@ pub(crate) fn serve(
     }
     let _ = (api, cx, stack, stepper);
     false
+}
+
+/// The restart in place a `patch` asked for, its snapshot written, for the main loop to do
+/// between frames ([`Api::take_restart`]); `None` without `dev`.
+#[cfg(feature = "dev")]
+pub(crate) fn take_restart(api: &mut Option<Api>) -> Option<crate::restart::Restart> {
+    api.as_mut()?.take_restart()
+}
+
+/// Answers the `patch` of the restart in place [`take_restart`] gave, with how it went
+/// ([`Api::restarted`]).
+#[cfg(feature = "dev")]
+pub(crate) fn restarted(
+    api: &mut Option<Api>,
+    done: gg_core::Result<gg_api::Restarted>,
+    ticks: u64,
+) {
+    if let Some(api) = api {
+        api.restarted(done, ticks);
+    }
 }
 
 /// For an embedded run: as a layer asks the run to end ([`Context::exit`]) while a copy of the

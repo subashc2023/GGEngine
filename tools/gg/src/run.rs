@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use gg_api::{Client, Failure, Pulse, Session, Snapshot, Snapshotted};
 use serde_json::{Value, json};
 
-use crate::patch::{Patches, Process, Watcher};
+use crate::patch::{self, Patches, Process, Watcher};
 use crate::runs::{self, Asked, State, Told};
 use crate::{Scope, build, game, settings};
 
@@ -243,9 +243,17 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
         event(&json!({"event": "closed", "why": CLOSED}));
         return Ok(true);
     }
+    let peers: Vec<Peer> = peers.collect();
+    let mut patches = patches.map(|patches| *patches);
+    // A lone game restarts in place into its own snapshot, which the run restarts it from.
+    if let (Some(patches), [peer]) = (&mut patches, &peers[..])
+        && restarts
+    {
+        patches.restart_into(peer.snapshot.clone());
+    }
     let mut supervisor = Supervisor {
         run,
-        peers: peers.collect(),
+        peers,
         exe,
         dir,
         serves: run.serves(),
@@ -253,7 +261,7 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
         served: false,
         scan_told: false,
         failed: None,
-        patches: patches.map(|patches| *patches),
+        patches,
         closed,
         told: Some(told),
     };
@@ -530,6 +538,13 @@ impl Supervisor<'_> {
                 if let (Some(told), Some((asked, failure))) = (told, patches.answered()) {
                     told.answer(asked, failure.as_ref());
                 }
+                // A restart in place's snapshot, the newest of the game's world.
+                if let Some(taken) = patches.taken() {
+                    self.peers[0].latest = Some(taken);
+                    if let Some(game) = games.first_mut() {
+                        game.snapshotted = true;
+                    }
+                }
             } else if self.restarts && watch.rebuilt(stamp(&self.exe), now) {
                 event(&json!({"event": "rebuilt", "exe": self.exe}));
                 rebuilt = true;
@@ -563,6 +578,13 @@ impl Supervisor<'_> {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             };
+            // A restart in place that failed ends the game, its world in the snapshot.
+            if let Some(patches) = &mut self.patches {
+                patches.settle();
+                if let Some(taken) = patches.taken() {
+                    self.peers[0].latest = Some(taken);
+                }
+            }
             // The rest stop, snapshotted first so they restart with the one that ended; on
             // `Closed` all stop, unsnapshotted, as they do to start afresh.
             let all = matches!(happened, Happened::Rebuilt { .. } | Happened::Closed);
@@ -586,7 +608,16 @@ impl Supervisor<'_> {
                 }
             }
             games.clear();
-            match next(happened, self.peers[ended].latest.as_ref(), self.restarts) {
+            let failed = matches!(happened, Happened::Failed { .. });
+            let mut next = next(happened, self.peers[ended].latest.as_ref(), self.restarts);
+            // Its build would restore a snapshot of layouts it lacks.
+            if failed
+                && matches!(next, Next::Start(_))
+                && (self.patches.as_mut()).is_some_and(|patches| patches.outdated())
+            {
+                next = Next::Wait(patch::OUTDATED);
+            }
+            match next {
                 Next::Start(from) => {
                     if afresh {
                         // So a later restart can't take the old world back.
@@ -1308,7 +1339,7 @@ fn killed(pid: u32, waiting: &str, latest: Option<&Snapshotted>) -> Value {
 }
 
 /// The snapshot at `path`, if written whole since `since`, as by a game that ended unanswering.
-fn written_since(path: &Path, since: SystemTime) -> Option<Snapshotted> {
+pub(crate) fn written_since(path: &Path, since: SystemTime) -> Option<Snapshotted> {
     let metadata = fs::metadata(path).ok()?;
     if metadata.modified().ok()? < since {
         return None;
@@ -1982,6 +2013,7 @@ mod tests {
             player: None,
             project: None,
             protocol: Some(gg_api::PROTOCOL),
+            hot: false,
         };
         (session, asked)
     }

@@ -15,8 +15,8 @@ and the APIs still change.
 - **Game code is Rust.** A game is a stack of layers over an ECS world, with Luau for scripts and
   mods.
 - **Agents are first-class.** Development builds serve a JSON tool API (`cargo gg`, or MCP) to
-  inspect, capture, set, undo and step the game. `cargo gg run` hot-patches code edits, and
-  restarts from a snapshot when a patch can't apply.
+  inspect, capture, set, undo and step the game. `cargo gg run` hot-patches code edits, restarts
+  the game in place for edits to its types, and rebuilds from a snapshot when neither can apply.
 - **Project state is text.** Scenes, prefabs, manifests and asset IDs are RON files that diff and
   merge.
 - **Modern rendering.** Bindless resources, a render graph and GPU-driven culling. Also PBR,

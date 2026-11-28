@@ -51,11 +51,13 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, as `main` runs it and its recordings replay it.
+/// The game, as `main` runs it, its recordings replay it, and a restart in place builds it again
+/// (`App::hot`).
 fn app() -> App {
     let app = App::new("Shards")
         .project(env!("CARGO_MANIFEST_DIR"))
-        .source(env!("GG_SOURCE"));
+        .source(env!("GG_SOURCE"))
+        .hot(app);
     app.layer(Shards::new()).debug_overlays()
 }
 

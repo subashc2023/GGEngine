@@ -59,6 +59,7 @@ use crate::layer::Stack;
 use crate::luau::Debugger;
 use crate::main_loop::Stepper;
 use crate::net::Ticket;
+use crate::restart::Restart;
 use crate::scene_files;
 use crate::snapshot::Run;
 use crate::{Context, patch};
@@ -226,6 +227,10 @@ pub(crate) struct Api {
     offered: Vec<(Reply, Ticket, Offer)>,
     /// The session file as written; rewritten as the run's player changes.
     written: Session,
+    /// The restart in place asked for, its snapshot written, until the main loop takes it.
+    restarting: Option<Restart>,
+    /// The `patch` of that restart, answered once it's done.
+    restart_reply: Option<Reply>,
 }
 
 /// What the main loop shares with the connections' threads.
@@ -259,8 +264,9 @@ impl Api {
     /// Starts serving `app`'s run: listens on the loopback, starts its threads and writes the
     /// session file.
     ///
-    /// `layers` are bottom up; `log` is the JSON log, if any; `player` is the run's player in a
-    /// lockstep session, if a peer; `project` is the project's manifest, if a project's game.
+    /// `hot` if the run can restart in place ([`gg_api::Session::hot`]); `log` is the JSON log, if
+    /// any; `player` is the run's player in a lockstep session, if a peer; `project` is the
+    /// project's manifest, if a project's game.
     ///
     /// The file is readable only by the game's user, from before it holds the token (see
     /// `dirs::write_private`). The token alone keeps another process from `patch`, which loads a
@@ -269,7 +275,7 @@ impl Api {
     /// Fails with `api.start` if it can't.
     pub(crate) fn start(
         app: &str,
-        layers: &[&str],
+        hot: bool,
         log: Option<&Path>,
         events: &'static Events,
         player: Option<u8>,
@@ -300,6 +306,7 @@ impl Api {
             player,
             project: project.map(Path::to_owned),
             protocol: Some(gg_api::PROTOCOL),
+            hot,
         };
         let welcome = Welcome {
             app: session.app.clone(),
@@ -328,10 +335,9 @@ impl Api {
             ))?;
         let (taken, to_save) = mpsc::channel();
         let named = app.to_owned();
-        let stack: Vec<String> = layers.iter().map(|&name| name.to_owned()).collect();
         thread::Builder::new()
             .name("gg-api-snapshot".to_owned())
-            .spawn(move || write_snapshots(&to_save, &named, &stack))
+            .spawn(move || write_snapshots(&to_save, &named))
             .map_err(failed(
                 "can't start the thread that writes snapshots".to_owned(),
             ))?;
@@ -406,6 +412,8 @@ impl Api {
             taken,
             offered: Vec::new(),
             written: session,
+            restarting: None,
+            restart_reply: None,
         })
     }
 
@@ -600,12 +608,14 @@ impl Api {
         }
         let mut quit = false;
         let came = self.shared.passed.load(Ordering::Acquire);
-        while let Some(Incoming {
-            call,
-            client,
-            names,
-            reply,
-        }) = self.next(came)
+        // Those after a restart in place wait for the restarted run.
+        while self.restart_reply.is_none()
+            && let Some(Incoming {
+                call,
+                client,
+                names,
+                reply,
+            }) = self.next(came)
         {
             match call {
                 // What a quit leaves would go with the run, and a snapshot that quits is what a
@@ -660,8 +670,15 @@ impl Api {
                 | Call::Ui
                 | Call::Cells
                 | Call::Edits(_) => self.answer_read(cx, stack, stepper, call, paused, reply),
-                Call::Snapshot { .. } => quit = self.answer_snapshot(cx, stepper, call, reply),
-                Call::Patch(_) | Call::Apply(..) | Call::SavePrefab { .. } | Call::Undo { .. } => {
+                Call::Snapshot { .. } => {
+                    quit = self.answer_snapshot(cx, stack, stepper, call, reply);
+                }
+                Call::Patch(_, Some(_)) if paused => {
+                    let message = "the game can't restart in place: frames have paused while the \
+                                   window is minimized, and it restarts between frames";
+                    reply.send(Err(Failure::new("api.restart", message)));
+                }
+                Call::Patch(..) | Call::Apply(..) | Call::SavePrefab { .. } | Call::Undo { .. } => {
                     self.answer_edit(cx, stack, stepper, call, &client, reply);
                 }
             }
@@ -1034,84 +1051,170 @@ impl Api {
     fn answer_snapshot(
         &mut self,
         cx: &Context,
+        stack: &Stack,
         stepper: &Stepper,
         call: Call,
         reply: Reply,
     ) -> bool {
-        let mut quit = false;
-        match call {
-            // A run stopped is snapshotted before its first tick too, so a restart keeps the world
-            // as edited; what the layers queued as they attached goes, as at a `stop` that brings
-            // that world back. So is one restored from a snapshot (its layers attached nothing),
-            // which may not tick for a while if restored paused. One playing the world its layers
-            // attached, or a copy of it, waits for its first tick, which applies what they queued.
-            Call::Snapshot { .. }
-                if stepper.fresh()
-                    && !stepper.stopped()
-                    && (cx.dev.edited.as_ref()).is_none_or(|edited| edited.attached) =>
-            {
-                let message = "the simulation hasn't ticked since the run started, and a \
-                               snapshot before then would miss what the layers queued for its \
-                               first tick; ask once it has";
-                reply.send(Err(Failure::new("api.not_ticked", message)));
-            }
-            Call::Snapshot { path, quit: quits } => {
-                let named = path.is_none();
-                let path = path.unwrap_or_else(|| {
-                    self.snapshotted += 1;
-                    let name = format!("{}-{}.snapshot", self.stem, self.snapshotted);
-                    self.snapshots.join(name)
-                });
-                let run = match &cx.dev.edited {
-                    Some(edited) => Run::Held {
-                        world: Box::new(edited.world.clone()),
-                        scenes: edited.scenes.clone(),
-                        open: edited.open.clone(),
-                        ticks: edited.ticks,
-                    },
-                    None if stepper.stopped() => Run::Stopped,
-                    None => Run::Playing,
-                };
-                let mut reply = reply;
-                let landing = quits.then(|| reply.landing());
-                let taken = Taken {
-                    world: cx.world().clone(),
-                    scenes: cx.scenes.files.clone(),
-                    cached: cx.scenes.cached.clone(),
-                    open: cx.scenes.open.clone(),
-                    scripts: cx.hosts.applied(),
-                    mods: cx.mods.applied(),
-                    run,
-                    paused: stepper.paused(),
-                    ticks: stepper.ticks,
-                    path,
-                    named,
-                    reply,
-                    written: None,
-                };
-                if quits {
-                    // Written before the run ends, which ends the thread too: the main thread
-                    // waits, and the snapshots asked earlier are written first.
-                    let (written, done) = mpsc::channel();
-                    let taken = Taken {
-                        written: Some(written),
-                        ..taken
-                    };
-                    // A failed one leaves the run going, as an untaken one does.
-                    quit = self.taken.send(taken).is_ok() && done.recv().unwrap_or(false);
-                    // The answer goes out before the run ends the thread that writes it, or a
-                    // client would take the snapshot for a failure.
-                    if quit && let Some(landing) = landing {
-                        let _ = landing.recv_timeout(ANSWERING);
-                    }
-                } else {
-                    // The thread runs until the API drops.
-                    let _ = self.taken.send(taken);
-                }
-            }
-            _ => unreachable!("`answer` passes a `snapshot` alone"),
+        let Call::Snapshot { path, quit: quits } = call else {
+            unreachable!("`answer` passes a `snapshot` alone");
+        };
+        if let Some(failure) = unticked(cx, stepper) {
+            reply.send(Err(failure));
+            return false;
+        }
+        let named = path.is_none();
+        let path = path.unwrap_or_else(|| {
+            self.snapshotted += 1;
+            let name = format!("{}-{}.snapshot", self.stem, self.snapshotted);
+            self.snapshots.join(name)
+        });
+        let mut reply = reply;
+        let landing = quits.then(|| reply.landing());
+        let taken = taken(cx, stack, stepper, path, named, Some(reply));
+        if !quits {
+            // The thread runs until the API drops.
+            let _ = self.taken.send(taken);
+            return false;
+        }
+        // Written before the run ends, which ends the thread too: the main thread waits, and the
+        // snapshots asked earlier are written first. A failed one leaves the run going, as an
+        // untaken one does.
+        let quit = self.write_now(taken).is_none();
+        // The answer goes out before the run ends the thread that writes it, or a client would
+        // take the snapshot for a failure.
+        if quit && let Some(landing) = landing {
+            let _ = landing.recv_timeout(ANSWERING);
         }
         quit
+    }
+
+    /// Has the thread write `taken`, after those asked earlier, and waits for it; returns why it
+    /// wasn't written, if it wasn't.
+    fn write_now(&self, taken: Taken) -> Option<Failure> {
+        let (written, done) = mpsc::channel();
+        let taken = Taken {
+            written: Some(written),
+            ..taken
+        };
+        let gone = || Failure::new("snapshot.file", "the thread writing snapshots has ended");
+        if self.taken.send(taken).is_err() {
+            return Some(gone());
+        }
+        done.recv().unwrap_or_else(|_| Some(gone()))
+    }
+
+    /// Answers a `patch` with `restart`: refused with `api.restart` if the run can't restart in
+    /// place, as [`restart_refusal`](Self::restart_refusal) says, and as a patch is
+    /// ([`patch::refusal`]) if the process refuses the table. Otherwise writes the snapshot at
+    /// `path` with the code the run runs, answering its failure if it fails, then holds the restart
+    /// for the main loop, which answers once done ([`take_restart`](Self::take_restart)). Requests
+    /// after it wait for the restarted run.
+    fn restart(
+        &mut self,
+        cx: &Context,
+        stack: &Stack,
+        stepper: &Stepper,
+        table: subsecond::JumpTable,
+        path: PathBuf,
+        reply: Reply,
+    ) {
+        if let Some(why) = self.restart_refusal(stack) {
+            let message = format!("the game can't restart in place: {why}");
+            reply.send(Err(Failure::new("api.restart", message)));
+            return;
+        }
+        if let Some(failure) = unticked(cx, stepper) {
+            reply.send(Err(failure));
+            return;
+        }
+        // Refused before the layers end, rather than after, ending the game.
+        if let Some(refused) = patch::refusal(patch::aslr_reference(), &table) {
+            reply.send(Err(failure(&refused)));
+            return;
+        }
+        let started = Instant::now();
+        if let Some(failure) = self.write_now(taken(cx, stack, stepper, path.clone(), false, None))
+        {
+            reply.send(Err(failure));
+            return;
+        }
+        self.restarting = Some(Restart {
+            table,
+            snapshot: path,
+            started,
+            snapshot_ms: started.elapsed().as_millis() as u64,
+        });
+        self.restart_reply = Some(reply);
+    }
+
+    /// Why the run can't restart in place, if it can't: it doesn't name its app's function, or its
+    /// flags have it recorded, sync-tested, networked or embedded, as the session file says
+    /// ([`gg_api::Session::hot`]), or it's recorded or networked otherwise, as a session a layer
+    /// started is ([`Stack::refuses_stop`]).
+    fn restart_refusal(&self, stack: &Stack) -> Option<&'static str> {
+        if !self.written.hot {
+            Some(
+                "it doesn't name the function that builds its app (`App::hot`), or it's recorded, \
+                 sync-tested, networked or embedded",
+            )
+        } else {
+            stack.refuses_stop()
+        }
+    }
+
+    /// The restart in place a `patch` asked for, its snapshot written, for the main loop to do.
+    /// Requests waiting on frames or input are answered `api.restarted`, as what they wait for
+    /// goes with the run's state: captures, films, picks, images, held inputs and listings.
+    pub(crate) fn take_restart(&mut self) -> Option<Restart> {
+        let restart = self.restarting.take()?;
+        let message = "the game restarted in place, with a patch whose types are laid out anew, \
+                       and dropped what waited on its frames and input; ask again";
+        let failed = || Err(Failure::new("api.restarted", message));
+        for holding in self.holds.drain(..) {
+            holding.reply.send(failed());
+        }
+        self.down.clear();
+        for listing in self.listing.drain(..) {
+            listing.reply.send(failed());
+        }
+        for capturing in self.asked.drain(..).chain(self.riding.drain(..)) {
+            capturing.reply.send(failed());
+        }
+        for film in self.films.drain(..) {
+            film.reply.send(failed());
+        }
+        for picking in self.picks.drain(..) {
+            picking.reply.send(failed());
+        }
+        for reply in self
+            .images_asked
+            .drain(..)
+            .chain(self.images_riding.drain(..))
+        {
+            reply.send(failed());
+        }
+        Some(restart)
+    }
+
+    /// Answers the `patch` of the restart in place [`take_restart`](Self::take_restart) gave: with
+    /// how it went, and the ticks the restored run goes on from, or with why it failed. A failure
+    /// waits for the answer to be written: the run ends after it.
+    pub(crate) fn restarted(&mut self, done: Result<gg_api::Restarted>, ticks: u64) {
+        let Some(mut reply) = self.restart_reply.take() else {
+            return;
+        };
+        match done {
+            Ok(restarted) => reply.result(&gg_api::Patched {
+                ticks,
+                restarted: Some(restarted),
+            }),
+            Err(error) => {
+                let landing = reply.landing();
+                reply.send(Err(failure(&error)));
+                let _ = landing.recv_timeout(ANSWERING);
+            }
+        }
     }
 
     fn answer_edit(
@@ -1124,7 +1227,8 @@ impl Api {
         reply: Reply,
     ) {
         match call {
-            Call::Patch(table) => match stack.offer_patch(table) {
+            Call::Patch(table, Some(path)) => self.restart(cx, stack, stepper, table, path, reply),
+            Call::Patch(table, None) => match stack.offer_patch(table) {
                 Ok(ticket) => self.offered.push((reply, ticket, Offer::Patch)),
                 Err(table) => {
                     let patched = stack.patch(table, stepper.ticks);
@@ -1402,6 +1506,59 @@ fn still_down(cx: &Context, release: &InputEvent) -> bool {
 }
 
 /// `error` as the API answers it.
+/// Why a snapshot can't be taken yet, if it can't: `api.not_ticked` before the first tick of a run
+/// playing the world its layers attached, or a copy of it, as that tick applies what they queued.
+/// A run stopped is snapshotted before its first tick too, so a restart keeps the world as edited;
+/// what the layers queued as they attached goes, as at a `stop` that brings that world back. So is
+/// one restored from a snapshot (its layers attached nothing), which may not tick for a while if
+/// restored paused.
+fn unticked(cx: &Context, stepper: &Stepper) -> Option<Failure> {
+    let unticked = stepper.fresh()
+        && !stepper.stopped()
+        && (cx.dev.edited.as_ref()).is_none_or(|edited| edited.attached);
+    let message = "the simulation hasn't ticked since the run started, and a snapshot before then \
+                   would miss what the layers queued for its first tick; ask once it has";
+    unticked.then(|| Failure::new("api.not_ticked", message))
+}
+
+/// A snapshot of `cx`'s run, with `stack`'s layers' names, for the writing thread: to `path`,
+/// which the engine `named` if no path was given, answering `reply` if any.
+fn taken(
+    cx: &Context,
+    stack: &Stack,
+    stepper: &Stepper,
+    path: PathBuf,
+    named: bool,
+    reply: Option<Reply>,
+) -> Taken {
+    let run = match &cx.dev.edited {
+        Some(edited) => Run::Held {
+            world: Box::new(edited.world.clone()),
+            scenes: edited.scenes.clone(),
+            open: edited.open.clone(),
+            ticks: edited.ticks,
+        },
+        None if stepper.stopped() => Run::Stopped,
+        None => Run::Playing,
+    };
+    Taken {
+        world: cx.world().clone(),
+        scenes: cx.scenes.files.clone(),
+        cached: cx.scenes.cached.clone(),
+        open: cx.scenes.open.clone(),
+        scripts: cx.hosts.applied(),
+        mods: cx.mods.applied(),
+        run,
+        paused: stepper.paused(),
+        ticks: stepper.ticks,
+        path,
+        named,
+        layers: stack.names().to_vec(),
+        reply,
+        written: None,
+    }
+}
+
 fn failure(error: &Error) -> Failure {
     Failure::new(error.code(), format!("{error:#}"))
 }

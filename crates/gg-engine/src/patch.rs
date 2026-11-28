@@ -1,12 +1,19 @@
 //! Code patches, built by `dx tools hotpatch` and delivered by the tool API's `patch`. This module
 //! finds the game's `main` (what a patch is built against) and applies patches, which needs unsafe.
 
+use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use gg_core::{Error, Result};
 use subsecond::JumpTable;
 use tracing::info;
+
+/// Where the last restart in place's patch put each function, by where the executable has it, both
+/// as this process loaded them; empty before one. Its layers' code calls `HotFn` with the patch's
+/// addresses, which later patches map too ([`compose`]). A restart in place drops what the one
+/// before built, so only the last one's matter.
+static RESTARTED: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
 
 /// Where the game's `main` is in its process: what `dx tools hotpatch` builds a patch against. 0
 /// where subsecond finds no exported `main` (cargo's Windows and Linux builds) or without debug
@@ -26,29 +33,44 @@ pub(crate) fn aslr_reference() -> u64 {
 }
 
 /// Applies the patch `table` names at simulation tick `ticks`. Calls through subsecond's `HotFn`
-/// from then on (such as the stack's calls of layer methods) run the patch's code. Logs
+/// from then on (such as the stack's calls of layer methods) run the patch's code, from the
+/// executable's code and from that of the last restart in place's patch ([`compose`]). `restarts`
+/// for the patch of a restart in place, whose own addresses later patches then map. Logs
 /// `Code patched` with the library.
 ///
 /// Fails with `api.patch`, changing nothing, if:
 /// - the process refuses the table, per [`refusal`];
 /// - the patch's library doesn't load;
 /// - it isn't a patch of this build (one exporting no `main`; subsecond panics on it).
-pub(crate) fn apply(table: JumpTable, ticks: u64) -> Result<()> {
+pub(crate) fn apply(mut table: JumpTable, ticks: u64, restarts: bool) -> Result<()> {
     let _zone = gg_core::zone!();
     if let Some(refused) = refusal(aslr_reference(), &table) {
         return Err(refused);
     }
     let library = table.lib.clone();
+    // What subsecond adds to each key, as the OS moved the executable: `refusal` keeps it positive.
+    let slide = aslr_reference() - table.aslr_reference;
+    let keys: Vec<u64> = (table.map.keys())
+        .map(|key| key.wrapping_add(slide))
+        .collect();
+    let mut restarted = RESTARTED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(restarted) = &*restarted {
+        compose(&mut table, restarted, slide);
+    }
     let apply = move || {
         // SAFETY: only a process that can read the session file's token can ask for a patch, and
         // only the game's user can: `dirs::write_private` writes the file mode 0600 on Unix, with
         // a DACL allowing its owner alone on Windows, before it holds the token. The API trusts
         // that process as it trusts the user, since a made-up table could corrupt memory.
         // `gg run` asks only with a patch `dx tools hotpatch` built against this process's
-        // executable and the `main` address the session file gives, from edits inside function
-        // bodies alone (but for items, and macros that may declare some, in them), so its code
-        // lays out each type as this process does. It applies on the main thread between ticks,
-        // the only caller of `HotFn`, so no call reads the jump table as it changes.
+        // executable and the `main` address the session file gives. No value laid out by code
+        // other than the patch's reaches its code: a patch whose types are laid out unlike the
+        // code the process runs comes with a restart in place, which ends the layers and drops
+        // all the run held before this applies, and builds anew with the patch's code
+        // (`restart::Restart`). Any other patch carries edits inside function bodies alone (but
+        // for items, and macros that may declare some, in them), so its code lays out each type as
+        // the code the process runs does. It applies on the main thread between ticks, the only
+        // caller of `HotFn`, so no call reads the jump table as it changes.
         unsafe { subsecond::apply_patch(table) }
     };
     // subsecond panics, after loading the library and before taking its table, on a library that
@@ -67,8 +89,35 @@ pub(crate) fn apply(table: JumpTable, ticks: u64) -> Result<()> {
             return Err(Error::new("api.patch", message));
         }
     }
-    info!(library = %library.display(), ticks, "Code patched");
+    if restarts {
+        // SAFETY: read on the main thread, the only one that applies patches, just after this one
+        // committed its table, which subsecond leaks, so the reference stays valid.
+        let table = unsafe { subsecond::get_jump_table() };
+        let map = table.map(|table| &table.map);
+        let placed = keys.iter().filter_map(|key| Some((*key, *map?.get(key)?)));
+        *restarted = Some(placed.collect());
+    }
+    info!(library = %library.display(), ticks, restarts, "Code patched");
     Ok(())
+}
+
+/// Adds to `table`'s map, before subsecond moves it by `slide`, the addresses the last restart in
+/// place's patch gave its functions (`restarted`, by where the executable has them), each mapped
+/// where the patch puts the function. A key already in the map stays.
+///
+/// The layers that patch's code built call `HotFn` with its addresses, which only this finds: a
+/// layer's methods' `call_it` keep their names as its fields change, since the symbol's hash
+/// covers the generic arguments' paths, not their layouts.
+fn compose(table: &mut JumpTable, restarted: &HashMap<u64, u64>, slide: u64) {
+    let added: Vec<(u64, u64)> = (table.map.iter())
+        .filter_map(|(key, value)| {
+            let address = restarted.get(&key.wrapping_add(slide))?;
+            Some((address.wrapping_sub(slide), *value))
+        })
+        .collect();
+    for (key, value) in added {
+        table.map.entry(key).or_insert(value);
+    }
 }
 
 /// Why a process whose `main` is at `main` refuses patch `table` before its library loads, if it
@@ -76,7 +125,7 @@ pub(crate) fn apply(table: JumpTable, ticks: u64) -> Result<()> {
 /// - `main` is 0, so it takes no patches ([`aslr_reference`]);
 /// - the table's reference is past `main`: subsecond subtracts it to find how far the OS moved the
 ///   executable and panics on a negative result, so the patch isn't for this process.
-fn refusal(main: u64, table: &JumpTable) -> Option<Error> {
+pub(crate) fn refusal(main: u64, table: &JumpTable) -> Option<Error> {
     let message = if main == 0 {
         "this build can't take patches: subsecond finds no `main` that its executable exports, as \
          that of a debug build `dx build --fat-binary` made does"
@@ -135,12 +184,33 @@ mod tests {
     fn a_patch_that_cant_apply_leaves_the_code_as_it_was() {
         let none = format!("gg-engine-patch-{}-none.dll", std::process::id());
         for reference in [0, u64::MAX] {
-            let refused = apply(table(&none, reference), 0)
+            let refused = apply(table(&none, reference), 0, false)
                 .err()
                 .map(|error| error.code());
             assert_eq!(refused, Some("api.patch"), "{reference:#x}");
         }
         // SAFETY: the table is read at once, and only a patch, which no test applies, changes it.
         assert!(unsafe { subsecond::get_jump_table() }.is_none());
+    }
+
+    /// A patch maps, beside where the executable has its functions, where the last restart in
+    /// place's patch put them, less the slide subsecond adds back; a key it has stays.
+    #[test]
+    fn a_patch_maps_where_the_last_restart_put_its_functions_too() {
+        let slide = 0x1000;
+        let mut patch = table("patch.dylib", 0);
+        // Where the executable has two functions, before the slide, and where the patch puts them.
+        patch.map.insert(0x10, 0x5010);
+        patch.map.insert(0x20, 0x5020);
+        // Where the last restart put the first, and a function this patch doesn't hold.
+        let restarted = HashMap::from([(0x1010, 0x9_0000), (0x1030, 0x9_1000)]);
+        let mut kept = table("patch.dylib", 0);
+        kept.map.clone_from(&patch.map);
+        compose(&mut patch, &restarted, slide);
+        assert_eq!(patch.map.get(&(0x9_0000 - slide)), Some(&0x5010));
+        assert_eq!(patch.map.len(), 3);
+        kept.map.insert(0x9_0000 - slide, 1);
+        compose(&mut kept, &restarted, slide);
+        assert_eq!(kept.map.get(&(0x9_0000 - slide)), Some(&1));
     }
 }

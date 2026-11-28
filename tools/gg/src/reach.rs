@@ -1,8 +1,10 @@
-//! Where a game's functions run from, as names reach them from what the engine calls: as the game
-//! starts (`main`, a layer's `load` and `restored`), as a layer's `attach` builds the world, or as
-//! the game runs. A patch reaches code only as the game runs, through a layer's methods, which the
-//! engine calls through subsecond's `HotFn`. So `gg run` rebuilds for an edit to code only startup
-//! reaches, and tells of one to code only `attach` reaches.
+//! Where a game's functions run from, as names reach them from what the engine calls: as the
+//! game's process starts (`main`), as the game starts (the function that builds its app, which
+//! `App::hot` names, and a layer's `load` and `restored`), as a layer's `attach` builds the world,
+//! or as the game runs. A patch reaches code only as the game runs, through a layer's methods,
+//! which the engine calls through subsecond's `HotFn`. So `gg run` restarts the game in place for
+//! an edit to code only the game's start reaches, rebuilds for one to code only `main` reaches, and
+//! tells of one to code only `attach` reaches.
 //!
 //! Calls are followed by name, as rustc's resolution isn't at hand:
 //! - `step` names a free function, through a `use`'s rename too;
@@ -31,12 +33,15 @@ use syn::{
 
 use crate::classify::{self, Binding};
 
-/// Runs as the game starts: `main`, a layer's `load` and `restored`.
+/// Runs as the game starts, which a restart in place runs again: the function that builds the app,
+/// as `App::hot` names it, and a layer's `load` and `restored`.
 const STARTUP: u8 = 1;
 /// Runs as a layer's `attach` builds the world, which only a start afresh does.
 const ATTACH: u8 = 2;
 /// Runs as the game runs, where a patch reaches.
 const RUNTIME: u8 = 4;
+/// Runs as the game's process starts, which only a new process runs: `main`.
+const MAIN: u8 = 8;
 
 /// A function, by its module and name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,7 +58,7 @@ struct Print {
     /// Of its text but for doc comments, of the values of the constants it names, however deep,
     /// and of what its module's `use`s bring in under the names it holds.
     hash: u64,
-    /// Which of [`STARTUP`], [`ATTACH`] and [`RUNTIME`] reach it.
+    /// Which of [`MAIN`], [`STARTUP`], [`ATTACH`] and [`RUNTIME`] reach it.
     from: u8,
 }
 
@@ -63,9 +68,20 @@ pub(crate) struct Prints(BTreeMap<Code, Print>);
 
 impl Prints {
     /// The first function only startup reaches whose print differs from `built`'s: one an edit
-    /// changed that a patch would come too late for.
-    pub(crate) fn started<'a>(&'a self, built: &'a Prints) -> Option<&'a Code> {
-        self.differ(STARTUP, built).next()
+    /// changed that a patch would come too late for. With it, whether only `main` reaches it,
+    /// which a restart in place doesn't run again: those come first.
+    pub(crate) fn started<'a>(&'a self, built: &'a Prints) -> Option<(&'a Code, bool)> {
+        let main = |code: &&Code| self.0[*code].from & STARTUP == 0;
+        let mut started = self.differ(STARTUP | MAIN, built);
+        let first = started.next()?;
+        if main(&first) {
+            return Some((first, true));
+        }
+        Some(
+            started
+                .find(main)
+                .map_or((first, false), |code| (code, true)),
+        )
     }
 
     /// The functions only `attach` reaches, or it and startup, whose prints differ from `world`'s,
@@ -79,6 +95,23 @@ impl Prints {
             told.insert(code.clone(), self.0[code].hash);
         }
         new
+    }
+
+    /// The layer types, each by its module and its name as an impl of `Layer` names it, which
+    /// `built` has none of: types an edit added, renamed or moved.
+    pub(crate) fn new_layers(&self, built: &Prints) -> Vec<(PathBuf, String)> {
+        let layers = |prints: &Prints| -> BTreeSet<(PathBuf, String)> {
+            let layers = prints.0.keys().filter_map(|code| {
+                let (ty, _) = code.name.strip_prefix('<')?.split_once(" as Layer>::")?;
+                Some((code.module.clone(), ty.to_owned()))
+            });
+            layers.collect()
+        };
+        let built = layers(built);
+        layers(self)
+            .into_iter()
+            .filter(|layer| !built.contains(layer))
+            .collect()
     }
 
     /// The functions `from` reaches, but nothing as the game runs, whose prints differ from
@@ -164,6 +197,8 @@ struct Collect {
     imp: Option<(Option<String>, Option<String>)>,
     /// The trait being visited.
     trait_name: Option<String>,
+    /// The functions named as the app's own, `.hot(app)`, which a restart in place calls.
+    hot: Vec<String>,
 }
 
 impl Collect {
@@ -279,6 +314,11 @@ impl Collect {
             })
             .collect();
         let mut from: Vec<u8> = self.defs.iter().map(|def| def.from).collect();
+        for name in &self.hot {
+            for at in frees(name) {
+                from[at] |= STARTUP;
+            }
+        }
         let mut elsewhere = Vec::new();
         for name in &self.elsewhere {
             named(name, &mut elsewhere);
@@ -365,7 +405,7 @@ impl VisitMut for Collect {
     fn visit_item_fn_mut(&mut self, item: &mut ItemFn) {
         let name = item.sig.ident.to_string();
         let from = match () {
-            _ if name == "main" => STARTUP,
+            _ if name == "main" => MAIN,
             _ if unnamed(&item.attrs, &item.sig) => RUNTIME,
             _ => 0,
         };
@@ -480,6 +520,12 @@ impl VisitMut for Collect {
 
     fn visit_expr_method_call_mut(&mut self, call: &mut ExprMethodCall) {
         self.name(Name::Method(call.method.to_string()));
+        if call.method == "hot"
+            && let [Expr::Path(app)] = &call.args.iter().collect::<Vec<_>>()[..]
+            && let Some(name) = app.path.segments.last()
+        {
+            self.hot.extend(self.renamed(&name.ident.to_string()));
+        }
         visit_mut::visit_expr_method_call_mut(self, call);
     }
 
@@ -580,7 +626,7 @@ fn main() {
 fn app() -> App {
     let later = paint;
     println!("{}", greet());
-    App::new(NAME).layer(Game::new()).on_frame(later).on_end(spawned)
+    App::new(NAME).hot(app).layer(Game::new()).on_frame(later).on_end(spawned)
 }
 
 struct Game;
@@ -686,13 +732,14 @@ fn describe(text: String, lanes: u32) {}
         let from = |module: &str, name: &str| prints.0[&code(module, name)].from;
         for (name, reached) in [
             // `main`, what it names however deep: by path, by `Self::`, as a value and in a macro
-            // read as expressions. `load`.
-            ("main", STARTUP),
-            ("app", STARTUP),
-            ("Game::new", STARTUP),
-            ("describe", STARTUP),
-            ("paint", STARTUP),
-            ("greet", STARTUP),
+            // read as expressions. The app's function `hot` names, which a restart in place runs
+            // again, and what it names. `load`.
+            ("main", MAIN),
+            ("app", MAIN | STARTUP),
+            ("Game::new", MAIN | STARTUP),
+            ("describe", MAIN | STARTUP),
+            ("paint", MAIN | STARTUP),
+            ("greet", MAIN | STARTUP),
             ("<Game as Layer>::load", STARTUP),
             // `attach`, and what it names.
             ("<Game as Layer>::attach", ATTACH),
@@ -704,25 +751,31 @@ fn describe(text: String, lanes: u32) {}
             ("Game::fire", RUNTIME),
             ("steer", RUNTIME),
             ("helper", RUNTIME),
-            ("wave", STARTUP | RUNTIME),
+            ("wave", MAIN | RUNTIME),
             // Another trait's method, which may be called unnamed, and what it names; a static's
             // value; what nothing names.
             ("<Game as Default>::default", RUNTIME),
-            ("Game::bind", STARTUP | RUNTIME),
-            ("spawned", STARTUP | RUNTIME),
+            ("Game::bind", MAIN | STARTUP | RUNTIME),
+            ("spawned", MAIN | STARTUP | RUNTIME),
             ("unnamed", RUNTIME),
         ] {
             assert_eq!(from("src/main.rs", name), reached, "{name}");
         }
         // Another module's, by its module's path and through a `use`'s rename.
-        assert_eq!(from("src/ship.rs", "chart"), STARTUP);
+        assert_eq!(from("src/ship.rs", "chart"), MAIN);
         assert_eq!(from("src/ship.rs", "sail"), RUNTIME);
+        // Without `hot`, only a new process builds the app.
+        let cold = game(&GAME.replace(".hot(app)", ""));
+        assert_eq!(cold.0[&code("src/main.rs", "Game::new")].from, MAIN);
     }
 
     #[test]
     fn an_edit_to_code_only_startup_reaches_is_found() {
         let built = game(GAME);
-        let started = |prints: Prints| prints.started(&built).map(|code| code.name.clone());
+        let started = |prints: Prints| {
+            let started = prints.started(&built);
+            started.map(|(code, main)| (code.name.clone(), main))
+        };
         for (from, to, name) in [
             // Its body, a constant it names in a format string, a `use` it names.
             ("walks at", "runs at", "Game::new"),
@@ -735,8 +788,16 @@ fn describe(text: String, lanes: u32) {}
             ),
             ("fn paint() {}", "fn paint() {\n    dab();\n}", "paint"),
         ] {
-            assert_eq!(started(edited(from, to)), Some(name.to_owned()), "{from}");
+            let found = Some((name.to_owned(), false));
+            assert_eq!(started(edited(from, to)), found, "{from}");
         }
+        // What only `main` reaches, which a restart in place doesn't run again, comes first.
+        let main = Some(("main".to_owned(), true));
+        assert_eq!(started(edited("    wave();\n", "")), main);
+        let both = GAME
+            .replace("    wave();\n", "")
+            .replace("walks at", "runs at");
+        assert_eq!(started(game(&both)), main);
         // Not what the running game or `attach` reaches, nor a doc comment.
         for (from, to) in [
             ("steer(SPEED);", "steer(SPEED * 2.0);"),
@@ -753,7 +814,20 @@ fn describe(text: String, lanes: u32) {}
             (Path::new("src/ship.rs"), ship.as_str()),
         ];
         let prints = prints(&modules).expect("prints");
-        assert_eq!(prints.started(&built), Some(&code("src/ship.rs", "chart")));
+        let chart = code("src/ship.rs", "chart");
+        assert_eq!(prints.started(&built), Some((&chart, true)));
+    }
+
+    /// A layer type added, renamed or moved is new; one edited isn't.
+    #[test]
+    fn new_layer_types_are_found() {
+        let built = game(GAME);
+        assert_eq!(built.new_layers(&built), Vec::new());
+        let edited = edited("fn bind() {}", "fn bind() {\n        tie();\n    }");
+        assert_eq!(edited.new_layers(&built), Vec::new());
+        let renamed = game(&GAME.replace("Game", "Match"));
+        let at = PathBuf::from("src/main.rs");
+        assert_eq!(renamed.new_layers(&built), [(at, "Match".to_owned())]);
     }
 
     #[test]

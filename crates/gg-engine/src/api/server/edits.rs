@@ -64,7 +64,10 @@ pub(super) fn answer_done(reply: Reply, offer: &Offer, ticks: u64, done: Result<
             });
             reply.result(&edit);
         }
-        (Offer::Patch, Ok(_)) => reply.result(&Patched { ticks }),
+        (Offer::Patch, Ok(_)) => reply.result(&Patched {
+            ticks,
+            restarted: None,
+        }),
         (Offer::Prefab { path, name }, Ok(Done::Applied(_))) => reply.result(&SavedPrefab {
             path: path.clone(),
             name: name.clone(),

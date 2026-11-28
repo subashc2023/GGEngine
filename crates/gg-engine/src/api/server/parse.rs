@@ -147,7 +147,8 @@ pub(super) enum Call {
         path: Option<PathBuf>,
         quit: bool,
     },
-    Patch(JumpTable),
+    /// A patch, and where to snapshot the world to restart in place with it, if it does.
+    Patch(JumpTable, Option<PathBuf>),
     /// An edit's operations, its gesture if it sets one field, and whether it changes the playing
     /// copy alone (`play`).
     Apply(Vec<gg_api::Operation>, Option<u64>, bool),
@@ -329,7 +330,7 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
             Call::Snapshot { path, quit }
         }
         "patch" => {
-            let gg_api::Patch { table } = take(method, params)?;
+            let gg_api::Patch { table, restart } = take(method, params)?;
             let table: JumpTable = serde_json::from_value(table).map_err(|error| {
                 let what = "takes as its `table` the jump table that `dx tools hotpatch` printed";
                 bad_params(method, format!("{what}: {error}"))
@@ -339,7 +340,12 @@ pub(super) fn parse(request: &Request) -> Result<Call, Failure> {
                             for a library named so where it finds any";
                 return Err(bad_params(method, what));
             }
-            Call::Patch(table)
+            if restart.as_deref().is_some_and(|path| !path.is_absolute()) {
+                let what = "takes an absolute `restart` path, since the game's working directory \
+                            may not be the tool's";
+                return Err(bad_params(method, what));
+            }
+            Call::Patch(table, restart)
         }
         "apply" => {
             let Apply {

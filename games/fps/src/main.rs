@@ -28,11 +28,13 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, with the engine's debug overlays: what `main` runs, and what its recordings replay.
+/// The game, with the engine's debug overlays: what `main` runs, what its recordings replay, and
+/// what a restart in place builds again (`App::hot`).
 fn app() -> App {
     let app = App::new("fps")
         .project(env!("CARGO_MANIFEST_DIR"))
-        .source(env!("GG_SOURCE"));
+        .source(env!("GG_SOURCE"))
+        .hot(app);
     app.layer(Game::new()).debug_overlays()
 }
 

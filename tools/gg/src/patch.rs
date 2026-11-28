@@ -1,21 +1,25 @@
 //! `gg run`'s patches, as ARCHITECTURE.md's Game code describes: building the game with dx and
 //! watching its sources. A change to function bodies, functions added, removed or re-signed,
 //! `use`s, or constants only bodies use, is built into a patch the game applies through the tool
-//! API, as [`classify`] tells. Another change rebuilds, as does one to code only startup reaches
-//! ([`reach`]) and as `gg rebuild` asks to, which the run restarts from a snapshot. The API's
-//! `note` has the game log failed patches and rebuilds, and edits to code only `attach` reaches,
-//! which won't show. Without dx, or where patches can't reach the game's code, it builds with
-//! cargo and each change rebuilds.
+//! API, as [`classify`] tells. Another change to the game's modules, or to code only the game's
+//! start reaches ([`reach`]), is built into a patch the game restarts in place with, if it can. The
+//! rest rebuilds, as do edits to code only `main` reaches and `gg rebuild`'s asks, and the run
+//! restarts the game from a snapshot. The API's `note` has the game log failed patches, restarts
+//! and rebuilds, and edits to code only `attach` reaches, which won't show. Without dx, or where
+//! patches can't reach the game's code, it builds with cargo and each change rebuilds.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{iter, mem};
 
-use gg_api::{Client, Failure, Note, NoteLevel, Patch, Patched, Session, UNBUILT};
+use gg_api::{
+    Client, Failure, LogEvents, Note, NoteLevel, Patch, Patched, Session, Snapshotted, UNBUILT,
+};
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::build::{self, Package, fit};
@@ -34,6 +38,10 @@ const QUIET: Duration = Duration::from_millis(200);
 const CONNECT: Duration = Duration::from_secs(10);
 
 const OUTSIDE: &str = "a change outside the game's modules";
+
+/// Why a game that restarted in place is rebuilt before it restarts from its snapshot.
+pub(crate) const OUTDATED: &str = "the game ended having restarted in place, which its build \
+                                   predates: it lays out the game's types as they were";
 
 const UNPATCHED: &str =
     "the run builds the game with cargo, without patches, as `patches_off` said";
@@ -61,6 +69,15 @@ pub(crate) struct Patches {
     sources: Sources,
     fat: Fat,
     baseline: Baseline,
+    /// The sources as the last restart in place built them, which the process runs since, edits
+    /// being compared with them; `None` while the processes run the build's layouts. Patches stay
+    /// against the build, carrying every edit since.
+    layout: Option<Baseline>,
+    /// Where a restart in place writes its snapshot: the one the run restarts the game from, set by
+    /// [`restart_into`](Self::restart_into); `None` keeps the game from restarting in place.
+    snapshot: Option<PathBuf>,
+    /// The snapshot the last restart in place wrote, until the run takes it ([`taken`](Self::taken)).
+    taken: Option<Snapshotted>,
     /// The rebuild that succeeded, until the game starts on it: its build, its sources, and whether
     /// `gg rebuild --fresh` asked for it, so the game starts afresh.
     rebuilt: Option<(Fat, Baseline, bool)>,
@@ -245,6 +262,9 @@ impl Patches {
             world: None,
             told: BTreeMap::new(),
             baseline,
+            layout: None,
+            snapshot: None,
+            taken: None,
         }))
     }
 
@@ -368,6 +388,8 @@ impl Patches {
             built = true;
         }
         self.processes.clear();
+        // A new process runs the build's layouts.
+        self.layout = None;
         self.applied = self.baseline.modules.clone();
         self.ran.clear();
         if afresh {
@@ -408,11 +430,15 @@ impl Patches {
     fn look(&mut self, games: &[Process]) {
         self.looked = self.seen.clone();
         self.fresh = false;
-        let diff = diff(&self.sources, &self.baseline, &self.seen, &self.ran);
+        let running = self.layout.as_ref().unwrap_or(&self.baseline);
+        let diff = diff(&self.sources, running, &self.seen, &self.ran);
+        let diff = self.past_new_layers(diff);
         let patches = matches!(self.builder, Builder::Dx(_));
         // The prints and edited modules' texts of the sources as they are.
         let (prints, texts) = match &diff {
-            Diff::Bodies(_, _, prints, texts) => (prints.clone(), texts.clone()),
+            Diff::Bodies(_, _, prints, texts) | Diff::Restart(.., prints, texts) => {
+                (prints.clone(), texts.clone())
+            }
             Diff::Rebuild(..) => (None, Texts::new()),
         };
         match act(diff, games, &self.applied, self.stale, patches) {
@@ -435,8 +461,116 @@ impl Patches {
                     .iter()
                     .filter_map(|game| Some((game.pid, game.session?.clone())));
                 let ran = ran_after(&files, &hashes, &texts);
-                self.patch(serving.collect(), files, hashes, unreadable, prints, ran);
+                self.patch(
+                    serving.collect(),
+                    files,
+                    hashes,
+                    unreadable,
+                    prints,
+                    ran,
+                    None,
+                );
             }
+            Act::Restart(file, _, _, _, _) if self.snapshot.is_none() => {
+                self.rebuild(&file, "restarts are off, which a restart in place needs");
+            }
+            Act::Restart(file, why, files, hashes, unreadable) => {
+                let serving = games
+                    .iter()
+                    .filter_map(|game| Some((game.pid, game.session?.clone())));
+                let running = self.layout.as_ref().unwrap_or(&self.baseline);
+                let layout = running.restarted(&self.sources, &self.looked, &texts, prints.clone());
+                let since = SystemTime::now();
+                let restart = Restarting {
+                    file,
+                    why,
+                    layout,
+                    since,
+                };
+                let (serving, ran) = (serving.collect(), Ran::new());
+                self.patch(
+                    serving,
+                    files,
+                    hashes,
+                    unreadable,
+                    prints,
+                    ran,
+                    Some(Box::new(restart)),
+                );
+            }
+        }
+    }
+
+    /// Has restarts in place write their snapshots at `path`: the game's own, which the run
+    /// restarts it from.
+    pub(crate) fn restart_into(&mut self, path: PathBuf) {
+        self.snapshot = Some(path);
+    }
+
+    /// The snapshot the last restart in place wrote, if one did since the last call: the newest of
+    /// the game's world, which the run restarts it from.
+    pub(crate) fn taken(&mut self) -> Option<Snapshotted> {
+        self.taken.take()
+    }
+
+    /// As a game's process ends: waits for a restart in place under way, as its failure may have
+    /// ended it, and notes how it went, so [`taken`](Self::taken) gives its snapshot.
+    pub(crate) fn settle(&mut self) {
+        if matches!(
+            &self.job,
+            Some(Job::Patch {
+                restart: Some(_),
+                ..
+            })
+        ) {
+            self.land(&[]);
+        }
+    }
+
+    /// As a game's process ended to restart from its snapshot: whether it had restarted in place,
+    /// running layouts its build lacks, which the snapshot may hold (a new component type, a field's
+    /// value). Then the build is rebuilt first, starting now unless a rebuild is under way; a patch
+    /// under way lands first. A rebuild that succeeded since, which the restart takes, is current.
+    pub(crate) fn outdated(&mut self) -> bool {
+        if self.layout.is_none() || self.rebuilt.is_some() {
+            return false;
+        }
+        if matches!(self.job, Some(Job::Patch { .. })) {
+            self.land(&[]);
+        }
+        if self.job.is_none() {
+            event(&json!({"event": "rebuilding", "file": null, "why": OUTDATED}));
+            self.start_rebuild(OUTDATED.to_owned(), None);
+        }
+        true
+    }
+
+    /// `diff`, but an edit a patch would carry restarts the game in place once a restart in place
+    /// gave it a layer type the build lacks. That type's methods run the restart's code, which a
+    /// later patch reaches only through functions the build has (the engine's `patch::compose`),
+    /// so a patch would change nothing they run.
+    fn past_new_layers(&self, diff: Diff) -> Diff {
+        let Diff::Bodies(hashes, unreadable, prints, texts) = diff else {
+            return diff;
+        };
+        let new = (self.layout.as_ref()).and_then(|layout| {
+            Some(
+                layout
+                    .prints
+                    .as_ref()?
+                    .new_layers(self.baseline.prints.as_ref()?),
+            )
+        });
+        let file = changed(&self.applied, &hashes).into_iter().next();
+        match (new.unwrap_or_default().first(), file) {
+            (Some((_, layer)), Some(file)) => {
+                let why = format!(
+                    "an edit since a restart in place added layer `{layer}`, whose methods only \
+                     another restart in place reaches"
+                );
+                Diff::Restart(file, why, hashes, unreadable, prints, texts)
+            }
+            _ => Diff::Bodies(hashes, unreadable, prints, texts),
         }
     }
 
@@ -488,7 +622,9 @@ impl Patches {
     /// own at the tick its host's applies before. Afterwards the modules' hashes are `hashes`, and
     /// their functions' prints `prints`, and the modules it changed run as `ran` says. A patch
     /// whose sources changed as it built is dropped; with `unreadable`, one that builds isn't
-    /// applied.
+    /// applied. With `restart`, the lone process restarts in place with it, writing its snapshot
+    /// first ([`Patch::restart`]), and the game's warnings since are kept.
+    #[expect(clippy::too_many_arguments)]
     fn patch(
         &mut self,
         processes: Vec<(u32, Session)>,
@@ -497,6 +633,7 @@ impl Patches {
         unreadable: Option<PathBuf>,
         prints: Option<Prints>,
         ran: Ran,
+        restart: Option<Box<Restarting>>,
     ) {
         let Builder::Dx(dx) = &self.builder else {
             let file = files.first().cloned().unwrap_or_default();
@@ -510,6 +647,7 @@ impl Patches {
             unreadable.is_none(),
         );
         let pids = processes.iter().map(|(pid, _)| *pid).collect();
+        let snapshot = restart.as_ref().and(self.snapshot.clone());
         let thread = thread::spawn(move || {
             let start = Instant::now();
             let mut tables = Vec::new();
@@ -537,15 +675,18 @@ impl Patches {
                 None if !checked => vec![(None, Outcome::Unreadable)],
                 None => {
                     let applying = tables.into_iter().map(|(pid, session, table)| {
+                        let restart = snapshot.clone();
                         let thread = thread::spawn(move || {
                             let start = Instant::now();
                             let applied =
                                 Client::connect(&session, "gg", CONNECT).and_then(|mut client| {
                                     client.set_timeout(None)?;
-                                    client.call_as::<Patched>("patch", Patch { table })
+                                    apply(&mut client, table, restart)
                                 });
                             match applied {
-                                Ok(patched) => Outcome::Applied(patched, start.elapsed()),
+                                Ok((patched, warned)) => {
+                                    Outcome::Applied(patched, start.elapsed(), warned)
+                                }
                                 Err(failure) => Outcome::Failed(failure),
                             }
                         });
@@ -575,6 +716,7 @@ impl Patches {
             unreadable,
             prints,
             ran,
+            restart,
             thread,
         });
     }
@@ -636,10 +778,33 @@ impl Patches {
             Some(Job::Patch {
                 pids,
                 files,
+                prints,
+                restart: Some(restart),
+                thread,
+                ..
+            }) => {
+                let patching = thread.join().unwrap_or_else(|_| Patching {
+                    libs: Vec::new(),
+                    built: Duration::ZERO,
+                    outcomes: vec![(None, Outcome::Failed(panicked()))],
+                });
+                self.libs.extend(patching.libs);
+                let current = self.processes == pids;
+                for (pid, outcome) in patching.outcomes {
+                    let (prints, to) = (prints.as_ref(), serving(pid));
+                    let built = patching.built;
+                    self.restarted(pid, outcome, current, &files, prints, &restart, built, to);
+                }
+                false
+            }
+            Some(Job::Patch {
+                pids,
+                files,
                 hashes,
                 unreadable,
                 prints,
                 ran,
+                restart: None,
                 thread,
             }) => {
                 let patching = thread.join().unwrap_or_else(|_| Patching {
@@ -675,7 +840,7 @@ impl Patches {
                         (None, pids) => json!(pids),
                     };
                     match outcome {
-                        Outcome::Applied(patched, applied) => {
+                        Outcome::Applied(patched, applied, _) => {
                             let (build_ms, apply_ms) = (millis(patching.built), millis(applied));
                             event(&json!({
                                 "event": "patched",
@@ -761,6 +926,124 @@ impl Patches {
     }
 }
 
+impl Patches {
+    /// Notes how the restart in place `restart` went for process `pid` (`None` for a failure to
+    /// build it), its patch of `files` having built in `built`, with the functions' prints
+    /// `prints` after it; `current` if the processes are still those it was for, `to` the serving
+    /// sessions it was for, which log what it told.
+    ///
+    /// Restarted, the process runs the sources the patch built, which edits are compared with from
+    /// then on, and its snapshot is the run's newest ([`taken`](Self::taken)). A failure to build
+    /// leaves the game as it was, as a patch's does. The game's refusal or failure rebuilds it
+    /// instead, restoring the snapshot if the restart ended it.
+    #[expect(clippy::too_many_arguments)]
+    fn restarted(
+        &mut self,
+        pid: Option<u32>,
+        outcome: Outcome,
+        current: bool,
+        files: &[PathBuf],
+        prints: Option<&Prints>,
+        restart: &Restarting,
+        built: Duration,
+        to: Vec<Session>,
+    ) {
+        let shown = match (pid, &self.processes[..]) {
+            (Some(pid), _) | (None, &[pid]) => json!(pid),
+            (None, pids) => json!(pids),
+        };
+        match outcome {
+            Outcome::Applied(patched, applied, warned) => {
+                let attach = if current {
+                    self.layout = Some(restart.layout.clone());
+                    self.applied = restart.layout.modules.clone();
+                    self.ran.clear();
+                    self.failed = None;
+                    self.attached(prints)
+                } else {
+                    Vec::new()
+                };
+                let (build_ms, restart_ms) = (millis(built), millis(applied));
+                let stages = patched.restarted.as_ref().map(|stages| json!(stages));
+                event(&json!({
+                    "event": "restarted",
+                    "pid": shown,
+                    "files": files,
+                    "why": restart.why,
+                    "attach": modules(&attach),
+                    "build_ms": build_ms,
+                    "restart_ms": restart_ms,
+                    "stages": stages,
+                    "ticks": patched.ticks,
+                }));
+                let (warnings, more) = runs::about_warnings(&warned, runs::MOST_WARNINGS);
+                let mut outcome = json!({
+                    "event": "restarted",
+                    "files": files,
+                    "why": restart.why,
+                    "build_ms": build_ms,
+                    "restart_ms": restart_ms,
+                });
+                if !warnings.is_empty() {
+                    outcome["warnings"] = Value::Array(warnings);
+                }
+                if more > 0 {
+                    outcome["more_warnings"] = json!(more);
+                }
+                self.outcome(outcome);
+                self.reload = self.reloads.last().cloned();
+                self.taken = (self.snapshot.as_deref())
+                    .and_then(|path| run::written_since(path, restart.since));
+                tell_attach(to, &attach);
+            }
+            Outcome::Failed(failure) => {
+                event(&json!({
+                    "event": "restart_failed",
+                    "pid": shown,
+                    "files": files,
+                    "error": error(&failure),
+                }));
+                self.outcome(json!({
+                    "event": "restart_failed",
+                    "files": files,
+                    "why": restart.why,
+                    "error": error(&failure),
+                }));
+                let fields = json!({"files": files, "error": failure.code});
+                // Unbuilt, the game runs its code as it was, as after a failed patch.
+                if pid.is_none() {
+                    let message = format!(
+                        "A patch of {} to restart the game in place failed to build, so it runs \
+                         its code as it was: {}",
+                        listed(files),
+                        failure.message
+                    );
+                    note(to, "gg.restart_failed", &message, &fields);
+                    self.failed = Some(failure);
+                    return;
+                }
+                let message = format!(
+                    "A restart in place with a patch of {} failed, so gg rebuilds the game: {}",
+                    listed(files),
+                    failure.message
+                );
+                note(to, "gg.restart_failed", &message, &fields);
+                // The game ended with its world in the snapshot, written before its layers ended.
+                if failure.code == "api.restart_failed" {
+                    self.taken = (self.snapshot.as_deref())
+                        .and_then(|path| run::written_since(path, restart.since));
+                }
+                let why = format!("{}, after the restart in place failed", restart.why);
+                self.rebuild(&restart.file, &why);
+            }
+            Outcome::Superseded => {}
+            Outcome::Unreadable => {
+                self.rebuild(&restart.file, "an edit gg can't read, which rustc builds");
+            }
+        }
+    }
+}
+
 /// What a run watches while it has no build, its first having failed.
 pub(crate) struct Watcher {
     sources: Sources,
@@ -808,7 +1091,7 @@ enum Job {
     },
     /// A patch of edits to `files` for processes `pids`; `files`, `hashes` and `unreadable` are
     /// [`Act::Patch`]'s, `prints` the functions' prints after it, and `ran` how `files` run after
-    /// it ([`ran_after`]).
+    /// it ([`ran_after`]). With `restart`, the process restarts in place with it.
     Patch {
         pids: Vec<u32>,
         files: Vec<PathBuf>,
@@ -816,8 +1099,18 @@ enum Job {
         unreadable: Option<PathBuf>,
         prints: Option<Prints>,
         ran: Ran,
+        restart: Option<Box<Restarting>>,
         thread: JoinHandle<Patching>,
     },
+}
+
+/// A restart in place under way: the change it's for and why, the sources its patch built, which
+/// its process runs once it's done, and when it started, before its snapshot.
+struct Restarting {
+    file: PathBuf,
+    why: String,
+    layout: Baseline,
+    since: SystemTime,
 }
 
 impl Job {
@@ -838,8 +1131,8 @@ struct Patching {
 }
 
 enum Outcome {
-    /// Applied, the game answering in this long.
-    Applied(Patched, Duration),
+    /// Applied, the game answering in this long; with a restart in place, its warnings since.
+    Applied(Patched, Duration, Vec<Box<RawValue>>),
     Failed(Failure),
     /// The sources changed as it built: dropped, to be looked at again.
     Superseded,
@@ -850,9 +1143,19 @@ enum Outcome {
 enum Diff {
     /// In what a patch can't carry: a change to a file, for a reason.
     Rebuild(PathBuf, String),
+    /// In what a patch carries only with a restart in place: a change to a module, for a reason;
+    /// then as `Bodies`.
+    Restart(
+        PathBuf,
+        String,
+        Hashes,
+        Option<PathBuf>,
+        Option<Prints>,
+        Texts,
+    ),
     /// In function bodies of modules, if at all: each module's hash, the module gg can't read, if
     /// any, the functions' prints, unless a module doesn't parse, and the texts of the modules
-    /// that differ from the build's.
+    /// that differ from what the processes run.
     Bodies(Hashes, Option<PathBuf>, Option<Prints>, Texts),
 }
 
@@ -863,6 +1166,8 @@ enum Act {
     /// A patch of these modules, after which each module's hash is as given; and the module gg
     /// can't read, if any.
     Patch(Vec<PathBuf>, Hashes, Option<PathBuf>),
+    /// A patch and a restart in place, for a change to a module and why; then as `Patch`.
+    Restart(PathBuf, String, Vec<PathBuf>, Hashes, Option<PathBuf>),
     Rebuild(PathBuf, String),
 }
 
@@ -873,13 +1178,16 @@ enum Act {
 /// - A change a patch can't carry rebuilds.
 /// - Processes that all serve take a patch of what changed since what they run, unless one can't
 ///   (its executable exports no `main`) or the build is stale; until all serve, nothing.
+/// - A change a patch carries only with a restart in place restarts a game that can
+///   ([`Session::hot`]), a lone process; another rebuilds.
 /// - A game waiting for a rebuild (crashed or hung) gets one at any change since what its
 ///   processes ran, as a patch made after they restart could come too late.
 /// - Without `patches`, as for a game built with cargo, what a patch would carry rebuilds.
 fn act(diff: Diff, games: &[Process], applied: &Hashes, stale: bool, patches: bool) -> Act {
-    let (hashes, unreadable) = match diff {
+    let (hashes, unreadable, restart) = match diff {
         Diff::Rebuild(file, why) => return Act::Rebuild(file, why),
-        Diff::Bodies(hashes, unreadable, ..) => (hashes, unreadable),
+        Diff::Restart(file, why, hashes, unreadable, ..) => (hashes, unreadable, Some((file, why))),
+        Diff::Bodies(hashes, unreadable, ..) => (hashes, unreadable, None),
     };
     let rebuild = |file: &PathBuf, why: &str| Act::Rebuild(file.clone(), why.to_owned());
     let sessions: Option<Vec<&Session>> = games.iter().map(|game| game.session).collect();
@@ -906,41 +1214,97 @@ fn act(diff: Diff, games: &[Process], applied: &Hashes, stale: bool, patches: bo
                            what it left";
                 return rebuild(file, why);
             }
-            Act::Patch(files, hashes, unreadable)
+            match restart {
+                None => Act::Patch(files, hashes, unreadable),
+                Some((file, why)) if matches!(sessions[..], [session] if session.hot) => {
+                    Act::Restart(file, why, files, hashes, unreadable)
+                }
+                Some((file, why)) => Act::Rebuild(file, why),
+            }
         }
     }
 }
 
-fn changed(from: &Hashes, to: &Hashes) -> Vec<PathBuf> {
-    let changed = (to.iter()).filter(|(path, hash)| from.get(*path) != Some(*hash));
-    changed.map(|(path, _)| path.clone()).collect()
+/// Has the game apply `table` through `client`, restarting in place with its snapshot written at
+/// `restart` if given. Returns its answer and, after a restart, what it warned of since.
+fn apply(
+    client: &mut Client,
+    table: Value,
+    restart: Option<PathBuf>,
+) -> Result<(Patched, Vec<Box<RawValue>>), Failure> {
+    let Some(snapshot) = restart else {
+        let patched = client.call_as(
+            "patch",
+            Patch {
+                table,
+                restart: None,
+            },
+        )?;
+        return Ok((patched, Vec::new()));
+    };
+    // Where the game's log stands, to read the restart's warnings from.
+    let read = client.call_as::<LogEvents>("logs", json!({"last": 0}))?;
+    let patch = Patch {
+        table,
+        restart: Some(snapshot),
+    };
+    let patched = client.call_as("patch", patch)?;
+    let from = json!({"level": "warn", "from": read.next, "run": read.run});
+    Ok((patched, runs::read_events(client, from)))
 }
 
-/// How the sources, with `stamps`, differ from the build's, `baseline`. A file added or removed,
-/// or a change outside function bodies of modules, as [`classify::classify`] tells, needs a
-/// rebuild, the first by path being the one given. So does an edit to a constant used outside
-/// function bodies of the modules, as [`classify::uses`] tells, given with the constant's module.
-/// So does one that changes a function only startup reaches, as [`reach`] tells, given with that
-/// function's module if it changed, else with the edited constant's. A new stamp with the same
-/// content is no change, nor is an edit, since the text a patch left in a module (`ran`), of doc
-/// comments or tests alone.
+/// The modules whose hashes differ from `from` to `to`, and those `to` lacks, which a restart in
+/// place removes.
+fn changed(from: &Hashes, to: &Hashes) -> Vec<PathBuf> {
+    let changed = (to.iter()).filter(|(path, hash)| from.get(*path) != Some(*hash));
+    let removed = from.keys().filter(|path| !to.contains_key(*path));
+    let mut changed: Vec<PathBuf> = changed
+        .map(|(path, _)| path)
+        .chain(removed)
+        .cloned()
+        .collect();
+    changed.sort();
+    changed
+}
+
+/// How the sources, with `stamps`, differ from what the processes run, `baseline`: the build's, or
+/// the sources as of the last restart in place.
+///
+/// - A file outside the game's modules added, removed or changed needs a rebuild, as does an edit
+///   to a function only `main` reaches ([`reach`]), given with that function's module if it
+///   changed, else with the edited constant's.
+/// - A module added or removed, or a change outside function bodies of modules, as
+///   [`classify::classify`] tells, needs a restart in place, the first by path being the one
+///   given. So does an edit to a constant used outside function bodies of the modules, as
+///   [`classify::uses`] tells, given with the constant's module, and one that changes a function
+///   only the game's start reaches.
+/// - A new stamp with the same content is no change, nor is an edit, since the text a patch left in
+///   a module (`ran`), of doc comments or tests alone.
 fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> Diff {
     let added = (stamps.keys()).filter(|path| !baseline.files.contains_key(*path));
     let removed = (baseline.files.keys()).filter(|path| !stamps.contains_key(*path));
-    if let Some(file) = added.chain(removed).next() {
-        let why = if sources.module(file) {
-            "a module added or removed"
-        } else {
-            OUTSIDE
-        };
-        return Diff::Rebuild(file.clone(), why.to_owned());
+    // The first edit a patch carries only with a restart in place, and why.
+    let mut restart: Option<(PathBuf, String)> = None;
+    for file in added.chain(removed) {
+        if !sources.module(file) {
+            return Diff::Rebuild(file.clone(), OUTSIDE.to_owned());
+        }
+        restart.get_or_insert_with(|| (file.clone(), "a module added or removed".to_owned()));
     }
     let (mut hashes, mut unreadable) = (Hashes::new(), None);
     // The constants whose values differ, by name, with their modules; the edited modules' texts.
     let (mut consts, mut texts) = (Vec::new(), BTreeMap::new());
     for (path, stamp) in stamps {
-        let known = &baseline.files[path];
         let module = sources.module(path);
+        let Some(known) = baseline.files.get(path) else {
+            // A module added, which only a restart in place carries.
+            let Ok(content) = fs::read(path) else {
+                return Diff::Rebuild(path.clone(), "a file gg can't read".to_owned());
+            };
+            hashes.insert(path.clone(), hash_of(&content));
+            texts.insert(path.clone(), String::from_utf8_lossy(&content).into_owned());
+            continue;
+        };
         let mut hash = known.hash;
         if *stamp != known.stamp {
             let Ok(content) = fs::read(path) else {
@@ -969,7 +1333,12 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> D
                         }
                     }
                     Edit::Unreadable => unreadable = Some(path.clone()),
-                    Edit::Rebuild(why) => return Diff::Rebuild(path.clone(), why.to_owned()),
+                    Edit::Rebuild(why) if !module => {
+                        return Diff::Rebuild(path.clone(), why.to_owned());
+                    }
+                    Edit::Rebuild(why) => {
+                        restart.get_or_insert_with(|| (path.clone(), why.to_owned()));
+                    }
                 }
                 texts.insert(path.clone(), text);
             }
@@ -982,10 +1351,13 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> D
     let now: Vec<(&Path, Option<&str>)> = (hashes.keys())
         .filter(|path| !tests_only(path, baseline))
         .map(|path| {
-            let text = texts.get(path).map(String::as_str);
+            let known = baseline
+                .files
+                .get(path)
+                .and_then(|known| known.text.as_deref());
             (
                 path.as_path(),
-                text.or(baseline.files[path].text.as_deref()),
+                texts.get(path).map(String::as_str).or(known),
             )
         })
         .collect();
@@ -993,7 +1365,7 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> D
         let names: Vec<String> = consts.iter().map(|(name, _)| name.clone()).collect();
         let texts: Vec<&str> = now.iter().filter_map(|(_, text)| *text).collect();
         if let Uses::Rebuild(at, why) = classify::uses(&texts, &names) {
-            return Diff::Rebuild(consts[at].1.clone(), why.to_owned());
+            restart.get_or_insert_with(|| (consts[at].1.clone(), why.to_owned()));
         }
     }
     let prints = match () {
@@ -1003,20 +1375,30 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps, ran: &Ran) -> D
         _ => read_prints(&now),
     };
     if let (Some(prints), Some(built)) = (&prints, &baseline.prints)
-        && let Some(code) = prints.started(built)
+        && let Some((code, main)) = prints.started(built)
     {
         let file = match consts.first() {
             Some((_, constant)) if !texts.contains_key(&code.module) => constant.clone(),
             _ => code.module.clone(),
         };
+        if main {
+            let why = format!(
+                "an edit changing `{}`, which only `main` calls, as the game's process starts",
+                code.name
+            );
+            return Diff::Rebuild(file, why);
+        }
         let why = format!(
             "an edit changing `{}`, which only code that runs as the game starts calls, as a \
              patch comes after",
             code.name
         );
-        return Diff::Rebuild(file, why);
+        restart.get_or_insert((file, why));
     }
-    Diff::Bodies(hashes, unreadable, prints, texts)
+    match restart {
+        Some((file, why)) => Diff::Restart(file, why, hashes, unreadable, prints, texts),
+        None => Diff::Bodies(hashes, unreadable, prints, texts),
+    }
 }
 
 /// How `files`, a patch's modules, run once it's applied: those whose hash after it, in `hashes`,
@@ -1236,6 +1618,7 @@ fn walk(dir: &Path, root: bool, keep: &impl Fn(&Path) -> bool, stamps: &mut Stam
 }
 
 /// The sources as of a build's start, which edits are compared with.
+#[derive(Clone)]
 struct Baseline {
     files: BTreeMap<PathBuf, Known>,
     modules: Hashes,
@@ -1246,6 +1629,7 @@ struct Baseline {
     inputs: Option<Inputs>,
 }
 
+#[derive(Clone)]
 struct Known {
     stamp: Stamp,
     hash: u64,
@@ -1304,6 +1688,37 @@ impl Baseline {
             }
         }
         self.inputs = Some(inputs);
+    }
+
+    /// The sources as a restart in place's patch builds them: these, with the game's modules as
+    /// `stamps` have them, those that differ holding `texts`, and the functions' prints `prints`.
+    /// Its process runs them once restarted.
+    fn restarted(
+        &self,
+        sources: &Sources,
+        stamps: &Stamps,
+        texts: &Texts,
+        prints: Option<Prints>,
+    ) -> Self {
+        let mut files = self.files.clone();
+        files.retain(|path, _| !sources.module(path) || stamps.contains_key(path));
+        for (path, text) in texts {
+            let Some(&stamp) = stamps.get(path) else {
+                continue;
+            };
+            let (hash, text) = (hash_of(text.as_bytes()), Some(text.clone()));
+            files.insert(path.clone(), Known { stamp, hash, text });
+        }
+        let modules = (files.iter())
+            .filter(|(path, _)| sources.module(path))
+            .map(|(path, known)| (path.clone(), known.hash))
+            .collect();
+        Self {
+            files,
+            modules,
+            prints,
+            inputs: self.inputs.clone(),
+        }
     }
 
     /// Takes the non-module file at `path` as the build wrote it.
@@ -1550,9 +1965,9 @@ mod tests {
             fs::write(path, text).expect("written");
         };
         let game = "fn main() {\n    run(1);\n    title();\n}\n\nfn title() {\n    show(1);\n}\n\n\
-                    fn run(_: u32) {\n    step(1);\n}\n\nimpl Layer for Game {\n    fn attach(&mut \
-                    self) {\n        spawn(1);\n    }\n\n    fn tick(&mut self) {\n        \
-                    run(2);\n    }\n}\n";
+                    fn run(_: u32) {\n    step(1);\n}\n\nimpl Layer for Game {\n    fn load(&mut \
+                    self) {\n        paint(1);\n    }\n\n    fn attach(&mut self) {\n        \
+                    spawn(1);\n    }\n\n    fn tick(&mut self) {\n        run(2);\n    }\n}\n";
         write("Cargo.toml", "[workspace]");
         write("Cargo.lock", "version = 4");
         write("game/Cargo.toml", "[package]");
@@ -1642,31 +2057,116 @@ mod tests {
         assert!(matches!(now(), Diff::Rebuild(file, why) if file == lib && why == OUTSIDE));
         write("engine/src/lib.rs", "pub fn tick() {}\n");
         assert!(matches!(now(), Diff::Bodies(..)));
-        // A function re-signed patches; an edit outside function bodies, or a module added,
-        // rebuilds.
+        // A function re-signed patches. An edit outside function bodies, a module added, or one
+        // in code only the game's start reaches, restarts the game in place, naming the function.
         write("game/src/main.rs", &game.replace("u32", "u128"));
         assert!(matches!(now(), Diff::Bodies(_, None, _, _)));
-        // One in code only `main` reaches rebuilds, naming the function.
-        write("game/src/main.rs", &game.replace("show(1)", "show(4444)"));
-        let starts = "an edit changing `title`, which only code that runs as the game starts \
-                      calls, as a patch comes after";
-        assert!(matches!(now(), Diff::Rebuild(file, why) if file == main && why == starts));
+        write("game/src/main.rs", &game.replace("paint(1)", "paint(4444)"));
+        let starts = "an edit to code that runs as the game starts, as a patch comes after";
+        assert!(matches!(now(), Diff::Restart(file, why, ..) if file == main && why == starts));
         write(
             "game/src/main.rs",
             &game.replace("fn run(", "struct Ship;\n\nfn run("),
         );
         let outside = "an edit outside function bodies";
-        assert!(matches!(now(), Diff::Rebuild(file, why) if file == main && why == outside));
+        let Diff::Restart(file, why, hashes, None, Some(_), texts) = now() else {
+            panic!("a restart");
+        };
+        assert_eq!((file, why.as_str()), (main.clone(), outside));
+        assert_ne!(hashes[&main], baseline.modules[&main]);
+        assert!(texts[&main].contains("struct Ship;"));
+        // One in code only `main` reaches, which a restart in place doesn't run again, rebuilds,
+        // whatever else changed.
+        write("game/src/main.rs", &game.replace("show(1)", "show(55555)"));
+        let main_only = "an edit changing `title`, which only `main` calls, as the game's process \
+                         starts";
+        assert!(matches!(now(), Diff::Rebuild(file, why) if file == main && why == main_only));
+        let ship = game.replace("fn run(", "struct Ship;\n\nfn run(");
+        write("game/src/main.rs", &ship.replace("show(1)", "show(666666)"));
+        assert!(
+            matches!(now(), Diff::Rebuild(_, why) if why == main_only),
+            "first"
+        );
         write("game/src/main.rs", game);
         write("game/src/extra.rs", "");
         let added = "a module added or removed";
-        assert!(matches!(now(), Diff::Rebuild(_, why) if why == added));
+        let extra = root.join("game/src/extra.rs");
+        let Diff::Restart(_, why, hashes, ..) = now() else {
+            panic!("a restart");
+        };
+        assert_eq!(why, added);
+        assert!(hashes.contains_key(&extra));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// After a restart in place, edits are compared with the sources it built: an edit inside a
+    /// function body patches, as the process lays out each type as they do. A new process runs the
+    /// build's layouts again, against which the same sources restart it in place.
+    #[test]
+    fn edits_after_a_restart_in_place_are_compared_with_what_it_built() {
+        let root = std::env::temp_dir().join(format!("gg-layout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().expect("a directory")).expect("a directory");
+            fs::write(path, text).expect("written");
+        };
+        let game = "fn main() {}\n\nstruct Game {\n    lives: u32,\n}\n\nimpl Layer for Game {\n    \
+                    fn tick(&mut self) {\n        step(1);\n    }\n}\n";
+        write("Cargo.toml", "[workspace]");
+        write("Cargo.lock", "version = 4");
+        write("game/src/main.rs", game);
+        let sources = Sources {
+            modules: root.join("game/src"),
+            game: root.join("game"),
+            dirs: Vec::new(),
+            files: vec![root.join("Cargo.toml"), root.join("Cargo.lock")],
+            lock: root.join("Cargo.lock"),
+            target: root.join("target"),
+        };
+        let baseline = Baseline::new(&sources);
+        let main = root.join("game/src/main.rs");
+        let fielded = game.replace("lives: u32,", "lives: u32,\n    score: u32,");
+        write("game/src/main.rs", &fielded);
+        write("game/src/extra.rs", "pub fn more() {}\n");
+        let stamps = sources.scan(None);
+        let Diff::Restart(_, _, hashes, None, prints, texts) =
+            diff(&sources, &baseline, &stamps, &Ran::new())
+        else {
+            panic!("a restart");
+        };
+        let layout = baseline.restarted(&sources, &stamps, &texts, prints);
+        assert_eq!(layout.modules, hashes);
+        // As the restart left them, nothing; a body edited since patches.
+        let since = |layout: &Baseline| diff(&sources, layout, &sources.scan(None), &Ran::new());
+        let Diff::Bodies(same, None, Some(_), _) = since(&layout) else {
+            panic!("bodies");
+        };
+        assert_eq!(same, layout.modules);
+        write("game/src/main.rs", &fielded.replace("step(1)", "step(22)"));
+        let Diff::Bodies(edited, None, Some(_), _) = since(&layout) else {
+            panic!("bodies");
+        };
+        assert_eq!(
+            changed(&layout.modules, &edited),
+            std::slice::from_ref(&main)
+        );
+        // Against the build, as a new process runs, the same sources restart it again.
+        assert!(matches!(since(&baseline), Diff::Restart(..)));
+        // A module the restart added, removed since, restarts it.
+        fs::remove_file(root.join("game/src/extra.rs")).expect("removed");
+        let Diff::Restart(_, why, hashes, ..) = since(&layout) else {
+            panic!("a restart");
+        };
+        assert_eq!(why, "a module added or removed");
+        let extra = root.join("game/src/extra.rs");
+        assert_eq!(changed(&layout.modules, &hashes), [extra, main]);
         let _ = fs::remove_dir_all(&root);
     }
 
     /// An edit to a constant patches where other modules' function bodies alone use it, as a
-    /// layer's `attach`, which it tells of. A use elsewhere, or in a function only `main` reaches,
-    /// rebuilds, naming the constant's module.
+    /// layer's `attach`, which it tells of. A use in a type restarts the game in place, and one in a
+    /// function only `main` reaches rebuilds, each naming the constant's module.
     #[test]
     fn edits_to_constants_patch_where_function_bodies_alone_use_them() {
         let root = std::env::temp_dir().join(format!("gg-consts-{}", std::process::id()));
@@ -1719,12 +2219,13 @@ mod tests {
         // One a function only `main` reaches uses, in a format string: named with the constant's
         // module, the function's being unedited.
         write("game/src/consts.rs", &consts.replace("Road", "Long road"));
-        let starts = "an edit changing `show`, which only code that runs as the game starts calls, \
-                      as a patch comes after";
+        let starts = "an edit changing `show`, which only `main` calls, as the game's process \
+                      starts";
         assert!(matches!(now(), Diff::Rebuild(file, why) if file == path && why == starts));
+        // One a type uses, which a restart in place carries.
         write("game/src/consts.rs", &consts.replace("3;", "4;"));
         let typed = classify::IN_A_TYPE;
-        assert!(matches!(now(), Diff::Rebuild(file, why) if file == path && why == typed));
+        assert!(matches!(now(), Diff::Restart(file, why, ..) if file == path && why == typed));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1788,7 +2289,7 @@ mod tests {
         let ship = root.join("game/src/ship.rs");
         assert_ne!(hashes[&ship], baseline.modules[&ship]);
         write("game/src/ship.rs", "pub struct Sail;\n\npub fn sail() {}\n");
-        assert!(matches!(now(), Diff::Rebuild(file, _) if file == ship));
+        assert!(matches!(now(), Diff::Restart(file, ..) if file == ship));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1874,6 +2375,9 @@ mod tests {
             world: None,
             told: BTreeMap::new(),
             baseline,
+            layout: None,
+            snapshot: None,
+            taken: None,
         };
         let session = Session {
             app: "Game".to_owned(),
@@ -1886,6 +2390,7 @@ mod tests {
             player: None,
             project: None,
             protocol: Some(gg_api::PROTOCOL),
+            hot: false,
         };
         let serving = [Process {
             pid: 7,
@@ -1944,6 +2449,7 @@ mod tests {
                 unreadable: None,
                 prints: None,
                 ran: Ran::new(),
+                restart: None,
                 thread: thread::spawn(move || Patching {
                     libs: Vec::new(),
                     built: Duration::ZERO,
@@ -1998,6 +2504,7 @@ mod tests {
             unreadable: None,
             prints: None,
             ran: Ran::new(),
+            restart: None,
             thread: thread::spawn(move || {
                 let _ = going.recv();
                 Patching {
@@ -2055,6 +2562,7 @@ mod tests {
             player: None,
             project: None,
             protocol: Some(gg_api::PROTOCOL),
+            hot: false,
         };
         let (patchable, unpatchable) = (session(26064), session(0));
         let serving = |session| {
@@ -2125,5 +2633,53 @@ mod tests {
         assert_eq!(acted, Act::Rebuild(main[0].clone(), UNPATCHED.to_owned()));
         let acted = act(bodies(), &serving(&patchable), &edited, false, false);
         assert_eq!(acted, Act::Nothing);
+        // A change a patch carries only with a restart in place restarts a lone game that can,
+        // and rebuilds one that can't, peers, and a game waiting for a rebuild.
+        let (field, why) = (
+            main[0].clone(),
+            "an edit outside function bodies".to_owned(),
+        );
+        let restart = || {
+            let (field, why) = (field.clone(), why.clone());
+            Diff::Restart(field, why, edited.clone(), None, None, Texts::new())
+        };
+        let hot = Session {
+            hot: true,
+            ..session(26064)
+        };
+        let acted = act(restart(), &serving(&hot), &built, false, true);
+        let restarts = Act::Restart(
+            field.clone(),
+            why.clone(),
+            main.clone(),
+            edited.clone(),
+            None,
+        );
+        assert_eq!(acted, restarts);
+        let rebuild = Act::Rebuild(field.clone(), why.clone());
+        assert_eq!(
+            act(restart(), &serving(&patchable), &built, false, true),
+            rebuild
+        );
+        let mut both = serving(&hot);
+        both.push(both[0]);
+        assert_eq!(act(restart(), &both, &built, false, true), rebuild);
+        let waiting = act(restart(), &[], &built, false, true);
+        assert!(matches!(waiting, Act::Rebuild(..)), "{waiting:?}");
+        let stale = act(restart(), &serving(&hot), &built, true, true);
+        assert!(matches!(stale, Act::Rebuild(..)), "{stale:?}");
+    }
+
+    /// A module a restart in place removed counts as changed.
+    #[test]
+    fn a_module_removed_counts_as_changed() {
+        let hashes = |paths: &[&str]| -> Hashes {
+            (paths.iter())
+                .map(|path| (PathBuf::from(path), 1))
+                .collect()
+        };
+        let (was, now) = (hashes(&["a.rs", "b.rs"]), hashes(&["a.rs", "c.rs"]));
+        let changed = changed(&was, &now);
+        assert_eq!(changed, [PathBuf::from("b.rs"), PathBuf::from("c.rs")]);
     }
 }

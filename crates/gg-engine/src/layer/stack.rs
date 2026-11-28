@@ -83,6 +83,27 @@ impl Stack {
         self.types.push(type_name::<L>());
     }
 
+    /// Drops the layers, with the code that made them, for a restart in place: they've detached.
+    /// The recorder, session and SyncTest stay, though a run with any doesn't restart in place.
+    #[cfg(feature = "dev")]
+    pub(crate) fn drop_layers(&mut self) {
+        self.layers.clear();
+        self.names.clear();
+        self.types.clear();
+        self.overlays = 0;
+    }
+
+    /// Takes `built`'s layers, the app's built again with a patch's code, in place of the dropped
+    /// ones ([`drop_layers`](Self::drop_layers)).
+    #[cfg(feature = "dev")]
+    pub(crate) fn take_layers(&mut self, built: Stack) {
+        debug_assert!(self.layers.is_empty(), "the layers dropped first");
+        self.layers = built.layers;
+        self.names = built.names;
+        self.types = built.types;
+        self.overlays = built.overlays;
+    }
+
     /// The names of the layers' types, from the bottom up.
     pub(crate) fn names(&self) -> &[&'static str] {
         &self.names
@@ -1222,7 +1243,7 @@ impl<L: Layer> Layer for Hot<L> {
 #[cfg(feature = "dev")]
 fn patched(recorder: &mut Option<Recorder>, table: subsecond::JumpTable, ticks: u64) -> Result<()> {
     let library = table.lib.clone();
-    crate::patch::apply(table, ticks)?;
+    crate::patch::apply(table, ticks, false)?;
     if let Some(recorder) = recorder {
         recorder.patched(&library);
     }

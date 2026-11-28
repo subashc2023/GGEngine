@@ -92,11 +92,13 @@ builds compile games' shaders with it as they run; builds without `dev` use the 
 
 Run the game under `cargo gg run`, in the background. It serves the tool API and patches in edits
 as they're saved: inside function bodies, functions added, removed or re-signed, `use`s, and
-constants only bodies use. It restarts from a snapshot after other changes, crashes or hangs, and
-after edits to code only `main`, `load` or `restored` reach. One reached only through the game's
-own trait objects or function pointers shows after `gg rebuild`. A layer's `attach` builds the
-world, and restarts skip it: an edit to code only it reaches shows after `gg rebuild --fresh`,
-which starts the game afresh. The game plays a copy of the world as edited: `gg set`, `gg apply`
+constants only bodies use. Other edits to the game's crate (types, fields, components, modules,
+code only `load` or `restored` reach) restart it in place from a snapshot, in about a patch's time,
+if its app names its function (`App::hot`). Edits to code only `main` reaches or outside the
+game's crate rebuild and restart it from a snapshot, as do crashes and hangs. One
+reached only through the game's own trait objects or function pointers shows after `gg rebuild`. A
+layer's `attach` builds the world, and restarts skip it: an edit to code only it reaches shows
+after `gg rebuild --fresh`, which starts the game afresh. The game plays a copy of the world as edited: `gg set`, `gg apply`
 and scene files' saves change both, so `gg scene save` writes them but not what play did, and
 `gg stop` then `gg play` start play over from them. `--play` on `gg set` or `gg apply` changes the
 copy alone, for a test's setup, such as a health of 0 to see an end screen.

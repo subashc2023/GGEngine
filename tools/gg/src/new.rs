@@ -93,11 +93,13 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The game, with the engine's debug overlays: what `main` runs, and what its recordings replay.
+/// The game, with the engine's debug overlays: what `main` runs, what its recordings replay, and
+/// what a restart in place builds again (`App::hot`).
 fn app() -> App {
     let app = App::new("{name}")
         .project(env!("CARGO_MANIFEST_DIR"))
-        .source(env!("GG_SOURCE"));
+        .source(env!("GG_SOURCE"))
+        .hot(app);
     app.layer(Game::new()).debug_overlays()
 }
 
@@ -138,8 +140,9 @@ impl Game {
         // What `gg actions` says each does, so an agent plays without reading this code. Name what
         // the value moves, its units, and the fields that set them or that it changes;
         // `describe_control` lists the mouse's look, clicks and wheel the same way. This runs as
-        // the game starts, so an edit to a constant it reads rebuilds the game rather than patching
-        // it: numbers to tune live best in components, which `gg set` changes as the game runs.
+        // the game starts, so an edit to a constant it reads restarts the game in place rather than
+        // patching it: numbers to tune live best in components, which `gg set` changes as the game
+        // runs.
         let steer = "Moves the player: [x, y], right and up; 1 is `Player.speed` units a second";
         actions.describe(Act::Steer, steer);
         Self {

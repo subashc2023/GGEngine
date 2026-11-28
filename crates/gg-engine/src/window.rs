@@ -50,6 +50,8 @@ use crate::main_loop::{keeps_egui, tessellate};
 use crate::pads::Gamepads;
 use crate::pipeline_cache;
 use crate::render_thread::RenderThread;
+#[cfg(feature = "dev")]
+use crate::restart::{self, Restart};
 use crate::snapshot::Snapshot;
 #[cfg(feature = "dev")]
 use crate::view_input::{Reach, ViewInput};
@@ -272,15 +274,38 @@ impl Handler<'_> {
         let renderer = Renderer::windowed(&settings, window.clone(), size.width, size.height)?;
         self.render = Some(RenderThread::start(renderer)?);
         #[cfg(feature = "dev")]
-        {
-            self.egui_winit = Some(WindowInput::new(&self.egui, ViewportId::ROOT, &window));
-            self.viewports = Some(Viewports::new(
-                &self.egui,
-                event_loop,
-                window.clone(),
-                self.chrome,
-            ));
-        }
+        self.start_egui(event_loop, &window);
+        self.gamepads = Gamepads::open(window.has_focus());
+        self.window = Some(window);
+        self.start_context();
+        let snapshot = self.snapshot.take();
+        start(
+            &mut self.app.stack,
+            &mut self.cx,
+            &mut self.stepper,
+            snapshot,
+            self.args.stopped,
+            self.args.paused,
+            self.api.is_some(),
+        )?;
+        Ok(())
+    }
+
+    /// Has egui take the main window's input, and tear panels off into windows of their own.
+    #[cfg(feature = "dev")]
+    fn start_egui(&mut self, event_loop: &ActiveEventLoop, window: &Arc<Window>) {
+        self.egui_winit = Some(WindowInput::new(&self.egui, ViewportId::ROOT, window));
+        self.viewports = Some(Viewports::new(
+            &self.egui,
+            event_loop,
+            window.clone(),
+            self.chrome,
+        ));
+    }
+
+    /// The run's context, in the opened window, set up as the settings and flags say.
+    fn start_context(&mut self) {
+        let window = (self.window.clone()).expect("the context starts once the window opened");
         self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app, true);
         // What the settings kept, else the app's default, as vsync and a cap; flags override it
         // for the run.
@@ -303,19 +328,61 @@ impl Handler<'_> {
         self.cx.set_render_scale(self.args.render_scale);
         api::debug(&self.api, &mut self.cx);
         crate::debug_overlays::start(&mut self.cx, self.args.overlays.as_deref());
-        self.gamepads = Gamepads::open(window.has_focus());
-        self.window = Some(window);
-        let snapshot = self.snapshot.take();
-        start(
-            &mut self.app.stack,
-            &mut self.cx,
-            &mut self.stepper,
-            snapshot,
-            self.args.stopped,
-            self.args.paused,
-            self.api.is_some(),
-        )?;
-        Ok(())
+    }
+
+    /// Restarts the run in place, as `restart` says ([`Restart`]), in the window it has. The
+    /// renderer, egui's state and the windows panels tore off into go too, the renderer first, as
+    /// it presents to them.
+    #[cfg(feature = "dev")]
+    fn restart(&mut self, event_loop: &ActiveEventLoop, restart: Restart) {
+        let _loading = api::loading();
+        let ticks = self.stepper.ticks;
+        let teardown = Instant::now();
+        Restart::tear_down(&mut self.app.stack, &mut self.cx);
+        let cache = (self.render.take()).and_then(|render| {
+            let (renderer, _) = render.stop();
+            renderer.pipeline_cache().ok().flatten()
+        });
+        let window = (self.window.clone()).expect("a run restarts once its window opened");
+        self.egui = egui_context();
+        self.egui_runs = true;
+        self.start_egui(event_loop, &window);
+        let teardown_ms = teardown.elapsed().as_millis() as u64;
+        let restored = restart
+            .build(self.app, ticks, teardown_ms)
+            .and_then(|restored| {
+                let started = Instant::now();
+                let settings = Settings {
+                    pipeline_cache: cache.as_deref(),
+                    ..settings(self.app, self.args)
+                };
+                let size = window.inner_size();
+                let renderer =
+                    Renderer::windowed(&settings, window.clone(), size.width, size.height)?;
+                self.render = Some(RenderThread::start(renderer)?);
+                self.start_context();
+                self.stepper = Stepper::default();
+                let snapshot = Some(restored.snapshot);
+                let (app, serves) = (&mut *self.app, self.api.is_some());
+                start(
+                    &mut app.stack,
+                    &mut self.cx,
+                    &mut self.stepper,
+                    snapshot,
+                    false,
+                    false,
+                    serves,
+                )?;
+                // So the next frame's time leaves the restart out.
+                self.cx.paused = true;
+                Ok(restored
+                    .stages
+                    .restored(started.elapsed().as_millis() as u64))
+            });
+        match restored {
+            Ok(restarted) => api::restarted(&mut self.api, Ok(restarted), self.stepper.ticks),
+            Err(error) => restart::fail(&mut self.api, error, ticks),
+        }
     }
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
@@ -341,6 +408,10 @@ impl Handler<'_> {
             debug!("A tool asked the run to end");
             event_loop.exit();
             return;
+        }
+        #[cfg(feature = "dev")]
+        if let Some(restart) = api::take_restart(&mut self.api) {
+            self.restart(event_loop, restart);
         }
         if self.cx.exiting() {
             debug!("A layer asked the run to end");

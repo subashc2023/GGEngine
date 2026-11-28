@@ -666,6 +666,7 @@ mod tests {
             player: None,
             project,
             protocol: Some(gg_api::PROTOCOL),
+            hot: false,
         };
         let text = serde_json::to_string(&session).expect("JSON");
         fs::write(dir.join(Session::file_name("Sandbox", pid)), text).expect("written");
@@ -734,6 +735,7 @@ mod tests {
             player,
             project: None,
             protocol: Some(gg_api::PROTOCOL),
+            hot: false,
         };
         let host = session(1, "Shards", Some(0));
         let joiner = session(2, "Shards", Some(1));
@@ -768,6 +770,7 @@ mod tests {
             player: None,
             project: None,
             protocol,
+            hot: false,
         };
         let ours = gg_api::PROTOCOL;
         assert_eq!(protocol_drift(&session(Some(ours))), None);
@@ -834,6 +837,7 @@ mod tests {
                 player: None,
                 project: None,
                 protocol: Some(gg_api::PROTOCOL),
+                hot: false,
             };
             let path = dir.join(Session::file_name("Sandbox", pid));
             fs::write(&path, serde_json::to_string(&session).expect("JSON")).expect("written");

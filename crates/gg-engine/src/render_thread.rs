@@ -552,6 +552,21 @@ impl<R: Render> RenderThread<R> {
         (trip.renderer, rendered)
     }
 
+    /// Replaces the renderer, for a restart in place: takes it back once it's rendered the frame,
+    /// ends the thread, and starts another on what `make` makes, given the old renderer to drop.
+    /// How that frame went is ignored.
+    ///
+    /// Fails as `make` does, leaving no renderer, and with `engine.render_thread` if the thread
+    /// can't start.
+    #[cfg(feature = "dev")]
+    pub(crate) fn renew(&mut self, make: impl FnOnce(R) -> Result<R>) -> Result<()> {
+        let _ = self.take();
+        self.end();
+        let trip = (self.home.take()).expect("the renderer is back");
+        *self = Self::start(make(trip.renderer)?)?;
+        Ok(())
+    }
+
     fn back(&mut self) -> Option<thread::Result<Rendered>> {
         if self.home.is_some() {
             return None;

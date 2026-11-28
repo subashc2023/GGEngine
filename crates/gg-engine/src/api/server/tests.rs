@@ -105,7 +105,7 @@ fn started(app: &str) -> (Api, Session) {
 /// As [`started`], the run's events kept in `events`.
 fn started_keeping(app: &str, events: &'static Events) -> (Api, Session) {
     let project = Some(Path::new(PROJECT));
-    let api = Api::start(app, &[], None, events, None, project).expect("the API starts");
+    let api = Api::start(app, false, None, events, None, project).expect("the API starts");
     let pid = std::process::id();
     let file = crate::beside_exe("sessions").join(Session::file_name(app, pid));
     let text = fs::read(file).expect("the session file");
@@ -2544,6 +2544,94 @@ fn a_patch_that_cant_apply_is_refused() {
     );
 }
 
+/// A `patch` that restarts the game in place is refused with `api.restart`, writing nothing,
+/// unless the run can: its app names its function, and it's neither recorded nor networked. Then,
+/// if the process takes the table, it writes the snapshot with the code the run runs, holds the
+/// restart for the main loop, and answers with how the restart went.
+#[test]
+fn a_restart_in_place_snapshots_first_and_is_refused_unless_the_game_can() {
+    let (mut api, session) = started("Api Restarts");
+    let dir = Scratch::new("api-restart");
+    std::fs::create_dir_all(&dir.0).expect("a directory");
+    let path = dir.0.join("restart.snapshot");
+    let ask = |path: std::path::PathBuf| {
+        move |mut client: Client| {
+            let table = json!({
+                "lib": std::env::temp_dir().join("patch.dll"),
+                "map": {},
+                "aslr_reference": 0,
+                "new_base_address": 0,
+                "ifunc_count": 0,
+            });
+            let params = json!({ "table": table, "restart": path });
+            client.call_as::<gg_api::Patched>("patch", params)
+        }
+    };
+    let mut stepper = Stepper::default();
+    stepper.start_at(5);
+    let mut recorded = Stack::default();
+    let recording = dir.0.join("run.recording");
+    recorded.record(Recorder::create(&recording, "Tested").expect("created"));
+    for (hot, stack) in [(false, &mut Stack::default()), (true, &mut recorded)] {
+        api.written.hot = hot;
+        let refused = serving(
+            &mut api,
+            &mut Context::seeded(7),
+            stack,
+            &mut stepper,
+            session.clone(),
+            ask(path.clone()),
+            |_, _, _| {},
+        );
+        let refused = refused.expect_err("refused");
+        assert_eq!(refused.code, "api.restart", "{}", refused.message);
+        assert!(!path.exists());
+    }
+    // A build whose `main` subsecond can't find refuses every patch, before writing anything.
+    if crate::patch::aslr_reference() == 0 {
+        let refused = serving(
+            &mut api,
+            &mut Context::seeded(7),
+            &mut Stack::default(),
+            &mut stepper,
+            session,
+            ask(path.clone()),
+            |_, _, _| {},
+        );
+        assert_eq!(refused.expect_err("refused").code, "api.patch");
+        assert!(!path.exists());
+        return;
+    }
+    let mut held = None;
+    let patched = serving(
+        &mut api,
+        &mut Context::seeded(7),
+        &mut Stack::default(),
+        &mut stepper,
+        session,
+        ask(path.clone()),
+        |api, _, stepper| {
+            if let Some(restart) = api.take_restart() {
+                let text = std::fs::read_to_string(&restart.snapshot).expect("written first");
+                assert!(text.starts_with("gg-snapshot "), "{text}");
+                held = Some(restart.snapshot);
+                let restarted = gg_api::Restarted {
+                    snapshot_ms: restart.snapshot_ms,
+                    teardown_ms: 1,
+                    apply_ms: 2,
+                    build_ms: 3,
+                    restore_ms: 4,
+                };
+                api.restarted(Ok(restarted), stepper.ticks);
+            }
+        },
+    );
+    let patched = patched.expect("restarted");
+    assert_eq!(held, Some(path));
+    let restarted = patched.restarted.expect("how it went");
+    assert_eq!((restarted.build_ms, restarted.restore_ms), (3, 4));
+}
+
 /// A capture rides with handed-off frames until one that rendered brings the view back: an error,
 /// or the view, written as a PNG.
 #[test]
@@ -4671,7 +4759,7 @@ fn requests_parse_into_calls_or_are_refused_with_a_code() {
         ifunc_count: 0,
     };
     let given = json!({ "table": table });
-    assert_eq!(parse(&request("patch", given)), Ok(Call::Patch(jump)));
+    assert_eq!(parse(&request("patch", given)), Ok(Call::Patch(jump, None)));
     let own = Call::Capture {
         path: None,
         at: None,

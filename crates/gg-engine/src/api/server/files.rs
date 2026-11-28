@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use gg_api::{Captured, FrameShot, Framed, Snapshotted};
+use gg_api::{Captured, Failure, FrameShot, Framed, Snapshotted};
 use gg_core::{Error, Result};
 
 use super::connection::Reply;
@@ -43,9 +43,13 @@ pub(super) struct Taken {
     pub(super) path: PathBuf,
     /// Whether the engine named the path (none given); then the directory is pruned.
     pub(super) named: bool,
-    pub(super) reply: Reply,
-    /// Told after the answer whether the snapshot was written, for a snapshot the run waits for.
-    pub(super) written: Option<Sender<bool>>,
+    /// The layers' names, bottom up, which a snapshot records.
+    pub(super) layers: Vec<&'static str>,
+    /// Where the answer goes; `None` for a restart in place's snapshot, whose `patch` answers.
+    pub(super) reply: Option<Reply>,
+    /// Told after the answer why the snapshot wasn't written, if it wasn't, for a snapshot the run
+    /// waits for.
+    pub(super) written: Option<Sender<Option<Failure>>>,
 }
 
 /// A capture for the PNG thread. `ticks` and `streaming` are its frame's.
@@ -133,10 +137,9 @@ fn pixel_at(shot: &Shot, at: [f64; 2]) -> Option<[u8; 4]> {
     shot.pixels.as_chunks::<4>().0.get(index).copied()
 }
 
-/// Writes `taken`'s snapshots of app `app` with `layers` ([`snapshot::write`]), whole or not at
-/// all, making the `snapshots` directory if needed. Answers each, until the API drops.
-pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
-    let layers: Vec<&str> = layers.iter().map(String::as_str).collect();
+/// Writes `taken`'s snapshots of app `app` ([`snapshot::write`]), whole or not at all, making the
+/// `snapshots` directory if needed. Answers each, until the API drops.
+pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str) {
     for Taken {
         world,
         scenes,
@@ -149,6 +152,7 @@ pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[Stri
         ticks,
         path,
         named,
+        layers,
         reply,
         written: told,
     } in taken
@@ -176,18 +180,19 @@ pub(super) fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[Stri
             }
             Ok(text.len() as u64)
         });
-        let whole = written.is_ok();
-        match written {
-            Ok(bytes) => reply.result(&Snapshotted {
+        let failed = written.as_ref().err().map(failure);
+        match (written, reply) {
+            (Ok(bytes), Some(reply)) => reply.result(&Snapshotted {
                 path,
                 ticks,
                 entities: world.entities(None).map_or(0, |entities| entities.len()),
                 bytes,
             }),
-            Err(error) => reply.send(Err(failure(&error))),
+            (Err(error), Some(reply)) => reply.send(Err(failure(&error))),
+            (_, None) => {}
         }
         if let Some(told) = told {
-            let _ = told.send(whole);
+            let _ = told.send(failed);
         }
     }
 }

@@ -182,23 +182,38 @@ them, as CI's layering check confirms. A game made for players, as the flagship,
 - **Hot reload keeps the world.** `gg run` builds the game with Dioxus's `dx` and watches its
   sources. An edit inside function bodies of the game's crate becomes a `subsecond` patch, applied
   between ticks. So does an edit to a constant only function bodies use, as rustc copies its value
-  into them; one a type, a static or a `const fn` uses rebuilds. A patch reaches calls made through
-  `HotFn`, through which a development build calls each layer method, so it reaches the systems and
-  scripts they call. An edit to code only `main`, `load` or `restored` reach rebuilds, as it ran
-  before any patch could, and function pointers it gave the engine keep the old code. `gg run`
-  follows calls by name across the game's modules to find it. What only the game's own trait
+  into them. A patch reaches calls made through `HotFn`, through which a development build calls
+  each layer method, so it reaches the systems and scripts they call. What only the game's own trait
   objects or function pointers reach waits for a rebuild, which `gg rebuild` asks for. As `HotFn`
   calls only methods a trait fixes, a patch may also add, remove or re-sign other functions, and
-  change `use`s whose names only bodies use. subsecond patches only the binary's crate, so a game's
-  crate is a binary with no library, and its statics start over at each patch, so a game keeps its
-  state in the world. Any other change rebuilds and restarts the game from a snapshot taken just
-  before, matching changed components by field name, a new field taking its default. Such changes
-  include a new field (even of a type declared in a function body) or component, or an engine
-  edit. An edit to code only `attach` reaches is patched, but restarts start from snapshots, so it
-  shows once `gg rebuild --fresh` starts the game afresh. `gg run` compares that code with the
-  build that built the world, so the game warns of each edit once (`gg.attach_changed`).
-  Without `dx`, every change rebuilds and restarts the game. `gg run` watches what each build read,
-  as cargo's dep-info lists it.
+  change `use`s whose names only bodies use. `gg run` follows calls by name across the game's
+  modules to tell where an edit's code runs from.
+- **Other edits to the game's crate restart it in place**, if its app names the function that
+  builds it (`App::hot`): a type, a field or a component changed or added, a module added or
+  removed, a constant a type uses, or code only `load`, `restored` or that function reach. A patch
+  carries them all. subsecond's one rule is that no value old code laid out reaches new code, and a
+  type keeps its `TypeId` as its fields change, so nothing would catch a breach. So the game first
+  snapshots its world with the code it runs, then ends its layers and drops all the run held, the
+  renderer and egui's state too. Then the patch applies, the game builds itself again with the
+  patch's code, and the snapshot restores, in the same process, window and connections. A patch
+  holds its own copies of the crate's statics, which start over. That takes a patch's build and a
+  tenth of a second, where a rebuild takes seconds and macOS scans each new executable. Patches
+  stay against the build, carrying every edit since. Each also maps where the last restart in
+  place's patch put each function, which the layers that patch built call. So a layer type that
+  restart added, which the build lacks, takes later edits only by restarting in place again.
+  `gg run` compares later edits with the sources that restart built. A new process runs the
+  build's layouts again, so after a crash or a hang the game is rebuilt before its snapshot
+  restores.
+- **The rest rebuilds** and restarts the game from a snapshot taken just before: an edit to code
+  only `main` reaches, which runs once a process; to a file outside the game's crate, as an engine
+  edit or a manifest; and any change to a game that names no app function or runs as peers. A
+  restore matches changed components by field name, a new field taking its default. subsecond
+  patches only the binary's crate, so a game's crate is a binary with no library, and its statics
+  start over at each patch, so a game keeps its state in the world. An edit to code only `attach`
+  reaches is patched, but restarts start from snapshots, so it shows once `gg rebuild --fresh`
+  starts the game afresh. `gg run` compares that code with the build that built the world, so the
+  game warns of each edit once (`gg.attach_changed`). Without `dx`, every change rebuilds and
+  restarts the game. `gg run` watches what each build read, as cargo's dep-info lists it.
 - **Luau, in every build, for mods and quick scripts.** Players install sandboxed mods, and quests,
   dialogue and level events reload in milliseconds. A script file declares one component, its
   fields and a tick per entity, as a native `Script` does; adding the component attaches the script.

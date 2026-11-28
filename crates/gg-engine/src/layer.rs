@@ -103,7 +103,9 @@ use crate::{Controls, Entity, EntityId, Event, Input, Ui, World};
 /// In a development build the engine calls each method through subsecond's `HotFn`. A patch from
 /// `gg run`, applied between ticks, reaches the method and what it calls directly, such as the
 /// systems and scripts its tick runs. What it calls through a trait object or the game's own
-/// function pointer waits for the next rebuild.
+/// function pointer waits for the next rebuild. A patch that changes the layer's fields comes with
+/// a restart in place ([`App::hot`]): the layers detach and drop, and the app's function builds
+/// them again with the patch's code.
 ///
 /// [`load`]: Self::load
 /// [`attach`]: Self::attach

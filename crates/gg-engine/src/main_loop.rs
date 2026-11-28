@@ -26,6 +26,8 @@ use crate::memory;
 use crate::perf::{self, Perf, Summary};
 use crate::pipeline_cache;
 use crate::render_thread::{Drawn, Render, RenderThread, TextureChanges};
+#[cfg(feature = "dev")]
+use crate::restart::{self, Restart};
 use crate::snapshot::Snapshot;
 use crate::{App, BUILD};
 
@@ -77,13 +79,9 @@ pub(crate) fn run_headless(
     api::debug(&api, &mut cx);
     crate::debug_overlays::start(&mut cx, args.overlays.as_deref());
     let mut clock = Clock::default();
-    let mut stepper = match app.headless_step {
-        Some(_) => Stepper::default(),
-        None if real_time => Stepper::default(),
-        None => Stepper::lockstep(),
-    };
+    let mut stepper = headless_stepper(app, real_time);
     #[cfg(feature = "dev")]
-    let egui = crate::egui_context();
+    let mut egui = crate::egui_context();
     // Headless runs neither read nor save the layout, to stay reproducible, and have no window to
     // frame.
     #[cfg(feature = "dev")]
@@ -122,6 +120,52 @@ pub(crate) fn run_headless(
             if api::serve(&mut api, &mut cx, &mut app.stack, &mut stepper) {
                 debug!("A tool asked the run to end");
                 break;
+            }
+            // As `restart::Restart` says: the renderer, the context and egui's state go too.
+            #[cfg(feature = "dev")]
+            if let Some(restart) = api::take_restart(&mut api) {
+                let _loading = api::loading();
+                let ticks = stepper.ticks;
+                let teardown = Instant::now();
+                Restart::tear_down(&mut app.stack, &mut cx);
+                egui = crate::egui_context();
+                egui_runs = !embedded;
+                let teardown_ms = millis(teardown);
+                let restored = restart.build(app, ticks, teardown_ms).and_then(|restored| {
+                    let started = Instant::now();
+                    render.renew(|old| {
+                        let cache = old.pipeline_cache().ok().flatten();
+                        drop(old);
+                        let settings = Settings {
+                            pipeline_cache: cache.as_deref(),
+                            ..self::settings(app, args)
+                        };
+                        Renderer::headless(&settings, width, height)
+                    })?;
+                    cx = Context::of_run(None, app, embedded);
+                    cx.set_render_scale(args.render_scale);
+                    api::debug(&api, &mut cx);
+                    crate::debug_overlays::start(&mut cx, args.overlays.as_deref());
+                    stepper = headless_stepper(app, real_time);
+                    let snapshot = Some(restored.snapshot);
+                    let serves = api.is_some();
+                    start(
+                        &mut app.stack,
+                        &mut cx,
+                        &mut stepper,
+                        snapshot,
+                        false,
+                        false,
+                        serves,
+                    )?;
+                    // So the next frame's time leaves the restart out.
+                    cx.paused = true;
+                    Ok(restored.stages.restored(millis(started)))
+                });
+                match restored {
+                    Ok(restarted) => api::restarted(&mut api, Ok(restarted), stepper.ticks),
+                    Err(error) => restart::fail(&mut api, error, ticks),
+                }
             }
             if embedded
                 && cx.exiting()
@@ -251,6 +295,22 @@ pub(crate) fn run_headless(
         perf,
         stopping,
     ))
+}
+
+/// A headless run's stepper: in real time for a client's, `--real-time` or an embedded run, or
+/// with frames spaced by [`App::headless_step`]; else a tick a frame.
+fn headless_stepper(app: &App, real_time: bool) -> Stepper {
+    match app.headless_step {
+        Some(_) => Stepper::default(),
+        None if real_time => Stepper::default(),
+        None => Stepper::lockstep(),
+    }
+}
+
+/// Milliseconds since `started`.
+#[cfg(feature = "dev")]
+fn millis(started: Instant) -> u64 {
+    started.elapsed().as_millis() as u64
 }
 
 /// Runs a server (`--serve`) with no window, GPU or tool API, which looks at frames. Frames come a

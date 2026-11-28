@@ -4326,7 +4326,7 @@ mod remote {
     fn a_remote_inspector_shows_and_edits_a_game_through_the_api() {
         let app = "Remote Inspector";
         let events: &'static gg_core::log::Events = Box::leak(Box::default());
-        let api = Api::start(app, &[], None, events, None, None).expect("the API starts");
+        let api = Api::start(app, false, None, events, None, None).expect("the API starts");
         let file = Session::file_name(app, std::process::id());
         let path = crate::beside_exe("sessions").join(file);
         let text = std::fs::read(path).expect("the session file");

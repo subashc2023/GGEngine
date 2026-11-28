@@ -457,7 +457,7 @@ pub(super) fn needs(call: &Call) -> Vec<Capability> {
         .into_iter()
         .flatten()
         .collect(),
-        Call::Patch(_) => vec![Patch],
+        Call::Patch(..) => vec![Patch],
         Call::Apply(operations, ..) => operations
             .iter()
             .map(|operation| match operation {

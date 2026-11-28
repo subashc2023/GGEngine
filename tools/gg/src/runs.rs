@@ -69,12 +69,14 @@ pub(crate) struct State {
     /// The last build's or patch's failure, until one succeeds or an edit undoes it.
     pub(crate) error: Option<Failure>,
     /// The last patch or rebuild that succeeded, as its event told it, with `at`, when it landed
-    /// (ms since the epoch): `patched` with its `files`, `build_ms` and `apply_ms`, or `rebuilt`
-    /// with its `why` and `build_ms`. A rebuild's game then starts again from a snapshot.
+    /// (ms since the epoch): `patched` with its `files`, `build_ms` and `apply_ms`; `restarted`,
+    /// restarted in place, with its `files`, `why`, `build_ms`, `restart_ms` and the game's
+    /// `warnings` as it restored its world; or `rebuilt` with its `why` and `build_ms`. A
+    /// rebuild's game then starts again from a snapshot.
     pub(crate) reload: Option<Value>,
     /// The latest [`MOST_KEPT`] outcomes, oldest first: [`reload`](Self::reload)'s kind, and
-    /// `patch_failed` and `rebuild_failed` with their `error`, each with `at`. A rebuild's has
-    /// `warnings` once its processes ended, restarting for the next.
+    /// `patch_failed`, `restart_failed` and `rebuild_failed` with their `error`, each with `at`. A
+    /// rebuild's has `warnings` once its processes ended, restarting for the next.
     pub(crate) reloads: Vec<Value>,
 }
 
@@ -620,19 +622,19 @@ fn looked(
     if let Some(until) = shown.until {
         answer(&at, gg, until);
     }
+    let mut tally = shown.warnings;
     if shown.rebuilt {
-        let mut tally = shown.warnings;
         // The game runs since the latest rebuild, which the listed always hold, being the latest
         // outcomes: all its events since it started are that rebuild's.
         let events = read_events(&mut client, json!({"level": "warn"}));
         tally_events(&mut tally, &events);
-        let (warnings, more) = told_warnings(tally, MOST_WARNINGS);
-        if !warnings.is_empty() {
-            told["warnings"] = Value::Array(warnings);
-        }
-        if more > 0 {
-            told["warnings_more"] = json!(more);
-        }
+    }
+    let (warnings, more) = told_warnings(tally, MOST_WARNINGS);
+    if !warnings.is_empty() {
+        told["warnings"] = Value::Array(warnings);
+    }
+    if more > 0 {
+        told["warnings_more"] = json!(more);
     }
     Ok(told)
 }
@@ -644,13 +646,14 @@ struct Listed {
     until: Option<u64>,
     /// Whether it listed a rebuild.
     rebuilt: bool,
-    /// The warnings the listed rebuilds kept, as a tally ([`tally_events`]).
+    /// The warnings the listed rebuilds and restarts in place kept, as a tally
+    /// ([`tally_events`]).
     warnings: Vec<(Value, Value, u64)>,
 }
 
 /// Sets `told["reloads"]` to the outcomes after `answered` (ms since the epoch), oldest first, the
 /// latest [`MOST_RELOADS`], with `reloads_more` for those before; takes the warnings off the
-/// rebuilds listed, which are told as `warnings`.
+/// rebuilds and restarts in place listed, which are told as `warnings`.
 fn listed(told: &mut Value, answered: u64) -> Listed {
     let all = told["reloads"].as_array().cloned().unwrap_or_default();
     let at = |outcome: &Value| outcome["at"].as_u64().unwrap_or(0);
@@ -665,10 +668,11 @@ fn listed(told: &mut Value, answered: u64) -> Listed {
         ..Listed::default()
     };
     for outcome in &mut new {
-        if outcome["event"] != "rebuilt" {
-            continue;
+        match outcome["event"].as_str() {
+            Some("rebuilt") => found.rebuilt = true,
+            Some("restarted") => {}
+            _ => continue,
         }
-        found.rebuilt = true;
         let kept = outcome
             .as_object_mut()
             .and_then(|outcome| outcome.remove("warnings"));
